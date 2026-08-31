@@ -119,6 +119,10 @@ func dispatchSubcommand() bool {
 	if len(os.Args) < 2 {
 		return false
 	}
+	if dispatchMeshUp() {
+		return true
+	}
+
 	var (
 		run  func([]string) error
 		name string
