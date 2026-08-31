@@ -319,8 +319,9 @@ UNIT
 systemctl daemon-reload
 systemctl enable pilots-mesh corrosion hostd >/dev/null
 
-# RESTART, not `enable --now`. pilots-mesh is a oneshot with RemainAfterExit,
-# so `--now` does nothing when it is already active -- and a re-run would keep
+# Restarted explicitly rather than started with the enable flag: pilots-mesh
+# is a oneshot with RemainAfterExit, so starting an already-active unit does
+# nothing -- and a re-run would keep
 # whatever peer the PREVIOUS run configured, with the new binary and the new
 # config both ignored. That is silent: the unit reports active and the mesh
 # reports up, while the peer that lets this host reach the fleet is missing.
