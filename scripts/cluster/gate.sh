@@ -168,21 +168,42 @@ if [ -n "$NEW_IP" ]; then
   # Live hosts only: the one killed in step 5 is still down on purpose, so the
   # fleet the new host should see is the survivors plus itself.
   LIVE=$(( ${#IPS[@]} - 1 + 1 ))
-  N=$(api "$NEW_IP" GET /v1/hosts | python3 -c "
+
+  # Poll rather than assert once. The checklist asks for schedulable and
+  # serving "within minutes", not instantly: a host that has just joined still
+  # has to exchange gossip and heartbeat once before anyone counts it alive.
+  # Asserting the moment the bootstrap returns measures convergence latency
+  # and calls it a failure.
+  live_seen() { # live_seen <ip>
+    api "$1" GET /v1/hosts 2>/dev/null | python3 -c "
 import sys, json
-print(sum(1 for h in json.load(sys.stdin) if h.get('alive')))" 2>/dev/null || echo 0)
-  [ "$N" = "$LIVE" ] && ok "the new host sees ${N} live hosts" \
+print(sum(1 for h in json.load(sys.stdin) if h.get('alive')))" 2>/dev/null || echo 0
+  }
+
+  START=$SECONDS; N=0
+  while [ $((SECONDS - START)) -lt 120 ]; do
+    N=$(live_seen "$NEW_IP"); [ "$N" = "$LIVE" ] && break
+    sleep 5
+  done
+  [ "$N" = "$LIVE" ] && ok "the new host sees ${N} live hosts after $((SECONDS - START))s" \
     || bad "the new host sees ${N} live hosts, want ${LIVE}"
 
-  N=$(api "$SURVIVOR" GET /v1/hosts | python3 -c "
-import sys, json
-print(sum(1 for h in json.load(sys.stdin) if h.get('alive')))" 2>/dev/null || echo 0)
+  START=$SECONDS; N=0
+  while [ $((SECONDS - START)) -lt 120 ]; do
+    N=$(live_seen "$SURVIVOR"); [ "$N" = "$LIVE" ] && break
+    sleep 5
+  done
   [ "$N" = "$LIVE" ] && ok "the existing hosts see it too" \
     || bad "an existing host sees ${N} live hosts, want ${LIVE}"
 
   # Serving, not merely present. A host that joined gossip but cannot route is
   # in the fleet's tables and useless to a client.
-  OUT=$(api "$NEW_IP" POST "/v1/machines/${ID}/exec" '{"cmd":"cat /var/tmp/marker"}' 2>/dev/null | jf stdout)
+  START=$SECONDS; OUT=""
+  while [ $((SECONDS - START)) -lt 120 ]; do
+    OUT=$(api "$NEW_IP" POST "/v1/machines/${ID}/exec" '{"cmd":"cat /var/tmp/marker"}' 2>/dev/null | jf stdout)
+    [ -n "$(echo "$OUT" | tr -d '[:space:]')" ] && break
+    sleep 5
+  done
   [ "$(echo "$OUT" | tr -d '[:space:]')" = "before-failover" ] \
     && ok "the new host served a request for a machine it does not own" \
     || bad "the new host could not serve it (got '${OUT}')"
@@ -248,6 +269,8 @@ fi
 say "Result"
 echo "  ${PASS} passed, ${FAIL} failed"
 echo
-echo "Two hosts were powered off on purpose. Bring them back with:"
-echo "  sudo virsh start <domain>"
+echo "This run left the rig changed on purpose:"
+echo "  - two hosts are powered off (steps 5 and 9); sudo virsh start <domain>"
+echo "  - the fleet is one host bigger (step 8), and cluster.env records it,"
+echo "    so the next run adds another. cluster-down.sh resets it."
 [ "$FAIL" = 0 ] || exit 1
