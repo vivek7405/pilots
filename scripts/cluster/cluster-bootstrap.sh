@@ -50,17 +50,52 @@ done
 say "Fleet"
 # Every host must see every other host. A host that only sees itself has a
 # mesh that came up but gossip that never reached anyone.
+#
+# Ask corrosion, not hostd. hostd's /v1/hosts needs an API key, and this
+# script has no reason to hold one -- an unauthenticated read there answers
+# 401, which parses as "sees 0 hosts" whether the fleet formed or not, so the
+# check could neither pass nor report a real failure. Corrosion is also the
+# more honest place to ask: gossip is what is being verified, and gossip
+# lands there.
+FLEET_OK=1
 for ip in "${IPS[@]}"; do
-  COUNT=$(ssh $SSH_OPTS "root@${ip}" \
-    "curl -sf http://127.0.0.1:8080/v1/hosts | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))'" 2>/dev/null || echo 0)
-  echo "  ${ip} sees ${COUNT} host(s)"
+  COUNT=$(ssh $SSH_OPTS "root@${ip}" '
+    source /etc/pilots/config
+    curl -s --http2-prior-knowledge -X POST \
+      -H "Authorization: Bearer $PILOT_CORROSION_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "{\"query\":\"SELECT COUNT(*) FROM hosts\"}" \
+      "http://$PILOT_CORROSION_ADDR/v1/queries" |
+      python3 -c "
+import sys, json
+for line in sys.stdin:
+    ev = json.loads(line)
+    if \"row\" in ev:
+        print(ev[\"row\"][1][0]); break
+else:
+    print(0)
+"' 2>/dev/null || echo 0)
+  if [ "${COUNT:-0}" -eq "${#IPS[@]}" ]; then
+    echo "  ${ip} sees ${COUNT} host(s)"
+  else
+    echo "  ${ip} sees ${COUNT:-0} host(s) -- expected ${#IPS[@]}" >&2
+    FLEET_OK=0
+  fi
 done
+[ "$FLEET_OK" = 1 ] || { echo "the fleet did not form" >&2; exit 1; }
 
+# Replace these keys rather than appending them. This script is meant to be
+# safe to re-run, and appending leaves several generations of the same
+# variable in the file -- the last one wins on `source`, so a stale rerun
+# reads correctly and looks corrupt, which is the worst of both.
+grep -vE '^(PILOT_CORROSION_TOKEN|PILOT_AGENT_TOKEN_SECRET|FIRST_MESH)=' \
+  "$STATE_FILE" > "${STATE_FILE}.tmp"
 {
   echo "PILOT_CORROSION_TOKEN=${PILOT_CORROSION_TOKEN}"
   echo "PILOT_AGENT_TOKEN_SECRET=${PILOT_AGENT_TOKEN_SECRET}"
   echo "FIRST_MESH=${FIRST_MESH}"
-} >> "$STATE_FILE"
+} >> "${STATE_FILE}.tmp"
+mv "${STATE_FILE}.tmp" "$STATE_FILE"
 
 echo
 echo "Fleet bootstrapped. Point the e2e battery at any host:"
