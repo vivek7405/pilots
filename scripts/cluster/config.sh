@@ -21,12 +21,16 @@
 : "${NET_BRIDGE:=virpilots0}"
 : "${NET_SUBNET:=192.168.124}"
 
-: "${NODE_PREFIX:=pilot-node}"
+# Distinct from the predecessor rig's pilot-node-* domains, which are still
+# defined on this laptop and share the old working directory. Reusing either
+# would silently adopt them as the cluster -- old disks, old cloud-init, and
+# nothing from the outside to say so.
+: "${NODE_PREFIX:=pilots-host}"
 
 # Ubuntu 24.04, which ships cloud-init.
 : "${BASE_IMAGE_URL:=https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img}"
 : "${OS_VARIANT:=ubuntu24.04}"
 
-: "${WORK_DIR:=/var/lib/libvirt/images/pilots-cluster}"
+: "${WORK_DIR:=/var/lib/libvirt/images/pilots-fleet}"
 : "${SSH_KEY:=$HOME/.ssh/id_ed25519}"
 : "${STATE_FILE:=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cluster.env}"

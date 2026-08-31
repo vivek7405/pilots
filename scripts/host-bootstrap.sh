@@ -17,7 +17,11 @@ set -euo pipefail
 # Pinned versions. Everything the fleet runs is a fixed artifact -- a host that
 # quietly installed a different Firecracker would produce snapshots its peers
 # could not restore.
-FC_VERSION="1.13.1"
+# Matched to what the engine was developed and tested against. Firecracker
+# makes no promise of snapshot compatibility across versions, and a fleet
+# running a different one than its template was built on fails at restore --
+# reporting a bad snapshot rather than a version mismatch.
+FC_VERSION="1.16.1"
 CORROSION_VERSION="1.0.0"
 KERNEL_VERSION="6.1.158"
 
