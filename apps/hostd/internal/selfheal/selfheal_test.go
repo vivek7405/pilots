@@ -130,11 +130,15 @@ func TestSurvivorsPartitionTheMachinesWithoutTalking(t *testing.T) {
 	for _, self := range []string{"host-a", "host-b", "host-c"} {
 		store := newFakeStore(machines...)
 		Tick(context.Background(), Options{
-			HostID:  self,
-			Fleet:   &fakeFleet{machines: machines, hosts: views[self]},
-			Store:   store,
-			Now:     func() time.Time { return now },
-			Restore: func(context.Context, *state.Machine) error { return nil },
+			HostID: self,
+			Fleet:  &fakeFleet{machines: machines, hosts: views[self]},
+			Store:  store,
+			Now:    func() time.Time { return now },
+			// Restore owns the claim, so this is where a rescue is observed.
+			Restore: func(_ context.Context, m *state.Machine) error {
+				return store.ClaimMachine(context.Background(), m.ID, self, "creating",
+					state.WithDeadOwnerClaim(m.HostID))
+			},
 		})
 		for _, id := range store.claimed() {
 			if other, ok := rescuedBy[id]; ok {
@@ -352,9 +356,11 @@ func TestNoCapacityDeclinesRatherThanWedging(t *testing.T) {
 	}
 }
 
-// A restore that fails must leave the machine visibly broken rather than
-// claimed-and-silent, or it looks owned by a host that is not running it.
-func TestAFailedRestoreIsRecorded(t *testing.T) {
+// A restore that fails is reported and left for the next tick. Recording the
+// failure on the row belongs to Restore, which owns the claim and therefore
+// the row -- doing it here as well is what made the loop claim a machine
+// twice and refuse its own second claim.
+func TestAFailedRestoreIsNotClaimedHere(t *testing.T) {
 	now := time.Now()
 	orphan := machine("m-1", "host-dead")
 	store := newFakeStore(orphan)
@@ -367,12 +373,9 @@ func TestAFailedRestoreIsRecorded(t *testing.T) {
 		Restore: func(context.Context, *state.Machine) error { return fmt.Errorf("no build in storage") },
 	})
 
-	got, err := store.GetMachine(context.Background(), "m-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.State != "error" {
-		t.Errorf("state = %q after a failed restore, want error", got.State)
+	if got := store.claimed(); len(got) != 0 {
+		t.Errorf("the loop claimed %v itself; Restore owns the claim, and a "+
+			"second one is refused because this host is alive", got)
 	}
 }
 

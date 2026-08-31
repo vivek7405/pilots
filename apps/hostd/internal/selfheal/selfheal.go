@@ -230,40 +230,25 @@ func rescue(ctx context.Context, opts Options, m state.Machine) {
 	slog.Info("rescuing a machine from a host that stopped responding",
 		"machine", m.ID, "dead_host", m.HostID)
 
-	// The claim re-checks the old owner's liveness inside the store, because
-	// the gap between this loop deciding and the write landing is exactly
-	// where a host comes back.
-	if err := opts.Store.ClaimMachine(ctx, m.ID, opts.HostID, "creating",
-		state.WithDeadOwnerClaim(m.HostID)); err != nil {
-		// Another survivor got there first, or the owner returned. Both are
-		// ordinary: the next tick re-reads the fleet.
-		slog.Info("did not win the claim", "machine", m.ID, "err", err)
+	// Restore OWNS the claim, and this loop must not make one of its own.
+	//
+	// Claiming here as well means the second claim -- the one inside Restore
+	// -- reads a row that now names THIS host and refuses it, because this
+	// host is very much alive. The machine ends up claimed, unrestored, and
+	// marked error, with a message about refusing to claim from a host that
+	// is still heartbeating: itself.
+	//
+	// The claim belongs with the restore because they must happen under the
+	// same per-machine lock: between claiming and starting the machine,
+	// nothing else may decide the machine is free.
+	if err := opts.Restore(ctx, &m); err != nil {
+		// Losing the claim is ordinary -- another survivor got there first,
+		// or the owner came back -- and so is a restore that failed. Restore
+		// records the outcome on the row; the next tick re-reads the fleet.
+		slog.Info("did not rescue a machine", "machine", m.ID, "err", err)
 		return
 	}
-
-	row, err := opts.Store.GetMachine(ctx, m.ID)
-	if err != nil {
-		slog.Error("claimed a machine but could not read it back", "machine", m.ID, "err", err)
-		return
-	}
-
-	if err := opts.Restore(ctx, row); err != nil {
-		slog.Error("claimed a machine but could not restore it", "machine", m.ID, "err", err)
-		row.State = "error"
-		row.UpdatedAt = opts.now().Unix()
-		if perr := opts.Store.PutMachine(ctx, row); perr != nil {
-			slog.Error("could not record the failure", "machine", m.ID, "err", perr)
-		}
-		return
-	}
-
-	row.State = "running"
-	row.UpdatedAt = opts.now().Unix()
-	if err := opts.Store.PutMachine(ctx, row); err != nil {
-		slog.Error("restored a machine but could not mark it running",
-			"machine", m.ID, "err", err)
-	}
-	slog.Info("machine rescued", "machine", m.ID, "url", row.Domain)
+	slog.Info("machine rescued", "machine", m.ID, "url", m.Domain)
 }
 
 // markUnrescuable records why a machine will not come back, once, rather than
