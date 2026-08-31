@@ -69,7 +69,7 @@ if [ -n "$PEER" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-say "[1/9] Base packages, user and directories"
+say "[1/10] Base packages, user and directories"
 on_host bash -euo pipefail -s <<'REMOTE'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
@@ -86,7 +86,7 @@ mkdir -p /var/lib/pilots/{machines,templates,corrosion} \
 REMOTE
 
 # ---------------------------------------------------------------------------
-say "[2/9] Kernel settings the engine depends on"
+say "[2/10] Kernel settings the engine depends on"
 on_host bash -euo pipefail -s <<'REMOTE'
 # The fault handler needs userfaultfd from an unprivileged process. Without
 # this every restore fails at the handshake, reported as a permission error
@@ -111,7 +111,7 @@ modprobe wireguard
 REMOTE
 
 # ---------------------------------------------------------------------------
-say "[3/9] Firecracker and jailer v${FC_VERSION}"
+say "[3/10] Firecracker and jailer v${FC_VERSION}"
 on_host bash -euo pipefail -s <<REMOTE
 FC_DIR="/opt/firecracker/v${FC_VERSION}"
 if [ -x "\$FC_DIR/firecracker" ] && "\$FC_DIR/firecracker" --version 2>&1 | grep -q "v${FC_VERSION}"; then
@@ -131,7 +131,7 @@ ln -sfn "\$FC_DIR/jailer" /opt/pilots/bin/jailer
 REMOTE
 
 # ---------------------------------------------------------------------------
-say "[4/9] Corrosion v${CORROSION_VERSION}"
+say "[4/10] Corrosion v${CORROSION_VERSION}"
 on_host bash -euo pipefail -s <<REMOTE
 # Pinned from day one, deliberately. The v0.x on-disk store cannot be upgraded
 # in place, and starting on 1.0.0 is how we never write the migration.
@@ -153,7 +153,7 @@ ln -sfn /opt/pilots/bin/corrosion /usr/local/bin/corrosion
 REMOTE
 
 # ---------------------------------------------------------------------------
-say "[5/9] Guest kernel and golden rootfs"
+say "[5/10] Guest kernel and golden rootfs"
 # Two gigabytes, so it is compared before it is copied. Without this every
 # re-run ships it again -- which makes "re-running upgrades a host" cost
 # minutes per host instead of seconds.
@@ -176,14 +176,14 @@ if [ -f "/opt/pilots/kernels/vmlinux-${KERNEL_VERSION}/vmlinux.bin" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-say "[6/9] hostd"
+say "[6/10] hostd"
 ( cd "${REPO}/apps/hostd" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/pilots-hostd ./cmd/hostd )
 scp $SSH_OPTS -q /tmp/pilots-hostd "root@${IP}:/opt/pilots/bin/hostd.new"
 on_host "chmod 0755 /opt/pilots/bin/hostd.new && mv /opt/pilots/bin/hostd.new /opt/pilots/bin/hostd"
 rm -f /tmp/pilots-hostd
 
 # ---------------------------------------------------------------------------
-say "[7/9] Mesh identity and host configuration"
+say "[7/10] Mesh identity and host configuration"
 # The identity is minted ON the host and never leaves it. Its mesh address is
 # derived from the public half, so nothing has to hand one out -- which is what
 # keeps adding a host from needing a registry.
@@ -228,7 +228,7 @@ chmod 0600 /etc/pilots/config
 REMOTE
 
 # ---------------------------------------------------------------------------
-say "[8/9] Corrosion schema, config and units"
+say "[8/10] Corrosion schema, config and units"
 scp $SSH_OPTS -q "${REPO}/apps/hostd/internal/state/schema.sql" \
   "root@${IP}:/var/lib/pilots/corrosion/schema.sql"
 
@@ -310,11 +310,41 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now pilots-mesh corrosion hostd
+systemctl enable pilots-mesh corrosion hostd >/dev/null
+
+# RESTART, not `enable --now`. pilots-mesh is a oneshot with RemainAfterExit,
+# so `--now` does nothing when it is already active -- and a re-run would keep
+# whatever peer the PREVIOUS run configured, with the new binary and the new
+# config both ignored. That is silent: the unit reports active and the mesh
+# reports up, while the peer that lets this host reach the fleet is missing.
+systemctl restart pilots-mesh
+systemctl restart corrosion
+systemctl restart hostd
 REMOTE
 
 # ---------------------------------------------------------------------------
-say "[9/9] Verifying"
+# A tunnel needs BOTH ends configured. The joining host was told about its
+# peer, but the peer has never heard of it -- and it cannot, because the only
+# channel that would tell it is the gossip that needs the tunnel.
+#
+# So the new host's row is seeded directly into the peer's state. That is not a
+# parallel mechanism: the peer adds mesh peers from the hosts table like it
+# does for everyone, gossip then flows both ways, and the row replicates to the
+# rest of the fleet normally -- after which every host adds this one from its
+# own copy of the table.
+if [ -n "$PEER" ]; then
+  say "[9/10] Introducing ${HOST_ID} to the fleet"
+  PEER_TOKEN=$(ssh $SSH_OPTS "root@${PEER}" "grep PILOT_CORROSION_TOKEN /etc/pilots/config | cut -d= -f2")
+  ssh $SSH_OPTS "root@${PEER}" "curl -sf --http2-prior-knowledge \
+    -X POST http://127.0.0.1:51002/v1/transactions \
+    -H 'Content-Type: application/json' \
+    -H 'Authorization: Bearer ${PEER_TOKEN}' \
+    -d '[{\"query\":\"INSERT INTO hosts (id,wg_addr,wg_pubkey,public_ip,last_seen) VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET wg_addr=excluded.wg_addr, wg_pubkey=excluded.wg_pubkey, public_ip=excluded.public_ip\",\"params\":[\"${HOST_ID}\",\"${MESH_ADDR}\",\"${PUBKEY}\",\"${IP}\",0]}]'" >/dev/null \
+    && echo "  introduced" || echo "  WARNING: could not introduce this host to ${PEER}"
+fi
+
+# ---------------------------------------------------------------------------
+say "[10/10] Verifying"
 on_host bash -euo pipefail -s <<'REMOTE'
 # hostd serves only once corrosion has applied its schema, and it waits up to
 # two minutes for that. A shorter window here fails a host that was fine.
