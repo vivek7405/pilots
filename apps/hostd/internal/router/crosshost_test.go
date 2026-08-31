@@ -153,3 +153,116 @@ func TestARequestForADeadHostsMachineRescuesItHere(t *testing.T) {
 		t.Fatal("a request for a dead host's machine did not trigger a rescue")
 	}
 }
+
+// A client may call exec, checkpoint or suspend against ANY host, and the one
+// it reaches is usually not the one running the machine. Without forwarding,
+// "every host serves the full API" means every host answers and most of them
+// are wrong.
+func TestAMachineScopedAPICallIsForwardedToTheOwner(t *testing.T) {
+	var got atomic.Value
+	owner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Store(r.URL.Path + "|" + r.Header.Get(forwardedHeader))
+		fmt.Fprint(w, `{"stdout":"from the owner"}`)
+	}))
+	defer owner.Close()
+	addr := strings.TrimPrefix(owner.URL, "http://")
+
+	r := New(Options{
+		Domain: "pilotrun.app", HostID: "host-a",
+		Peers: &stubPeers{addrs: map[string]string{"host-b": addr}},
+	})
+
+	local := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		t.Error("the request was served locally instead of forwarded")
+	})
+	h := r.ForwardAPI(func(context.Context, string) (string, bool) {
+		return "host-b", true
+	}, local)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/machines/m-1/exec", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "from the owner") {
+		t.Fatalf("status %d body %q", w.Code, w.Body.String())
+	}
+	if s, _ := got.Load().(string); s != "/v1/machines/m-1/exec|host-a" {
+		t.Errorf("the owner received %q", s)
+	}
+}
+
+// A machine this host owns is served here, with no hop at all.
+func TestAnAPICallForALocalMachineIsNotForwarded(t *testing.T) {
+	served := false
+	r := New(Options{
+		Domain: "pilotrun.app", HostID: "host-a",
+		Peers: &stubPeers{addrs: map[string]string{"host-a": "unused"}},
+	})
+	h := r.ForwardAPI(func(context.Context, string) (string, bool) { return "host-a", true },
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) { served = true }))
+
+	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1/machines/m-1", nil))
+	if !served {
+		t.Error("a local machine's API call was forwarded")
+	}
+}
+
+// Creating a machine, or listing them, is answerable anywhere: creation places
+// the machine here on purpose, and a list is a local read of replicated state.
+func TestUnscopedAPICallsAreNeverForwarded(t *testing.T) {
+	r := New(Options{
+		Domain: "pilotrun.app", HostID: "host-a",
+		Peers: &stubPeers{addrs: map[string]string{"host-b": "unused"}},
+	})
+
+	for _, path := range []string{"/v1/machines", "/v1/hosts", "/v1/health"} {
+		served := false
+		h := r.ForwardAPI(func(context.Context, string) (string, bool) { return "host-b", true },
+			http.HandlerFunc(func(http.ResponseWriter, *http.Request) { served = true }))
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, path, nil))
+		if !served {
+			t.Errorf("%s was forwarded; it is answerable anywhere", path)
+		}
+	}
+}
+
+// An already-forwarded API call is served here or not at all. Forwarding it
+// again would bounce it between hosts whose views disagree.
+func TestAForwardedAPICallIsNotForwardedAgain(t *testing.T) {
+	served := false
+	r := New(Options{
+		Domain: "pilotrun.app", HostID: "host-b",
+		Peers: &stubPeers{addrs: map[string]string{"host-c": "unused"}},
+	})
+	h := r.ForwardAPI(func(context.Context, string) (string, bool) { return "host-c", true },
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) { served = true }))
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/machines/m-1/exec", nil)
+	req.Header.Set(forwardedHeader, "host-a")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	if !served {
+		t.Error("a second hop was attempted")
+	}
+}
+
+// When the owner is gone the call is handled locally, where the machine layer
+// rescues it under its own lock -- rather than proxying into a dead host.
+func TestAnAPICallForADeadOwnerIsHandledLocally(t *testing.T) {
+	served := false
+	r := New(Options{
+		Domain: "pilotrun.app", HostID: "host-a",
+		Peers: &stubPeers{
+			addrs: map[string]string{"host-dead": "unused"},
+			dead:  map[string]bool{"host-dead": true},
+		},
+	})
+	h := r.ForwardAPI(func(context.Context, string) (string, bool) { return "host-dead", true },
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) { served = true }))
+
+	h.ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest(http.MethodPost, "/v1/machines/m-1/exec", nil))
+	if !served {
+		t.Error("a call for a dead owner was proxied into it")
+	}
+}

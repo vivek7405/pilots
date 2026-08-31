@@ -33,6 +33,7 @@ S3_ENDPOINT="${PILOT_S3_ENDPOINT:-}"
 S3_KEY="${PILOT_S3_ACCESS_KEY:-}"
 S3_SECRET="${PILOT_S3_SECRET_KEY:-}"
 CORROSION_TOKEN="${PILOT_CORROSION_TOKEN:-}"
+AGENT_SECRET="${PILOT_AGENT_TOKEN_SECRET:-}"
 DOMAIN="${PILOT_WORKLOAD_DOMAIN:-pilotrun.app}"
 SSH_OPTS="${SSH_OPTS:--o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null}"
 
@@ -47,6 +48,11 @@ done
 [ -n "$IP" ] || { echo "usage: $0 <ip> [--peer <ip-of-any-existing-host>]" >&2; exit 2; }
 [ -n "$CORROSION_TOKEN" ] || {
   echo "PILOT_CORROSION_TOKEN must be set: it is the cluster's shared API secret" >&2
+  exit 2
+}
+[ -n "$AGENT_SECRET" ] || {
+  echo "PILOT_AGENT_TOKEN_SECRET must be set: machine credentials are derived" >&2
+  echo "from it, and a host that rescues a machine computes the same one." >&2
   exit 2
 }
 
@@ -215,6 +221,7 @@ PILOT_MESH_ENABLED=1
 PILOT_MESH_BOOTSTRAP=${PEER_BOOTSTRAP}
 PILOT_CORROSION_ADDR=127.0.0.1:51002
 PILOT_CORROSION_TOKEN=${CORROSION_TOKEN}
+PILOT_AGENT_TOKEN_SECRET=${AGENT_SECRET}
 PILOT_S3_ENDPOINT=${S3_ENDPOINT}
 PILOT_S3_BUCKET=${BUCKET}
 PILOT_S3_ACCESS_KEY=${S3_KEY}

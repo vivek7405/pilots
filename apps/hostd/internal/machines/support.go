@@ -3,7 +3,10 @@ package machines
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -56,7 +59,25 @@ func (m *Manager) forgetToken(id string) {
 	_ = os.Remove(m.tokenPath(id))
 }
 
+// token is the credential hostd authenticates to a machine's guest agent with.
+//
+// DERIVED from a fleet-wide secret and the machine id, when one is configured.
+// That is what makes a rescued machine reachable: the host taking it over has
+// never held that machine's token, and the hash on its row authenticates a
+// caller TO hostd rather than hostd to the guest. Without derivation the
+// rescue succeeds -- right URL, right disk, machine running -- and every exec
+// into it returns 401, which is a machine that looks recovered and cannot be
+// used.
+//
+// Deriving also means no per-machine secret is ever written to replicated
+// state or shipped between hosts.
 func (m *Manager) token(id string) string {
+	if secret := m.opts.AgentTokenSecret; secret != "" {
+		mac := hmac.New(sha256.New, []byte(secret))
+		_, _ = mac.Write([]byte(id))
+		return "agt-" + hex.EncodeToString(mac.Sum(nil))[:32]
+	}
+
 	if v, ok := tokens.Load(id); ok {
 		return v.(string)
 	}

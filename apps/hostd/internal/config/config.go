@@ -67,6 +67,12 @@ type Config struct {
 	// peers come from the hosts table, the table arrives by gossip, and
 	// gossip rides the mesh.
 	MeshBootstrap string // PILOT_MESH_BOOTSTRAP
+
+	// AgentTokenSecret is what per-machine guest credentials are DERIVED
+	// from, fleet-wide. It is what lets a machine be rescued and still be
+	// reachable: the host that takes it over has never held that machine's
+	// token, and the hash on its row cannot authenticate to the guest.
+	AgentTokenSecret string // PILOT_AGENT_TOKEN_SECRET
 }
 
 // Fleet reports whether this host is part of a cluster.
@@ -141,6 +147,8 @@ func Load() (*Config, error) {
 		CorrosionToken: os.Getenv("PILOT_CORROSION_TOKEN"),
 		MeshEnabled:    os.Getenv("PILOT_MESH_ENABLED") == "1",
 		MeshBootstrap:  os.Getenv("PILOT_MESH_BOOTSTRAP"),
+
+		AgentTokenSecret: os.Getenv("PILOT_AGENT_TOKEN_SECRET"),
 	}
 
 	if c.HostID == "" {

@@ -117,7 +117,7 @@ func (p peers) IsLive(hostID string) bool {
 // Bound to the mesh address ONLY. It carries no TLS and authenticates nothing,
 // which is safe exactly because it is unreachable from outside the tunnel --
 // and would be a hole the moment it were bound anywhere else.
-func startInternalListener(ctx context.Context, dev *mesh.Device, r *router.Router) error {
+func startInternalListener(ctx context.Context, dev *mesh.Device, internal http.Handler) error {
 	addr := net.JoinHostPort(dev.Address().String(), strconv.Itoa(router.InternalPort))
 
 	ln, err := net.Listen("tcp", addr)
@@ -125,7 +125,10 @@ func startInternalListener(ctx context.Context, dev *mesh.Device, r *router.Rout
 		return fmt.Errorf("listen on the mesh at %s: %w", addr, err)
 	}
 
-	srv := &http.Server{Handler: r.InternalHandler()}
+	// The internal listener serves BOTH audiences the public one does: a
+	// workload hostname goes to the router, anything else is a forwarded API
+	// call. Both refuse a request that arrives without the forwarding marker.
+	srv := &http.Server{Handler: internal}
 	go func() {
 		<-ctx.Done()
 		_ = srv.Close()
@@ -200,5 +203,20 @@ func splitLines(s string) func(func(string) bool) {
 		if start < len(s) {
 			yield(s[start:])
 		}
+	}
+}
+
+// machineOwner resolves which host owns a machine, for API forwarding.
+//
+// A local read of replicated state, so it costs nothing and does not depend on
+// the owner being reachable -- which matters, because the answer is often that
+// the owner is gone.
+func machineOwner(store state.Store) router.MachineOwner {
+	return func(ctx context.Context, machineID string) (string, bool) {
+		m, err := store.GetMachine(ctx, machineID)
+		if err != nil {
+			return "", false
+		}
+		return m.HostID, true
 	}
 }

@@ -23,6 +23,9 @@ read -ra IPS <<< "$NODE_IPS"
 # fleet-wide by nature: a host with a different token cannot read the cluster,
 # and a host with a different bucket cannot restore anyone else's machines.
 export PILOT_CORROSION_TOKEN="${PILOT_CORROSION_TOKEN:-$(head -c 32 /dev/urandom | base64 | tr -d '=/+')}"
+# Machine credentials are derived from this, so it must be identical on every
+# host: a rescuing host computes the token of a machine it has never held.
+export PILOT_AGENT_TOKEN_SECRET="${PILOT_AGENT_TOKEN_SECRET:-$(head -c 32 /dev/urandom | base64 | tr -d '=/+')}"
 export PILOT_S3_ENDPOINT="${PILOT_S3_ENDPOINT:-http://${NET_SUBNET}.1:9000}"
 export PILOT_S3_BUCKET="${PILOT_S3_BUCKET:-pilots}"
 export PILOT_S3_ACCESS_KEY="${PILOT_S3_ACCESS_KEY:-pilots}"
@@ -55,6 +58,7 @@ done
 
 {
   echo "PILOT_CORROSION_TOKEN=${PILOT_CORROSION_TOKEN}"
+  echo "PILOT_AGENT_TOKEN_SECRET=${PILOT_AGENT_TOKEN_SECRET}"
   echo "FIRST_MESH=${FIRST_MESH}"
 } >> "$STATE_FILE"
 

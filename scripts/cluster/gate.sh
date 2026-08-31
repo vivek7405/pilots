@@ -81,8 +81,12 @@ say "4. Give the machine a snapshot in object storage"
 # retrying forever.
 api "${IPS[0]}" POST "/v1/machines/${ID}/suspend" >/dev/null && ok "suspended"
 api "${IPS[0]}" POST "/v1/machines/${ID}/wake" >/dev/null && ok "woke"
-MEMBUILD=$(api "${IPS[0]}" GET "/v1/machines/${ID}" | jf mem_build_id)
-[ -n "$MEMBUILD" ] && ok "machine has a snapshot (${MEMBUILD:0:8})" || bad "no snapshot recorded"
+# Read from the row rather than the API: build ids are internal and the API
+# deliberately does not expose them.
+MEMBUILD=$($SSH "root@${IPS[0]}" "sqlite3 /var/lib/pilots/corrosion/store.db \
+  \"SELECT mem_build_id FROM machines WHERE id='${ID}';\"" 2>/dev/null | tr -d '[:space:]')
+[ -n "$MEMBUILD" ] && ok "machine has a snapshot (${MEMBUILD:0:8})" \
+  || bad "no snapshot recorded; it could not be rescued"
 
 say "5. Hard-kill the host that owns it"
 OWNER=$(api "${IPS[0]}" GET "/v1/machines/${ID}" | jf host_id)

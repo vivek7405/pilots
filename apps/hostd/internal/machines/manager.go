@@ -67,6 +67,10 @@ type Options struct {
 	// HandlerEnv is passed to the block and fault servers, which need the
 	// object-storage credentials to read builds.
 	HandlerEnv []string
+
+	// AgentTokenSecret derives each machine's guest credential. See
+	// Manager.token for why a rescued machine is unreachable without it.
+	AgentTokenSecret string
 }
 
 // Manager is the per-host machine registry.
@@ -179,7 +183,12 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 	// The agent token is generated once and only its hash is stored. hostd
 	// keeps the plaintext in memory for as long as it drives this machine; a
 	// restart re-mints it, since nothing else needs to reproduce it.
+	// Derived rather than random when the fleet has a secret, so that any host
+	// can reach this machine after rescuing it. See Manager.token.
 	token := newID("agt")
+	if m.opts.AgentTokenSecret != "" {
+		token = m.token(id)
+	}
 	sum := sha256.Sum256([]byte(token))
 
 	// A partial knobs object merges onto the defaults rather than replacing

@@ -118,6 +118,8 @@ func run() error {
 		// The handlers are separate processes and read builds themselves, so
 		// they need this daemon's storage credentials.
 		HandlerEnv: os.Environ(),
+		// Fleet-wide, so a host that rescues a machine can still reach it.
+		AgentTokenSecret: cfg.AgentTokenSecret,
 		FCConfig: fc.Config{
 			KernelPath:     cfg.KernelPath,
 			TemplateRootfs: cfg.TemplateRootfs,
@@ -183,19 +185,28 @@ func run() error {
 	}
 	rtr := router.New(routerOpts)
 
+	// One listener, two audiences: requests for a workload hostname are
+	// proxied into a machine, everything else is the control API. Keeping them
+	// on one port means a host needs exactly one address to be useful.
+	controlAPI := api.Routes(api.Deps{
+		HostID: cfg.HostID, Store: store, Machines: mgr,
+	})
+
+	// Machine-scoped API calls go to the host that owns the machine. Without
+	// this, "every host serves the full API" means every host answers and
+	// most of them are wrong -- an exec against a machine running elsewhere
+	// simply fails.
+	handler := dispatch(cfg, rtr, rtr.ForwardAPI(machineOwner(store), controlAPI))
+
 	if f != nil && f.dev != nil {
-		if err := startInternalListener(ctx, f.dev, rtr); err != nil {
+		// Peers reach the same dispatch, guarded so a forwarded request is
+		// never forwarded again.
+		internal := router.InternalAPIHandler(dispatch(cfg, rtr.InternalHandler(), controlAPI))
+		if err := startInternalListener(ctx, f.dev, internal); err != nil {
 			return err
 		}
 		startSelfHeal(ctx, cfg, f, mgr)
 	}
-
-	// One listener, two audiences: requests for a workload hostname are
-	// proxied into a machine, everything else is the control API. Keeping them
-	// on one port means a host needs exactly one address to be useful.
-	handler := dispatch(cfg, rtr, api.Routes(api.Deps{
-		HostID: cfg.HostID, Store: store, Machines: mgr,
-	}))
 
 	srv := &http.Server{
 		Handler:           handler,
