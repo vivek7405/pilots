@@ -179,7 +179,12 @@ func rehydrate(ctx context.Context, cfg Config, store block.ObjectStore,
 		return fmt.Errorf("nbd: open rehydrate build: %w", err)
 	}
 	defer diff.Close()
-	diff.SetParent(template)
+	// A mismatched template is not recoverable: the diff's unchanged ranges
+	// would resolve against another template's bytes, and the guest would mount
+	// a filesystem stitched from two different disks.
+	if err := diff.SetParent(template); err != nil {
+		return fmt.Errorf("nbd: rehydrate: %w", err)
+	}
 
 	if err := cache.PopulateFromSlicer(ctx, diff); err != nil {
 		return fmt.Errorf("nbd: rehydrate: %w", err)

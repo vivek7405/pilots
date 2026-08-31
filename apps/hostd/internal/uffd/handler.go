@@ -261,12 +261,28 @@ func handleFault(ctx context.Context, h *handshake, src block.Slicer,
 		return fmt.Errorf("address %#x is not in any region", faultAddr)
 	}
 
-	chunk, err := src.Slice(ctx, off, int64(h.pageSize))
-	if err != nil {
-		return fmt.Errorf("read page at %d: %w", off, err)
+	// Loop, because a Slicer is allowed to return less than asked for -- it
+	// stops at a mapping boundary, and a page spans more than one whenever the
+	// build's block size is smaller than the guest's. Treating the first short
+	// return as the end of the image would zero-fill the rest of a page whose
+	// bytes are sitting in the very next mapping, and the guest would resume on
+	// memory that is half correct and half holes.
+	filled := 0
+	for filled < len(buf) {
+		chunk, err := src.Slice(ctx, off+int64(filled), int64(len(buf)-filled))
+		if err != nil {
+			if errors.Is(err, block.ErrOutOfRange) {
+				break // past the end of the image: the rest is zeros
+			}
+			return fmt.Errorf("read page at %d: %w", off+int64(filled), err)
+		}
+		if len(chunk) == 0 {
+			break
+		}
+		filled += copy(buf[filled:], chunk)
 	}
-	// A short read is the elided tail of the image, which is zeros.
-	for i := copy(buf, chunk); i < len(buf); i++ {
+	// Whatever is left is the elided tail of the image, which is zeros.
+	for i := filled; i < len(buf); i++ {
 		buf[i] = 0
 	}
 

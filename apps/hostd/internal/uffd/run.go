@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -100,11 +101,25 @@ func Run(ctx context.Context, cfg Config, store block.ObjectStore) error {
 		go ctlsock.Serve(ctl, control(&prefaulter{h: h, src: src}, &stats))
 	}
 
-	go prefault(ctx, h, src, prefetch, &stats)
+	// The replay must be joined before this function returns: its deferred
+	// cleanup closes the userfaultfd and the memory source, and a prefetch
+	// goroutine still running past that point reads a closed file and issues
+	// UFFDIO_COPY on a descriptor the process may already have handed to
+	// something else.
+	prefaultCtx, stopPrefault := context.WithCancel(ctx)
+	var prefaultDone sync.WaitGroup
+	prefaultDone.Add(1)
+	go func() {
+		defer prefaultDone.Done()
+		prefault(prefaultCtx, h, src, prefetch, &stats)
+	}()
 
 	start := time.Now()
 	err = serve(ctx, h, src, &stats, rec)
 	elapsed := time.Since(start)
+
+	stopPrefault()
+	prefaultDone.Wait()
 
 	slog.Info("uffd handler exiting",
 		"ms", elapsed.Milliseconds(),
@@ -153,7 +168,11 @@ func openSource(ctx context.Context, cfg Config, store block.ObjectStore) (block
 			b.Close()
 			return nil, nil, fmt.Errorf("uffd: open parent build: %w", err)
 		}
-		b.SetParent(parent)
+		if err := b.SetParent(parent); err != nil {
+			b.Close()
+			parent.Close()
+			return nil, nil, fmt.Errorf("uffd: %w", err)
+		}
 		return b, func() { b.Close(); parent.Close() }, nil
 
 	default:
