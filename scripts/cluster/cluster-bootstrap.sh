@@ -57,6 +57,10 @@ say "Fleet"
 # check could neither pass nor report a real failure. Corrosion is also the
 # more honest place to ask: gossip is what is being verified, and gossip
 # lands there.
+#
+# Count hosts that are still heartbeating, not rows. A host that is retired --
+# or that was destroyed and not brought back -- leaves its row behind forever,
+# and counting rows would fail this check on a perfectly healthy fleet.
 FLEET_OK=1
 for ip in "${IPS[@]}"; do
   COUNT=$(ssh $SSH_OPTS "root@${ip}" '
@@ -64,7 +68,7 @@ for ip in "${IPS[@]}"; do
     curl -s --http2-prior-knowledge -X POST \
       -H "Authorization: Bearer $PILOT_CORROSION_TOKEN" \
       -H "Content-Type: application/json" \
-      -d "{\"query\":\"SELECT COUNT(*) FROM hosts\"}" \
+      -d "{\"query\":\"SELECT COUNT(*) FROM hosts WHERE last_seen > ?\",\"params\":[$(( $(date +%s) - 60 ))]}" \
       "http://$PILOT_CORROSION_ADDR/v1/queries" |
       python3 -c "
 import sys, json
