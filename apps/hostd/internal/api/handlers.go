@@ -21,6 +21,7 @@ type Manager interface {
 	Checkpoint(ctx context.Context, machineID, comment string) (*state.Checkpoint, error)
 	ListCheckpoints(ctx context.Context, machineID string) ([]state.Checkpoint, error)
 	RestoreCheckpoint(ctx context.Context, checkpointID string) (*state.Machine, error)
+	GetCheckpoint(ctx context.Context, checkpointID string) (*state.Checkpoint, error)
 	Exec(ctx context.Context, machineID string, req ExecRequest) (*ExecResponse, error)
 	Logs(ctx context.Context, machineID string) ([]byte, error)
 }
@@ -180,6 +181,20 @@ func (d Deps) handleRestoreCheckpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, toAPI(*row))
+}
+
+// handleCheckpointStatus lets a caller learn when a checkpoint became durable.
+//
+// Checkpoint returns as soon as the guest is running again, with the upload
+// still in flight, so this is the only way to know the data can be restored
+// from another host.
+func (d Deps) handleCheckpointStatus(w http.ResponseWriter, r *http.Request) {
+	ck, err := d.Machines.GetCheckpoint(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toAPICheckpoint(*ck))
 }
 
 func (d Deps) handleLogs(w http.ResponseWriter, r *http.Request) {

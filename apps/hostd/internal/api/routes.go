@@ -51,6 +51,7 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("POST /v1/machines/{id}/checkpoints", d.handleCreateCheckpoint)
 	mux.HandleFunc("GET /v1/machines/{id}/checkpoints", d.handleListCheckpoints)
 	mux.HandleFunc("POST /v1/checkpoints/{id}/restore", d.handleRestoreCheckpoint)
+	mux.HandleFunc("GET /v1/checkpoints/{id}", d.handleCheckpointStatus)
 
 	// Builds: any Dockerfile to a bootable rootfs, with streamed NDJSON logs.
 	mux.HandleFunc("POST /v1/builds", notImplemented)

@@ -44,6 +44,9 @@ func (f *fakeManager) RestoreCheckpoint(context.Context, string) (*state.Machine
 	f.restored++
 	return f.machine, f.err
 }
+func (f *fakeManager) GetCheckpoint(context.Context, string) (*state.Checkpoint, error) {
+	return f.checkpoint, f.err
+}
 func (f *fakeManager) Exec(context.Context, string, ExecRequest) (*ExecResponse, error) {
 	return &ExecResponse{Stdout: "hello\n", ExitCode: 0}, f.err
 }

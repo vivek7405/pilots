@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -149,9 +150,18 @@ func (m *Manager) localCacheDir(machineID string, at fc.Artifacts) string {
 // Create boots a new machine from the golden template.
 func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*state.Machine, error) {
 	id := newID("m")
+
 	name := req.Name
 	if name == "" {
 		name = generateName()
+	}
+	// A name becomes a DNS label and a routing key, so it has to be usable as
+	// both before the machine exists.
+	if err := validateName(name); err != nil {
+		return nil, err
+	}
+	if err := m.ensureNameFree(ctx, name); err != nil {
+		return nil, err
 	}
 
 	// The agent token is generated once and only its hash is stored. hostd
@@ -220,13 +230,7 @@ func (m *Manager) boot(ctx context.Context, row *state.Machine, token string) (*
 		return nil, err
 	}
 
-	cfg := m.opts.FCConfig
-	cfg.MachineID = row.ID
-	cfg.Slot = slot
-	cfg.MAC = mac
-	cfg.VCPUs = row.VCPUs
-	cfg.MemMiB = row.MemMiB
-	cfg.StateDir = m.stateDir(row.ID)
+	cfg := m.machineFCConfig(row, slot, mac)
 
 	fcm, err := fc.Boot(ctx, cfg)
 	if err != nil {
@@ -236,8 +240,14 @@ func (m *Manager) boot(ctx context.Context, row *state.Machine, token string) (*
 	}
 
 	// Give the guest its own token, replacing the template's placeholder.
+	//
+	// Fatal, not a warning. hostd stores the new token while the guest keeps
+	// the shared placeholder, and token() falls back to that same placeholder
+	// -- so exec, the clock poke and the flush all keep working and the machine
+	// is indistinguishable from a healthy one, while actually running on a
+	// credential every other machine from this template also has.
 	if err := m.installToken(ctx, slot, token); err != nil {
-		slog.Warn("could not install the machine's agent token", "machine", row.ID, "err", err)
+		return nil, fmt.Errorf("install agent token: %w", err)
 	}
 
 	if err := fcm.Persist(); err != nil {
@@ -249,16 +259,24 @@ func (m *Manager) boot(ctx context.Context, row *state.Machine, token string) (*
 	return fcm, nil
 }
 
-// Destroy stops a machine and removes every trace of it.
+// Destroy stops a machine and removes its state from the host AND from object
+// storage.
+//
+// Every step runs even if an earlier one fails, and the errors are reported
+// together. Abandoning cleanup on the first failure left the worst possible
+// shape: the process gone but the slot still held, the caches still on disk,
+// the row still in the store -- and Kill aggregates its own errors, so a single
+// stubborn namespace could strand everything else.
 func (m *Manager) Destroy(ctx context.Context, id string) error {
 	lock := m.lockFor(id)
 	lock.Lock()
 	defer lock.Unlock()
 
-	row, err := m.opts.Store.GetMachine(ctx, id)
-	if err != nil {
+	if _, err := m.opts.Store.GetMachine(ctx, id); err != nil {
 		return err
 	}
+
+	var errs []error
 
 	if fcm, ok := m.get(id); ok {
 		slotIdx := 0
@@ -266,20 +284,85 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 			slotIdx = fcm.Slot.Idx
 		}
 		if err := fcm.Kill(); err != nil {
-			return err
+			errs = append(errs, fmt.Errorf("kill: %w", err))
 		}
+		// Release the slot and the registry entry regardless: the process is
+		// gone or unreachable either way, and holding them leaks a slot per
+		// failed destroy until the pool is exhausted.
 		m.drop(id)
 		if slotIdx > 0 {
 			m.pool.Return(slotIdx)
 		}
 	}
 
-	_ = os.RemoveAll(m.stateDir(id))
-	_ = os.RemoveAll(m.cacheDir(id))
+	if err := os.RemoveAll(m.stateDir(id)); err != nil {
+		errs = append(errs, fmt.Errorf("remove state dir: %w", err))
+	}
+	// The machine's caches live under the object-storage layout, not under a
+	// bare id -- removing the wrong path meant every destroyed machine left its
+	// full memory and disk images behind forever.
+	if err := os.RemoveAll(filepath.Join(m.opts.CacheRoot, "machines", id)); err != nil {
+		errs = append(errs, fmt.Errorf("remove cache: %w", err))
+	}
 	m.forgetToken(id)
 
-	_ = row // row is fetched to confirm existence before destroying
-	return m.opts.Store.DeleteMachine(ctx, id)
+	if err := m.deleteRemoteState(ctx, id); err != nil {
+		errs = append(errs, err)
+	}
+	if err := m.deleteCheckpointRows(ctx, id); err != nil {
+		errs = append(errs, err)
+	}
+	if err := m.opts.Store.DeleteMachine(ctx, id); err != nil {
+		errs = append(errs, fmt.Errorf("delete row: %w", err))
+	}
+	return errors.Join(errs...)
+}
+
+// deleteRemoteState removes a machine's objects.
+//
+// Object storage is the only truth for machine state, so state left there is a
+// machine that still exists in every way that matters -- and it is billed for
+// and readable indefinitely.
+func (m *Manager) deleteRemoteState(ctx context.Context, id string) error {
+	deleter, ok := m.opts.Uploader.(interface {
+		Delete(ctx context.Context, key string) error
+	})
+	if !ok {
+		return nil // no object storage configured
+	}
+
+	sets := []fc.Artifacts{artifactsFor(id)}
+	if cks, err := m.opts.Store.ListCheckpoints(ctx, id); err == nil {
+		for _, c := range cks {
+			sets = append(sets, checkpointArtifacts(id, c.ID))
+		}
+	}
+
+	var errs []error
+	for _, at := range sets {
+		for _, key := range []string{at.Snap(), at.Mem(), at.Rootfs()} {
+			if err := deleter.Delete(ctx, key); err != nil {
+				errs = append(errs, fmt.Errorf("delete %s: %w", key, err))
+			}
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// deleteCheckpointRows removes the machine's checkpoints, which would
+// otherwise outlive it as rows pointing at objects that no longer exist.
+func (m *Manager) deleteCheckpointRows(ctx context.Context, id string) error {
+	cks, err := m.opts.Store.ListCheckpoints(ctx, id)
+	if err != nil {
+		return fmt.Errorf("list checkpoints: %w", err)
+	}
+	var errs []error
+	for _, c := range cks {
+		if err := m.opts.Store.DeleteCheckpoint(ctx, c.ID); err != nil {
+			errs = append(errs, fmt.Errorf("delete checkpoint %s: %w", c.ID, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // Suspend snapshots a machine to object storage and stops it.
@@ -370,13 +453,7 @@ func (m *Manager) restore(ctx context.Context, row *state.Machine, at fc.Artifac
 		return nil, err
 	}
 
-	cfg := m.opts.FCConfig
-	cfg.MachineID = row.ID
-	cfg.Slot = slot
-	cfg.MAC = mac
-	cfg.VCPUs = row.VCPUs
-	cfg.MemMiB = row.MemMiB
-	cfg.StateDir = m.stateDir(row.ID)
+	cfg := m.machineFCConfig(row, slot, mac)
 
 	fcm, err := fc.Restore(ctx, fc.RestoreConfig{
 		Config:     cfg,
@@ -416,6 +493,38 @@ func (m *Manager) Adopt(id string, fcm *fc.Machine, slotIdx int) error {
 	fcm.Slot = slot
 	m.put(id, fcm)
 	return nil
+}
+
+// machineFCConfig derives a machine's Firecracker configuration, including the
+// cgroup limits that bound what a guest can take from its neighbours.
+//
+// Firecracker isolates the guest from the host kernel, but nothing stops it
+// consuming every core or all remaining memory -- including hostd's own. The
+// limits were previously documented as mandatory and then never set from the
+// machine's shape, so only a pid cap was ever applied.
+func (m *Manager) machineFCConfig(row *state.Machine, slot *netns.Slot, mac string) fc.Config {
+	cfg := m.opts.FCConfig
+	cfg.MachineID = row.ID
+	cfg.Slot = slot
+	cfg.MAC = mac
+	cfg.VCPUs = row.VCPUs
+	cfg.MemMiB = row.MemMiB
+	cfg.StateDir = m.stateDir(row.ID)
+
+	// Memory: the guest's own size plus a margin for Firecracker's own
+	// allocations, so the VMM is not OOM-killed for doing its job.
+	const vmmOverheadMiB = 128
+	cfg.Limits.MemMaxB = int64(row.MemMiB+vmmOverheadMiB) * 1024 * 1024
+
+	// CPU: vcpus worth of a 100ms period, so a machine cannot exceed the cores
+	// it was sold.
+	const cpuPeriodUS = 100_000
+	cfg.Limits.CPUMax = fmt.Sprintf("%d %d", row.VCPUs*cpuPeriodUS, cpuPeriodUS)
+
+	if cfg.Limits.PidsMax == 0 {
+		cfg.Limits.PidsMax = 2048
+	}
+	return cfg
 }
 
 func orDefault(v, def int) int {

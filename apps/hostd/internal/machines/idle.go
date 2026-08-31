@@ -61,13 +61,19 @@ func (m *Manager) End(id string)   { m.flight.end(id) }
 // something inside a machine generates no HTTP traffic at all -- suspending it
 // mid-build because "nobody visited the URL" would be indefensible.
 func (m *Manager) Touch(ctx context.Context, id string) {
-	row, err := m.opts.Store.GetMachine(ctx, id)
-	if err != nil {
-		return
-	}
-	row.LastActivity = time.Now().Unix()
-	row.UpdatedAt = time.Now().Unix()
-	_ = m.opts.Store.PutMachine(ctx, row)
+	// A narrow write, not a read-modify-write of the whole row.
+	//
+	// Upserting every column raced Suspend and Wake, which write the same row
+	// under the machine's lock: read the row while it said running, have
+	// Suspend commit, then write the stale copy back, and the row claimed
+	// running for a machine that was suspended and already dropped. That
+	// wedges the URL for good, because every repair path trusts the row --
+	// the router sees running and never wakes it, and the idle monitor's
+	// Suspend returns early for a machine it no longer holds.
+	//
+	// Whole-row upserts also become last-writer-wins merges under Corrosion,
+	// so the narrow write is what keeps working when the store is replicated.
+	_ = m.opts.Store.TouchMachine(ctx, id, time.Now().Unix())
 }
 
 // RunIdleMonitor suspends machines that have gone quiet, until ctx ends.

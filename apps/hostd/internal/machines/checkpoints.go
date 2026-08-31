@@ -3,6 +3,7 @@ package machines
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/fc"
@@ -63,8 +64,56 @@ func (m *Manager) Checkpoint(ctx context.Context, machineID, comment string) (*s
 	if err := m.opts.Store.PutCheckpoint(ctx, ckpt); err != nil {
 		return nil, err
 	}
+
+	// Watch for the upload to finish and record it. Without this the row's
+	// durable flag stayed false forever, so a client could never learn its
+	// checkpoint was safe -- which makes the whole async-durability design
+	// unobservable from outside.
+	go m.awaitDurable(ckpt.ID, machineID, localDir)
+
 	return ckpt, nil
 }
+
+// awaitDurable records a checkpoint as durable once its upload completes.
+//
+// Detached from the request that created the checkpoint: the caller already
+// has its id, and the upload outlives the call by design.
+func (m *Manager) awaitDurable(checkpointID, machineID, localDir string) {
+	ctx := context.Background()
+	deadline := time.Now().Add(durabilityWatchTimeout)
+
+	for time.Now().Before(deadline) {
+		st := fc.StatusOf(localDir)
+		switch {
+		case st.Durable:
+			ck, err := m.findCheckpoint(ctx, checkpointID)
+			if err != nil {
+				return
+			}
+			ck.Durable = true
+			if err := m.opts.Store.PutCheckpoint(ctx, ck); err != nil {
+				slog.Error("checkpoint is durable but the row was not updated",
+					"checkpoint", checkpointID, "err", err)
+			}
+			return
+		case st.Failed:
+			slog.Error("checkpoint upload failed; it cannot be restored from "+
+				"another host", "checkpoint", checkpointID, "machine", machineID,
+				"err", st.Error)
+			return
+		}
+		time.Sleep(durabilityPollInterval)
+	}
+	slog.Warn("checkpoint upload did not finish in time; its durability is unknown",
+		"checkpoint", checkpointID, "machine", machineID)
+}
+
+// How long to watch an upload before giving up on recording its outcome. The
+// upload itself is not cancelled -- only the watching stops.
+const (
+	durabilityWatchTimeout = 30 * time.Minute
+	durabilityPollInterval = time.Second
+)
 
 // CheckpointStatus reports whether a checkpoint's data is durable yet.
 func (m *Manager) CheckpointStatus(machineID, checkpointID string) fc.CheckpointStatus {
@@ -124,6 +173,11 @@ func (m *Manager) RestoreCheckpoint(ctx context.Context, checkpointID string) (*
 		return row, err
 	}
 	return row, nil
+}
+
+// GetCheckpoint returns one checkpoint, including whether it is durable yet.
+func (m *Manager) GetCheckpoint(ctx context.Context, checkpointID string) (*state.Checkpoint, error) {
+	return m.findCheckpoint(ctx, checkpointID)
 }
 
 // ListCheckpoints returns a machine's checkpoints in order.
