@@ -152,15 +152,41 @@ func (b *LocalBuild) Slice(_ context.Context, off, length int64) ([]byte, error)
 // offset the block was read from, which the caller needs to decide whether a
 // run can be coalesced.
 func (b *LocalBuild) blockAt(off int64, buf []byte) (*BuildMap, int64, error) {
+	m, storageOff, err := b.mappingAt(off)
+	if err != nil {
+		return nil, 0, err
+	}
+	if m == nil {
+		// A parent gap is all zeros.
+		for i := range buf {
+			buf[i] = 0
+		}
+		return nil, 0, nil
+	}
+
+	n, err := b.data.ReadAt(buf, storageOff)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, 0, fmt.Errorf("block: read parent at %d: %w", storageOff, err)
+	}
+	for i := n; i < len(buf); i++ {
+		buf[i] = 0
+	}
+
+	return m, storageOff, nil
+}
+
+// mappingAt resolves a logical offset to its mapping and storage offset
+// WITHOUT reading the block.
+//
+// The copy-on-write path needs the pointer for every clean block and the bytes
+// for none of them. Reading anyway would mean streaming the whole template on
+// every checkpoint -- exactly the cost the dirty bitmap exists to avoid.
+func (b *LocalBuild) mappingAt(off int64) (*BuildMap, int64, error) {
 	storageOff, _, buildID, err := b.header.GetShiftedMapping(uint64(off))
 	if err != nil {
 		return nil, 0, err
 	}
 	if buildID == nil {
-		// A parent gap is all zeros.
-		for i := range buf {
-			buf[i] = 0
-		}
 		return nil, 0, nil
 	}
 	if *buildID != b.header.Metadata.BuildId {
@@ -170,15 +196,6 @@ func (b *LocalBuild) blockAt(off int64, buf []byte) (*BuildMap, int64, error) {
 		return nil, 0, fmt.Errorf("%w: parent build %s maps offset %d to build %s",
 			ErrGrandparentChain, b.header.Metadata.BuildId, off, *buildID)
 	}
-
-	n, err := b.data.ReadAt(buf, int64(storageOff))
-	if err != nil && !errors.Is(err, io.EOF) {
-		return nil, 0, fmt.Errorf("block: read parent at %d: %w", storageOff, err)
-	}
-	for i := n; i < len(buf); i++ {
-		buf[i] = 0
-	}
-
 	return b.mappingCovering(off), int64(storageOff), nil
 }
 

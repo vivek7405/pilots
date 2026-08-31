@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/google/uuid"
 )
 
@@ -30,6 +31,18 @@ type ChunkifyOpts struct {
 	// directory: blocks identical to the parent are recorded as pointers and
 	// cost no storage. Absent, the result is a self-contained template.
 	ParentDir string
+	// Dirty, when set, names the only blocks In is allowed to speak for.
+	// Requires ParentDir.
+	//
+	// This is what makes a copy-on-write file chunkifiable at all. A CoW
+	// cache is SPARSE: a block the guest never wrote reads back as zeros,
+	// which is indistinguishable from a block it deliberately zeroed. Diffing
+	// it byte-for-byte would therefore record every untouched block as "zeros,
+	// mine" and shadow the template's real content with holes -- a rootfs that
+	// parses, mounts, and is empty. With the bitmap, clean blocks become
+	// parent pointers without being read, which is also why a checkpoint costs
+	// the size of the writes rather than the size of the disk.
+	Dirty *roaring.Bitmap
 }
 
 // ChunkifyStats reports what a build cost.
@@ -96,6 +109,10 @@ func Chunkify(ctx context.Context, opts ChunkifyOpts) (*Header, ChunkifyStats, e
 	)
 
 	if opts.ParentDir == "" {
+		if opts.Dirty != nil {
+			return nil, stats, errors.New(
+				"block: Dirty requires ParentDir; clean blocks have nowhere to point")
+		}
 		metadata = NewTemplateMetadata(buildID, uint64(blockSize), uint64(size))
 		mapping, err = writeSparse(ctx, src, dst, size, blockSize, buildID, &stats)
 	} else {
@@ -111,7 +128,7 @@ func Chunkify(ctx context.Context, opts ChunkifyOpts) (*Header, ChunkifyStats, e
 
 		metadata = parent.Header().Metadata.NextGeneration(buildID)
 		metadata.Size = uint64(size)
-		mapping, err = writeDiff(ctx, src, dst, parent, size, blockSize, buildID, &stats)
+		mapping, err = writeDiff(ctx, src, dst, parent, opts.Dirty, size, blockSize, buildID, &stats)
 	}
 	if err != nil {
 		return nil, stats, err
@@ -207,8 +224,13 @@ const (
 // Three outcomes per block: all-zero becomes a gap; identical to the parent
 // becomes a pointer at the parent's bytes and costs no storage; anything else
 // is appended to our own data file.
-func writeDiff(ctx context.Context, src io.Reader, dst io.Writer, parent *LocalBuild,
-	size, blockSize int64, buildID uuid.UUID, stats *ChunkifyStats) ([]*BuildMap, error) {
+//
+// dirty, when non-nil, restricts which blocks are read at all: everything
+// outside it is a parent pointer by definition. See ChunkifyOpts.Dirty for why
+// a copy-on-write file cannot be diffed without it.
+func writeDiff(ctx context.Context, src io.ReaderAt, dst io.Writer, parent *LocalBuild,
+	dirty *roaring.Bitmap, size, blockSize int64, buildID uuid.UUID,
+	stats *ChunkifyStats) ([]*BuildMap, error) {
 
 	var (
 		mapping []*BuildMap
@@ -238,15 +260,63 @@ func writeDiff(ctx context.Context, src io.Reader, dst io.Writer, parent *LocalB
 		kind = runNone
 	}
 
+	// extendParent coalesces a parent-served block onto the open run.
+	//
+	// All THREE conditions are required. Logical contiguity alone is not
+	// enough: extending Length only stays correct while the parent's storage
+	// is contiguous too AND both blocks read through the same parent mapping.
+	// Dropping either of the latter produces a header that parses cleanly and
+	// resolves to the WRONG parent bytes -- corruption with no error anywhere.
+	extendParent := func(off int64, pm *BuildMap, parentStorageOff int64) bool {
+		return kind == runParent &&
+			runStart+runBytes == off &&
+			runStorage+runBytes == parentStorageOff &&
+			runParentAt == int64(pm.Offset)
+	}
+	openParent := func(off int64, pm *BuildMap, parentStorageOff int64) {
+		closeRun()
+		kind = runParent
+		runStart = off
+		runBytes = blockSize
+		runStorage = parentStorageOff
+		runParentAt = int64(pm.Offset)
+		runBuild = pm.BuildId
+		stats.ParentRefs++
+	}
+
 	for off := int64(0); off < size; off += blockSize {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if err := readBlock(src, buf); err != nil {
+
+		if dirty != nil && !dirty.Contains(uint32(off/blockSize)) {
+			// Never written: the parent still speaks for this block. Read
+			// nothing -- neither ours (it would be a hole) nor the parent's.
+			pm, parentStorageOff, err := parent.mappingAt(off)
+			if err != nil {
+				return nil, err
+			}
+			if pm == nil {
+				// The parent has a gap here, so zeros are already correct.
+				stats.ZeroBlocks++
+				closeRun()
+				continue
+			}
+			if extendParent(off, pm, parentStorageOff) {
+				runBytes += blockSize
+				continue
+			}
+			openParent(off, pm, parentStorageOff)
+			continue
+		}
+
+		if err := readBlockAt(src, buf, off); err != nil {
 			return nil, err
 		}
 
 		if bytes.Equal(buf, zero) {
+			// A gap reads back as zeros whatever the parent holds, so this is
+			// correct for a deliberately zeroed block too.
 			stats.ZeroBlocks++
 			closeRun()
 			continue
@@ -259,28 +329,11 @@ func writeDiff(ctx context.Context, src io.Reader, dst io.Writer, parent *LocalB
 
 		if pm != nil && bytes.Equal(buf, parentBuf) {
 			// Identical to the parent: record a pointer, store nothing.
-			//
-			// Coalescing needs ALL THREE conditions. Logical contiguity alone
-			// is not enough: extending Length only stays correct while the
-			// parent's storage is contiguous too AND both blocks read through
-			// the same parent mapping. Dropping either of the latter produces
-			// a header that parses cleanly and resolves to the WRONG parent
-			// bytes -- corruption with no error anywhere.
-			if kind == runParent &&
-				runStart+runBytes == off &&
-				runStorage+runBytes == parentStorageOff &&
-				runParentAt == int64(pm.Offset) {
+			if extendParent(off, pm, parentStorageOff) {
 				runBytes += blockSize
 				continue
 			}
-			closeRun()
-			kind = runParent
-			runStart = off
-			runBytes = blockSize
-			runStorage = parentStorageOff
-			runParentAt = int64(pm.Offset)
-			runBuild = pm.BuildId
-			stats.ParentRefs++
+			openParent(off, pm, parentStorageOff)
 			continue
 		}
 
@@ -305,6 +358,20 @@ func writeDiff(ctx context.Context, src io.Reader, dst io.Writer, parent *LocalB
 
 	stats.PackedBytes = packed
 	return mapping, nil
+}
+
+// readBlockAt fills buf from an absolute offset, zero-padding past end of file.
+func readBlockAt(src io.ReaderAt, buf []byte, off int64) error {
+	n, err := src.ReadAt(buf, off)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("block: read source at %d: %w", off, err)
+	}
+	// Past the end of the source -- or inside a hole the filesystem never
+	// allocated. Either way the padding is zeros.
+	for i := n; i < len(buf); i++ {
+		buf[i] = 0
+	}
+	return nil
 }
 
 // readBlock fills buf, zero-padding a short read at end of file.
