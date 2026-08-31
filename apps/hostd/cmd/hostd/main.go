@@ -20,9 +20,11 @@ import (
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/vivek7405/pilots/hostd/internal/block"
 	"github.com/vivek7405/pilots/hostd/internal/config"
 	"github.com/vivek7405/pilots/hostd/internal/fc"
 	"github.com/vivek7405/pilots/hostd/internal/machines"
+	"github.com/vivek7405/pilots/hostd/internal/nbd"
 	"github.com/vivek7405/pilots/hostd/internal/router"
 	"github.com/vivek7405/pilots/hostd/internal/s3"
 	"github.com/vivek7405/pilots/hostd/internal/state"
@@ -38,6 +40,13 @@ const shutdownTimeout = 30 * time.Second
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
+
+	// hostd re-executes itself to serve a machine's disk. Checked before
+	// anything else, because a handler must not load daemon config, open the
+	// state database, or bind a port.
+	if dispatchSubcommand() {
+		return
+	}
 
 	if err := run(); err != nil {
 		slog.Error("hostd exited", "err", err)
@@ -73,13 +82,32 @@ func run() error {
 		return err
 	}
 
+	// One device pool per host: the kernel's nbd devices are a host resource,
+	// and reconcile has to reserve the ones adopted machines still hold before
+	// the manager can hand any out.
+	devices := nbd.NewDevicePool(nbd.DefaultMaxDevices)
+
+	// A second client over the same bucket under the chunk prefix. Content-
+	// addressed builds are named by uuid alone, so they need their own
+	// namespace or a build id could collide with a machine's key.
+	chunks, err := newChunkStore(cfg)
+	if err != nil {
+		return err
+	}
+
 	mgr := machines.New(machines.Options{
-		HostID:    cfg.HostID,
-		Domain:    cfg.WorkloadDomain,
-		StateRoot: cfg.MachineStateRoot(),
-		CacheRoot: cfg.CacheRoot(),
-		Store:     store,
-		Uploader:  uploader,
+		HostID:     cfg.HostID,
+		Domain:     cfg.WorkloadDomain,
+		StateRoot:  cfg.MachineStateRoot(),
+		CacheRoot:  cfg.CacheRoot(),
+		Store:      store,
+		Uploader:   uploader,
+		Chunks:     chunks,
+		BlockStore: chunkReader(chunks),
+		NBDDevices: devices,
+		// The handlers are separate processes and read builds themselves, so
+		// they need this daemon's storage credentials.
+		HandlerEnv: os.Environ(),
 		FCConfig: fc.Config{
 			KernelPath:     cfg.KernelPath,
 			TemplateRootfs: cfg.TemplateRootfs,
@@ -96,7 +124,7 @@ func run() error {
 	// Re-adopt machines that outlived the previous hostd. This is what makes a
 	// restart safe: the processes are still serving, and picking them back up
 	// costs nothing.
-	adopted := reconcile(cfg, mgr)
+	adopted := reconcile(cfg, mgr, devices)
 	if adopted > 0 {
 		slog.Info("re-adopted machines from a previous run", "count", adopted)
 	}
@@ -188,7 +216,7 @@ func dispatch(cfg *config.Config, rtr http.Handler, ctrl http.Handler) http.Hand
 }
 
 // reconcile re-adopts machines left running by a previous hostd.
-func reconcile(cfg *config.Config, mgr *machines.Manager) int {
+func reconcile(cfg *config.Config, mgr *machines.Manager, devices *nbd.DevicePool) int {
 	found, err := fc.Reconcile(cfg.MachineStateRoot())
 	if err != nil {
 		slog.Error("reconcile failed", "err", err)
@@ -203,7 +231,7 @@ func reconcile(cfg *config.Config, mgr *machines.Manager) int {
 			_ = fc.ClearBreadcrumbs(filepath.Join(cfg.MachineStateRoot(), r.State.MachineID))
 			continue
 		}
-		m := fc.Adopted(r.State, cfg.MachineStateRoot())
+		m := fc.Adopted(r.State, cfg.MachineStateRoot(), devices)
 		if err := mgr.Adopt(r.State.MachineID, m, r.State.SlotIdx); err != nil {
 			slog.Error("could not adopt machine", "machine", r.State.MachineID, "err", err)
 			continue
@@ -211,6 +239,33 @@ func reconcile(cfg *config.Config, mgr *machines.Manager) int {
 		adopted++
 	}
 	return adopted
+}
+
+// chunkPrefix namespaces content-addressed builds inside the bucket.
+const chunkPrefix = "chunks"
+
+// newChunkStore builds the client that reads and writes builds.
+func newChunkStore(cfg *config.Config) (fc.Uploader, error) {
+	if cfg.S3Bucket == "" {
+		return fc.UnconfiguredStore{}, nil
+	}
+	return s3.New(context.Background(), s3.Config{
+		Endpoint: cfg.S3Endpoint, Region: cfg.S3Region, Bucket: cfg.S3Bucket,
+		Prefix:    chunkPrefix,
+		AccessKey: cfg.S3AccessKey, SecretKey: cfg.S3SecretKey,
+	})
+}
+
+// chunkReader exposes a chunk store as the block layer's read surface.
+//
+// Nil rather than a stub when storage is unconfigured: a lazy read has no
+// meaningful failure to return per page, so the restore must fail up front on
+// a missing store instead of per fault, with the guest already resumed.
+func chunkReader(up fc.Uploader) block.ObjectStore {
+	if store, ok := up.(block.ObjectStore); ok {
+		return store
+	}
+	return nil
 }
 
 func newUploader(cfg *config.Config) (fc.Uploader, error) {

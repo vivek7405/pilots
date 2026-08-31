@@ -27,6 +27,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 
+	"github.com/vivek7405/pilots/hostd/internal/block"
 	"github.com/vivek7405/pilots/hostd/internal/fc"
 )
 
@@ -36,7 +37,12 @@ import (
 // zero-length object, and a range request against it returns 416. Phase 3
 // treats that as "these blocks are zeros" rather than an error. Callers must
 // be able to tell it apart, so it is surfaced rather than wrapped away.
-var ErrRangeNotSatisfiable = errors.New("s3: range not satisfiable")
+//
+// It IS the block layer's sentinel rather than a parallel one, so that a
+// *Client satisfies block.ObjectStore directly. Two sentinels meaning the same
+// thing need an adapter between them, and an adapter that forgets to translate
+// this particular error turns an all-zero diff into a failed wake.
+var ErrRangeNotSatisfiable = block.ErrRangeNotSatisfiable
 
 // ErrNotFound reports a missing key.
 //

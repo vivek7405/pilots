@@ -327,12 +327,136 @@ async function lifecycleAssertions() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 3: the instant engine, timed.
+//
+// Correctness is already covered above and is not repeated here. What this
+// section asserts is that the lazy paths are actually lazy: a create is a
+// snapshot restore rather than a boot, a wake serves from the block store
+// rather than copying an image, and a checkpoint freezes the guest only long
+// enough to write its state.
+//
+// The numbers are the phase gate. They are p50s over several samples, not
+// single measurements: the pause window competes with whatever else the host
+// is doing, and one unlucky run is noise rather than a regression.
+// ---------------------------------------------------------------------------
+
+const TIMING_SAMPLES = 5;
+
+// median is the honest summary for a latency with a long tail.
+function median(values) {
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+async function timed(fn) {
+  const started = process.hrtime.bigint();
+  const result = await fn();
+  return { ms: Number(process.hrtime.bigint() - started) / 1e6, result };
+}
+
+async function timingAssertions() {
+  const created = [];
+
+  try {
+    await step(`create is under 1.5s (p50 of ${TIMING_SAMPLES})`, async () => {
+      const samples = [];
+      for (let i = 0; i < TIMING_SAMPLES; i++) {
+        const { ms, result } = await timed(() =>
+          request('/v1/machines', { method: 'POST', body: { vcpus: 1, mem_mib: 512 } }));
+        assert(result.status === 201, `create failed: ${result.status}`);
+        created.push(result.json.id);
+        samples.push(ms);
+      }
+      const p50 = median(samples);
+      console.log(`      create p50 ${p50.toFixed(0)}ms  [${samples.map((s) => s.toFixed(0)).join(', ')}]`);
+      assert(p50 < 1500, `create p50 was ${p50.toFixed(0)}ms`);
+    });
+
+    const id = created[0];
+
+    await step(`wake is under 1s with a warm cache (p50 of ${TIMING_SAMPLES})`, async () => {
+      const samples = [];
+      for (let i = 0; i < TIMING_SAMPLES; i++) {
+        const suspended = await request(`/v1/machines/${id}/suspend`, { method: 'POST' });
+        assert(suspended.status === 204 || suspended.status === 200,
+          `suspend failed: ${suspended.status}`);
+
+        const { ms, result } = await timed(() =>
+          request(`/v1/machines/${id}/wake`, { method: 'POST' }));
+        assert(result.status === 204 || result.status === 200,
+          `wake failed: ${result.status} ${JSON.stringify(result.json)}`);
+        samples.push(ms);
+      }
+      const p50 = median(samples);
+      console.log(`      wake p50 ${p50.toFixed(0)}ms  [${samples.map((s) => s.toFixed(0)).join(', ')}]`);
+      assert(p50 < 1000, `wake p50 was ${p50.toFixed(0)}ms`);
+    });
+
+    await step('a machine still serves after being woken', async () => {
+      const out = await exec(id, 'echo awake');
+      assert(out === 'awake', `guest returned ${JSON.stringify(out)}`);
+    });
+
+    await step(`checkpoint resume gap is under 500ms (p50 of ${TIMING_SAMPLES})`, async () => {
+      // The gate is the RESUME GAP -- how long the guest is frozen -- which
+      // the server reports. It is not the call's duration: waiting for the
+      // previous capture and making memory resident both happen before the
+      // pause, with the machine still running and serving. Both are printed,
+      // because a client waiting on the call cares about the round trip too.
+      const gaps = [];
+      const trips = [];
+      for (let i = 0; i < TIMING_SAMPLES; i++) {
+        const { ms, result } = await timed(() =>
+          request(`/v1/machines/${id}/checkpoints`, {
+            method: 'POST', body: { comment: `timing-${i}` },
+          }));
+        assert(result.status === 201, `checkpoint failed: ${result.status}`);
+        assert(typeof result.json.resume_gap_ms === 'number',
+          'the checkpoint response did not report a resume gap');
+        gaps.push(result.json.resume_gap_ms);
+        trips.push(ms);
+      }
+      const p50 = median(gaps);
+      console.log(`      checkpoint resume gap p50 ${p50.toFixed(0)}ms  [${gaps.join(', ')}]`);
+      console.log(`      checkpoint round trip p50 ${median(trips).toFixed(0)}ms  [${trips.map((t) => t.toFixed(0)).join(', ')}]`);
+      assert(p50 < 500, `checkpoint resume gap p50 was ${p50.toFixed(0)}ms`);
+    });
+
+    await step('the guest keeps serving through a checkpoint', async () => {
+      const out = await exec(id, 'echo still-here');
+      assert(out === 'still-here', `guest returned ${JSON.stringify(out)}`);
+    });
+
+    await step('a suspend/wake cycle preserves everything written before it', async () => {
+      // The failure this catches is silent: a second wake that restores the
+      // FIRST suspend loses every write in between and reports nothing.
+      await exec(id, 'echo one > /var/tmp/rounds.txt');
+      for (let round = 2; round <= 4; round++) {
+        await exec(id, `echo ${round} >> /var/tmp/rounds.txt`);
+        await request(`/v1/machines/${id}/suspend`, { method: 'POST' });
+        const woken = await request(`/v1/machines/${id}/wake`, { method: 'POST' });
+        assert(woken.status === 204 || woken.status === 200,
+          `wake ${round} failed: ${woken.status} ${JSON.stringify(woken.json)}`);
+      }
+      const out = await exec(id, 'tr "\n" "," < /var/tmp/rounds.txt');
+      assert(out === 'one,2,3,4,',
+        `writes were lost across suspend/wake: ${JSON.stringify(out)}`);
+    });
+  } finally {
+    for (const id of created) {
+      await request(`/v1/machines/${id}`, { method: 'DELETE' });
+    }
+  }
+}
+
 async function main() {
   console.log(`e2e: ${API}${FULL ? ' (full lifecycle)' : ' (process only)'}`);
 
   await processAssertions();
   if (FULL) {
     await lifecycleAssertions();
+    await timingAssertions();
   } else {
     console.log('  - machine lifecycle skipped (set PILOTS_E2E_FULL=1 on a Firecracker host)');
   }

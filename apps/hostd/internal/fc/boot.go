@@ -8,12 +8,15 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
 
+	"github.com/vivek7405/pilots/hostd/internal/nbd"
 	"github.com/vivek7405/pilots/hostd/internal/netns"
+	"github.com/vivek7405/pilots/hostd/internal/uffd"
 )
 
 // BakedRootfsPath is where the guest kernel expects its root device to be, as
@@ -84,6 +87,17 @@ type Machine struct {
 	StateDir  string
 	SerialLog string
 	StartedAt time.Time
+
+	// NBD and Uffd serve the machine's disk and memory. They are separate
+	// processes, and they outlive hostd on purpose -- see instant.go. Nil for
+	// a machine booted from a template file rather than restored.
+	NBD  *nbd.Process
+	Uffd *uffd.Process
+
+	// captureDone is closed when the background half of the previous snapshot
+	// finishes. See awaitCapture.
+	captureMu   sync.Mutex
+	captureDone chan struct{}
 }
 
 // GenerateMAC returns a locally administered unicast address.
