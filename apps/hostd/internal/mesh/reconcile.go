@@ -2,8 +2,10 @@ package mesh
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/netip"
+	"strings"
 	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
@@ -30,12 +32,24 @@ type HostSource interface {
 // host that joins appears as a row and becomes a peer; one that is
 // decommissioned and removed stops being one. Nothing here allocates or
 // assigns: a peer's address is derived from the key in its row.
-func Reconcile(ctx context.Context, dev *Device, hosts HostSource, selfID string) {
+//
+// bootstrap is the peer a joining host was given, and it is ALWAYS included.
+// Without it a new host cannot join at all: its peers come from the hosts
+// table, the hosts table arrives by gossip, and gossip rides this mesh -- so
+// with an empty table there is no route to anywhere, and the table stays
+// empty forever. The bootstrap peer is the one edge that is configured rather
+// than discovered, and it is what breaks that circle.
+//
+// It stays in the set even after the table fills. Once the peer's own row
+// arrives the two describe the same peer and the row's version wins on merge;
+// dropping it early would cut the only link a host has while it is still the
+// only link.
+func Reconcile(ctx context.Context, dev *Device, hosts HostSource, selfID string, bootstrap []Peer) {
 	tick := time.NewTicker(reconcileInterval)
 	defer tick.Stop()
 
 	for {
-		if err := dev.Sync(PeersFrom(hosts.Hosts(), selfID)); err != nil {
+		if err := dev.Sync(withBootstrap(PeersFrom(hosts.Hosts(), selfID), bootstrap)); err != nil {
 			slog.Error("could not reconcile mesh peers", "err", err)
 		}
 		select {
@@ -44,6 +58,47 @@ func Reconcile(ctx context.Context, dev *Device, hosts HostSource, selfID string
 		case <-tick.C:
 		}
 	}
+}
+
+// withBootstrap adds the configured peers that the hosts table does not
+// already describe.
+func withBootstrap(peers []Peer, bootstrap []Peer) []Peer {
+	if len(bootstrap) == 0 {
+		return peers
+	}
+	known := make(map[wgtypes.Key]bool, len(peers))
+	for _, p := range peers {
+		known[p.PublicKey] = true
+	}
+	for _, b := range bootstrap {
+		if !known[b.PublicKey] {
+			peers = append(peers, b)
+		}
+	}
+	return peers
+}
+
+// ParseBootstrapPeer reads a "<public-key>@<host>:<port>" peer.
+//
+// This is how a joining host is told where to find the fleet. It carries the
+// public KEY, not just an address, because a mesh address is derived from a
+// key one way -- there is no recovering the key from it, and without the key
+// there is no tunnel.
+func ParseBootstrapPeer(spec string) (Peer, error) {
+	at := strings.LastIndex(spec, "@")
+	if at < 0 {
+		return Peer{}, fmt.Errorf("mesh: bootstrap peer %q is not <public-key>@<host>:<port>", spec)
+	}
+
+	key, err := wgtypes.ParseKey(spec[:at])
+	if err != nil {
+		return Peer{}, fmt.Errorf("mesh: bootstrap peer key: %w", err)
+	}
+	endpoint, err := netip.ParseAddrPort(spec[at+1:])
+	if err != nil {
+		return Peer{}, fmt.Errorf("mesh: bootstrap peer endpoint: %w", err)
+	}
+	return Peer{PublicKey: key, Address: AddressFor(key), Endpoint: endpoint}, nil
 }
 
 // PeersFrom turns host rows into mesh peers.

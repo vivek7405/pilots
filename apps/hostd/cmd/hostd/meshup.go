@@ -59,8 +59,21 @@ func runMeshUp() error {
 	}
 	defer dev.Close()
 
-	// No peers yet: they come from the hosts table, which needs corrosion,
-	// which needs this. Peers are reconciled by hostd once it is running.
+	// The bootstrap peer goes in HERE, not later. Corrosion starts after this
+	// unit and immediately tries to reach its gossip bootstrap address, which
+	// is inside the tunnel -- so the route has to exist before it starts, not
+	// once hostd gets around to reconciling.
+	if cfg.MeshBootstrap != "" {
+		peer, err := mesh.ParseBootstrapPeer(cfg.MeshBootstrap)
+		if err != nil {
+			return err
+		}
+		if err := dev.Sync([]mesh.Peer{peer}); err != nil {
+			return fmt.Errorf("add the bootstrap peer: %w", err)
+		}
+		fmt.Printf("bootstrap peer %s via %s\n", peer.Address, peer.Endpoint)
+	}
+
 	fmt.Printf("mesh %s up at %s\n", mesh.LinkName, dev.Address())
 	return nil
 }

@@ -75,8 +75,22 @@ func startMesh(ctx context.Context, cfg *config.Config, cache *corrosion.Cache) 
 		return nil, keys, err
 	}
 
-	slog.Info("mesh up", "addr", dev.Address(), "pubkey", dev.PublicKey())
-	go mesh.Reconcile(ctx, dev, cache, cfg.HostID)
+	// The peer this host was told about, if any. The first host in a cluster
+	// has none and needs none: everyone else comes to it.
+	var bootstrap []mesh.Peer
+	if cfg.MeshBootstrap != "" {
+		peer, err := mesh.ParseBootstrapPeer(cfg.MeshBootstrap)
+		if err != nil {
+			dev.Close()
+			return nil, keys, err
+		}
+		bootstrap = append(bootstrap, peer)
+		slog.Info("joining through a bootstrap peer",
+			"addr", peer.Address, "endpoint", peer.Endpoint)
+	}
+
+	slog.Info("mesh up", "addr", dev.Address(), "pubkey", dev.PublicKey().String())
+	go mesh.Reconcile(ctx, dev, cache, cfg.HostID, bootstrap)
 	return dev, keys, nil
 }
 

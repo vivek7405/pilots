@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Turn a bare Ubuntu host into a pilots host.
 #
-#   scripts/host-bootstrap.sh <ip> [--peer <mesh-addr>]
+#   scripts/host-bootstrap.sh <ip> [--peer <ip-of-any-existing-host>]
 #
 # Idempotent by presence-check at every step, so re-running it upgrades a host
 # and never breaks one. The first host is bootstrapped with no --peer and
@@ -44,7 +44,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "$IP" ] || { echo "usage: $0 <ip> [--peer <mesh-addr>]" >&2; exit 2; }
+[ -n "$IP" ] || { echo "usage: $0 <ip> [--peer <ip-of-any-existing-host>]" >&2; exit 2; }
 [ -n "$CORROSION_TOKEN" ] || {
   echo "PILOT_CORROSION_TOKEN must be set: it is the cluster's shared API secret" >&2
   exit 2
@@ -54,6 +54,19 @@ say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 on_host() { ssh $SSH_OPTS "root@${IP}" "$@"; }
 
 say "Bootstrapping ${IP}${PEER:+ (joining via ${PEER})}"
+
+# What a joining host needs from its peer is the peer's KEY, not just its
+# address. A mesh address is derived from a key one way -- there is no
+# recovering the key from it, and without the key there is no tunnel, so
+# gossip never reaches the peer and the hosts table never arrives.
+PEER_MESH=""
+PEER_BOOTSTRAP=""
+if [ -n "$PEER" ]; then
+  PEER_PUBKEY=$(ssh $SSH_OPTS "root@${PEER}" "wg pubkey < /var/lib/pilots/mesh.key")
+  PEER_MESH=$(ssh $SSH_OPTS "root@${PEER}" "/opt/pilots/bin/hostd mesh-addr")
+  PEER_BOOTSTRAP="${PEER_PUBKEY}@${PEER}:51820"
+  echo "  peer ${PEER_MESH} via ${PEER}:51820"
+fi
 
 # ---------------------------------------------------------------------------
 say "[1/9] Base packages, user and directories"
@@ -199,6 +212,7 @@ PILOT_PUBLIC_IP=${IP}
 PILOT_WORKLOAD_DOMAIN=${DOMAIN}
 PILOT_STATE_BACKEND=corrosion
 PILOT_MESH_ENABLED=1
+PILOT_MESH_BOOTSTRAP=${PEER_BOOTSTRAP}
 PILOT_CORROSION_ADDR=127.0.0.1:51002
 PILOT_CORROSION_TOKEN=${CORROSION_TOKEN}
 PILOT_S3_ENDPOINT=${S3_ENDPOINT}
@@ -221,7 +235,7 @@ scp $SSH_OPTS -q "${REPO}/apps/hostd/internal/state/schema.sql" \
 # The schema file must be BYTE-IDENTICAL on every host: corrosion does not
 # replicate DDL, so a host with a different one silently diverges.
 BOOTSTRAP_LINE=""
-[ -n "$PEER" ] && BOOTSTRAP_LINE="\"[${PEER}]:51001\""
+[ -n "$PEER_MESH" ] && BOOTSTRAP_LINE="\"[${PEER_MESH}]:51001\""
 
 on_host bash -euo pipefail -s <<REMOTE
 cat >/var/lib/pilots/corrosion/config.toml <<CONF
@@ -324,4 +338,4 @@ echo "  host id:   ${HOST_ID}"
 echo "  mesh addr: ${MESH_ADDR}"
 echo
 echo "Bootstrap the next host with:"
-echo "  scripts/host-bootstrap.sh <ip> --peer ${MESH_ADDR}"
+echo "  scripts/host-bootstrap.sh <ip> --peer ${IP}"

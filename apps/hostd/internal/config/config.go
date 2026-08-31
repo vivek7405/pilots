@@ -61,6 +61,12 @@ type Config struct {
 	// MeshEnabled brings up WireGuard. Off on a single box, where there is
 	// nothing to mesh with.
 	MeshEnabled bool // PILOT_MESH_ENABLED
+	// MeshBootstrap is the peer a joining host was given, as
+	// "<public-key>@<host>:<port>". It is the one edge that is configured
+	// rather than discovered, and without it a new host can never join: its
+	// peers come from the hosts table, the table arrives by gossip, and
+	// gossip rides the mesh.
+	MeshBootstrap string // PILOT_MESH_BOOTSTRAP
 }
 
 // Fleet reports whether this host is part of a cluster.
@@ -134,6 +140,7 @@ func Load() (*Config, error) {
 		CorrosionAddr:  env("PILOT_CORROSION_ADDR", "127.0.0.1:51002"),
 		CorrosionToken: os.Getenv("PILOT_CORROSION_TOKEN"),
 		MeshEnabled:    os.Getenv("PILOT_MESH_ENABLED") == "1",
+		MeshBootstrap:  os.Getenv("PILOT_MESH_BOOTSTRAP"),
 	}
 
 	if c.HostID == "" {

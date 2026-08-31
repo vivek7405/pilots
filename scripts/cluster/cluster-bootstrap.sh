@@ -37,9 +37,11 @@ say "First host: ${IPS[0]}"
 FIRST_MESH=$(ssh $SSH_OPTS "root@${IPS[0]}" "/opt/pilots/bin/hostd mesh-addr")
 echo "first host's mesh address: ${FIRST_MESH}"
 
+# Joining hosts are pointed at the first host's PUBLIC address; the bootstrap
+# script asks it for the key and mesh address itself.
 for ip in "${IPS[@]:1}"; do
   say "Joining ${ip}"
-  "${REPO}/scripts/host-bootstrap.sh" "$ip" --peer "$FIRST_MESH"
+  "${REPO}/scripts/host-bootstrap.sh" "$ip" --peer "${IPS[0]}"
 done
 
 say "Fleet"
