@@ -1,0 +1,29 @@
+[Unit]
+Description=pilots host daemon (data plane)
+Documentation=https://github.com/vivek7405/pilots
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/hostd
+EnvironmentFile=-/etc/pilots/hostd.env
+Restart=always
+RestartSec=1
+
+# hostd spawns firecracker and the uffd/NBD handlers, and creates cgroup v2
+# sub-slices per guest -- Delegate=yes is what makes that legal.
+Delegate=yes
+KillMode=mixed
+
+# Long-lived FC API sockets, exec streams and per-VM handlers add up fast; the
+# predecessor wedged hosts by exhausting file descriptors.
+LimitNOFILE=65536
+LimitMEMLOCK=infinity
+
+# Must exceed hostd's own 30s bounded shutdown so systemd never SIGKILLs a
+# host that is still tearing guests down cleanly.
+TimeoutStopSec=45
+
+[Install]
+WantedBy=multi-user.target
