@@ -15,6 +15,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/config"
 	"github.com/vivek7405/pilots/hostd/internal/nbd"
 	"github.com/vivek7405/pilots/hostd/internal/s3"
+	"github.com/vivek7405/pilots/hostd/internal/uffd"
 )
 
 // runNBDHandler is hostd re-executed as a block-device server for one machine.
@@ -109,11 +110,20 @@ func parseOptionalUUID(s string) (uuid.UUID, error) {
 
 // dispatchSubcommand runs a hidden subcommand and reports whether it did.
 func dispatchSubcommand() bool {
-	if len(os.Args) < 2 || os.Args[1] != nbd.SubcommandName {
+	if len(os.Args) < 2 {
 		return false
 	}
-	if err := runNBDHandler(os.Args[2:]); err != nil {
-		slog.Error("nbd handler exited", "err", err)
+	var run func([]string) error
+	switch os.Args[1] {
+	case nbd.SubcommandName:
+		run = runNBDHandler
+	case uffd.SubcommandName:
+		run = runUffdHandler
+	default:
+		return false
+	}
+	if err := run(os.Args[2:]); err != nil {
+		slog.Error("handler exited", "handler", os.Args[1], "err", err)
 		os.Exit(1)
 	}
 	return true

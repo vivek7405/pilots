@@ -208,3 +208,50 @@ func (b *LocalBuild) mappingCovering(off int64) *BuildMap {
 	}
 	return nil
 }
+
+// FileSlicer serves a plain file as a Slicer.
+//
+// The memory path uses it for an image already on local disk -- a same-host
+// wake, or a machine whose snapshot was never chunkified. Without it the uffd
+// handler would need a second code path for the un-chunked case, which is the
+// path a first boot always takes.
+type FileSlicer struct {
+	f         *os.File
+	size      int64
+	blockSize int64
+}
+
+// OpenFileSlicer opens a file for random access.
+func OpenFileSlicer(path string, blockSize int64) (*FileSlicer, error) {
+	if blockSize <= 0 {
+		blockSize = DefaultBlockSize
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("block: open %s: %w", path, err)
+	}
+	info, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, fmt.Errorf("block: stat %s: %w", path, err)
+	}
+	return &FileSlicer{f: f, size: info.Size(), blockSize: blockSize}, nil
+}
+
+func (s *FileSlicer) BlockSize() int64 { return s.blockSize }
+func (s *FileSlicer) Size() int64      { return s.size }
+func (s *FileSlicer) Close() error     { return s.f.Close() }
+
+// Prefault is a no-op: the bytes are already local.
+func (s *FileSlicer) Prefault(context.Context) error { return nil }
+
+func (s *FileSlicer) Slice(_ context.Context, off, length int64) ([]byte, error) {
+	out := make([]byte, length)
+	n, err := s.f.ReadAt(out, off)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, fmt.Errorf("block: read %d bytes at %d: %w", length, off, err)
+	}
+	// A short read is the end of the file. Returning the truncated slice
+	// rather than zero-padding lets the caller tell the two apart.
+	return out[:n], nil
+}
