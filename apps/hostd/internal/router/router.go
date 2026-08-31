@@ -31,7 +31,10 @@ type Target struct {
 
 // Options configures the router.
 type Options struct {
-	Domain  string // e.g. "pilotrun.app"
+	Domain string // e.g. "pilotrun.app"
+	// HostID identifies this host. A machine owned by another host is not
+	// this router's to start.
+	HostID  string
 	Store   state.Store
 	Manager *machines.Manager
 	// SlotFor resolves a running machine's network slot. The router needs the
@@ -99,9 +102,23 @@ func (r *Router) resolve(ctx context.Context, host string) (*Target, error) {
 		return nil, err
 	}
 	for _, row := range rows {
-		if row.Name == name || row.Domain == strings.ToLower(host) {
-			return &Target{Machine: row, Port: port}, nil
+		if row.Name != name && row.Domain != strings.ToLower(host) {
+			continue
 		}
+		// Only this host's machines are servable here.
+		//
+		// Waking someone else's machine locally would run a second copy from
+		// the same artifacts AND write state onto a row this host does not
+		// own -- a single-writer violation, which under a replicated store
+		// corrupts silently through the merge rather than erroring.
+		//
+		// Phase 4 replaces this error with a proxy to the owning host over the
+		// mesh; until the mesh exists, refusing is the honest answer.
+		if r.opts.HostID != "" && row.HostID != r.opts.HostID {
+			return nil, fmt.Errorf("router: machine %q is owned by host %q, not %q",
+				name, row.HostID, r.opts.HostID)
+		}
+		return &Target{Machine: row, Port: port}, nil
 	}
 	return nil, fmt.Errorf("router: no machine named %q", name)
 }

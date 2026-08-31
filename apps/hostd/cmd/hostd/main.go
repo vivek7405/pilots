@@ -101,6 +101,11 @@ func run() error {
 		slog.Info("re-adopted machines from a previous run", "count", adopted)
 	}
 
+	// After adoption, anything still lying around belongs to nothing.
+	if err := mgr.GCOrphanInterfaces(); err != nil {
+		slog.Warn("could not clean up orphaned interfaces", "err", err)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -111,6 +116,7 @@ func run() error {
 
 	rtr := router.New(router.Options{
 		Domain:  cfg.WorkloadDomain,
+		HostID:  cfg.HostID,
 		Store:   store,
 		Manager: mgr,
 		SlotFor: mgr.SlotFor,

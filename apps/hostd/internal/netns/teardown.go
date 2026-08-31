@@ -78,6 +78,15 @@ func deleteNamedNS(name string) error {
 		name, ebusyRetries, lastErr)
 }
 
+// TeardownByName removes a namespace when only its name is known.
+//
+// The reaper finds an orphaned machine by its process, not by a slot, so it has
+// no Slot to tear down -- but a namespace left behind blocks the next machine
+// that lands on the same slot with "file exists".
+func TeardownByName(netnsName string) error {
+	return deleteNamedNS(netnsName)
+}
+
 // GCOrphanVeths removes veth-* links with no peer, left behind when a teardown
 // was interrupted. Called on reconcile, so a crashed hostd does not leak
 // interfaces across restarts.

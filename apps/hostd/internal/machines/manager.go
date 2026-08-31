@@ -105,6 +105,24 @@ func (m *Manager) drop(id string) {
 	delete(m.running, id)
 }
 
+// GCOrphanInterfaces removes veth links belonging to no live machine.
+//
+// A veth normally dies with its namespace, but an interrupted teardown can
+// strand one, and they accumulate silently across crashes. Called on startup,
+// once the machines that survived have been adopted -- anything not claimed by
+// then has no owner.
+func (m *Manager) GCOrphanInterfaces() error {
+	m.mu.RLock()
+	inUse := make(map[string]bool, len(m.running))
+	for _, fcm := range m.running {
+		if fcm.Slot != nil {
+			inUse[fcm.Slot.VEthName] = true
+		}
+	}
+	m.mu.RUnlock()
+	return netns.GCOrphanVeths(inUse)
+}
+
 // Running reports the machines this host currently has processes for.
 func (m *Manager) Running() []string {
 	m.mu.RLock()

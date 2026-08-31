@@ -238,6 +238,30 @@ async function lifecycleAssertions() {
       assert(marker === 'survives-suspend', `disk did not survive: ${marker}`);
     });
 
+    // A SECOND cycle, because one proves almost nothing here.
+    //
+    // The suspend prefix is reused per machine, so a restore that trusted its
+    // local cache came back on the FIRST snapshot and lost everything written
+    // in between -- with no error, and only on the host that happened to hold
+    // the stale copy. One round trip cannot see that; two can.
+    await step('a second suspend/wake cycle restores the LATEST state', async () => {
+      await exec(id, 'echo second-cycle > /root/marker.txt');
+      await exec(id, 'echo only-after-first-wake > /root/second.txt');
+
+      const susp = await request(`/v1/machines/${id}/suspend`, { method: 'POST' });
+      assert(susp.status === 204, `suspend: expected 204, got ${susp.status}`);
+      const wake = await request(`/v1/machines/${id}/wake`, { method: 'POST' });
+      assert(wake.status === 204, `wake: expected 204, got ${wake.status}`);
+
+      const marker = await exec(id, 'cat /root/marker.txt');
+      assert(marker === 'second-cycle',
+        `restored a stale snapshot: marker is ${JSON.stringify(marker)}, want second-cycle`);
+
+      const fresh = await exec(id, 'cat /root/second.txt');
+      assert(fresh === 'only-after-first-wake',
+        `a file written after the first wake did not survive: ${JSON.stringify(fresh)}`);
+    });
+
     // A restored guest resumes with its clock frozen at snapshot time. The
     // failure is silent -- the machine accepts connections and never serves
     // them -- so it is worth asserting directly.
@@ -246,6 +270,45 @@ async function lifecycleAssertions() {
       const host = Math.floor(Date.now() / 1000);
       const drift = Math.abs(host - guest);
       assert(drift < 60, `guest clock is ${drift}s from the host's`);
+    });
+
+    await step('a checkpoint reports itself durable once uploaded', async () => {
+      const { status, json } = await request(`/v1/machines/${id}/checkpoints`, {
+        method: 'POST', body: { comment: 'durability' },
+      });
+      assert(status === 201, `expected 201, got ${status}`);
+
+      // Returns before the upload finishes by design, so poll for the flag.
+      await waitFor(async () => {
+        const { json: ck } = await request(`/v1/checkpoints/${json.id}`);
+        return ck?.durable === true;
+      }, { timeoutMs: 180_000, what: 'the checkpoint to become durable' });
+    });
+
+    // A partial knobs object must not zero the fields the caller left out; a
+    // machine created with auto_start off suspends and then never wakes.
+    await step('partial knobs merge onto the defaults', async () => {
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST', body: { knobs: { soft_limit: 5 } },
+      });
+      assert(status === 201, `expected 201, got ${status}`);
+      try {
+        assert(json.knobs.soft_limit === 5, `soft_limit = ${json.knobs.soft_limit}`);
+        assert(json.knobs.auto_start === true,
+          'auto_start was zeroed by a partial knobs object; this machine could never wake');
+        assert(json.knobs.auto_stop === 'suspend', `auto_stop = ${json.knobs.auto_stop}`);
+      } finally {
+        await request(`/v1/machines/${json.id}`, { method: 'DELETE' });
+      }
+    });
+
+    await step('a duplicate name is rejected', async () => {
+      const { json: mine } = await request(`/v1/machines/${id}`);
+      const { status } = await request('/v1/machines', {
+        method: 'POST', body: { name: mine.name },
+      });
+      assert(status !== 201,
+        'a second machine took an existing name, which would steal its URL');
     });
 
     await step('logs return the guest console', async () => {

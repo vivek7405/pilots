@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+
+	"github.com/vivek7405/pilots/hostd/internal/netns"
 	"strconv"
 	"strings"
 	"time"
@@ -70,7 +72,28 @@ func (m *Manager) reapOrphans(ctx context.Context) {
 			"pid", p.pid, "machine", p.machineID, "age", p.age)
 		if err := unix.Kill(p.pid, unix.SIGKILL); err != nil {
 			slog.Error("could not reap orphan", "pid", p.pid, "err", err)
+			continue
 		}
+		// Killing the process is not the whole job: its namespace, veth,
+		// chroot and cgroup outlive it, and a namespace left behind blocks the
+		// next machine that lands on the same slot.
+		m.reapOrphanResources(p.machineID)
+	}
+}
+
+// reapOrphanResources removes what an orphaned machine left on the host.
+func (m *Manager) reapOrphanResources(machineID string) {
+	// The namespace is named after the machine, so it can be torn down without
+	// knowing which slot it held.
+	if err := netns.TeardownByName(machineID); err != nil {
+		slog.Warn("could not tear down an orphan's namespace",
+			"machine", machineID, "err", err)
+	}
+	if err := os.RemoveAll(filepath.Join(m.opts.FCConfig.ChrootBase, "firecracker", machineID)); err != nil {
+		slog.Warn("could not remove an orphan's chroot", "machine", machineID, "err", err)
+	}
+	if err := os.RemoveAll(m.stateDir(machineID)); err != nil {
+		slog.Warn("could not remove an orphan's state dir", "machine", machineID, "err", err)
 	}
 }
 
