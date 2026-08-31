@@ -26,6 +26,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+
+	"github.com/vivek7405/pilots/hostd/internal/fc"
 )
 
 // ErrRangeNotSatisfiable reports an HTTP 416.
@@ -37,7 +39,11 @@ import (
 var ErrRangeNotSatisfiable = errors.New("s3: range not satisfiable")
 
 // ErrNotFound reports a missing key.
-var ErrNotFound = errors.New("s3: not found")
+//
+// It wraps fc.ErrArtifactMissing so a restore can tell an absent object -- a
+// machine that never wrote to disk has no rootfs -- from a failed fetch, which
+// must never silently fall back to the template.
+var ErrNotFound = fmt.Errorf("s3: not found: %w", fc.ErrArtifactMissing)
 
 // Config describes the bucket and how to reach it.
 type Config struct {
@@ -204,14 +210,42 @@ func (c *Client) GetToFile(ctx context.Context, key, filePath string) error {
 	}
 	defer out.Body.Close()
 
-	f, err := os.Create(filePath)
+	// Download to a temp name and rename, so the file at the visible path is
+	// either absent or complete. Writing in place meant an interrupted fetch
+	// left a truncated file that every later restore then trusted -- handing
+	// Firecracker a short memory image or a corrupt disk, permanently, with
+	// nothing to notice short of deleting it by hand.
+	tmp := filePath + ".partial"
+	f, err := os.Create(tmp)
 	if err != nil {
-		return fmt.Errorf("s3: create %s: %w", filePath, err)
+		return fmt.Errorf("s3: create %s: %w", tmp, err)
 	}
-	defer f.Close()
+	defer func() {
+		f.Close()
+		os.Remove(tmp) // a no-op once the rename below has succeeded
+	}()
 
 	if _, err := io.Copy(f, out.Body); err != nil {
-		return fmt.Errorf("s3: write %s: %w", filePath, err)
+		return fmt.Errorf("s3: write %s: %w", tmp, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("s3: close %s: %w", tmp, err)
+	}
+	if err := os.Rename(tmp, filePath); err != nil {
+		return fmt.Errorf("s3: rename %s: %w", filePath, err)
+	}
+	return nil
+}
+
+// Delete removes an object. Destroying a machine has to remove its state from
+// the store as well as the host: object storage is the only truth, so state
+// left behind there is a machine that still exists in every way that counts.
+func (c *Client) Delete(ctx context.Context, key string) error {
+	_, err := c.api.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(c.bucket), Key: aws.String(c.key(key)),
+	})
+	if err != nil && !isNotFound(err) {
+		return fmt.Errorf("s3: delete %s: %w", key, err)
 	}
 	return nil
 }

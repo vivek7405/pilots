@@ -209,9 +209,14 @@ func reconcile(cfg *config.Config, mgr *machines.Manager) int {
 
 func newUploader(cfg *config.Config) (fc.Uploader, error) {
 	if cfg.S3Bucket == "" {
-		slog.Warn("no object storage configured; suspend and restore will fail. " +
-			"Set PILOT_S3_BUCKET and credentials.")
-		return nil, nil
+		// A stub, not nil. Returning a nil interface meant the first idle
+		// suspend dereferenced it in the idle monitor's own goroutine and took
+		// the whole daemon down about a minute after the first machine went
+		// quiet -- and Restart=always then crash-looped it. The failure belongs
+		// on the operation, not on the process.
+		slog.Warn("no object storage configured; suspend and restore will fail " +
+			"until PILOT_S3_BUCKET and credentials are set")
+		return fc.UnconfiguredStore{}, nil
 	}
 	return s3.New(context.Background(), s3.Config{
 		Endpoint: cfg.S3Endpoint, Region: cfg.S3Region, Bucket: cfg.S3Bucket,

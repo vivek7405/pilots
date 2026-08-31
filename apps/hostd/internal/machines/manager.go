@@ -126,16 +126,22 @@ func artifactsFor(machineID string) fc.Artifacts {
 }
 
 func checkpointArtifacts(machineID, checkpointID string) fc.Artifacts {
-	return fc.Artifacts{Prefix: filepath.Join("machines", machineID, "checkpoints", checkpointID)}
+	return fc.Artifacts{
+		Prefix: filepath.Join("machines", machineID, "checkpoints", checkpointID),
+		// A checkpoint is written once under its own id and never rewritten,
+		// so a local copy is always current and can be reused. A suspend image
+		// is the opposite: one prefix, overwritten every time.
+		Immutable: true,
+	}
 }
 
 // localCacheDir mirrors the object-storage layout on disk.
 //
-// This MUST be per-artifact-set, not merely per-machine. Restores fetch only
-// what is missing locally, so if a machine's suspend image and its checkpoints
-// shared one directory, a file left by an earlier restore would shadow the one
-// being fetched -- and the machine would silently come back with the wrong
-// disk. Mirroring the remote layout makes that collision impossible.
+// Per-artifact-set, not merely per-machine: sharing one directory between a
+// machine's suspend image and its checkpoints let a file from one restore
+// shadow the other. Note this alone is not sufficient -- within the suspend
+// set the prefix is reused on every suspend, so Restore additionally
+// re-fetches mutable sets rather than trusting what is on disk.
 func (m *Manager) localCacheDir(machineID string, at fc.Artifacts) string {
 	return filepath.Join(m.opts.CacheRoot, at.Prefix)
 }
@@ -154,9 +160,11 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 	token := newID("agt")
 	sum := sha256.Sum256([]byte(token))
 
-	knobs := api.Knobs{AutoStop: "suspend", AutoStart: true, SoftLimit: 20}
-	if req.Knobs != nil {
-		knobs = *req.Knobs
+	// A partial knobs object merges onto the defaults rather than replacing
+	// them; see api.DecodeKnobs for why that distinction matters.
+	knobs, err := api.DecodeKnobs(req.Knobs)
+	if err != nil {
+		return nil, err
 	}
 	knobsJSON, err := marshalKnobs(knobs)
 	if err != nil {

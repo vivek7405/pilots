@@ -23,6 +23,33 @@ type Knobs struct {
 	SoftLimit          int    `json:"soft_limit"`           // concurrency before starting another replica
 }
 
+// DefaultKnobs is the policy a machine gets when the caller says nothing.
+//
+// The defaults keep a machine REACHABLE and cheap: it suspends when idle and
+// wakes on the next request.
+func DefaultKnobs() Knobs {
+	return Knobs{AutoStop: "suspend", AutoStart: true, SoftLimit: 20}
+}
+
+// DecodeKnobs applies a caller's partial policy on top of the defaults.
+//
+// Decoding onto a pre-seeded value is the point: encoding/json leaves absent
+// fields untouched, so {"auto_stop":"suspend"} keeps auto_start true. Assigning
+// a decoded struct wholesale instead would zero every field the caller did not
+// mention -- and a machine with auto_start false suspends after a minute and
+// then refuses to wake, which is a permanently dead URL earned by setting one
+// unrelated field.
+func DecodeKnobs(raw json.RawMessage) (Knobs, error) {
+	k := DefaultKnobs()
+	if len(raw) == 0 {
+		return k, nil
+	}
+	if err := json.Unmarshal(raw, &k); err != nil {
+		return k, fmt.Errorf("api: invalid knobs: %w", err)
+	}
+	return k, nil
+}
+
 // ParseKnobs reads a machine's stored policy.
 //
 // The stored blob is exactly this struct serialised, so there is no
@@ -30,7 +57,7 @@ type Knobs struct {
 // keep a machine REACHABLE: a corrupt or missing value must not strand it with
 // autoStart off.
 func ParseKnobs(raw string) Knobs {
-	k := Knobs{AutoStop: "suspend", AutoStart: true, SoftLimit: 20}
+	k := DefaultKnobs()
 	if raw == "" {
 		return k
 	}
@@ -78,8 +105,10 @@ type CreateMachineRequest struct {
 	Checkpoint string `json:"checkpoint,omitempty"`
 	VCPUs      int    `json:"vcpus,omitempty"`
 	MemMiB     int    `json:"mem_mib,omitempty"`
-	Knobs      *Knobs `json:"knobs,omitempty"`
-	Volume     string `json:"volume,omitempty"`
+	// Raw so a partial object merges onto the defaults instead of
+	// replacing them. See DecodeKnobs.
+	Knobs  json.RawMessage `json:"knobs,omitempty"`
+	Volume string          `json:"volume,omitempty"`
 }
 
 // ExecRequest runs a command inside a machine. Cwd and Env are required on

@@ -54,19 +54,37 @@ func Restore(ctx context.Context, cfg RestoreConfig, dl Uploader) (*Machine, err
 	localMem := filepath.Join(cfg.LocalDir, MemFile)
 	localRootfs := filepath.Join(cfg.LocalDir, RootfsFile)
 
-	// Fetch only what is missing. On the host that took the snapshot these are
-	// already here; on any OTHER host nothing is, which is exactly the
-	// cross-host restore path.
-	if err := fetchIfAbsent(ctx, dl, cfg.Artifacts.Snap(), localSnap); err != nil {
+	// Object storage is the only truth, so a mutable artifact set is always
+	// re-fetched rather than trusted from disk.
+	//
+	// A suspend reuses one prefix per machine, so the objects behind it change
+	// every time. Treating a local copy as good enough meant the second wake
+	// skipped the download and restored the FIRST snapshot -- losing everything
+	// written in between, with no error anywhere, and only on the host that
+	// happened to have the stale files.
+	//
+	// Immutable sets (a checkpoint, written once and never rewritten) can and
+	// should be served from cache.
+	fetch := fetchAlways
+	if cfg.Artifacts.Immutable {
+		fetch = fetchIfAbsent
+	}
+
+	if err := fetch(ctx, dl, cfg.Artifacts.Snap(), localSnap); err != nil {
 		return nil, err
 	}
-	if err := fetchIfAbsent(ctx, dl, cfg.Artifacts.Mem(), localMem); err != nil {
+	if err := fetch(ctx, dl, cfg.Artifacts.Mem(), localMem); err != nil {
 		return nil, err
 	}
-	rootfsErr := fetchIfAbsent(ctx, dl, cfg.Artifacts.Rootfs(), localRootfs)
+	rootfsErr := fetch(ctx, dl, cfg.Artifacts.Rootfs(), localRootfs)
 	haveRootfs := rootfsErr == nil
 	if rootfsErr != nil && !isMissing(rootfsErr) {
 		return nil, rootfsErr
+	}
+	if !haveRootfs {
+		// A machine that never wrote to disk has no saved rootfs, and a stale
+		// copy from an earlier restore must not stand in for it.
+		_ = os.Remove(localRootfs)
 	}
 
 	// Build the network namespace. Restore owns this rather than assuming it
@@ -210,6 +228,7 @@ func jailerArgs(cfg Config) []string {
 	return append(args, "--", "--api-sock", "/run/fc.sock")
 }
 
+// fetchIfAbsent serves an immutable object from cache when it is present.
 func fetchIfAbsent(ctx context.Context, dl Uploader, key, dest string) error {
 	if _, err := os.Stat(dest); err == nil {
 		return nil
@@ -217,10 +236,16 @@ func fetchIfAbsent(ctx context.Context, dl Uploader, key, dest string) error {
 	return dl.GetToFile(ctx, key, dest)
 }
 
+// fetchAlways re-downloads, for artifact sets whose contents change under a
+// stable key.
+func fetchAlways(ctx context.Context, dl Uploader, key, dest string) error {
+	return dl.GetToFile(ctx, key, dest)
+}
+
+// isMissing reports a genuinely absent object, as distinct from a failed
+// fetch. Only the former is allowed to fall back to the template.
 func isMissing(err error) bool {
-	return err != nil && (errors.Is(err, os.ErrNotExist) ||
-		strings.Contains(err.Error(), "not found") ||
-		strings.Contains(err.Error(), "NoSuchKey"))
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrArtifactMissing)
 }
 
 // pokeGuestClock sets the restored guest's wall clock to now.

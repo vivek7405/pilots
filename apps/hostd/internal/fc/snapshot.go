@@ -2,7 +2,9 @@ package fc
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -22,6 +24,11 @@ const (
 // object storage -- which is what lets any host restore any machine.
 type Artifacts struct {
 	Prefix string // e.g. "machines/<id>/checkpoints/<ckpt>"
+
+	// Immutable marks a set whose objects are written once and never
+	// rewritten, so a local copy is always current. A checkpoint is immutable;
+	// a machine's suspend image is not -- it is overwritten on every suspend.
+	Immutable bool
 }
 
 func (a Artifacts) Snap() string   { return filepath.Join(a.Prefix, SnapFile) }
@@ -102,10 +109,32 @@ func hasAllocatedBlocks(path string) (bool, error) {
 	return st.Blocks > 0, nil
 }
 
+// ErrArtifactMissing reports an object that is not in the store.
+//
+// Restore distinguishes it from a failed fetch: a machine that never wrote to
+// disk legitimately has no rootfs object and falls back to the template, while
+// a network failure must not silently do the same.
+var ErrArtifactMissing = errors.New("fc: artifact missing")
+
 // Uploader is the object-storage surface the snapshot paths need.
+//
+// Implementations MUST return an error satisfying errors.Is(err,
+// ErrArtifactMissing) when an object does not exist.
 type Uploader interface {
 	PutFile(ctx context.Context, key, filePath string) error
 	GetToFile(ctx context.Context, key, filePath string) error
+}
+
+// UnconfiguredStore stands in when no object storage is configured. Every
+// operation fails with an explanation rather than a nil dereference.
+type UnconfiguredStore struct{}
+
+func (UnconfiguredStore) PutFile(context.Context, string, string) error {
+	return errors.New("fc: no object storage is configured")
+}
+
+func (UnconfiguredStore) GetToFile(context.Context, string, string) error {
+	return errors.New("fc: no object storage is configured")
 }
 
 // SuspendResult reports what a suspend produced.
@@ -119,30 +148,44 @@ type SuspendResult struct {
 // This is the scale-to-zero path: a suspended machine costs nothing but
 // storage, and wakes on the next request. The guest is NOT resumed -- the
 // caller is deliberately giving up the memory.
-func (m *Machine) Suspend(ctx context.Context, up Uploader, at Artifacts) (SuspendResult, error) {
-	res := SuspendResult{Artifacts: at}
+func (m *Machine) Suspend(ctx context.Context, up Uploader, at Artifacts) (res SuspendResult, err error) {
+	res = SuspendResult{Artifacts: at}
 
 	p, err := m.pauseAndSnapshot(ctx)
 	if err != nil {
-		return res, err
-	}
-	if err := syncRootfs(p.hostRootfs); err != nil {
-		return res, err
-	}
-
-	if err := up.PutFile(ctx, at.Snap(), p.hostSnap); err != nil {
-		return res, err
-	}
-	if err := up.PutFile(ctx, at.Mem(), p.hostMem); err != nil {
+		// pauseAndSnapshot may have paused before failing.
+		m.resumeAfterFailure(ctx, err)
 		return res, err
 	}
 
-	allocated, err := hasAllocatedBlocks(p.hostRootfs)
-	if err != nil {
+	// Any failure from here until the machine is killed leaves the guest
+	// frozen. A paused VM whose row still says "running" is worse than a
+	// failed suspend: the router proxies into a machine that can never answer,
+	// and the idle monitor retries the same failing suspend every tick.
+	defer func() {
+		if err != nil {
+			m.resumeAfterFailure(ctx, err)
+		}
+	}()
+
+	if err = syncRootfs(p.hostRootfs); err != nil {
+		return res, err
+	}
+
+	if err = up.PutFile(ctx, at.Snap(), p.hostSnap); err != nil {
+		return res, err
+	}
+	if err = up.PutFile(ctx, at.Mem(), p.hostMem); err != nil {
+		return res, err
+	}
+
+	allocated, aerr := hasAllocatedBlocks(p.hostRootfs)
+	if aerr != nil {
+		err = aerr
 		return res, err
 	}
 	if allocated {
-		if err := up.PutFile(ctx, at.Rootfs(), p.hostRootfs); err != nil {
+		if err = up.PutFile(ctx, at.Rootfs(), p.hostRootfs); err != nil {
 			return res, err
 		}
 		res.RootfsSaved = true
@@ -152,5 +195,17 @@ func (m *Machine) Suspend(ctx context.Context, up Uploader, at Artifacts) (Suspe
 	// on a busy host these are the largest files around.
 	_ = os.Remove(p.hostMem)
 
-	return res, m.Kill()
+	err = m.Kill()
+	return res, err
+}
+
+// resumeAfterFailure puts a guest back to running after a snapshot attempt
+// failed partway. Best effort: if even this fails there is nothing left to try
+// but say so loudly, because the machine is now frozen and unreachable.
+func (m *Machine) resumeAfterFailure(ctx context.Context, cause error) {
+	if rerr := m.Client.Resume(context.WithoutCancel(ctx)); rerr != nil {
+		slog.Error("snapshot failed and the guest could not be resumed; it is "+
+			"frozen and will not answer",
+			"machine", m.ID, "cause", cause, "err", rerr)
+	}
 }
