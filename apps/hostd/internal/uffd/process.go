@@ -225,6 +225,6 @@ func (p *Process) MakeResident() error {
 func (p *Process) Pid() int { return p.pid }
 
 // AdoptedProcess rebuilds a handle to a handler that survived a hostd restart.
-func AdoptedProcess(pid int, socket string) *Process {
-	return &Process{pid: pid, Socket: socket}
+func AdoptedProcess(pid int, socket, control string) *Process {
+	return &Process{pid: pid, Socket: socket, control: control}
 }

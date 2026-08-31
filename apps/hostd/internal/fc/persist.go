@@ -9,6 +9,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/vivek7405/pilots/hostd/internal/nbd"
+	"github.com/vivek7405/pilots/hostd/internal/uffd"
 )
 
 // Breadcrumb file names. The pid is kept separate from the JSON deliberately:
@@ -34,6 +37,19 @@ type State struct {
 	SocketPath  string `json:"socket_path"`
 	NetnsName   string `json:"netns_name"`
 	StartedAtNs int64  `json:"started_at_unix_ns"`
+
+	// The block and fault servers, so a restarted hostd can pick them back up.
+	//
+	// Without these a restart adopts the machine but not its handlers: the
+	// device stays attached and the processes keep running with nothing
+	// holding a handle to them, so destroying the machine leaks both -- and
+	// that device is unusable until the host reboots.
+	NBDPid      int    `json:"nbd_pid,omitempty"`
+	NBDIndex    int    `json:"nbd_index"`
+	NBDControl  string `json:"nbd_control,omitempty"`
+	UffdPid     int    `json:"uffd_pid,omitempty"`
+	UffdSocket  string `json:"uffd_socket,omitempty"`
+	UffdControl string `json:"uffd_control,omitempty"`
 }
 
 // Persist writes the breadcrumbs for a running machine.
@@ -57,6 +73,16 @@ func (m *Machine) Persist() error {
 	}
 	if m.Cmd != nil && m.Cmd.Process != nil {
 		st.Pid = m.Cmd.Process.Pid
+	}
+	if m.NBD != nil {
+		st.NBDPid = m.NBD.Pid()
+		st.NBDIndex = m.NBD.Index
+		st.NBDControl = nbd.ControlSockFor(m.StateDir)
+	}
+	if m.Uffd != nil {
+		st.UffdPid = m.Uffd.Pid()
+		st.UffdSocket = m.Uffd.Socket
+		st.UffdControl = uffd.ControlSockFor(m.StateDir)
 	}
 	return WriteState(m.StateDir, st)
 }
@@ -194,12 +220,12 @@ func (s State) Age() time.Duration {
 // Signal and Kill work, which is everything teardown needs. Wrapping the pid
 // in a Process here lets an adopted machine flow through exactly the same code
 // paths as one this process started.
-func Adopted(st State, stateRoot string) *Machine {
+func Adopted(st State, stateRoot string, pool *nbd.DevicePool) *Machine {
 	proc, err := os.FindProcess(st.Pid)
 	if err != nil {
 		return nil
 	}
-	return &Machine{
+	m := &Machine{
 		ID:        st.MachineID,
 		Cmd:       &exec.Cmd{Process: proc},
 		Client:    NewClient(st.SocketPath),
@@ -208,4 +234,21 @@ func Adopted(st State, stateRoot string) *Machine {
 		SerialLog: st.SerialLog,
 		StartedAt: time.Unix(0, st.StartedAtNs),
 	}
+
+	// Re-attach the handlers. They outlived this daemon by design -- that is
+	// the whole reason they are separate processes -- so they are picked back
+	// up rather than restarted, which would tear the disk out from under a
+	// running guest.
+	//
+	// Reserving the device matters as much as the handle: an unreserved index
+	// whose handler is still attached would be scanned as busy today and
+	// handed out the moment that handler exits, while this machine still
+	// believes it owns it.
+	if st.NBDPid > 0 && pool != nil {
+		m.NBD = nbd.AdoptedProcess(pool, st.NBDPid, st.NBDIndex, st.NBDControl)
+	}
+	if st.UffdPid > 0 {
+		m.Uffd = uffd.AdoptedProcess(st.UffdPid, st.UffdSocket, st.UffdControl)
+	}
+	return m
 }

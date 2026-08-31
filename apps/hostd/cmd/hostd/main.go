@@ -82,6 +82,11 @@ func run() error {
 		return err
 	}
 
+	// One device pool per host: the kernel's nbd devices are a host resource,
+	// and reconcile has to reserve the ones adopted machines still hold before
+	// the manager can hand any out.
+	devices := nbd.NewDevicePool(nbd.DefaultMaxDevices)
+
 	// A second client over the same bucket under the chunk prefix. Content-
 	// addressed builds are named by uuid alone, so they need their own
 	// namespace or a build id could collide with a machine's key.
@@ -99,7 +104,7 @@ func run() error {
 		Uploader:   uploader,
 		Chunks:     chunks,
 		BlockStore: chunkReader(chunks),
-		NBDDevices: nbd.NewDevicePool(nbd.DefaultMaxDevices),
+		NBDDevices: devices,
 		// The handlers are separate processes and read builds themselves, so
 		// they need this daemon's storage credentials.
 		HandlerEnv: os.Environ(),
@@ -119,7 +124,7 @@ func run() error {
 	// Re-adopt machines that outlived the previous hostd. This is what makes a
 	// restart safe: the processes are still serving, and picking them back up
 	// costs nothing.
-	adopted := reconcile(cfg, mgr)
+	adopted := reconcile(cfg, mgr, devices)
 	if adopted > 0 {
 		slog.Info("re-adopted machines from a previous run", "count", adopted)
 	}
@@ -211,7 +216,7 @@ func dispatch(cfg *config.Config, rtr http.Handler, ctrl http.Handler) http.Hand
 }
 
 // reconcile re-adopts machines left running by a previous hostd.
-func reconcile(cfg *config.Config, mgr *machines.Manager) int {
+func reconcile(cfg *config.Config, mgr *machines.Manager, devices *nbd.DevicePool) int {
 	found, err := fc.Reconcile(cfg.MachineStateRoot())
 	if err != nil {
 		slog.Error("reconcile failed", "err", err)
@@ -226,7 +231,7 @@ func reconcile(cfg *config.Config, mgr *machines.Manager) int {
 			_ = fc.ClearBreadcrumbs(filepath.Join(cfg.MachineStateRoot(), r.State.MachineID))
 			continue
 		}
-		m := fc.Adopted(r.State, cfg.MachineStateRoot())
+		m := fc.Adopted(r.State, cfg.MachineStateRoot(), devices)
 		if err := mgr.Adopt(r.State.MachineID, m, r.State.SlotIdx); err != nil {
 			slog.Error("could not adopt machine", "machine", r.State.MachineID, "err", err)
 			continue

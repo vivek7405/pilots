@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/vivek7405/pilots/hostd/internal/nbd"
 )
 
 func TestStateRoundTrip(t *testing.T) {
@@ -196,5 +198,104 @@ func TestCgroupArgsAlwaysNonEmpty(t *testing.T) {
 	got := cgroupArgs(Limits{CPUMax: "200000 100000", MemMaxB: 536870912, PidsMax: 512})
 	if len(got) != 3 {
 		t.Errorf("got %v, want cpu.max, memory.max and pids.max", got)
+	}
+}
+
+// Handlers outlive hostd by design -- that is why they are separate processes
+// -- so their details have to survive in the breadcrumbs too. Without them a
+// restart adopts the machine but not its block and fault servers: the device
+// stays attached with nothing holding a handle to it, destroying the machine
+// leaks both processes, and that device is unusable until the host reboots.
+func TestBreadcrumbsCarryTheHandlerProcesses(t *testing.T) {
+	dir := t.TempDir()
+
+	want := State{
+		MachineID: "m-1", Pid: 4242, SlotIdx: 7,
+		ChrootDir: "/var/lib/pilots/jailer/firecracker/m-1/root",
+		NBDPid:    111, NBDIndex: 3, NBDControl: "/var/lib/pilots/machines/m-1/nbd.sock",
+		UffdPid:     222,
+		UffdSocket:  "/var/lib/pilots/jailer/firecracker/m-1/root/uffd.sock",
+		UffdControl: "/var/lib/pilots/machines/m-1/uffd-ctl.sock",
+	}
+	if err := WriteState(dir, want); err != nil {
+		t.Fatalf("WriteState: %v", err)
+	}
+
+	got, err := ReadState(dir)
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if got.NBDPid != want.NBDPid || got.NBDIndex != want.NBDIndex ||
+		got.NBDControl != want.NBDControl {
+		t.Errorf("block server details did not round-trip: %+v", got)
+	}
+	if got.UffdPid != want.UffdPid || got.UffdSocket != want.UffdSocket ||
+		got.UffdControl != want.UffdControl {
+		t.Errorf("fault server details did not round-trip: %+v", got)
+	}
+}
+
+// Device zero is a legitimate index, so it must survive a round trip rather
+// than being indistinguishable from "no handler". The pid is what says whether
+// there is one.
+func TestBreadcrumbsKeepDeviceZero(t *testing.T) {
+	dir := t.TempDir()
+
+	if err := WriteState(dir, State{MachineID: "m-1", Pid: 1, NBDPid: 99, NBDIndex: 0}); err != nil {
+		t.Fatalf("WriteState: %v", err)
+	}
+	got, err := ReadState(dir)
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if got.NBDIndex != 0 || got.NBDPid != 99 {
+		t.Errorf("index 0 did not round-trip: index=%d pid=%d", got.NBDIndex, got.NBDPid)
+	}
+}
+
+// An adopted machine must reserve its device, or the pool hands that index to
+// a new machine the moment the old handler exits -- while this one still
+// believes it owns it.
+func TestAdoptReservesTheDevice(t *testing.T) {
+	pool := nbd.NewDevicePool(nbd.DefaultMaxDevices)
+
+	m := Adopted(State{
+		MachineID: "m-1", Pid: os.Getpid(),
+		NBDPid: os.Getpid(), NBDIndex: 5, NBDControl: "/tmp/nbd.sock",
+		UffdPid: os.Getpid(), UffdSocket: "/tmp/uffd.sock",
+	}, t.TempDir(), pool)
+
+	if m == nil {
+		t.Fatal("Adopted returned nil")
+	}
+	if m.NBD == nil {
+		t.Fatal("the block server was not re-attached")
+	}
+	if m.Uffd == nil {
+		t.Fatal("the fault server was not re-attached")
+	}
+	if pool.InUse() != 1 {
+		t.Errorf("the pool holds %d devices after adopting one, want 1", pool.InUse())
+	}
+	if m.NBD.Index != 5 {
+		t.Errorf("adopted device index %d, want 5", m.NBD.Index)
+	}
+}
+
+// A machine with no handlers -- there is none in normal operation now, but a
+// breadcrumb written by an older build has none -- must adopt cleanly rather
+// than reserving device zero for nobody.
+func TestAdoptWithoutHandlersReservesNothing(t *testing.T) {
+	pool := nbd.NewDevicePool(nbd.DefaultMaxDevices)
+
+	m := Adopted(State{MachineID: "m-1", Pid: os.Getpid()}, t.TempDir(), pool)
+	if m == nil {
+		t.Fatal("Adopted returned nil")
+	}
+	if m.NBD != nil || m.Uffd != nil {
+		t.Error("handlers were invented for a machine that recorded none")
+	}
+	if pool.InUse() != 0 {
+		t.Errorf("the pool reserved %d devices for a machine with no handler", pool.InUse())
 	}
 }

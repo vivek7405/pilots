@@ -46,9 +46,18 @@ type Config struct {
 	ReadOnly bool
 }
 
+// ProcessName is what a handler calls itself.
+//
+// A handler is hostd re-executed, so without this its comm is "hostd" too --
+// and `pkill hostd`, whether from an operator or a supervisor, takes every
+// machine's disk server down with the daemon. The guests then block forever
+// on a device whose server is gone, which no signal clears.
+const ProcessName = "pilot-nbd"
+
 // Run serves one device until it is disconnected. It is the body of the
 // handler process, not something hostd calls in-process.
 func Run(ctx context.Context, cfg Config, store block.ObjectStore) error {
+
 	template, closeTemplate, err := openTemplate(ctx, cfg, store)
 	if err != nil {
 		return err

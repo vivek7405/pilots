@@ -49,8 +49,14 @@ type Config struct {
 	ReadyFD int
 }
 
+// ProcessName is what a handler calls itself. See nbd.ProcessName: without it
+// a pkill aimed at hostd takes every machine's memory server with it, and a
+// guest whose fault handler is gone hangs on its next page fault forever.
+const ProcessName = "pilot-uffd"
+
 // Run serves one machine's memory until Firecracker exits or ctx is cancelled.
 func Run(ctx context.Context, cfg Config, store block.ObjectStore) error {
+
 	src, closeSrc, err := openSource(ctx, cfg, store)
 	if err != nil {
 		return err

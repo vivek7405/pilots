@@ -14,6 +14,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/block"
 	"github.com/vivek7405/pilots/hostd/internal/config"
 	"github.com/vivek7405/pilots/hostd/internal/nbd"
+	"github.com/vivek7405/pilots/hostd/internal/procname"
 	"github.com/vivek7405/pilots/hostd/internal/s3"
 	"github.com/vivek7405/pilots/hostd/internal/uffd"
 )
@@ -118,14 +119,26 @@ func dispatchSubcommand() bool {
 	if len(os.Args) < 2 {
 		return false
 	}
-	var run func([]string) error
+	var (
+		run  func([]string) error
+		name string
+	)
 	switch os.Args[1] {
 	case nbd.SubcommandName:
-		run = runNBDHandler
+		run, name = runNBDHandler, nbd.ProcessName
 	case uffd.SubcommandName:
-		run = runUffdHandler
+		run, name = runUffdHandler, uffd.ProcessName
 	default:
 		return false
+	}
+
+	// Rename before anything else. This is the first thing main does, which is
+	// the only place it works: the rename applies to the calling thread, and
+	// the name pkill matches is the main thread's. See procname.Set for what a
+	// silently-unrenamed handler costs.
+	if err := procname.Set(name); err != nil {
+		slog.Warn("could not rename the handler process; a pkill aimed at hostd "+
+			"will take this machine's disk or memory with it", "err", err)
 	}
 	if err := run(os.Args[2:]); err != nil {
 		slog.Error("handler exited", "handler", os.Args[1], "err", err)

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/vivek7405/pilots/hostd/internal/block"
+	"github.com/vivek7405/pilots/hostd/internal/procname"
 )
 
 // TestMain lets the test binary re-exec itself as a handler.
@@ -25,6 +27,13 @@ import (
 // the teardown order -- could only ever be tested by hand.
 func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == SubcommandName {
+		// Mirrors cmd/hostd: the rename has to be the first thing the process
+		// does, on the main thread, or it lands on the wrong one and the
+		// handler still answers to the daemon's name.
+		if err := procname.Set(ProcessName); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		if err := runHandlerForTest(os.Args[2:]); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
@@ -567,4 +576,46 @@ func threadsOf(t *testing.T, pid int) []int {
 		}
 	}
 	return tids
+}
+
+// A handler is hostd re-executed, so without a rename its comm is "hostd" too
+// -- and a pkill aimed at the daemon, from an operator or a supervisor, takes
+// every machine's disk server with it. The guests then block forever on a
+// device whose server is gone, in a wait no signal clears.
+func TestHandlerDoesNotAnswerToTheDaemonsName(t *testing.T) {
+	requireNBD(t)
+
+	dir := t.TempDir()
+	templateDir, _ := buildTemplate(t, dir, []byte{1, 2})
+
+	pool := NewDevicePool(DefaultMaxDevices)
+	logFile, err := os.Create(filepath.Join(dir, "handler.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logFile.Close()
+
+	p, err := Start(context.Background(), pool, StartOptions{
+		Config: Config{
+			TemplateDir: templateDir,
+			CachePath:   filepath.Join(dir, "rootfs.cow"),
+			ControlSock: filepath.Join(dir, "nbd.sock"),
+		},
+		Env:     os.Environ(),
+		LogFile: logFile,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v\n%s", err, readLog(t, logFile.Name()))
+	}
+	defer p.Stop()
+
+	raw, err := os.ReadFile(fmt.Sprintf("/proc/%d/comm", p.Pid()))
+	if err != nil {
+		t.Fatalf("read comm: %v", err)
+	}
+	got := strings.TrimSpace(string(raw))
+	if got != ProcessName {
+		t.Errorf("the handler calls itself %q, want %q; a pkill on the daemon's "+
+			"name would reach it", got, ProcessName)
+	}
 }
