@@ -243,6 +243,13 @@ type Host struct {
 type HealthResponse struct {
 	OK     bool   `json:"ok"`
 	HostID string `json:"host_id"`
+	// Reflink reports whether this host's machine store can share extents.
+	// Without it the engine still works and still passes every correctness
+	// assertion, but create and checkpoint are several times slower, because
+	// image copies that should be metadata operations become real ones. It is
+	// on the health response so that a degraded host is visible from the
+	// outside rather than only in a latency graph nobody is watching.
+	Reflink bool `json:"reflink"`
 }
 
 type ErrorResponse struct {

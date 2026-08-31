@@ -71,6 +71,19 @@ func run() error {
 		}
 	}
 
+	// Probe once, at startup, before anything can be created. The engine's
+	// image copies use --reflink=auto, which falls back to a full copy without
+	// reporting anything, so a host on the wrong filesystem is slow in a way
+	// that looks like nothing is wrong. Say it out loud instead.
+	reflink := fc.SupportsReflink(cfg.ChrootBase)
+	if !reflink {
+		slog.Warn("this host's machine store cannot share extents, so every "+
+			"image copy is a real copy: create and checkpoint will be several "+
+			"times slower than the engine is designed for. Put "+
+			"PILOT_CHROOT_BASE on btrfs, or on XFS formatted with reflink=1.",
+			"chroot_base", cfg.ChrootBase)
+	}
+
 	// The daemon's own lifetime. Everything the fleet runs in the background
 	// -- gossip subscriptions, mesh reconciliation, the self-heal loops --
 	// hangs off this, so a shutdown stops them without stopping the machines.
@@ -189,7 +202,7 @@ func run() error {
 	// proxied into a machine, everything else is the control API. Keeping them
 	// on one port means a host needs exactly one address to be useful.
 	controlAPI := api.Routes(api.Deps{
-		HostID: cfg.HostID, Store: store, Machines: mgr,
+		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink,
 	})
 
 	// Machine-scoped API calls go to the host that owns the machine. Without

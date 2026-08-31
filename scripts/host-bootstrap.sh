@@ -353,7 +353,10 @@ fi
 
 # ---------------------------------------------------------------------------
 say "[10/10] Verifying"
-on_host bash -euo pipefail -s <<'REMOTE'
+# The heredoc below is quoted so nothing in it expands locally; that also means
+# it cannot see this shell's environment, so the one value it needs travels as
+# a positional argument.
+on_host bash -euo pipefail -s "${PILOT_REQUIRE_REFLINK:-0}" <<'REMOTE'
 # hostd serves only once corrosion has applied its schema, and it waits up to
 # two minutes for that. A shorter window here fails a host that was fine.
 for i in $(seq 180); do
@@ -368,6 +371,29 @@ echo "  hostd serving"
 PEERS=$(wg show pilots0 2>/dev/null | grep -c peer || true)
 echo "  mesh peers: ${PEERS}"
 systemctl is-active --quiet corrosion && echo "  corrosion running"
+
+# hostd probes this at startup and reports it, so ask it rather than guessing
+# from the filesystem type. A host without extent sharing still works and
+# still passes every correctness test -- it is just several times slower at
+# the two operations the product is named for, with nothing anywhere saying
+# so. That is worth a loud line at the end of a bootstrap.
+REFLINK=$(curl -sf http://127.0.0.1:8080/v1/health |
+  python3 -c 'import sys,json;print(json.load(sys.stdin).get("reflink"))' 2>/dev/null || echo None)
+if [ "$REFLINK" = True ]; then
+  echo "  reflink: yes"
+else
+  echo "  reflink: NO -- $(findmnt -no FSTYPE -T /var/lib/pilots) cannot share extents." >&2
+  echo "    Every machine image copy will be a real copy: create and checkpoint" >&2
+  echo "    will run several times slower than the engine is designed for." >&2
+  echo "    Put /var/lib/pilots on btrfs, or on XFS made with -m reflink=1." >&2
+  # An `&&` chain here would be the last command in the script, so a false
+  # test would exit non-zero under `set -e` and fail the bootstrap of a host
+  # that is merely slow.
+  if [ "${1:-0}" = 1 ]; then
+    echo "    PILOT_REQUIRE_REFLINK=1 is set; refusing to finish." >&2
+    exit 1
+  fi
+fi
 REMOTE
 
 echo

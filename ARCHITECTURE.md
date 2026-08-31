@@ -218,6 +218,21 @@ not tmpfs) is bind-mounted onto the constant path
 `/srv/pilots/rootfs.ext4` inside that private mount ns. Every snapshot
 therefore restores against the same path on any host.
 
+**The machine store must be on a filesystem that can share extents** (btrfs,
+or XFS made with `-m reflink=1`). This is a hard precondition, not a
+preference. Create reflinks the golden template and checkpoint reflinks the
+snapshot and the cow *inside the pause window*, and both are budgeted as
+metadata operations. Where extents cannot be shared, `cp --reflink=auto`
+silently does the copy for real: create grows by the time it takes to
+duplicate the whole template (measured at **2.2s for a 2GiB rootfs on ext4**,
+against a 1.5s budget for all of create), and the checkpoint pause stops being
+independent of machine size — which is the property that makes checkpoints
+usable at all. Nothing errors. The platform is simply several times slower
+than it claims, everywhere. So hostd probes for extent sharing at startup,
+warns when it is missing, and reports it on `/v1/health`; `host-bootstrap.sh`
+prints it at the end of a bootstrap and refuses to finish under
+`PILOT_REQUIRE_REFLINK=1`.
+
 **Snapshot (suspend/checkpoint).** The order of these steps is the design,
 and every one of them was arrived at by measuring a resume gap:
 
