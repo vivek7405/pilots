@@ -133,6 +133,121 @@ done
   && ok "the machine came back with what it had written" \
   || bad "exec after rescue returned '${OUT}'"
 
+say "8. One command turns a new IP into a serving host"
+# "Add a host = give an IP" is the claim. On real hardware the machine is
+# already racked and already has an address, so provisioning one more VM is
+# the local stand-in for that and is not part of what is being asserted. What
+# IS asserted is everything after it: one command, and the fleet is bigger.
+#
+# NEW_ONLY matters here. A host is deliberately powered off at this point, and
+# a plain cluster-up would start it back up and quietly undo step 5.
+NEW_N=$(( ${#IPS[@]} + 1 ))
+if NODES=$NEW_N NEW_ONLY=1 ./cluster-up.sh >/dev/null 2>&1; then
+  NEW_IP=$(sed -n 's/^NODE_IPS="\(.*\)"$/\1/p' "$STATE_FILE" | tail -1 | awk -v n="$NEW_N" '{print $n}')
+else
+  NEW_IP=""
+fi
+[ -n "$NEW_IP" ] && ok "a new machine exists at ${NEW_IP}" || bad "could not provision one"
+
+if [ -n "$NEW_IP" ]; then
+  # The one command. It is pointed at a SURVIVOR, not at the first host --
+  # joining must not depend on any particular host being alive, and the host
+  # this fleet started from is currently powered off.
+  if PILOT_CORROSION_TOKEN="$PILOT_CORROSION_TOKEN" \
+     PILOT_AGENT_TOKEN_SECRET="$PILOT_AGENT_TOKEN_SECRET" \
+     PILOT_S3_ENDPOINT="${PILOT_S3_ENDPOINT:-http://${NET_SUBNET}.1:9000}" \
+     PILOT_S3_BUCKET="${PILOT_S3_BUCKET:-pilots}" \
+     PILOT_S3_ACCESS_KEY="${PILOT_S3_ACCESS_KEY:-pilots}" \
+     PILOT_S3_SECRET_KEY="${PILOT_S3_SECRET_KEY:-pilots-secret}" \
+     "${REPO}/scripts/host-bootstrap.sh" "$NEW_IP" --peer "$SURVIVOR" >/dev/null 2>&1; then
+    ok "host-bootstrap.sh ${NEW_IP} --peer ${SURVIVOR} succeeded"
+  else
+    bad "the one command failed"
+  fi
+
+  # Live hosts only: the one killed in step 5 is still down on purpose, so the
+  # fleet the new host should see is the survivors plus itself.
+  LIVE=$(( ${#IPS[@]} - 1 + 1 ))
+  N=$(api "$NEW_IP" GET /v1/hosts | python3 -c "
+import sys, json
+print(sum(1 for h in json.load(sys.stdin) if h.get('alive')))" 2>/dev/null || echo 0)
+  [ "$N" = "$LIVE" ] && ok "the new host sees ${N} live hosts" \
+    || bad "the new host sees ${N} live hosts, want ${LIVE}"
+
+  N=$(api "$SURVIVOR" GET /v1/hosts | python3 -c "
+import sys, json
+print(sum(1 for h in json.load(sys.stdin) if h.get('alive')))" 2>/dev/null || echo 0)
+  [ "$N" = "$LIVE" ] && ok "the existing hosts see it too" \
+    || bad "an existing host sees ${N} live hosts, want ${LIVE}"
+
+  # Serving, not merely present. A host that joined gossip but cannot route is
+  # in the fleet's tables and useless to a client.
+  OUT=$(api "$NEW_IP" POST "/v1/machines/${ID}/exec" '{"cmd":"cat /var/tmp/marker"}' 2>/dev/null | jf stdout)
+  [ "$(echo "$OUT" | tr -d '[:space:]')" = "before-failover" ] \
+    && ok "the new host served a request for a machine it does not own" \
+    || bad "the new host could not serve it (got '${OUT}')"
+fi
+
+say "9. Killing the host a client is mid-request against"
+# The client is talking to the machine's owner when that host dies. Every
+# workload name resolves to every host, so the client's retry lands somewhere
+# else -- and that host has to be able to finish the job, which means claiming
+# a machine whose owner is gone and restoring it from object storage.
+#
+# This is a different path from step 6: there, a background loop noticed a
+# dead host with nobody waiting. Here a client is on the line the whole time.
+CUR_OWNER=$(api "$SURVIVOR" GET "/v1/machines/${ID}" | jf host_id)
+CUR_IP=""
+for ip in "${IPS[@]}" ${NEW_IP:-}; do
+  HID=$($SSH "root@${ip}" "grep PILOT_HOST_ID /etc/pilots/config | cut -d= -f2" 2>/dev/null)
+  [ "$HID" = "$CUR_OWNER" ] && CUR_IP="$ip"
+done
+
+NEXT=""
+for ip in "${IPS[@]}" ${NEW_IP:-}; do
+  [ "$ip" != "$CUR_IP" ] && [ "$ip" != "$OWNER_IP" ] && NEXT="$ip" && break
+done
+
+if [ -z "$CUR_IP" ] || [ -z "$NEXT" ]; then
+  bad "could not find a live owner and a host to retry against"
+else
+  # In flight, and slow enough that the host dies underneath it rather than
+  # after it. The reply never arrives; that is the point.
+  api "$CUR_IP" POST "/v1/machines/${ID}/exec" '{"cmd":"sleep 45; echo done"}' >/dev/null 2>&1 &
+  INFLIGHT=$!
+  sleep 5
+
+  DOM=$(sudo virsh list --name | while read -r d; do
+    [ -n "$d" ] && sudo virsh domifaddr "$d" --source lease 2>/dev/null | grep -q "$CUR_IP" && echo "$d"
+  done | head -1)
+  [ -n "$DOM" ] && sudo virsh destroy "$DOM" >/dev/null 2>&1 \
+    && ok "destroyed ${DOM} with a request in flight against it" \
+    || bad "could not destroy the owner mid-request"
+
+  # The in-flight call is now talking to a powered-off machine. Nothing can
+  # make that return promptly -- the packets go nowhere and there is no RST to
+  # read -- so the client's own timeout is its business, not the fleet's. Stop
+  # waiting on it, the way a client with a retry would.
+  kill "$INFLIGHT" 2>/dev/null
+  wait "$INFLIGHT" 2>/dev/null
+
+  # The retry. It has to wait out the fleet declaring the owner dead before
+  # anyone may claim the machine, so this is slow by design, not by accident.
+  START=$SECONDS
+  OUT=""
+  while [ $((SECONDS - START)) -lt 240 ]; do
+    OUT=$(api "$NEXT" POST "/v1/machines/${ID}/exec" '{"cmd":"cat /var/tmp/marker"}' 2>/dev/null | jf stdout)
+    [ -n "$(echo "$OUT" | tr -d '[:space:]')" ] && break
+    sleep 5
+  done
+  [ "$(echo "$OUT" | tr -d '[:space:]')" = "before-failover" ] \
+    && ok "the retry was served by ${NEXT} after $((SECONDS - START))s, same machine, same disk" \
+    || bad "the retry never succeeded (got '${OUT}')"
+fi
+
 say "Result"
 echo "  ${PASS} passed, ${FAIL} failed"
+echo
+echo "Two hosts were powered off on purpose. Bring them back with:"
+echo "  sudo virsh start <domain>"
 [ "$FAIL" = 0 ] || exit 1
