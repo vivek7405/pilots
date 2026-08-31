@@ -10,10 +10,16 @@
 -- The `writer:` comments are the only in-code record of the single-writer
 -- invariant: a host writes ONLY rows describing its own machines. Violating
 -- it does not error, it corrupts state silently. See ARCHITECTURE.md.
+--
+-- A machine is never DELETEd either. A delete racing an update loses the race
+-- through the merge and the row comes back, so destruction is the state
+-- `destroyed` plus a reaper that collects those rows after a retention window.
+-- Every read filters them.
 
 CREATE TABLE IF NOT EXISTS hosts (      -- writer: the host itself
   id            TEXT PRIMARY KEY,
-  wg_addr       TEXT,
+  wg_addr       TEXT,    -- derived from wg_pubkey; never assigned
+  wg_pubkey     TEXT,
   public_ip     TEXT,
   cpu_free      INTEGER,
   mem_free_mib  INTEGER,
@@ -24,7 +30,7 @@ CREATE TABLE IF NOT EXISTS machines (   -- writer: host_id only
   id               TEXT PRIMARY KEY,
   name             TEXT,
   host_id          TEXT,
-  state            TEXT,    -- creating|running|suspended|stopped|error
+  state            TEXT,    -- creating|running|suspended|stopped|error|destroyed
   kind_knobs       TEXT,    -- json: auto_stop/auto_start/min_machines_running/soft_limit
   image_ref        TEXT,
   vcpus            INTEGER,

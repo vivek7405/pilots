@@ -21,6 +21,7 @@ import (
 	_ "embed"
 	"errors"
 	"fmt"
+	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver: hostd builds with CGO_ENABLED=0
 )
@@ -59,8 +60,11 @@ type Machine struct {
 // Host is one member of the fleet. Every host heartbeats its own row; a row
 // whose last_seen is stale is what triggers self-heal on the survivors.
 type Host struct {
-	ID         string
+	ID string
+	// WGAddr is DERIVED from WGPubKey, never assigned. Anything that hands out
+	// mesh addresses is an allocator, and an allocator is a control plane.
 	WGAddr     string
+	WGPubKey   string
 	PublicIP   string
 	CPUFree    int
 	MemFreeMiB int
@@ -86,6 +90,62 @@ type Checkpoint struct {
 	ResumeGapMS int64 `json:"-"`
 }
 
+// A host writes ONLY rows describing its own machines. Corrosion accepts a
+// violating write and merges it -- no error, no conflict, no log line -- and
+// the damage surfaces later as a row two hosts both believe they own. So the
+// rule is enforced in the driver, and the three sanctioned exceptions each
+// need an explicit option, so that none of them can happen by accident.
+
+// WriteOption authorises a write that would otherwise breach single-writer.
+type WriteOption func(*WriteAuth)
+
+// WriteAuth carries what a driver needs to check an exception.
+type WriteAuth struct {
+	// NameAllocation: this host is the deterministic owner of the name,
+	// hash(name) mod live_hosts == my rank.
+	NameAllocation bool
+	// DeadOwnerClaim names the host being claimed from. The driver re-checks
+	// that host's last_seen immediately before writing, because the claim is
+	// only legitimate while the owner is still gone.
+	DeadOwnerClaim string
+	// APIKeyWrite: the dashboard's host writing api_keys, the one table whose
+	// rows describe no machine.
+	APIKeyWrite bool
+}
+
+// WithNameAllocation authorises the write that reserves a machine name.
+func WithNameAllocation() WriteOption {
+	return func(a *WriteAuth) { a.NameAllocation = true }
+}
+
+// WithDeadOwnerClaim authorises taking a machine from a host that has stopped
+// heartbeating. The driver verifies that independently; passing the option
+// does not assert it.
+func WithDeadOwnerClaim(ownerID string) WriteOption {
+	return func(a *WriteAuth) { a.DeadOwnerClaim = ownerID }
+}
+
+// WithAPIKeyWrite authorises the dashboard host's api_keys writes.
+func WithAPIKeyWrite() WriteOption {
+	return func(a *WriteAuth) { a.APIKeyWrite = true }
+}
+
+// ResolveAuth collects options into one authorisation.
+func ResolveAuth(opts []WriteOption) WriteAuth {
+	var a WriteAuth
+	for _, opt := range opts {
+		opt(&a)
+	}
+	return a
+}
+
+// ErrNotOwner reports a write to a machine this host does not own.
+var ErrNotOwner = errors.New("state: this host does not own that machine")
+
+// StateDestroyed is the tombstone. Reads filter it; a reaper collects the rows
+// after a retention window.
+const StateDestroyed = "destroyed"
+
 // APIKey is a hashed credential. Hashes replicate to every host so that each
 // one authenticates locally -- auth survives the loss of any host, including
 // the one running the dashboard.
@@ -100,8 +160,20 @@ type APIKey struct {
 type Store interface {
 	GetMachine(ctx context.Context, id string) (*Machine, error)
 	ListMachines(ctx context.Context) ([]Machine, error)
-	PutMachine(ctx context.Context, m *Machine) error
+	// PutMachine writes a machine's row. A replicated store REJECTS a write
+	// to a machine this host does not own unless an option authorises it --
+	// see WriteOption for why that check cannot live in review comments.
+	PutMachine(ctx context.Context, m *Machine, opts ...WriteOption) error
+	// DeleteMachine makes a machine invisible to every read. A replicated
+	// store tombstones rather than deleting, because a delete racing an
+	// update loses through the merge and the row comes back.
 	DeleteMachine(ctx context.Context, id string) error
+	// ClaimMachine takes ownership of a machine from a host that is provably
+	// gone, writing the owner and the state TOGETHER. They must move as one:
+	// merges are per column, so split across two writes a row can end up
+	// owned by the rescuer while still reporting what its dead owner last
+	// said about it.
+	ClaimMachine(ctx context.Context, id, newHostID, newState string, opts ...WriteOption) error
 	// TouchMachine updates only the activity columns. Callers recording use of
 	// a machine must not write the whole row, or they clobber a concurrent
 	// lifecycle change.
@@ -187,7 +259,9 @@ func (s *sqliteStore) ListMachines(ctx context.Context) ([]Machine, error) {
 	return out, rows.Err()
 }
 
-func (s *sqliteStore) PutMachine(ctx context.Context, m *Machine) error {
+// PutMachine ignores the write options: a single-box store has exactly one
+// writer, so there is no invariant here for them to guard.
+func (s *sqliteStore) PutMachine(ctx context.Context, m *Machine, _ ...WriteOption) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO machines (`+machineCols+`)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -207,6 +281,21 @@ func (s *sqliteStore) PutMachine(ctx context.Context, m *Machine) error {
 		m.LastActivity, m.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("state: put machine %q: %w", m.ID, err)
+	}
+	return nil
+}
+
+// ClaimMachine writes the owner and the state together. On a single box this
+// is only ever the local host reclaiming its own row after a restart.
+func (s *sqliteStore) ClaimMachine(ctx context.Context, id, newHostID, newState string, _ ...WriteOption) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE machines SET host_id = ?, state = ?, updated_at = ? WHERE id = ?`,
+		newHostID, newState, time.Now().Unix(), id)
+	if err != nil {
+		return fmt.Errorf("state: claim machine %q: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("state: claim machine %q: %w", id, ErrNotFound)
 	}
 	return nil
 }
