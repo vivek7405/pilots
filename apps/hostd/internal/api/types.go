@@ -7,6 +7,11 @@
 // incidentally.
 package api
 
+import (
+	"encoding/json"
+	"fmt"
+)
+
 // Knobs are the per-machine lifecycle policy. There is no sandbox type and no
 // service type -- a sandbox and a production service are the same machine with
 // different knobs. Scale-to-zero (MinMachinesRunning == 0) is valid for
@@ -16,6 +21,57 @@ type Knobs struct {
 	AutoStart          bool   `json:"auto_start"`           // wake on an inbound request
 	MinMachinesRunning int    `json:"min_machines_running"` // 0 = scale to zero
 	SoftLimit          int    `json:"soft_limit"`           // concurrency before starting another replica
+}
+
+// DefaultKnobs is the policy a machine gets when the caller says nothing.
+//
+// The defaults keep a machine REACHABLE and cheap: it suspends when idle and
+// wakes on the next request.
+func DefaultKnobs() Knobs {
+	return Knobs{AutoStop: "suspend", AutoStart: true, SoftLimit: 20}
+}
+
+// DecodeKnobs applies a caller's partial policy on top of the defaults.
+//
+// Decoding onto a pre-seeded value is the point: encoding/json leaves absent
+// fields untouched, so {"auto_stop":"suspend"} keeps auto_start true. Assigning
+// a decoded struct wholesale instead would zero every field the caller did not
+// mention -- and a machine with auto_start false suspends after a minute and
+// then refuses to wake, which is a permanently dead URL earned by setting one
+// unrelated field.
+func DecodeKnobs(raw json.RawMessage) (Knobs, error) {
+	k := DefaultKnobs()
+	if len(raw) == 0 {
+		return k, nil
+	}
+	if err := json.Unmarshal(raw, &k); err != nil {
+		return k, fmt.Errorf("api: invalid knobs: %w", err)
+	}
+	return k, nil
+}
+
+// ParseKnobs reads a machine's stored policy.
+//
+// The stored blob is exactly this struct serialised, so there is no
+// translation layer between the wire format and what is persisted. Defaults
+// keep a machine REACHABLE: a corrupt or missing value must not strand it with
+// autoStart off.
+func ParseKnobs(raw string) Knobs {
+	k := DefaultKnobs()
+	if raw == "" {
+		return k
+	}
+	_ = json.Unmarshal([]byte(raw), &k)
+	return k
+}
+
+// MarshalKnobs serialises a machine's policy for storage.
+func MarshalKnobs(k Knobs) (string, error) {
+	raw, err := json.Marshal(k)
+	if err != nil {
+		return "", fmt.Errorf("api: marshal knobs: %w", err)
+	}
+	return string(raw), nil
 }
 
 // Machine is the platform's one primitive: a Firecracker microVM whose
@@ -49,8 +105,10 @@ type CreateMachineRequest struct {
 	Checkpoint string `json:"checkpoint,omitempty"`
 	VCPUs      int    `json:"vcpus,omitempty"`
 	MemMiB     int    `json:"mem_mib,omitempty"`
-	Knobs      *Knobs `json:"knobs,omitempty"`
-	Volume     string `json:"volume,omitempty"`
+	// Raw so a partial object merges onto the defaults instead of
+	// replacing them. See DecodeKnobs.
+	Knobs  json.RawMessage `json:"knobs,omitempty"`
+	Volume string          `json:"volume,omitempty"`
 }
 
 // ExecRequest runs a command inside a machine. Cwd and Env are required on
