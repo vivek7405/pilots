@@ -363,6 +363,49 @@ func (s *Store) PutAPIKey(ctx context.Context, k *state.APIKey) error {
 	return nil
 }
 
+func (s *Store) GetTemplate(ctx context.Context, id string) (*state.Template, error) {
+	rows, err := s.client.Query(ctx,
+		`SELECT id, mem_build_id, rootfs_build_id, snap_key, created_at
+		 FROM templates WHERE id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("state: template %q: %w", id, state.ErrNotFound)
+	}
+	var t state.Template
+	if err := rows.Scan(&t.ID, &t.MemBuildID, &t.RootfsBuildID, &t.SnapKey, &t.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &t, rows.Err()
+}
+
+// PutTemplate publishes the fleet's golden template.
+//
+// Unguarded by single-writer on purpose: the template belongs to the fleet
+// rather than to a host, and the row is written once by whichever host finds
+// none. A concurrent second writer is resolved by re-reading afterwards and
+// adopting whatever won, which costs a wasted build and nothing else.
+func (s *Store) PutTemplate(ctx context.Context, t *state.Template) error {
+	_, err := s.client.Exec(ctx, `
+		INSERT INTO templates (id, mem_build_id, rootfs_build_id, snap_key, created_at)
+		VALUES (?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+			mem_build_id=excluded.mem_build_id,
+			rootfs_build_id=excluded.rootfs_build_id,
+			snap_key=excluded.snap_key, created_at=excluded.created_at`,
+		t.ID, t.MemBuildID, t.RootfsBuildID, t.SnapKey, t.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put template %q: %w", t.ID, err)
+	}
+	return nil
+}
+
 // Close releases the store. The agent is a separate process with its own
 // lifetime, so there is nothing here to shut down.
 func (s *Store) Close() error { return nil }

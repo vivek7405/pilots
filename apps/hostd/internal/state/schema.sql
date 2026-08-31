@@ -68,6 +68,21 @@ CREATE TABLE IF NOT EXISTS api_keys (   -- writer: the dashboard's host
   created_at INTEGER
 );
 
+-- The golden template every machine is created from.
+--
+-- FLEET-WIDE, not per host. A machine's memory image is a diff against the
+-- template it was created from, so a host that built its own would be unable
+-- to restore anyone else's machines -- which is the whole of cross-host
+-- rescue. A host that has never built one reads this row and pulls the builds
+-- it names from object storage.
+CREATE TABLE IF NOT EXISTS templates (
+  id              TEXT PRIMARY KEY,   -- "golden"
+  mem_build_id    TEXT,
+  rootfs_build_id TEXT,
+  snap_key        TEXT,
+  created_at      INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS releases (
   id              TEXT PRIMARY KEY,
   service_id      TEXT,

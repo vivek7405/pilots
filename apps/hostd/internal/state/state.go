@@ -146,6 +146,19 @@ var ErrNotOwner = errors.New("state: this host does not own that machine")
 // after a retention window.
 const StateDestroyed = "destroyed"
 
+// Template is the golden image machines are created from, shared by the whole
+// fleet. See the schema for why it cannot be per host.
+type Template struct {
+	ID            string
+	MemBuildID    string
+	RootfsBuildID string
+	SnapKey       string
+	CreatedAt     int64
+}
+
+// GoldenTemplate is the id of the default template's row.
+const GoldenTemplate = "golden"
+
 // APIKey is a hashed credential. Hashes replicate to every host so that each
 // one authenticates locally -- auth survives the loss of any host, including
 // the one running the dashboard.
@@ -188,6 +201,11 @@ type Store interface {
 
 	GetAPIKeyByHash(ctx context.Context, hash string) (*APIKey, error)
 	PutAPIKey(ctx context.Context, k *APIKey) error
+
+	// GetTemplate reads the fleet's golden template. ErrNotFound means no host
+	// has built one yet.
+	GetTemplate(ctx context.Context, id string) (*Template, error)
+	PutTemplate(ctx context.Context, t *Template) error
 
 	Close() error
 }
@@ -281,6 +299,36 @@ func (s *sqliteStore) PutMachine(ctx context.Context, m *Machine, _ ...WriteOpti
 		m.LastActivity, m.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("state: put machine %q: %w", m.ID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) GetTemplate(ctx context.Context, id string) (*Template, error) {
+	var t Template
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, mem_build_id, rootfs_build_id, snap_key, created_at
+		 FROM templates WHERE id = ?`, id).
+		Scan(&t.ID, &t.MemBuildID, &t.RootfsBuildID, &t.SnapKey, &t.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("state: template %q: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get template %q: %w", id, err)
+	}
+	return &t, nil
+}
+
+func (s *sqliteStore) PutTemplate(ctx context.Context, t *Template) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO templates (id, mem_build_id, rootfs_build_id, snap_key, created_at)
+		VALUES (?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+			mem_build_id=excluded.mem_build_id,
+			rootfs_build_id=excluded.rootfs_build_id,
+			snap_key=excluded.snap_key, created_at=excluded.created_at`,
+		t.ID, t.MemBuildID, t.RootfsBuildID, t.SnapKey, t.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put template %q: %w", t.ID, err)
 	}
 	return nil
 }
