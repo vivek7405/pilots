@@ -105,6 +105,9 @@ func run() error {
 	defer stop()
 
 	go mgr.RunIdleMonitor(ctx)
+	// Sweeps up Firecrackers this host has no record of -- the residue of a
+	// hostd killed mid-create, or a destroy that failed partway.
+	go mgr.RunReaper(ctx)
 
 	rtr := router.New(router.Options{
 		Domain:  cfg.WorkloadDomain,
