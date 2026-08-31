@@ -81,3 +81,20 @@ func TestTokensFallBackToTheTemplatePlaceholderWithoutASecret(t *testing.T) {
 		t.Errorf("token = %q, want the template placeholder", got)
 	}
 }
+
+// The template machine never goes through installToken -- it is booted once to
+// be photographed -- so its guest still carries the placeholder the golden
+// rootfs ships with. Deriving a token for it locks hostd out of the very
+// machine it is snapshotting, and the template build fails with a 401 that
+// names nothing useful.
+func TestTheTemplateMachineKeepsThePlaceholderToken(t *testing.T) {
+	m := &Manager{opts: Options{HostID: "host-a", AgentTokenSecret: "fleet-secret"}}
+
+	if got := m.token("tmpl-abc123"); got != templateToken {
+		t.Errorf("template machine token = %q, want the placeholder", got)
+	}
+	if got := m.token("m-abc123"); got == templateToken {
+		t.Error("a real machine got the placeholder; it would be reachable by " +
+			"anything holding the golden rootfs")
+	}
+}

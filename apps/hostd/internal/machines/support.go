@@ -72,6 +72,16 @@ func (m *Manager) forgetToken(id string) {
 // Deriving also means no per-machine secret is ever written to replicated
 // state or shipped between hosts.
 func (m *Manager) token(id string) string {
+	// The template machine is the exception, and it has to be. It is booted
+	// once to be photographed and never goes through installToken, so its
+	// guest still carries the placeholder the golden rootfs ships with --
+	// which is also what every new machine's FIRST contact uses, before it
+	// installs its own. Deriving a token for it would lock hostd out of the
+	// very machine it is trying to snapshot.
+	if strings.HasPrefix(id, templateMachinePrefix) {
+		return templateToken
+	}
+
 	if secret := m.opts.AgentTokenSecret; secret != "" {
 		mac := hmac.New(sha256.New, []byte(secret))
 		_, _ = mac.Write([]byte(id))
@@ -93,6 +103,10 @@ func (m *Manager) token(id string) string {
 	// template's placeholder.
 	return templateToken
 }
+
+// templateMachinePrefix marks the throwaway machine a golden template is
+// captured from.
+const templateMachinePrefix = "tmpl-"
 
 // templateToken is what the golden rootfs ships with. Every machine replaces
 // it at create time, so it is only ever valid for a machine that has not been

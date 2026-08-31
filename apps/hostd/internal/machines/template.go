@@ -270,6 +270,8 @@ func (m *Manager) buildTemplate(ctx context.Context) (*Template, error) {
 // captureTemplateMemory boots a throwaway machine and chunkifies its memory.
 func (m *Manager) captureTemplateMemory(ctx context.Context, snapKey string) (uuid.UUID, error) {
 	row := &state.Machine{
+		// The prefix matters: it is how Manager.token knows this guest still
+		// carries the golden rootfs's placeholder credential.
 		ID: newID("tmpl"), VCPUs: 1, MemMiB: 512,
 		AppPort: netns.GuestAppPort, AgentPort: netns.GuestAgentPort,
 	}
