@@ -142,7 +142,12 @@ for i in $(seq 1 "$NODES"); do
   NODE="${NODE_PREFIX}-${i}"
   IP=""
   for _ in $(seq 120); do
-    IP=$($SUDO virsh domifaddr "$NODE" --source lease 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1 | head -1)
+    # `|| true` is load-bearing: domifaddr exits non-zero for a domain that is
+    # not running, and under `set -e` with pipefail a failed command
+    # substitution ends the script -- silently, mid-loop, with no message about
+    # what went wrong. NEW_ONLY deliberately walks past powered-off nodes, so
+    # this is the normal path, not the exceptional one.
+    IP=$($SUDO virsh domifaddr "$NODE" --source lease 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1 | head -1 || true)
     [ -n "$IP" ] && break
     # A node this run deliberately left powered off has no lease to wait for.
     if [ "${NEW_ONLY:-0}" = 1 ] && ! $SUDO virsh domstate "$NODE" 2>/dev/null | grep -q running; then
@@ -164,7 +169,13 @@ for i in $(seq 1 "$NODES"); do
 done
 
 say "Waiting for ssh"
-for ip in "${IPS[@]}"; do
+for i in "${!IPS[@]}"; do
+  ip="${IPS[$i]}"
+  # Do not wait two minutes for a node this run deliberately left powered off.
+  if [ "${NEW_ONLY:-0}" = 1 ] &&
+     ! $SUDO virsh domstate "${NODE_PREFIX}-$((i + 1))" 2>/dev/null | grep -q running; then
+    continue
+  fi
   for _ in $(seq 60); do
     ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
         -o ConnectTimeout=3 -i "$SSH_KEY" "root@${ip}" true 2>/dev/null && break
