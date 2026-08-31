@@ -13,6 +13,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -324,20 +325,7 @@ func (m *Manager) deleteRemoteState(ctx context.Context, id string) error {
 			errs = append(errs, fmt.Errorf("delete %s: %w", key, err))
 		}
 	}
-	if chunkDeleter, ok := m.opts.Chunks.(interface {
-		Delete(ctx context.Context, key string) error
-	}); ok {
-		for _, b := range builds {
-			if b == "" {
-				continue
-			}
-			for _, name := range []string{b + "/header", b + "/data"} {
-				if err := chunkDeleter.Delete(ctx, name); err != nil {
-					errs = append(errs, fmt.Errorf("delete %s: %w", name, err))
-				}
-			}
-		}
-	}
+	m.discardBuilds(ctx, builds...)
 	return errors.Join(errs...)
 }
 
@@ -403,6 +391,11 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 		m.pool.Return(slotIdx)
 	}
 
+	// The builds this suspend replaces. Nothing else can be reading them: a
+	// checkpoint mints its own ids, so a machine's suspend builds are named by
+	// its row and nowhere else.
+	superseded := []string{row.MemBuildID, row.RootfsBuildID}
+
 	row.State = StateSuspended
 	row.MemBuildID = res.MemBuildID.String()
 	// An empty rootfs build is meaningful: the machine wrote nothing, so its
@@ -413,7 +406,45 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 		row.RootfsBuildID = res.RootfsBuildID.String()
 	}
 	row.UpdatedAt = time.Now().Unix()
-	return m.opts.Store.PutMachine(ctx, row)
+	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
+		return err
+	}
+
+	// Only AFTER the row names the new builds. Deleting first would, on a
+	// failed write, leave the row pointing at objects that no longer exist --
+	// a machine that cannot be woken anywhere.
+	m.discardBuilds(ctx, superseded...)
+	return nil
+}
+
+// discardBuilds removes builds nothing references any more.
+//
+// Every suspend writes a fresh memory build, so without this each one leaks a
+// full memory diff into object storage forever -- the largest objects the
+// system produces, growing without bound for a machine that wakes and sleeps
+// on a schedule.
+//
+// Best effort: a failure here costs storage, while failing the suspend over it
+// would cost the machine.
+func (m *Manager) discardBuilds(ctx context.Context, ids ...string) {
+	deleter, ok := m.opts.Chunks.(interface {
+		Delete(ctx context.Context, key string) error
+	})
+	if !ok {
+		return
+	}
+
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		for _, name := range []string{id + "/header", id + "/data"} {
+			if err := deleter.Delete(ctx, name); err != nil {
+				slog.Warn("a superseded build was left in object storage",
+					"build", id, "key", name, "err", err)
+			}
+		}
+	}
 }
 
 // Wake restores a suspended machine.
