@@ -1,0 +1,10 @@
+# Must match the kernel `ip=` boot arg exactly. Constant on every machine and
+# every host: host-agnostic snapshots depend on it.
+[Match]
+Name=eth0
+
+[Network]
+Address=169.254.0.21/30
+Gateway=169.254.0.22
+DNS=8.8.8.8
+DNS=1.1.1.1

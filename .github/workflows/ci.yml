@@ -1,0 +1,80 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  go:
+    name: go (hostd)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: apps/hostd
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: apps/hostd/go.sum
+      - run: go build ./...
+      - run: go vet ./...
+      - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go test ./...
+      # The guest-agent is baked into the rootfs, where there is no libc we
+      # control -- it must link statically.
+      - run: CGO_ENABLED=0 go build -o /dev/null ./cmd/guest-agent
+
+  ts:
+    name: node
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install
+      - run: node --check scripts/e2e.mjs
+      # Skips cleanly without PILOTS_E2E=1; this asserts the skip path works.
+      - run: npm run test:e2e
+
+  boot:
+    name: firecracker boot gate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: apps/hostd/go.sum
+
+      # Probe rather than assume. If a runner image stops exposing KVM, the job
+      # skips loudly instead of turning the whole pipeline red -- the laptop
+      # gate still covers the boot.
+      - id: kvm
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=kvm
+          if [ -w /dev/kvm ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::/dev/kvm unavailable; skipping the boot gate"
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - if: steps.kvm.outputs.ok == 'true'
+        run: sudo PREFIX=/opt/pilots scripts/fetch-firecracker.sh
+      - if: steps.kvm.outputs.ok == 'true'
+        run: sudo PREFIX=/opt/pilots scripts/fetch-kernel.sh
+      - if: steps.kvm.outputs.ok == 'true'
+        run: scripts/build-golden-rootfs.sh
+      - if: steps.kvm.outputs.ok == 'true'
+        run: scripts/dev-vm.sh
+
+      - if: always() && steps.kvm.outputs.ok == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: firecracker-serial-log
+          path: /tmp/pilots-dev-vm-*.log
+          if-no-files-found: ignore
