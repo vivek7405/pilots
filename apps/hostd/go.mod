@@ -3,6 +3,8 @@ module github.com/vivek7405/pilots/hostd
 go 1.26
 
 require (
+	github.com/coder/websocket v1.8.15
+	github.com/creack/pty v1.1.24
 	github.com/google/nftables v0.3.0
 	github.com/vishvananda/netlink v1.3.1
 	github.com/vishvananda/netns v0.0.5
