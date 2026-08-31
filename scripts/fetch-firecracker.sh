@@ -45,7 +45,8 @@ install -m0755 "$rel/jailer-v${FC_VERSION}-${arch}"      "$PREFIX/bin/jailer"
 for tpl in T2 T2CL T2A; do
   src="$rel/cpu-templates/${tpl}-v${FC_VERSION}.json"
   [ -f "$src" ] || src="$rel/${tpl}-v${FC_VERSION}.json"
-  [ -f "$src" ] && install -m0644 "$src" "$PREFIX/cpu-templates/${tpl}.json" || true
+  [ -f "$src" ] || { echo "missing cpu template: $tpl" >&2; exit 1; }
+  install -m0644 "$src" "$PREFIX/cpu-templates/${tpl}.json"
 done
 
 echo "==> installed:"

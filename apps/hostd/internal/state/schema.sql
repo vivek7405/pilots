@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS machines (   -- writer: host_id only
   name             TEXT,
   host_id          TEXT,
   state            TEXT,    -- creating|running|suspended|stopped|error
-  kind_knobs       TEXT,    -- json: autoStop/autoStart/minRunning/softLimit
+  kind_knobs       TEXT,    -- json: auto_stop/auto_start/min_machines_running/soft_limit
   image_ref        TEXT,
   vcpus            INTEGER,
   mem_mib          INTEGER,

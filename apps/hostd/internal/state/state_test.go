@@ -23,7 +23,7 @@ func TestMachineRoundTrip(t *testing.T) {
 
 	want := &Machine{
 		ID: "m_1", Name: "webapp", HostID: "host-a", State: "running",
-		KindKnobs: `{"autoStop":"suspend","autoStart":true,"minMachinesRunning":0}`,
+		KindKnobs: `{"auto_stop":"suspend","auto_start":true,"min_machines_running":0,"soft_limit":0}`,
 		ImageRef:  "golden", VCPUs: 2, MemMiB: 512,
 		Domain: "webapp.pilotrun.app", AppPort: 45001, AgentPort: 46001,
 		AgentTokenHash: "deadbeef", LastActivity: 1700000000, UpdatedAt: 1700000001,

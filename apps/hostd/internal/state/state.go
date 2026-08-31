@@ -119,6 +119,12 @@ func Open(dsn string) (Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("state: open %q: %w", dsn, err)
 	}
+	// One connection, deliberately. This driver sets no busy timeout, so
+	// concurrent writers to a single SQLite file hit SQLITE_BUSY; serializing
+	// avoids it. It also keeps ":memory:" coherent -- an in-memory database is
+	// private to its connection, so a pooled second one would see empty tables.
+	db.SetMaxOpenConns(1)
+
 	if _, err := db.Exec(Schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("state: apply schema: %w", err)

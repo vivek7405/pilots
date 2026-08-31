@@ -70,14 +70,22 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Bind before announcing readiness. Doing this inside the serving goroutine
+	// would let notifyReady() fire while the bind was still failing, and under
+	// Type=notify systemd would consider the host up while it served nothing.
+	ln, err := net.Listen("tcp", cfg.ListenAddr)
+	if err != nil {
+		return err
+	}
+
 	errc := make(chan error, 1)
 	go func() {
-		slog.Info("hostd listening", "addr", cfg.ListenAddr, "host_id", cfg.HostID)
-		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errc <- err
 		}
 	}()
 
+	slog.Info("hostd listening", "addr", ln.Addr().String(), "host_id", cfg.HostID)
 	notifyReady()
 
 	select {

@@ -102,7 +102,7 @@ CREATE TABLE hosts    (id TEXT PRIMARY KEY, wg_addr TEXT, public_ip TEXT,
                        last_seen INTEGER);           -- writer: the host itself
 CREATE TABLE machines (id TEXT PRIMARY KEY, name TEXT, host_id TEXT,
                        state TEXT,   -- creating|running|suspended|stopped|error
-                       kind_knobs TEXT,  -- json: autoStop/autoStart/minRunning/softLimit
+                       kind_knobs TEXT,  -- json: auto_stop/auto_start/min_machines_running/soft_limit
                        image_ref TEXT, vcpus INTEGER, mem_mib INTEGER,
                        domain TEXT, custom_domain TEXT,
                        app_port INTEGER, agent_port INTEGER,
@@ -126,22 +126,28 @@ CREATE TABLE releases (id TEXT PRIMARY KEY, service_id TEXT,
 
 ```
 POST   /v1/machines                  create {name?, image|template|checkpoint, vcpus, mem, knobs, volume?}
-GET    /v1/machines[/:id]            list / info
+GET    /v1/machines                  list
+GET    /v1/machines/:id              info
 DELETE /v1/machines/:id              destroy
 POST   /v1/machines/:id/exec         {cmd, cwd?, env?, user?, timeout?} → {stdout, stderr, exitCode}
 GET    /v1/machines/:id/exec/stream  WS: query argv/dir/env/stdin → frames (below)
-POST   /v1/machines/:id/checkpoints  {comment?} → {id, seq}
-POST   /v1/checkpoints/:id/restore   in-place restore
-POST   /v1/machines/:id/suspend|wake|stop|start
 GET    /v1/machines/:id/logs?follow  stream
+POST   /v1/machines/:id/suspend|wake|stop|start
+POST   /v1/machines/:id/checkpoints  {comment?} → {id, seq}
+GET    /v1/machines/:id/checkpoints  list
+POST   /v1/checkpoints/:id/restore   in-place restore
 POST   /v1/builds                    {dockerfile-context tar} → streamed structured log → {rootfs_build_id}
 POST   /v1/services                  {name, release|build, replicas, health, domain?}
+GET    /v1/services                  list
+GET    /v1/services/:id              info
 POST   /v1/services/:id/deploy       health-gated cutover
 POST   /v1/services/:id/rollback
 POST   /v1/machines/:id/promote      {domain?} → service
 POST   /v1/volumes                   create JuiceFS volume
+GET    /v1/volumes                   list
 GET    /v1/hosts                     fleet view
-GET    /metrics                      Prometheus
+GET    /v1/health                    liveness (unauthenticated)
+GET    /metrics                      Prometheus (unauthenticated)
 ```
 
 ### Guest-agent protocol (inside every VM, port 3001)

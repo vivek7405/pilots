@@ -58,11 +58,11 @@ func WithAuth(d Deps, next http.Handler) http.Handler {
 				writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "auth lookup failed"})
 				return
 			}
-			// Compare against a dummy anyway so a miss and a hit cost the same.
-			subtle.ConstantTimeCompare([]byte(hash), []byte(strings.Repeat("0", len(hash))))
 			unauthorized(w)
 			return
 		}
+		// Cheap guard on the Store contract: the row is looked up by hash, so
+		// this should never differ.
 		if subtle.ConstantTimeCompare([]byte(rec.Hash), []byte(hash)) != 1 {
 			unauthorized(w)
 			return
