@@ -40,6 +40,16 @@ type Options struct {
 	// SlotFor resolves a running machine's network slot. The router needs the
 	// slot's host-facing address to dial the guest.
 	SlotFor func(machineID string) (*netns.Slot, bool)
+
+	// Peers resolves other hosts on the mesh, for machines this host does not
+	// own. Nil on a single-box deployment, where every machine is local.
+	Peers Peers
+
+	// Rescue claims a machine from a host that has stopped responding and
+	// restores it here. Called on the request path, holding the client, so
+	// that a host dying mid-request costs one slow request rather than an
+	// outage lasting until a background loop notices.
+	Rescue func(ctx context.Context, m state.Machine) error
 }
 
 // Router proxies inbound requests to machines, waking them if needed.
@@ -105,19 +115,9 @@ func (r *Router) resolve(ctx context.Context, host string) (*Target, error) {
 		if row.Name != name && row.Domain != strings.ToLower(host) {
 			continue
 		}
-		// Only this host's machines are servable here.
-		//
-		// Waking someone else's machine locally would run a second copy from
-		// the same artifacts AND write state onto a row this host does not
-		// own -- a single-writer violation, which under a replicated store
-		// corrupts silently through the merge rather than erroring.
-		//
-		// Phase 4 replaces this error with a proxy to the owning host over the
-		// mesh; until the mesh exists, refusing is the honest answer.
-		if r.opts.HostID != "" && row.HostID != r.opts.HostID {
-			return nil, fmt.Errorf("router: machine %q is owned by host %q, not %q",
-				name, row.HostID, r.opts.HostID)
-		}
+		// Ownership is NOT checked here. Any host can resolve any machine --
+		// DNS points every workload name at every host -- and what differs is
+		// only where the request is then served. See serveOrForward.
 		return &Target{Machine: row, Port: port}, nil
 	}
 	return nil, fmt.Errorf("router: no machine named %q", name)
@@ -184,28 +184,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "unknown host", http.StatusNotFound)
 		return
 	}
-
-	if err := r.ensureAwake(ctx, target.Machine); err != nil {
-		slog.Error("could not wake machine for request",
-			"machine", target.Machine.ID, "err", err)
-		http.Error(w, "machine unavailable", http.StatusServiceUnavailable)
-		return
-	}
-
-	slot, ok := r.opts.SlotFor(target.Machine.ID)
-	if !ok {
-		http.Error(w, "machine unavailable", http.StatusServiceUnavailable)
-		return
-	}
-
-	// Count the request while it is in flight so the idle monitor cannot
-	// suspend the machine mid-response, and record the activity so it is not
-	// suspended immediately after.
-	r.opts.Manager.Begin(target.Machine.ID)
-	defer r.opts.Manager.End(target.Machine.ID)
-	go r.opts.Manager.Touch(context.WithoutCancel(ctx), target.Machine.ID)
-
-	r.proxyTo(w, req, slot, target.Port)
+	r.serveOrForward(w, req, target)
 }
 
 // proxyTo forwards to the guest.

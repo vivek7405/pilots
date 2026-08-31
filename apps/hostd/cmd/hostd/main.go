@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -27,7 +28,6 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/nbd"
 	"github.com/vivek7405/pilots/hostd/internal/router"
 	"github.com/vivek7405/pilots/hostd/internal/s3"
-	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
 // shutdownTimeout bounds a graceful stop.
@@ -71,11 +71,21 @@ func run() error {
 		}
 	}
 
-	store, err := state.Open(cfg.StateDSN)
+	// The daemon's own lifetime. Everything the fleet runs in the background
+	// -- gossip subscriptions, mesh reconciliation, the self-heal loops --
+	// hangs off this, so a shutdown stops them without stopping the machines.
+	ctx, stopFleet := context.WithCancel(context.Background())
+	defer stopFleet()
+
+	store, cache, err := openState(ctx, cfg)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
+
+	if cfg.Fleet() {
+		slog.Info("joining the fleet", "state", "corrosion", "agent", cfg.CorrosionAddr)
+	}
 
 	uploader, err := newUploader(cfg)
 	if err != nil {
@@ -142,13 +152,43 @@ func run() error {
 	// hostd killed mid-create, or a destroy that failed partway.
 	go mgr.RunReaper(ctx)
 
-	rtr := router.New(router.Options{
+	// The fleet pieces, in the order they depend on each other: the mesh
+	// carries gossip and forwarded requests, so it comes up before anything
+	// that rides it.
+	var f *fleet
+	if cfg.Fleet() {
+		f = &fleet{store: store, cache: cache}
+		if cfg.MeshEnabled {
+			dev, keys, err := startMesh(ctx, cfg, cache)
+			if err != nil {
+				return fmt.Errorf("bring up the mesh: %w", err)
+			}
+			defer dev.Close()
+			f.dev, f.keys = dev, keys
+		}
+	}
+
+	routerOpts := router.Options{
 		Domain:  cfg.WorkloadDomain,
 		HostID:  cfg.HostID,
 		Store:   store,
 		Manager: mgr,
 		SlotFor: mgr.SlotFor,
-	})
+	}
+	if f != nil {
+		routerOpts.Peers = peers{cache: f.cache}
+		// A host that finds the owner gone rescues the machine HERE, holding
+		// the client, rather than failing until the rescue loop's next tick.
+		routerOpts.Rescue = mgr.Rescue
+	}
+	rtr := router.New(routerOpts)
+
+	if f != nil && f.dev != nil {
+		if err := startInternalListener(ctx, f.dev, rtr); err != nil {
+			return err
+		}
+		startSelfHeal(ctx, cfg, f, mgr)
+	}
 
 	// One listener, two audiences: requests for a workload hostname are
 	// proxied into a machine, everything else is the control API. Keeping them
