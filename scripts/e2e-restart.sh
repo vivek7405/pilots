@@ -15,7 +15,7 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 API="${PILOT_API:-http://127.0.0.1:8080}"
 KEY="${PILOT_API_KEY:-pilot_e2e_testkey}"
 HOSTD="${HOSTD_BIN:-$REPO/apps/hostd/hostd}"
-ROOTFS="${PILOT_TEMPLATE_ROOTFS:-$REPO/scripts/rootfs/golden.ext4}"
+ROOTFS="${PILOT_TEMPLATE_ROOTFS:-/var/lib/pilots/templates/golden.ext4}"
 STATE_DSN="${PILOT_STATE_DSN:-/var/lib/pilots/e2e-state.db}"
 auth="Authorization: Bearer $KEY"
 
@@ -87,6 +87,24 @@ URL_AFTER=$(curl -sf "$API/v1/machines/$ID" -H "$auth" | jsonfield url)
 [ "$URL" = "$URL_AFTER" ] && echo "  PASS: URL unchanged across restart" \
   || { echo "  FAIL: URL changed to $URL_AFTER"; exit 1; }
 
+# The block and fault servers outlive hostd for the same reason firecracker
+# does, so the restart has to pick THOSE back up too. It is not enough for the
+# machine to be routable: a restart that adopts the VM but not its handlers
+# leaves the device attached with nothing holding a handle to it, and destroy
+# then leaks both processes and burns that /dev/nbdN until the host reboots.
+NBD_PID=$(python3 -c "import json;print(json.load(open('/var/lib/pilots/machines/$ID/state.json')).get('nbd_pid',0))")
+NBD_IDX=$(python3 -c "import json;print(json.load(open('/var/lib/pilots/machines/$ID/state.json')).get('nbd_index',-1))")
+UFFD_PID=$(python3 -c "import json;print(json.load(open('/var/lib/pilots/machines/$ID/state.json')).get('uffd_pid',0))")
+[ "$NBD_PID" -gt 0 ] && [ -d "/proc/$NBD_PID" ]   && echo "  PASS: the block server survived and is recorded (pid $NBD_PID, nbd$NBD_IDX)"   || { echo "  FAIL: block server pid '$NBD_PID' not recorded or not running"; exit 1; }
+[ "$UFFD_PID" -gt 0 ] && [ -d "/proc/$UFFD_PID" ]   && echo "  PASS: the fault server survived and is recorded (pid $UFFD_PID)"   || { echo "  FAIL: fault server pid '$UFFD_PID' not recorded or not running"; exit 1; }
+
 curl -sf -X DELETE "$API/v1/machines/$ID" -H "$auth" >/dev/null && echo "  cleaned up"
+sleep 1
+
+# Destroy on a RE-ADOPTED machine has to reach the handlers it never spawned.
+[ -d "/proc/$NBD_PID" ] && { echo "  FAIL: the block server outlived destroy"; exit 1; }   || echo "  PASS: the block server was stopped by destroy"
+[ -d "/proc/$UFFD_PID" ] && { echo "  FAIL: the fault server outlived destroy"; exit 1; }   || echo "  PASS: the fault server was stopped by destroy"
+[ "$(cat "/sys/block/nbd$NBD_IDX/pid" 2>/dev/null)" = "" ]   && echo "  PASS: /dev/nbd$NBD_IDX was released back to the kernel"   || { echo "  FAIL: /dev/nbd$NBD_IDX is still attached"; exit 1; }
+
 pkill -9 -x "$(basename "$HOSTD")" 2>/dev/null || true
 echo "ALL RESTART ASSERTIONS PASSED"

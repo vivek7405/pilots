@@ -80,6 +80,10 @@ type Checkpoint struct {
 	RootfsBuildID string
 	Durable       bool
 	CreatedAt     int64
+
+	// ResumeGapMS is how long the guest was frozen for this checkpoint. Not
+	// persisted: it describes one event, not the checkpoint's contents.
+	ResumeGapMS int64 `json:"-"`
 }
 
 // APIKey is a hashed credential. Hashes replicate to every host so that each

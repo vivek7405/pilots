@@ -153,6 +153,11 @@ type Checkpoint struct {
 	SourceID  string `json:"source_id,omitempty"`
 	Durable   bool   `json:"durable"` // false = upload still in flight
 	CreatedAt int64  `json:"created_at"`
+
+	// ResumeGapMS is how long the guest was frozen, in milliseconds. Present
+	// only on the response that created the checkpoint. The call itself takes
+	// longer: the preparation before the pause runs with the machine serving.
+	ResumeGapMS int64 `json:"resume_gap_ms,omitempty"`
 }
 
 // BuildLogLine is one NDJSON line of a streamed build. Structured so an agent

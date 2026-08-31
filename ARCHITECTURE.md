@@ -218,19 +218,70 @@ not tmpfs) is bind-mounted onto the constant path
 `/srv/pilots/rootfs.ext4` inside that private mount ns. Every snapshot
 therefore restores against the same path on any host.
 
-**Snapshot (suspend/checkpoint):** PATCH `/vm Paused` → PUT `/snapshot/create
-{Full, snap.bin, mem.bin}`. Then:
-- *Suspend*: chunkify mem.bin (diff vs template mem build) + rootfs cow →
-  upload → delete local mem.bin → kill VM → upload prefetch capture.
-- *Checkpoint (instant)*: `cp --reflink=auto --sparse=always` the cow →
-  **resume immediately** → chunkify+upload in a bounded background worker
-  (semaphore, default 1 — unbounded chunkify OOMs hosts) → durability
-  signalled by `.durable`/`.failed` marker files, exposed via
-  checkpoint-status (`durable/present/failed` — `present=false` means
-  "cross-host: fetch from S3").
-- Skip the rootfs build entirely when the cow has 0 allocated blocks.
-- Flush with `SyncFileRange` on the cow fd — NEVER global `sync()`
-  (holds the kernel bdev lock; concurrent suspends serialize for minutes).
+**Snapshot (suspend/checkpoint).** The order of these steps is the design,
+and every one of them was arrived at by measuring a resume gap:
+
+1. *Before* pausing, wait for the previous snapshot's background capture.
+   That capture reads the whole memory image, chunkifies it and uploads it;
+   overlapped with the next snapshot it competes with Firecracker's snapshot
+   write, and that write is inside the pause — so the freeze a user feels
+   belongs to the checkpoint before the one they asked for.
+2. *Before* pausing, ask the uffd handler to make the guest's memory
+   resident. Firecracker reads all of guest memory to write a snapshot, so
+   any page still lazily backed faults through the handler with the guest
+   frozen. On a first checkpoint that is the entire image: 5.8s versus 450ms.
+3. Flush the guest's page cache (`sync` over the agent) so the memory and
+   disk images agree about recent writes.
+4. PATCH `/vm Paused` → PUT `/snapshot/create {Full, snap.bin, mem.bin}`.
+5. Read the NBD handler's dirty bitmap over its control socket, while the
+   guest is still paused — a bitmap read mid-write describes a disk state
+   that never existed.
+6. *Checkpoint*: reflink the cow, **resume immediately**, then chunkify and
+   upload in the background (semaphore, default 1 — unbounded chunkify OOMs
+   hosts). The memory image is chunkified IN PLACE: step 1 guarantees
+   Firecracker cannot overwrite it first, and reflinking half a gigabyte
+   pins extents whose allocation cost resurfaces as a multi-second pause a
+   checkpoint or two later.
+   *Suspend*: chunkify both synchronously, upload, kill the VM, then upload
+   the fault order — the handler writes it as it runs, so it is only
+   complete once that process is gone.
+7. Durability is signalled by marker files and exposed through
+   checkpoint-status. `.chunked` means the builds exist on THIS host, which
+   is all a local rollback needs; `.durable` means they are uploaded, which
+   is what a restore anywhere else needs. Collapsing the two would make
+   every rollback wait for an upload it never reads.
+
+- The vmstate is uploaded BEFORE the machine is killed: the kill removes the
+  jail it lives in.
+- Skip the rootfs build entirely when the machine wrote no blocks.
+- The checkpoint response reports `resume_gap_ms`. The call takes longer than
+  the freeze — steps 1–3 run with the machine serving — so a client timing the
+  round trip overstates what its users experience.
+- Never global `sync()`: it holds the kernel bdev lock, and concurrent
+  suspends serialize behind it for minutes.
+
+**Chunkifying a copy-on-write file requires its dirty bitmap.** A cow cache is
+sparse, so a block the guest never wrote reads back as zeros — byte-identical
+to one it deliberately zeroed. Diffing it against its template records every
+untouched block as "zeros, mine", and the restored rootfs mounts empty with
+nothing having errored. The bitmap lives in the handler's memory and crosses
+to hostd over the control socket; inferring it from the file's allocated
+extents is NOT a substitute, because a filesystem may report data where there
+is a hole.
+
+**A create is a restore.** Each host builds a golden template once — boot the
+rootfs, let systemd settle for 20s, chunkify the memory — and every machine
+after that starts from it. Booting a kernel instead takes twenty seconds and
+produces a machine indistinguishable from this one. The template's disk build
+is the golden rootfs chunked directly, never a snapshot of the booted machine:
+the two must be the same bytes, or every restore starts from a disk its memory
+image does not describe.
+
+**Firecracker is chrooted**, so it reaches neither `/dev/nbdN` nor the fault
+socket by their real paths. The device is reproduced inside the jail with
+`mknod` at the same baked path a rootfs file would occupy — that path is
+recorded inside every snapshot, which is what keeps a snapshot restorable on
+any host — and the fault socket is created inside the chroot.
 
 **Restore (create-from-template, wake, checkpoint-restore — same path):**
 prefetch snap.bin + prefetch.txt from S3 if absent → netns setup and
@@ -241,15 +292,21 @@ guest `/init {now}` (5ms retry loop, 15s deadline).
 
 **Lazy memory (uffd handler):** receives the uffd fd via SCM_RIGHTS on FC's
 socket + a JSON region map `{base_host_virt_addr, size, offset, page_size}`;
-serves guest page faults with `UFFDIO_COPY` (x86_64 ioctls; EAGAIN retry,
-EEXIST=success, short-copy detection); 4 fault workers. **Coalesced
-prefault**: one bulk `GetRange` of the packed data file in a goroutine —
-without it, cold restore = one ~50ms S3 round-trip per 4KiB fault (~70min for
-256MiB). Records fault order to prefetch.txt for next-restore replay (read
-the replay file fully BEFORE creating the record file — commonly same path).
-Mixed page sizes (hugepages+uffd) unsupported. Port this handler from the old
-code (`cmd/pilot-uffd-handler`, 881 LOC) — hand-rolled kernel ABI; do not
-rewrite from scratch.
+serves guest page faults with `UFFDIO_COPY` (`0xC028AA03` — struct
+uffdio_copy is 40 bytes, and that size is baked into the ioctl number; the
+`_UFFDIO_*` nr values are NOT sequential from zero, `_UFFDIO_API` is `0x3F`);
+EEXIST is success, a short copy is an error, and the EAGAIN retry is
+**bounded** — an unbounded one turns a persistent EAGAIN into a worker
+spinning on a core with a guest thread blocked behind it. 4 fault workers.
+**Coalesced prefault**: one bulk `GetRange` of the packed data file in a
+goroutine — without it, cold restore = one ~50ms S3 round-trip per 4KiB fault
+(~70min for 256MiB). Records fault order to prefetch.txt for next-restore
+replay (read the replay file fully BEFORE creating the record file — commonly
+the same path, and os.Create truncates). A control socket exposes `prefault`,
+which installs every page; the snapshot path calls it before pausing.
+MINOR and WP faults are counted and still answered — leaving one unresolved
+wedges the guest thread that raised it. Mixed page sizes (hugepages+uffd) are
+refused at the handshake, not per fault.
 
 **Lazy disk (NBD handler):** kernel NBD split-mode via socketpair fd handoff
 (28-byte BE requests / 16-byte BE replies); serves a block `Overlay` =
@@ -263,8 +320,21 @@ returns **416: treat as zeros, mark cached** (else wake dies on an NBD sizing
 timeout). If the local data file is already ≥ packed size, mark all cached
 up-front (else restores crawl at 10–20 faults/s). Pick free NBD devices via
 `/sys/block/nbdN/pid` (a `blockdev` probe hangs on half-attached devices).
-Issue `NBD_DISCONNECT` ioctl BEFORE killing a handler — otherwise FC blocks
-in D-state and `/dev/nbdN` is dead until host reboot.
+Issue `NBD_DISCONNECT` ioctl BEFORE killing a handler, from the PARENT —
+a handler blocked in `NBD_DO_IT` never reaches its own cleanup, and FC then
+blocks in D-state with `/dev/nbdN` dead until the host reboots.
+**`NBD_DO_IT` must be issued with signals masked on a locked thread.** It
+parks in `wait_event_interruptible` for the life of the device, and any
+signal delivered to that thread makes the kernel run `sock_shutdown` and
+`nbd_clear_que` — so the Go runtime's own `SIGURG` preemption killed roughly
+one restore in four. The symptom is thoroughly misleading: the attach
+succeeds, the kernel logs a capacity change, the size then returns to zero,
+and the caller fails on a sizing timeout against a device that reports no
+owner and looks free. A failed `NBD_DO_IT` must also be surfaced rather than
+collected at the end, or nothing anywhere names the cause. Devices are handed
+out **round-robin**, not lowest-free: the kernel publishes and clears a
+device's size asynchronously, and those two are not ordered against each
+other.
 
 **Process management:** every child (fc, uffd, nbd) spawned under a
 background context (never an HTTP request ctx), `Setpgid`, killed as
@@ -392,7 +462,7 @@ pilots/
   apps/
     hostd/                # Go, own go.mod — the entire data plane
       cmd/hostd/  cmd/guest-agent/  cmd/chunkify/
-      internal/{fc,block,uffd,nbd,netns,router,state,s3,build,volumes,selfheal}/
+      internal/{fc,block,uffd,nbd,ctlsock,netns,router,state,s3,build,volumes,selfheal}/
       systemd/            # hostd.service, corrosion.service
     dashboard/            # webjs full-stack app (scaffolded `npm create webjs`)
   packages/cli/           # `pilot` CLI (TS)

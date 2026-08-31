@@ -40,58 +40,53 @@ func (c *countingStore) GetToFile(_ context.Context, key, path string) error {
 	return os.WriteFile(path, []byte(body), 0o644)
 }
 
-// A suspend reuses one prefix, so its objects change under a stable key.
-// Trusting the local copy meant the second wake restored the FIRST snapshot,
-// losing everything written in between with no error anywhere.
-func TestMutableArtifactsAreAlwaysRefetched(t *testing.T) {
-	store := newCountingStore()
+// A machine's suspend image is written under ONE key and rewritten on every
+// suspend, so a cached copy is a copy of the PREVIOUS suspend. Trusting it
+// restores the machine to where it was two suspends ago and loses everything
+// since, with no error anywhere -- and only on the host that happens to have
+// the stale file.
+func TestMutableSnapshotsAreAlwaysRefetched(t *testing.T) {
 	dir := t.TempDir()
-	at := Artifacts{Prefix: "machines/m-1/suspend"} // Immutable is false
+	dest := filepath.Join(dir, "snap.bin")
 
-	store.objects[at.Snap()] = "first"
-	if err := fetchAlways(context.Background(), store, at.Snap(), filepath.Join(dir, SnapFile)); err != nil {
-		t.Fatalf("first fetch: %v", err)
+	store := newCountingStore()
+	store.objects["k"] = "second"
+	if err := os.WriteFile(dest, []byte("first"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 
-	// A second suspend overwrites the object behind the same key.
-	store.objects[at.Snap()] = "second"
-	if err := fetchAlways(context.Background(), store, at.Snap(), filepath.Join(dir, SnapFile)); err != nil {
-		t.Fatalf("second fetch: %v", err)
+	if err := fetchAlways(context.Background(), store, "k", dest); err != nil {
+		t.Fatalf("fetchAlways: %v", err)
 	}
-
-	got, err := os.ReadFile(filepath.Join(dir, SnapFile))
+	got, err := os.ReadFile(dest)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if string(got) != "second" {
-		t.Errorf("restored %q, want the latest snapshot; the stale local copy shadowed it", got)
-	}
-	if store.fetches[at.Snap()] != 2 {
-		t.Errorf("fetched %d times, want 2", store.fetches[at.Snap()])
+		t.Errorf("read back %q; a stale local copy was used", got)
 	}
 }
 
-// An immutable set is written once under its own id, so serving it from cache
-// is correct and saves a download.
-func TestImmutableArtifactsAreServedFromCache(t *testing.T) {
-	store := newCountingStore()
+// A checkpoint is written once under its own id and never rewritten, so its
+// local copy is always current and re-downloading it wastes a restore.
+func TestImmutableSnapshotsAreServedFromCache(t *testing.T) {
 	dir := t.TempDir()
-	at := Artifacts{Prefix: "machines/m-1/checkpoints/ck-1", Immutable: true}
-	store.objects[at.Snap()] = "v1"
+	dest := filepath.Join(dir, "snap.bin")
 
-	for i := 0; i < 3; i++ {
-		if err := fetchIfAbsent(context.Background(), store, at.Snap(), filepath.Join(dir, SnapFile)); err != nil {
-			t.Fatalf("fetch %d: %v", i, err)
-		}
+	store := newCountingStore()
+	store.objects["k"] = "remote"
+	if err := os.WriteFile(dest, []byte("local"), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if store.fetches[at.Snap()] != 1 {
-		t.Errorf("fetched %d times, want 1 -- an immutable object should be cached",
-			store.fetches[at.Snap()])
+
+	if err := fetchIfAbsent(context.Background(), store, "k", dest); err != nil {
+		t.Fatalf("fetchIfAbsent: %v", err)
+	}
+	if store.fetches["k"] != 0 {
+		t.Errorf("made %d fetches for an artifact already on disk", store.fetches["k"])
 	}
 }
 
-// Only a genuinely absent object may fall back to the template. A failed fetch
-// must not, or a network blip silently resets a machine's disk.
 func TestIsMissingDistinguishesAbsentFromFailed(t *testing.T) {
 	if !isMissing(fmt.Errorf("wrapped: %w", ErrArtifactMissing)) {
 		t.Error("an absent artifact was not recognised")

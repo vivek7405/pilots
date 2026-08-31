@@ -51,6 +51,7 @@ func toAPICheckpoint(c state.Checkpoint) Checkpoint {
 	return Checkpoint{
 		ID: c.ID, MachineID: c.MachineID, Seq: c.Seq, Comment: c.Comment,
 		SourceID: c.SourceID, Durable: c.Durable, CreatedAt: c.CreatedAt,
+		ResumeGapMS: c.ResumeGapMS,
 	}
 }
 
