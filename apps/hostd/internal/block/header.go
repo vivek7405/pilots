@@ -196,8 +196,17 @@ func Deserialize(r io.Reader) (*Header, error) {
 	for {
 		var m BuildMap
 		err := binary.Read(r, binary.LittleEndian, &m)
-		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		if errors.Is(err, io.EOF) {
 			break
+		}
+		// A PARTIAL record is not the end of the mapping, it is a header that
+		// was cut short -- an interrupted upload, a truncated cache file.
+		// Accepting it drops every mapping from that point on, and the ranges
+		// they described then read back as zeros: exactly the silent corruption
+		// validateDataSize refuses to allow on the data side.
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			return nil, fmt.Errorf("block: header is truncated: a %d-byte mapping "+
+				"record is incomplete after %d mappings", BuildMapSize, len(mapping))
 		}
 		if err != nil {
 			return nil, fmt.Errorf("block: read mapping: %w", err)

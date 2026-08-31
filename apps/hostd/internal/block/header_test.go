@@ -296,3 +296,38 @@ func TestNewHeaderSortsMapping(t *testing.T) {
 		t.Error("mapping was not sorted; the binary search assumes ordering")
 	}
 }
+
+// A cut-short mapping record is not the end of the mapping -- it is a header
+// that was truncated by an interrupted upload or a partial write. Treating it
+// as clean EOF drops every mapping after the cut, and the ranges they described
+// then read back as zeros: the same silent corruption validateDataSize refuses
+// to allow on the data side.
+func TestDeserializeRejectsATruncatedHeader(t *testing.T) {
+	meta := NewTemplateMetadata(uuid.New(), 4096, 4*4096)
+	mapping := []*BuildMap{
+		{Offset: 0, Length: 4096, BuildId: meta.BuildId, BuildStorageOffset: 0},
+		{Offset: 4096, Length: 4096, BuildId: meta.BuildId, BuildStorageOffset: 4096},
+		{Offset: 8192, Length: 4096, BuildId: meta.BuildId, BuildStorageOffset: 8192},
+	}
+	raw, err := Serialize(meta, mapping)
+	if err != nil {
+		t.Fatalf("Serialize: %v", err)
+	}
+
+	// Cut the last record in half, the way an interrupted write would.
+	cut := raw[:len(raw)-BuildMapSize/2]
+	if _, err := Deserialize(bytes.NewReader(cut)); err == nil {
+		t.Error("a header ending in a half-written mapping was accepted; " +
+			"the ranges it dropped would read back as zeros")
+	}
+
+	// A whole number of records is still fine: that is just a shorter header.
+	whole := raw[:len(raw)-BuildMapSize]
+	h, err := Deserialize(bytes.NewReader(whole))
+	if err != nil {
+		t.Fatalf("a complete but shorter header was rejected: %v", err)
+	}
+	if len(h.Mapping) != 2 {
+		t.Errorf("read %d mappings, want 2", len(h.Mapping))
+	}
+}

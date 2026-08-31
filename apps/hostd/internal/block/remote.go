@@ -48,9 +48,20 @@ type RemoteBuild struct {
 	data       *os.File
 	packedSize int64
 
-	mu     sync.Mutex
-	cached *roaring.Bitmap // storage blocks already on local disk
+	mu       sync.Mutex
+	cached   *roaring.Bitmap // storage blocks already on local disk
+	complete bool            // every storage block is on disk and the marker is written
 }
+
+// completeMarker is written next to "data" once every storage block has landed.
+//
+// The data file is TRUNCATED to its full packed size when the cache is created,
+// so its size says nothing about how much of it was actually downloaded. A
+// handler that exits partway -- a failed bulk fetch, a SIGKILL, a host reboot --
+// leaves a full-length file holding holes, and trusting the size alone makes
+// the next open serve those holes as zeros with no error anywhere. The marker
+// is the only thing that distinguishes "complete" from "the right length".
+const completeMarker = "data.complete"
 
 // OpenRemoteBuild fetches a build's header and prepares its local cache.
 func OpenRemoteBuild(ctx context.Context, store ObjectStore, buildID uuid.UUID, cacheRoot string) (*RemoteBuild, error) {
@@ -104,12 +115,16 @@ func OpenRemoteBuild(ctx context.Context, store ObjectStore, buildID uuid.UUID, 
 		return nil, fmt.Errorf("block: stat data cache: %w", err)
 	}
 
-	if b.packedSize > 0 && info.Size() >= b.packedSize {
+	_, markerErr := os.Stat(filepath.Join(dir, completeMarker))
+	if b.packedSize > 0 && markerErr == nil && info.Size() >= b.packedSize {
 		// Already complete on disk -- a same-host wake, or a second restore.
 		// Marking every block cached up front matters more than it looks:
 		// without it a wake re-downloads a file it already has, and faults
 		// land at a rate that leaves the guest deadlocked waiting for pages.
+		//
+		// The marker, not the size, is what licenses this: see completeMarker.
 		b.cached.AddRange(0, uint64(TotalBlocks(b.packedSize, b.BlockSize())))
+		b.complete = true
 	} else if err := f.Truncate(b.packedSize); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("block: truncate data cache: %w", err)
@@ -119,7 +134,33 @@ func OpenRemoteBuild(ctx context.Context, store ObjectStore, buildID uuid.UUID, 
 }
 
 // SetParent attaches the build that serves this one's unchanged ranges.
-func (b *RemoteBuild) SetParent(parent Slicer) { b.parent = parent }
+//
+// It reports a parent that is not the one this diff was encoded against. The
+// caller decides what to do about it, but it must not be ignored: a diff's
+// parent-pointing ranges name a logical offset, not bytes, so attaching a
+// DIFFERENT build resolves them to whatever that build happens to hold at the
+// same offset. Nothing downstream can notice -- the header parses, every range
+// resolves, and the guest simply comes back with other memory or another
+// machine's disk. Which template a host has is not fleet-wide state: a host
+// that has never built one, or whose cache was cleared, mints a fresh template
+// with fresh ids, so this is the check that stands between a wake on such a
+// host and silent corruption.
+//
+// The parent is attached either way, so a caller that genuinely wants an
+// unchecked parent -- a test stitching builds by hand -- can discard the error.
+func (b *RemoteBuild) SetParent(parent Slicer) error {
+	b.parent = parent
+
+	hs, ok := parent.(HeaderedSlicer)
+	if !ok {
+		return nil // nothing to check it against
+	}
+	if got, want := hs.Header().Metadata.BuildId, b.header.Metadata.BaseBuildId; got != want {
+		return fmt.Errorf("block: build %s was diffed against base %s, but build %s "+
+			"was attached as its parent", b.buildID, want, got)
+	}
+	return nil
+}
 
 func (b *RemoteBuild) Header() *Header  { return b.header }
 func (b *RemoteBuild) BlockSize() int64 { return int64(b.header.Metadata.BlockSize) }
@@ -241,8 +282,26 @@ func (b *RemoteBuild) fetchRange(ctx context.Context, firstBlock, lastBlock int6
 
 func (b *RemoteBuild) markCached(firstBlock, lastBlock int64) {
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	b.cached.AddRange(uint64(firstBlock), uint64(lastBlock))
+
+	total := TotalBlocks(b.packedSize, b.BlockSize())
+	newlyComplete := !b.complete && total > 0 && b.cached.GetCardinality() >= uint64(total)
+	if newlyComplete {
+		b.complete = true
+	}
+	b.mu.Unlock()
+
+	if !newlyComplete {
+		return
+	}
+	// Best effort: a missing marker only costs the next open a re-download,
+	// which is slow rather than wrong. Writing one that is not true is the
+	// failure that matters, so it goes in only once every block is on disk.
+	f, err := os.Create(filepath.Join(b.dir, completeMarker))
+	if err != nil {
+		return
+	}
+	_ = f.Close()
 }
 
 // Prefault pulls the whole packed data file in one request.

@@ -101,11 +101,16 @@ func (c *Cache) ReadAt(p []byte, off int64) (int, error) {
 	first := uint64(BlockIdx(off, c.blockSize))
 	last := uint64(BlockCeilIdx(end, c.blockSize))
 
-	// roaring v2 has no ContainsRange, so ownership of the whole span is
-	// checked by cardinality.
-	if c.dirty.GetCardinality() == 0 ||
-		c.dirty.AndCardinality(rangeBitmap(first, last)) != last-first {
+	// roaring v2 has no ContainsRange. A span here is a handful of blocks at
+	// most -- the NBD path asks a block at a time -- so this walks them rather
+	// than allocating a second bitmap per read on the hot I/O path.
+	if c.dirty.IsEmpty() {
 		return 0, ErrBytesNotAvailable
+	}
+	for idx := first; idx < last; idx++ {
+		if !c.dirty.Contains(uint32(idx)) {
+			return 0, ErrBytesNotAvailable
+		}
 	}
 
 	n := copy(p, c.data[off:end])
@@ -297,11 +302,4 @@ func isUnsupported(err error) bool {
 	return errors.Is(err, unix.EXDEV) ||
 		errors.Is(err, unix.EOPNOTSUPP) ||
 		errors.Is(err, unix.ENOSYS)
-}
-
-// rangeBitmap builds [first, last) for an intersection test.
-func rangeBitmap(first, last uint64) *roaring.Bitmap {
-	b := roaring.New()
-	b.AddRange(first, last)
-	return b
 }

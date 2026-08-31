@@ -320,3 +320,139 @@ func TestRemoteBuildCachesItsHeaderForChunkify(t *testing.T) {
 		t.Errorf("cached build differs at byte %d", firstDiff(got, want))
 	}
 }
+
+// A cache file is TRUNCATED to its full packed size the moment it is created,
+// so its length says nothing about how much was actually downloaded. A handler
+// that exits partway leaves a full-length file full of holes -- and trusting
+// the size alone makes the next open mark every block cached and serve those
+// holes as zeros, with nothing erroring anywhere.
+//
+// This is reachable on an ordinary wake: the memory template is the parent of
+// every machine's memory build.
+func TestRemoteBuildDoesNotTrustAPartiallyDownloadedCache(t *testing.T) {
+	dir := t.TempDir()
+	store := newFakeStore()
+	ctx := context.Background()
+
+	in := writeBlocks(t, dir, 1, 2, 3, 4)
+	id := uuid.New()
+	publish(t, store, filepath.Join(dir, "build"), in, id, "")
+
+	cacheRoot := filepath.Join(dir, "cache")
+
+	// Open once and abandon it without fetching: this is what a killed handler
+	// leaves behind -- the right length, none of the content.
+	first, err := OpenRemoteBuild(ctx, store, id, cacheRoot)
+	if err != nil {
+		t.Fatalf("OpenRemoteBuild: %v", err)
+	}
+	first.Close()
+
+	info, err := os.Stat(filepath.Join(cacheRoot, id.String(), "data"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() == 0 {
+		t.Fatal("setup: the abandoned cache file is empty, so it cannot model the hazard")
+	}
+
+	second, err := OpenRemoteBuild(ctx, store, id, cacheRoot)
+	if err != nil {
+		t.Fatalf("second OpenRemoteBuild: %v", err)
+	}
+	defer second.Close()
+
+	want, err := os.ReadFile(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := readWhole(t, second); !bytes.Equal(got, want) {
+		t.Errorf("a partially downloaded cache was served as complete; "+
+			"differs at byte %d", firstDiff(got, want))
+	}
+}
+
+// Once everything really is local, a re-open must not download it again.
+func TestRemoteBuildTrustsACompletedCache(t *testing.T) {
+	dir := t.TempDir()
+	store := newFakeStore()
+	ctx := context.Background()
+
+	in := writeBlocks(t, dir, 1, 2, 3)
+	id := uuid.New()
+	publish(t, store, filepath.Join(dir, "build"), in, id, "")
+
+	cacheRoot := filepath.Join(dir, "cache")
+	first, err := OpenRemoteBuild(ctx, store, id, cacheRoot)
+	if err != nil {
+		t.Fatalf("OpenRemoteBuild: %v", err)
+	}
+	readWhole(t, first)
+	first.Close()
+
+	before := store.ranges
+	second, err := OpenRemoteBuild(ctx, store, id, cacheRoot)
+	if err != nil {
+		t.Fatalf("second OpenRemoteBuild: %v", err)
+	}
+	defer second.Close()
+
+	readWhole(t, second)
+	if store.ranges != before {
+		t.Errorf("a complete cache was re-downloaded (%d extra requests)",
+			store.ranges-before)
+	}
+}
+
+// A diff's parent-pointing ranges name a LOGICAL offset, not bytes, so any
+// build attached as the parent resolves them to whatever it holds there. The
+// header parses, every range resolves, and the guest comes back with another
+// machine's memory. Which template a host has is local state -- a host with a
+// cleared cache mints a fresh one with a fresh id -- so this is the only thing
+// standing between a wake there and silent corruption.
+func TestSetParentRejectsTheWrongTemplate(t *testing.T) {
+	dir := t.TempDir()
+	store := newFakeStore()
+	ctx := context.Background()
+
+	parentIn := writeBlocks(t, dir, 1, 2, 3)
+	parentID := uuid.New()
+	publish(t, store, filepath.Join(dir, "parent"), parentIn, parentID, "")
+
+	// A second template, of the same shape but different bytes: exactly what a
+	// host that rebuilt its template has.
+	otherIn := writeBlocks(t, dir, 7, 8, 9)
+	otherID := uuid.New()
+	publish(t, store, filepath.Join(dir, "other"), otherIn, otherID, "")
+
+	childID := uuid.New()
+	publish(t, store, filepath.Join(dir, "child"), parentIn, childID,
+		filepath.Join(dir, "parent"))
+
+	cacheRoot := filepath.Join(dir, "cache")
+	child, err := OpenRemoteBuild(ctx, store, childID, cacheRoot)
+	if err != nil {
+		t.Fatalf("OpenRemoteBuild(child): %v", err)
+	}
+	defer child.Close()
+
+	wrong, err := OpenRemoteBuild(ctx, store, otherID, cacheRoot)
+	if err != nil {
+		t.Fatalf("OpenRemoteBuild(other): %v", err)
+	}
+	defer wrong.Close()
+
+	if err := child.SetParent(wrong); err == nil {
+		t.Error("a build was accepted as the parent of a diff it never encoded")
+	}
+
+	right, err := OpenRemoteBuild(ctx, store, parentID, cacheRoot)
+	if err != nil {
+		t.Fatalf("OpenRemoteBuild(parent): %v", err)
+	}
+	defer right.Close()
+
+	if err := child.SetParent(right); err != nil {
+		t.Errorf("the correct parent was rejected: %v", err)
+	}
+}
