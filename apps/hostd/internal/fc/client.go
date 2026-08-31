@@ -1,0 +1,202 @@
+// Package fc drives Firecracker: boot, snapshot, restore, and the process
+// bookkeeping that keeps machines alive across a hostd restart.
+package fc
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"time"
+)
+
+// apiTimeout bounds a single Firecracker API call. Snapshot creation on a
+// large machine is the slowest of them.
+const apiTimeout = 60 * time.Second
+
+// Client speaks Firecracker's HTTP API over its unix socket.
+type Client struct {
+	socketPath string
+}
+
+func NewClient(socketPath string) *Client { return &Client{socketPath: socketPath} }
+
+// do issues one API call.
+//
+// A FRESH transport per call, with keep-alives disabled. Firecracker's
+// embedded HTTP server caps total connections at ten, and a pooled transport
+// holds idle connections open after each request. On a long-lived hostd those
+// leak until every subsequent call to that machine fails with "too many open
+// connections" -- and because the cap is per-VM, the failure looks like one
+// machine going mad rather than a client bug.
+func (c *Client) do(ctx context.Context, method, path string, body any) ([]byte, error) {
+	var payload io.Reader
+	if body != nil {
+		raw, err := json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("fc: marshal %s %s: %w", method, path, err)
+		}
+		payload = bytes.NewReader(raw)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, "http://localhost"+path, payload)
+	if err != nil {
+		return nil, fmt.Errorf("fc: build %s %s: %w", method, path, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	client := &http.Client{
+		Timeout: apiTimeout,
+		Transport: &http.Transport{
+			DisableKeepAlives: true,
+			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, "unix", c.socketPath)
+			},
+		},
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fc: %s %s: %w", method, path, err)
+	}
+	defer resp.Body.Close()
+
+	out, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("fc: read %s %s: %w", method, path, err)
+	}
+	if resp.StatusCode >= 300 {
+		return out, fmt.Errorf("fc: %s %s: status %d: %s", method, path, resp.StatusCode, bytes.TrimSpace(out))
+	}
+	return out, nil
+}
+
+// MachineConfig is the VM's shape. SMT stays off: hyperthread siblings shared
+// between tenants are a side-channel, and the density gain is not worth it.
+type MachineConfig struct {
+	VCPUCount   int    `json:"vcpu_count"`
+	MemSizeMiB  int    `json:"mem_size_mib"`
+	SMT         bool   `json:"smt"`
+	CPUTemplate string `json:"cpu_template,omitempty"`
+}
+
+func (c *Client) SetMachineConfig(ctx context.Context, cfg MachineConfig) error {
+	_, err := c.do(ctx, http.MethodPut, "/machine-config", cfg)
+	return err
+}
+
+type BootSource struct {
+	KernelImagePath string `json:"kernel_image_path"`
+	BootArgs        string `json:"boot_args"`
+}
+
+func (c *Client) SetBootSource(ctx context.Context, src BootSource) error {
+	_, err := c.do(ctx, http.MethodPut, "/boot-source", src)
+	return err
+}
+
+type Drive struct {
+	DriveID      string `json:"drive_id"`
+	PathOnHost   string `json:"path_on_host"`
+	IsRootDevice bool   `json:"is_root_device"`
+	IsReadOnly   bool   `json:"is_read_only"`
+}
+
+func (c *Client) SetDrive(ctx context.Context, d Drive) error {
+	_, err := c.do(ctx, http.MethodPut, "/drives/"+d.DriveID, d)
+	return err
+}
+
+type NetworkInterface struct {
+	IfaceID     string `json:"iface_id"`
+	HostDevName string `json:"host_dev_name"`
+	GuestMAC    string `json:"guest_mac"`
+}
+
+func (c *Client) SetNetworkInterface(ctx context.Context, ni NetworkInterface) error {
+	_, err := c.do(ctx, http.MethodPut, "/network-interfaces/"+ni.IfaceID, ni)
+	return err
+}
+
+func (c *Client) Start(ctx context.Context) error {
+	_, err := c.do(ctx, http.MethodPut, "/actions", map[string]string{"action_type": "InstanceStart"})
+	return err
+}
+
+// Pause and Resume drive the VM state machine. Both are idempotent here: an
+// InvalidStateTransition into the state we already wanted is success, which
+// matters because suspend and checkpoint can race the idle monitor.
+func (c *Client) Pause(ctx context.Context) error {
+	return c.setVMState(ctx, "Paused")
+}
+
+func (c *Client) Resume(ctx context.Context) error {
+	return c.setVMState(ctx, "Resumed")
+}
+
+func (c *Client) setVMState(ctx context.Context, state string) error {
+	_, err := c.do(ctx, http.MethodPatch, "/vm", map[string]string{"state": state})
+	if err != nil && isAlreadyInState(err) {
+		return nil
+	}
+	return err
+}
+
+func isAlreadyInState(err error) bool {
+	return err != nil && bytes.Contains([]byte(err.Error()), []byte("InvalidStateTransition"))
+}
+
+type SnapshotCreate struct {
+	SnapshotType string `json:"snapshot_type"` // "Full"
+	SnapshotPath string `json:"snapshot_path"`
+	MemFilePath  string `json:"mem_file_path"`
+}
+
+func (c *Client) CreateSnapshot(ctx context.Context, s SnapshotCreate) error {
+	_, err := c.do(ctx, http.MethodPut, "/snapshot/create", s)
+	return err
+}
+
+// MemBackend selects how guest memory is supplied on restore. Phase 2 uses
+// File, which reads the whole image up front. Phase 3 switches to Uffd for
+// lazy paging without changing anything above this layer.
+type MemBackend struct {
+	BackendType string `json:"backend_type"` // "File" | "Uffd"
+	BackendPath string `json:"backend_path"`
+}
+
+type SnapshotLoad struct {
+	SnapshotPath        string     `json:"snapshot_path"`
+	MemBackend          MemBackend `json:"mem_backend"`
+	ResumeVM            bool       `json:"resume_vm"`
+	EnableDiffSnapshots bool       `json:"enable_diff_snapshots"`
+}
+
+func (c *Client) LoadSnapshot(ctx context.Context, s SnapshotLoad) error {
+	_, err := c.do(ctx, http.MethodPut, "/snapshot/load", s)
+	return err
+}
+
+// WaitForSocket blocks until Firecracker's API socket accepts a connection.
+func (c *Client) WaitForSocket(ctx context.Context, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		conn, err := net.DialTimeout("unix", c.socketPath, 200*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("fc: api socket %s not ready after %s: %w", c.socketPath, timeout, err)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}

@@ -15,6 +15,11 @@ import (
 const testKey = "pilot_testkey"
 
 func newTestServer(t *testing.T) (http.Handler, state.Store) {
+	h, st, _ := newTestServerWithManager(t)
+	return h, st
+}
+
+func newTestServerWithManager(t *testing.T) (http.Handler, state.Store, *fakeManager) {
 	t.Helper()
 	st, err := state.Open(":memory:")
 	if err != nil {
@@ -28,7 +33,12 @@ func newTestServer(t *testing.T) (http.Handler, state.Store) {
 	}); err != nil {
 		t.Fatalf("PutAPIKey: %v", err)
 	}
-	return Routes(Deps{HostID: "host-test", Store: st}), st
+	fake := newFakeManager()
+	// Seed a machine so the read paths have something to return.
+	if err := st.PutMachine(context.Background(), fake.machine); err != nil {
+		t.Fatalf("PutMachine: %v", err)
+	}
+	return Routes(Deps{HostID: "host-test", Store: st, Machines: fake}), st, fake
 }
 
 func do(t *testing.T, h http.Handler, method, path, key string) *httptest.ResponseRecorder {
@@ -128,17 +138,18 @@ func TestEveryRouteIsRegistered(t *testing.T) {
 		rec := do(t, h, r.method, r.path, testKey)
 		if rec.Code == http.StatusNotFound {
 			t.Errorf("%s %s: 404 -- route not registered", r.method, r.path)
-			continue
 		}
-		if rec.Code != http.StatusNotImplemented {
-			t.Errorf("%s %s: got %d, want 501", r.method, r.path, rec.Code)
+		// Anything that is not a 404 proves the pattern matched. Handlers that
+		// are still unimplemented answer 501; implemented ones answer for real.
+		if rec.Code == http.StatusMethodNotAllowed {
+			t.Errorf("%s %s: 405 -- pattern registered under the wrong method", r.method, r.path)
 		}
 	}
 }
 
 // Auth must be enforced before the 501, or an unauthenticated caller could map
 // the entire API surface.
-func TestAuthPrecedesNotImplemented(t *testing.T) {
+func TestAuthPrecedesHandler(t *testing.T) {
 	h, _ := newTestServer(t)
 	if rec := do(t, h, "POST", "/v1/machines/m_1/promote", ""); rec.Code != http.StatusUnauthorized {
 		t.Errorf("got %d, want 401 (auth must run before the handler)", rec.Code)

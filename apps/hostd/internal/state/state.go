@@ -98,12 +98,17 @@ type Store interface {
 	ListMachines(ctx context.Context) ([]Machine, error)
 	PutMachine(ctx context.Context, m *Machine) error
 	DeleteMachine(ctx context.Context, id string) error
+	// TouchMachine updates only the activity columns. Callers recording use of
+	// a machine must not write the whole row, or they clobber a concurrent
+	// lifecycle change.
+	TouchMachine(ctx context.Context, id string, now int64) error
 
 	PutHost(ctx context.Context, h *Host) error
 	ListHosts(ctx context.Context) ([]Host, error)
 
 	PutCheckpoint(ctx context.Context, c *Checkpoint) error
 	ListCheckpoints(ctx context.Context, machineID string) ([]Checkpoint, error)
+	DeleteCheckpoint(ctx context.Context, id string) error
 
 	GetAPIKeyByHash(ctx context.Context, hash string) (*APIKey, error)
 	PutAPIKey(ctx context.Context, k *APIKey) error
@@ -209,6 +214,15 @@ func (s *sqliteStore) DeleteMachine(ctx context.Context, id string) error {
 	return nil
 }
 
+func (s *sqliteStore) TouchMachine(ctx context.Context, id string, now int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE machines SET last_activity = ?, updated_at = ? WHERE id = ?`, now, now, id)
+	if err != nil {
+		return fmt.Errorf("state: touch machine %q: %w", id, err)
+	}
+	return nil
+}
+
 func (s *sqliteStore) PutHost(ctx context.Context, h *Host) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO hosts (id, wg_addr, public_ip, cpu_free, mem_free_mib, last_seen)
@@ -280,6 +294,13 @@ func (s *sqliteStore) ListCheckpoints(ctx context.Context, machineID string) ([]
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+func (s *sqliteStore) DeleteCheckpoint(ctx context.Context, id string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM checkpoints WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("state: delete checkpoint %q: %w", id, err)
+	}
+	return nil
 }
 
 func (s *sqliteStore) GetAPIKeyByHash(ctx context.Context, hash string) (*APIKey, error) {
