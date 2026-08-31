@@ -35,24 +35,44 @@ func (m *Machine) Kill() error {
 	var errs []error
 
 	if m.Cmd != nil && m.Cmd.Process != nil {
+		pid := m.Cmd.Process.Pid
 		_ = m.Cmd.Process.Signal(syscall.SIGTERM)
 
-		deadline := time.Now().Add(killGrace)
-		for time.Now().Before(deadline) {
-			if !processAlive(m.Cmd.Process.Pid) {
-				break
+		// Reaping, not polling. After SIGTERM the process becomes a ZOMBIE
+		// until it is waited for, and kill(pid, 0) on a zombie SUCCEEDS -- so
+		// polling for its absence burns the whole grace period on a process
+		// that already exited. Nothing fails; every destroy on the host just
+		// takes killGrace longer than it should.
+		//
+		// An adopted machine is not our child, so Wait returns ECHILD at once
+		// and the poll below is what actually observes its exit.
+		reaped := make(chan struct{})
+		go func() { _, _ = m.Cmd.Process.Wait(); close(reaped) }()
+
+		deadline := time.After(killGrace)
+		poll := time.NewTicker(20 * time.Millisecond)
+		defer poll.Stop()
+
+	wait:
+		for {
+			select {
+			case <-reaped:
+				if !processAlive(pid) {
+					break wait
+				}
+			case <-poll.C:
+				if !processAlive(pid) {
+					break wait
+				}
+			case <-deadline:
+				// Kill the whole process group: the jailer's Firecracker child
+				// would otherwise survive its parent.
+				_ = syscall.Kill(-pid, syscall.SIGKILL)
+				_ = m.Cmd.Process.Kill()
+				<-reaped
+				break wait
 			}
-			time.Sleep(20 * time.Millisecond)
 		}
-		if processAlive(m.Cmd.Process.Pid) {
-			// Kill the whole process group: the jailer's Firecracker child
-			// would otherwise survive its parent.
-			_ = syscall.Kill(-m.Cmd.Process.Pid, syscall.SIGKILL)
-			_ = m.Cmd.Process.Kill()
-		}
-		// Reap if it is genuinely our child. A reconciled machine is not, and
-		// Wait would return ECHILD.
-		_, _ = m.Cmd.Process.Wait()
 	}
 
 	if m.Slot != nil {
