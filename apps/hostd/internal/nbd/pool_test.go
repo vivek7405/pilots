@@ -1,6 +1,8 @@
 package nbd
 
 import (
+	"os"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -70,5 +72,24 @@ func TestPoolExhaustionIsAnError(t *testing.T) {
 	p := &DevicePool{max: 0, held: map[int]bool{}}
 	if _, _, err := p.Acquire(); err == nil {
 		t.Error("an empty pool handed out a device")
+	}
+}
+
+// "All busy" and "the module was never loaded" need completely different
+// actions from whoever reads the error. A fresh host hits the second, and
+// reporting it as exhaustion sends them looking for a capacity problem on a
+// machine running nothing.
+func TestPoolNamesAMissingKernelModule(t *testing.T) {
+	if _, err := os.Stat("/dev/nbd0"); err == nil {
+		t.Skip("the nbd module is loaded here; this path needs a host without it")
+	}
+
+	p := NewDevicePool(DefaultMaxDevices)
+	_, _, err := p.Acquire()
+	if err == nil {
+		t.Fatal("a device was handed out with no nbd devices present")
+	}
+	if !strings.Contains(err.Error(), "modprobe nbd") {
+		t.Errorf("error does not name the fix: %v", err)
 	}
 }

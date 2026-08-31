@@ -74,7 +74,15 @@ func (p *DevicePool) Acquire() (path string, index int, err error) {
 		p.next = (i + 1) % p.max
 		return fmt.Sprintf("/dev/nbd%d", i), i, nil
 	}
-	return "", 0, fmt.Errorf("nbd: no free device among %d", p.max)
+	// Distinguish "all busy" from "the kernel module was never loaded". They
+	// need completely different actions, and the second is what a fresh host
+	// hits -- reported as exhaustion it reads as a capacity problem on a host
+	// running nothing.
+	if _, err := os.Stat("/dev/nbd0"); err != nil {
+		return "", 0, fmt.Errorf("nbd: no network block devices exist; " +
+			"load the kernel module with `modprobe nbd nbds_max=64`")
+	}
+	return "", 0, fmt.Errorf("nbd: all %d devices are in use", p.max)
 }
 
 // Reserve marks a device as taken without picking it.
