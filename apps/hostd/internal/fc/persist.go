@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -43,12 +44,16 @@ type State struct {
 func (m *Machine) Persist() error {
 	st := State{
 		MachineID:   m.ID,
-		SlotIdx:     m.Slot.Idx,
 		ChrootDir:   m.ChrootDir,
 		SerialLog:   m.SerialLog,
 		SocketPath:  filepath.Join(m.ChrootDir, "run", "fc.sock"),
-		NetnsName:   m.Slot.NetnsName,
 		StartedAtNs: m.StartedAt.UnixNano(),
+	}
+	// An adopted machine carries no slot: its namespace already exists and was
+	// recorded by whichever process created it.
+	if m.Slot != nil {
+		st.SlotIdx = m.Slot.Idx
+		st.NetnsName = m.Slot.NetnsName
 	}
 	if m.Cmd != nil && m.Cmd.Process != nil {
 		st.Pid = m.Cmd.Process.Pid
@@ -181,4 +186,26 @@ func (s State) Age() time.Duration {
 		return 0
 	}
 	return time.Since(time.Unix(0, s.StartedAtNs))
+}
+
+// Adopted rebuilds a Machine handle for a process that outlived hostd.
+//
+// The process is not our child, so exec.Cmd.Wait would fail on it -- but
+// Signal and Kill work, which is everything teardown needs. Wrapping the pid
+// in a Process here lets an adopted machine flow through exactly the same code
+// paths as one this process started.
+func Adopted(st State, stateRoot string) *Machine {
+	proc, err := os.FindProcess(st.Pid)
+	if err != nil {
+		return nil
+	}
+	return &Machine{
+		ID:        st.MachineID,
+		Cmd:       &exec.Cmd{Process: proc},
+		Client:    NewClient(st.SocketPath),
+		ChrootDir: st.ChrootDir,
+		StateDir:  filepath.Join(stateRoot, st.MachineID),
+		SerialLog: st.SerialLog,
+		StartedAt: time.Unix(0, st.StartedAtNs),
+	}
 }

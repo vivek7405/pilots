@@ -113,24 +113,11 @@ func waitForAgent(ctx context.Context, addr string, timeout time.Duration) error
 	return fmt.Errorf("machines: agent at %s not ready in %s: %w", addr, timeout, lastErr)
 }
 
-func marshalKnobs(k api.Knobs) (string, error) {
-	raw, err := json.Marshal(k)
-	if err != nil {
-		return "", fmt.Errorf("machines: marshal knobs: %w", err)
-	}
-	return string(raw), nil
-}
+func marshalKnobs(k api.Knobs) (string, error) { return api.MarshalKnobs(k) }
 
-// ParseKnobs reads a machine row's stored policy, falling back to defaults
-// that keep a machine reachable rather than stranded.
-func ParseKnobs(raw string) api.Knobs {
-	k := api.Knobs{AutoStop: "suspend", AutoStart: true, SoftLimit: 20}
-	if raw == "" {
-		return k
-	}
-	_ = json.Unmarshal([]byte(raw), &k)
-	return k
-}
+// ParseKnobs re-exports the wire package's parser so callers here need only
+// one import.
+func ParseKnobs(raw string) api.Knobs { return api.ParseKnobs(raw) }
 
 // Name generation. Two words plus a short suffix: readable enough to say out
 // loud, and distinct enough that a collision within an account is unlikely.

@@ -10,8 +10,9 @@ import (
 // Deps is what the handlers need from the rest of the process. It stays small
 // on purpose: anything reachable only from one host does not belong here.
 type Deps struct {
-	HostID string
-	Store  state.Store
+	HostID   string
+	Store    state.Store
+	Machines Manager
 }
 
 // Routes registers the full public API. Phase 1 lands the shapes; the handlers
@@ -31,25 +32,25 @@ func Routes(d Deps) http.Handler {
 	})
 
 	// Machines: the one primitive.
-	mux.HandleFunc("POST /v1/machines", notImplemented)
-	mux.HandleFunc("GET /v1/machines", notImplemented)
-	mux.HandleFunc("GET /v1/machines/{id}", notImplemented)
-	mux.HandleFunc("DELETE /v1/machines/{id}", notImplemented)
-	mux.HandleFunc("POST /v1/machines/{id}/exec", notImplemented)
+	mux.HandleFunc("POST /v1/machines", d.handleCreateMachine)
+	mux.HandleFunc("GET /v1/machines", d.handleListMachines)
+	mux.HandleFunc("GET /v1/machines/{id}", d.handleGetMachine)
+	mux.HandleFunc("DELETE /v1/machines/{id}", d.handleDestroyMachine)
+	mux.HandleFunc("POST /v1/machines/{id}/exec", d.handleExec)
 	mux.HandleFunc("GET /v1/machines/{id}/exec/stream", notImplemented)
-	mux.HandleFunc("GET /v1/machines/{id}/logs", notImplemented)
+	mux.HandleFunc("GET /v1/machines/{id}/logs", d.handleLogs)
 
 	// Lifecycle. Suspend/wake are the scale-to-zero pair; stop/start are the
 	// non-snapshotting equivalents.
-	mux.HandleFunc("POST /v1/machines/{id}/suspend", notImplemented)
-	mux.HandleFunc("POST /v1/machines/{id}/wake", notImplemented)
+	mux.HandleFunc("POST /v1/machines/{id}/suspend", d.handleSuspend)
+	mux.HandleFunc("POST /v1/machines/{id}/wake", d.handleWake)
 	mux.HandleFunc("POST /v1/machines/{id}/stop", notImplemented)
 	mux.HandleFunc("POST /v1/machines/{id}/start", notImplemented)
 
 	// Checkpoints. Restore is in place: same machine, same URL, same token.
-	mux.HandleFunc("POST /v1/machines/{id}/checkpoints", notImplemented)
-	mux.HandleFunc("GET /v1/machines/{id}/checkpoints", notImplemented)
-	mux.HandleFunc("POST /v1/checkpoints/{id}/restore", notImplemented)
+	mux.HandleFunc("POST /v1/machines/{id}/checkpoints", d.handleCreateCheckpoint)
+	mux.HandleFunc("GET /v1/machines/{id}/checkpoints", d.handleListCheckpoints)
+	mux.HandleFunc("POST /v1/checkpoints/{id}/restore", d.handleRestoreCheckpoint)
 
 	// Builds: any Dockerfile to a bootable rootfs, with streamed NDJSON logs.
 	mux.HandleFunc("POST /v1/builds", notImplemented)
@@ -68,7 +69,7 @@ func Routes(d Deps) http.Handler {
 	// Volumes and fleet.
 	mux.HandleFunc("POST /v1/volumes", notImplemented)
 	mux.HandleFunc("GET /v1/volumes", notImplemented)
-	mux.HandleFunc("GET /v1/hosts", notImplemented)
+	mux.HandleFunc("GET /v1/hosts", d.handleListHosts)
 
 	return WithAuth(d, mux)
 }

@@ -3,7 +3,6 @@ package machines
 import (
 	"context"
 	"fmt"
-	"path/filepath"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/fc"
@@ -47,7 +46,13 @@ func (m *Manager) Checkpoint(ctx context.Context, machineID, comment string) (*s
 	}
 
 	at := checkpointArtifacts(machineID, ckpt.ID)
-	localDir := filepath.Join(m.cacheDir(machineID), "checkpoints", ckpt.ID)
+	// Same directory a restore of this checkpoint will look in, so the local
+	// copy is reused instead of re-downloaded.
+	localDir := m.localCacheDir(machineID, at)
+
+	// Same reason as suspend: the disk image must agree with the memory image
+	// about what was written.
+	m.flushGuestDisk(ctx, machineID)
 
 	// Returns as soon as the guest is running again; the upload continues in
 	// the background and durability is reported separately.
@@ -63,7 +68,7 @@ func (m *Manager) Checkpoint(ctx context.Context, machineID, comment string) (*s
 
 // CheckpointStatus reports whether a checkpoint's data is durable yet.
 func (m *Manager) CheckpointStatus(machineID, checkpointID string) fc.CheckpointStatus {
-	return fc.StatusOf(filepath.Join(m.cacheDir(machineID), "checkpoints", checkpointID))
+	return fc.StatusOf(m.localCacheDir(machineID, checkpointArtifacts(machineID, checkpointID)))
 }
 
 // RestoreCheckpoint rolls a machine back, in place.

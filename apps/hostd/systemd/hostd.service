@@ -14,7 +14,12 @@ RestartSec=1
 # hostd spawns firecracker and the uffd/NBD handlers, and creates cgroup v2
 # sub-slices per guest -- Delegate=yes is what makes that legal.
 Delegate=yes
-KillMode=mixed
+
+# Kill ONLY the daemon, never its machines. systemd's default (control-group)
+# would SIGTERM every Firecracker in hostd's cgroup on a restart, turning a
+# routine daemon upgrade into an outage for every workload on the host. hostd
+# re-adopts the running machines on its next start.
+KillMode=process
 
 # Long-lived FC API sockets, exec streams and per-VM handlers add up fast; the
 # predecessor wedged hosts by exhausting file descriptors.

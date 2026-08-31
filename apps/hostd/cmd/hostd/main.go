@@ -4,10 +4,6 @@
 // tier and no scheduler. A host serves the full public API, routes and wakes
 // its own machines, and reads cluster state from a local replica so that no
 // request path depends on another host being alive.
-//
-// Phase 1 stands up the process, its configuration, its state store, and the
-// API shapes. The engine -- Firecracker lifecycle, netns, router, snapshots --
-// lands in Phase 2 (issue #3).
 package main
 
 import (
@@ -19,17 +15,25 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/config"
+	"github.com/vivek7405/pilots/hostd/internal/fc"
+	"github.com/vivek7405/pilots/hostd/internal/machines"
+	"github.com/vivek7405/pilots/hostd/internal/router"
+	"github.com/vivek7405/pilots/hostd/internal/s3"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
-// shutdownTimeout bounds a graceful stop. A host that hangs on shutdown blocks
-// its own restart and strands machines; the systemd unit's TimeoutStopSec is
-// set higher than this so systemd never has to SIGKILL us first.
+// shutdownTimeout bounds a graceful stop.
+//
+// SIGTERM DETACHES: the machines keep running and are re-adopted on the next
+// start. A restart of the daemon must not be an outage for the workloads it
+// happens to be supervising, so the systemd unit uses KillMode=process and
+// this path only drains HTTP.
 const shutdownTimeout = 30 * time.Second
 
 func main() {
@@ -47,28 +51,82 @@ func run() error {
 		return err
 	}
 
-	if dir := filepath.Dir(cfg.StateDSN); dir != "." && dir != "" {
+	for _, dir := range []string{
+		filepath.Dir(cfg.StateDSN),
+		cfg.MachineStateRoot(),
+		cfg.CacheRoot(),
+		cfg.ChrootBase,
+	} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
 	}
+
 	store, err := state.Open(cfg.StateDSN)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
 
-	srv := &http.Server{
-		Addr:              cfg.ListenAddr,
-		Handler:           api.Routes(api.Deps{HostID: cfg.HostID, Store: store}),
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       120 * time.Second,
-		// No WriteTimeout on purpose: exec streams, log follows, and build log
-		// streams are long-lived by design.
+	uploader, err := newUploader(cfg)
+	if err != nil {
+		return err
+	}
+
+	mgr := machines.New(machines.Options{
+		HostID:    cfg.HostID,
+		Domain:    cfg.WorkloadDomain,
+		StateRoot: cfg.MachineStateRoot(),
+		CacheRoot: cfg.CacheRoot(),
+		Store:     store,
+		Uploader:  uploader,
+		FCConfig: fc.Config{
+			KernelPath:     cfg.KernelPath,
+			TemplateRootfs: cfg.TemplateRootfs,
+			FirecrackerBin: cfg.FirecrackerBin,
+			JailerBin:      cfg.JailerBin,
+			ChrootBase:     cfg.ChrootBase,
+			CPUTemplate:    cfg.CPUTemplate,
+			JailUID:        cfg.JailUID,
+			JailGID:        cfg.JailGID,
+			Limits:         fc.Limits{PidsMax: 2048},
+		},
+	})
+
+	// Re-adopt machines that outlived the previous hostd. This is what makes a
+	// restart safe: the processes are still serving, and picking them back up
+	// costs nothing.
+	adopted := reconcile(cfg, mgr)
+	if adopted > 0 {
+		slog.Info("re-adopted machines from a previous run", "count", adopted)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	go mgr.RunIdleMonitor(ctx)
+
+	rtr := router.New(router.Options{
+		Domain:  cfg.WorkloadDomain,
+		Store:   store,
+		Manager: mgr,
+		SlotFor: mgr.SlotFor,
+	})
+
+	// One listener, two audiences: requests for a workload hostname are
+	// proxied into a machine, everything else is the control API. Keeping them
+	// on one port means a host needs exactly one address to be useful.
+	handler := dispatch(cfg, rtr, api.Routes(api.Deps{
+		HostID: cfg.HostID, Store: store, Machines: mgr,
+	}))
+
+	srv := &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		// No WriteTimeout: exec streams, log follows and build logs are all
+		// long-lived by design.
+	}
 
 	// Bind before announcing readiness. Doing this inside the serving goroutine
 	// would let notifyReady() fire while the bind was still failing, and under
@@ -85,19 +143,77 @@ func run() error {
 		}
 	}()
 
-	slog.Info("hostd listening", "addr", ln.Addr().String(), "host_id", cfg.HostID)
+	slog.Info("hostd listening",
+		"addr", ln.Addr().String(), "host_id", cfg.HostID, "domain", cfg.WorkloadDomain)
 	notifyReady()
 
 	select {
 	case err := <-errc:
 		return err
 	case <-ctx.Done():
-		slog.Info("shutting down", "timeout", shutdownTimeout)
+		// Machines are deliberately left running.
+		slog.Info("draining; machines stay up and will be re-adopted", "timeout", shutdownTimeout)
 	}
 
 	shutCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	return srv.Shutdown(shutCtx)
+}
+
+// dispatch sends workload hostnames to the router and everything else to the
+// control API.
+func dispatch(cfg *config.Config, rtr http.Handler, ctrl http.Handler) http.Handler {
+	suffix := "." + strings.ToLower(cfg.WorkloadDomain)
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := strings.ToLower(r.Host)
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		if strings.HasSuffix(host, suffix) {
+			rtr.ServeHTTP(w, r)
+			return
+		}
+		ctrl.ServeHTTP(w, r)
+	})
+}
+
+// reconcile re-adopts machines left running by a previous hostd.
+func reconcile(cfg *config.Config, mgr *machines.Manager) int {
+	found, err := fc.Reconcile(cfg.MachineStateRoot())
+	if err != nil {
+		slog.Error("reconcile failed", "err", err)
+		return 0
+	}
+
+	var adopted int
+	for _, r := range found {
+		if !r.Alive {
+			// The process is gone; clear the breadcrumbs so the next start
+			// does not keep trying to adopt a machine that no longer exists.
+			_ = fc.ClearBreadcrumbs(filepath.Join(cfg.MachineStateRoot(), r.State.MachineID))
+			continue
+		}
+		m := fc.Adopted(r.State, cfg.MachineStateRoot())
+		if err := mgr.Adopt(r.State.MachineID, m, r.State.SlotIdx); err != nil {
+			slog.Error("could not adopt machine", "machine", r.State.MachineID, "err", err)
+			continue
+		}
+		adopted++
+	}
+	return adopted
+}
+
+func newUploader(cfg *config.Config) (fc.Uploader, error) {
+	if cfg.S3Bucket == "" {
+		slog.Warn("no object storage configured; suspend and restore will fail. " +
+			"Set PILOT_S3_BUCKET and credentials.")
+		return nil, nil
+	}
+	return s3.New(context.Background(), s3.Config{
+		Endpoint: cfg.S3Endpoint, Region: cfg.S3Region, Bucket: cfg.S3Bucket,
+		AccessKey: cfg.S3AccessKey, SecretKey: cfg.S3SecretKey,
+	})
 }
 
 // notifyReady tells systemd (Type=notify) that the process is serving. Done by

@@ -7,6 +7,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"strconv"
 )
 
 // Config is the full runtime configuration for a hostd process.
@@ -30,7 +31,15 @@ type Config struct {
 	// creates /dev/{net/tun,kvm,userfaultfd} inside each machine's chroot, and
 	// on a nodev mount (any default /tmp) they can be created but never
 	// opened -- surfacing much later as an unrelated permission error.
-	ChrootBase string // PILOT_CHROOT_BASE
+	ChrootBase  string // PILOT_CHROOT_BASE
+	CPUTemplate string // PILOT_CPU_TEMPLATE
+	JailUID     int    // PILOT_JAIL_UID
+	JailGID     int    // PILOT_JAIL_GID
+
+	// WorkloadDomain is the apex every machine's URL sits under. Workloads
+	// never share the dashboard's apex: a guest on the same apex could set
+	// cookies scoped to it.
+	WorkloadDomain string // PILOT_WORKLOAD_DOMAIN
 
 	// Object storage: the only truth for machine state. Local disk is cache.
 	S3Endpoint  string // PILOT_S3_ENDPOINT
@@ -38,6 +47,24 @@ type Config struct {
 	S3Bucket    string // PILOT_S3_BUCKET
 	S3AccessKey string // PILOT_S3_ACCESS_KEY
 	S3SecretKey string // PILOT_S3_SECRET_KEY
+}
+
+// MachineStateRoot holds per-machine breadcrumbs. On persistent disk, not
+// /var/run: a host reboot must not orphan the bookkeeping for machines whose
+// snapshots are still in object storage.
+func (c *Config) MachineStateRoot() string { return "/var/lib/pilots/machines" }
+
+// CacheRoot holds snapshot files pulled back from object storage. Purely a
+// cache -- deleting it costs a re-download, never data.
+func (c *Config) CacheRoot() string { return "/var/cache/pilots" }
+
+func envInt(key string, def int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return def
 }
 
 func env(key, def string) string {
@@ -64,6 +91,10 @@ func Load() (*Config, error) {
 		TemplateRootfs: env("PILOT_TEMPLATE_ROOTFS", "/var/lib/pilots/templates/golden.ext4"),
 		BuildCacheDir:  env("PILOT_BUILD_CACHE", "/var/cache/pilot-build"),
 		ChrootBase:     env("PILOT_CHROOT_BASE", "/var/lib/pilots/jailer"),
+		CPUTemplate:    os.Getenv("PILOT_CPU_TEMPLATE"),
+		JailUID:        envInt("PILOT_JAIL_UID", 0),
+		JailGID:        envInt("PILOT_JAIL_GID", 0),
+		WorkloadDomain: env("PILOT_WORKLOAD_DOMAIN", "pilotrun.app"),
 
 		S3Endpoint:  os.Getenv("PILOT_S3_ENDPOINT"),
 		S3Region:    env("PILOT_S3_REGION", "eu-central-1"),

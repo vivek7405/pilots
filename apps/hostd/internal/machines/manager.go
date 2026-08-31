@@ -11,7 +11,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -34,7 +33,10 @@ const (
 	StateError     = "error"
 )
 
-var ErrNotFound = errors.New("machines: not found")
+// ErrNotFound wraps the store's sentinel so errors.Is works across the
+// package boundary and the API layer can map it to a 404 without importing
+// this package.
+var ErrNotFound = fmt.Errorf("machines: %w", state.ErrNotFound)
 
 // Options configures the manager.
 type Options struct {
@@ -125,6 +127,17 @@ func artifactsFor(machineID string) fc.Artifacts {
 
 func checkpointArtifacts(machineID, checkpointID string) fc.Artifacts {
 	return fc.Artifacts{Prefix: filepath.Join("machines", machineID, "checkpoints", checkpointID)}
+}
+
+// localCacheDir mirrors the object-storage layout on disk.
+//
+// This MUST be per-artifact-set, not merely per-machine. Restores fetch only
+// what is missing locally, so if a machine's suspend image and its checkpoints
+// shared one directory, a file left by an earlier restore would shadow the one
+// being fetched -- and the machine would silently come back with the wrong
+// disk. Mirroring the remote layout makes that collision impossible.
+func (m *Manager) localCacheDir(machineID string, at fc.Artifacts) string {
+	return filepath.Join(m.opts.CacheRoot, at.Prefix)
 }
 
 // Create boots a new machine from the golden template.
@@ -285,6 +298,10 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 		slotIdx = fcm.Slot.Idx
 	}
 
+	// The guest must write out its page cache before we capture the disk, or
+	// the memory and disk images disagree about recent writes.
+	m.flushGuestDisk(ctx, id)
+
 	if _, err := fcm.Suspend(ctx, m.opts.Uploader, artifactsFor(id)); err != nil {
 		return err
 	}
@@ -356,7 +373,7 @@ func (m *Manager) restore(ctx context.Context, row *state.Machine, at fc.Artifac
 	fcm, err := fc.Restore(ctx, fc.RestoreConfig{
 		Config:     cfg,
 		Artifacts:  at,
-		LocalDir:   m.cacheDir(row.ID),
+		LocalDir:   m.localCacheDir(row.ID, at),
 		AgentToken: m.token(row.ID),
 	}, m.opts.Uploader)
 	if err != nil {
@@ -390,10 +407,16 @@ func orDefault(v, def int) int {
 	return v
 }
 
+// newID mints an identifier.
+//
+// Hyphen-separated, not underscore: a machine id becomes the jailer's instance
+// id, and the jailer accepts only alphanumerics and hyphens. Sanitising at
+// every use would be one more thing to forget, so the ids are simply safe
+// everywhere they appear -- jail, URL, and API alike.
 func newID(prefix string) string {
 	b := make([]byte, 12)
 	if _, err := rand.Read(b); err != nil {
 		panic(fmt.Sprintf("machines: entropy unavailable: %v", err))
 	}
-	return prefix + "_" + hex.EncodeToString(b)
+	return prefix + "-" + hex.EncodeToString(b)
 }
