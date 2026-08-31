@@ -1,0 +1,12 @@
+[Unit]
+Description=pilots in-VM guest agent
+After=network.target
+
+[Service]
+ExecStart=/opt/pilot-agent/guest-agent
+Environment=AGENT_PORT=3001
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+[Unit]
+Description=Corrosion (gossip-replicated cluster state)
+Documentation=https://github.com/superfly/corrosion
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/corrosion agent -c /etc/corrosion/config.toml
+Restart=always
+RestartSec=1
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

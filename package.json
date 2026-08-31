@@ -1,0 +1,19 @@
+{
+  "name": "pilots-monorepo",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "workspaces": [
+    "apps/dashboard",
+    "packages/*",
+    "sdks/js"
+  ],
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "build:hostd": "cd apps/hostd && go build ./...",
+    "test:hostd": "cd apps/hostd && go test ./...",
+    "vet:hostd": "cd apps/hostd && go vet ./...",
+    "test:e2e": "node scripts/e2e.mjs",
+    "test": "npm run vet:hostd && npm run test:hostd && npm run test:e2e"
+  }
+}

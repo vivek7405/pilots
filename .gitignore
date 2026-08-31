@@ -1,0 +1,12 @@
+node_modules/
+**/.webjs/*
+!**/.webjs/vendor/
+apps/hostd/bin/
+*.ext4
+*.img
+vmlinux*
+.env
+.env.*
+!.env.example
+/tmp/
+.DS_Store
