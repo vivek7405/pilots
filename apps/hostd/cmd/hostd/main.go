@@ -39,6 +39,13 @@ const shutdownTimeout = 30 * time.Second
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stderr, nil)))
 
+	// hostd re-executes itself to serve a machine's disk. Checked before
+	// anything else, because a handler must not load daemon config, open the
+	// state database, or bind a port.
+	if dispatchSubcommand() {
+		return
+	}
+
 	if err := run(); err != nil {
 		slog.Error("hostd exited", "err", err)
 		os.Exit(1)
