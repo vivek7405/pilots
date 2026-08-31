@@ -75,6 +75,11 @@ func (m *Machine) Kill() error {
 		}
 	}
 
+	// After Firecracker, never before: the handlers serve its disk and its
+	// memory, and taking either away from a live guest leaves it in an
+	// uninterruptible wait that no signal clears.
+	errs = append(errs, m.stopHandlers()...)
+
 	if m.Slot != nil {
 		if err := netns.Teardown(m.Slot); err != nil {
 			errs = append(errs, fmt.Errorf("teardown netns: %w", err))
