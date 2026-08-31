@@ -49,6 +49,13 @@ func (m *Machine) Kill() error {
 		reaped := make(chan struct{})
 		go func() { _, _ = m.Cmd.Process.Wait(); close(reaped) }()
 
+		// reapedC is nil'ed once the wait has returned without the process
+		// actually being gone -- which is what happens for an ADOPTED machine,
+		// where Wait returns ECHILD immediately. A closed channel is always
+		// ready, so leaving it in the select would spin this loop at full tilt,
+		// issuing a kill(2) per iteration for the whole grace period.
+		reapedC := reaped
+
 		deadline := time.After(killGrace)
 		poll := time.NewTicker(20 * time.Millisecond)
 		defer poll.Stop()
@@ -56,10 +63,11 @@ func (m *Machine) Kill() error {
 	wait:
 		for {
 			select {
-			case <-reaped:
+			case <-reapedC:
 				if !processAlive(pid) {
 					break wait
 				}
+				reapedC = nil
 			case <-poll.C:
 				if !processAlive(pid) {
 					break wait
