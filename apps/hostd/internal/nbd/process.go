@@ -13,6 +13,8 @@ import (
 
 	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/google/uuid"
+
+	"github.com/vivek7405/pilots/hostd/internal/ctlsock"
 )
 
 // SubcommandName is the hidden argv[1] that turns hostd into a handler.
@@ -170,7 +172,7 @@ func argv(opts StartOptions) []string {
 // describes a disk state that never existed at any instant, and chunkifying
 // against it produces a snapshot with a torn filesystem.
 func (p *Process) Dirty() (*roaring.Bitmap, error) {
-	payload, err := control(p.control, cmdDirty)
+	payload, err := ctlsock.Request(p.control, cmdDirty)
 	if err != nil {
 		return nil, err
 	}

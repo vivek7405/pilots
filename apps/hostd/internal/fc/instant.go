@@ -176,6 +176,7 @@ func RestoreInstant(ctx context.Context, cfg InstantConfig, dl Uploader,
 					ParentBuildID: cfg.MemParentBuildID,
 					CacheRoot:     cfg.Backends.CacheRoot,
 					PrefetchFile:  uffd.PrefetchFor(cfg.StateDir),
+					ControlSock:   uffd.ControlSockFor(cfg.StateDir),
 				},
 				Env: cfg.Env, LogFile: logFile,
 			})
@@ -320,6 +321,16 @@ func mknodBlockDevice(device, dest string, uid, gid int) error {
 type InstantSnapshot struct {
 	MemBuildID    uuid.UUID
 	RootfsBuildID uuid.UUID // uuid.Nil when the machine never wrote to disk
+
+	// ResumeGap is how long the guest was actually frozen.
+	//
+	// Reported rather than left to be inferred from the call's duration: the
+	// preparation before the pause -- waiting for the previous capture,
+	// making memory resident -- happens with the machine running and serving,
+	// so the round trip overstates the freeze, sometimes by a lot. An agent
+	// checkpointing between messages needs the number that describes what its
+	// user experiences.
+	ResumeGap time.Duration
 }
 
 // SnapshotOpts describes where a chunkified snapshot should land.
@@ -478,6 +489,13 @@ func (m *Machine) SuspendInstant(ctx context.Context, up Uploader, chunks Upload
 
 	res.SnapKey = snapKey
 
+	// Same two reasons as a checkpoint, and in the same order: a capture still
+	// running from an earlier checkpoint would compete with the snapshot
+	// write, and pages that are not resident fault in with the guest frozen.
+	// See CheckpointInstant.
+	m.awaitCapture()
+	m.makeMemoryResident()
+
 	p, err := m.pauseAndSnapshot(ctx)
 	if err != nil {
 		m.resumeAfterFailure(ctx, err)
@@ -551,6 +569,28 @@ func (m *Machine) CheckpointInstant(ctx context.Context, up Uploader, chunks Upl
 		_ = os.Remove(filepath.Join(localDir, marker))
 	}
 
+	// Wait for the PREVIOUS checkpoint's background work to finish before
+	// pausing.
+	//
+	// That work reads the whole memory image, chunkifies it and uploads it. It
+	// runs perfectly happily alongside a running guest -- but if it is still
+	// going when the next snapshot starts, it competes with Firecracker's
+	// snapshot write, and that write is inside the pause. The freeze the user
+	// feels then belongs to the checkpoint BEFORE the one they asked for.
+	//
+	// Waiting here rather than skipping it puts that delay where the guest is
+	// still running and serving.
+	m.awaitCapture()
+
+	// Make the memory resident BEFORE pausing.
+	//
+	// Firecracker reads all of guest memory to write a snapshot, so every page
+	// still lazily backed faults through the fault handler with the guest
+	// frozen. On a machine's first checkpoint that is its entire memory, one
+	// page at a time, inside the window the user experiences as a freeze --
+	// measured at 5.8 seconds for 512MiB, against 450ms once resident.
+	m.makeMemoryResident()
+
 	// The resume gap is the only part of a checkpoint a user experiences, so
 	// it is measured rather than assumed.
 	pausedAt := time.Now()
@@ -567,8 +607,9 @@ func (m *Machine) CheckpointInstant(ctx context.Context, up Uploader, chunks Upl
 	// Resume as soon as the local copies exist. Everything after runs with the
 	// machine already serving.
 	defer func() {
+		res.ResumeGap = time.Since(pausedAt)
 		slog.Info("checkpoint resume gap", "machine", m.ID,
-			"ms", time.Since(pausedAt).Milliseconds())
+			"ms", res.ResumeGap.Milliseconds())
 		if rerr := m.Client.Resume(context.WithoutCancel(ctx)); rerr != nil {
 			slog.Error("guest could not be resumed after checkpoint",
 				"machine", m.ID, "err", rerr)
@@ -596,28 +637,38 @@ func (m *Machine) CheckpointInstant(ctx context.Context, up Uploader, chunks Upl
 	}
 
 	localSnap := filepath.Join(localDir, SnapFile)
-	localMem := filepath.Join(localDir, MemFile)
 	localCow := filepath.Join(localDir, CowFile)
 
 	if err := reflinkCopy(p.hostSnap, localSnap); err != nil {
 		return res, err
 	}
-	if err := reflinkCopy(p.hostMem, localMem); err != nil {
-		return res, err
-	}
+	// The memory image is NOT copied. It is chunkified where Firecracker wrote
+	// it, which is safe because awaitCapture above guarantees the previous
+	// capture finished before Firecracker was allowed to overwrite it.
+	//
+	// Copying it first only looked free: a reflink of half a gigabyte pins its
+	// extents, and on a copy-on-write filesystem that allocation pressure
+	// comes back as a multi-second snapshot write a checkpoint or two later --
+	// inside the pause. The copy protected nothing, either: a capture
+	// interrupted by a crash leaves the checkpoint unusable whether or not a
+	// staged copy survives, because nothing resumes one.
 	if !dirty.IsEmpty() {
 		if err := reflinkCopy(CowPath(m.StateDir), localCow); err != nil {
 			return res, err
 		}
 	}
 
-	go m.finishCheckpoint(up, chunks, opts, localDir, snapKey, dirty, res)
+	m.beginCapture()
+	go func() {
+		defer m.endCapture()
+		m.finishCheckpoint(up, chunks, opts, localDir, p.hostMem, snapKey, dirty, res)
+	}()
 	return res, nil
 }
 
 // finishCheckpoint chunkifies and uploads a checkpoint's staged copies.
 func (m *Machine) finishCheckpoint(up Uploader, chunks Uploader, opts SnapshotOpts,
-	localDir, snapKey string, dirty *roaring.Bitmap, ids InstantSnapshot) {
+	localDir, memPath, snapKey string, dirty *roaring.Bitmap, ids InstantSnapshot) {
 
 	uploadSlots <- struct{}{}
 	defer func() { <-uploadSlots }()
@@ -632,13 +683,14 @@ func (m *Machine) finishCheckpoint(up Uploader, chunks Uploader, opts SnapshotOp
 	}
 
 	if _, _, err := block.Chunkify(ctx, block.ChunkifyOpts{
-		In:      filepath.Join(localDir, MemFile),
+		In:      memPath,
 		OutDir:  filepath.Join(opts.BuildDir, ids.MemBuildID.String()),
 		BuildID: ids.MemBuildID, ParentDir: opts.MemParentDir,
 	}); err != nil {
 		fail(err)
 		return
 	}
+
 	if ids.RootfsBuildID != uuid.Nil {
 		if _, _, err := block.Chunkify(ctx, block.ChunkifyOpts{
 			In:      filepath.Join(localDir, CowFile),
@@ -661,6 +713,20 @@ func (m *Machine) finishCheckpoint(up Uploader, chunks Uploader, opts SnapshotOp
 	if err := os.WriteFile(filepath.Join(localDir, chunkedMarker), nil, 0o644); err != nil {
 		fail(err)
 		return
+	}
+
+	// The staged copies have served their purpose: the builds are the durable
+	// form and a restore reads those. Keeping both means every checkpoint
+	// costs a full memory image of local disk forever -- which on a machine
+	// checkpointed a few times is gigabytes, and the resulting writeback
+	// pressure lands on the next checkpoint's pause window, where the user
+	// feels it. The vmstate stays: it is kilobytes and a rollback needs it.
+	for _, name := range []string{CowFile} {
+		if err := os.Remove(filepath.Join(localDir, name)); err != nil &&
+			!errors.Is(err, os.ErrNotExist) {
+			slog.Warn("could not discard a staged checkpoint copy",
+				"machine", m.ID, "file", name, "err", err)
+		}
 	}
 
 	if err := uploadBuild(ctx, chunks, opts.BuildDir, ids.MemBuildID); err != nil {
@@ -776,4 +842,64 @@ func (m *Machine) CaptureTemplate(ctx context.Context, opts SnapshotOpts) (Templ
 	out.MemBuildID = snapshot.MemBuildID
 	out.SnapPath = p.hostSnap
 	return out, nil
+}
+
+// makeMemoryResident asks the fault handler to install every page.
+//
+// Best effort. A machine whose handler cannot be reached still snapshots
+// correctly -- it just pays for its faults inside the pause instead of before
+// it, which is slow rather than wrong.
+func (m *Machine) makeMemoryResident() {
+	if m.Uffd == nil {
+		return
+	}
+	start := time.Now()
+	if err := m.Uffd.MakeResident(); err != nil {
+		slog.Warn("could not make memory resident before snapshotting; the "+
+			"guest will be paused for its page faults", "machine", m.ID, "err", err)
+		return
+	}
+	slog.Debug("memory made resident before snapshot",
+		"machine", m.ID, "ms", time.Since(start).Milliseconds())
+}
+
+// A snapshot's expensive half -- reading the memory image, chunkifying it,
+// uploading it -- runs in the background so the guest can resume. The next
+// snapshot has to wait for it, because the two compete and the second one's
+// share of that competition lands inside its pause window.
+//
+// The wait belongs BEFORE the pause, where the guest is still running and
+// serving, rather than inside it.
+
+// awaitCapture blocks until any background capture has finished.
+func (m *Machine) awaitCapture() {
+	m.captureMu.Lock()
+	done := m.captureDone
+	m.captureMu.Unlock()
+
+	if done == nil {
+		return
+	}
+	start := time.Now()
+	<-done
+	slog.Debug("waited for the previous capture", "machine", m.ID,
+		"ms", time.Since(start).Milliseconds())
+}
+
+// beginCapture marks a background capture as in flight.
+func (m *Machine) beginCapture() {
+	m.captureMu.Lock()
+	defer m.captureMu.Unlock()
+	m.captureDone = make(chan struct{})
+}
+
+// endCapture releases whoever is waiting on the capture.
+func (m *Machine) endCapture() {
+	m.captureMu.Lock()
+	defer m.captureMu.Unlock()
+
+	if m.captureDone != nil {
+		close(m.captureDone)
+		m.captureDone = nil
+	}
 }

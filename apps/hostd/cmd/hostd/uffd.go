@@ -31,6 +31,7 @@ func runUffdHandler(args []string) error {
 	cacheRoot := fs.String("cache-root", "", "local cache for remote builds")
 	prefetch := fs.String("prefetch", "",
 		"fault order to replay, then rewrite with this run's order")
+	control := fs.String("control", "", "unix socket for hostd's requests")
 	readyFD := fs.Int("ready-fd", 0, "fd to signal once the socket is listening")
 
 	if err := fs.Parse(args); err != nil {
@@ -42,7 +43,7 @@ func runUffdHandler(args []string) error {
 
 	cfg := uffd.Config{
 		Socket: *socket, MemFile: *memFile, CacheRoot: *cacheRoot,
-		PrefetchFile: *prefetch, ReadyFD: *readyFD,
+		PrefetchFile: *prefetch, ControlSock: *control, ReadyFD: *readyFD,
 	}
 
 	var err error

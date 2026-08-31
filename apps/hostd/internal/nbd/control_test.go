@@ -2,12 +2,13 @@ package nbd
 
 import (
 	"bytes"
-	"net"
 	"path/filepath"
 	"testing"
 
 	"github.com/RoaringBitmap/roaring/v2"
+
 	"github.com/vivek7405/pilots/hostd/internal/block"
+	"github.com/vivek7405/pilots/hostd/internal/ctlsock"
 )
 
 // startControl runs a control server over a cache in a temp dir.
@@ -23,14 +24,14 @@ func startControl(t *testing.T) (sock string, cache *block.Cache, stopped chan s
 	}
 	t.Cleanup(func() { cache.Close() })
 
-	ln, err := listenControl(sock)
+	ln, err := ctlsock.Listen(sock)
 	if err != nil {
-		t.Fatalf("listenControl: %v", err)
+		t.Fatalf("ctlsock.Listen: %v", err)
 	}
 	t.Cleanup(func() { ln.Close() })
 
 	stopped = make(chan struct{}, 1)
-	go serveControl(ln, cache, func() { stopped <- struct{}{} })
+	go ctlsock.Serve(ln, control(cache, func() { stopped <- struct{}{} }))
 	return sock, cache, stopped
 }
 
@@ -46,7 +47,7 @@ func TestControlReturnsTheDirtyBitmap(t *testing.T) {
 		t.Fatalf("WriteAt: %v", err)
 	}
 
-	payload, err := control(sock, cmdDirty)
+	payload, err := ctlsock.Request(sock, cmdDirty)
 	if err != nil {
 		t.Fatalf("control(dirty): %v", err)
 	}
@@ -68,7 +69,7 @@ func TestControlReturnsTheDirtyBitmap(t *testing.T) {
 func TestControlReturnsAnEmptyBitmapForACleanCache(t *testing.T) {
 	sock, _, _ := startControl(t)
 
-	payload, err := control(sock, cmdDirty)
+	payload, err := ctlsock.Request(sock, cmdDirty)
 	if err != nil {
 		t.Fatalf("control(dirty): %v", err)
 	}
@@ -84,7 +85,7 @@ func TestControlReturnsAnEmptyBitmapForACleanCache(t *testing.T) {
 func TestControlStopTriggersShutdown(t *testing.T) {
 	sock, _, stopped := startControl(t)
 
-	if _, err := control(sock, cmdStop); err != nil {
+	if _, err := ctlsock.Request(sock, cmdStop); err != nil {
 		t.Fatalf("control(stop): %v", err)
 	}
 	select {
@@ -100,7 +101,7 @@ func TestControlStopTriggersShutdown(t *testing.T) {
 func TestControlRejectsAnUnknownCommand(t *testing.T) {
 	sock, _, _ := startControl(t)
 
-	if _, err := control(sock, "nonsense"); err == nil {
+	if _, err := ctlsock.Request(sock, "nonsense"); err == nil {
 		t.Error("an unknown command was accepted")
 	}
 }
@@ -114,7 +115,7 @@ func TestControlServesRepeatedRequests(t *testing.T) {
 		if _, err := cache.WriteAt(bytes.Repeat([]byte{byte(i)}, 4096), int64(i)*4096); err != nil {
 			t.Fatalf("WriteAt: %v", err)
 		}
-		payload, err := control(sock, cmdDirty)
+		payload, err := ctlsock.Request(sock, cmdDirty)
 		if err != nil {
 			t.Fatalf("request %d: %v", i, err)
 		}
@@ -126,26 +127,4 @@ func TestControlServesRepeatedRequests(t *testing.T) {
 			t.Errorf("request %d: %d dirty blocks, want %d", i, got.GetCardinality(), i+1)
 		}
 	}
-}
-
-// A stale socket file from a handler that was SIGKILLed must not stop the next
-// one binding -- otherwise a machine that died badly can never be woken again.
-func TestListenControlClearsAStaleSocket(t *testing.T) {
-	sock := filepath.Join(t.TempDir(), "nbd.sock")
-
-	first, err := net.Listen("unix", sock)
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	// Close the listener the way a SIGKILL does: the file stays behind.
-	if ul, ok := first.(*net.UnixListener); ok {
-		ul.SetUnlinkOnClose(false)
-	}
-	first.Close()
-
-	second, err := listenControl(sock)
-	if err != nil {
-		t.Fatalf("listenControl over a stale socket: %v", err)
-	}
-	second.Close()
 }

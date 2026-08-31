@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vivek7405/pilots/hostd/internal/block"
+	"github.com/vivek7405/pilots/hostd/internal/ctlsock"
 )
 
 // Config describes one disk to serve.
@@ -80,7 +81,7 @@ func Run(ctx context.Context, cfg Config, store block.ObjectStore) error {
 
 	overlay := block.NewOverlay(template, cache)
 
-	ln, err := listenControl(cfg.ControlSock)
+	ln, err := ctlsock.Listen(cfg.ControlSock)
 	if err != nil {
 		return err
 	}
@@ -97,7 +98,7 @@ func Run(ctx context.Context, cfg Config, store block.ObjectStore) error {
 			close(stopped)
 		})
 	}
-	go serveControl(ln, cache, stop)
+	go ctlsock.Serve(ln, control(cache, stop))
 
 	go func() {
 		select {

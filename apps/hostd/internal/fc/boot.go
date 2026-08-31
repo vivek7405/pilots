@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -92,6 +93,11 @@ type Machine struct {
 	// a machine booted from a template file rather than restored.
 	NBD  *nbd.Process
 	Uffd *uffd.Process
+
+	// captureDone is closed when the background half of the previous snapshot
+	// finishes. See awaitCapture.
+	captureMu   sync.Mutex
+	captureDone chan struct{}
 }
 
 // GenerateMAC returns a locally administered unicast address.

@@ -71,6 +71,7 @@ func (m *Manager) Checkpoint(ctx context.Context, machineID, comment string) (*s
 	}
 	// The build ids are known up front rather than when the background work
 	// finishes, so the row is complete the moment the caller gets it back.
+	ckpt.ResumeGapMS = ids.ResumeGap.Milliseconds()
 	ckpt.MemBuildID = ids.MemBuildID.String()
 	if ids.RootfsBuildID != uuid.Nil {
 		ckpt.RootfsBuildID = ids.RootfsBuildID.String()

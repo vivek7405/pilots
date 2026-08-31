@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vivek7405/pilots/hostd/internal/block"
+	"github.com/vivek7405/pilots/hostd/internal/ctlsock"
 )
 
 // acceptTimeout bounds the wait for Firecracker to connect. It has to outlast
@@ -39,6 +40,10 @@ type Config struct {
 	// PrefetchFile is read for a fault order to replay and then rewritten with
 	// this run's order. The same path on purpose: each wake refines the last.
 	PrefetchFile string
+
+	// ControlSock is where the handler answers hostd's requests. Optional: a
+	// handler without one simply serves faults.
+	ControlSock string
 
 	// ReadyFD, when non-zero, receives a byte once the socket is listening.
 	ReadyFD int
@@ -79,6 +84,16 @@ func Run(ctx context.Context, cfg Config, store block.ObjectStore) error {
 	defer rec.Close()
 
 	var stats Stats
+
+	if cfg.ControlSock != "" {
+		ctl, err := ctlsock.Listen(cfg.ControlSock)
+		if err != nil {
+			return err
+		}
+		defer ctl.Close()
+		go ctlsock.Serve(ctl, control(&prefaulter{h: h, src: src}, &stats))
+	}
+
 	go prefault(ctx, h, src, prefetch, &stats)
 
 	start := time.Now()
@@ -178,6 +193,9 @@ func signalReady(fd int) {
 
 // SocketFor is where a machine's handler listens.
 func SocketFor(stateDir string) string { return filepath.Join(stateDir, "uffd.sock") }
+
+// ControlSockFor is where a machine's fault handler answers hostd.
+func ControlSockFor(stateDir string) string { return filepath.Join(stateDir, "uffd-ctl.sock") }
 
 // PrefetchFor is where a machine's fault order is kept between wakes.
 func PrefetchFor(stateDir string) string { return filepath.Join(stateDir, "prefetch.txt") }

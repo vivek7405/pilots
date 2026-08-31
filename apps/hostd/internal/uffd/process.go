@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/vivek7405/pilots/hostd/internal/ctlsock"
 )
 
 // SubcommandName is the hidden argv[1] that turns hostd into a memory handler.
@@ -30,6 +32,8 @@ type Process struct {
 
 	// Socket is what goes into Firecracker's snapshot load request.
 	Socket string
+	// control is where this handler answers hostd's requests.
+	control string
 }
 
 // StartOptions describes a handler to launch.
@@ -83,7 +87,7 @@ func Start(ctx context.Context, opts StartOptions) (*Process, error) {
 	// and every failure costs the full timeout.
 	writeEnd.Close()
 
-	p := &Process{cmd: cmd, pid: cmd.Process.Pid, Socket: opts.Socket}
+	p := &Process{cmd: cmd, pid: cmd.Process.Pid, Socket: opts.Socket, control: opts.ControlSock}
 	if err := p.waitReady(ctx, readEnd); err != nil {
 		_ = p.Stop()
 		return nil, err
@@ -137,6 +141,9 @@ func argv(opts StartOptions) []string {
 	if opts.PrefetchFile != "" {
 		args = append(args, "--prefetch", opts.PrefetchFile)
 	}
+	if opts.ControlSock != "" {
+		args = append(args, "--control", opts.ControlSock)
+	}
 	return args
 }
 
@@ -157,8 +164,11 @@ func (p *Process) Stop() error {
 		}
 	}
 
-	if p.Socket != "" {
-		if err := os.Remove(p.Socket); err != nil && !errors.Is(err, os.ErrNotExist) {
+	for _, path := range []string{p.Socket, p.control} {
+		if path == "" {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			errs = append(errs, err)
 		}
 	}
@@ -196,6 +206,20 @@ func (p *Process) waitExit() error {
 		case <-time.After(20 * time.Millisecond):
 		}
 	}
+}
+
+// MakeResident installs every page of the machine's memory.
+//
+// Called BEFORE pausing for a snapshot, never after. Firecracker reads all of
+// guest memory to write one, and any page not already resident faults through
+// the handler while the guest is frozen -- which is the whole of a first
+// checkpoint's freeze.
+func (p *Process) MakeResident() error {
+	if p.control == "" {
+		return nil
+	}
+	_, err := ctlsock.Request(p.control, cmdPrefault)
+	return err
 }
 
 func (p *Process) Pid() int { return p.pid }
