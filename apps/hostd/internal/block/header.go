@@ -122,17 +122,16 @@ func (m *Metadata) NextGeneration(buildID uuid.UUID) *Metadata {
 
 // NewHeader assembles a header, sorting the mapping and validating the chain.
 //
-// An empty mapping synthesizes one full-file self-mapping, which is what a
-// fully-zero input produces.
+// An EMPTY mapping is legal and meaningful: it describes a build whose every
+// block was zero and therefore stored nowhere. Reads fall through the gap path
+// and yield zeros.
+//
+// The predecessor synthesized a full-file self-mapping here instead, which is
+// incompatible with the zero-elision it also performs -- the mapping claims the
+// whole file is stored while the data file is empty, and its own size
+// validation rejects the result. An all-zero memory image is not hypothetical:
+// it is what a machine that has barely touched its disk produces.
 func NewHeader(metadata *Metadata, mapping []*BuildMap) (*Header, error) {
-	if len(mapping) == 0 {
-		mapping = []*BuildMap{{
-			Offset:             0,
-			Length:             metadata.Size,
-			BuildId:            metadata.BuildId,
-			BuildStorageOffset: 0,
-		}}
-	}
 	sort.Slice(mapping, func(i, j int) bool { return mapping[i].Offset < mapping[j].Offset })
 
 	h := &Header{Metadata: metadata, Mapping: mapping}

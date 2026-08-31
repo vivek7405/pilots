@@ -258,20 +258,28 @@ func TestGetShiftedMappingRejectsBadOffsets(t *testing.T) {
 	}
 }
 
-// A fully-zero input produces no mappings, so the header synthesizes one
-// covering the whole file. Chunkify relies on that.
-func TestNewHeaderSynthesizesAFullMapping(t *testing.T) {
+// An all-zero build has no mappings at all, and every offset in it resolves to
+// a gap. Synthesizing a full self-mapping instead would claim the whole file is
+// stored while the data file is empty.
+func TestNewHeaderEmptyMappingIsAllZero(t *testing.T) {
 	id := uuid.New()
 	h, err := NewHeader(NewTemplateMetadata(id, 4096, 8192), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(h.Mapping) != 1 {
-		t.Fatalf("got %d mappings, want 1", len(h.Mapping))
+	if len(h.Mapping) != 0 {
+		t.Fatalf("got %d mappings, want none", len(h.Mapping))
 	}
-	m := h.Mapping[0]
-	if m.Offset != 0 || m.Length != 8192 || m.BuildId != id {
-		t.Errorf("synthesized mapping does not cover the build: %+v", *m)
+
+	storage, length, buildID, err := h.GetShiftedMapping(0)
+	if err != nil {
+		t.Fatalf("GetShiftedMapping: %v", err)
+	}
+	if buildID != nil {
+		t.Error("offset 0 resolved to stored bytes; an all-zero build stores none")
+	}
+	if length != 8192 || storage != 0 {
+		t.Errorf("gap = (storage %d, length %d), want (0, 8192)", storage, length)
 	}
 }
 
