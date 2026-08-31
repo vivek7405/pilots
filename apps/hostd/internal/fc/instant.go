@@ -691,6 +691,13 @@ func (m *Machine) finishCheckpoint(up Uploader, chunks Uploader, opts SnapshotOp
 		return
 	}
 
+	// Deliberately NOT posix_fadvise(DONTNEED) on the image here. Dropping it
+	// looks obviously right -- half a gigabyte, read once, never read again --
+	// and it measures worse: p50 500ms against 312ms, with the multi-second
+	// outliers back. Firecracker fully overwrites this file on the next
+	// checkpoint, and on a copy-on-write filesystem that rewrite goes faster
+	// with the extents still cached.
+
 	if ids.RootfsBuildID != uuid.Nil {
 		if _, _, err := block.Chunkify(ctx, block.ChunkifyOpts{
 			In:      filepath.Join(localDir, CowFile),

@@ -5,10 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
 	"path/filepath"
-
-	"golang.org/x/sys/unix"
 )
 
 // Snapshot artifact names, both on disk and as object-storage keys.
@@ -52,24 +49,6 @@ func (m *Machine) pauseAndSnapshot(ctx context.Context) (snapshotPaths, error) {
 		return p, fmt.Errorf("fc: snapshot %s: %w", m.ID, err)
 	}
 	return p, nil
-}
-
-// dropFromPageCache releases a file's clean pages.
-//
-// Called after a memory image has been read for chunkifying. Half a gigabyte
-// per checkpoint otherwise stays cached, evicting pages that are actually in
-// use -- and that eviction happens during the next snapshot write, which is
-// inside the pause.
-//
-// Best effort by design: this is an advisory hint about a file nothing will
-// read again, so a failure costs a little cache and nothing else.
-func dropFromPageCache(path string) {
-	f, err := os.Open(path)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	_ = unix.Fadvise(int(f.Fd()), 0, 0, unix.FADV_DONTNEED)
 }
 
 // ErrArtifactMissing reports an object that is not in the store.
