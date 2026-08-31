@@ -97,6 +97,11 @@ func newBlockStore(ctx context.Context) (block.ObjectStore, error) {
 	}
 	return s3.New(ctx, s3.Config{
 		Endpoint: cfg.S3Endpoint, Region: cfg.S3Region, Bucket: cfg.S3Bucket,
+		// The same prefix hostd writes builds under. A handler reading from a
+		// different namespace than the daemon wrote to fails on a missing
+		// header, which reads as a corrupt build rather than a misconfigured
+		// prefix.
+		Prefix:    chunkPrefix,
 		AccessKey: cfg.S3AccessKey, SecretKey: cfg.S3SecretKey,
 	})
 }

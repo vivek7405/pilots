@@ -4,7 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/vivek7405/pilots/hostd/internal/fc"
 	"github.com/vivek7405/pilots/hostd/internal/state"
@@ -46,19 +50,30 @@ func (m *Manager) Checkpoint(ctx context.Context, machineID, comment string) (*s
 		CreatedAt: time.Now().Unix(),
 	}
 
-	at := checkpointArtifacts(machineID, ckpt.ID)
+	t, err := m.EnsureTemplate(ctx)
+	if err != nil {
+		return nil, err
+	}
 	// Same directory a restore of this checkpoint will look in, so the local
 	// copy is reused instead of re-downloaded.
-	localDir := m.localCacheDir(machineID, at)
+	localDir := m.checkpointDir(machineID, ckpt.ID)
 
 	// Same reason as suspend: the disk image must agree with the memory image
 	// about what was written.
 	m.flushGuestDisk(ctx, machineID)
 
-	// Returns as soon as the guest is running again; the upload continues in
-	// the background and durability is reported separately.
-	if err := fcm.Checkpoint(ctx, m.opts.Uploader, at, localDir); err != nil {
+	// Returns as soon as the guest is running again; chunkify and upload
+	// continue in the background and durability is reported separately.
+	ids, err := fcm.CheckpointInstant(ctx, m.opts.Uploader, m.opts.Chunks,
+		m.snapshotOpts(t), localDir, checkpointSnapKey(machineID, ckpt.ID))
+	if err != nil {
 		return nil, err
+	}
+	// The build ids are known up front rather than when the background work
+	// finishes, so the row is complete the moment the caller gets it back.
+	ckpt.MemBuildID = ids.MemBuildID.String()
+	if ids.RootfsBuildID != uuid.Nil {
+		ckpt.RootfsBuildID = ids.RootfsBuildID.String()
 	}
 
 	if err := m.opts.Store.PutCheckpoint(ctx, ckpt); err != nil {
@@ -117,7 +132,12 @@ const (
 
 // CheckpointStatus reports whether a checkpoint's data is durable yet.
 func (m *Manager) CheckpointStatus(machineID, checkpointID string) fc.CheckpointStatus {
-	return fc.StatusOf(m.localCacheDir(machineID, checkpointArtifacts(machineID, checkpointID)))
+	return fc.StatusOf(m.checkpointDir(machineID, checkpointID))
+}
+
+// checkpointDir is where a checkpoint's staged copies and markers live.
+func (m *Manager) checkpointDir(machineID, checkpointID string) string {
+	return filepath.Join(m.opts.CacheRoot, "machines", machineID, "checkpoints", checkpointID)
 }
 
 // RestoreCheckpoint rolls a machine back, in place.
@@ -157,7 +177,7 @@ func (m *Manager) RestoreCheckpoint(ctx context.Context, checkpointID string) (*
 		}
 	}
 
-	fcm, err := m.restore(ctx, row, checkpointArtifacts(row.ID, ckpt.ID))
+	fcm, err := m.restoreFromCheckpoint(ctx, row, ckpt)
 	if err != nil {
 		row.State = StateError
 		row.UpdatedAt = time.Now().Unix()
@@ -204,3 +224,78 @@ func (m *Manager) findCheckpoint(ctx context.Context, checkpointID string) (*sta
 	}
 	return nil, fmt.Errorf("machines: checkpoint %s: %w", checkpointID, ErrNotFound)
 }
+
+// restoreFromCheckpoint rolls a machine back to one of its checkpoints.
+//
+// It waits for the checkpoint to be CHUNKIFIED, not uploaded. A rollback on
+// this host reads the builds off local disk; making it wait for durability
+// would mean every rollback paid for an upload it never touches.
+func (m *Manager) restoreFromCheckpoint(ctx context.Context, row *state.Machine,
+	ckpt *state.Checkpoint) (*fc.Machine, error) {
+
+	t, err := m.EnsureTemplate(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	localDir := m.checkpointDir(row.ID, ckpt.ID)
+	if err := m.awaitChunked(ctx, localDir); err != nil {
+		return nil, err
+	}
+
+	memBuild, err := uuid.Parse(ckpt.MemBuildID)
+	if err != nil {
+		return nil, fmt.Errorf("machines: checkpoint %s has no usable memory build (%q): %w",
+			ckpt.ID, ckpt.MemBuildID, err)
+	}
+	backends := fc.Backends{
+		MemBuildID:        memBuild,
+		MemParentBuildID:  t.MemBuildID,
+		RootfsTemplateDir: m.rootfsTemplateDir(t),
+		CacheRoot:         m.buildDir(),
+	}
+	if ckpt.RootfsBuildID != "" {
+		if backends.RootfsDiffID, err = uuid.Parse(ckpt.RootfsBuildID); err != nil {
+			return nil, fmt.Errorf("machines: checkpoint %s has an unusable disk build (%q): %w",
+				ckpt.ID, ckpt.RootfsBuildID, err)
+		}
+	}
+
+	// The machine's copy-on-write file holds everything written since the
+	// checkpoint. Rolling back means discarding exactly that.
+	if err := os.Remove(fc.CowPath(m.stateDir(row.ID))); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("machines: discard the current disk: %w", err)
+	}
+
+	fcm, _, err := m.restoreInstantImmutable(ctx, row, backends,
+		checkpointSnapKey(row.ID, ckpt.ID), localDir)
+	return fcm, err
+}
+
+// awaitChunked blocks until a checkpoint's builds exist on this host.
+//
+// A checkpoint taken moments ago may still be chunkifying. Failing instead
+// would make "checkpoint then immediately roll back" -- the exact loop an
+// agent runs -- fail intermittently on nothing but timing.
+func (m *Manager) awaitChunked(ctx context.Context, localDir string) error {
+	deadline := time.Now().Add(chunkWaitTimeout)
+
+	for time.Now().Before(deadline) {
+		st := fc.StatusOf(localDir)
+		switch {
+		case st.Chunked:
+			return nil
+		case st.Failed:
+			return fmt.Errorf("machines: checkpoint could not be prepared: %s", st.Error)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(durabilityPollInterval):
+		}
+	}
+	return fmt.Errorf("machines: checkpoint was not ready within %s", chunkWaitTimeout)
+}
+
+// chunkWaitTimeout bounds the wait for a just-taken checkpoint to be usable.
+const chunkWaitTimeout = 5 * time.Minute

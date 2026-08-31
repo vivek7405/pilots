@@ -13,14 +13,17 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/vivek7405/pilots/hostd/internal/api"
+
+	"github.com/vivek7405/pilots/hostd/internal/block"
 	"github.com/vivek7405/pilots/hostd/internal/fc"
+	"github.com/vivek7405/pilots/hostd/internal/nbd"
 	"github.com/vivek7405/pilots/hostd/internal/netns"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
@@ -49,6 +52,20 @@ type Options struct {
 	Store     state.Store
 	Uploader  fc.Uploader
 	PoolSize  int
+
+	// Chunks writes content-addressed builds, and BlockStore reads them back.
+	// Both address the same objects under the chunk prefix; they are separate
+	// fields only because uploading and lazy reading have different shapes.
+	Chunks     fc.Uploader
+	BlockStore block.ObjectStore
+
+	// NBDDevices hands out the kernel block devices machines' disks are
+	// served on. One pool per host, because the devices are a host resource.
+	NBDDevices *nbd.DevicePool
+
+	// HandlerEnv is passed to the block and fault servers, which need the
+	// object-storage credentials to read builds.
+	HandlerEnv []string
 }
 
 // Manager is the per-host machine registry.
@@ -137,35 +154,11 @@ func (m *Manager) Running() []string {
 func (m *Manager) stateDir(id string) string { return filepath.Join(m.opts.StateRoot, id) }
 func (m *Manager) cacheDir(id string) string { return filepath.Join(m.opts.CacheRoot, id) }
 
-// artifactsFor returns the object-storage prefix for a machine's suspend
-// image. A checkpoint gets its own prefix so it is never overwritten by a
-// later suspend.
-func artifactsFor(machineID string) fc.Artifacts {
-	return fc.Artifacts{Prefix: filepath.Join("machines", machineID, "suspend")}
-}
-
-func checkpointArtifacts(machineID, checkpointID string) fc.Artifacts {
-	return fc.Artifacts{
-		Prefix: filepath.Join("machines", machineID, "checkpoints", checkpointID),
-		// A checkpoint is written once under its own id and never rewritten,
-		// so a local copy is always current and can be reused. A suspend image
-		// is the opposite: one prefix, overwritten every time.
-		Immutable: true,
-	}
-}
-
-// localCacheDir mirrors the object-storage layout on disk.
+// Create brings up a new machine by restoring the golden template.
 //
-// Per-artifact-set, not merely per-machine: sharing one directory between a
-// machine's suspend image and its checkpoints let a file from one restore
-// shadow the other. Note this alone is not sufficient -- within the suspend
-// set the prefix is reused on every suspend, so Restore additionally
-// re-fetches mutable sets rather than trusting what is on disk.
-func (m *Manager) localCacheDir(machineID string, at fc.Artifacts) string {
-	return filepath.Join(m.opts.CacheRoot, at.Prefix)
-}
-
-// Create boots a new machine from the golden template.
+// Restoring, not booting: the template is a machine that already finished
+// booting and settling, so a create costs a snapshot load rather than twenty
+// seconds of kernel and systemd.
 func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*state.Machine, error) {
 	id := newID("m")
 
@@ -214,7 +207,7 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 		return nil, err
 	}
 
-	fcm, err := m.boot(ctx, row, token)
+	fcm, err := m.createFromTemplate(ctx, row, token)
 	if err != nil {
 		row.State = StateError
 		row.UpdatedAt = time.Now().Unix()
@@ -231,50 +224,6 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 		return row, err
 	}
 	return row, nil
-}
-
-func (m *Manager) boot(ctx context.Context, row *state.Machine, token string) (*fc.Machine, error) {
-	slot, err := m.pool.Take(row.ID)
-	if err != nil {
-		return nil, err
-	}
-	mac, err := fc.GenerateMAC()
-	if err != nil {
-		m.pool.Return(slot.Idx)
-		return nil, err
-	}
-	if err := netns.Setup(slot, mac, m.opts.FCConfig.JailUID); err != nil {
-		m.pool.Return(slot.Idx)
-		return nil, err
-	}
-
-	cfg := m.machineFCConfig(row, slot, mac)
-
-	fcm, err := fc.Boot(ctx, cfg)
-	if err != nil {
-		_ = netns.Teardown(slot)
-		m.pool.Return(slot.Idx)
-		return nil, err
-	}
-
-	// Give the guest its own token, replacing the template's placeholder.
-	//
-	// Fatal, not a warning. hostd stores the new token while the guest keeps
-	// the shared placeholder, and token() falls back to that same placeholder
-	// -- so exec, the clock poke and the flush all keep working and the machine
-	// is indistinguishable from a healthy one, while actually running on a
-	// credential every other machine from this template also has.
-	if err := m.installToken(ctx, slot, token); err != nil {
-		return nil, fmt.Errorf("install agent token: %w", err)
-	}
-
-	if err := fcm.Persist(); err != nil {
-		// Not fatal: the machine is running and serving. But a restart will
-		// not re-adopt it, which is worth shouting about.
-		slog.Error("machine is running but its breadcrumbs were not written; "+
-			"a hostd restart will not re-adopt it", "machine", row.ID, "err", err)
-	}
-	return fcm, nil
 }
 
 // Destroy stops a machine and removes its state from the host AND from object
@@ -297,6 +246,9 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	var errs []error
 
 	if fcm, ok := m.get(id); ok {
+		// The copy-on-write file holds every write since the last snapshot.
+		// Destroy is the ONLY point at which discarding it is correct.
+		defer fcm.DiscardCow()
 		slotIdx := 0
 		if fcm.Slot != nil {
 			slotIdx = fcm.Slot.Idx
@@ -349,18 +301,40 @@ func (m *Manager) deleteRemoteState(ctx context.Context, id string) error {
 		return nil // no object storage configured
 	}
 
-	sets := []fc.Artifacts{artifactsFor(id)}
+	keys := []string{suspendSnapKey(id), prefetchKey(id)}
+
+	// The machine's content-addressed builds go too. Each build id belongs to
+	// exactly one snapshot of one machine, so nothing else reads them -- and
+	// they are the large objects. The template's builds are shared and are
+	// deliberately not touched here.
+	var builds []string
+	if row, err := m.opts.Store.GetMachine(ctx, id); err == nil {
+		builds = append(builds, row.MemBuildID, row.RootfsBuildID)
+	}
 	if cks, err := m.opts.Store.ListCheckpoints(ctx, id); err == nil {
 		for _, c := range cks {
-			sets = append(sets, checkpointArtifacts(id, c.ID))
+			keys = append(keys, checkpointSnapKey(id, c.ID))
+			builds = append(builds, c.MemBuildID, c.RootfsBuildID)
 		}
 	}
 
 	var errs []error
-	for _, at := range sets {
-		for _, key := range []string{at.Snap(), at.Mem(), at.Rootfs()} {
-			if err := deleter.Delete(ctx, key); err != nil {
-				errs = append(errs, fmt.Errorf("delete %s: %w", key, err))
+	for _, key := range keys {
+		if err := deleter.Delete(ctx, key); err != nil {
+			errs = append(errs, fmt.Errorf("delete %s: %w", key, err))
+		}
+	}
+	if chunkDeleter, ok := m.opts.Chunks.(interface {
+		Delete(ctx context.Context, key string) error
+	}); ok {
+		for _, b := range builds {
+			if b == "" {
+				continue
+			}
+			for _, name := range []string{b + "/header", b + "/data"} {
+				if err := chunkDeleter.Delete(ctx, name); err != nil {
+					errs = append(errs, fmt.Errorf("delete %s: %w", name, err))
+				}
 			}
 		}
 	}
@@ -411,7 +385,17 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 	// the memory and disk images disagree about recent writes.
 	m.flushGuestDisk(ctx, id)
 
-	if _, err := fcm.Suspend(ctx, m.opts.Uploader, artifactsFor(id)); err != nil {
+	t, err := m.EnsureTemplate(ctx)
+	if err != nil {
+		return err
+	}
+
+	res, err := fcm.SuspendInstant(ctx, m.opts.Uploader, m.opts.Chunks, fc.SnapshotOpts{
+		MemParentDir:      m.memParentDir(t),
+		RootfsTemplateDir: m.rootfsTemplateDir(t),
+		BuildDir:          m.buildDir(),
+	}, suspendSnapKey(id), prefetchKey(id))
+	if err != nil {
 		return err
 	}
 	m.drop(id)
@@ -420,6 +404,14 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 	}
 
 	row.State = StateSuspended
+	row.MemBuildID = res.MemBuildID.String()
+	// An empty rootfs build is meaningful: the machine wrote nothing, so its
+	// next restore reads the template directly. Writing a zero uuid instead
+	// would send the wake looking for a build that was never created.
+	row.RootfsBuildID = ""
+	if res.RootfsBuildID != uuid.Nil {
+		row.RootfsBuildID = res.RootfsBuildID.String()
+	}
 	row.UpdatedAt = time.Now().Unix()
 	return m.opts.Store.PutMachine(ctx, row)
 }
@@ -443,7 +435,7 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 		return err
 	}
 
-	fcm, err := m.restore(ctx, row, artifactsFor(id))
+	fcm, err := m.wakeFromSuspend(ctx, row)
 	if err != nil {
 		row.State = StateError
 		row.UpdatedAt = time.Now().Unix()
@@ -456,40 +448,6 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 	row.LastActivity = time.Now().Unix()
 	row.UpdatedAt = time.Now().Unix()
 	return m.opts.Store.PutMachine(ctx, row)
-}
-
-// restore rebuilds a machine from artifacts. Shared by wake and
-// checkpoint-restore, because they are the same operation.
-func (m *Manager) restore(ctx context.Context, row *state.Machine, at fc.Artifacts) (*fc.Machine, error) {
-	slot, err := m.pool.Take(row.ID)
-	if err != nil {
-		return nil, err
-	}
-	mac, err := fc.GenerateMAC()
-	if err != nil {
-		m.pool.Return(slot.Idx)
-		return nil, err
-	}
-
-	cfg := m.machineFCConfig(row, slot, mac)
-
-	fcm, err := fc.Restore(ctx, fc.RestoreConfig{
-		Config:     cfg,
-		Artifacts:  at,
-		LocalDir:   m.localCacheDir(row.ID, at),
-		AgentToken: m.token(row.ID),
-	}, m.opts.Uploader)
-	if err != nil {
-		_ = netns.Teardown(slot)
-		m.pool.Return(slot.Idx)
-		return nil, err
-	}
-
-	if err := fcm.Persist(); err != nil {
-		slog.Error("restored machine's breadcrumbs were not written",
-			"machine", row.ID, "err", err)
-	}
-	return fcm, nil
 }
 
 // Adopt re-registers a machine that survived a hostd restart.

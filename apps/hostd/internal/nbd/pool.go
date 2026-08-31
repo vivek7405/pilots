@@ -28,6 +28,7 @@ type DevicePool struct {
 	mu   sync.Mutex
 	max  int
 	held map[int]bool // reserved here but not yet visible to the kernel
+	next int          // where the next scan starts
 }
 
 func NewDevicePool(max int) *DevicePool {
@@ -48,14 +49,29 @@ func (p *DevicePool) Acquire() (path string, index int, err error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	for i := 0; i < p.max; i++ {
-		if p.held[i] {
+	// Round-robin from wherever the last hand-out left off, rather than always
+	// the lowest free index.
+	//
+	// This is not fairness, it is correctness. The kernel publishes a device's
+	// size asynchronously after the attach and clears it asynchronously after
+	// the detach, and those two are not ordered against each other. Reusing an
+	// index seconds after releasing it lets the old teardown zero the size the
+	// new handler just set, and the device then never becomes usable: the
+	// restore fails on a sizing timeout, on a device that reports no owner and
+	// looks perfectly free. Cycling through the whole pool first puts dozens
+	// of machine lifetimes between one use of a device and the next.
+	for n := 0; n < p.max; n++ {
+		i := (p.next + n) % p.max
+		if p.held[i] || !deviceFree(i) {
 			continue
 		}
-		if !deviceFree(i) {
+		// The kernel must also have cleared the size: a device mid-teardown
+		// reports no owner but is not finished with.
+		if size, err := DeviceSize(i); err != nil || size != 0 {
 			continue
 		}
 		p.held[i] = true
+		p.next = (i + 1) % p.max
 		return fmt.Sprintf("/dev/nbd%d", i), i, nil
 	}
 	return "", 0, fmt.Errorf("nbd: no free device among %d", p.max)
@@ -85,6 +101,30 @@ func (p *DevicePool) InUse() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return len(p.held)
+}
+
+// WaitDetached blocks until the kernel has finished tearing a device down.
+//
+// The pid file disappears as soon as the disconnect is issued, but the
+// kernel's own teardown continues past that point -- and it ends by clearing
+// the device's size. A handler that claims the device inside that window sets
+// its size and then has it zeroed underneath, so the device never becomes
+// usable and the restore fails on a sizing timeout naming a device that looks
+// perfectly free.
+func WaitDetached(index int, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = readyTimeout
+	}
+	deadline := time.Now().Add(timeout)
+
+	for time.Now().Before(deadline) {
+		size, err := DeviceSize(index)
+		if (err == nil && size == 0) && deviceFree(index) {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return fmt.Errorf("nbd: device nbd%d was still attached after %s", index, timeout)
 }
 
 // deviceFree reports whether the kernel considers a device unattached.
@@ -125,12 +165,19 @@ func WaitReady(index int, timeout time.Duration) error {
 	}
 	deadline := time.Now().Add(timeout)
 
+	var lastSize int64
+	var lastErr error
 	for time.Now().Before(deadline) {
 		size, err := DeviceSize(index)
 		if err == nil && size > 0 {
 			return nil
 		}
+		lastSize, lastErr = size, err
 		time.Sleep(20 * time.Millisecond)
 	}
-	return fmt.Errorf("nbd: device nbd%d was not ready within %s", index, timeout)
+
+	pid, pidErr := os.ReadFile(fmt.Sprintf("/sys/block/nbd%d/pid", index))
+	return fmt.Errorf("nbd: device nbd%d was not ready within %s "+
+		"(size=%d sizeErr=%v owner=%q ownerErr=%v)",
+		index, timeout, lastSize, lastErr, strings.TrimSpace(string(pid)), pidErr)
 }

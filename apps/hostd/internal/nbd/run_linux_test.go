@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/google/uuid"
+	"golang.org/x/sys/unix"
 
 	"github.com/vivek7405/pilots/hostd/internal/block"
 )
@@ -470,4 +472,99 @@ func readLog(t *testing.T, path string) string {
 		return "(no handler log)"
 	}
 	return string(raw)
+}
+
+// NBD_DO_IT parks in wait_event_interruptible for the life of the device, and
+// any signal delivered to the thread holding it makes that wait return early
+// -- at which point the kernel shuts the sockets down and clears the queue,
+// and the device is finished. The Go runtime sends SIGURG to preempt
+// goroutines, so an unmasked DO_IT dies on the runtime's own scheduling.
+//
+// The symptom is thoroughly misleading: the attach succeeds and the kernel
+// logs a capacity change, then the size drops back to zero, so the caller
+// fails on a sizing timeout against a device that reports no owner and looks
+// perfectly free. It hit roughly one restore in four.
+func TestDeviceSurvivesSignalsToTheHandler(t *testing.T) {
+	requireNBD(t)
+
+	dir := t.TempDir()
+	fills := []byte{1, 2, 3, 4}
+	templateDir, want := buildTemplate(t, dir, fills)
+
+	pool := NewDevicePool(DefaultMaxDevices)
+	logFile, err := os.Create(filepath.Join(dir, "handler.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer logFile.Close()
+
+	p, err := Start(context.Background(), pool, StartOptions{
+		Config: Config{
+			TemplateDir: templateDir,
+			CachePath:   filepath.Join(dir, "rootfs.cow"),
+			ControlSock: filepath.Join(dir, "nbd.sock"),
+		},
+		Env:     os.Environ(),
+		LogFile: logFile,
+	})
+	if err != nil {
+		t.Fatalf("Start: %v\n%s", err, readLog(t, logFile.Name()))
+	}
+	defer p.Stop()
+
+	if err := WaitReady(p.Index, 5*time.Second); err != nil {
+		t.Fatalf("WaitReady: %v\n%s", err, readLog(t, logFile.Name()))
+	}
+
+	// SIGURG is what the runtime itself uses, so this is the real signal
+	// rather than a stand-in. It has to be aimed at EVERY thread, though: a
+	// process-directed kill(2) is delivered to whichever thread the kernel
+	// picks, which is almost never the one parked in the ioctl -- which is
+	// exactly why this bug survived so long in ordinary testing.
+	for round := 0; round < 40; round++ {
+		for _, tid := range threadsOf(t, p.Pid()) {
+			_ = unix.Tgkill(p.Pid(), tid, syscall.SIGURG)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	size, err := DeviceSize(p.Index)
+	if err != nil || size != int64(len(want)) {
+		t.Fatalf("device is %d bytes (err %v) after signalling, want %d; "+
+			"the kernel tore it down on an interrupted NBD_DO_IT\n%s",
+			size, err, len(want), readLog(t, logFile.Name()))
+	}
+
+	// And it must still serve, not merely still be sized.
+	dev, err := os.Open(p.Device)
+	if err != nil {
+		t.Fatalf("open %s: %v", p.Device, err)
+	}
+	defer dev.Close()
+
+	got := make([]byte, len(want))
+	if _, err := dev.ReadAt(got, 0); err != nil {
+		t.Fatalf("read after signalling: %v\n%s", err, readLog(t, logFile.Name()))
+	}
+	if !bytes.Equal(got, want) {
+		t.Error("the device served the wrong bytes after signalling")
+	}
+}
+
+// threadsOf lists a process's thread ids.
+func threadsOf(t *testing.T, pid int) []int {
+	t.Helper()
+
+	entries, err := os.ReadDir(fmt.Sprintf("/proc/%d/task", pid))
+	if err != nil {
+		return nil
+	}
+	tids := make([]int, 0, len(entries))
+	for _, e := range entries {
+		tid, err := strconv.Atoi(e.Name())
+		if err == nil {
+			tids = append(tids, tid)
+		}
+	}
+	return tids
 }

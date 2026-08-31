@@ -64,6 +64,11 @@ type InstantConfig struct {
 	AgentToken string
 	// SnapKey is the object-storage key of the Firecracker vmstate file.
 	SnapKey string
+	// SnapImmutable marks a vmstate written once under its own key -- a
+	// checkpoint -- so a local copy can be trusted. A machine's suspend image
+	// is the opposite: one key, rewritten on every suspend, so a cached copy
+	// silently restores the PREVIOUS suspend and loses everything since.
+	SnapImmutable bool
 	// Env is handed to the handler processes; they need the storage
 	// credentials.
 	Env []string
@@ -96,6 +101,13 @@ func RestoreInstant(ctx context.Context, cfg InstantConfig, dl Uploader,
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return nil, fmt.Errorf("fc: mkdir %s: %w", dir, err)
 		}
+	}
+
+	// The machine's state directory is created here rather than assumed: on a
+	// create it does not exist yet, and this is the first thing to write into
+	// it.
+	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
+		return nil, fmt.Errorf("fc: mkdir state dir: %w", err)
 	}
 
 	logFile, err := os.OpenFile(filepath.Join(cfg.StateDir, "handlers.log"),
@@ -172,6 +184,9 @@ func RestoreInstant(ctx context.Context, cfg InstantConfig, dl Uploader,
 		func() error {
 			// The vmstate file is the one artifact still fetched whole. It is
 			// kilobytes: device state and vcpu registers, not memory.
+			if cfg.SnapImmutable {
+				return fetchIfAbsent(ctx, dl, cfg.SnapKey, localSnap)
+			}
 			return dl.GetToFile(ctx, cfg.SnapKey, localSnap)
 		},
 	)
@@ -526,14 +541,19 @@ func (m *Machine) SuspendInstant(ctx context.Context, up Uploader, chunks Upload
 // the machine is. Chunkifying and uploading happen afterwards, with the
 // machine already serving.
 func (m *Machine) CheckpointInstant(ctx context.Context, up Uploader, chunks Uploader,
-	opts SnapshotOpts, localDir, snapKey string) (err error) {
+	opts SnapshotOpts, localDir, snapKey string) (res InstantSnapshot, err error) {
 
 	if err := os.MkdirAll(localDir, 0o755); err != nil {
-		return fmt.Errorf("fc: mkdir checkpoint dir: %w", err)
+		return res, fmt.Errorf("fc: mkdir checkpoint dir: %w", err)
 	}
 	// This directory may be a retry of a failed attempt.
-	_ = os.Remove(filepath.Join(localDir, durableMarker))
-	_ = os.Remove(filepath.Join(localDir, failedMarker))
+	for _, marker := range []string{durableMarker, failedMarker, chunkedMarker} {
+		_ = os.Remove(filepath.Join(localDir, marker))
+	}
+
+	// The resume gap is the only part of a checkpoint a user experiences, so
+	// it is measured rather than assumed.
+	pausedAt := time.Now()
 
 	p, err := m.pauseAndSnapshot(ctx)
 	if err != nil {
@@ -541,12 +561,14 @@ func (m *Machine) CheckpointInstant(ctx context.Context, up Uploader, chunks Upl
 			slog.Error("checkpoint failed and the guest could not be resumed",
 				"machine", m.ID, "err", rerr)
 		}
-		return err
+		return res, err
 	}
 
 	// Resume as soon as the local copies exist. Everything after runs with the
 	// machine already serving.
 	defer func() {
+		slog.Info("checkpoint resume gap", "machine", m.ID,
+			"ms", time.Since(pausedAt).Milliseconds())
 		if rerr := m.Client.Resume(context.WithoutCancel(ctx)); rerr != nil {
 			slog.Error("guest could not be resumed after checkpoint",
 				"machine", m.ID, "err", rerr)
@@ -561,7 +583,16 @@ func (m *Machine) CheckpointInstant(ctx context.Context, up Uploader, chunks Upl
 	// that never existed.
 	dirty, err := m.DirtyBlocks()
 	if err != nil {
-		return err
+		return res, err
+	}
+
+	// The build ids are minted HERE, not when the background work finishes.
+	// The caller records them on the checkpoint row and returns immediately,
+	// so a client can roll back to a checkpoint the moment it is chunkified
+	// rather than waiting for the upload it does not need locally.
+	res.MemBuildID = uuid.New()
+	if !dirty.IsEmpty() {
+		res.RootfsBuildID = uuid.New()
 	}
 
 	localSnap := filepath.Join(localDir, SnapFile)
@@ -569,24 +600,24 @@ func (m *Machine) CheckpointInstant(ctx context.Context, up Uploader, chunks Upl
 	localCow := filepath.Join(localDir, CowFile)
 
 	if err := reflinkCopy(p.hostSnap, localSnap); err != nil {
-		return err
+		return res, err
 	}
 	if err := reflinkCopy(p.hostMem, localMem); err != nil {
-		return err
+		return res, err
 	}
 	if !dirty.IsEmpty() {
 		if err := reflinkCopy(CowPath(m.StateDir), localCow); err != nil {
-			return err
+			return res, err
 		}
 	}
 
-	go m.finishCheckpoint(up, chunks, opts, localDir, snapKey, dirty)
-	return nil
+	go m.finishCheckpoint(up, chunks, opts, localDir, snapKey, dirty, res)
+	return res, nil
 }
 
 // finishCheckpoint chunkifies and uploads a checkpoint's staged copies.
 func (m *Machine) finishCheckpoint(up Uploader, chunks Uploader, opts SnapshotOpts,
-	localDir, snapKey string, dirty *roaring.Bitmap) {
+	localDir, snapKey string, dirty *roaring.Bitmap, ids InstantSnapshot) {
 
 	uploadSlots <- struct{}{}
 	defer func() { <-uploadSlots }()
@@ -596,53 +627,57 @@ func (m *Machine) finishCheckpoint(up Uploader, chunks Uploader, opts SnapshotOp
 	ctx := context.Background()
 
 	fail := func(err error) {
-		slog.Error("checkpoint upload failed", "machine", m.ID, "err", err)
+		slog.Error("checkpoint could not be completed", "machine", m.ID, "err", err)
 		_ = os.WriteFile(filepath.Join(localDir, failedMarker), []byte(err.Error()), 0o644)
 	}
 
-	memBuild := uuid.New()
 	if _, _, err := block.Chunkify(ctx, block.ChunkifyOpts{
 		In:      filepath.Join(localDir, MemFile),
-		OutDir:  filepath.Join(opts.BuildDir, memBuild.String()),
-		BuildID: memBuild, ParentDir: opts.MemParentDir,
+		OutDir:  filepath.Join(opts.BuildDir, ids.MemBuildID.String()),
+		BuildID: ids.MemBuildID, ParentDir: opts.MemParentDir,
 	}); err != nil {
 		fail(err)
 		return
 	}
-	if err := uploadBuild(ctx, chunks, opts.BuildDir, memBuild); err != nil {
-		fail(err)
-		return
-	}
-
-	rootfsBuild := uuid.Nil
-	if !dirty.IsEmpty() {
-		rootfsBuild = uuid.New()
+	if ids.RootfsBuildID != uuid.Nil {
 		if _, _, err := block.Chunkify(ctx, block.ChunkifyOpts{
 			In:      filepath.Join(localDir, CowFile),
-			OutDir:  filepath.Join(opts.BuildDir, rootfsBuild.String()),
-			BuildID: rootfsBuild, ParentDir: opts.RootfsTemplateDir, Dirty: dirty,
+			OutDir:  filepath.Join(opts.BuildDir, ids.RootfsBuildID.String()),
+			BuildID: ids.RootfsBuildID, ParentDir: opts.RootfsTemplateDir, Dirty: dirty,
 		}); err != nil {
 			fail(err)
 			return
 		}
-		if err := uploadBuild(ctx, chunks, opts.BuildDir, rootfsBuild); err != nil {
+	}
+
+	// Chunkified is not durable, and the difference matters: a rollback on
+	// THIS host needs only the local builds, while a restore anywhere else
+	// needs the upload. Collapsing the two would make every rollback wait for
+	// an upload it does not use.
+	if err := writeBuildIDs(localDir, ids.MemBuildID, ids.RootfsBuildID); err != nil {
+		fail(err)
+		return
+	}
+	if err := os.WriteFile(filepath.Join(localDir, chunkedMarker), nil, 0o644); err != nil {
+		fail(err)
+		return
+	}
+
+	if err := uploadBuild(ctx, chunks, opts.BuildDir, ids.MemBuildID); err != nil {
+		fail(err)
+		return
+	}
+	if ids.RootfsBuildID != uuid.Nil {
+		if err := uploadBuild(ctx, chunks, opts.BuildDir, ids.RootfsBuildID); err != nil {
 			fail(err)
 			return
 		}
 	}
-
 	if err := up.PutFile(ctx, snapKey, filepath.Join(localDir, SnapFile)); err != nil {
 		fail(err)
 		return
 	}
 
-	// The build ids are recorded next to the markers so the row can be
-	// completed by whoever observes durability, without holding them in
-	// memory across a restart.
-	if err := writeBuildIDs(localDir, memBuild, rootfsBuild); err != nil {
-		fail(err)
-		return
-	}
 	if err := os.WriteFile(filepath.Join(localDir, durableMarker), nil, 0o644); err != nil {
 		slog.Error("could not mark checkpoint durable", "machine", m.ID, "err", err)
 	}
@@ -691,6 +726,11 @@ func ReadBuildIDs(dir string) (mem, rootfs uuid.UUID, err error) {
 // that are not there yet -- and the failure surfaces as corrupt guest memory
 // rather than a missing object.
 func uploadBuild(ctx context.Context, up Uploader, buildDir string, id uuid.UUID) error {
+	return UploadBuild(ctx, up, buildDir, id)
+}
+
+// UploadBuild publishes one content-addressed build.
+func UploadBuild(ctx context.Context, up Uploader, buildDir string, id uuid.UUID) error {
 	dir := filepath.Join(buildDir, id.String())
 
 	if err := up.PutFile(ctx, id.String()+"/data", filepath.Join(dir, "data")); err != nil {
@@ -700,4 +740,40 @@ func uploadBuild(ctx context.Context, up Uploader, buildDir string, id uuid.UUID
 		return fmt.Errorf("fc: upload build %s header: %w", id, err)
 	}
 	return nil
+}
+
+// TemplateCapture is the golden template a host builds once.
+type TemplateCapture struct {
+	MemBuildID uuid.UUID
+	// SnapPath is the local vmstate file. It stays inside the jail, so the
+	// caller must upload it BEFORE killing the machine.
+	SnapPath string
+}
+
+// CaptureTemplate freezes a settled machine and chunkifies its memory.
+//
+// The guest is deliberately NOT resumed: this machine exists only to be
+// photographed. Every machine on the host is then created by restoring that
+// photograph, which is what makes a create a restore rather than a boot.
+func (m *Machine) CaptureTemplate(ctx context.Context, opts SnapshotOpts) (TemplateCapture, error) {
+	var out TemplateCapture
+
+	p, err := m.pauseAndSnapshot(ctx)
+	if err != nil {
+		return out, err
+	}
+	// The disk is not captured here. The template's disk is the golden rootfs
+	// itself, chunked directly -- a machine that has only just booted has
+	// written nothing worth keeping, and the two must be the same bytes or
+	// every restore starts from a disk its memory image does not describe.
+	snapshot, err := m.Chunkify(ctx, SnapshotOpts{
+		BuildDir: opts.BuildDir, MemParentDir: "",
+	})
+	if err != nil {
+		return out, err
+	}
+
+	out.MemBuildID = snapshot.MemBuildID
+	out.SnapPath = p.hostSnap
+	return out, nil
 }

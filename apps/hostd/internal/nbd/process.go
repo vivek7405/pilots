@@ -199,8 +199,14 @@ func (p *Process) Stop() error {
 		}
 	}
 
-	// Last: a device released while the kernel still holds it would be handed
-	// to the next machine, whose writes would land on this one's disk.
+	// Wait for the kernel to finish before the pool can hand this device to
+	// anyone else. Releasing on the handler's exit alone is too early: the
+	// teardown ends by zeroing the device's size, so the next machine's
+	// handler sets a size that is then wiped, and its restore fails on a
+	// sizing timeout that points at the wrong machine entirely.
+	if err := WaitDetached(p.Index, 0); err != nil {
+		errs = append(errs, err)
+	}
 	p.pool.Release(p.Index)
 
 	// The socket outlives the process it belonged to.

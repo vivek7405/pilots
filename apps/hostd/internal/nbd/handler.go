@@ -8,7 +8,9 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"runtime"
 	"sync"
+	"sync/atomic"
 
 	"golang.org/x/sys/unix"
 )
@@ -141,23 +143,46 @@ func Serve(devIndex int, device Device, readOnly bool, ready chan<- struct{}) er
 
 	// NBD_DO_IT blocks until the device is disconnected, so it runs in its own
 	// goroutine while this one serves requests.
+	//
+	// It is also where the kernel reports that it REFUSED the device -- and
+	// that has to be watched for, not collected at the end. A refused DO_IT
+	// means no request ever arrives, so the serve loop below blocks forever on
+	// a socket the kernel is not reading, the device's size stays zero, and
+	// the caller eventually fails on a sizing timeout with nothing anywhere
+	// naming the actual cause.
+	var doItFailure atomic.Pointer[error]
+	doneServing := make(chan struct{})
 	doItErr := make(chan error, 1)
+
 	go func() {
-		doItErr <- ioctl(devFile.Fd(), ioctlDoIt, 0)
+		doItErr <- runDoIt(devFile.Fd())
+	}()
+	go func() {
+		select {
+		case err := <-doItErr:
+			if err != nil {
+				doItFailure.Store(&err)
+			}
+			// Either way the device is finished: unblock the serve loop.
+			_ = ours.Close()
+		case <-doneServing:
+		}
 	}()
 
 	if ready != nil {
 		close(ready)
 	}
-
 	serveErr := h.serve()
+	close(doneServing)
 
 	// Tear the device down so the kernel releases it. Without this a killed
 	// handler leaves the device attached, Firecracker blocks in uninterruptible
 	// sleep on it, and /dev/nbdN stays dead until the host reboots.
 	h.Disconnect()
-	<-doItErr
 
+	if failure := doItFailure.Load(); failure != nil {
+		return fmt.Errorf("nbd: the kernel refused device %s: %w", devPath, *failure)
+	}
 	return serveErr
 }
 
@@ -299,4 +324,41 @@ func ioctl(fd, req, arg uintptr) error {
 		return errno
 	}
 	return nil
+}
+
+// runDoIt issues NBD_DO_IT with signals blocked on a dedicated thread.
+//
+// This is not defensive tidying, it is the difference between a device that
+// works and one that dies 57 microseconds after coming up. NBD_DO_IT parks in
+// wait_event_interruptible for the life of the device, and ANY signal delivered
+// to the calling thread makes that wait return early -- at which point the
+// kernel runs sock_shutdown() and nbd_clear_que() and the device is finished.
+//
+// The Go runtime sends SIGURG to preempt goroutines, often, at times nothing
+// here controls. So the ioctl is issued from a thread of its own with every
+// signal masked, and the thread is never unlocked: it exists solely to hold
+// this call, and dies with the goroutine.
+//
+// The symptom when this is wrong is thoroughly misleading. The attach
+// succeeds, the kernel logs a capacity change, and then the size returns to
+// zero -- so the caller fails on a sizing timeout against a device that
+// reports no owner and looks perfectly free. It happens on maybe one restore
+// in four.
+func runDoIt(fd uintptr) error {
+	runtime.LockOSThread()
+
+	var blockAll, previous unix.Sigset_t
+	for i := range blockAll.Val {
+		blockAll.Val[i] = ^uint64(0)
+	}
+	if err := unix.PthreadSigmask(unix.SIG_SETMASK, &blockAll, &previous); err != nil {
+		return fmt.Errorf("nbd: block signals for NBD_DO_IT: %w", err)
+	}
+
+	err := ioctl(fd, ioctlDoIt, 0)
+
+	// Restore before the goroutine returns, so the thread the runtime tears
+	// down is in the state it was handed over in.
+	_ = unix.PthreadSigmask(unix.SIG_SETMASK, &previous, nil)
+	return err
 }

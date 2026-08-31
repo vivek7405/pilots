@@ -20,9 +20,11 @@ import (
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/vivek7405/pilots/hostd/internal/block"
 	"github.com/vivek7405/pilots/hostd/internal/config"
 	"github.com/vivek7405/pilots/hostd/internal/fc"
 	"github.com/vivek7405/pilots/hostd/internal/machines"
+	"github.com/vivek7405/pilots/hostd/internal/nbd"
 	"github.com/vivek7405/pilots/hostd/internal/router"
 	"github.com/vivek7405/pilots/hostd/internal/s3"
 	"github.com/vivek7405/pilots/hostd/internal/state"
@@ -80,13 +82,27 @@ func run() error {
 		return err
 	}
 
+	// A second client over the same bucket under the chunk prefix. Content-
+	// addressed builds are named by uuid alone, so they need their own
+	// namespace or a build id could collide with a machine's key.
+	chunks, err := newChunkStore(cfg)
+	if err != nil {
+		return err
+	}
+
 	mgr := machines.New(machines.Options{
-		HostID:    cfg.HostID,
-		Domain:    cfg.WorkloadDomain,
-		StateRoot: cfg.MachineStateRoot(),
-		CacheRoot: cfg.CacheRoot(),
-		Store:     store,
-		Uploader:  uploader,
+		HostID:     cfg.HostID,
+		Domain:     cfg.WorkloadDomain,
+		StateRoot:  cfg.MachineStateRoot(),
+		CacheRoot:  cfg.CacheRoot(),
+		Store:      store,
+		Uploader:   uploader,
+		Chunks:     chunks,
+		BlockStore: chunkReader(chunks),
+		NBDDevices: nbd.NewDevicePool(nbd.DefaultMaxDevices),
+		// The handlers are separate processes and read builds themselves, so
+		// they need this daemon's storage credentials.
+		HandlerEnv: os.Environ(),
 		FCConfig: fc.Config{
 			KernelPath:     cfg.KernelPath,
 			TemplateRootfs: cfg.TemplateRootfs,
@@ -218,6 +234,33 @@ func reconcile(cfg *config.Config, mgr *machines.Manager) int {
 		adopted++
 	}
 	return adopted
+}
+
+// chunkPrefix namespaces content-addressed builds inside the bucket.
+const chunkPrefix = "chunks"
+
+// newChunkStore builds the client that reads and writes builds.
+func newChunkStore(cfg *config.Config) (fc.Uploader, error) {
+	if cfg.S3Bucket == "" {
+		return fc.UnconfiguredStore{}, nil
+	}
+	return s3.New(context.Background(), s3.Config{
+		Endpoint: cfg.S3Endpoint, Region: cfg.S3Region, Bucket: cfg.S3Bucket,
+		Prefix:    chunkPrefix,
+		AccessKey: cfg.S3AccessKey, SecretKey: cfg.S3SecretKey,
+	})
+}
+
+// chunkReader exposes a chunk store as the block layer's read surface.
+//
+// Nil rather than a stub when storage is unconfigured: a lazy read has no
+// meaningful failure to return per page, so the restore must fail up front on
+// a missing store instead of per fault, with the guest already resumed.
+func chunkReader(up fc.Uploader) block.ObjectStore {
+	if store, ok := up.(block.ObjectStore); ok {
+		return store
+	}
+	return nil
 }
 
 func newUploader(cfg *config.Config) (fc.Uploader, error) {
