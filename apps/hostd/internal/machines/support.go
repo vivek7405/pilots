@@ -6,8 +6,11 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"math/big"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -23,15 +26,50 @@ import (
 // after a restart rather than recovered.
 var tokens sync.Map // machine id -> string
 
-func (m *Manager) rememberToken(id, token string) { tokens.Store(id, token) }
-func (m *Manager) forgetToken(id string)          { tokens.Delete(id) }
+// tokenPath is where a machine's agent credential lives on the host.
+//
+// It sits with the machine's other breadcrumbs because hostd must be able to
+// reach its guests again after a restart. Keeping it only in memory meant a
+// restarted hostd could re-adopt a machine's PROCESS but could no longer talk
+// to it -- the machine was alive, routable, and permanently unusable.
+//
+// This is a host-to-guest credential, not a user-facing one: the API key hash
+// in the database authenticates clients, this authenticates hostd to a guest.
+func (m *Manager) tokenPath(id string) string {
+	return filepath.Join(m.stateDir(id), "agent.token")
+}
+
+func (m *Manager) rememberToken(id, token string) {
+	tokens.Store(id, token)
+	if err := os.MkdirAll(m.stateDir(id), 0o700); err == nil {
+		// 0600: readable only by the user hostd runs as.
+		if err := os.WriteFile(m.tokenPath(id), []byte(token), 0o600); err != nil {
+			slog.Error("could not persist the machine's agent token; hostd will "+
+				"not be able to reach this machine after a restart",
+				"machine", id, "err", err)
+		}
+	}
+}
+
+func (m *Manager) forgetToken(id string) {
+	tokens.Delete(id)
+	_ = os.Remove(m.tokenPath(id))
+}
 
 func (m *Manager) token(id string) string {
 	if v, ok := tokens.Load(id); ok {
 		return v.(string)
 	}
-	// A machine adopted after a restart has no remembered token; the template
-	// placeholder is what the guest still has.
+	// Adopted after a restart: recover the credential from disk and cache it.
+	if raw, err := os.ReadFile(m.tokenPath(id)); err == nil {
+		tok := strings.TrimSpace(string(raw))
+		if tok != "" {
+			tokens.Store(id, tok)
+			return tok
+		}
+	}
+	// A machine that has not been through installToken yet still has the
+	// template's placeholder.
 	return templateToken
 }
 

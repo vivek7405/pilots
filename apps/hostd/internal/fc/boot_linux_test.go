@@ -65,10 +65,12 @@ func TestBootRealMachine(t *testing.T) {
 	defer cancel()
 
 	machineID := fmt.Sprintf("pilotstest-boot-%d", time.Now().UnixNano()%1e6)
+	// High, varying slot so the test does not collide with a hostd running on
+	// the same machine, which would hold the low indices.
 	pool := netns.NewPool(1024)
-	slot, err := pool.Take(machineID)
+	slot, err := pool.Reserve(900+int(time.Now().UnixNano()%90), machineID)
 	if err != nil {
-		t.Fatalf("Take slot: %v", err)
+		t.Fatalf("Reserve slot: %v", err)
 	}
 
 	mac, err := GenerateMAC()

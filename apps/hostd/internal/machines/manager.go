@@ -390,12 +390,22 @@ func (m *Manager) restore(ctx context.Context, row *state.Machine, at fc.Artifac
 }
 
 // Adopt re-registers a machine that survived a hostd restart.
+//
+// Reserving the slot does two things at once: it stops the pool handing that
+// index to a new machine, and it rebuilds the Slot itself -- which the adopted
+// machine needs, because the router and every exec reach a guest through its
+// slot address. Without reattaching it the machine would be running and
+// routable in the registry but unreachable in practice.
 func (m *Manager) Adopt(id string, fcm *fc.Machine, slotIdx int) error {
-	if slotIdx > 0 {
-		if _, err := m.pool.Reserve(slotIdx, id); err != nil {
-			return err
-		}
+	if slotIdx <= 0 {
+		m.put(id, fcm)
+		return nil
 	}
+	slot, err := m.pool.Reserve(slotIdx, id)
+	if err != nil {
+		return err
+	}
+	fcm.Slot = slot
 	m.put(id, fcm)
 	return nil
 }

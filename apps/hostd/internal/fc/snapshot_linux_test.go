@@ -61,10 +61,15 @@ func bootTestMachine(t *testing.T, name string) (*Machine, Config, *netns.Pool) 
 	kernel, rootfs, fcBin, jailerBin := requireBootEnv(t)
 
 	machineID := fmt.Sprintf("pilotstest-%s-%d", name, time.Now().UnixNano()%1e6)
+
+	// Reserve a high, varying slot rather than taking the pool's first.
+	// A fresh pool always hands out index 1, so a test would collide with a
+	// hostd running on the same machine -- or with leftovers from a previous
+	// run -- on veth-1 and its host route.
 	pool := netns.NewPool(1024)
-	slot, err := pool.Take(machineID)
+	slot, err := pool.Reserve(700+int(time.Now().UnixNano()%200), machineID)
 	if err != nil {
-		t.Fatalf("Take slot: %v", err)
+		t.Fatalf("Reserve slot: %v", err)
 	}
 	mac, err := GenerateMAC()
 	if err != nil {
