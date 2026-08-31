@@ -13,6 +13,17 @@ cd "$(dirname "$0")"
 # shellcheck source=config.sh
 source ./config.sh
 
+# Previous runs' node addresses, for NEW_ONLY: a node left powered off has no
+# DHCP lease to read, but its address is still the one it will come back on.
+#
+# Read the one key rather than sourcing the file: the file also carries NODES
+# from the last run, and sourcing it would override the NODES the caller just
+# asked for -- which is exactly how a node gets added.
+PREV_NODE_IPS=""
+if [ -f "$STATE_FILE" ]; then
+  PREV_NODE_IPS=$(sed -n 's/^NODE_IPS="\(.*\)"$/\1/p' "$STATE_FILE" | tail -1)
+fi
+
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 
 command -v virsh >/dev/null || { echo "virsh not installed" >&2; exit 1; }
@@ -73,8 +84,16 @@ for i in $(seq 1 "$NODES"); do
   say "Node ${NODE}"
 
   if $SUDO virsh dominfo "$NODE" >/dev/null 2>&1; then
-    $SUDO virsh start "$NODE" >/dev/null 2>&1 || true
-    echo "  already defined"
+    # NEW_ONLY leaves nodes that already exist exactly as they are, running
+    # or not. Adding a node to a fleet must not restart the fleet -- and the
+    # gate adds one while a host is deliberately powered off, so starting it
+    # back up here would quietly undo the failure being tested.
+    if [ "${NEW_ONLY:-0}" = 1 ]; then
+      echo "  already defined (left alone)"
+    else
+      $SUDO virsh start "$NODE" >/dev/null 2>&1 || true
+      echo "  already defined"
+    fi
     continue
   fi
 
@@ -125,9 +144,21 @@ for i in $(seq 1 "$NODES"); do
   for _ in $(seq 120); do
     IP=$($SUDO virsh domifaddr "$NODE" --source lease 2>/dev/null | awk '/ipv4/ {print $4}' | cut -d/ -f1 | head -1)
     [ -n "$IP" ] && break
+    # A node this run deliberately left powered off has no lease to wait for.
+    if [ "${NEW_ONLY:-0}" = 1 ] && ! $SUDO virsh domstate "$NODE" 2>/dev/null | grep -q running; then
+      break
+    fi
     sleep 2
   done
-  [ -n "$IP" ] || { echo "  ${NODE} never got a lease" >&2; exit 1; }
+  if [ -z "$IP" ]; then
+    if [ "${NEW_ONLY:-0}" = 1 ]; then
+      echo "  ${NODE} is not running; keeping its last known address"
+      IP=$(echo "$PREV_NODE_IPS" | awk -v n="$i" '{print $n}')
+      [ -n "$IP" ] || { echo "  ${NODE} has no known address" >&2; exit 1; }
+    else
+      echo "  ${NODE} never got a lease" >&2; exit 1
+    fi
+  fi
   echo "  ${NODE} ${IP}"
   IPS+=("$IP")
 done
@@ -141,10 +172,19 @@ for ip in "${IPS[@]}"; do
   done
 done
 
+# Keep keys this script does not own. cluster-bootstrap.sh puts the cluster's
+# shared secrets here, and truncating the file on a later cluster-up would
+# take the fleet's corrosion token and agent secret with it -- leaving a live
+# cluster that no script can talk to any more.
+PRESERVED=""
+if [ -f "$STATE_FILE" ]; then
+  PRESERVED=$(grep -vE '^(#|NODES=|NODE_IPS=)' "$STATE_FILE" || true)
+fi
 {
   echo "# Written by cluster-up.sh"
   echo "NODES=${NODES}"
   echo "NODE_IPS=\"${IPS[*]}\""
+  [ -n "$PRESERVED" ] && echo "$PRESERVED"
 } > "$STATE_FILE"
 
 say "Cluster up"
