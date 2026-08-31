@@ -122,13 +122,18 @@ say "[4/9] Corrosion v${CORROSION_VERSION}"
 on_host bash -euo pipefail -s <<REMOTE
 # Pinned from day one, deliberately. The v0.x on-disk store cannot be upgraded
 # in place, and starting on 1.0.0 is how we never write the migration.
-if [ -x /opt/pilots/bin/corrosion ] && /opt/pilots/bin/corrosion --version 2>&1 | grep -q "${CORROSION_VERSION}"; then
+# Checked against a marker rather than --version: the v1.0.0 binary reports
+# itself as 0.2.0-beta.0, so a version grep never matches and every run
+# re-downloads it.
+if [ -x /opt/pilots/bin/corrosion ] && \
+   [ "\$(cat /opt/pilots/bin/.corrosion-version 2>/dev/null)" = "${CORROSION_VERSION}" ]; then
   echo "  already installed"
 else
   TMP=\$(mktemp -d); trap "rm -rf '\$TMP'" EXIT
   curl -fsSL "https://github.com/superfly/corrosion/releases/download/v${CORROSION_VERSION}/corrosion-x86_64-unknown-linux-gnu.tar.gz" -o "\$TMP/c.tgz"
   tar -xzf "\$TMP/c.tgz" -C "\$TMP"
   install -m 0755 "\$(find "\$TMP" -name corrosion -type f | head -1)" /opt/pilots/bin/corrosion
+  echo "${CORROSION_VERSION}" > /opt/pilots/bin/.corrosion-version
   echo "  installed v${CORROSION_VERSION}"
 fi
 ln -sfn /opt/pilots/bin/corrosion /usr/local/bin/corrosion
@@ -136,8 +141,21 @@ REMOTE
 
 # ---------------------------------------------------------------------------
 say "[5/9] Guest kernel and golden rootfs"
-scp $SSH_OPTS -q "${REPO}/scripts/rootfs/golden.ext4" "root@${IP}:/var/lib/pilots/templates/golden.ext4" 2>/dev/null \
-  || echo "  no local golden rootfs; the host will need one before creating machines"
+# Two gigabytes, so it is compared before it is copied. Without this every
+# re-run ships it again -- which makes "re-running upgrades a host" cost
+# minutes per host instead of seconds.
+if [ -f "${REPO}/scripts/rootfs/golden.ext4" ]; then
+  WANT=$(sha256sum "${REPO}/scripts/rootfs/golden.ext4" | cut -d' ' -f1)
+  HAVE=$(on_host "sha256sum /var/lib/pilots/templates/golden.ext4 2>/dev/null | cut -d' ' -f1" || true)
+  if [ "$WANT" = "$HAVE" ]; then
+    echo "  golden rootfs already present"
+  else
+    echo "  copying the golden rootfs (2 GiB)"
+    scp $SSH_OPTS -q "${REPO}/scripts/rootfs/golden.ext4" "root@${IP}:/var/lib/pilots/templates/golden.ext4"
+  fi
+else
+  echo "  no local golden rootfs; the host will need one before creating machines"
+fi
 if [ -f "/opt/pilots/kernels/vmlinux-${KERNEL_VERSION}/vmlinux.bin" ]; then
   on_host "mkdir -p /opt/pilots/kernels/vmlinux-${KERNEL_VERSION}"
   scp $SSH_OPTS -q "/opt/pilots/kernels/vmlinux-${KERNEL_VERSION}/vmlinux.bin" \
@@ -284,13 +302,19 @@ REMOTE
 # ---------------------------------------------------------------------------
 say "[9/9] Verifying"
 on_host bash -euo pipefail -s <<'REMOTE'
-for i in $(seq 60); do
+# hostd serves only once corrosion has applied its schema, and it waits up to
+# two minutes for that. A shorter window here fails a host that was fine.
+for i in $(seq 180); do
   curl -sf http://127.0.0.1:8080/v1/health >/dev/null 2>&1 && break
   sleep 1
 done
 curl -sf http://127.0.0.1:8080/v1/health >/dev/null || { echo "  hostd is not serving" >&2; exit 1; }
 echo "  hostd serving"
-wg show pilots0 2>/dev/null | grep -c peer | xargs -I{} echo "  mesh peers: {}"
+# `grep -c` exits 1 on a zero count, and under pipefail that fails the whole
+# script -- on a host that is perfectly healthy and simply has no peers yet,
+# which is ALWAYS true of the first host in a cluster.
+PEERS=$(wg show pilots0 2>/dev/null | grep -c peer || true)
+echo "  mesh peers: ${PEERS}"
 systemctl is-active --quiet corrosion && echo "  corrosion running"
 REMOTE
 
