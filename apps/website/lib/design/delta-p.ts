@@ -63,21 +63,6 @@ export type DeltaP = {
   stemW: number;
   stem: 'none' | 'baseline';
   /**
-   * A second hairline, cutting the stem away from the plane.
-   *
-   * Given as a centre and a length. Its ANGLE is not given: it is derived from
-   * the plane's own bottom flap.
-   *
-   * It is placed ON that flap's edge, a shade below it, and the reason is what
-   * the crack is for. The stem's top runs up INSIDE the plane, so the plane's
-   * outline is already whole and the weld is hidden within it. Cutting along
-   * the flap restores that outline as a real edge and leaves the stem lying
-   * against it, so the plane reads as a finished mark with the stem taken out
-   * of it. Cut anywhere else and the crack is a slash across a shape rather
-   * than the boundary between two.
-   */
-  crack?: { cx: number; cy: number; len: number };
-  /**
    * Carry the Delta half drawing: the hairline opened along the mark's own
    * axis. Identical geometry to the candidate card, cut and all.
    */
@@ -144,24 +129,6 @@ function undersideY(v: DeltaP, x: number): number {
   return tip.y + t * (apex.y - tip.y);
 }
 
-/**
- * The angle of the plane's bottom flap, in degrees, once the turn is applied.
- *
- * That flap is the edge from the lower wingtip to the apex. WHICH wingtip is
- * lower depends on the turn, so it is found from the transformed vertices
- * rather than assumed, the same way `undersideY` finds it. A line has no head
- * or tail, so the result is folded onto (-90, 90].
- */
-function flapAngle(v: DeltaP): number {
-  const apex = pt(v, 20.661, 3.8);
-  const wings = [pt(v, 5.235, 27.6), pt(v, 26.835, 27.6)];
-  const tip = wings[0].y > wings[1].y ? wings[0] : wings[1];
-  let a = (Math.atan2(apex.y - tip.y, apex.x - tip.x) * 180) / Math.PI;
-  if (a > 90) a -= 180;
-  if (a <= -90) a += 180;
-  return a;
-}
-
 /** The mark: the delta, and the thin stem dropped from its partition. */
 export function deltaPLetter(v: DeltaP) {
   const px = partitionX(v);
@@ -177,16 +144,6 @@ export function deltaPLetter(v: DeltaP) {
           />
         </g>`}
     ${deltaAt(v)}
-    ${v.crack
-      ? html`<rect
-          x=${(v.crack.cx - v.crack.len / 2).toFixed(2)}
-          y=${(v.crack.cy - (0.6 * v.size) / 2).toFixed(2)}
-          width=${v.crack.len}
-          height=${(0.6 * v.size).toFixed(2)}
-          transform="rotate(${flapAngle(v).toFixed(2)} ${v.crack.cx} ${v.crack.cy})"
-          fill="var(--logo-bg)"
-        />`
-      : ''}
   `;
 }
 
@@ -302,22 +259,6 @@ export const DELTA_PS: DeltaP[] = [
     stemW: 15,
     stem: 'baseline',
     halved: true,
-  },
-  {
-    id: 'raked-half-p',
-    name: 'Turned to the letters half P',
-    idea:
-      'The halved lockup with a second hairline cutting the stem free of the plane. Same weight as the cut already in the plane, and set parallel to the plane\'s bottom flap rather than to that cut, so it reads as the edge the stem is lying against rather than as a slash across it. The angle is derived from the flap, not typed in.',
-    cost:
-      'A hairline is the first thing a reproduction loses. This one closes before the plane\'s does, because it sits where two shapes already meet, and once it shuts the stem is welded back on.',
-    rotate: 64,
-    size: 5.2,
-    cx: 50,
-    cy: -12.5,
-    stemW: 15,
-    stem: 'baseline',
-    halved: true,
-    crack: { cx: 29.2, cy: 58.8, len: 34 },
   },
   {
     id: 'raked-bare',
