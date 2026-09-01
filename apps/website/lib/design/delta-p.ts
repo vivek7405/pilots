@@ -68,16 +68,6 @@ export type DeltaP = {
    * axis. Identical geometry to the candidate card, cut and all.
    */
   halved?: boolean;
-  /**
-   * Where the stem hangs, when the mark's partition cannot say.
-   *
-   * The halved drawing has no crossways partition left to hang from, its cut
-   * running along the axis instead, so that variant states the position rather
-   * than deriving one.
-   */
-  stemX?: number;
-  /** Where the stem starts, when the underside is not the edge it meets. */
-  stemTop?: number;
 };
 
 /** The delta, placed. Its ink centre lands on (cx, cy) whatever the rotation. */
@@ -142,8 +132,8 @@ function undersideY(v: DeltaP, x: number): number {
 
 /** The mark: the delta, and the thin stem dropped from its partition. */
 export function deltaPLetter(v: DeltaP) {
-  const px = v.stemX ?? partitionX(v);
-  const top = v.stemTop ?? undersideY(v, px) - 2;
+  const px = partitionX(v);
+  const top = undersideY(v, px) - 2;
   const bottom = v.stem === 'descender' ? DESCENDER : BASELINE;
   return html`
     ${v.stem === 'none'
@@ -170,7 +160,7 @@ function markBox(v: DeltaP) {
   const ys = pts.map((p) => p.y);
   const stemLean = BASELINE * 0.15838;
   if (v.stem !== 'none') {
-    const px = v.stemX ?? partitionX(v);
+    const px = partitionX(v);
     xs.push(px - v.stemW / 2 - stemLean, px + v.stemW / 2);
     ys.push(v.stem === 'descender' ? DESCENDER : BASELINE);
   }
@@ -298,23 +288,6 @@ export const DELTA_PS: DeltaP[] = [
     cy: -12.5,
     stemW: 15,
     stem: 'none',
-  },
-  {
-    id: 'half-raked',
-    name: 'Delta half, over the letters',
-    idea:
-      'The Delta half drawing from the candidate round, unchanged, with a stem added and nothing else. It keeps its own seventy-nine degree turn, which is the angle that lays its cut flat, so the hairline stays level with the baseline instead of tilting to follow the wing.',
-    cost:
-      'Seventy-nine degrees is not the angle the word wants. The underside runs at twenty-five degrees against the forty the step from the i up to the l asks for, so setting the wing clear of the l leaves it riding well above the i. That gap is the price of keeping the cut flat.',
-    rotate: 79,
-    size: 4.2,
-    cx: 56,
-    cy: -8,
-    stemW: 15,
-    stem: 'baseline',
-    halved: true,
-    stemX: 40,
-    stemTop: 30,
   },
   {
     id: 'raked-descender',
