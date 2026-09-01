@@ -294,3 +294,36 @@ func TestTemplateRoundTrip(t *testing.T) {
 		t.Errorf("round trip changed the template:\n got %+v\nwant %+v", *got, *want)
 	}
 }
+
+// A machine must remember which template it was built from.
+//
+// Its images are diffs whose unchanged ranges resolve against the parent by
+// offset, so restoring against a different template returns a guest stitched
+// from two machines. The host's current template is not that answer: it moves
+// when the golden template is rebuilt, and a host whose cache was cleared
+// mints its own with fresh ids. Losing this on a round trip means the machine
+// silently becomes unrestorable everywhere.
+func TestAMachineRemembersTheTemplateItWasBuiltFrom(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+
+	want := &Machine{
+		ID: "m-1", Name: "alpha", HostID: "host-a", State: "running",
+		MemBuildID: "mem-diff", RootfsBuildID: "rootfs-diff",
+		TemplateMemBuildID:    "tmpl-mem",
+		TemplateRootfsBuildID: "tmpl-rootfs",
+	}
+	if err := s.PutMachine(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetMachine(ctx, "m-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.TemplateMemBuildID != want.TemplateMemBuildID ||
+		got.TemplateRootfsBuildID != want.TemplateRootfsBuildID {
+		t.Errorf("the pinned template did not survive a round trip: got (%q, %q), want (%q, %q)",
+			got.TemplateMemBuildID, got.TemplateRootfsBuildID,
+			want.TemplateMemBuildID, want.TemplateRootfsBuildID)
+	}
+}

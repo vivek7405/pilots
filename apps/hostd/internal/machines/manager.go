@@ -382,7 +382,11 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 	// the memory and disk images disagree about recent writes.
 	m.flushGuestDisk(ctx, id)
 
-	t, err := m.EnsureTemplate(ctx)
+	// The template this machine was built from, not this host's current one.
+	// A suspend writes a DIFF, and its base is recorded in the header, so
+	// capturing against the wrong template produces an image that no host --
+	// including this one -- can ever resolve correctly again.
+	t, err := m.templateFor(ctx, row)
 	if err != nil {
 		return err
 	}

@@ -33,13 +33,15 @@ func NewStore(client *Client, hostID string) *Store {
 // machineCols is the column list, in the order rows are scanned.
 const machineCols = `id, name, host_id, state, kind_knobs, image_ref, vcpus, mem_mib,
 	domain, custom_domain, app_port, agent_port, agent_token_hash,
-	mem_build_id, rootfs_build_id, volume_id, service_id, release_id,
+	mem_build_id, rootfs_build_id, template_mem_build_id, template_rootfs_build_id,
+	volume_id, service_id, release_id,
 	last_activity, updated_at`
 
 func scanMachine(rows *Rows, m *state.Machine) error {
 	return rows.Scan(&m.ID, &m.Name, &m.HostID, &m.State, &m.KindKnobs, &m.ImageRef,
 		&m.VCPUs, &m.MemMiB, &m.Domain, &m.CustomDomain, &m.AppPort, &m.AgentPort,
-		&m.AgentTokenHash, &m.MemBuildID, &m.RootfsBuildID, &m.VolumeID,
+		&m.AgentTokenHash, &m.MemBuildID, &m.RootfsBuildID,
+		&m.TemplateMemBuildID, &m.TemplateRootfsBuildID, &m.VolumeID,
 		&m.ServiceID, &m.ReleaseID, &m.LastActivity, &m.UpdatedAt)
 }
 
@@ -108,7 +110,8 @@ func (s *Store) PutMachine(ctx context.Context, m *state.Machine, opts ...state.
 	params := []any{
 		m.ID, m.Name, m.HostID, m.State, m.KindKnobs, m.ImageRef, m.VCPUs, m.MemMiB,
 		m.Domain, m.CustomDomain, m.AppPort, m.AgentPort, m.AgentTokenHash,
-		m.MemBuildID, m.RootfsBuildID, m.VolumeID, m.ServiceID, m.ReleaseID,
+		m.MemBuildID, m.RootfsBuildID, m.TemplateMemBuildID, m.TemplateRootfsBuildID,
+		m.VolumeID, m.ServiceID, m.ReleaseID,
 		m.LastActivity, m.UpdatedAt,
 	}
 	if auth.NameAllocation || auth.DeadOwnerClaim != "" {
@@ -119,7 +122,7 @@ func (s *Store) PutMachine(ctx context.Context, m *state.Machine, opts ...state.
 
 	res, err := s.client.Exec(ctx, `
 		INSERT INTO machines (`+machineCols+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			name=excluded.name, state=excluded.state,
 			kind_knobs=excluded.kind_knobs, image_ref=excluded.image_ref,
@@ -127,6 +130,8 @@ func (s *Store) PutMachine(ctx context.Context, m *state.Machine, opts ...state.
 			custom_domain=excluded.custom_domain, app_port=excluded.app_port,
 			agent_port=excluded.agent_port, agent_token_hash=excluded.agent_token_hash,
 			mem_build_id=excluded.mem_build_id, rootfs_build_id=excluded.rootfs_build_id,
+			template_mem_build_id=excluded.template_mem_build_id,
+			template_rootfs_build_id=excluded.template_rootfs_build_id,
 			volume_id=excluded.volume_id, service_id=excluded.service_id,
 			release_id=excluded.release_id, last_activity=excluded.last_activity,
 			updated_at=excluded.updated_at`+guard,

@@ -51,6 +51,15 @@ CREATE TABLE IF NOT EXISTS machines (   -- writer: host_id only
   agent_token_hash TEXT,
   mem_build_id     TEXT,    -- latest snapshot
   rootfs_build_id  TEXT,
+  -- The template this machine was built from, pinned at create.
+  --
+  -- A machine's images are diffs whose unchanged ranges resolve against their
+  -- parent, so the parent has to be the template it was actually diffed
+  -- against -- not whichever template the host restoring it happens to hold.
+  -- Those differ whenever the golden template is rebuilt, or a host mints its
+  -- own, and the machine then cannot be restored there at all.
+  template_mem_build_id    TEXT,
+  template_rootfs_build_id TEXT,
   volume_id        TEXT,
   service_id       TEXT,
   release_id       TEXT,

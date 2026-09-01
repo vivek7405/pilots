@@ -51,11 +51,15 @@ type Machine struct {
 	AgentTokenHash string
 	MemBuildID     string
 	RootfsBuildID  string
-	VolumeID       string
-	ServiceID      string
-	ReleaseID      string
-	LastActivity   int64
-	UpdatedAt      int64
+	// The template this machine was built from. Its images are diffs against
+	// these, and restoring against any other template is corruption.
+	TemplateMemBuildID    string
+	TemplateRootfsBuildID string
+	VolumeID              string
+	ServiceID             string
+	ReleaseID             string
+	LastActivity          int64
+	UpdatedAt             int64
 }
 
 // Host is one member of the fleet. Every host heartbeats its own row; a row
@@ -236,14 +240,16 @@ func (s *sqliteStore) Close() error { return s.db.Close() }
 
 const machineCols = `id, name, host_id, state, kind_knobs, image_ref, vcpus, mem_mib,
 	domain, custom_domain, app_port, agent_port, agent_token_hash,
-	mem_build_id, rootfs_build_id, volume_id, service_id, release_id,
+	mem_build_id, rootfs_build_id, template_mem_build_id, template_rootfs_build_id,
+	volume_id, service_id, release_id,
 	last_activity, updated_at`
 
 func scanMachine(sc interface{ Scan(...any) error }) (*Machine, error) {
 	var m Machine
 	err := sc.Scan(&m.ID, &m.Name, &m.HostID, &m.State, &m.KindKnobs, &m.ImageRef,
 		&m.VCPUs, &m.MemMiB, &m.Domain, &m.CustomDomain, &m.AppPort, &m.AgentPort,
-		&m.AgentTokenHash, &m.MemBuildID, &m.RootfsBuildID, &m.VolumeID,
+		&m.AgentTokenHash, &m.MemBuildID, &m.RootfsBuildID,
+		&m.TemplateMemBuildID, &m.TemplateRootfsBuildID, &m.VolumeID,
 		&m.ServiceID, &m.ReleaseID, &m.LastActivity, &m.UpdatedAt)
 	return &m, err
 }
@@ -283,7 +289,7 @@ func (s *sqliteStore) ListMachines(ctx context.Context) ([]Machine, error) {
 func (s *sqliteStore) PutMachine(ctx context.Context, m *Machine, _ ...WriteOption) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO machines (`+machineCols+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			name=excluded.name, host_id=excluded.host_id, state=excluded.state,
 			kind_knobs=excluded.kind_knobs, image_ref=excluded.image_ref,
@@ -291,12 +297,15 @@ func (s *sqliteStore) PutMachine(ctx context.Context, m *Machine, _ ...WriteOpti
 			custom_domain=excluded.custom_domain, app_port=excluded.app_port,
 			agent_port=excluded.agent_port, agent_token_hash=excluded.agent_token_hash,
 			mem_build_id=excluded.mem_build_id, rootfs_build_id=excluded.rootfs_build_id,
+			template_mem_build_id=excluded.template_mem_build_id,
+			template_rootfs_build_id=excluded.template_rootfs_build_id,
 			volume_id=excluded.volume_id, service_id=excluded.service_id,
 			release_id=excluded.release_id, last_activity=excluded.last_activity,
 			updated_at=excluded.updated_at`,
 		m.ID, m.Name, m.HostID, m.State, m.KindKnobs, m.ImageRef, m.VCPUs, m.MemMiB,
 		m.Domain, m.CustomDomain, m.AppPort, m.AgentPort, m.AgentTokenHash,
-		m.MemBuildID, m.RootfsBuildID, m.VolumeID, m.ServiceID, m.ReleaseID,
+		m.MemBuildID, m.RootfsBuildID, m.TemplateMemBuildID, m.TemplateRootfsBuildID,
+		m.VolumeID, m.ServiceID, m.ReleaseID,
 		m.LastActivity, m.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("state: put machine %q: %w", m.ID, err)

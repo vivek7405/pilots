@@ -47,6 +47,16 @@ func (m *Manager) createFromTemplate(ctx context.Context, row *state.Machine, to
 		return nil, err
 	}
 
+	// Pin it. Every image this machine ever writes is a diff against this
+	// template, and the ranges it does not change resolve against the parent
+	// by offset -- so restoring it against a DIFFERENT template returns a
+	// guest stitched from two machines. Which template a host holds is not
+	// fleet-wide: it changes when the golden template is rebuilt, and a host
+	// whose cache was cleared mints its own. Recording it here is what lets
+	// any host restore this machine correctly, forever.
+	row.TemplateMemBuildID = t.MemBuildID.String()
+	row.TemplateRootfsBuildID = t.RootfsBuildID.String()
+
 	fcm, slot, err := m.restoreInstant(ctx, row, fc.Backends{
 		MemBuildID:        t.MemBuildID,
 		RootfsTemplateDir: m.rootfsTemplateDir(t),
@@ -71,7 +81,7 @@ func (m *Manager) createFromTemplate(ctx context.Context, row *state.Machine, to
 
 // wakeFromSuspend restores a machine from its own last suspend.
 func (m *Manager) wakeFromSuspend(ctx context.Context, row *state.Machine) (*fc.Machine, error) {
-	t, err := m.EnsureTemplate(ctx)
+	t, err := m.templateFor(ctx, row)
 	if err != nil {
 		return nil, err
 	}

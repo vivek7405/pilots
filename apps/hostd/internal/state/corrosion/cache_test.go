@@ -16,10 +16,10 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
-// machineRow renders one machine as the subscription's 20 columns.
+// machineRow renders one machine as the subscription's 22 columns.
 func machineRow(id, name, hostID, machineState string) string {
 	return fmt.Sprintf(
-		`["%s","%s","%s","%s","","",1,512,"%s.pilotrun.app","",8080,3001,"","","","","","",0,0]`,
+		`["%s","%s","%s","%s","","",1,512,"%s.pilotrun.app","",8080,3001,"","","","","","","","",0,0]`,
 		id, name, hostID, machineState, name)
 }
 
@@ -60,7 +60,7 @@ func startCache(t *testing.T, s *cacheServer) *Cache {
 				flushLine(w, `{"row":[1,`+row+`]}`)
 			}
 		} else {
-			flushLine(w, `{"columns":["id","name","host_id","state","kind_knobs","image_ref","vcpus","mem_mib","domain","custom_domain","app_port","agent_port","agent_token_hash","mem_build_id","rootfs_build_id","volume_id","service_id","release_id","last_activity","updated_at"]}`)
+			flushLine(w, `{"columns":["id","name","host_id","state","kind_knobs","image_ref","vcpus","mem_mib","domain","custom_domain","app_port","agent_port","agent_token_hash","mem_build_id","rootfs_build_id","template_mem_build_id","template_rootfs_build_id","volume_id","service_id","release_id","last_activity","updated_at"]}`)
 			for _, row := range s.machineRows {
 				flushLine(w, `{"row":[1,`+row+`]}`)
 			}
@@ -269,7 +269,7 @@ func TestCacheRebuildsWhenItsSubscriptionIsGone(t *testing.T) {
 		}
 
 		n := subscribes.Add(1)
-		flushLine(w, `{"columns":["id","name","host_id","state","kind_knobs","image_ref","vcpus","mem_mib","domain","custom_domain","app_port","agent_port","agent_token_hash","mem_build_id","rootfs_build_id","volume_id","service_id","release_id","last_activity","updated_at"]}`)
+		flushLine(w, `{"columns":["id","name","host_id","state","kind_knobs","image_ref","vcpus","mem_mib","domain","custom_domain","app_port","agent_port","agent_token_hash","mem_build_id","rootfs_build_id","template_mem_build_id","template_rootfs_build_id","volume_id","service_id","release_id","last_activity","updated_at"]}`)
 		for _, row := range rows {
 			flushLine(w, `{"row":[1,`+row+`]}`)
 		}

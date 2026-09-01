@@ -361,3 +361,55 @@ func (m *Manager) uploadBuild(ctx context.Context, id uuid.UUID) error {
 	}
 	return fc.UploadBuild(ctx, m.opts.Chunks, m.buildDir(), id)
 }
+
+// templateFor returns the template a machine's images are diffs against.
+//
+// NOT this host's current template. A machine's unchanged ranges resolve
+// against its parent by offset, so attaching a different template hands the
+// guest another machine's bytes -- and the two differ routinely: the golden
+// template is rebuilt, or a host that has never held one mints its own with
+// fresh ids. block.SetParent catches the mismatch and refuses, which turns
+// silent corruption into a failed restore; this is what stops the restore
+// failing in the first place.
+//
+// A machine created before the pin existed has no recorded template, and the
+// host's own is the only answer available. That is the pre-existing behaviour,
+// kept only for those rows.
+func (m *Manager) templateFor(ctx context.Context, row *state.Machine) (*Template, error) {
+	if row.TemplateMemBuildID == "" || row.TemplateRootfsBuildID == "" {
+		return m.EnsureTemplate(ctx)
+	}
+
+	memID, err := uuid.Parse(row.TemplateMemBuildID)
+	if err != nil {
+		return nil, fmt.Errorf("machines: machine %s names an unusable template memory build (%q): %w",
+			row.ID, row.TemplateMemBuildID, err)
+	}
+	rootfsID, err := uuid.Parse(row.TemplateRootfsBuildID)
+	if err != nil {
+		return nil, fmt.Errorf("machines: machine %s names an unusable template disk build (%q): %w",
+			row.ID, row.TemplateRootfsBuildID, err)
+	}
+
+	// The host's own template, when it happens to be the same one. Saves
+	// materialising what is already on disk, which is the common case.
+	if t, err := m.loadTemplate(); err == nil &&
+		t.MemBuildID == memID && t.RootfsBuildID == rootfsID {
+		return t, nil
+	}
+
+	// A template this host has never held. The builds are content-addressed
+	// and already in object storage, so this is a download rather than a
+	// rebuild -- the same path adoptFleetTemplate takes, and what makes a
+	// machine restorable on a host that has never seen its template.
+	for _, id := range []uuid.UUID{memID, rootfsID} {
+		if err := m.materializeBuild(ctx, id); err != nil {
+			return nil, fmt.Errorf("machines: fetch the template machine %s was built from: %w",
+				row.ID, err)
+		}
+	}
+
+	// The vmstate key is only needed to START from a template. A machine being
+	// woken or restored has its own snapshot and never reads the template's.
+	return &Template{MemBuildID: memID, RootfsBuildID: rootfsID}, nil
+}

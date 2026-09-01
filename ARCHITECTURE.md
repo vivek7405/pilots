@@ -218,6 +218,19 @@ not tmpfs) is bind-mounted onto the constant path
 `/srv/pilots/rootfs.ext4` inside that private mount ns. Every snapshot
 therefore restores against the same path on any host.
 
+**A machine is pinned to the template it was built from.** Its memory and disk
+images are diffs, and a diff's unchanged ranges name a logical offset rather
+than bytes, so they only mean anything against the exact build they were
+encoded against. The machine row therefore records `template_mem_build_id` and
+`template_rootfs_build_id` at create, and every later capture and restore uses
+*those* — never whichever template the acting host happens to hold. The two
+differ routinely: the golden template is rebuilt, or a host that has never held
+one mints its own with fresh ids. A host restoring a machine whose template it
+lacks materializes that template from object storage, which is a download
+because builds are content-addressed. `block.SetParent` verifies the pairing
+and refuses a mismatch, turning what would be a silently stitched guest into a
+failed restore.
+
 **The machine store must be on a filesystem that can share extents** (btrfs,
 or XFS made with `-m reflink=1`). This is a hard precondition, not a
 preference. Create reflinks the golden template and checkpoint reflinks the
