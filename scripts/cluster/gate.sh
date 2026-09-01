@@ -156,6 +156,7 @@ if [ -n "$NEW_IP" ]; then
   # this fleet started from is currently powered off.
   if PILOT_CORROSION_TOKEN="$PILOT_CORROSION_TOKEN" \
      PILOT_AGENT_TOKEN_SECRET="$PILOT_AGENT_TOKEN_SECRET" \
+     PILOT_FLEET_KEY="$PILOT_FLEET_KEY" \
      PILOT_S3_ENDPOINT="${PILOT_S3_ENDPOINT:-http://${NET_SUBNET}.1:9000}" \
      PILOT_S3_BUCKET="${PILOT_S3_BUCKET:-pilots}" \
      PILOT_S3_ACCESS_KEY="${PILOT_S3_ACCESS_KEY:-pilots}" \

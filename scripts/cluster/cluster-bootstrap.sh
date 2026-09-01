@@ -26,6 +26,12 @@ export PILOT_CORROSION_TOKEN="${PILOT_CORROSION_TOKEN:-$(head -c 32 /dev/urandom
 # Machine credentials are derived from this, so it must be identical on every
 # host: a rescuing host computes the token of a machine it has never held.
 export PILOT_AGENT_TOKEN_SECRET="${PILOT_AGENT_TOKEN_SECRET:-$(head -c 32 /dev/urandom | base64 | tr -d '=/+')}"
+# Seals secret env before it is written to a replicated row, and must be
+# identical on every host: a host with a different one cannot open what its
+# peers wrote, which surfaces at the first rescue rather than at bootstrap.
+# Full base64 here, unlike the two above -- it is a 32-byte AES key, not an
+# opaque string, so the padding matters.
+export PILOT_FLEET_KEY="${PILOT_FLEET_KEY:-$(head -c 32 /dev/urandom | base64)}"
 export PILOT_S3_ENDPOINT="${PILOT_S3_ENDPOINT:-http://${NET_SUBNET}.1:9000}"
 export PILOT_S3_BUCKET="${PILOT_S3_BUCKET:-pilots}"
 export PILOT_S3_ACCESS_KEY="${PILOT_S3_ACCESS_KEY:-pilots}"
@@ -100,11 +106,12 @@ done
 # safe to re-run, and appending leaves several generations of the same
 # variable in the file -- the last one wins on `source`, so a stale rerun
 # reads correctly and looks corrupt, which is the worst of both.
-grep -vE '^(PILOT_CORROSION_TOKEN|PILOT_AGENT_TOKEN_SECRET|FIRST_MESH)=' \
+grep -vE '^(PILOT_CORROSION_TOKEN|PILOT_AGENT_TOKEN_SECRET|PILOT_FLEET_KEY|FIRST_MESH)=' \
   "$STATE_FILE" > "${STATE_FILE}.tmp"
 {
   echo "PILOT_CORROSION_TOKEN=${PILOT_CORROSION_TOKEN}"
   echo "PILOT_AGENT_TOKEN_SECRET=${PILOT_AGENT_TOKEN_SECRET}"
+  echo "PILOT_FLEET_KEY=\"${PILOT_FLEET_KEY}\""
   echo "FIRST_MESH=${FIRST_MESH}"
 } >> "${STATE_FILE}.tmp"
 mv "${STATE_FILE}.tmp" "$STATE_FILE"
