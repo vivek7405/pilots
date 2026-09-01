@@ -133,16 +133,52 @@ func TestSolveUsesTheTarExporterAndMachineReadableProgress(t *testing.T) {
 func TestSolveArgsWireUpTheSharedCache(t *testing.T) {
 	b := &Builder{opts: Options{
 		CacheBucket: "pilots", CacheEndpoint: "https://ep", CacheRegion: "auto",
+		CacheAccessKey: "ak", CacheSecretKey: "sk",
 	}}
 	joined := strings.Join(b.solveArgs("/ctx", "/out.tar", "df-abc"), " ")
 
+	base := "type=s3,bucket=pilots,endpoint_url=https://ep,region=auto,name=df-abc," +
+		"use_path_style=true,access_key_id=ak,secret_access_key=sk"
 	for _, want := range []string{
-		"--export-cache type=s3,bucket=pilots,endpoint_url=https://ep,region=auto,name=df-abc,mode=max",
-		"--import-cache type=s3,bucket=pilots,endpoint_url=https://ep,region=auto,name=df-abc",
+		"--export-cache " + base + ",mode=max",
+		"--import-cache " + base,
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing %q in %s", want, joined)
 		}
+	}
+}
+
+// The cache backend runs inside buildkitd, which has no credentials of its
+// own and no way to acquire any: it is rootless, runs as another user, and
+// knows nothing of hostd's configuration. Without these attributes it reaches
+// for the EC2 metadata service and fails the build on a context deadline that
+// names IMDS rather than the cache.
+func TestTheCacheCarriesItsOwnCredentials(t *testing.T) {
+	b := &Builder{opts: Options{
+		CacheBucket: "pilots", CacheEndpoint: "https://ep", CacheRegion: "auto",
+		CacheAccessKey: "ak", CacheSecretKey: "sk",
+	}}
+	joined := strings.Join(b.solveArgs("/ctx", "/out.tar", "df-abc"), " ")
+
+	for _, want := range []string{"access_key_id=ak", "secret_access_key=sk", "use_path_style=true"} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("the cache spec is missing %q: %s", want, joined)
+		}
+	}
+}
+
+// No credentials configured means no credential attributes, rather than empty
+// ones: an empty access_key_id is a different request from an absent one, and
+// the daemon's own chain is the right fallback on a host that has one.
+func TestTheCacheOmitsAbsentCredentials(t *testing.T) {
+	b := &Builder{opts: Options{
+		CacheBucket: "pilots", CacheEndpoint: "https://ep", CacheRegion: "auto",
+	}}
+	joined := strings.Join(b.solveArgs("/ctx", "/out.tar", "df-abc"), " ")
+
+	if strings.Contains(joined, "access_key_id") {
+		t.Errorf("an empty credential was sent: %s", joined)
 	}
 }
 
