@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net/netip"
+	"sort"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/mesh"
@@ -91,6 +92,7 @@ func runTenantFilter(ctx context.Context, hostID string, view fleetView, loc *me
 // tenantRules turns the fleet's rows into the filter's desired state.
 func tenantRules(hostID string, view fleetView, loc *mesh.Locator) netns.TenantRules {
 	rules := netns.TenantRules{Apps: map[string][]netip.Addr{}}
+	local := map[int][]state.Machine{}
 
 	for _, m := range view.Machines() {
 		addr, ok := loc.MachineAddress(m)
@@ -103,10 +105,49 @@ func tenantRules(hostID string, view fleetView, loc *mesh.Locator) netns.TenantR
 			rules.Apps[m.App] = append(rules.Apps[m.App], addr)
 		}
 		if m.HostID == hostID {
-			rules.Local = append(rules.Local, netns.TenantMachine{
-				SlotIdx: m.Slot, Addr: addr, App: m.App,
-			})
+			local[m.Slot] = append(local[m.Slot], m)
 		}
 	}
+
+	// One slot, one machine. Two rows claiming the same slot is not a
+	// hypothetical: a slot is reused once its previous occupant is gone, so a
+	// row that outlives the machine it describes -- a destroy that never
+	// replicated, a host that lost its state and rebuilt -- collides with the
+	// slot's real occupant.
+	//
+	// It has to be resolved HERE rather than left to the rule builder, because
+	// the rules are keyed by slot and both machines' blocks would be written
+	// to the same veth. They are not equivalent blocks: a machine with no app
+	// gets an unconditional drop, which lands last and shadows the app-aware
+	// accept written for the real occupant above it. The live machine goes
+	// unreachable while every rule on the host reads as correct on its own.
+	//
+	// The most recently written row wins. A live machine's row keeps being
+	// touched by the host that owns it; a row that outlived its machine stops
+	// changing at the moment it went stale, so the freshest write is the best
+	// evidence available here of which claimant still exists.
+	for slot, claimants := range local {
+		winner := claimants[0]
+		for _, m := range claimants[1:] {
+			if m.UpdatedAt > winner.UpdatedAt || (m.UpdatedAt == winner.UpdatedAt && m.ID > winner.ID) {
+				winner = m
+			}
+		}
+		if len(claimants) > 1 {
+			slog.Error("two machines claim one slot; filtering for the newest. "+
+				"A row has outlived the machine it describes, and the slot has "+
+				"since been reused",
+				"slot", slot, "claimants", len(claimants), "using", winner.ID)
+		}
+		addr, _ := loc.MachineAddress(winner)
+		rules.Local = append(rules.Local, netns.TenantMachine{
+			SlotIdx: winner.Slot, Addr: addr, App: winner.App,
+		})
+	}
+
+	// Ordered, so the ruleset a host writes is a function of the fleet's state
+	// and not of map iteration -- otherwise every tick rewrites the chain in a
+	// new order and no two hosts can be compared.
+	sort.Slice(rules.Local, func(i, j int) bool { return rules.Local[i].SlotIdx < rules.Local[j].SlotIdx })
 	return rules
 }
