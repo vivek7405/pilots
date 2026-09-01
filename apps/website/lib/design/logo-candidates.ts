@@ -152,6 +152,42 @@ export const CANDIDATES: Candidate[] = [
     `,
   },
   {
+    id: 'delta-half',
+    name: 'Delta half',
+    idea:
+      'Delta 90 opened along its own axis, so the flyer is two mirror halves rather than one body. The tail notch already began that split and the cut only carries it through to the tip.',
+    cost:
+      'Nothing joins the halves, so the mark depends entirely on the reader closing the gap themselves. It is also the one drawing here with no solid mass at all, which is what a favicon has the least of to work with.',
+    art: () => html`
+      <!-- The cut sits INSIDE the skew, unlike the partition on the two cards
+           above, and that is the whole trick. The delta is symmetric about
+           x = 16 before it is leaned (its apex and its notch both sit on that
+           line), so a vertical band there halves it exactly. Being inside the
+           skew, the band leans with the drawing and therefore follows the
+           mark's own axis rather than the tile's, which is what makes it run
+           tip to tail instead of merely crossing the shape.
+
+           The quarter turn then lays that axis over, so the cut reads
+           horizontal in the rendered mark.
+
+           The band runs into the tail notch, which is already a void on the
+           same line. The two join, and the halves come apart cleanly rather
+           than staying pinned together at the back.
+
+           There is no second partition here. Keeping the one from Delta 90 as
+           well would cross this at right angles and leave four pieces, and the
+           brief was two halves. -->
+      <g transform="rotate(90 16 16)">
+        <g transform="translate(5.4 0)">
+          <g transform="skewX(-11)">
+            <path d="M16 3.8 L26.8 27.6 L16 21.4 L5.2 27.6 Z" fill=${ACCENT_INK} />
+            <rect x="15" y="2" width="2" height="28" fill="var(--logo-bg)" />
+          </g>
+        </g>
+      </g>
+    `,
+  },
+  {
     id: 'two-faces',
     name: 'Two faces',
     idea:
