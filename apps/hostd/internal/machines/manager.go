@@ -441,9 +441,6 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 	// The guest must write out its page cache before we capture the disk, or
 	// the memory and disk images disagree about recent writes.
 	m.flushGuestDisk(ctx, id)
-	// A suspended machine has no namespace and no address, so it must stop
-	// being resolvable before it stops existing.
-	m.releaseDiscovery(id)
 
 	// The template this machine was built from, not this host's current one.
 	// A suspend writes a DIFF, and its base is recorded in the header, so
@@ -466,6 +463,11 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 	if slotIdx > 0 {
 		m.pool.Return(slotIdx)
 	}
+	// A suspended machine holds no namespace and no address, so it stops being
+	// resolvable here -- AFTER the snapshot succeeded, not before. A suspend
+	// that failed leaves the machine running and serving, and it must keep
+	// answering its own guest's lookups.
+	m.releaseDiscovery(id)
 
 	// The builds this suspend replaces. Nothing else can be reading them: a
 	// checkpoint mints its own ids, so a machine's suspend builds are named by

@@ -318,25 +318,3 @@ func concat(parts ...[]expr.Any) []expr.Any {
 	}
 	return out
 }
-
-// TenantFilterInstalled reports whether the root namespace currently carries
-// the filter. Used by tests and by the health surface; a host forwarding guest
-// traffic with no filter is a tenant boundary that is simply absent.
-func TenantFilterInstalled() (bool, error) {
-	c, err := nftables.New()
-	if err != nil {
-		return false, err
-	}
-	defer c.CloseLasting()
-
-	tables, err := c.ListTables()
-	if err != nil {
-		return false, err
-	}
-	for _, t := range tables {
-		if t.Name == tenantTable && t.Family == nftables.TableFamilyINet {
-			return true, nil
-		}
-	}
-	return false, nil
-}
