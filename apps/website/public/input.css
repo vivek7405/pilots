@@ -101,7 +101,7 @@
   --font-mono: var(--font-mono);
 
   /* Fluid type. Named once here rather than repeated as inline clamps. */
-  --text-display: clamp(2.6rem, 1.3rem + 4.6vw, 4.9rem);
+  --text-display: clamp(2.35rem, 1.5rem + 2.9vw, 3.85rem);
   --text-h2:      clamp(1.65rem, 1.15rem + 1.5vw, 2.4rem);
   --text-h3:      clamp(1.15rem, 1rem + 0.5vw, 1.4rem);
   --text-lede:    clamp(1.1rem, 1rem + 0.5vw, 1.35rem);
@@ -146,10 +146,16 @@
    any zoom. Masked so it fades out rather than ending on a hard edge. */
 .blueprint {
   background-image:
-    repeating-linear-gradient(to right,  var(--rule) 0 1px, transparent 1px 72px),
-    repeating-linear-gradient(to bottom, var(--rule) 0 1px, transparent 1px 72px);
-  mask-image: radial-gradient(120% 90% at 12% 0%, #000 12%, transparent 72%);
-  opacity: 0.55;
+    repeating-linear-gradient(to right,  var(--rule) 0 1px, transparent 1px 22px),
+    repeating-linear-gradient(to bottom, var(--rule) 0 1px, transparent 1px 22px);
+  /* Fine graph paper, faded on a diagonal. Three passes to get here, and the
+     failures are worth recording: a 72px cell at high opacity fought the
+     headline, and an 88px cell behind a radial mask cut off mid-cell so it
+     read as a scatter of stray rectangles rather than a surface. The cell has
+     to be small enough that a partial one at the fade edge is invisible, which
+     is what makes the texture read as paper instead of as a rendering bug. */
+  mask-image: linear-gradient(155deg, #000 0%, rgba(0, 0, 0, 0.35) 32%, transparent 62%);
+  opacity: 0.7;
 }
 
 /* A pulsing live dot. The ONLY animation on the site, because it is the one

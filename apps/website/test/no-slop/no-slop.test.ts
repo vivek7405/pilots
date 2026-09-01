@@ -90,6 +90,41 @@ function visibleText(src: string): string {
     .replace(/<[^>]+>/g, ' '); // tags, leaving text nodes
 }
 
+
+/**
+ * Everywhere a numeric claim can reach a reader.
+ *
+ * Markup alone is not enough, and finding that out was worth a rule change.
+ * The roadmap page holds its phase gates ("under 500 milliseconds") in a plain
+ * data array that html`` renders later, so scanning templates declared the
+ * page clean while unsourced numbers sat on it. Anything a page can print has
+ * to be scanned, not just the syntax it happens to print it with.
+ *
+ * So PROSE string literals are scanned too. Deciding what counts as prose is
+ * the whole problem, and two false-positive families taught the rule:
+ *
+ *   class="${FOO} m-0 mb-2"     an attribute value INSIDE a template, read as
+ *                               the literal " m-0 mb-2" and flagged as "0 mb"
+ *   'public, max-age=60, …'     a Cache-Control header, flagged as "60, s"
+ *
+ * Both are fixed by the same observation: prose has SENTENCE punctuation and
+ * configuration does not. Templates are removed first so attribute values are
+ * never candidates, then a literal qualifies only if it contains a full stop
+ * followed by a space or ending it. A Tailwind class list never does. A header
+ * value never does. A sentence always does.
+ */
+function claimSurfaces(src: string): string[] {
+  const out = [visibleText(src)];
+  // Remove templates: their attribute values are markup, already covered.
+  const bare = stripComments(src).replace(/html`[\s\S]*?`/g, ' ');
+  for (const m of bare.matchAll(/'([^'\\\n]*)'|"([^"\\\n]*)"/g)) {
+    const text = m[1] ?? m[2] ?? '';
+    const isSentence = /\s/.test(text) && /[.!?](\s|$)/.test(text);
+    if (isSentence) out.push(text);
+  }
+  return out;
+}
+
 // AGENTS.md invariant 5. Generated marketing prose reaches for these first.
 const BANNED_WORDS = [
   'blazing fast', 'blazingly fast', 'seamlessly', 'seamless', 'effortlessly',
@@ -162,8 +197,10 @@ test('invariant 1: every measured claim carries provenance', () => {
   const CLAIM = /\b\d[\d,.]*\s?(ms|µs|s|x|%|GB|MB|TB|KB|×|milliseconds?|seconds?|minutes?)\b/i;
   const hits: string[] = [];
   for (const { rel, src } of FILES) {
-    const m = CLAIM.exec(visibleText(src));
-    if (m) hits.push(`${rel}: "${m[0]}" — wrap it in <data data-source="…">`);
+    for (const text of claimSurfaces(src)) {
+      const m = CLAIM.exec(text);
+      if (m) hits.push(`${rel}: "${m[0]}" — put it in lib/facts.ts and render it through #lib/ui/stat.ts`);
+    }
   }
   assert.deepEqual(hits, [], `Unsourced numeric claim (AGENTS.md invariant 1):\n${hits.join('\n')}`);
 });

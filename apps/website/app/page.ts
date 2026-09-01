@@ -50,7 +50,7 @@ export default function Home() {
       <div class="blueprint absolute inset-0 pointer-events-none" aria-hidden="true"></div>
 
       <div class="relative max-w-6xl mx-auto px-6 pt-16 pb-20 mid:pt-24 mid:pb-28">
-        <div class="grid gap-12 wide:grid-cols-[1.05fr_1fr] wide:gap-16 wide:items-center">
+        <div class="grid gap-12 wide:grid-cols-[1.1fr_1fr] wide:gap-14 wide:items-center">
           <div>
             <p class="${FIELD_LABEL} m-0 mb-5">Firecracker microVMs on bare metal</p>
 

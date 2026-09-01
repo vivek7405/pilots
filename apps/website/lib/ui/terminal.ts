@@ -39,13 +39,12 @@ export function terminal(title: string, lines: Line[]) {
   return html`
     <div class="rounded border border-rule bg-paper-sunken overflow-hidden">
       <div class="flex items-center gap-2 px-3 h-9 border-b border-rule bg-paper-elev">
-        <!-- Two hairline squares, not the three coloured circles. The circles
-             are a macOS chrome pastiche that every generated landing page
-             ships; these read as a technical window without borrowing anyone's
-             UI. -->
-        <span class="w-2 h-2 border border-rule-strong rounded-[1px]"></span>
-        <span class="w-2 h-2 border border-rule-strong rounded-[1px]"></span>
-        <span class="font-mono text-[11px] text-ink-subtle ml-1 truncate">${title}</span>
+        <!-- A single hairline dash, not three coloured circles. The circles are
+             a macOS pastiche every generated landing page ships, and the first
+             pass here used two outlined squares which read as unticked
+             checkboxes. One mark is enough to say "window". -->
+        <span class="w-4 h-px bg-rule-strong shrink-0" aria-hidden="true"></span>
+        <span class="font-mono text-[11px] text-ink-subtle truncate">${title}</span>
       </div>
       <pre class="m-0 p-4 overflow-x-auto scroll-thin font-mono text-[13px] leading-[1.75]"><code>${lines.map(
         (l) => html`<span class="block ${LINE_CLASS[l.kind]}">${
