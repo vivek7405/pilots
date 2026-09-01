@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/vivek7405/pilots/hostd/internal/fc"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -300,5 +301,41 @@ func TestMachineVolumeLeavesCacheTypeEmptyWhenNothingIsRunning(t *testing.T) {
 	}
 	if got.MountPath != "/data" || got.VolumeID != "vol-1" {
 		t.Fatalf("got %+v", got)
+	}
+}
+
+// The partitioned-host case. This host comes back to find its machine rescued
+// elsewhere, so it stops the local copy -- and has to let go of the volume's
+// filesystem too. Killing Firecracker does not: the juicefs mount survives,
+// still holding the metadata database this host had, and writes into the same
+// object-storage prefix behind the new owner's back.
+func TestStopLocalReleasesTheVolumeFilesystem(t *testing.T) {
+	ctx := context.Background()
+	m, fv, st := newVolumeTestManager(t)
+
+	if err := st.PutMachine(ctx, &state.Machine{
+		ID: "m-1", HostID: "host-b", VolumeID: "vol-1", State: StateRunning,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// A registry entry with no process behind it is enough: what is asserted
+	// is what happens after the kill, not the kill.
+	m.put("m-1", &fc.Machine{ID: "m-1"})
+
+	if err := m.StopLocal(ctx, "m-1"); err != nil {
+		t.Fatalf("StopLocal: %v", err)
+	}
+	if len(fv.detached) != 1 || fv.detached[0] != "vol-1" {
+		t.Fatalf("the volume was not released: %v", fv.detached)
+	}
+
+	// And the row is untouched: it belongs to the rescuer now, and writing to
+	// it is the single-writer violation this path is cleaning up after.
+	row, err := st.GetMachine(ctx, "m-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.HostID != "host-b" || row.VolumeID != "vol-1" {
+		t.Fatalf("StopLocal wrote to a row it does not own: %+v", *row)
 	}
 }

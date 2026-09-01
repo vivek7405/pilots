@@ -2,6 +2,7 @@ package machines
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -277,7 +278,7 @@ func (m *Manager) Rescue(ctx context.Context, row state.Machine) error {
 // processes and releases the slot WITHOUT touching the row: the row already
 // belongs to someone else, and writing to it would be the single-writer
 // violation this is cleaning up after.
-func (m *Manager) StopLocal(_ context.Context, id string) error {
+func (m *Manager) StopLocal(ctx context.Context, id string) error {
 	lock := m.lockFor(id)
 	lock.Lock()
 	defer lock.Unlock()
@@ -295,6 +296,21 @@ func (m *Manager) StopLocal(_ context.Context, id string) error {
 	m.drop(id)
 	if slotIdx > 0 {
 		m.pool.Return(slotIdx)
+	}
+
+	// And let go of its volume's filesystem, which killing Firecracker does
+	// not do. This host was partitioned and the machine has been rescued
+	// elsewhere, so the rescuer has already restored that volume's metadata
+	// and mounted it -- and a second juicefs mount here, still holding the
+	// database this host had, writes into the same object-storage prefix
+	// behind the new owner's back. Nothing about the row: it belongs to
+	// someone else now, and writing to it is the violation this is cleaning
+	// up after.
+	if row, rerr := m.opts.Store.GetMachine(ctx, id); rerr == nil &&
+		row.VolumeID != "" && m.opts.Volumes != nil {
+		if verr := m.opts.Volumes.Detach(ctx, row.VolumeID); verr != nil {
+			err = errors.Join(err, fmt.Errorf("release volume %s: %w", row.VolumeID, verr))
+		}
 	}
 	return err
 }
