@@ -307,16 +307,15 @@ export const DELTA_PS: DeltaP[] = [
     id: 'raked-half-p',
     name: 'Turned to the letters half P',
     idea:
-      'The halved lockup with a second hairline cutting the stem free of the plane. Same weight as the cut already in the plane, and set parallel to the plane\'s bottom flap rather than to that cut, so it reads as the edge the stem is lying against rather than as a slash across it. The angle is derived from the flap, not typed in.',
+      'The plane left whole, with one hairline cutting the stem free of it. The cut runs parallel to the plane\'s bottom flap and sits on that flap\'s own line, so it restores the outline as a real edge and leaves the stem lying against it. The angle is derived from the flap rather than typed in.',
     cost:
-      'A hairline is the first thing a reproduction loses. This one closes before the plane\'s does, because it sits where two shapes already meet, and once it shuts the stem is welded back on.',
+      'One hairline is now carrying the whole idea. A hairline is the first thing a reproduction loses, and this one sits where two shapes already meet, so it closes early. Once it shuts the stem is welded back on and the mark is a plane on a post again.',
     rotate: 64,
     size: 5.2,
     cx: 50,
     cy: -12.5,
     stemW: 15,
     stem: 'baseline',
-    halved: true,
     crack: { cx: 29.2, cy: 58.8, len: 34 },
   },
   {
