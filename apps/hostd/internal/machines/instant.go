@@ -206,6 +206,11 @@ func (m *Manager) restore(ctx context.Context, row *state.Machine, backends fc.B
 		return nil, nil, err
 	}
 
+	// Every restore lands here -- create, wake, rescue, checkpoint rollback --
+	// so this is the one place a namespace becomes servable, and the one place
+	// the responder has to follow it to.
+	m.bindDiscovery(row.ID, slot)
+
 	if err := fcm.Persist(); err != nil {
 		// Not fatal: the machine is running and serving. But a restart will
 		// not re-adopt it, which is worth shouting about.
@@ -295,6 +300,7 @@ func (m *Manager) StopLocal(ctx context.Context, id string) error {
 	if fcm.Slot != nil {
 		slotIdx = fcm.Slot.Idx
 	}
+	m.releaseDiscovery(id)
 
 	err := fcm.Kill()
 	m.drop(id)

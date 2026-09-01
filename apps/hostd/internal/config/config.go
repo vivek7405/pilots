@@ -78,6 +78,11 @@ type Config struct {
 	// gossip rides the mesh.
 	MeshBootstrap string // PILOT_MESH_BOOTSTRAP
 
+	// DNSUpstream is where queries that are not under .internal go, as a
+	// comma-separated list. Forwarded from the ROOT namespace, so these are
+	// resolvers the HOST can reach rather than ones a guest could.
+	DNSUpstream string // PILOT_DNS_UPSTREAM
+
 	// AgentTokenSecret is what per-machine guest credentials are DERIVED
 	// from, fleet-wide. It is what lets a machine be rescued and still be
 	// reachable: the host that takes it over has never held that machine's
@@ -160,6 +165,7 @@ func Load() (*Config, error) {
 		MeshEnabled:    os.Getenv("PILOT_MESH_ENABLED") == "1",
 		MeshBootstrap:  os.Getenv("PILOT_MESH_BOOTSTRAP"),
 
+		DNSUpstream:      env("PILOT_DNS_UPSTREAM", "1.1.1.1:53,8.8.8.8:53"),
 		AgentTokenSecret: os.Getenv("PILOT_AGENT_TOKEN_SECRET"),
 	}
 

@@ -25,6 +25,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/block"
 	"github.com/vivek7405/pilots/hostd/internal/build"
 	"github.com/vivek7405/pilots/hostd/internal/config"
+	"github.com/vivek7405/pilots/hostd/internal/dns"
 	"github.com/vivek7405/pilots/hostd/internal/fc"
 	"github.com/vivek7405/pilots/hostd/internal/machines"
 	"github.com/vivek7405/pilots/hostd/internal/mesh"
@@ -163,6 +164,27 @@ func run() error {
 			AccessKey: cfg.S3AccessKey,
 			SecretKey: cfg.S3SecretKey,
 		})
+	// The fleet's view of itself, and the rule that turns a row into an
+	// address. The tenant filter and the DNS responder read the SAME view, or
+	// a machine could be resolvable and unreachable at the same instant.
+	var view fleetView = storeView{store: store}
+	if cache != nil {
+		view = cache
+	}
+	locator := mesh.NewLocator(cfg.HostID, meshKeys.Public, view)
+
+	// The .internal responder. Built here because the machine manager tells it
+	// when a namespace appears; a host with no mesh identity gets none, and
+	// its machines simply have nothing to resolve.
+	var discovery machines.Discovery
+	if machinePrefix.IsValid() {
+		upstreams, err := dns.ParseUpstreams(cfg.DNSUpstream)
+		if err != nil {
+			return err
+		}
+		responder := dns.New(dns.NewFleetResolver(view, locator), upstreams)
+		defer responder.Close()
+		discovery = responder
 	}
 
 	mgr := machines.New(machines.Options{
@@ -182,6 +204,7 @@ func run() error {
 		AgentTokenSecret: cfg.AgentTokenSecret,
 		Volumes:          volumeManager,
 		MachinePrefix:    machinePrefix,
+		Discovery:        discovery,
 		FCConfig: fc.Config{
 			KernelPath:     cfg.KernelPath,
 			TemplateRootfs: cfg.TemplateRootfs,
@@ -252,16 +275,6 @@ func run() error {
 			f.dev, f.keys = dev, meshKeys
 		}
 	}
-
-	// The fleet's view of itself, and the rule that turns a row into an
-	// address. Both the tenant filter and the DNS responder read them, and
-	// both must read the SAME view or a machine can be resolvable and
-	// unreachable at once.
-	var view fleetView = storeView{store: store}
-	if f != nil && f.cache != nil {
-		view = f.cache
-	}
-	locator := mesh.NewLocator(cfg.HostID, meshKeys.Public, view)
 
 	if machinePrefix.IsValid() {
 		go runTenantFilter(ctx, cfg.HostID, view, locator)

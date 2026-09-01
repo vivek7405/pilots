@@ -233,6 +233,24 @@ func newNamedNS(name string) (vnetns.NsHandle, error) {
 	return handle, nil
 }
 
+// Do runs fn with the calling thread inside a machine's network namespace.
+//
+// This exists for the same reason the tap is created the way it is: a socket
+// belongs to the namespace of the THREAD that created it, and no handle or
+// option changes that. hostd binds the .internal responder on the guest's
+// gateway address, which only exists inside the namespace, so the bind has to
+// happen from in there. Everything afterwards -- accepting, reading, answering
+// -- runs wherever the scheduler puts it, because the socket already carries
+// the namespace with it.
+func Do(netnsName string, fn func() error) error {
+	handle, err := vnetns.GetFromName(netnsName)
+	if err != nil {
+		return fmt.Errorf("netns: open %s: %w", netnsName, err)
+	}
+	defer handle.Close()
+	return withNetns(handle, fn)
+}
+
 // withNetns runs fn with the calling thread inside ns, restoring the previous
 // namespace afterwards. Used only where an operation reads or writes /proc,
 // which is thread-namespace-scoped; link and route work goes through a netlink

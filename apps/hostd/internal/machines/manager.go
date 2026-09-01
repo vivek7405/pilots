@@ -39,6 +39,20 @@ const (
 	StateError     = "error"
 )
 
+// Discovery is notified about the lifetime of a machine's namespace.
+//
+// An interface so the lifecycle does not depend on what is listening in there
+// -- and so a host with nothing to discover simply has none, rather than a
+// responder resolving names for a fleet of one that has no peers.
+type Discovery interface {
+	// Bind starts serving inside a namespace that has just been built.
+	Bind(machineID, netnsName string) error
+	// Release stops, before the namespace is torn down. A responder left
+	// bound to a namespace that no longer exists is a goroutine per machine
+	// for the life of the process.
+	Release(machineID string)
+}
+
 // ErrNotFound wraps the store's sentinel so errors.Is works across the
 // package boundary and the API layer can map it to a 404 without importing
 // this package.
@@ -77,6 +91,12 @@ type Options struct {
 	// object storage, where every volume operation is refused up front rather
 	// than failing somewhere inside a create.
 	Volumes VolumeManager
+	// Discovery follows a machine's network namespace: it is told when one
+	// appears and when it goes away, so the .internal responder can bind a
+	// socket inside it. Nil on a host with no mesh identity, where there is
+	// nothing for a name to resolve to.
+	Discovery Discovery
+
 	// MachinePrefix is this host's block of mesh addresses, derived from its
 	// WireGuard key. Every slot's address comes out of it, so a host without
 	// one runs machines that cannot reach a peer -- correct on a single box,
@@ -269,6 +289,8 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 
 	var errs []error
 
+	m.releaseDiscovery(id)
+
 	if fcm, ok := m.get(id); ok {
 		// The copy-on-write file holds every write since the last snapshot.
 		// Destroy is the ONLY point at which discarding it is correct.
@@ -401,6 +423,9 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 	// The guest must write out its page cache before we capture the disk, or
 	// the memory and disk images disagree about recent writes.
 	m.flushGuestDisk(ctx, id)
+	// A suspended machine has no namespace and no address, so it must stop
+	// being resolvable before it stops existing.
+	m.releaseDiscovery(id)
 
 	// The template this machine was built from, not this host's current one.
 	// A suspend writes a DIFF, and its base is recorded in the header, so
@@ -520,6 +545,29 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 	return m.opts.Store.PutMachine(ctx, row)
 }
 
+// bindDiscovery starts the .internal responder inside a machine's namespace.
+//
+// Never fatal to the operation that triggered it. A machine whose responder
+// failed to bind is running, routable and serving; it simply cannot resolve
+// its peers by name, which is worth an error line and is not worth killing a
+// guest over.
+func (m *Manager) bindDiscovery(machineID string, slot *netns.Slot) {
+	if m.opts.Discovery == nil || slot == nil {
+		return
+	}
+	if err := m.opts.Discovery.Bind(machineID, slot.NetnsName); err != nil {
+		slog.Error("could not serve .internal inside this machine; it will not "+
+			"resolve its peers by name", "machine", machineID, "err", err)
+	}
+}
+
+// releaseDiscovery stops the responder before the namespace goes away.
+func (m *Manager) releaseDiscovery(machineID string) {
+	if m.opts.Discovery != nil {
+		m.opts.Discovery.Release(machineID)
+	}
+}
+
 // Adopt re-registers a machine that survived a hostd restart.
 //
 // Reserving the slot does two things at once: it stops the pool handing that
@@ -538,6 +586,10 @@ func (m *Manager) Adopt(id string, fcm *fc.Machine, slotIdx int) error {
 	}
 	fcm.Slot = slot
 	m.put(id, fcm)
+	// The previous hostd's responder died with it, so an adopted machine has a
+	// namespace with nothing listening on its DNS port. Without this, every
+	// machine that survived a restart resolves nothing until it next moves.
+	m.bindDiscovery(id, slot)
 	return nil
 }
 
