@@ -3,7 +3,6 @@ import { section } from '#lib/ui/section.ts';
 import { pageHero } from '#lib/ui/page-hero.ts';
 import { PROSE, FIELD_LABEL, PANEL } from '#lib/design/recipes.ts';
 import { CANDIDATES, markSvg, type Candidate } from '#lib/design/logo-candidates.ts';
-import { FUSIONS, fusionMark, type Fusion } from '#lib/design/logo-fusions.ts';
 import { DELTA_PS, deltaPMark, deltaPLockup, type DeltaP } from '#lib/design/delta-p.ts';
 
 /**
@@ -146,42 +145,6 @@ function headerMock(c: Candidate) {
 }
 
 /**
- * A fusion monogram card. Tighter than a candidate card: these four are four
- * drawings of ONE idea, so the review question is which construction survives,
- * not which concept wins.
- */
-function fusionCard(f: Fusion) {
-  return html`
-    <article class="${PANEL} overflow-hidden flex flex-col">
-      <div class="flex border-b border-rule">
-        <div class="lab-dark flex-1 aspect-4/3 grid place-items-center">${fusionMark(f, 58)}</div>
-        <div class="lab-light flex-1 aspect-4/3 grid place-items-center">${fusionMark(f, 58)}</div>
-      </div>
-      <div class="p-5 flex flex-col gap-3.5 flex-1">
-        <div class="flex items-baseline justify-between gap-3">
-          <h3 class="text-h3 font-bold m-0">${f.name}</h3>
-          <code class="font-mono text-xs text-ink-subtle">${f.initial}</code>
-        </div>
-        <div class="lab-paper flex items-end gap-4 border-y border-rule py-3">
-          ${SMALL_SIZES.map(
-            (px) => html`
-              <span class="flex flex-col items-center gap-1.5">
-                ${fusionMark(f, px)}
-                <span class="font-mono text-[10px] text-ink-subtle leading-none">${px}px</span>
-              </span>
-            `,
-          )}
-        </div>
-        <p class="${PROSE} text-sm m-0">${f.idea}</p>
-        <p class="text-sm text-ink-subtle leading-[1.65] m-0 mt-auto pt-1">
-          <span class="text-ink font-semibold">The cost.</span> ${f.cost}
-        </p>
-      </div>
-    </article>
-  `;
-}
-
-/**
  * One delta-P, shown as the two things it has to be at once: a monogram on its
  * own, and the first letter of the word. Both are the same paths, so a variant
  * that only works in one of the two has failed.
@@ -213,15 +176,15 @@ function deltaPCard(v: DeltaP) {
           )}
         </div>
         <div class="py-5 flex flex-wrap items-center gap-x-6 gap-y-3">
-          ${deltaPLockup(v, { height: 40, face: 'sans', sliced: true, leanWord: true })}
+          ${deltaPLockup(v, { height: 40, face: 'sans', sliced: true })}
           <span class=${FIELD_LABEL}>sliced</span>
         </div>
         <div class="py-5 flex flex-wrap items-center gap-x-6 gap-y-3">
-          ${deltaPLockup(v, { height: 40, face: 'sans', sliced: false, leanWord: true })}
+          ${deltaPLockup(v, { height: 40, face: 'sans', sliced: false })}
           <span class=${FIELD_LABEL}>whole</span>
         </div>
         <div class="py-5 flex flex-wrap items-center gap-x-6 gap-y-3">
-          ${deltaPLockup(v, { height: 20, face: 'sans', sliced: true, leanWord: true })}
+          ${deltaPLockup(v, { height: 20, face: 'sans', sliced: true })}
           <span class=${FIELD_LABEL}>at header size</span>
         </div>
       </div>
@@ -319,46 +282,30 @@ export default function LogoLabPage() {
     })}
 
     ${section({
-      id: 'fusion',
-      heading: 'Delta, fused into the P',
-      layout: 'split',
-      lede: html`
-        Four ways to make the delta carry the initial rather than sit beside it.
-        The question each one answers differently is what gives way when an
-        arrowhead and a letter want the same space.
-      `,
-      body: html`
-        <div class="grid gap-6 mid:grid-cols-2 wide:grid-cols-4">
-          ${FUSIONS.map((f) => fusionCard(f))}
-        </div>
-      `,
-    })}
-
-    ${section({
       id: 'delta-p',
-      heading: 'The delta, turned into the P',
+      heading: 'The flap over the i',
       layout: 'split',
       lede: html`
-        The delta rotated onto a heading, with a stem behind it, so the bowl of
-        the letter is the mark. Its tail notch becomes the counter. Four
-        versions, differing only in how far that notch cuts back and whether the
-        blades keep their points where they land on the stem.
+        The flap sheared upward so it hangs over the i rather than stopping
+        short of it. A plain ninety degree rotation cannot do this: it puts the
+        apex at the bowl's mid-height, so the flap falls away towards the next
+        letter instead of clearing it. Four versions, differing in how hard the
+        apex is raked and how far it reaches.
       `,
       body: html`
         <p class="${PROSE} mb-9">
           Each card shows one drawing twice. The monogram is not a second file,
           it is these exact paths with the word cropped off, which is how the
           sibling brand builds its own and the reason its mark and its lockup
-          cannot drift apart. The slice is a real gap rather than a painted bar,
-          so the stem ships as two shapes and one file is correct on ink, on
-          paper, and on a photograph.
+          cannot drift apart.
         </p>
         <p class="${PROSE} mb-9">
-          The two tiles are the same letter sliced and whole, and they do not
-          agree. Cutting the stem of a W leaves two halves of a wide letter, and
-          cutting the stem of a P leaves a bowl above a detached post. The whole
-          version is the one that reads as a letter here, which means this mark
-          may simply not want the device the sibling brand is built on.
+          The word starts where the flap's trailing edge crosses the shoulder
+          line of the letters, plus a hair. That position is calculated from the
+          drawing rather than chosen, so the gap cannot open up again when the
+          bowl changes size. The i is dotless because the flap is standing in
+          for its tittle, which is the trade that lets the two shapes share a
+          space instead of queueing up next to each other.
         </p>
         <div class="grid gap-6 mid:grid-cols-2">
           ${DELTA_PS.map((v) => deltaPCard(v))}

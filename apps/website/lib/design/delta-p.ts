@@ -1,31 +1,40 @@
 import { html } from '@webjsdev/core';
 
 /**
- * The delta, turned onto a heading and made into the P of pilots.
+ * The delta raked into the P of pilots, with its flap overhanging the i.
  *
- * ONE DRAWING, TWO CROPS. That is the whole construction, and it is lifted
- * from the sibling brand rather than invented: webjs.dev's standalone mark and
- * its lockup are the same two path elements with identical coordinates, and
- * the only difference between the files is the viewBox. So the monogram is not
- * a version of the logo, it is the logo with the word cropped off, and the two
- * cannot drift because there is nothing to keep in sync.
+ * ONE DRAWING, TWO CROPS, which is the sibling brand's construction: on
+ * webjs.dev the standalone mark file and the lockup file carry byte-identical
+ * path geometry and differ only in the viewBox, so the monogram is the logo
+ * with the word cropped off rather than a second drawing to keep in sync.
  *
- * The letter is drawn in one coordinate space, described here once:
+ * WHY THE APEX IS RAKED, because it is the whole reason this round exists and
+ * it is a geometric fact rather than a preference.
  *
- *   cap top     y = 8         baseline    y = 108      (cap height 100)
- *   stem        x = 18 to 44                           (26 wide, 0.26 of cap)
- *   bowl        y = 8 to BOWL_BOTTOM, apex at x = 128
- *   slice       y = 68 to 77
+ * Rotating the delta exactly ninety degrees puts its apex at the bowl's
+ * mid-height. Every point on the trailing edge left of that apex is therefore
+ * LOWER than the apex, so the flap descends as it approaches the stem. An
+ * x-height letter starts around a third of the way down the cap, which means
+ * a bowl of any usable size collides with it long before it could hang over
+ * it. Shortening the bowl until it clears leaves a bowl too small to read as
+ * a P. There is no setting of the ninety-degree version that overhangs.
  *
- * The stem is 0.22 of the cap height because that is where a black weight sits.
- * The previous round drew a heavier letter and it read as an object sitting
- * next to type rather than as the first letter of the word.
+ * So the delta is SHEARED: the wingtips still sit on the stem, but the apex is
+ * lifted above the midpoint by `rake`. Now the trailing edge falls away to the
+ * right of the letter rather than towards it, the flap tip is the highest
+ * thing on the bowl, and the space underneath is free for the next letter to
+ * tuck into.
  *
- * THE SLICE IS A REAL GAP, not a painted bar. The stem is emitted as two
- * separate paths with air between them, which is how the sibling brand draws
- * its W, and it is what lets one file sit on any background. It only works
- * because the slice crosses the stem alone: the bowl stops above it, so no
- * polygon has to be split.
+ * THE i IS DOTLESS, and that is the trade this construction makes. The zone a
+ * tittle occupies is exactly the zone the flap sweeps through. Rather than
+ * fight for it, the flap takes the job: it is the mark and the i's tittle at
+ * once, which is what closes the gap the previous round left open.
+ *
+ * The coordinate space, stated once:
+ *
+ *   cap top   y = 8        baseline  y = 108      (cap height 100)
+ *   stem      x = 18 to 44                        (26 wide, 0.26 of cap)
+ *   bowl      y = 8 to bowlBottom, apex raked above the midpoint
  */
 
 const ACCENT_INK = 'var(--logo-accent, currentColor)';
@@ -36,141 +45,87 @@ const STEM_L = 18;
 const STEM_R = 44;
 const SLICE_H = 9;
 
+/** tan(9 degrees). The lean, applied to the letter and the word alike. */
+const TAN9 = 0.15838;
+const LEAN = 'skewX(-9)';
+
 /**
- * The delta's own aspect: its length divided by its wingtip span, taken off the
- * candidate drawing (23.8 over 21.6). The mark is very nearly square.
- *
- * The bowl's length is DERIVED from its height through this number rather than
- * set by hand, and that is the correction that made this round work. The first
- * attempt fixed the apex at a constant x, which stretched the rotated delta to
- * roughly two to one and turned every variant back into a pennant. A bowl only
- * reads as a bowl when it is about as deep as it is tall.
+ * The delta's own aspect, length over wingtip span, taken off the candidate
+ * drawing. The mark is very nearly square, and deriving the bowl's length from
+ * its height through this number rather than fixing an apex coordinate is what
+ * stops the rotated delta stretching into a pennant.
  */
 const DELTA_ASPECT = 23.8 / 21.6;
-
-/** Where the blades converge, derived so the delta keeps its proportions. */
-function apexX(bowlBottom: number) {
-  return STEM_R + (bowlBottom - CAP_TOP) * DELTA_ASPECT;
-}
-
-/** The lean, on the letter and on the word alike. */
-const LEAN = 'skewX(-9)';
 
 export type DeltaP = {
   id: string;
   name: string;
   idea: string;
   cost: string;
-  /** How far the delta's tail notch cuts back, as a fraction of the bowl's length. */
-  notch: number;
-  /**
-   * Vertical thickness where each blade meets the stem.
-   *
-   * Zero is the delta's own geometry, whose trailing edges converge to sharp
-   * points. A letter's bowl normally joins its stem at full stroke weight, so
-   * this is the dial between keeping the aircraft and keeping the P.
-   */
-  blunt: number;
-  /** Where the bowl closes on the stem. */
+  /** Where the bowl closes back onto the stem. */
   bowlBottom: number;
+  /** How far the apex is lifted above the wingtips' midpoint. Zero is a plain rotation. */
+  rake: number;
+  /** Multiplier on the delta's natural length. Above one is overhang bought with width. */
+  reach: number;
+  /** How far the tail notch cuts back along the axis, as a fraction of it. */
+  notch: number;
+  /** Vertical thickness where each blade lands on the stem. Zero keeps the delta's points. */
+  blunt: number;
 };
 
-export const DELTA_PS: DeltaP[] = [
-  {
-    id: 'blade',
-    name: 'Blade',
-    idea:
-      'The delta rotated onto a heading and butted against a stem, keeping its own proportions. The tail notch becomes the counter, so the letter is built from the mark rather than around it.',
-    cost:
-      'The notch is shallow because the delta drew it that way, so the counter is a nick rather than a hole and the bowl reads as one solid mass.',
-    notch: 0.28,
-    blunt: 0,
-    bowlBottom: 70,
-  },
-  {
-    id: 'counter',
-    name: 'Counter',
-    idea:
-      'The same construction with the notch cut back until the void behind the blades is a real counter. This is the least a P can enclose and still be read as one.',
-    cost:
-      'Both blades taper to a point where they meet the stem, so the bowl hangs off two hairlines. It is the first thing to break at small size and in a stroke-thickening print.',
-    notch: 0.5,
-    blunt: 0,
-    bowlBottom: 70,
-  },
-  {
-    id: 'joined',
-    name: 'Joined',
-    idea:
-      'The counter version with the blades given real thickness where they land on the stem. A bowl that meets its stem at full weight is what separates a letter from a shape stuck to a bar.',
-    cost:
-      'Blunting the tips is the one place this stops being the delta. The trailing edges no longer converge, which is the detail that made the standalone mark look like it was moving.',
-    notch: 0.5,
-    blunt: 16,
-    bowlBottom: 70,
-  },
-  {
-    id: 'deep',
-    name: 'Deep',
-    idea:
-      'Joined, with a longer bowl and a deeper notch. The counter opens up and the blades sweep further, which is the version that reads as a letter from furthest away.',
-    cost:
-      'The bowl runs past the halfway line of the cap, so the stem below it is short and the letter sits closer to a D than a P.',
-    notch: 0.6,
-    blunt: 18,
-    bowlBottom: 76,
-  },
-];
+function apexOf(v: DeltaP) {
+  const x = STEM_R + (v.bowlBottom - CAP_TOP) * DELTA_ASPECT * v.reach;
+  const y = (CAP_TOP + v.bowlBottom) / 2 - v.rake;
+  return { x, y };
+}
 
 /**
- * The bowl outline.
+ * The bowl.
  *
- * Traced clockwise from the top join: out along the leading edge to the apex,
- * back along the trailing edge to the bottom join, then in and out of the
- * notch. With `blunt` at zero the two stem-side vertices collapse onto the
- * joins and the shape is the delta exactly.
+ * Traced from the top join out to the apex, back to the bottom join, then in
+ * and out of the notch. The notch apex sits on the delta's own axis, the line
+ * from the wingtips' midpoint to the apex, so shearing the shape carries the
+ * notch with it instead of leaving it pointing somewhere the mark no longer is.
  */
 function bowlPath(v: DeltaP): string {
-  const apexY = (CAP_TOP + v.bowlBottom) / 2;
-  const ax = apexX(v.bowlBottom);
-  const notchX = STEM_R + (ax - STEM_R) * v.notch;
+  const a = apexOf(v);
+  const midY = (CAP_TOP + v.bowlBottom) / 2;
+  const nx = STEM_R + (a.x - STEM_R) * v.notch;
+  const ny = midY + (a.y - midY) * v.notch;
   const b = v.blunt;
   return [
     `M${STEM_R} ${CAP_TOP}`,
-    `L${ax} ${apexY}`,
+    `L${a.x.toFixed(2)} ${a.y.toFixed(2)}`,
     `L${STEM_R} ${v.bowlBottom}`,
     `L${STEM_R} ${v.bowlBottom - b}`,
-    `L${notchX} ${apexY}`,
+    `L${nx.toFixed(2)} ${ny.toFixed(2)}`,
     `L${STEM_R} ${CAP_TOP + b}`,
     'Z',
   ].join(' ');
 }
 
 /**
- * The letter, as separate paths.
+ * The letter, as separate paths: the bowl, and the stem in one piece or two.
  *
- * Three of them: the bowl, the stem above the slice, and the stem below it.
- * The gap between the last two IS the slice. Emitting it as absent geometry
- * rather than as a bar in the background colour is what makes one file correct
- * on ink, on paper, and on a photograph.
+ * When sliced, the cut starts exactly where the bowl closes, so the split runs
+ * through the stem alone and no concave polygon has to be divided. The gap is
+ * absent geometry rather than a bar painted in the background colour, which is
+ * what lets one file sit on ink, on paper, and on a photograph.
  */
-export function deltaPLetter(v: DeltaP, opts: { sliced: boolean } = { sliced: true }) {
-  /* The cut starts exactly where the bowl closes, so the upper piece is bowl
-     plus stem and the lower piece is the rest of the stem. Putting it anywhere
-     else would mean splitting the bowl polygon, and a slice that has to cut a
-     concave shape in two is a slice that will be redrawn by hand every time
-     the bowl moves. */
-  const sliceY = v.bowlBottom;
-  const stemTop = opts.sliced
-    ? `M${STEM_L} ${CAP_TOP} H${STEM_R} V${sliceY} H${STEM_L} Z`
-    : `M${STEM_L} ${CAP_TOP} H${STEM_R} V${BASELINE} H${STEM_L} Z`;
+export function deltaPLetter(v: DeltaP, opts: { sliced?: boolean } = {}) {
+  const sliced = opts.sliced ?? true;
+  const y = v.bowlBottom;
   return html`
     <g transform=${LEAN}>
       <path d=${bowlPath(v)} fill=${ACCENT_INK} />
-      <path d=${stemTop} fill=${ACCENT_INK} />
-      ${opts.sliced
+      <path
+        d="M${STEM_L} ${CAP_TOP} H${STEM_R} V${sliced ? y : BASELINE} H${STEM_L} Z"
+        fill=${ACCENT_INK}
+      />
+      ${sliced
         ? html`<path
-            d="M${STEM_L} ${sliceY + SLICE_H} H${STEM_R} V${BASELINE} H${STEM_L} Z"
+            d="M${STEM_L} ${y + SLICE_H} H${STEM_R} V${BASELINE} H${STEM_L} Z"
             fill=${ACCENT_INK}
           />`
         : ''}
@@ -179,86 +134,108 @@ export function deltaPLetter(v: DeltaP, opts: { sliced: boolean } = { sliced: tr
 }
 
 /**
- * The monogram: the letter with the word cropped off.
+ * Where the trailing edge crosses the x-height line, in leaned coordinates.
  *
- * The box is square and centred on the leaned letter's ink, which lands the
- * mark off-centre in its own bounding box. That is correct and deliberate: the
- * lean throws the stem's foot left and the apex right, so matching the box
- * margins would push the letter's weight up and to the left. The sibling
- * brand's monogram carries the same note for the same reason.
+ * This is the number the whole round turns on. It is the leftmost point at
+ * which the next letter can sit without running into the flap, so the wordmark
+ * is positioned FROM it rather than from a gap chosen by eye. The previous
+ * round set the gap by hand off the bowl's nominal right edge and left a hole
+ * between the P and the i wide enough to read as a mark parked in front of a
+ * name.
+ *
+ * Returns null when the apex is not above the x-height line, which means the
+ * bowl cannot overhang at all and the caller has to fall back to butting the
+ * word against the apex.
  */
-const MONO_VB = '-10.5 -6 128 128';
+function trailingEdgeAtXHeight(v: DeltaP, xTop: number): number | null {
+  const a = apexOf(v);
+  if (a.y >= xTop || v.bowlBottom <= xTop) return null;
+  const t = (xTop - a.y) / (v.bowlBottom - a.y);
+  const x = a.x - t * (a.x - STEM_R);
+  return x - xTop * TAN9;
+}
+
+/** A square crop around the leaned letter's own ink. */
+function monoViewBox(v: DeltaP): string {
+  const a = apexOf(v);
+  const right = a.x - a.y * TAN9;
+  const left = STEM_L - BASELINE * TAN9;
+  const side = Math.max(right - left, BASELINE - CAP_TOP) + 22;
+  const cx = (left + right) / 2;
+  const cy = (CAP_TOP + BASELINE) / 2;
+  return `${(cx - side / 2).toFixed(2)} ${(cy - side / 2).toFixed(2)} ${side.toFixed(2)} ${side.toFixed(2)}`;
+}
 
 export function deltaPMark(v: DeltaP, px: number, opts: { sliced?: boolean } = {}) {
   return html`
     <svg
-      viewBox=${MONO_VB}
+      viewBox=${monoViewBox(v)}
       width=${px}
       height=${px}
       class="block shrink-0"
       aria-hidden="true"
       focusable="false"
     >
-      ${deltaPLetter(v, { sliced: opts.sliced ?? true })}
+      ${deltaPLetter(v, { sliced: opts.sliced ?? false })}
     </svg>
   `;
 }
 
 /**
- * The lockup: the same paths, a wider crop, and the rest of the name.
+ * The lockup: the same paths, a wider crop, and the rest of the name tucked
+ * under the flap.
  *
- * The word is passed without its first letter. The type is set at the size
- * that puts its cap height on the drawn letter's cap height, so the P is the
- * word's first letter rather than a mark parked in front of it.
- *
- * The band across the word is painted, not cut, and that is a limit of using
- * live text: glyph outlines cannot be split without outlining the face first.
- * A shipped file outlines the word and the slice becomes a gap there too.
+ * The word is set as a dotless i followed by "lots", because the flap is doing
+ * the tittle's job. Its start is derived from the trailing edge rather than
+ * chosen, and the arithmetic collapses pleasantly: the word is skewed about
+ * the origin and pushed back by baseline times tan(9 degrees) so its baseline
+ * lands where asked, and the letter is skewed about the origin with no such
+ * correction, so the two lean terms cancel everywhere except that constant.
+ * What is left is the crossing point, plus a clearance, minus the shift.
  */
-const LOCKUP_VB_H = 128;
-
 export function deltaPLockup(
   v: DeltaP,
-  opts: { height: number; face: 'sans' | 'mono'; sliced: boolean; leanWord: boolean },
+  opts: { height: number; face: 'sans' | 'mono'; sliced: boolean; clearance?: number },
 ) {
   const fontSize = opts.face === 'mono' ? 126 : 139;
-  /* The word starts just past where the leaned apex actually lands, not past
-     the bowl's nominal right edge. The lean pulls the apex back by its own
-     height times tan(9 degrees), and setting the gap off the un-leaned number
-     opened a hole between the letter and the word wide enough to read as a
-     mark parked in front of a name. */
-  const apexY = (CAP_TOP + v.bowlBottom) / 2;
-  const apexInk = apexX(v.bowlBottom) - apexY * 0.15838;
-  const tx = apexInk + (opts.face === 'mono' ? 16 : 10);
-  const width = tx + (opts.face === 'mono' ? 330 : 268);
-  const vb = `-10.5 -6 ${width} ${LOCKUP_VB_H}`;
-  /* Skewing about the origin drags the word left by baseline * tan(9 degrees),
-     so the run is pushed back by that much to start where tx asks. */
-  const leanShift = opts.leanWord ? BASELINE * 0.15838 : 0;
+  /** Where the following letters' shoulders start, for this face at this size. */
+  const xTop = BASELINE - (opts.face === 'mono' ? 0.55 : 0.52) * fontSize;
+  const leanShift = BASELINE * TAN9;
+  const clearance = opts.clearance ?? 7;
+  const cross = trailingEdgeAtXHeight(v, xTop);
+  const a = apexOf(v);
+  const tx =
+    cross === null
+      ? a.x - a.y * TAN9 + clearance - leanShift
+      : cross + clearance - leanShift;
+  const width = tx + leanShift + (opts.face === 'mono' ? 340 : 278);
+  const vbLeft = STEM_L - BASELINE * TAN9 - 11;
+  const vbTop = CAP_TOP - 14;
+  const vbH = BASELINE - vbTop + 12;
   return html`
     <svg
-      viewBox=${vb}
+      viewBox="${vbLeft.toFixed(2)} ${vbTop} ${(width - vbLeft).toFixed(2)} ${vbH}"
       height=${opts.height}
-      width=${Math.round((opts.height * width) / LOCKUP_VB_H)}
+      width=${Math.round((opts.height * (width - vbLeft)) / vbH)}
       role="img"
       aria-label="Pilots"
       class="block"
     >
       ${deltaPLetter(v, { sliced: opts.sliced })}
-      <g transform=${opts.leanWord ? `translate(${leanShift} 0) ${LEAN}` : ''}>
+      <g transform="translate(${leanShift.toFixed(2)} 0) ${LEAN}">
         <text
-          x=${tx}
+          x=${tx.toFixed(2)}
           y=${BASELINE}
           font-size=${fontSize}
           class=${opts.face === 'mono' ? 'dp-mono' : 'dp-sans'}
           fill="currentColor"
         >
-          ilots
+          ılots
         </text>
       </g>
       ${opts.sliced
         ? html`<rect
-            x=${tx - 12}
+            x=${(cross ?? 0).toFixed(2)}
             y=${v.bowlBottom}
             width=${width}
             height=${SLICE_H}
@@ -268,3 +245,58 @@ export function deltaPLockup(
     </svg>
   `;
 }
+
+export const DELTA_PS: DeltaP[] = [
+  {
+    id: 'rake',
+    name: 'Rake',
+    idea:
+      'The least shear that buys an overhang. The apex lifts just clear of the x-height line, so the i tucks under the flap tip with nothing between them and the letter still sits in a square.',
+    cost:
+      'The overhang is barely a letter wide, so the interlock reads as tight spacing rather than as two shapes sharing a space.',
+    bowlBottom: 66,
+    rake: 12,
+    reach: 1.15,
+    notch: 0.5,
+    blunt: 14,
+  },
+  {
+    id: 'rake-deep',
+    name: 'Rake, deep',
+    idea:
+      'The apex lifted well above the midpoint and the flap given more reach. The i sits most of its width under the overhang, which is the arrangement the sibling lockup uses, and the flap plainly stands in for the tittle.',
+    cost:
+      'Shearing this hard leaves the trailing edge much longer than the leading one. Beside the standalone delta, whose edges converge evenly, it is visibly a different shape.',
+    bowlBottom: 66,
+    rake: 24,
+    reach: 1.4,
+    notch: 0.52,
+    blunt: 14,
+  },
+  {
+    id: 'rake-sharp',
+    name: 'Rake, sharp',
+    idea:
+      'The deep rake with the blades left at their points where they meet the stem, the way the delta draws its own trailing edges. It is the version that still looks like the mark that was picked.',
+    cost:
+      'The bowl hangs off two hairlines. It is the first thing to close up at favicon size and the first to fill in when a press spreads the ink.',
+    bowlBottom: 66,
+    rake: 24,
+    reach: 1.4,
+    notch: 0.52,
+    blunt: 0,
+  },
+  {
+    id: 'rake-long',
+    name: 'Rake, long',
+    idea:
+      'Reach pushed as far as the letter will carry. The flap covers the i completely and reaches the l, which makes the strongest single object of the three words it touches.',
+    cost:
+      'The letter is now half again as wide as it is tall, so the monogram crop is no longer square and a favicon has to shrink the whole thing to fit the flap in.',
+    bowlBottom: 62,
+    rake: 26,
+    reach: 1.75,
+    notch: 0.55,
+    blunt: 14,
+  },
+];
