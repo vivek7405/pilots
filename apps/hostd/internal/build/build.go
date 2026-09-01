@@ -19,6 +19,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/vivek7405/pilots/hostd/internal/netns"
 	"io"
 	"log/slog"
 	"os"
@@ -302,6 +303,12 @@ func (b *Builder) buildImage(ctx context.Context, tarPath, imagePath string, sta
 		AgentBinary: b.opts.AgentBinary,
 		AgentToken:  GuestAgentPlaceholderToken,
 		Start:       start,
+		// The gateway, exactly as the golden rootfs has it. A built image
+		// left with public resolvers cannot resolve .internal at all -- and
+		// build-backed machines are the ones the feature is for. Pointing
+		// here costs them nothing: the responder answers .internal and
+		// forwards everything else upstream.
+		Nameservers: []string{netns.TapHostIP},
 	}, hasSystemd); err != nil {
 		return err
 	}
