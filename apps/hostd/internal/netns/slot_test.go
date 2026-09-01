@@ -3,8 +3,16 @@ package netns
 import (
 	"fmt"
 	"net/netip"
+	"os"
+	"strings"
 	"testing"
 )
+
+// guestNetworkConfig is the systemd-networkd unit baked into the golden
+// rootfs. Reached by path because it is not Go: it is the other half of a
+// contract this package owns one end of, and the two drifting apart is a
+// machine that boots with an address the host does not route.
+const guestNetworkConfig = "../../../../scripts/rootfs/eth0.network"
 
 // testPrefix stands in for a real host's derived machine block.
 var testPrefix = netip.MustParsePrefix("fdcd:1::/112")
@@ -69,6 +77,72 @@ func TestGuestFacingAddressesAreSlotIndependent(t *testing.T) {
 	}
 	if TapGuestIP != "169.254.0.21" || TapHostIP != "169.254.0.22" {
 		t.Fatal("guest-facing constants changed: this invalidates every snapshot in the fleet")
+	}
+	// The v6 pair is guest-facing for exactly the same reason and carries
+	// exactly the same consequence. A guest reaches its peers from fdee::21 on
+	// every host in the fleet; everything that makes a packet individually
+	// routable happens outside the guest.
+	if TapGuestIP6 != "fdee::21" || TapHostIP6 != "fdee::22" {
+		t.Fatal("guest-facing v6 constants changed: this invalidates every snapshot in the fleet")
+	}
+}
+
+// Nothing host-specific may enter a snapshot, and the golden rootfs's network
+// configuration is the one file where a slot address or a host address could
+// be baked in permanently -- it is written once at image build time and then
+// captured in the template every machine is created from.
+//
+// So this reads the real file and asserts it names ONLY constants. The failure
+// it guards against does not surface at build time or at create time: it
+// surfaces when a machine is restored onto a different host, months later,
+// configured for a slot that belongs to someone else.
+func TestTheGuestsNetworkConfigNamesOnlyConstants(t *testing.T) {
+	raw, err := os.ReadFile(guestNetworkConfig)
+	if err != nil {
+		t.Skipf("cannot read %s: %v", guestNetworkConfig, err)
+	}
+
+	// Comments explain the addressing and therefore mention addresses the
+	// configuration must not contain. Only the directives are the contract.
+	var directives []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		directives = append(directives, line)
+	}
+	config := strings.Join(directives, "\n")
+
+	for _, want := range []string{TapGuestIP, TapHostIP, TapGuestIP6, TapHostIP6, "fdcd::/16"} {
+		if !strings.Contains(config, want) {
+			t.Errorf("the guest's network config does not name %s:\n%s", want, config)
+		}
+	}
+
+	// hostd listens under fdcc::. A guest that had a route there would be
+	// addressing the platform, and the split between the two spaces is the
+	// tenant boundary itself.
+	if strings.Contains(config, "fdcc") {
+		t.Errorf("the guest's network config names the host space:\n%s", config)
+	}
+
+	// And nothing derived from a slot or a host key. Sampled across the pool,
+	// because the derivation crosses byte boundaries and a mistake at one
+	// index need not be visible at another.
+	for _, idx := range []int{1, 42, 255, 256, 512, 1023} {
+		slot := slotForIdx(idx, "m", testPrefix)
+		for _, host := range []string{
+			slot.HostIP.String(), slot.VEthIP.String(), slot.VPeerIP.String(),
+			slot.VEth6IP.String(), slot.VPeer6IP.String(), slot.Machine6.String(),
+			slot.VEthName,
+		} {
+			if strings.Contains(config, host) {
+				t.Errorf("slot %d's address %s is baked into the guest's config; "+
+					"this machine could never be restored on another host:\n%s",
+					idx, host, config)
+			}
+		}
 	}
 }
 
