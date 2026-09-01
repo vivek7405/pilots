@@ -548,12 +548,19 @@ func (s *Store) GetService(ctx context.Context, id string) (*state.Service, erro
 		}
 		return nil, fmt.Errorf("state: service %q: %w", id, state.ErrNotFound)
 	}
+	// SQLite has no boolean, so the column is an INTEGER and corrosion hands it
+	// back as a JSON number. Scanning it straight into a bool fails at the
+	// decoder with a message about types rather than about the column, and it
+	// fails on every read of the table -- which reached a caller as a create
+	// that could not deliver an environment.
+	var autodeploy int
 	var svc state.Service
 	if err := rows.Scan(&svc.ID, &svc.Name, &svc.App, &svc.ReleaseID, &svc.Replicas,
 		&svc.Health, &svc.Env, &svc.EnvSealed, &svc.Domain, &svc.CustomDomain,
-		&svc.Repo, &svc.Branch, &svc.Autodeploy, &svc.CreatedAt); err != nil {
+		&svc.Repo, &svc.Branch, &autodeploy, &svc.CreatedAt); err != nil {
 		return nil, err
 	}
+	svc.Autodeploy = autodeploy != 0
 	return &svc, rows.Err()
 }
 
@@ -576,7 +583,7 @@ func (s *Store) PutService(ctx context.Context, svc *state.Service) error {
 			created_at=excluded.created_at`,
 		svc.ID, svc.Name, svc.App, svc.ReleaseID, svc.Replicas, svc.Health,
 		svc.Env, svc.EnvSealed, svc.Domain, svc.CustomDomain, svc.Repo,
-		svc.Branch, svc.Autodeploy, svc.CreatedAt)
+		svc.Branch, boolToInt(svc.Autodeploy), svc.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("state: put service %q: %w", svc.ID, err)
 	}

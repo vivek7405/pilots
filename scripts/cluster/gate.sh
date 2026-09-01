@@ -50,7 +50,12 @@ sleep 3
 
 say "1. Every host sees the whole fleet"
 for ip in "${IPS[@]}"; do
-  N=$(api "$ip" GET /v1/hosts | python3 -c "import sys,json;print(len(json.load(sys.stdin)))" 2>/dev/null || echo 0)
+  # Live hosts, not rows. A host that was retired -- or destroyed by an
+  # earlier run and never brought back -- leaves its row behind, and counting
+  # rows fails this on a perfectly healthy fleet.
+  N=$(api "$ip" GET /v1/hosts | python3 -c "
+import sys, json
+print(sum(1 for h in json.load(sys.stdin) if h.get('alive')))" 2>/dev/null || echo 0)
   [ "$N" = "${#IPS[@]}" ] && ok "${ip} sees ${N} hosts" || bad "${ip} sees ${N} hosts, want ${#IPS[@]}"
 done
 
