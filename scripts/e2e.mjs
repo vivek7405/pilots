@@ -381,11 +381,20 @@ async function timingAssertions() {
   // choice, and it is visible.
   if (!reflink) {
     console.log('      ! this host cannot share extents, so image copies are real copies.');
-    console.log('        Timing targets are reported, not enforced. Put the machine store');
-    console.log('        on btrfs, or on XFS made with -m reflink=1, to enforce them.');
+    console.log('        The engine targets are replaced by the degraded ceilings below.');
+    console.log('        Put the machine store on btrfs, or on XFS made with -m reflink=1.');
   }
-  const enforce = (p50, budget, what) => {
-    if (reflink) assert(p50 < budget, `${what} p50 was ${p50.toFixed(0)}ms`);
+
+  // Every assertion still asserts, on every host. A budget the filesystem
+  // makes unreachable is replaced, not dropped: the degraded ceiling is what
+  // the engine costs when each image copy is a real copy, measured on ext4
+  // with the 2GiB golden rootfs and left with roughly 2x headroom so it flags
+  // a regression rather than noise. A host with no ceiling of its own asserts
+  // nothing, which is how a real slowdown would hide here.
+  const enforce = (p50, budget, degraded, what) => {
+    const limit = reflink ? budget : degraded;
+    assert(p50 < limit, `${what} p50 was ${p50.toFixed(0)}ms, over the `
+      + `${reflink ? 'engine target' : 'degraded ceiling'} of ${limit}ms`);
   };
 
   try {
@@ -408,7 +417,7 @@ async function timingAssertions() {
       }
       const p50 = median(samples);
       console.log(`      create p50 ${p50.toFixed(0)}ms  [${samples.map((s) => s.toFixed(0)).join(', ')}]`);
-      enforce(p50, 1500, 'create');
+      enforce(p50, 1500, 5000, 'create');
     });
 
     const id = created[0];
@@ -428,7 +437,7 @@ async function timingAssertions() {
       }
       const p50 = median(samples);
       console.log(`      wake p50 ${p50.toFixed(0)}ms  [${samples.map((s) => s.toFixed(0)).join(', ')}]`);
-      enforce(p50, 1000, 'wake');
+      enforce(p50, 1000, 1000, 'wake');
     });
 
     await step('a machine still serves after being woken', async () => {
@@ -458,7 +467,7 @@ async function timingAssertions() {
       const p50 = median(gaps);
       console.log(`      checkpoint resume gap p50 ${p50.toFixed(0)}ms  [${gaps.join(', ')}]`);
       console.log(`      checkpoint round trip p50 ${median(trips).toFixed(0)}ms  [${trips.map((t) => t.toFixed(0)).join(', ')}]`);
-      enforce(p50, 500, 'checkpoint resume gap');
+      enforce(p50, 500, 3000, 'checkpoint resume gap');
     });
 
     await step('the guest keeps serving through a checkpoint', async () => {

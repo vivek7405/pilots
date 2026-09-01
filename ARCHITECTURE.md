@@ -231,7 +231,9 @@ usable at all. Nothing errors. The platform is simply several times slower
 than it claims, everywhere. So hostd probes for extent sharing at startup,
 warns when it is missing, and reports it on `/v1/health`; `host-bootstrap.sh`
 prints it at the end of a bootstrap and refuses to finish under
-`PILOT_REQUIRE_REFLINK=1`.
+`PILOT_REQUIRE_REFLINK=1`. The e2e battery keeps asserting a latency budget on
+such a host — a *degraded ceiling* rather than the engine target — because an
+assertion that stops asserting is how a real slowdown hides.
 
 **Snapshot (suspend/checkpoint).** The order of these steps is the design,
 and every one of them was arrived at by measuring a resume gap:
