@@ -196,3 +196,125 @@ func TestCreateDestroyChurnLeavesNothingBehind(t *testing.T) {
 		t.Errorf("slot leak: InUse = %d after balanced take/return", pool.InUse())
 	}
 }
+
+// The IPv6 half of the namespace is what makes a peer reachable at all, and
+// every piece of it has to be there: the guest's gateway, the veth pair the
+// translated packet leaves over, and the route the root namespace uses to send
+// one back in.
+func TestIPv6DataPathIsBuilt(t *testing.T) {
+	requireRoot(t)
+	s := testSlot(t, 906)
+	if err := Setup(s, "02:00:00:00:09:06", 0); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	out, err := exec.Command("ip", "netns", "exec", s.NetnsName, "ip", "-6", "addr").CombinedOutput()
+	if err != nil {
+		t.Fatalf("ip -6 addr in ns: %v\n%s", err, out)
+	}
+	for _, want := range []string{TapHostIP6, s.VPeer6IP.String()} {
+		if !strings.Contains(string(out), want) {
+			t.Errorf("namespace is missing the v6 address %q:\n%s", want, out)
+		}
+	}
+	// Tentative means duplicate address detection has not finished, and an
+	// address in that state cannot be used. There is nothing to detect on a
+	// link with one other node, and waiting a second for it would land inside
+	// the create budget.
+	if strings.Contains(string(out), "tentative") {
+		t.Errorf("a v6 address is still tentative, so it cannot carry traffic yet:\n%s", out)
+	}
+
+	// The route that makes the whole design work: the root namespace needs an
+	// unambiguous next hop for this machine, which is only possible because
+	// the translation happens inside the namespace.
+	route, err := exec.Command("ip", "-6", "route", "get", s.Machine6.String()).CombinedOutput()
+	if err != nil {
+		t.Fatalf("ip -6 route get %s: %v\n%s", s.Machine6, err, route)
+	}
+	if !strings.Contains(string(route), s.VPeer6IP.String()) {
+		t.Errorf("the route to %s does not go via %s:\n%s", s.Machine6, s.VPeer6IP, route)
+	}
+
+	// And the namespace forwards, or nothing crosses it.
+	fwd, err := exec.Command("ip", "netns", "exec", s.NetnsName,
+		"cat", "/proc/sys/net/ipv6/conf/all/forwarding").CombinedOutput()
+	if err != nil || strings.TrimSpace(string(fwd)) != "1" {
+		t.Errorf("ipv6 forwarding in the namespace is %q (%v)", fwd, err)
+	}
+
+	if err := Teardown(s); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	after, err := exec.Command("ip", "-6", "route", "show", s.Machine6.String()+"/128").CombinedOutput()
+	if err == nil && strings.Contains(string(after), s.Machine6.String()) {
+		t.Errorf("the machine route survived teardown, so the next machine in "+
+			"this slot inherits a route to an address that is now someone else's:\n%s", after)
+	}
+}
+
+// NAT66 is what turns the address every guest shares into one that is
+// individually routable. Both directions, or the machine is either unreachable
+// or unable to reach anyone.
+func TestNAT66RulesBothDirections(t *testing.T) {
+	requireRoot(t)
+	s := testSlot(t, 907)
+	if err := Setup(s, "02:00:00:00:09:07", 0); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	out, err := exec.Command("ip", "netns", "exec", s.NetnsName,
+		"nft", "list", "table", "ip6", "pilots-nat6").CombinedOutput()
+	if err != nil {
+		t.Skipf("nft unavailable in ns: %v\n%s", err, out)
+	}
+	ruleset := string(out)
+	for _, want := range []string{"snat", "dnat", TapGuestIP6, s.Machine6.String()} {
+		if !strings.Contains(ruleset, want) {
+			t.Errorf("NAT66 does not mention %q:\n%s", want, ruleset)
+		}
+	}
+}
+
+// fdcc and fdcd differ by one bit. The host space has to be dropped BEFORE the
+// machine space is accepted, and both have to come before the blanket fc00::/7
+// drop that would otherwise swallow them -- an ordering mistake here silently
+// opens hostd's internal listener to every guest on the box.
+func TestFirewallOrdersTheTenantBoundary(t *testing.T) {
+	requireRoot(t)
+	s := testSlot(t, 908)
+	if err := Setup(s, "02:00:00:00:09:08", 0); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	out, err := exec.Command("ip", "netns", "exec", s.NetnsName,
+		"nft", "list", "table", "inet", "pilots-firewall").CombinedOutput()
+	if err != nil {
+		t.Skipf("nft unavailable in ns: %v\n%s", err, out)
+	}
+	ruleset := string(out)
+
+	hostSpace := strings.Index(ruleset, "fdcc::/16")
+	machineSpace := strings.Index(ruleset, "fdcd::/16")
+	blanket := strings.Index(ruleset, "fc00::/7")
+
+	if hostSpace < 0 {
+		t.Fatalf("the host space is not dropped explicitly:\n%s", ruleset)
+	}
+	if machineSpace < 0 {
+		t.Fatalf("the machine space is not accepted, so no peer is reachable:\n%s", ruleset)
+	}
+	if blanket < 0 {
+		t.Fatalf("fc00::/7 is no longer dropped:\n%s", ruleset)
+	}
+	if !(hostSpace < machineSpace && machineSpace < blanket) {
+		t.Errorf("the tenant boundary is out of order (fdcc %d, fdcd %d, fc00 %d):\n%s",
+			hostSpace, machineSpace, blanket, ruleset)
+	}
+	// And the guest's own link stays reachable, or neighbour discovery
+	// replies -- which arrive as unicast to these addresses -- are dropped and
+	// v6 fails in a way that looks like packet loss.
+	if !strings.Contains(ruleset, "fdee::20/126") {
+		t.Errorf("the guest's v6 link is not accepted:\n%s", ruleset)
+	}
+}

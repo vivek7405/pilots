@@ -177,7 +177,15 @@ func Setup(s *Slot, macAddr string, tapOwnerUID int) (err error) {
 	// and the post-translation address (fdee::21) is identical in every one of
 	// this host's namespaces, so it can never be that next hop.
 	if s.HasMesh() {
-		if err := netlink.RouteReplace(machineRoute(s)); err != nil {
+		route := machineRoute(s)
+		// Named explicitly rather than left for the kernel to infer from the
+		// gateway. It can infer it -- the /127 is directly connected -- but
+		// the inference runs against the routing table at the instant the
+		// route is added, and this runs while the interface is seconds old.
+		if link, err := netlink.LinkByName(s.VEthName); err == nil {
+			route.LinkIndex = link.Attrs().Index
+		}
+		if err := netlink.RouteReplace(route); err != nil {
 			return fmt.Errorf("netns: host route to %s: %w", s.Machine6, err)
 		}
 	}
