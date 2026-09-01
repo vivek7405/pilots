@@ -115,12 +115,22 @@ func prepareCommand(cmd *exec.Cmd, username, cwd string, env map[string]string) 
 	// escalated away from.
 	if username == "" {
 		if _, err := user.Lookup(defaultGuestUser); err != nil {
-			return applyImageDefaultUser(cmd)
+			// The image has no unprivileged default account, so run as
+			// whatever the agent is -- but STILL apply the caller's cwd and
+			// env below. Returning here dropped both, so an exec asking for a
+			// working directory or an environment silently got neither.
+			if err := applyImageDefaultUser(cmd); err != nil {
+				return err
+			}
+			username = ""
+		} else {
+			username = defaultGuestUser
 		}
-		username = defaultGuestUser
 	}
-	if err := applyUserCredential(cmd, username); err != nil {
-		return err
+	if username != "" {
+		if err := applyUserCredential(cmd, username); err != nil {
+			return err
+		}
 	}
 	if cwd != "" {
 		cmd.Dir = cwd
