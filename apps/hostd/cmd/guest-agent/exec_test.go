@@ -18,7 +18,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	agentToken = "test-token"
+	agentToken.Store("test-token")
 	os.Exit(m.Run())
 }
 
@@ -38,7 +38,7 @@ func postExec(t *testing.T, body execRequest, auth bool) *httptest.ResponseRecor
 	raw, _ := json.Marshal(body)
 	req := httptest.NewRequest("POST", "/exec", bytes.NewReader(raw))
 	if auth {
-		req.Header.Set("Authorization", "Bearer "+agentToken)
+		req.Header.Set("Authorization", "Bearer "+currentToken())
 	}
 	rec := httptest.NewRecorder()
 	requireAuth(handleExec)(rec, req)
@@ -149,7 +149,7 @@ func TestExecFailsClosedOnUnknownUser(t *testing.T) {
 func TestAuthAcceptsQueryTokenForWebSockets(t *testing.T) {
 	// Browsers cannot set headers on a WebSocket handshake, so the token is
 	// also accepted as a query parameter.
-	req := httptest.NewRequest("GET", "/exec/stream?token="+agentToken, nil)
+	req := httptest.NewRequest("GET", "/exec/stream?token="+currentToken(), nil)
 	if !authOK(req) {
 		t.Error("query-parameter token was rejected")
 	}
@@ -159,7 +159,7 @@ func TestAuthAcceptsQueryTokenForWebSockets(t *testing.T) {
 }
 
 func TestAuthRejectsMalformedHeaders(t *testing.T) {
-	for _, h := range []string{"", "Basic abc", "Bearer", "Bearer wrong", agentToken} {
+	for _, h := range []string{"", "Basic abc", "Bearer", "Bearer wrong", currentToken()} {
 		req := httptest.NewRequest("GET", "/health", nil)
 		if h != "" {
 			req.Header.Set("Authorization", h)

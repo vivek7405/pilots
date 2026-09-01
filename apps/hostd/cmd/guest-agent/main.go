@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -25,18 +26,57 @@ const defaultAgentPort = "3001"
 // any other.
 const tokenPath = "/etc/pilot-agent/token"
 
-var agentToken string
+// tokenFile is where the token is actually read from. A variable rather than
+// the constant so the reload path can be exercised against a temporary file;
+// nothing in the guest ever changes it.
+var tokenFile = tokenPath
+
+// agentToken is the current credential. Held in an atomic rather than a plain
+// string because it can be REPLACED while the agent runs: the create path
+// writes a fresh token into the file and the agent has to start accepting it.
+//
+// The golden rootfs restarts the agent under systemd to pick the new one up.
+// An image built from a Dockerfile usually has no systemd to restart it with,
+// so the reload happens here instead -- see authOK.
+var agentToken atomic.Value // string
+
+func currentToken() string {
+	tok, _ := agentToken.Load().(string)
+	return tok
+}
+
+// reloadToken re-reads the token file, returning what it now holds.
+func reloadToken() string {
+	raw, err := os.ReadFile(tokenFile)
+	if err != nil {
+		return currentToken()
+	}
+	tok := strings.TrimSpace(string(raw))
+	if tok == "" {
+		return currentToken()
+	}
+	agentToken.Store(tok)
+	return tok
+}
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 
-	raw, err := os.ReadFile(tokenPath)
-	if err != nil {
-		log.Fatalf("guest-agent: read %s: %v", tokenPath, err)
+	// An image built from a Dockerfile usually carries no init system, so the
+	// build path makes this binary /sbin/init. Before that first read of the
+	// token there is no /proc, no writable root and no /dev -- so this comes
+	// first, and it is a no-op in the golden rootfs where systemd is PID 1.
+	if isPID1() {
+		runAsInit()
 	}
-	agentToken = strings.TrimSpace(string(raw))
-	if agentToken == "" {
-		log.Fatalf("guest-agent: %s is empty; refusing to serve unauthenticated", tokenPath)
+
+	raw, err := os.ReadFile(tokenFile)
+	if err != nil {
+		die("read %s: %v", tokenFile, err)
+	}
+	agentToken.Store(strings.TrimSpace(string(raw)))
+	if currentToken() == "" {
+		die("%s is empty; refusing to serve unauthenticated", tokenPath)
 	}
 
 	port := os.Getenv("AGENT_PORT")
@@ -61,8 +101,25 @@ func main() {
 
 	log.Printf("guest-agent listening on :%s", port)
 	if err := srv.ListenAndServe(); err != nil {
-		log.Fatalf("guest-agent: %v", err)
+		die("%v", err)
 	}
+}
+
+// die reports a fatal condition and stops.
+//
+// It does NOT exit when this process is the guest's init. PID 1 exiting is a
+// kernel panic, the boot arguments say panic=1, and the machine reboots into
+// the same failure -- so the reason scrolls past on a console nobody is
+// watching and the guest boot-loops. Parking instead leaves the message on
+// the serial log, which is what /v1/machines/:id/logs returns.
+func die(format string, args ...any) {
+	log.Printf("guest-agent: "+format, args...)
+	if isPID1() {
+		log.Printf("guest-agent: this process is the guest's init; parking " +
+			"rather than panicking the kernel")
+		select {}
+	}
+	os.Exit(1)
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -92,7 +149,16 @@ func authOK(r *http.Request) bool {
 	if presented == "" {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(presented), []byte(agentToken)) == 1
+	if subtle.ConstantTimeCompare([]byte(presented), []byte(currentToken())) == 1 {
+		return true
+	}
+	// A miss might mean the token was just replaced. The create path writes
+	// the machine's own credential into the file and, in an image with
+	// systemd, restarts the agent to pick it up -- but an image built from an
+	// ordinary Dockerfile has no systemd to restart anything, and hostd would
+	// then hold a token this process never learned about. Re-reading on a miss
+	// costs one small file read on a request that was going to be rejected.
+	return subtle.ConstantTimeCompare([]byte(presented), []byte(reloadToken())) == 1
 }
 
 // withPortProxy forwards any request carrying X-Pilot-Proxy-Port to a local
