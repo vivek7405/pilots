@@ -128,12 +128,51 @@ exposed to Tailwind via `@theme`. Never write the dark half twice, once
 under `prefers-color-scheme` and once under the toggle's attribute: the
 two silently drift, which is a bug webjs.dev shipped and had to fix.
 
+## 12. No kicker label above a heading
+
+A small label, then a heading, then a lede, repeated down the page, is the
+single most recognisable generated-page rhythm there is. Swapping the
+coloured pill for a monospace uppercase label does not fix it. The tell is
+the STACK, not the styling.
+
+This site shipped that mistake on its first pass: eighteen blocks all
+opening with the same three-part stack, including one right above the H1.
+`section()` and `pageHero()` therefore do not accept an eyebrow at all,
+because a parameter that exists gets passed.
+
+A heading that needs a label above it to be understood is a heading that
+needs rewriting.
+
+The reference point is the sibling site: webjs.dev's home page has zero of
+these. Its only uppercase labels are footer column headings, which sit
+above a list of links rather than above a heading, and are a different
+thing.
+
+A monospace label is still correct when it labels a VALUE beside or below
+it (a field name in the demos, a readout's caption, a footer column) or
+when it qualifies a heading on the same baseline. What it may never do is
+sit stacked above one.
+
+## 13. Prose punctuation
+
+No em-dash (U+2014). No space-surrounded hyphen or semicolon used as a
+pause between words. No colon after a code-shaped left-hand side. Use a
+period, a comma, parentheses, or restructure the sentence.
+
+Plain hyphens inside compound words, flags, and filenames are fine, and
+arithmetic in code is not prose.
+
+This is the same rule the sibling project enforces with a commit hook, and
+the em-dash in particular has become a strong generated-text signal
+regardless of whether it is good punctuation.
+
 ## Enforcement
 
 `test/no-slop/no-slop.test.ts` fails CI on the banned vocabulary, the
 staccato tagline, emoji in rendered text, gradient/blur utility classes in
-markup, a theme colour declared twice, a hard-coded domain, and any
-digit-bearing claim outside a sourced `<data>` element.
+markup, a kicker stacked above a heading, em-dash and pause punctuation, a
+theme colour declared twice, a hard-coded domain, and any digit-bearing
+claim outside a sourced `<data>` element.
 
 Two things it learned the hard way, worth knowing before adding a rule:
 

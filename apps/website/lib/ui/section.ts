@@ -12,14 +12,16 @@ import { H2, PROSE } from '#lib/design/recipes.ts';
  * impose a grid, a column count, or an alignment, which is where a section
  * helper turns into the ten-identical-sections page it exists to prevent.
  *
- * The eyebrow is a monospace field label rather than a coloured pill: a pill
- * is a badge, and a badge above every heading is decoration repeated ten
- * times.
+ * There is NO eyebrow parameter, and its absence is the point. A small label
+ * stacked above every heading is the single most recognisable generated-page
+ * tell there is, and swapping the coloured pill for a monospace kicker does
+ * not fix it: the tell is the STACK, not the styling. This file used to take
+ * an eyebrow and every section passed one, which meant the page opened
+ * eighteen blocks with the same three-part rhythm. A heading that needs a
+ * label above it to make sense is a heading that needs rewriting.
  */
 export function section(opts: {
   id: string;
-  /** The small mono label above the heading. Omit when the heading stands alone. */
-  eyebrow?: string;
   heading: string;
   /**
    * The opening sentence. It must resolve with nothing above it: readers
@@ -33,11 +35,6 @@ export function section(opts: {
   return html`
     <section id=${opts.id} class="scroll-mt-24 py-16 mid:py-24">
       <div class="max-w-6xl mx-auto px-6">
-        ${opts.eyebrow
-          ? html`<p class="font-mono text-[11px] uppercase tracking-[0.18em] text-ink-subtle m-0 mb-3">
-              ${opts.eyebrow}
-            </p>`
-          : ''}
         <h2 class="${H2}">${opts.heading}</h2>
         ${opts.lede ? html`<p class="${PROSE} mt-4 text-lede">${opts.lede}</p>` : ''}
         <div class="mt-10">${opts.body}</div>

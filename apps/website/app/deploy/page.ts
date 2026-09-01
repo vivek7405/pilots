@@ -1,7 +1,7 @@
 import { html } from '@webjsdev/core';
 import { terminal } from '#lib/ui/terminal.ts';
 import { section } from '#lib/ui/section.ts';
-import { PANEL, PROSE, LINK, FIELD_LABEL, BTN_PRIMARY, BTN_GHOST, HAIRLINE } from '#lib/design/recipes.ts';
+import { PANEL, PROSE, LINK, BTN_PRIMARY, BTN_GHOST, HAIRLINE } from '#lib/design/recipes.ts';
 import { WORKLOAD_APEX, WEBJS_URL, GH_URL, NEW_TAB } from '#lib/links.ts';
 import { pageHero } from '#lib/ui/page-hero.ts';
 
@@ -24,7 +24,6 @@ export const metadata = {
 export default function Deploy() {
   return html`
     ${pageHero({
-      eyebrow: 'Services',
       heading: 'Ship a Dockerfile, keep the old one running',
       lede: html`Point pilots at any repository with a Dockerfile and it builds a microVM image, starts it
         behind a health check, and cuts traffic over only once the new release answers. The previous
@@ -34,7 +33,6 @@ export default function Deploy() {
 
     ${section({
       id: 'build',
-      eyebrow: 'Build',
       heading: 'Any Dockerfile, and structured logs when it fails',
       lede: html`The build turns a container image into a flat filesystem and stores it as a
         content-addressed template, which is what later lets machines start from it without copying
@@ -53,7 +51,7 @@ export default function Deploy() {
           </div>
           <div class="flex flex-col gap-5">
             <div>
-              <p class="${FIELD_LABEL} m-0 mb-2">Logs an agent can act on</p>
+              <p class="font-semibold m-0 mb-1.5">Logs an agent can act on</p>
               <p class="text-sm text-ink-muted m-0">
                 Build output streams as structured records rather than as a wall of text, so the
                 thing reading it can tell which step failed and why without scraping. That matters
@@ -62,7 +60,7 @@ export default function Deploy() {
               </p>
             </div>
             <div>
-              <p class="${FIELD_LABEL} m-0 mb-2">No Dockerfile? The agent writes one</p>
+              <p class="font-semibold m-0 mb-1.5">No Dockerfile? The agent writes one</p>
               <p class="text-sm text-ink-muted m-0">
                 Detection is by lockfile and project layout, and the generated file is a starting
                 point the build loop then corrects. Django, Rails, Next.js, and anything else that
@@ -70,7 +68,7 @@ export default function Deploy() {
               </p>
             </div>
             <div>
-              <p class="${FIELD_LABEL} m-0 mb-2">Two ways in, one pipeline</p>
+              <p class="font-semibold m-0 mb-1.5">Two ways in, one pipeline</p>
               <p class="text-sm text-ink-muted m-0">
                 Push a local directory from the command line, or connect a repository once and let
                 pushes deploy themselves. The webhook is an ordinary route on every host, so there
@@ -84,7 +82,6 @@ export default function Deploy() {
 
     ${section({
       id: 'cutover',
-      eyebrow: 'Release',
       heading: 'The gate is the readiness endpoint, not a timer',
       lede: html`Waiting a fixed number of seconds and hoping is the usual way a deploy decides it
         worked. Here the new release has to answer its readiness check before it receives any
@@ -113,21 +110,21 @@ export default function Deploy() {
 
         <div class="grid gap-6 mid:grid-cols-3">
           <div>
-            <p class="${FIELD_LABEL} m-0 mb-2">Custom domains</p>
+            <p class="font-semibold m-0 mb-1.5">Custom domains</p>
             <p class="text-sm text-ink-muted m-0">
               Point a record at the fleet and the certificate is issued on demand. Any host can
               answer the challenge, so issuance is not something one machine owns.
             </p>
           </div>
           <div>
-            <p class="${FIELD_LABEL} m-0 mb-2">Replicas that follow load</p>
+            <p class="font-semibold m-0 mb-1.5">Replicas that follow load</p>
             <p class="text-sm text-ink-muted m-0">
               Traffic spread across healthy replicas; a concurrency ceiling starts the next one, and
               excess capacity stops again, down to a floor you set.
             </p>
           </div>
           <div>
-            <p class="${FIELD_LABEL} m-0 mb-2">Scale to zero, honestly</p>
+            <p class="font-semibold m-0 mb-1.5">Scale to zero, honestly</p>
             <p class="text-sm text-ink-muted m-0">
               A floor of zero is allowed for a real service. The first request afterwards is held
               while the machine comes back rather than being shown a splash page.
@@ -139,7 +136,6 @@ export default function Deploy() {
 
     ${section({
       id: 'promote',
-      eyebrow: 'The part nobody else has',
       heading: 'Promotion is a change of intent, not a migration',
       lede: html`A prototype becomes a production service by changing three numbers on its row:
         whether it stops when idle, whether it starts on demand, and how many copies stay running.
@@ -148,7 +144,7 @@ export default function Deploy() {
       body: html`
         <div class="grid gap-6 mid:grid-cols-2">
           <div class="${PANEL} p-6">
-            <p class="${FIELD_LABEL} m-0 mb-3">As a sandbox</p>
+            <p class="font-semibold m-0 mb-2.5">As a sandbox</p>
             <dl class="m-0 grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 font-mono text-sm">
               <dt class="text-ink-subtle">autoStop</dt><dd class="m-0">suspend</dd>
               <dt class="text-ink-subtle">autoStart</dt><dd class="m-0">true</dd>
@@ -156,7 +152,7 @@ export default function Deploy() {
             </dl>
           </div>
           <div class="${PANEL} p-6">
-            <p class="${FIELD_LABEL} m-0 mb-3">After promote</p>
+            <p class="font-semibold m-0 mb-2.5">After promote</p>
             <dl class="m-0 grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 font-mono text-sm">
               <dt class="text-ink-subtle">autoStop</dt><dd class="m-0">off</dd>
               <dt class="text-ink-subtle">autoStart</dt><dd class="m-0">true</dd>
@@ -175,7 +171,6 @@ export default function Deploy() {
 
     ${section({
       id: 'data',
-      eyebrow: 'State',
       heading: 'Where application data actually belongs',
       lede: html`Checkpoints capture a machine at a moment, which is the wrong granularity for a
         database. Volumes are the right one: durable per write, and not tied to the host that

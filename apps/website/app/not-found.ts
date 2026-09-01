@@ -1,5 +1,5 @@
 import { html } from '@webjsdev/core';
-import { BTN_PRIMARY, BTN_GHOST, PROSE, FIELD_LABEL } from '#lib/design/recipes.ts';
+import { BTN_PRIMARY, BTN_GHOST, PROSE } from '#lib/design/recipes.ts';
 
 /**
  * The 404.
@@ -11,8 +11,7 @@ import { BTN_PRIMARY, BTN_GHOST, PROSE, FIELD_LABEL } from '#lib/design/recipes.
 export default function NotFound() {
   return html`
     <div class="max-w-6xl mx-auto px-6 py-24 mid:py-32">
-      <p class="${FIELD_LABEL} m-0 mb-4">404</p>
-      <h1 class="text-h2 font-bold m-0 max-w-[20ch]">This address does not resolve</h1>
+      <h1 class="text-h2 font-bold m-0 max-w-[24ch]">404, this address does not resolve</h1>
       <p class="${PROSE} mt-4">
         Machine URLs are permanent. Marketing URLs, it turns out, are not. Here is what does exist.
       </p>

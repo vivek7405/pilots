@@ -199,7 +199,7 @@ test('invariant 1: every measured claim carries provenance', () => {
   for (const { rel, src } of FILES) {
     for (const text of claimSurfaces(src)) {
       const m = CLAIM.exec(text);
-      if (m) hits.push(`${rel}: "${m[0]}" — put it in lib/facts.ts and render it through #lib/ui/stat.ts`);
+      if (m) hits.push(`${rel}: "${m[0]}", put it in lib/facts.ts and render it through #lib/ui/stat.ts`);
     }
   }
   assert.deepEqual(hits, [], `Unsourced numeric claim (AGENTS.md invariant 1):\n${hits.join('\n')}`);
@@ -226,4 +226,52 @@ test('invariant 10: the domain is written in exactly one place', () => {
     if (/pilots\.run/.test(stripComments(src))) hits.push(`${rel}: hard-codes the domain; import it from #lib/links.ts`);
   }
   assert.deepEqual(hits, [], `Hard-coded domain (AGENTS.md invariant 10):\n${hits.join('\n')}`);
+});
+
+test('invariant 12: no kicker label stacked above a heading', () => {
+  // The single most recognisable generated-page rhythm: a small label, then a
+  // heading, then a lede, repeated down the page. Swapping the coloured pill
+  // for a monospace uppercase label does NOT fix it, which is exactly the trap
+  // this site fell into on its first pass: eighteen sections all opened with
+  // the same three-part stack. The tell is the STACK, not the styling.
+  //
+  // Reference point: the webjs marketing site has zero of these on its home
+  // page. Its only uppercase labels are footer column headings, which sit
+  // above a LIST of links rather than above a heading, and are not this.
+  //
+  // A heading that needs a label above it to be understood needs rewriting,
+  // which is why section() and pageHero() no longer accept an eyebrow at all.
+  const KICKER = /<(p|span|div)\b[^>]*(FIELD_LABEL|uppercase)[^>]*>[\s\S]{0,200}?<\/\1>\s*<h[1-3]\b/;
+  const hits: string[] = [];
+  for (const { rel, src } of FILES) {
+    if (KICKER.test(markupSource(src))) {
+      hits.push(`${rel}: a small label sits directly above a heading`);
+    }
+  }
+  assert.deepEqual(hits, [], `Kicker above a heading (AGENTS.md invariant 12):\n${hits.join('\n')}`);
+});
+
+test('invariant 13: prose punctuation', () => {
+  // The house rule the sibling project already enforces with a commit hook:
+  // no em-dash, and no space-surrounded hyphen or semicolon used as a pause
+  // between words. Use a period, a comma, parentheses, or restructure.
+  //
+  // Scanned over the same surfaces as the numeric claim, so it covers prose
+  // held in data arrays as well as prose in markup. Plain hyphens inside
+  // compound words, flags, and filenames are untouched, and arithmetic like
+  // `n - 1` is code rather than prose so it never reaches here.
+  const RULES: [RegExp, string][] = [
+    [/\u2014/, 'em-dash'],
+    [/\s;\s/, 'semicolon used as a pause'],
+    [/\s-\s/, 'hyphen used as a pause'],
+  ];
+  const hits: string[] = [];
+  for (const { rel, src } of FILES) {
+    for (const text of claimSurfaces(src)) {
+      for (const [re, name] of RULES) {
+        if (re.test(text)) hits.push(`${rel}: ${name}`);
+      }
+    }
+  }
+  assert.deepEqual([...new Set(hits)], [], `Prose punctuation (AGENTS.md invariant 13):\n${hits.join('\n')}`);
 });

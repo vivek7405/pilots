@@ -3,7 +3,7 @@ import '#components/lifecycle-demo.ts';
 import { terminal } from '#lib/ui/terminal.ts';
 import { section } from '#lib/ui/section.ts';
 import { readout, inlineFact } from '#lib/ui/stat.ts';
-import { PANEL, PROSE, LINK, FIELD_LABEL, BTN_PRIMARY, BTN_GHOST } from '#lib/design/recipes.ts';
+import { PANEL, PROSE, LINK, BTN_PRIMARY, BTN_GHOST } from '#lib/design/recipes.ts';
 import { WORKLOAD_APEX, GH_URL, NEW_TAB } from '#lib/links.ts';
 import { pageHero } from '#lib/ui/page-hero.ts';
 
@@ -26,7 +26,6 @@ export const metadata = {
 export default function Sandboxes() {
   return html`
     ${pageHero({
-      eyebrow: 'Sandboxes',
       heading: 'Somewhere safe to run code nobody has read',
       lede: html`An agent writes code and needs to run it immediately, in a place where the worst outcome is
         a machine you throw away. A real virtual machine gives you that boundary. Restoring one from a
@@ -37,7 +36,6 @@ export default function Sandboxes() {
 
     ${section({
       id: 'speed',
-      eyebrow: 'Why restore beats boot',
       heading: 'A machine that was never off',
       lede: html`Booting a Linux guest costs whatever the operating system costs, every time, which
         is why sandbox products either make you wait or keep idle machines burning money. pilots
@@ -57,7 +55,6 @@ export default function Sandboxes() {
 
     ${section({
       id: 'checkpoints',
-      eyebrow: 'Recovery',
       heading: 'Checkpoint before the risky step, restore after it',
       lede: html`An agent about to run a migration, an upgrade, or a command it just invented is one
         step away from a machine that no longer works. A checkpoint makes that step cheap to undo,
@@ -77,7 +74,7 @@ export default function Sandboxes() {
           </div>
           <div class="flex flex-col gap-5">
             <div>
-              <p class="${FIELD_LABEL} m-0 mb-2">In place, not a replacement</p>
+              <p class="font-semibold m-0 mb-1.5">In place, not a replacement</p>
               <p class="text-sm text-ink-muted m-0">
                 Restoring does not spawn a fresh machine from a template and hand you a new address.
                 It is the same row in the database, the same URL, and the same credential the agent
@@ -86,14 +83,14 @@ export default function Sandboxes() {
               </p>
             </div>
             <div>
-              <p class="${FIELD_LABEL} m-0 mb-2">Named and chained</p>
+              <p class="font-semibold m-0 mb-1.5">Named and chained</p>
               <p class="text-sm text-ink-muted m-0">
                 Checkpoints have names and can be taken from a restored state, so an agent can walk
                 back to a known-good point and try a different branch.
               </p>
             </div>
             <div>
-              <p class="${FIELD_LABEL} m-0 mb-2">Durable in the background</p>
+              <p class="font-semibold m-0 mb-1.5">Durable in the background</p>
               <p class="text-sm text-ink-muted m-0">
                 The machine resumes as soon as the copy-on-write layer is cloned; the upload happens
                 behind it. Durability is reported separately, so a client that genuinely needs the
@@ -107,7 +104,6 @@ export default function Sandboxes() {
 
     ${section({
       id: 'exec',
-      eyebrow: 'Driving it',
       heading: 'Streaming exec, because agents produce output for minutes',
       lede: html`Running a command and collecting its output at the end is fine for a script and
         useless for a model that emits tokens for several minutes. Both shapes exist: buffered when
@@ -115,7 +111,7 @@ export default function Sandboxes() {
       body: html`
         <div class="grid gap-6 mid:grid-cols-2">
           <div class="${PANEL} p-5">
-            <p class="${FIELD_LABEL} m-0 mb-2">Working directory and environment</p>
+            <p class="font-semibold m-0 mb-1.5">Working directory and environment</p>
             <p class="text-sm text-ink-muted m-0">
               Every exec takes a directory, an environment, and a user, in both the buffered and the
               streaming form. A tool that only accepts them in one of the two forces its callers to
@@ -123,7 +119,7 @@ export default function Sandboxes() {
             </p>
           </div>
           <div class="${PANEL} p-5">
-            <p class="${FIELD_LABEL} m-0 mb-2">Optional stdin</p>
+            <p class="font-semibold m-0 mb-1.5">Optional stdin</p>
             <p class="text-sm text-ink-muted m-0">
               A stream can be opened with no input side at all, which is what a long-running agent
               process wants: it never reads, and holding a half-open pipe for it is a way to lose the
@@ -142,7 +138,6 @@ export default function Sandboxes() {
 
     ${section({
       id: 'isolation',
-      eyebrow: 'Isolation',
       heading: 'The boundary is a virtual machine, not a namespace',
       lede: html`Containers share a kernel, so a kernel bug is a tenant boundary failure. These are
         Firecracker microVMs with their own kernels, which is the isolation model the code you are
@@ -168,7 +163,6 @@ export default function Sandboxes() {
 
     ${section({
       id: 'lifecycle',
-      eyebrow: 'Identity',
       heading: 'One address, whatever happens to the machine behind it',
       lede: html`A sandbox that changes address when it sleeps is a sandbox every client has to poll
         for. Drive one through its lifecycle and watch the address hold.`,

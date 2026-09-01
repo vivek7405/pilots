@@ -3,7 +3,7 @@ import '#components/fleet-demo.ts';
 import { terminal } from '#lib/ui/terminal.ts';
 import { section } from '#lib/ui/section.ts';
 import { inlineFact } from '#lib/ui/stat.ts';
-import { PANEL, PROSE, LINK, FIELD_LABEL, BTN_GHOST, HAIRLINE } from '#lib/design/recipes.ts';
+import { PANEL, PROSE, LINK, BTN_GHOST, HAIRLINE } from '#lib/design/recipes.ts';
 import { GH_URL, NEW_TAB } from '#lib/links.ts';
 import { pageHero } from '#lib/ui/page-hero.ts';
 
@@ -55,7 +55,6 @@ const INVARIANTS = [
 export default function Architecture() {
   return html`
     ${pageHero({
-      eyebrow: 'Architecture',
       heading: 'No control plane, on purpose',
       lede: html`Every host runs the identical stack and serves the entire API. There is no scheduler to
         register with, no database to fail over, and no appliance in front. The tradeoffs that choice
@@ -65,7 +64,6 @@ export default function Architecture() {
 
     ${section({
       id: 'invariants',
-      eyebrow: 'Rules',
       heading: 'Five things that are never traded away',
       lede: html`Several of these were paid for with production incidents in the codebase that came
         before this one. They are written down because the expensive ones are the ones that look
@@ -89,7 +87,6 @@ export default function Architecture() {
 
     ${section({
       id: 'host',
-      eyebrow: 'A host',
       heading: 'Three processes, and that is the whole machine',
       lede: html`A pilots host is not a node in a cluster that something else manages. It runs
         ${inlineFact('processes')} processes, holds a full replica of the fleet’s state, and can
@@ -97,14 +94,14 @@ export default function Architecture() {
       body: html`
         <div class="grid gap-6 mid:grid-cols-3">
           <div class="${PANEL} p-5">
-            <p class="${FIELD_LABEL} m-0 mb-2">hostd</p>
+            <p class="font-semibold m-0 mb-1.5">hostd</p>
             <p class="text-sm text-ink-muted m-0">
               The entire data plane in one Go binary: the API, the router and its TLS, the
               Firecracker supervisor, the block layer, the idle monitor, and the self-heal loop.
             </p>
           </div>
           <div class="${PANEL} p-5">
-            <p class="${FIELD_LABEL} m-0 mb-2">corrosion</p>
+            <p class="font-semibold m-0 mb-1.5">corrosion</p>
             <p class="text-sm text-ink-muted m-0">
               Gossip-replicated SQLite. Every host reads its own local replica, so a lookup on the
               request path is a local read rather than a network call to something that might be
@@ -112,7 +109,7 @@ export default function Architecture() {
             </p>
           </div>
           <div class="${PANEL} p-5">
-            <p class="${FIELD_LABEL} m-0 mb-2">firecracker</p>
+            <p class="font-semibold m-0 mb-1.5">firecracker</p>
             <p class="text-sm text-ink-muted m-0">
               One process per machine, inside its own network namespace, under the jailer with a
               cgroup slice bounding CPU, memory, and process count.
@@ -145,7 +142,6 @@ export default function Architecture() {
 
     ${section({
       id: 'snapshots',
-      eyebrow: 'Storage',
       heading: 'A snapshot that does not know which host made it',
       lede: html`A memory snapshot is only portable if nothing host-specific got baked into it, and
         the two places that happens are networking and file paths. Both are solved by making the
@@ -193,7 +189,6 @@ export default function Architecture() {
 
     ${section({
       id: 'request',
-      eyebrow: 'The request path',
       heading: 'A request to a sleeping machine is held, not bounced',
       lede: html`The router lives inside the same binary that supervises the microVMs, which is what
         makes waking on demand a local operation rather than a distributed one. A request arrives for
@@ -229,7 +224,6 @@ export default function Architecture() {
 
     ${section({
       id: 'failure',
-      eyebrow: 'Failure',
       heading: 'A dead host is noticed by everyone at once',
       lede: html`Every host writes a heartbeat. After ${inlineFact('deadHost')} of silence a host is
         presumed dead, and every survivor independently rescues the slice of its machines that hashes
@@ -252,7 +246,6 @@ export default function Architecture() {
 
     ${section({
       id: 'edges',
-      eyebrow: 'Consequences',
       heading: 'What this design costs',
       lede: html`Choosing no control plane is not free. These are the bills it comes with, and they
         are structural rather than temporary.`,

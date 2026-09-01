@@ -1,5 +1,5 @@
 import { html } from '@webjsdev/core';
-import { PROSE, FIELD_LABEL } from '#lib/design/recipes.ts';
+import { PROSE } from '#lib/design/recipes.ts';
 
 /**
  * The masthead for an interior page.
@@ -16,9 +16,12 @@ import { PROSE, FIELD_LABEL } from '#lib/design/recipes.ts';
  * Splitting headline from lede fills the width and gives the eye somewhere to
  * go, and the baseline alignment is what keeps it from looking like two
  * unrelated blocks.
+ *
+ * No eyebrow, for the reason section() gives: a small label stacked above the
+ * heading is the generated-page rhythm, and a monospace one is the same tell
+ * in different clothes.
  */
 export function pageHero(opts: {
-  eyebrow: string;
   heading: string;
   lede: unknown;
   /** Optional actions, rendered under the lede. */
@@ -27,7 +30,6 @@ export function pageHero(opts: {
   return html`
     <div class="border-b border-rule">
       <div class="max-w-6xl mx-auto px-6 pt-14 pb-12 mid:pt-20 mid:pb-16">
-        <p class="${FIELD_LABEL} m-0 mb-5">${opts.eyebrow}</p>
         <div class="grid gap-7 wide:grid-cols-[1.05fr_0.95fr] wide:gap-14 wide:items-end">
           <h1 class="text-display font-bold leading-[1.02] m-0 max-w-[15ch]">${opts.heading}</h1>
           <div class="wide:pb-1.5">

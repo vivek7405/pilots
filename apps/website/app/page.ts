@@ -54,8 +54,6 @@ export default function Home() {
       <div class="relative max-w-6xl mx-auto px-6 pt-16 pb-20 mid:pt-24 mid:pb-28">
         <div class="grid gap-12 wide:grid-cols-[1.1fr_1fr] wide:gap-14 wide:items-center">
           <div>
-            <p class="${FIELD_LABEL} m-0 mb-5">Firecracker microVMs on bare metal</p>
-
             <h1 class="text-display font-bold leading-[0.98] m-0">
               The sandbox and the service are the same machine.
             </h1>
@@ -86,7 +84,6 @@ export default function Home() {
 
     ${section({
       id: 'url',
-      eyebrow: 'Identity',
       heading: 'A URL that outlives everything that happens to it',
       lede: html`Most platforms mean "stable until you redeploy". On pilots the address is part of
         the machine's identity, so suspend, wake, checkpoint, restore, promote, and a host dying
@@ -99,7 +96,6 @@ export default function Home() {
          for, so it gets the wider column and the transcript. -->
     ${section({
       id: 'faces',
-      eyebrow: 'One primitive',
       heading: 'Two things to want, one thing to run',
       lede: html`A sandbox and a production service differ by three numbers on a row in a database:
         when to stop, whether to start on demand, and how many to keep running. They are not two
@@ -139,7 +135,6 @@ export default function Home() {
 
     ${section({
       id: 'instant',
-      eyebrow: 'The engine',
       heading: 'Nothing boots, so nothing waits',
       lede: html`A machine that boots takes as long as its operating system does, which is why
         sandbox products either keep you waiting or keep idle VMs burning money. pilots restores a
@@ -158,7 +153,7 @@ export default function Home() {
 
         <div class="grid gap-6 mid:grid-cols-2 mt-10">
           <div class="${PANEL} p-5">
-            <p class="${FIELD_LABEL} m-0 mb-2">Lazy memory</p>
+            <p class="font-semibold m-0 mb-1.5">Lazy memory</p>
             <p class="text-sm text-ink-muted m-0 leading-relaxed">
               A userfaultfd handler serves the guest's page faults straight out of a content-addressed
               blob, and replays the fault order recorded on the previous restore so the next one
@@ -168,7 +163,7 @@ export default function Home() {
             </p>
           </div>
           <div class="${PANEL} p-5">
-            <p class="${FIELD_LABEL} m-0 mb-2">Lazy disk</p>
+            <p class="font-semibold m-0 mb-1.5">Lazy disk</p>
             <p class="text-sm text-ink-muted m-0 leading-relaxed">
               The rootfs is a read-through overlay: a shared template underneath, a
               copy-on-write cache of dirty blocks on top. A machine that changed nothing stores
@@ -181,7 +176,6 @@ export default function Home() {
 
     ${section({
       id: 'fleet',
-      eyebrow: 'Architecture',
       heading: 'There is no control plane to lose',
       lede: html`Every host runs the same three processes and serves the entire API, so no request
         needs a particular machine to be alive. State is a gossiped CRDT that every host holds a
@@ -192,21 +186,21 @@ export default function Home() {
 
         <div class="grid gap-6 mid:grid-cols-3 mt-10">
           <div>
-            <p class="${FIELD_LABEL} m-0 mb-2">Single writer</p>
+            <p class="font-semibold m-0 mb-1.5">Single writer</p>
             <p class="text-sm text-ink-muted m-0">
               A host writes only rows about its own machines. Last-write-wins merges make a
               violation silent rather than loud, so this one is enforced in review.
             </p>
           </div>
           <div>
-            <p class="${FIELD_LABEL} m-0 mb-2">Object storage is the truth</p>
+            <p class="font-semibold m-0 mb-1.5">Object storage is the truth</p>
             <p class="text-sm text-ink-muted m-0">
               Local NVMe is a cache. The design test is that you can wipe any host's disk and lose
               nothing.
             </p>
           </div>
           <div>
-            <p class="${FIELD_LABEL} m-0 mb-2">Adding a host</p>
+            <p class="font-semibold m-0 mb-1.5">Adding a host</p>
             <p class="text-sm text-ink-muted m-0">
               One script and an IP. It joins the gossip mesh and starts taking traffic. There is no
               scheduler to register with.
@@ -222,7 +216,6 @@ export default function Home() {
          paragraph of capability. -->
     ${section({
       id: 'limits',
-      eyebrow: 'Constraints',
       heading: 'What it cannot do',
       lede: html`Every one of these is a real edge of the current design rather than a feature that
         is nearly finished. They are here because you would otherwise find them at a worse moment.`,
@@ -259,7 +252,6 @@ export default function Home() {
 
     ${section({
       id: 'webjs',
-      eyebrow: 'Sibling',
       heading: 'WebJs is the framework, pilots is the platform',
       lede: html`They are built by the same people, the way Next.js and Vercel are. You do not need
         either one to use the other: pilots runs any Dockerfile, and WebJs deploys anywhere a Node

@@ -1,6 +1,6 @@
 import { html } from '@webjsdev/core';
 import { section } from '#lib/ui/section.ts';
-import { PROSE, LINK, FIELD_LABEL, BTN_GHOST } from '#lib/design/recipes.ts';
+import { PROSE, LINK, BTN_GHOST } from '#lib/design/recipes.ts';
 import { inlineFact } from '#lib/ui/stat.ts';
 import { GH_URL, GH_BOARD_URL, NEW_TAB } from '#lib/links.ts';
 import { pageHero } from '#lib/ui/page-hero.ts';
@@ -115,7 +115,6 @@ const STATUS_LABEL: Record<Status, string> = {
 export default function Roadmap() {
   return html`
     ${pageHero({
-      eyebrow: 'Roadmap',
       heading: 'Four phases closed, one being built',
       lede: html`A phase closes when its gate passes, not when its code is written. That is the rule the
         repository holds itself to, so it is the rule this page reports against. The gates are below
@@ -126,7 +125,6 @@ export default function Roadmap() {
 
     ${section({
       id: 'phases',
-      eyebrow: 'Six phases',
       heading: 'Everything ships, nothing waits for a later version',
       lede: html`The order is a build order rather than a release plan. There is no reduced first
         version to be upgraded from later: each phase makes the whole system more capable and none
@@ -143,7 +141,7 @@ export default function Roadmap() {
                     <h3 class="text-h3 font-bold m-0">${p.title}</h3>
                     <p class="${PROSE} m-0 mt-2">${p.summary}</p>
                     <div class="mt-4 border-l-2 ${p.status === 'done' ? 'border-signal' : 'border-rule-strong'} pl-4">
-                      <p class="${FIELD_LABEL} m-0 mb-1">Gate</p>
+                      <p class="font-semibold m-0 mb-1">Gate</p>
                       <p class="text-sm text-ink-muted m-0 max-w-[70ch]">${p.gate}</p>
                     </div>
                   </div>
@@ -176,7 +174,6 @@ export default function Roadmap() {
 
     ${section({
       id: 'honest',
-      eyebrow: 'Where it actually is',
       heading: 'What you should not do with this yet',
       lede: html`The engine works and the fleet heals itself. That is genuinely most of the hard
         part, and it is not the same as being ready for your traffic.`,
