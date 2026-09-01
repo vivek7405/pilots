@@ -218,6 +218,46 @@ not tmpfs) is bind-mounted onto the constant path
 `/srv/pilots/rootfs.ext4` inside that private mount ns. Every snapshot
 therefore restores against the same path on any host.
 
+**A machine is pinned to the template it was built from.** Its memory and disk
+images are diffs, and a diff's unchanged ranges name a logical offset rather
+than bytes, so they only mean anything against the exact build they were
+encoded against. The machine row therefore records `template_mem_build_id` and
+`template_rootfs_build_id` at create, and every later capture and restore uses
+*those* — never whichever template the acting host happens to hold. The two
+differ routinely: the golden template is rebuilt, or a host that has never held
+one mints its own with fresh ids. A host restoring a machine whose template it
+lacks materializes that template from object storage, which is a download
+because builds are content-addressed. `block.SetParent` verifies the pairing
+and refuses a mismatch, turning what would be a silently stitched guest into a
+failed restore.
+
+**Put the machine store on a filesystem that can share extents** (btrfs, or
+XFS made with `-m reflink=1`). Create copies the golden template, and
+checkpoint copies the snapshot and the cow *inside the pause window*; all
+three are budgeted as metadata operations, and a reflink is what makes them
+metadata operations.
+
+Measured on ext4 with the 2GiB golden rootfs, the engine's actual copy
+(`cp --reflink=auto --sparse=always`, which skips zero blocks) costs **134ms
+warm and 465ms cold** — not free, but not fatal either: create measures
+**~1020ms** there, inside its 1.5s budget. What does break is the **checkpoint
+pause**, which stops being independent of machine size and measures **409ms to
+2172ms p50 across hosts against a 500ms budget**, with single samples past 4s.
+That size-independence is the property that makes checkpoints usable at all,
+so it is the reason to care.
+
+Nothing errors when extents cannot be shared. So hostd probes at startup,
+warns, and reports it on `/v1/health`; `host-bootstrap.sh` prints it and
+refuses to finish under `PILOT_REQUIRE_REFLINK=1`. The e2e battery holds
+create and wake to the engine targets on every host, and gives the checkpoint
+gap a *degraded ceiling* where extents cannot be shared rather than dropping
+the assertion — an assertion that stops asserting is how a real slowdown
+hides.
+
+(An earlier note here put the ext4 penalty at 2.2s per create. That measured
+`cp --reflink=auto` without `--sparse=always`, which is not what the engine
+runs; the same copy without sparse detection takes 19s on these hosts.)
+
 **Snapshot (suspend/checkpoint).** The order of these steps is the design,
 and every one of them was arrived at by measuring a resume gap:
 

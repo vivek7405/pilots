@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -27,7 +28,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/nbd"
 	"github.com/vivek7405/pilots/hostd/internal/router"
 	"github.com/vivek7405/pilots/hostd/internal/s3"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/vivek7405/pilots/hostd/internal/selfheal"
 )
 
 // shutdownTimeout bounds a graceful stop.
@@ -71,11 +72,34 @@ func run() error {
 		}
 	}
 
-	store, err := state.Open(cfg.StateDSN)
+	// Probe once, at startup, before anything can be created. The engine's
+	// image copies use --reflink=auto, which falls back to a full copy without
+	// reporting anything, so a host on the wrong filesystem is slow in a way
+	// that looks like nothing is wrong. Say it out loud instead.
+	reflink := fc.SupportsReflink(cfg.ChrootBase)
+	if !reflink {
+		slog.Warn("this host's machine store cannot share extents, so every "+
+			"image copy is a real copy: create and checkpoint will be several "+
+			"times slower than the engine is designed for. Put "+
+			"PILOT_CHROOT_BASE on btrfs, or on XFS formatted with reflink=1.",
+			"chroot_base", cfg.ChrootBase)
+	}
+
+	// The daemon's own lifetime. Everything the fleet runs in the background
+	// -- gossip subscriptions, mesh reconciliation, the self-heal loops --
+	// hangs off this, so a shutdown stops them without stopping the machines.
+	ctx, stopFleet := context.WithCancel(context.Background())
+	defer stopFleet()
+
+	store, cache, err := openState(ctx, cfg)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
+
+	if cfg.Fleet() {
+		slog.Info("joining the fleet", "state", "corrosion", "agent", cfg.CorrosionAddr)
+	}
 
 	uploader, err := newUploader(cfg)
 	if err != nil {
@@ -108,6 +132,8 @@ func run() error {
 		// The handlers are separate processes and read builds themselves, so
 		// they need this daemon's storage credentials.
 		HandlerEnv: os.Environ(),
+		// Fleet-wide, so a host that rescues a machine can still reach it.
+		AgentTokenSecret: cfg.AgentTokenSecret,
 		FCConfig: fc.Config{
 			KernelPath:     cfg.KernelPath,
 			TemplateRootfs: cfg.TemplateRootfs,
@@ -142,20 +168,76 @@ func run() error {
 	// hostd killed mid-create, or a destroy that failed partway.
 	go mgr.RunReaper(ctx)
 
-	rtr := router.New(router.Options{
+	// The fleet pieces, in the order they depend on each other: the mesh
+	// carries gossip and forwarded requests, so it comes up before anything
+	// that rides it.
+	var f *fleet
+	if cfg.Fleet() {
+		f = &fleet{store: store, cache: cache}
+		if cfg.MeshEnabled {
+			dev, keys, err := startMesh(ctx, cfg, cache)
+			if err != nil {
+				return fmt.Errorf("bring up the mesh: %w", err)
+			}
+			defer dev.Close()
+			f.dev, f.keys = dev, keys
+		}
+	}
+
+	routerOpts := router.Options{
 		Domain:  cfg.WorkloadDomain,
 		HostID:  cfg.HostID,
 		Store:   store,
 		Manager: mgr,
 		SlotFor: mgr.SlotFor,
-	})
+	}
+	if f != nil {
+		routerOpts.Peers = peers{cache: f.cache}
+		// A host that finds the owner gone rescues the machine HERE, holding
+		// the client, rather than failing until the rescue loop's next tick.
+		routerOpts.Rescue = mgr.Rescue
+		// ...but only the host the hash names, so two survivors cannot both
+		// claim and both start a Firecracker on one machine's state. Same rule
+		// and same function the rescue loop uses; there is only one definition
+		// of it on purpose.
+		routerOpts.RescuerFor = func(machineID string) (string, bool) {
+			return selfheal.RescuerFor(machineID,
+				f.cache.LiveHosts(time.Now(), selfheal.DeadAfter))
+		}
+		// The hot path reads the subscription cache, not the agent.
+		routerOpts.Lookup = f.cache.MachineByName
+	}
+	rtr := router.New(routerOpts)
 
 	// One listener, two audiences: requests for a workload hostname are
 	// proxied into a machine, everything else is the control API. Keeping them
 	// on one port means a host needs exactly one address to be useful.
-	handler := dispatch(cfg, rtr, api.Routes(api.Deps{
-		HostID: cfg.HostID, Store: store, Machines: mgr,
-	}))
+	controlAPI := api.Routes(api.Deps{
+		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink,
+	})
+
+	// Machine-scoped API calls go to the host that owns the machine. Without
+	// this, "every host serves the full API" means every host answers and
+	// most of them are wrong -- an exec against a machine running elsewhere
+	// simply fails.
+	owner := machineOwner(store)
+	if f != nil {
+		owner = cachedOwner(f.cache, owner)
+	}
+	// The forwarding marker is a fleet-internal signal set by peers proxying
+	// over the mesh. Stripped here so a client on the public listener cannot
+	// forge it and make a non-owner host act on a machine-scoped call.
+	handler := router.StripForwardMarker(dispatch(cfg, rtr, rtr.ForwardAPI(owner, controlAPI)))
+
+	if f != nil && f.dev != nil {
+		// Peers reach the same dispatch, guarded so a forwarded request is
+		// never forwarded again.
+		internal := router.InternalAPIHandler(dispatch(cfg, rtr.InternalHandler(), controlAPI))
+		if err := startInternalListener(ctx, f.dev, internal); err != nil {
+			return err
+		}
+		startSelfHeal(ctx, cfg, f, mgr)
+	}
 
 	srv := &http.Server{
 		Handler:           handler,

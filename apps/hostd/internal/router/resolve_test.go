@@ -2,7 +2,6 @@ package router
 
 import (
 	"context"
-	"strings"
 	"testing"
 
 	"github.com/vivek7405/pilots/hostd/internal/state"
@@ -16,6 +15,16 @@ type stubStore struct {
 
 func (s *stubStore) ListMachines(context.Context) ([]state.Machine, error) {
 	return s.machines, nil
+}
+
+func (s *stubStore) GetMachine(_ context.Context, id string) (*state.Machine, error) {
+	for i := range s.machines {
+		if s.machines[i].ID == id {
+			m := s.machines[i]
+			return &m, nil
+		}
+	}
+	return nil, state.ErrNotFound
 }
 
 func TestResolveFindsLocalMachine(t *testing.T) {
@@ -40,7 +49,10 @@ func TestResolveFindsLocalMachine(t *testing.T) {
 // Doing so would run a second copy from the same artifacts and write state onto
 // a row this host does not own -- a single-writer violation that, once the store
 // is replicated, corrupts silently through the merge rather than erroring.
-func TestResolveRefusesAnotherHostsMachine(t *testing.T) {
+// Any host resolves any machine. DNS points every workload name at every
+// host, so a request for someone else's machine is ordinary -- what differs is
+// only where it is then served, which serveOrForward decides.
+func TestResolveFindsAMachineOwnedElsewhere(t *testing.T) {
 	r := New(Options{
 		Domain: "pilotrun.app", HostID: "host-a",
 		Store: &stubStore{machines: []state.Machine{
@@ -48,12 +60,13 @@ func TestResolveRefusesAnotherHostsMachine(t *testing.T) {
 		}},
 	})
 
-	_, err := r.resolve(context.Background(), "elsewhere.pilotrun.app")
-	if err == nil {
-		t.Fatal("resolved a machine owned by another host")
+	target, err := r.resolve(context.Background(), "elsewhere.pilotrun.app")
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
 	}
-	if !strings.Contains(err.Error(), "host-b") {
-		t.Errorf("the error should name the owning host, got: %v", err)
+	if target.Machine.HostID != "host-b" {
+		t.Errorf("owner = %q, want host-b so the caller can forward there",
+			target.Machine.HostID)
 	}
 }
 

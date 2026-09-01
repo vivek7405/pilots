@@ -40,6 +40,30 @@ type Options struct {
 	// SlotFor resolves a running machine's network slot. The router needs the
 	// slot's host-facing address to dial the guest.
 	SlotFor func(machineID string) (*netns.Slot, bool)
+
+	// Peers resolves other hosts on the mesh, for machines this host does not
+	// own. Nil on a single-box deployment, where every machine is local.
+	Peers Peers
+
+	// RescuerFor names the one host allowed to rescue a machine, by the same
+	// rule the self-heal loop uses. Without it a request-path rescue has no
+	// way to exclude a second host doing the same thing at the same moment.
+	// Nil disables rescuing on the request path entirely, which is correct for
+	// a single-box deployment where there is nobody to rescue from.
+	RescuerFor func(machineID string) (hostID string, ok bool)
+
+	// Rescue claims a machine from a host that has stopped responding and
+	// restores it here. Called on the request path, holding the client, so
+	// that a host dying mid-request costs one slow request rather than an
+	// outage lasting until a background loop notices.
+	Rescue func(ctx context.Context, m state.Machine) error
+
+	// Lookup resolves a machine by name from an in-memory replica, sparing
+	// the routing hot path a store query per request -- which in a fleet is
+	// an HTTP round trip to the corrosion agent. Optional; nil, and a miss
+	// (a row the subscription has not delivered yet, or a custom domain),
+	// fall back to Store.ListMachines.
+	Lookup func(name string) (state.Machine, bool)
 }
 
 // Router proxies inbound requests to machines, waking them if needed.
@@ -95,6 +119,16 @@ func (r *Router) resolve(ctx context.Context, host string) (*Target, error) {
 		return nil, fmt.Errorf("router: %q is not a machine hostname", host)
 	}
 
+	// The subscription cache first: a mutex and a map lookup, no query at
+	// all. A miss falls through to the store, so a machine the subscription
+	// has not delivered yet -- or one reached by custom domain -- still
+	// resolves.
+	if r.opts.Lookup != nil {
+		if m, ok := r.opts.Lookup(name); ok {
+			return &Target{Machine: m, Port: port}, nil
+		}
+	}
+
 	// A local read. This is the whole point: routing must not depend on any
 	// other host being reachable.
 	rows, err := r.opts.Store.ListMachines(ctx)
@@ -105,19 +139,9 @@ func (r *Router) resolve(ctx context.Context, host string) (*Target, error) {
 		if row.Name != name && row.Domain != strings.ToLower(host) {
 			continue
 		}
-		// Only this host's machines are servable here.
-		//
-		// Waking someone else's machine locally would run a second copy from
-		// the same artifacts AND write state onto a row this host does not
-		// own -- a single-writer violation, which under a replicated store
-		// corrupts silently through the merge rather than erroring.
-		//
-		// Phase 4 replaces this error with a proxy to the owning host over the
-		// mesh; until the mesh exists, refusing is the honest answer.
-		if r.opts.HostID != "" && row.HostID != r.opts.HostID {
-			return nil, fmt.Errorf("router: machine %q is owned by host %q, not %q",
-				name, row.HostID, r.opts.HostID)
-		}
+		// Ownership is NOT checked here. Any host can resolve any machine --
+		// DNS points every workload name at every host -- and what differs is
+		// only where the request is then served. See serveOrForward.
 		return &Target{Machine: row, Port: port}, nil
 	}
 	return nil, fmt.Errorf("router: no machine named %q", name)
@@ -184,28 +208,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "unknown host", http.StatusNotFound)
 		return
 	}
-
-	if err := r.ensureAwake(ctx, target.Machine); err != nil {
-		slog.Error("could not wake machine for request",
-			"machine", target.Machine.ID, "err", err)
-		http.Error(w, "machine unavailable", http.StatusServiceUnavailable)
-		return
-	}
-
-	slot, ok := r.opts.SlotFor(target.Machine.ID)
-	if !ok {
-		http.Error(w, "machine unavailable", http.StatusServiceUnavailable)
-		return
-	}
-
-	// Count the request while it is in flight so the idle monitor cannot
-	// suspend the machine mid-response, and record the activity so it is not
-	// suspended immediately after.
-	r.opts.Manager.Begin(target.Machine.ID)
-	defer r.opts.Manager.End(target.Machine.ID)
-	go r.opts.Manager.Touch(context.WithoutCancel(ctx), target.Machine.ID)
-
-	r.proxyTo(w, req, slot, target.Port)
+	r.serveOrForward(w, req, target)
 }
 
 // proxyTo forwards to the guest.
