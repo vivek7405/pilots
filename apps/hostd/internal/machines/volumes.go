@@ -6,11 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"time"
-
-	"github.com/google/uuid"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/fc"
@@ -122,86 +119,6 @@ func (m *Manager) releaseVolume(ctx context.Context, volumeID string) error {
 		}
 	}
 	return errors.Join(errs...)
-}
-
-// createWithVolume brings up a machine that has a volume attached.
-//
-// It BOOTS rather than restoring, and that is the one place in the engine
-// where a create costs a kernel boot. The drive set is baked into a snapshot:
-// Firecracker requires every backing file to be at the same path on restore,
-// and there is no documented way to add a drive between loading a snapshot and
-// resuming it. A template captured with a volume drive would not help either,
-// since the drive's capacity travels with the device state and every volume is
-// a different size.
-//
-// So the trade is explicit: a machine with a volume pays ~20s on its FIRST
-// start, and every wake after that is an ordinary restore from its own
-// snapshot, which does carry the drive.
-func (m *Manager) createWithVolume(ctx context.Context, row *state.Machine,
-	token, volumeID string) (*fc.Machine, error) {
-
-	v, err := m.claimVolume(ctx, volumeID, row.ID)
-	if err != nil {
-		return nil, err
-	}
-
-	// The disk template this machine's later snapshots are diffs against. Its
-	// root filesystem is a copy of the golden rootfs, so the golden rootfs's
-	// build is the right and only parent.
-	t, err := m.EnsureTemplate(ctx)
-	if err != nil {
-		return nil, err
-	}
-	row.TemplateRootfsBuildID = t.RootfsBuildID.String()
-	// Its MEMORY has no parent, and saying so explicitly is load-bearing. This
-	// guest booted; it is not a divergence from the template's photographed
-	// memory, and diffing it against that template would record every
-	// coincidentally-identical page as a pointer into a completely different
-	// machine's memory image. Nothing would error -- the restore would just
-	// hand the guest another machine's pages.
-	row.TemplateMemBuildID = uuid.Nil.String()
-	row.VolumeID = v.ID
-
-	slot, err := m.pool.Take(row.ID)
-	if err != nil {
-		return nil, err
-	}
-	mac, err := fc.GenerateMAC()
-	if err != nil {
-		m.pool.Return(slot.Idx)
-		return nil, err
-	}
-	if err := netns.Setup(slot, mac, m.opts.FCConfig.JailUID); err != nil {
-		m.pool.Return(slot.Idx)
-		return nil, err
-	}
-
-	cfg := m.machineFCConfig(row, slot, mac)
-	cfg.VolumeImage = m.opts.Volumes.ImagePath(v.ID)
-
-	fcm, err := fc.Boot(ctx, cfg)
-	if err != nil {
-		_ = netns.Teardown(slot)
-		m.pool.Return(slot.Idx)
-		return nil, fmt.Errorf("machines: boot %s with volume %s: %w", row.ID, v.ID, err)
-	}
-
-	if err := m.installToken(ctx, slot, token); err != nil {
-		_ = fcm.Kill()
-		m.pool.Return(slot.Idx)
-		return nil, fmt.Errorf("install agent token: %w", err)
-	}
-	if err := m.mountVolumeInGuest(ctx, slot, row.ID, v.MountPath); err != nil {
-		_ = fcm.Kill()
-		m.pool.Return(slot.Idx)
-		return nil, err
-	}
-
-	if err := fcm.Persist(); err != nil {
-		slog.Error("booted machine's breadcrumbs were not written",
-			"machine", row.ID, "err", err)
-	}
-	return fcm, nil
 }
 
 // mountVolumeInGuest tells the guest agent to mount the volume.

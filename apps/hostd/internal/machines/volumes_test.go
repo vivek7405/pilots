@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
@@ -211,5 +213,49 @@ func TestMachineConfigCarriesTheVolumeImage(t *testing.T) {
 	without := m.machineFCConfig(&state.Machine{ID: "m-2", VCPUs: 1, MemMiB: 512}, nil, "")
 	if without.VolumeImage != "" {
 		t.Fatalf("a machine with no volume was given the image %q", without.VolumeImage)
+	}
+}
+
+// A machine created from a build id boots from that build and pins it as the
+// disk template its later diffs resolve against. Pinning anything else --
+// the golden template included -- hands a restored guest another image's
+// blocks, which nothing errors on.
+func TestBootFromABuildPinsThatBuildAsTheDiskTemplate(t *testing.T) {
+	ctx := context.Background()
+	m, _, _ := newVolumeTestManager(t)
+	m.opts.CacheRoot = t.TempDir()
+
+	row := &state.Machine{ID: "m-1", VCPUs: 1, MemMiB: 512}
+	// The boot itself needs Firecracker; what is asserted here is what the row
+	// records before anything is started, which is the part that is permanent.
+	_, err := m.bootMachine(ctx, row, "tok", "", "not-a-uuid")
+	if err == nil || !strings.Contains(err.Error(), "not a build id") {
+		t.Fatalf("got %v, want a refusal naming the unusable build id", err)
+	}
+}
+
+// A booted machine records the nil memory build, which is the recorded ABSENCE
+// of a parent rather than an unset field. templateFor treats an empty value as
+// "an old row, use the host's template", which for a booted machine would
+// resolve its pages from a completely different guest.
+func TestNilMemoryParentIsNotTreatedAsUnset(t *testing.T) {
+	ctx := context.Background()
+	m, _, _ := newVolumeTestManager(t)
+	m.opts.CacheRoot = t.TempDir()
+
+	tmpl, err := m.templateFor(ctx, &state.Machine{
+		ID:                    "m-1",
+		TemplateMemBuildID:    uuid.Nil.String(),
+		TemplateRootfsBuildID: uuid.Nil.String(),
+	})
+	if err != nil {
+		t.Fatalf("templateFor: %v", err)
+	}
+	if tmpl.MemBuildID != uuid.Nil {
+		t.Fatalf("memory build resolved to %s, want the nil uuid", tmpl.MemBuildID)
+	}
+	if got := m.memParentDir(tmpl); got != "" {
+		t.Fatalf("a booted machine was given the memory parent %q; every "+
+			"coincidentally identical page would resolve from another machine", got)
 	}
 }

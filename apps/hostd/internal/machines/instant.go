@@ -39,15 +39,17 @@ func checkpointSnapKey(machineID, checkpointID string) string {
 
 // startNewMachine brings up a machine that has just been created.
 //
-// Two paths, and the split is forced by Firecracker rather than chosen: a
-// machine with a volume has to be booted, because a drive cannot be added to a
-// snapshot being restored. Everything else restores from the golden template,
-// which is what makes a create sub-second.
+// Two paths, and the split is forced rather than chosen. A machine with a
+// volume has to boot, because a drive cannot be added to a snapshot being
+// restored; a machine with its own image has to boot, because the golden
+// template's memory describes the golden template's disk and resuming it
+// against another root filesystem is a guest whose memory and disk have never
+// met. Everything else restores, which is what makes a create sub-second.
 func (m *Manager) startNewMachine(ctx context.Context, row *state.Machine,
-	token, volumeID string) (*fc.Machine, error) {
+	token, volumeID, image string) (*fc.Machine, error) {
 
-	if volumeID != "" {
-		return m.createWithVolume(ctx, row, token, volumeID)
+	if volumeID != "" || image != "" {
+		return m.bootMachine(ctx, row, token, volumeID, image)
 	}
 	return m.createFromTemplate(ctx, row, token)
 }

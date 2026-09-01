@@ -222,7 +222,7 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 		return nil, err
 	}
 
-	fcm, err := m.startNewMachine(ctx, row, token, req.Volume)
+	fcm, err := m.startNewMachine(ctx, row, token, req.Volume, req.Image)
 	if err != nil {
 		row.State = StateError
 		row.UpdatedAt = time.Now().Unix()
