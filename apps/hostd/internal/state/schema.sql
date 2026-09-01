@@ -157,6 +157,7 @@ CREATE TABLE IF NOT EXISTS volumes (    -- writer: host_id only
   mount_path TEXT,     -- where the guest mounts /dev/vdb
   host_id    TEXT,
   created_at INTEGER
+);
 
 -- A service is a set of machines that share a name, a release and an
 -- environment. In this phase only its environment is consumed; the rollout

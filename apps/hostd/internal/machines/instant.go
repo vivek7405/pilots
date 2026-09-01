@@ -47,12 +47,12 @@ func checkpointSnapKey(machineID, checkpointID string) string {
 // against another root filesystem is a guest whose memory and disk have never
 // met. Everything else restores, which is what makes a create sub-second.
 func (m *Manager) startNewMachine(ctx context.Context, row *state.Machine,
-	token, volumeID, image string) (*fc.Machine, error) {
+	token, volumeID, image, appCmd string) (*fc.Machine, error) {
 
 	if volumeID != "" || image != "" {
-		return m.bootMachine(ctx, row, token, volumeID, image)
+		return m.bootMachine(ctx, row, token, volumeID, image, appCmd)
 	}
-	return m.createFromTemplate(ctx, row, token)
+	return m.createFromTemplate(ctx, row, token, appCmd)
 }
 
 // createFromTemplate restores a brand-new machine from the golden template.

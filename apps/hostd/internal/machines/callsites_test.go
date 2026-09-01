@@ -31,17 +31,38 @@ func TestEnvIsDeliveredFromTheCreatePathAndNowhereElse(t *testing.T) {
 		why    string
 	}{
 		{
+			// Two create paths, not one. A machine with a volume or its own
+			// image cannot be restored from the golden template -- a drive
+			// cannot be added to a snapshot being resumed, and the template's
+			// memory describes the template's disk -- so it boots instead.
+			// Both are creates, and a create is the only moment an application
+			// can be handed an environment it did not start with.
 			callee: "deliverEnv",
-			want:   []string{"createFromTemplate"},
+			want:   []string{"bootMachine", "createFromTemplate"},
 			why: "a wake resumes a snapshot in which the application is already " +
 				"running, so delivering an environment there restarts the process " +
 				"the guest just restored",
 		},
 		{
 			callee: "createFromTemplate",
-			want:   []string{"Create"},
+			want:   []string{"startNewMachine"},
 			why: "reaching the create path from anywhere else would deliver an " +
 				"environment on that path too, by the back door",
+		},
+		{
+			callee: "bootMachine",
+			want:   []string{"startNewMachine"},
+			why:    "the same back door, by the other create path",
+		},
+		{
+			// The dispatcher is the choke point both paths go through, so the
+			// invariant survives as one assertion rather than two that could
+			// drift apart: whatever reaches an environment reaches it through
+			// here, and only Create reaches here.
+			callee: "startNewMachine",
+			want:   []string{"Create"},
+			why: "both create paths run through this, so anything else calling " +
+				"it would deliver an environment outside a create",
 		},
 	} {
 		got := callersOf(t, tc.callee)

@@ -81,7 +81,7 @@ func (m *Manager) imageForBuild(ctx context.Context, buildID uuid.UUID) (string,
 // machine's first suspend captures its own memory, and every wake after that
 // is the ordinary instant restore.
 func (m *Manager) bootMachine(ctx context.Context, row *state.Machine,
-	token, volumeID, image string) (*fc.Machine, error) {
+	token, volumeID, image, appCmd string) (*fc.Machine, error) {
 
 	rootfs := m.opts.FCConfig.TemplateRootfs
 	initPath := ""
@@ -165,6 +165,20 @@ func (m *Manager) bootMachine(ctx context.Context, row *state.Machine,
 			m.pool.Return(slot.Idx)
 			return nil, err
 		}
+	}
+
+	// The environment goes in after the volume is mounted, because an
+	// application started here may expect to find its data already there.
+	//
+	// A machine that booted needs this exactly as much as one that restored:
+	// it is a create either way, and it is the only moment an application can
+	// be handed an environment it did not start with. An image built from a
+	// Dockerfile carries no command in the row at all, so appCmd is usually
+	// empty here and the start spec baked into the image supplies it.
+	if err := m.deliverEnv(ctx, row, slot, appCmd); err != nil {
+		_ = fcm.Kill()
+		m.pool.Return(slot.Idx)
+		return nil, fmt.Errorf("deliver env: %w", err)
 	}
 
 	if err := fcm.Persist(); err != nil {

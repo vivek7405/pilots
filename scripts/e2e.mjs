@@ -810,6 +810,9 @@ async function buildAssertions() {
     assert(/this-command-does-not-exist/.test(JSON.stringify(lines)),
       'nothing in the stream names the instruction that failed');
   });
+}
+
+// ---------------------------------------------------------------------------
 // Phase 5b: .internal, tenant isolation, and environment delivery.
 //
 // These need a golden template built from the CURRENT rootfs: one that names

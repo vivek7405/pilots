@@ -265,8 +265,7 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 		return nil, err
 	}
 
-	fcm, err := m.startNewMachine(ctx, row, token, req.Volume, req.Image)
-	fcm, err := m.createFromTemplate(ctx, row, token, env.Cmd)
+	fcm, err := m.startNewMachine(ctx, row, token, req.Volume, req.Image, env.Cmd)
 	if err != nil {
 		row.State = StateError
 		stampSlot(row, nil)

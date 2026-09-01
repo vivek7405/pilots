@@ -165,6 +165,8 @@ func run() error {
 			AccessKey: cfg.S3AccessKey,
 			SecretKey: cfg.S3SecretKey,
 		})
+	}
+
 	// The fleet's view of itself, and the rule that turns a row into an
 	// address. The tenant filter and the DNS responder read the SAME view, or
 	// a machine could be resolvable and unreachable at the same instant.
