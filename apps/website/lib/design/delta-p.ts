@@ -36,7 +36,6 @@ import { html } from '@webjsdev/core';
 const ACCENT_INK = 'var(--logo-accent, currentColor)';
 
 const BASELINE = 108;
-const DESCENDER = 132;
 
 /** The candidate drawing, verbatim, inside the translate and lean it was drawn with. */
 const DELTA_D = 'M16 3.8 L26.8 27.6 L16 21.4 L5.2 27.6 Z';
@@ -62,7 +61,7 @@ export type DeltaP = {
   cy: number;
   /** Stem weight, matched to the letters rather than to the mark. */
   stemW: number;
-  stem: 'none' | 'baseline' | 'descender';
+  stem: 'none' | 'baseline';
   /**
    * Carry the Delta half drawing: the hairline opened along the mark's own
    * axis. Identical geometry to the candidate card, cut and all.
@@ -134,7 +133,7 @@ function undersideY(v: DeltaP, x: number): number {
 export function deltaPLetter(v: DeltaP) {
   const px = partitionX(v);
   const top = undersideY(v, px) - 2;
-  const bottom = v.stem === 'descender' ? DESCENDER : BASELINE;
+  const bottom = BASELINE;
   return html`
     ${v.stem === 'none'
       ? ''
@@ -162,7 +161,7 @@ function markBox(v: DeltaP) {
   if (v.stem !== 'none') {
     const px = partitionX(v);
     xs.push(px - v.stemW / 2 - stemLean, px + v.stemW / 2);
-    ys.push(v.stem === 'descender' ? DESCENDER : BASELINE);
+    ys.push(BASELINE);
   }
   const pad = 10;
   const left = Math.min(...xs) - pad;
@@ -203,7 +202,7 @@ export function deltaPLockup(v: DeltaP, opts: { height: number; face?: 'sans' | 
   const b = markBox(v);
   const left = Math.min(b.left, WORD_X - 14);
   const top = Math.min(b.top, -12);
-  const bottom = Math.max(b.top + b.h, v.stem === 'descender' ? DESCENDER + 10 : BASELINE + 14);
+  const bottom = Math.max(b.top + b.h, BASELINE + 14);
   const right = Math.max(b.left + b.w, WORD_X + leanShift + (face === 'mono' ? 350 : 292));
   const h = bottom - top;
   return html`
@@ -232,20 +231,6 @@ export function deltaPLockup(v: DeltaP, opts: { height: number; face?: 'sans' | 
 }
 
 export const DELTA_PS: DeltaP[] = [
-  {
-    id: 'turn-90',
-    name: 'Quarter turn',
-    idea:
-      'The plain quarter turn, kept as the control. Everything else on this row is a departure from it, and this is what they are departing from.',
-    cost:
-      'Its underside runs at fifteen degrees while the step from the i\'s shoulder to the l\'s ascender is about forty. Lift it clear of the l and it floats far above the i, so it can sit properly over one letter or the other, never both.',
-    rotate: 90,
-    size: 3.5,
-    cx: 60,
-    cy: -14,
-    stemW: 15,
-    stem: 'baseline',
-  },
   {
     id: 'raked',
     name: 'Turned to the letters',
@@ -288,19 +273,5 @@ export const DELTA_PS: DeltaP[] = [
     cy: -12.5,
     stemW: 15,
     stem: 'none',
-  },
-  {
-    id: 'raked-descender',
-    name: 'Turned, dropped',
-    idea:
-      'The stem carried below the baseline, which makes the letter a lowercase p. That is how the name is set on every page of the site, and the descender is the counterweight to a wing that sits high.',
-    cost:
-      'A descender needs clearance, so any line of type under the lockup has to move down to make room for one letter.',
-    rotate: 64,
-    size: 5.2,
-    cx: 50,
-    cy: -12.5,
-    stemW: 15,
-    stem: 'descender',
   },
 ];
