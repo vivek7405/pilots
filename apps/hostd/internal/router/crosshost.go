@@ -75,10 +75,19 @@ type Peers interface {
 // provides. TLS terminates once, at whichever host the client actually
 // reached.
 func (r *Router) forwardToOwner(w http.ResponseWriter, req *http.Request, m state.Machine) {
-	addr, ok := r.opts.Peers.InternalAddr(m.HostID)
+	r.forwardTo(w, req, m, m.HostID)
+}
+
+// forwardTo proxies a request to a named host.
+//
+// The target is not always the owner. When the owner is gone the request goes
+// to whichever host is designated to rescue the machine, which is the only
+// host allowed to claim it -- see serveOrForward.
+func (r *Router) forwardTo(w http.ResponseWriter, req *http.Request, m state.Machine, hostID string) {
+	addr, ok := r.opts.Peers.InternalAddr(hostID)
 	if !ok {
-		slog.Error("cannot forward: the owning host has no mesh address",
-			"machine", m.ID, "owner", m.HostID)
+		slog.Error("cannot forward: the target host has no mesh address",
+			"machine", m.ID, "target", hostID)
 		http.Error(w, "machine unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -97,8 +106,8 @@ func (r *Router) forwardToOwner(w http.ResponseWriter, req *http.Request, m stat
 		// what the user typed.
 	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
-		slog.Error("could not forward to the owning host",
-			"machine", m.ID, "owner", m.HostID, "addr", target.Host, "err", err)
+		slog.Error("could not forward to the target host",
+			"machine", m.ID, "target", hostID, "addr", target.Host, "err", err)
 		http.Error(w, "machine unavailable", http.StatusBadGateway)
 	}
 
@@ -129,11 +138,25 @@ func (r *Router) InternalHandler() http.Handler {
 			return
 		}
 		if target.Machine.HostID != r.opts.HostID {
-			// The forwarding host's view is stale, or ownership moved while
-			// the request was in flight. Refusing is what stops a loop; the
-			// client's next request will be routed from a fresher view.
+			// A peer forwards an orphan here when this host is the one
+			// designated to rescue it. Accept exactly that case: the owner
+			// must actually be gone, and the hash must actually name us.
+			owner := target.Machine.HostID
+			ownerGone := r.opts.Peers == nil || !r.opts.Peers.IsLive(owner)
+			rescuer, ok := "", false
+			if r.opts.RescuerFor != nil {
+				rescuer, ok = r.opts.RescuerFor(target.Machine.ID)
+			}
+			if ownerGone && ok && rescuer == r.opts.HostID {
+				r.rescueAndServe(w, req, target)
+				return
+			}
+
+			// Otherwise the forwarding host's view is stale, or ownership
+			// moved while the request was in flight. Refusing is what stops a
+			// loop; the client's next request is routed from a fresher view.
 			slog.Warn("a peer forwarded a machine this host does not own",
-				"machine", target.Machine.ID, "from", from, "owner", target.Machine.HostID)
+				"machine", target.Machine.ID, "from", from, "owner", owner)
 			http.Error(w, "machine is not served by this host", http.StatusNotFound)
 			return
 		}
@@ -160,12 +183,53 @@ func (r *Router) serveOrForward(w http.ResponseWriter, req *http.Request, target
 		return
 	}
 
-	// The owner is not heartbeating. Rescue it here rather than making the
-	// client wait for the self-heal loop's next tick.
-	if r.opts.Rescue == nil {
+	// The owner is not heartbeating, so the machine has to be rescued before
+	// this request can be served. Exactly one host may do that.
+	//
+	// Liveness here is read from a local CRDT replica, and so is the claim
+	// that follows it. Neither can exclude anything: two survivors reading
+	// their own replicas both see the owner as dead, both claim successfully,
+	// and both start a Firecracker on one machine's state until last-write-
+	// wins picks a loser. The fix is the rule the rescue loop already uses --
+	// hash the machine id over the sorted live hosts -- because it needs no
+	// coordination to give the same answer everywhere.
+	r.rescueAndServe(w, req, target)
+}
+
+// rescueAndServe brings a machine back from a dead host and serves the request
+// that asked for it, or hands the job to the host whose job it is.
+func (r *Router) rescueAndServe(w http.ResponseWriter, req *http.Request, target *Target) {
+	m := target.Machine
+
+	if r.opts.Rescue == nil || r.opts.RescuerFor == nil {
 		http.Error(w, "machine unavailable", http.StatusServiceUnavailable)
 		return
 	}
+	rescuer, ok := r.opts.RescuerFor(m.ID)
+	if !ok {
+		// No live fleet to hash over -- including the case where this host's
+		// own heartbeat is stale, which makes it the wrong one to be taking on
+		// work. The rescue loop will pick this up once the view settles.
+		slog.Warn("cannot decide who rescues a machine; leaving it",
+			"machine", m.ID, "dead_host", m.HostID)
+		http.Error(w, "machine unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if rescuer != r.opts.HostID {
+		// Someone else's to claim. Forward rather than refuse, so the client
+		// is still served by this one request -- which is the whole point of
+		// rescuing on the request path. Still one hop: the marker is set, and
+		// the far side will not forward again.
+		if req.Header.Get(forwardedHeader) != "" {
+			http.Error(w, "machine is not served by this host", http.StatusNotFound)
+			return
+		}
+		slog.Info("forwarding to the host designated to rescue a machine",
+			"machine", m.ID, "dead_host", m.HostID, "rescuer", rescuer)
+		r.forwardTo(w, req, m, rescuer)
+		return
+	}
+
 	slog.Info("serving a machine whose host is gone by rescuing it here",
 		"machine", m.ID, "dead_host", m.HostID)
 

@@ -136,7 +136,9 @@ func TestARequestForADeadHostsMachineRescuesItHere(t *testing.T) {
 			store.machines[0].State = "running"
 			return nil
 		},
-		SlotFor: func(string) (*netns.Slot, bool) { return nil, false },
+		// This host is the one the hash names, so it is the one that rescues.
+		RescuerFor: func(string) (string, bool) { return "host-a", true },
+		SlotFor:    func(string) (*netns.Slot, bool) { return nil, false },
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "http://alpha.pilotrun.app/", nil)
@@ -277,5 +279,160 @@ func TestAnAPICallForADeadOwnerIsRescuedThenHandledLocally(t *testing.T) {
 	}
 	if !served {
 		t.Error("a call for a dead owner was proxied into it")
+	}
+}
+
+// The split-brain this exists to prevent: liveness and the claim are both read
+// from a local CRDT replica, which cannot exclude anything. Two survivors
+// looking at their own replicas both see the owner as dead and both claim
+// successfully -- so without an arbiter, both start a Firecracker on one
+// machine's state and the disk is corrupted until last-write-wins picks a
+// loser. A host that is not the designated rescuer must not claim, ever.
+func TestAHostThatIsNotTheDesignatedRescuerDoesNotClaim(t *testing.T) {
+	var rescues atomic.Int32
+
+	// The host the hash named. It rescues and serves, and the forwarding host
+	// must reach it rather than doing the job itself.
+	designated := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(forwardedHeader) == "" {
+			t.Error("the forwarded request lost its one-hop marker")
+		}
+		fmt.Fprint(w, "served by the rescuer")
+	}))
+	defer designated.Close()
+
+	store := &stubStore{machines: []state.Machine{
+		{ID: "m-1", Name: "alpha", HostID: "host-dead", Domain: "alpha.pilotrun.app"},
+	}}
+	r := New(Options{
+		Domain: "pilotrun.app", HostID: "host-a",
+		Store: store,
+		Peers: &stubPeers{
+			addrs: map[string]string{
+				"host-dead": "fdcc::9",
+				"host-b":    strings.TrimPrefix(designated.URL, "http://"),
+			},
+			dead: map[string]bool{"host-dead": true},
+		},
+		Rescue: func(_ context.Context, _ state.Machine) error {
+			rescues.Add(1)
+			return nil
+		},
+		// The hash names host-b. This host is host-a.
+		RescuerFor: func(string) (string, bool) { return "host-b", true },
+		SlotFor:    func(string) (*netns.Slot, bool) { return nil, false },
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://alpha.pilotrun.app/", nil)
+	req.Host = "alpha.pilotrun.app"
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if n := rescues.Load(); n != 0 {
+		t.Fatalf("a host that is not the designated rescuer claimed the machine (%d rescues)", n)
+	}
+	if body := w.Body.String(); !strings.Contains(body, "served by the rescuer") {
+		t.Errorf("the request was not served by the designated rescuer: %q", body)
+	}
+}
+
+// With no live fleet to hash over there is no arbiter, and rescuing anyway is
+// the split-brain above. This also covers the case where the host's OWN
+// heartbeat is stale, which makes it the last host that should take on work.
+func TestWithNoArbiterNobodyRescues(t *testing.T) {
+	var rescues atomic.Int32
+
+	r := New(Options{
+		Domain: "pilotrun.app", HostID: "host-a",
+		Store: &stubStore{machines: []state.Machine{
+			{ID: "m-1", Name: "alpha", HostID: "host-dead", Domain: "alpha.pilotrun.app"},
+		}},
+		Peers: &stubPeers{
+			addrs: map[string]string{"host-dead": "fdcc::9"},
+			dead:  map[string]bool{"host-dead": true},
+		},
+		Rescue:     func(_ context.Context, _ state.Machine) error { rescues.Add(1); return nil },
+		RescuerFor: func(string) (string, bool) { return "", false },
+		SlotFor:    func(string) (*netns.Slot, bool) { return nil, false },
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://alpha.pilotrun.app/", nil)
+	req.Host = "alpha.pilotrun.app"
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if n := rescues.Load(); n != 0 {
+		t.Fatalf("rescued with no arbiter to say it was ours (%d rescues)", n)
+	}
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status %d, want 503", w.Code)
+	}
+}
+
+// The other half of forwarding an orphan: the designated rescuer receives a
+// request for a machine whose row still names the dead host, and must accept
+// it. Refusing would make the forward above a 404 round trip.
+func TestTheDesignatedRescuerAcceptsAForwardedOrphan(t *testing.T) {
+	rescued := make(chan string, 1)
+
+	store := &stubStore{machines: []state.Machine{
+		{ID: "m-1", Name: "alpha", HostID: "host-dead", Domain: "alpha.pilotrun.app"},
+	}}
+	r := New(Options{
+		Domain: "pilotrun.app", HostID: "host-b",
+		Store: store,
+		Peers: &stubPeers{
+			addrs: map[string]string{"host-dead": "fdcc::9"},
+			dead:  map[string]bool{"host-dead": true},
+		},
+		Rescue: func(_ context.Context, m state.Machine) error {
+			rescued <- m.ID
+			store.machines[0].HostID = "host-b"
+			store.machines[0].State = "running"
+			return nil
+		},
+		RescuerFor: func(string) (string, bool) { return "host-b", true },
+		SlotFor:    func(string) (*netns.Slot, bool) { return nil, false },
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://alpha.pilotrun.app/", nil)
+	req.Host = "alpha.pilotrun.app"
+	req.Header.Set(forwardedHeader, "host-a")
+	w := httptest.NewRecorder()
+	r.InternalHandler().ServeHTTP(w, req)
+
+	select {
+	case <-rescued:
+	default:
+		t.Fatal("the designated rescuer refused an orphan forwarded to it")
+	}
+}
+
+// A forwarded request must never be forwarded again, even down the rescue
+// path. Two hosts with briefly disagreeing views would otherwise bounce a
+// request between them until something timed out.
+func TestAForwardedOrphanIsNotForwardedAgain(t *testing.T) {
+	r := New(Options{
+		Domain: "pilotrun.app", HostID: "host-a",
+		Store: &stubStore{machines: []state.Machine{
+			{ID: "m-1", Name: "alpha", HostID: "host-dead", Domain: "alpha.pilotrun.app"},
+		}},
+		Peers: &stubPeers{
+			addrs: map[string]string{"host-dead": "fdcc::9", "host-b": "fdcc::b"},
+			dead:  map[string]bool{"host-dead": true},
+		},
+		Rescue:     func(_ context.Context, _ state.Machine) error { return nil },
+		RescuerFor: func(string) (string, bool) { return "host-b", true },
+		SlotFor:    func(string) (*netns.Slot, bool) { return nil, false },
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "http://alpha.pilotrun.app/", nil)
+	req.Host = "alpha.pilotrun.app"
+	req.Header.Set(forwardedHeader, "host-c")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status %d, want 404 rather than a second hop", w.Code)
 	}
 }

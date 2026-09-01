@@ -159,7 +159,7 @@ func Tick(ctx context.Context, opts Options) {
 		if liveIDs[m.HostID] || m.State == state.StateDestroyed {
 			continue
 		}
-		if !mine(m.ID, rank, len(live)) {
+		if rescuer, ok := RescuerFor(m.ID, live); !ok || rescuer != opts.HostID {
 			continue
 		}
 		if opts.Capacity != nil && !opts.Capacity(m.VCPUs, m.MemMiB) {
@@ -288,11 +288,23 @@ func rankOf(live []state.Host, hostID string) int {
 // same machine -- and then either both rescue it or neither does. The whole
 // scheme rests on every survivor computing the same answer from the same
 // inputs, so the function has to be one that cannot vary.
-func mine(machineID string, rank, liveCount int) bool {
-	if liveCount <= 0 {
-		return false
+// RescuerFor names the ONE host responsible for rescuing a machine.
+//
+// Exported because the rescue loop is no longer the only caller: a request
+// arriving at a survivor for a machine whose host is gone rescues it on the
+// spot, and that path has to reach the same answer this loop does. Two
+// different answers means two hosts claiming one machine -- and a claim
+// checks a local CRDT replica, which cannot exclude anything, so both would
+// succeed and both would start a Firecracker on the same machine's state.
+//
+// It sorts its own input for the same reason Tick does: rank is a position in
+// a list, and two hosts that order it differently compute different owners.
+func RescuerFor(machineID string, live []state.Host) (string, bool) {
+	sorted := sortedByID(live)
+	if len(sorted) == 0 {
+		return "", false
 	}
-	return int(hashID(machineID)%uint32(liveCount)) == rank
+	return sorted[int(hashID(machineID)%uint32(len(sorted)))].ID, true
 }
 
 func hashID(s string) uint32 {

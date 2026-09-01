@@ -28,6 +28,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/nbd"
 	"github.com/vivek7405/pilots/hostd/internal/router"
 	"github.com/vivek7405/pilots/hostd/internal/s3"
+	"github.com/vivek7405/pilots/hostd/internal/selfheal"
 )
 
 // shutdownTimeout bounds a graceful stop.
@@ -195,6 +196,14 @@ func run() error {
 		// A host that finds the owner gone rescues the machine HERE, holding
 		// the client, rather than failing until the rescue loop's next tick.
 		routerOpts.Rescue = mgr.Rescue
+		// ...but only the host the hash names, so two survivors cannot both
+		// claim and both start a Firecracker on one machine's state. Same rule
+		// and same function the rescue loop uses; there is only one definition
+		// of it on purpose.
+		routerOpts.RescuerFor = func(machineID string) (string, bool) {
+			return selfheal.RescuerFor(machineID,
+				f.cache.LiveHosts(time.Now(), selfheal.DeadAfter))
+		}
 		// The hot path reads the subscription cache, not the agent.
 		routerOpts.Lookup = f.cache.MachineByName
 	}

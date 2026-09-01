@@ -45,6 +45,13 @@ type Options struct {
 	// own. Nil on a single-box deployment, where every machine is local.
 	Peers Peers
 
+	// RescuerFor names the one host allowed to rescue a machine, by the same
+	// rule the self-heal loop uses. Without it a request-path rescue has no
+	// way to exclude a second host doing the same thing at the same moment.
+	// Nil disables rescuing on the request path entirely, which is correct for
+	// a single-box deployment where there is nobody to rescue from.
+	RescuerFor func(machineID string) (hostID string, ok bool)
+
 	// Rescue claims a machine from a host that has stopped responding and
 	// restores it here. Called on the request path, holding the client, so
 	// that a host dying mid-request costs one slow request rather than an
