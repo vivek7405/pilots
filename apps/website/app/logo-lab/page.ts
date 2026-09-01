@@ -4,7 +4,7 @@ import { pageHero } from '#lib/ui/page-hero.ts';
 import { PROSE, FIELD_LABEL, PANEL } from '#lib/design/recipes.ts';
 import { CANDIDATES, markSvg, type Candidate } from '#lib/design/logo-candidates.ts';
 import { FUSIONS, fusionMark, type Fusion } from '#lib/design/logo-fusions.ts';
-import { WORDMARKS, wordmark, type Wordmark } from '#lib/design/wordmarks.ts';
+import { DELTA_PS, deltaPMark, deltaPLockup, type DeltaP } from '#lib/design/delta-p.ts';
 
 /**
  * /logo-lab
@@ -182,38 +182,53 @@ function fusionCard(f: Fusion) {
 }
 
 /**
- * One whole-word treatment, shown in the three places a lockup has to survive:
- * large on ink, at working size on paper in both faces, and small enough to
- * sit in a header.
+ * One delta-P, shown as the two things it has to be at once: a monogram on its
+ * own, and the first letter of the word. Both are the same paths, so a variant
+ * that only works in one of the two has failed.
  */
-function wordmarkCard(w: Wordmark) {
+function deltaPCard(v: DeltaP) {
   return html`
     <article class="${PANEL} overflow-hidden">
-      <div class="lab-dark px-8 py-10 flex items-center justify-center">
-        ${wordmark(w, { height: 58, face: 'sans' })}
+      <div class="flex border-b border-rule">
+        <div class="lab-dark flex-1 aspect-square grid place-items-center">
+          ${deltaPMark(v, 82, { sliced: true })}
+        </div>
+        <div class="lab-light flex-1 aspect-square grid place-items-center">
+          ${deltaPMark(v, 82, { sliced: false })}
+        </div>
       </div>
-      <div class="flex items-baseline justify-between gap-3 px-5 pt-4 border-t border-rule">
-        <h3 class="text-h3 font-bold m-0">${w.name}</h3>
-        <code class="font-mono text-xs text-ink-subtle">${w.id}</code>
+      <div class="flex items-baseline justify-between gap-3 px-5 pt-4">
+        <h3 class="text-h3 font-bold m-0">${v.name}</h3>
+        <code class="font-mono text-xs text-ink-subtle">${v.id}</code>
       </div>
       <div class="lab-paper px-5 divide-y divide-rule">
-        <div class="py-5 flex flex-wrap items-center gap-x-6 gap-y-3">
-          ${wordmark(w, { height: 40, face: 'sans' })}
-          <span class=${FIELD_LABEL}>sans</span>
+        <div class="py-4 flex items-end gap-4">
+          ${SMALL_SIZES.map(
+            (px) => html`
+              <span class="flex flex-col items-center gap-1.5">
+                ${deltaPMark(v, px, { sliced: false })}
+                <span class="font-mono text-[10px] text-ink-subtle leading-none">${px}px</span>
+              </span>
+            `,
+          )}
         </div>
         <div class="py-5 flex flex-wrap items-center gap-x-6 gap-y-3">
-          ${wordmark(w, { height: 40, face: 'mono' })}
-          <span class=${FIELD_LABEL}>mono</span>
+          ${deltaPLockup(v, { height: 40, face: 'sans', sliced: true, leanWord: true })}
+          <span class=${FIELD_LABEL}>sliced</span>
         </div>
         <div class="py-5 flex flex-wrap items-center gap-x-6 gap-y-3">
-          ${wordmark(w, { height: 20, face: 'sans' })}
+          ${deltaPLockup(v, { height: 40, face: 'sans', sliced: false, leanWord: true })}
+          <span class=${FIELD_LABEL}>whole</span>
+        </div>
+        <div class="py-5 flex flex-wrap items-center gap-x-6 gap-y-3">
+          ${deltaPLockup(v, { height: 20, face: 'sans', sliced: true, leanWord: true })}
           <span class=${FIELD_LABEL}>at header size</span>
         </div>
       </div>
       <div class="px-5 py-5 border-t border-rule flex flex-col gap-3">
-        <p class="${PROSE} text-sm m-0">${w.idea}</p>
+        <p class="${PROSE} text-sm m-0">${v.idea}</p>
         <p class="text-sm text-ink-subtle leading-[1.65] m-0">
-          <span class="text-ink font-semibold">The cost.</span> ${w.cost}
+          <span class="text-ink font-semibold">The cost.</span> ${v.cost}
         </p>
       </div>
     </article>
@@ -266,12 +281,12 @@ export default function LogoLabPage() {
       /* The whole-word treatments. Heavier than the lockup faces above,
          because here the type carries the mark rather than sitting beside a
          drawn letter that was doing the carrying. */
-      .wm-sans {
+      .dp-sans {
         font-family: var(--font-sans);
         font-weight: 800;
-        letter-spacing: -0.03em;
+        letter-spacing: -0.035em;
       }
-      .wm-mono {
+      .dp-mono {
         font-family: var(--font-mono);
         font-weight: 600;
       }
@@ -320,26 +335,33 @@ export default function LogoLabPage() {
     })}
 
     ${section({
-      id: 'whole-word',
-      heading: 'The word, with the delta left alone',
+      id: 'delta-p',
+      heading: 'The delta, turned into the P',
       layout: 'split',
       lede: html`
-        Three arrangements that relate the mark to the name instead of welding
-        it into one. The word is set in a single face at a single weight in all
-        three, and stays lowercase, which is how the site sets it everywhere it
-        appears today.
+        The delta rotated onto a heading, with a stem behind it, so the bowl of
+        the letter is the mark. Its tail notch becomes the counter. Four
+        versions, differing only in how far that notch cuts back and whether the
+        blades keep their points where they land on the stem.
       `,
       body: html`
         <p class="${PROSE} mb-9">
-          The round before this one made the mark supply the word's first
-          letter. It failed for a reason worth keeping: a hand-drawn letter
-          beside font-drawn letters reads as an object beside type no matter how
-          closely the weights are matched, and a bar through live text reads as
-          a strikethrough, because that is already what a bar through a word
-          means.
+          Each card shows one drawing twice. The monogram is not a second file,
+          it is these exact paths with the word cropped off, which is how the
+          sibling brand builds its own and the reason its mark and its lockup
+          cannot drift apart. The slice is a real gap rather than a painted bar,
+          so the stem ships as two shapes and one file is correct on ink, on
+          paper, and on a photograph.
         </p>
-        <div class="grid gap-6 wide:grid-cols-3">
-          ${WORDMARKS.map((w) => wordmarkCard(w))}
+        <p class="${PROSE} mb-9">
+          The two tiles are the same letter sliced and whole, and they do not
+          agree. Cutting the stem of a W leaves two halves of a wide letter, and
+          cutting the stem of a P leaves a bowl above a detached post. The whole
+          version is the one that reads as a letter here, which means this mark
+          may simply not want the device the sibling brand is built on.
+        </p>
+        <div class="grid gap-6 mid:grid-cols-2">
+          ${DELTA_PS.map((v) => deltaPCard(v))}
         </div>
       `,
     })}
