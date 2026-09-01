@@ -130,11 +130,30 @@ two silently drift, which is a bug webjs.dev shipped and had to fix.
 
 ## Enforcement
 
-`test/no-slop.test.mjs` fails CI on the banned vocabulary, on emoji in
-headings, on gradient/blur utility classes in page markup, and on
-digit-bearing claims outside a sourced `<data>` element. The test is the
-mechanism; this document is the reason. When a rule here changes, change
-the test in the same commit.
+`test/no-slop/no-slop.test.ts` fails CI on the banned vocabulary, the
+staccato tagline, emoji in rendered text, gradient/blur utility classes in
+markup, a theme colour declared twice, a hard-coded domain, and any
+digit-bearing claim outside a sourced `<data>` element.
+
+Two things it learned the hard way, worth knowing before adding a rule:
+
+- **Scan markup, not raw source.** `lib/utils/cn.ts` carries `bg-clip-text`
+  as Tailwind class-group config inside a comment and renders nothing, so a
+  raw-source scan failed a file with no design in it at all. The class rules
+  run on template contents, and every rule strips comments first.
+- **Markup is not the only surface.** The roadmap holds its phase gates in a
+  plain data array, so a template-only scan called the page clean while an
+  unsourced "under 500 milliseconds" sat on it. Prose string literals are
+  scanned too, identified by sentence punctuation, which is what separates a
+  sentence from a Tailwind class list or a Cache-Control header.
+
+Numbers reach the page ONLY through `lib/facts.ts`, rendered by
+`lib/ui/stat.ts`. There is deliberately no second path: a helper that could
+render a number without its provenance would make invariant 1 optional
+again.
+
+The test is the mechanism; this document is the reason. When a rule here
+changes, change the test in the same commit.
 
 ---
 
