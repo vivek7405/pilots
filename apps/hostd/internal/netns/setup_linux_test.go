@@ -318,3 +318,55 @@ func TestFirewallOrdersTheTenantBoundary(t *testing.T) {
 		t.Errorf("the guest's v6 link is not accepted:\n%s", ruleset)
 	}
 }
+
+// Neighbour discovery must survive the link-local drop.
+//
+// The regression this pins cost a day. The namespace resolves the root
+// namespace's veth address by soliciting it, and the kernel sources that
+// solicitation from the interface's LINK-LOCAL address -- so the reply comes
+// back addressed to fe80::, which the fe80::/10 drop then eats. The neighbour
+// entry stays FAILED forever, every guest packet bound for the mesh is dropped
+// locally for want of a next hop, and the symptom is 100% loss on a host where
+// the routes, the NAT rules and the tenant sets are all provably correct. The
+// accepts for fdee::/126 above do NOT cover this: they match the addresses NDP
+// was assumed to use, not the one the kernel actually picks.
+func TestNeighbourDiscoverySurvivesTheLinkLocalDrop(t *testing.T) {
+	requireRoot(t)
+	s := testSlot(t, 909)
+	if err := Setup(s, "02:00:00:00:09:09", 0); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	out, err := exec.Command("ip", "netns", "exec", s.NetnsName,
+		"nft", "list", "table", "inet", "pilots-firewall").CombinedOutput()
+	if err != nil {
+		t.Skipf("nft unavailable in ns: %v\n%s", err, out)
+	}
+	ruleset := string(out)
+
+	linkLocal := strings.Index(ruleset, "fe80::/10")
+	if linkLocal < 0 {
+		t.Fatalf("fe80::/10 is no longer dropped:\n%s", ruleset)
+	}
+	for _, nd := range []string{"nd-neighbor-solicit", "nd-neighbor-advert"} {
+		at := strings.Index(ruleset, nd)
+		if at < 0 {
+			t.Errorf("%s is not accepted; the namespace cannot resolve its "+
+				"next hop and v6 egress fails as silent loss:\n%s", nd, ruleset)
+			continue
+		}
+		if at > linkLocal {
+			t.Errorf("%s is accepted at %d, AFTER the fe80::/10 drop at %d, "+
+				"so the drop wins and the accept is dead:\n%s",
+				nd, at, linkLocal, ruleset)
+		}
+	}
+
+	// Router advertisement stays dropped: the namespace's routes are
+	// configured, not discovered, so a guest able to inject one would be
+	// reconfiguring the host's side of the link.
+	if strings.Contains(ruleset, "nd-router-advert") {
+		t.Errorf("router advertisement is accepted; a guest can reconfigure "+
+			"the link:\n%s", ruleset)
+	}
+}

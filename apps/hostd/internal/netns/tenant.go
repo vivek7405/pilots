@@ -134,6 +134,14 @@ func ApplyTenantFilter(r TenantRules) error {
 		Policy:   chainPolicy(nftables.ChainPolicyAccept),
 	})
 
+	// Belt and braces with the delete above, which is load-bearing enough to
+	// be worth stating twice: everything below appends, so a chain that
+	// survives this batch with its previous generation intact silently
+	// becomes the union of two generations rather than the newer one. The
+	// delete should prevent that on its own. This costs one netlink message
+	// and removes the need to be right about that.
+	c.FlushChain(chain)
+
 	// Return traffic first, before any drop can catch it -- and before the
 	// per-machine rules, so an established conversation costs one lookup
 	// rather than a walk over every machine on the host.

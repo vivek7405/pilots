@@ -146,6 +146,28 @@ func applyNftables(ns vnetns.NsHandle, s *Slot) error {
 				&expr.Verdict{Kind: expr.VerdictAccept})})
 	}
 
+	// Neighbour discovery, before any address-based drop can reach it.
+	//
+	// This is not generosity either, and the allowances above are not enough
+	// on their own. The kernel sources a neighbour solicitation from the
+	// interface's LINK-LOCAL address, so the advertisement comes back
+	// addressed to fe80::, not to the fdee address the rules above accept --
+	// and the fe80::/10 drop three lines down then eats it. The namespace can
+	// never resolve the root namespace's veth address, every guest packet
+	// bound for the mesh is dropped locally for want of a next hop, and the
+	// guest sees 100% loss with no rule anywhere naming the traffic it lost.
+	//
+	// Only solicitation and advertisement. Router advertisement and redirect
+	// stay dropped: the namespace's routes are configured, not discovered, so
+	// a guest that could inject either would be reconfiguring the host's side
+	// of the link. NDP itself is safe to accept from either direction because
+	// the kernel enforces a hop limit of 255 on it, which no off-link sender
+	// can forge.
+	for _, icmpType := range []uint8{ndNeighborSolicit, ndNeighborAdvert} {
+		c.AddRule(&nftables.Rule{Table: filter, Chain: fchain,
+			Exprs: append(matchNDP(icmpType), &expr.Verdict{Kind: expr.VerdictAccept})})
+	}
+
 	// IPv6 equivalents: loopback, unique-local, link-local.
 	for _, deny := range []struct {
 		cidr string
@@ -282,5 +304,31 @@ func matchIPv6Net(offset uint32, ip net.IP, bits int) []expr.Any {
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: offset, Len: 16},
 		&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 16, Mask: mask, Xor: make([]byte, 16)},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: network},
+	}
+}
+
+// The two ICMPv6 message types neighbour resolution needs. x/sys/unix does
+// not export them (they are ICMPv6 message types, not kernel ABI constants),
+// so they are named here rather than left as bare numbers in the rule.
+const (
+	ndNeighborSolicit = 135
+	ndNeighborAdvert  = 136
+)
+
+// matchNDP matches one ICMPv6 neighbour-discovery message type.
+//
+// The protocol is read from meta l4proto rather than from the IPv6 header's
+// next-header field, because the two disagree the moment a packet carries an
+// extension header: the header field then names the first extension and the
+// real protocol sits further along a chain this expression cannot walk. The
+// kernel has already resolved that chain by the time meta is evaluated.
+func matchNDP(icmpType uint8) []expr.Any {
+	return []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyNFPROTO, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.NFPROTO_IPV6}},
+		&expr.Meta{Key: expr.MetaKeyL4PROTO, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.IPPROTO_ICMPV6}},
+		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseTransportHeader, Offset: 0, Len: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{icmpType}},
 	}
 }
