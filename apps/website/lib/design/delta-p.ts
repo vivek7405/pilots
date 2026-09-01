@@ -289,4 +289,19 @@ export const DELTA_PS: DeltaP[] = [
     stem: 'none',
     halved: true,
   },
+  {
+    id: 'raked-bare-half-full',
+    name: 'Turned, no stem half full',
+    idea:
+      "The same halved plane, still stemless, turned until its long left edge stands where a stem would and scaled to cap height so it sits in the line rather than over it. The angle is not picked by eye: at minus twenty-four degrees that edge leans nine degrees, exactly the lean of the word, so the mark stands on the same axis as the letters.",
+    cost:
+      'It does not get there, and the reason is structural rather than a matter of finding the right angle. A P needs a stem of even width and a counter that closes. The plane is a solid arrowhead whose only concavity is a shallow notch, so it has neither, and turning it only ever moves an arrowhead around. Every fifteen degrees of a full turn was rendered and none reads as a letter. This is the closest of them.',
+    rotate: -24,
+    size: 3.57,
+    cx: 5.5,
+    cy: 53.5,
+    stemW: 15,
+    stem: 'none',
+    halved: true,
+  },
 ];
