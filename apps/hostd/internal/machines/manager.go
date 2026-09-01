@@ -27,6 +27,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/fc"
 	"github.com/vivek7405/pilots/hostd/internal/nbd"
 	"github.com/vivek7405/pilots/hostd/internal/netns"
+	"github.com/vivek7405/pilots/hostd/internal/seal"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -91,6 +92,11 @@ type Options struct {
 	// object storage, where every volume operation is refused up front rather
 	// than failing somewhere inside a create.
 	Volumes VolumeManager
+	// FleetKey seals secret environment values before they are written to a
+	// row. Held by hostd rather than by clients: if a client sealed, every
+	// laptop would need the key and it would stop being fleet infrastructure.
+	FleetKey seal.Key
+
 	// Discovery follows a machine's network namespace: it is told when one
 	// appears and when it goes away, so the .internal responder can bind a
 	// socket inside it. Nil on a host with no mesh identity, where there is
@@ -233,8 +239,19 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 		return nil, err
 	}
 
+	// The grouping and the environment are recorded BEFORE the machine is
+	// built, so that a create which dies partway leaves a row naming a service
+	// row that exists -- rather than a machine whose environment was never
+	// written anywhere and cannot be recovered from the request that is gone.
+	env := createEnv{App: req.App, Cmd: req.Cmd, Env: req.Env, SecretEnv: req.SecretEnv}
+	serviceID, err := m.provisionService(ctx, name, env)
+	if err != nil {
+		return nil, err
+	}
+
 	row := &state.Machine{
 		ID: id, Name: name, HostID: m.opts.HostID, State: StateCreating,
+		App: req.App, ServiceID: serviceID,
 		KindKnobs: knobsJSON,
 		VCPUs:     orDefault(req.VCPUs, 1),
 		MemMiB:    orDefault(req.MemMiB, 512),
@@ -249,6 +266,7 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 	}
 
 	fcm, err := m.startNewMachine(ctx, row, token, req.Volume, req.Image)
+	fcm, err := m.createFromTemplate(ctx, row, token, env.Cmd)
 	if err != nil {
 		row.State = StateError
 		stampSlot(row, nil)

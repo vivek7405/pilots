@@ -78,6 +78,17 @@ type Config struct {
 	// gossip rides the mesh.
 	MeshBootstrap string // PILOT_MESH_BOOTSTRAP
 
+	// FleetKey seals secret environment values before they are written to a
+	// replicated row, and it is the one piece of state whose durability is the
+	// operator's job.
+	//
+	// A stated exception to "object storage is the only truth": it is
+	// operator-held, supplied out of band to host-bootstrap.sh, and lives only
+	// in /etc/pilots/config. Wipe every host and the sealed values are
+	// unrecoverable with object storage completely intact. Rotating it means a
+	// re-seal sweep over every affected row.
+	FleetKey string // PILOT_FLEET_KEY
+
 	// DNSUpstream is where queries that are not under .internal go, as a
 	// comma-separated list. Forwarded from the ROOT namespace, so these are
 	// resolvers the HOST can reach rather than ones a guest could.
@@ -165,6 +176,7 @@ func Load() (*Config, error) {
 		MeshEnabled:    os.Getenv("PILOT_MESH_ENABLED") == "1",
 		MeshBootstrap:  os.Getenv("PILOT_MESH_BOOTSTRAP"),
 
+		FleetKey:         os.Getenv("PILOT_FLEET_KEY"),
 		DNSUpstream:      env("PILOT_DNS_UPSTREAM", "1.1.1.1:53,8.8.8.8:53"),
 		AgentTokenSecret: os.Getenv("PILOT_AGENT_TOKEN_SECRET"),
 	}

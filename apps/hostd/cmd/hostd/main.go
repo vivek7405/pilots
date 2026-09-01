@@ -32,6 +32,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/nbd"
 	"github.com/vivek7405/pilots/hostd/internal/router"
 	"github.com/vivek7405/pilots/hostd/internal/s3"
+	"github.com/vivek7405/pilots/hostd/internal/seal"
 	"github.com/vivek7405/pilots/hostd/internal/selfheal"
 	"github.com/vivek7405/pilots/hostd/internal/volumes"
 )
@@ -187,6 +188,19 @@ func run() error {
 		discovery = responder
 	}
 
+	// The fleet key. Parsed at startup so a malformed one is a host that
+	// refuses to start rather than a create that fails much later, after a
+	// client has already handed over a secret.
+	fleetKey, err := seal.ParseKey(cfg.FleetKey)
+	if err != nil {
+		return err
+	}
+	if !fleetKey.IsSet() {
+		slog.Warn("no fleet key, so this host cannot store secrets: creates " +
+			"carrying secret_env will be refused. Set PILOT_FLEET_KEY to the " +
+			"same value on every host.")
+	}
+
 	mgr := machines.New(machines.Options{
 		HostID:     cfg.HostID,
 		Domain:     cfg.WorkloadDomain,
@@ -205,6 +219,7 @@ func run() error {
 		Volumes:          volumeManager,
 		MachinePrefix:    machinePrefix,
 		Discovery:        discovery,
+		FleetKey:         fleetKey,
 		FCConfig: fc.Config{
 			KernelPath:     cfg.KernelPath,
 			TemplateRootfs: cfg.TemplateRootfs,

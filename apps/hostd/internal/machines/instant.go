@@ -59,7 +59,8 @@ func (m *Manager) startNewMachine(ctx context.Context, row *state.Machine,
 //
 // A create is a restore. The alternative -- booting a kernel -- takes twenty
 // seconds and produces a machine indistinguishable from this one.
-func (m *Manager) createFromTemplate(ctx context.Context, row *state.Machine, token string) (*fc.Machine, error) {
+func (m *Manager) createFromTemplate(ctx context.Context, row *state.Machine,
+	token, appCmd string) (*fc.Machine, error) {
 	t, err := m.EnsureTemplate(ctx)
 	if err != nil {
 		return nil, err
@@ -93,6 +94,15 @@ func (m *Manager) createFromTemplate(ctx context.Context, row *state.Machine, to
 		_ = fcm.Kill()
 		m.pool.Return(slot.Idx)
 		return nil, fmt.Errorf("install agent token: %w", err)
+	}
+
+	// The ONE call site. See the note at the top of env.go: the wake path
+	// resumes a snapshot in which the application is already running, and has
+	// no business delivering an environment to it.
+	if err := m.deliverEnv(ctx, row, slot, appCmd); err != nil {
+		_ = fcm.Kill()
+		m.pool.Return(slot.Idx)
+		return nil, fmt.Errorf("deliver env: %w", err)
 	}
 	return fcm, nil
 }
