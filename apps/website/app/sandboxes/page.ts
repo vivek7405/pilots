@@ -3,7 +3,7 @@ import '#components/lifecycle-demo.ts';
 import { terminal } from '#lib/ui/terminal.ts';
 import { section } from '#lib/ui/section.ts';
 import { readout, inlineFact } from '#lib/ui/stat.ts';
-import { PANEL, PROSE, LINK, BTN_PRIMARY, BTN_GHOST } from '#lib/design/recipes.ts';
+import { PANEL, PROSE, BTN_PRIMARY, BTN_GHOST, HAIRLINE } from '#lib/design/recipes.ts';
 import { WORKLOAD_APEX, GH_URL, NEW_TAB } from '#lib/links.ts';
 import { pageHero } from '#lib/ui/page-hero.ts';
 
@@ -47,7 +47,7 @@ export default function Sandboxes() {
         </div>
         <p class="${PROSE} mt-10">
           These are the thresholds Phase 3 had to clear before it could close, timed on a laptop.
-          Every number on this site carries its source; hover one to see it. Fleet numbers replace
+          Every number on this site carries its source. Hover one to see it. Fleet numbers replace
           these when there is a fleet to measure.
         </p>
       `,
@@ -55,6 +55,7 @@ export default function Sandboxes() {
 
     ${section({
       id: 'checkpoints',
+      layout: 'split',
       heading: 'Checkpoint before the risky step, restore after it',
       lede: html`An agent about to run a migration, an upgrade, or a command it just invented is one
         step away from a machine that no longer works. A checkpoint makes that step cheap to undo,
@@ -74,7 +75,7 @@ export default function Sandboxes() {
           </div>
           <div class="flex flex-col gap-5">
             <div>
-              <p class="font-semibold m-0 mb-1.5">In place, not a replacement</p>
+              <p class="font-semibold m-0 mb-1.5">In place, on the same machine</p>
               <p class="text-sm text-ink-muted m-0">
                 Restoring does not spawn a fresh machine from a template and hand you a new address.
                 It is the same row in the database, the same URL, and the same credential the agent
@@ -92,7 +93,7 @@ export default function Sandboxes() {
             <div>
               <p class="font-semibold m-0 mb-1.5">Durable in the background</p>
               <p class="text-sm text-ink-muted m-0">
-                The machine resumes as soon as the copy-on-write layer is cloned; the upload happens
+                The machine resumes as soon as the copy-on-write layer is cloned, and the upload happens
                 behind it. Durability is reported separately, so a client that genuinely needs the
                 bytes in object storage can wait for exactly that.
               </p>
@@ -138,7 +139,8 @@ export default function Sandboxes() {
 
     ${section({
       id: 'isolation',
-      heading: 'The boundary is a virtual machine, not a namespace',
+      layout: 'split',
+      heading: 'The boundary is a whole virtual machine',
       lede: html`Containers share a kernel, so a kernel bug is a tenant boundary failure. These are
         Firecracker microVMs with their own kernels, which is the isolation model the code you are
         about to run has not read.`,
@@ -175,21 +177,25 @@ export default function Sandboxes() {
       `,
     })}
 
+    <!-- No bordered panel here. The home page closes with one, and repeating
+         the same box on every page is the closing-CTA template that makes a
+         site read as generated. A hairline and a wide statement end this page
+         on a different shape. -->
     <div class="max-w-6xl mx-auto px-6 pb-24">
-      <div class="rounded border border-rule-strong bg-paper-elev p-8 mid:p-12">
-        <h2 class="text-h2 font-bold m-0 max-w-[26ch]">The sandbox becomes the service</h2>
-        <p class="${PROSE} mt-4">
-          When something an agent built turns out to matter, it does not get rebuilt somewhere else.
-          It gets promoted, keeps its address at <span class="font-mono">${WORKLOAD_APEX}</span>, and
-          starts being health-checked.
-        </p>
-        <div class="flex flex-wrap gap-3 mt-7">
-          <a class=${BTN_PRIMARY} href="/deploy">How deploying works</a>
-          <a class=${BTN_GHOST} href=${GH_URL} target="_blank" rel="noopener">Read the source${NEW_TAB}</a>
+      <hr class="${HAIRLINE} mb-10" />
+      <div class="grid gap-6 wide:grid-cols-[1.3fr_1fr] wide:gap-14 wide:items-end">
+        <h2 class="text-h2 font-bold m-0 max-w-[20ch]">The sandbox becomes the service</h2>
+        <div>
+          <p class="${PROSE} m-0">
+            When something an agent built turns out to matter, it does not get rebuilt somewhere
+            else. It gets promoted, keeps its address at
+            <span class="font-mono">${WORKLOAD_APEX}</span>, and starts being health-checked.
+          </p>
+          <div class="flex flex-wrap gap-3 mt-6">
+            <a class=${BTN_PRIMARY} href="/deploy">How deploying works</a>
+            <a class=${BTN_GHOST} href="/roadmap">Where it actually is</a>
+          </div>
         </div>
-        <p class="text-sm text-ink-subtle mt-6 m-0">
-          Not accepting production traffic yet. <a class=${LINK} href="/roadmap">Here is exactly where it is.</a>
-        </p>
       </div>
     </div>
   `;

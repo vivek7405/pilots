@@ -82,7 +82,8 @@ export default function Deploy() {
 
     ${section({
       id: 'cutover',
-      heading: 'The gate is the readiness endpoint, not a timer',
+      layout: 'split',
+      heading: 'Nothing takes traffic until it answers',
       lede: html`Waiting a fixed number of seconds and hoping is the usual way a deploy decides it
         worked. Here the new release has to answer its readiness check before it receives any
         traffic, and the old one keeps serving until it does.`,
@@ -119,7 +120,7 @@ export default function Deploy() {
           <div>
             <p class="font-semibold m-0 mb-1.5">Replicas that follow load</p>
             <p class="text-sm text-ink-muted m-0">
-              Traffic spread across healthy replicas; a concurrency ceiling starts the next one, and
+              Traffic spread across healthy replicas. A concurrency ceiling starts the next one, and
               excess capacity stops again, down to a floor you set.
             </p>
           </div>
@@ -136,7 +137,7 @@ export default function Deploy() {
 
     ${section({
       id: 'promote',
-      heading: 'Promotion is a change of intent, not a migration',
+      heading: 'Promotion changes three numbers on a row',
       lede: html`A prototype becomes a production service by changing three numbers on its row:
         whether it stops when idle, whether it starts on demand, and how many copies stay running.
         Nothing is rebuilt and nothing is copied, because there was never a second kind of thing to
@@ -171,6 +172,7 @@ export default function Deploy() {
 
     ${section({
       id: 'data',
+      layout: 'split',
       heading: 'Where application data actually belongs',
       lede: html`Checkpoints capture a machine at a moment, which is the wrong granularity for a
         database. Volumes are the right one: durable per write, and not tied to the host that
@@ -189,19 +191,19 @@ export default function Deploy() {
       `,
     })}
 
+    <!-- A sign-off line rather than a panel or a heading. Three pages ending
+         on three different shapes is the point (AGENTS.md invariant 3). -->
     <div class="max-w-6xl mx-auto px-6 pb-24">
-      <div class="rounded border border-rule-strong bg-paper-elev p-8 mid:p-12">
-        <h2 class="text-h2 font-bold m-0 max-w-[28ch]">Built by the people who build the framework</h2>
-        <p class="${PROSE} mt-4">
-          WebJs apps have no build step, so deploying one is copying files and starting a process,
-          and its readiness endpoint is exactly what the health gate above waits on. Neither product
-          requires the other. They are just designed with knowledge of each other.
-        </p>
-        <div class="flex flex-wrap gap-3 mt-7">
-          <a class=${BTN_PRIMARY} href="/architecture">Read the architecture</a>
-          <a class=${BTN_GHOST} href=${WEBJS_URL} target="_blank" rel="noopener">Visit WebJs${NEW_TAB}</a>
-          <a class=${BTN_GHOST} href=${GH_URL} target="_blank" rel="noopener">Source${NEW_TAB}</a>
-        </div>
+      <hr class="${HAIRLINE} mb-10" />
+      <p class="${PROSE} text-lede max-w-[58ch]">
+        WebJs apps have no build step, so deploying one is copying files and starting a process,
+        and its readiness endpoint is exactly what the health gate above waits on. Neither product
+        requires the other. They are designed by people who know what the other one does.
+      </p>
+      <div class="flex flex-wrap gap-3 mt-7">
+        <a class=${BTN_PRIMARY} href="/architecture">Read the architecture</a>
+        <a class=${BTN_GHOST} href=${WEBJS_URL} target="_blank" rel="noopener">Visit WebJs${NEW_TAB}</a>
+        <a class=${BTN_GHOST} href=${GH_URL} target="_blank" rel="noopener">Source${NEW_TAB}</a>
       </div>
     </div>
   `;

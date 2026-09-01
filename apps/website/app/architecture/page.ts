@@ -73,7 +73,7 @@ export default function Architecture() {
           ${INVARIANTS.map(
             ([title, body], i) => html`
               <li class="grid grid-cols-[2.5rem_1fr] gap-4 py-6 ${i > 0 ? 'border-t border-rule' : ''}">
-                <span class="font-mono text-sm text-ink-subtle pt-1">${String(i + 1).padStart(2, '0')}</span>
+                <span class="font-mono text-sm text-ink-subtle pt-1">${i + 1}</span>
                 <div>
                   <h3 class="text-h3 font-semibold m-0">${title}</h3>
                   <p class="${PROSE} m-0 mt-2">${body}</p>
@@ -87,6 +87,7 @@ export default function Architecture() {
 
     ${section({
       id: 'host',
+      layout: 'split',
       heading: 'Three processes, and that is the whole machine',
       lede: html`A pilots host is not a node in a cluster that something else manages. It runs
         ${inlineFact('processes')} processes, holds a full replica of the fleet’s state, and can
@@ -189,7 +190,8 @@ export default function Architecture() {
 
     ${section({
       id: 'request',
-      heading: 'A request to a sleeping machine is held, not bounced',
+      layout: 'split',
+      heading: 'A request to a sleeping machine waits while it wakes',
       lede: html`The router lives inside the same binary that supervises the microVMs, which is what
         makes waking on demand a local operation rather than a distributed one. A request arrives for
         a machine that is suspended, and the connection is simply held open while it comes back.`,
@@ -214,7 +216,7 @@ export default function Architecture() {
         </ol>
 
         <p class="${PROSE} mt-8">
-          Suspension needs two conditions, not one. The idle timer (${inlineFact('idle')} by default)
+          Suspension needs both of its conditions to agree. The idle timer (${inlineFact('idle')} by default)
           has to expire <em>and</em> there has to be nothing in flight. An agent partway through a
           long build generates no HTTP traffic at all, and a timer alone would put its machine to
           sleep underneath it.
@@ -239,13 +241,14 @@ export default function Architecture() {
         <p class="${PROSE} mt-4">
           Placement can still be refused. A host is the final authority on its own capacity, so a
           rescue aimed at a full host is rejected and re-hashed rather than accepted and then failed.
-          Coordinators propose; hosts dispose.
+          Coordinators propose. Hosts dispose.
         </p>
       `,
     })}
 
     ${section({
       id: 'edges',
+      layout: 'split',
       heading: 'What this design costs',
       lede: html`Choosing no control plane is not free. These are the bills it comes with, and they
         are structural rather than temporary.`,
@@ -254,7 +257,7 @@ export default function Architecture() {
           ${[
             ['One CPU vendor, fleet-wide', 'Memory snapshots carry raw CPUID and will not cross the Intel/AMD line. The fleet commits to one vendor and a machine cannot leave it.'],
             ['No cross-host transactions', 'The state layer cannot express one. Anything needing uniqueness has to be reachable by a hash instead, and anything that cannot be is a design problem rather than a query problem.'],
-            ['Silent corruption is the failure mode', 'A single-writer violation produces no error at all. It merges. That makes review, not the runtime, the place this is caught.'],
+            ['Silent corruption is the failure mode', 'A single-writer violation produces no error at all. It merges. Review is therefore where this gets caught.'],
             ['Every host is a security boundary', 'Since every host serves the full API, every host authenticates. Key hashes are replicated so authentication survives losing any host, including the one running the dashboard.'],
           ].map(
             ([title, body]) => html`

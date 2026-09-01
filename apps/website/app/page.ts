@@ -96,6 +96,7 @@ export default function Home() {
          for, so it gets the wider column and the transcript. -->
     ${section({
       id: 'faces',
+      layout: 'split',
       heading: 'Two things to want, one thing to run',
       lede: html`A sandbox and a production service differ by three numbers on a row in a database:
         when to stop, whether to start on demand, and how many to keep running. They are not two
@@ -176,6 +177,7 @@ export default function Home() {
 
     ${section({
       id: 'fleet',
+      layout: 'split',
       heading: 'There is no control plane to lose',
       lede: html`Every host runs the same three processes and serves the entire API, so no request
         needs a particular machine to be alive. State is a gossiped CRDT that every host holds a
@@ -217,8 +219,6 @@ export default function Home() {
     ${section({
       id: 'limits',
       heading: 'What it cannot do',
-      lede: html`Every one of these is a real edge of the current design rather than a feature that
-        is nearly finished. They are here because you would otherwise find them at a worse moment.`,
       body: html`
         <ul class="m-0 p-0 list-none grid gap-px bg-rule border border-rule rounded overflow-hidden">
           ${[
@@ -232,7 +232,7 @@ export default function Home() {
             ],
             [
               'One region',
-              'The design is decentralised but the fleet is not yet geographically spread. Multi-region is past parity, not part of it.',
+              'The design is decentralised but the fleet is not yet geographically spread. Multi-region comes after parity rather than inside it.',
             ],
             [
               'No production traffic yet',
@@ -252,6 +252,7 @@ export default function Home() {
 
     ${section({
       id: 'webjs',
+      layout: 'split',
       heading: 'WebJs is the framework, pilots is the platform',
       lede: html`They are built by the same people, the way Next.js and Vercel are. You do not need
         either one to use the other: pilots runs any Dockerfile, and WebJs deploys anywhere a Node

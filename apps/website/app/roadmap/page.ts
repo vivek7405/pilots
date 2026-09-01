@@ -27,7 +27,7 @@ import { pageHero } from '#lib/ui/page-hero.ts';
 export const metadata = {
   title: 'Roadmap: what is finished and what is not',
   description:
-    'The six phases of building pilots, which gate each one had to pass to close, and exactly which are done. Phases 1 to 4 are closed; Phase 5 is in progress.',
+    'The six phases of building pilots, which gate each one had to pass to close, and exactly which are done. Phases 1 to 4 are closed. Phase 5 is in progress.',
 };
 
 type Status = 'done' | 'active' | 'next';
@@ -102,7 +102,7 @@ const PHASES: Phase[] = [
     issue: 7,
     summary:
       'The dashboard, accounts and API keys, the command line tool, typed SDKs, the agent-facing tool server, metering, quotas, and a hostility suite that replays every known incident class as a test.',
-    gate: 'A real product builds, iterates, checkpoints, and promotes an application end to end; the dashboard runs as a service on the platform it describes; and the entire battery is green on the production fleet.',
+    gate: 'A real product builds, iterates, checkpoints, and promotes an application end to end. The dashboard runs as a service on the platform it describes. The entire battery is green on the production fleet.',
   },
 ];
 
@@ -174,6 +174,7 @@ export default function Roadmap() {
 
     ${section({
       id: 'honest',
+      layout: 'split',
       heading: 'What you should not do with this yet',
       lede: html`The engine works and the fleet heals itself. That is genuinely most of the hard
         part, and it is not the same as being ready for your traffic.`,
@@ -182,7 +183,7 @@ export default function Roadmap() {
           ${[
             ['Do not put production traffic on it', 'Phase 6 exists precisely to earn that, and it has not started. There is no accounts system, no metering, and no quota enforcement yet.'],
             ['There is nothing to sign up for', 'Accounts and API keys are Phase 6 work. No waiting list is collecting addresses in the meantime.'],
-            ['The timings are laptop timings', 'The Phase 3 gate was measured on a development machine, not on the hardware this eventually runs on. Real fleet numbers replace them when there is a fleet.'],
+            ['The timings are laptop timings', 'The Phase 3 gate was measured on a development machine rather than on the hardware this eventually runs on. Real fleet numbers replace them when there is a fleet.'],
             ['One region, one CPU vendor', 'Both are structural rather than temporary. Snapshots cannot cross a CPU vendor boundary, so the fleet commits to one.'],
           ].map(
             ([t, b]) => html`

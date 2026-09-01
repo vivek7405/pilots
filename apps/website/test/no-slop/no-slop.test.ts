@@ -85,9 +85,18 @@ function markupSource(src: string): string {
  */
 function visibleText(src: string): string {
   return markupSource(src)
+    // A <script> in a template is CODE that happens to live in markup. Tag
+    // stripping alone leaves its body behind as "text", and the punctuation
+    // rule then reads the theme bootstrap's JavaScript semicolons as prose.
+    // Same for <style>.
+    .replace(/<script\b[\s\S]*?<\/script>/gi, ' ')
+    .replace(/<style\b[\s\S]*?<\/style>/gi, ' ')
     .replace(/<data\b[^>]*>[\s\S]*?<\/data>/g, ' ') // sourced numbers are exempt, see rule 1
     .replace(/\$\{[\s\S]*?\}/g, ' ') // interpolated code is not prose
-    .replace(/<[^>]+>/g, ' '); // tags, leaving text nodes
+    .replace(/<[^>]+>/g, ' ') // tags, leaving text nodes
+    // HTML entities are syntax, not punctuation. The semicolon terminating
+    // `&rarr;` is not a semicolon a reader ever sees.
+    .replace(/&[a-zA-Z]+;|&#\d+;/g, ' ');
 }
 
 
@@ -260,9 +269,15 @@ test('invariant 13: prose punctuation', () => {
   // held in data arrays as well as prose in markup. Plain hyphens inside
   // compound words, flags, and filenames are untouched, and arithmetic like
   // `n - 1` is code rather than prose so it never reaches here.
+  // The semicolon rule is ANY semicolon, not just a space-surrounded one.
+  // The first version copied the sibling project's " ; " pattern and six
+  // ordinary "word; word" semicolons sailed straight past it, including one in
+  // a page description that search engines render. Prose here uses a period or
+  // a comma. Code is unaffected: this runs on rendered text and sentence-shaped
+  // string literals, so a TypeScript member separator never reaches it.
   const RULES: [RegExp, string][] = [
     [/\u2014/, 'em-dash'],
-    [/\s;\s/, 'semicolon used as a pause'],
+    [/;/, 'semicolon'],
     [/\s-\s/, 'hyphen used as a pause'],
   ];
   const hits: string[] = [];

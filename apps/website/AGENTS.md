@@ -58,6 +58,21 @@ built to one template: centred heading, centred muted subtitle, `py-24`, a
 grid. Human-built pages have sections that look different because they do
 different things.
 
+Three specific failures this site has already committed, all found by
+reading the built pages rather than the source:
+
+- **A lede under every single heading.** Removing the kicker left a
+  two-part stack repeated twenty-three times. `section()` takes a `layout`
+  of `stacked` or `split` for this reason, and a section whose body speaks
+  for itself takes no lede at all.
+- **The same closing panel on every page.** Three pages ended with an
+  identical bordered box holding a heading, a paragraph, and two buttons.
+  Pages now end on three different shapes.
+- **Grids of titled paragraphs everywhere.** The icon-less version of the
+  feature-card grid is still the feature-card grid. Reach for a different
+  form (a numbered list, a ledger row, a two-column comparison, prose) when
+  the content does not genuinely want a grid.
+
 ## 4. Banned visual vocabulary
 
 Never: gradient backgrounds or gradient text; glassmorphism / `backdrop-blur`
@@ -79,6 +94,14 @@ Simple."). Never an FAQ answering a question nobody asked.
 Vary sentence length. Perfectly parallel bullets, every item the same
 length and shape, are a syntactic signature of generation more than any
 individual word is.
+
+Watch for a construction repeating across a page even when each use is
+good on its own. This site accumulated fifteen "X, not Y" antitheses,
+five of them headings, which reads as a formula once you notice it. Two
+were kept because they carry a real contrast and the rest were rewritten
+to state the thing positively. The same caution applies to the rule of
+three ("no A, no B, and no C") and to any other cadence you find yourself
+reaching for twice on one page.
 
 ## 6. State the limits
 
