@@ -590,8 +590,7 @@ say "Result"
 echo "  ${PASS} passed, ${FAIL} failed"
 echo
 echo "This run left the rig changed on purpose:"
-echo "  - three hosts are powered off (steps 5, 9 and 10); sudo virsh start <domain>"
-echo "  - three hosts are powered off (steps 5, 9 and 12); sudo virsh start <domain>"
-echo "  - the fleet is one host bigger (step 8), and cluster.env records it,"
+echo "  - three hosts are powered off (steps 8, 12 and 13); sudo virsh start <domain>"
+echo "  - the fleet is one host bigger (step 11), and cluster.env records it,"
 echo "    so the next run adds another. cluster-down.sh resets it."
 [ "$FAIL" = 0 ] || exit 1
