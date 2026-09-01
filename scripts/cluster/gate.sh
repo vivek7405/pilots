@@ -149,12 +149,30 @@ curl_from() {
     2>/dev/null | jf stdout | tr -d '\n'
 }
 
+# curl_until <ip> <machine> <url> -- the same, retried until it works.
+#
+# Discovery converges rather than existing: a machine that was created a
+# moment ago has to reach every host's subscription cache, and the filter and
+# the translation rules are rebuilt on a ticker. Asking once and failing is
+# asking whether the fleet had already converged, which is not what any of
+# these steps are about -- and it is the same reason every other step here
+# that depends on the fleet agreeing polls to a deadline.
+curl_until() {
+  local deadline=$((SECONDS + 90)) out=""
+  while [ $SECONDS -lt $deadline ]; do
+    out=$(curl_from "$1" "$2" "$3")
+    [ "${out%% *}" = "200" ] && { echo "$out"; return; }
+    sleep 3
+  done
+  echo "$out"
+}
+
 if [ -n "$WEB_ID" ] && [ -n "$DB_ID" ]; then
   # The listener is the peer's own guest agent: /health needs no credential,
   # so every machine already has one and reaching it proves the whole path --
   # the name resolved, the address translated at both ends, and the filter
   # let it through.
-  OUT=$(curl_from "$A_IP" "$WEB_ID" "http://${DB_NAME}.internal:3001/health")
+  OUT=$(curl_until "$A_IP" "$WEB_ID" "http://${DB_NAME}.internal:3001/health")
   CODE=${OUT%% *}; PEER=${OUT##* }
   [ "$CODE" = "200" ] && ok "web reached ${DB_NAME}.internal at ${PEER}" \
     || bad "web could not reach ${DB_NAME}.internal (curl said '${OUT}')"
@@ -163,7 +181,7 @@ if [ -n "$WEB_ID" ] && [ -n "$DB_ID" ]; then
     *)      bad "the name resolved to '${PEER}'" ;;
   esac
 
-  OUT=$(curl_from "$B_IP" "$DB_ID" "http://${WEB_NAME}.internal:3001/health")
+  OUT=$(curl_until "$B_IP" "$DB_ID" "http://${WEB_NAME}.internal:3001/health")
   [ "${OUT%% *}" = "200" ] && ok "and the reverse direction works too" \
     || bad "db could not reach ${WEB_NAME}.internal (curl said '${OUT}')"
 fi
@@ -212,7 +230,7 @@ if [ -n "$WEB_ID" ] && [ -n "$DB_ID" ] && [ "${#LIVE_IPS[@]}" -ge 2 ]; then
   api "$B_IP" POST "/v1/machines/${DB_ID}/suspend" >/dev/null 2>&1
   api "$B_IP" POST "/v1/machines/${DB_ID}/wake" >/dev/null 2>&1
 
-  BEFORE=$(curl_from "$A_IP" "$WEB_ID" "http://${DB_NAME}.internal:3001/health")
+  BEFORE=$(curl_until "$A_IP" "$WEB_ID" "http://${DB_NAME}.internal:3001/health")
   BEFORE_ADDR=${BEFORE##* }
 
   DOM=$(sudo virsh list --name | while read -r d; do
