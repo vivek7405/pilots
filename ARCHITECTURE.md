@@ -571,6 +571,16 @@ guest agent, which mounts the pseudo-filesystems, remounts `/` read-write
 and reaps orphans before serving. Images that do carry systemd keep it, and
 the agent runs as a unit with `systemd-networkd-wait-online` masked.
 
+The `tar` exporter carries the filesystem and **no image metadata** — no CMD,
+ENTRYPOINT, WORKDIR or ENV. That is the price of taking the flattened
+filesystem instead of a layered image, and it leaves the agent nothing to
+exec once env has been delivered. So the build reads the start spec out of
+the **Dockerfile's final stage** and writes it into the image at
+`/etc/pilot-agent/start.json`, recording `from_dockerfile_only: true`. Read
+that field: a Dockerfile that inherits its command from its base image yields
+an empty spec, and a consumer must be able to tell that from "this
+application declares no start command" and fall back to the service spec.
+
 **A machine with its own image, or with a volume, BOOTS rather than
 restoring.** Both are forced. The golden template's memory describes the
 golden template's disk, so resuming it against another root filesystem is a

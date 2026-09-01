@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"os/exec"
@@ -365,5 +366,57 @@ func TestTruncateTarTerminatorRejectsAnEmptyArchive(t *testing.T) {
 	writeTar(t, p, nil, nil)
 	if err := truncateTarTerminator(p); err == nil {
 		t.Fatal("an archive with no entries was accepted; there is nothing to build from it")
+	}
+}
+
+// The start spec has to reach the image, because the agent execs the
+// application after env delivery and the tar exporter carries no CMD,
+// ENTRYPOINT or WORKDIR of its own.
+func TestFixupsCarryTheStartSpecIntoTheImage(t *testing.T) {
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "rootfs.tar")
+	writeTar(t, tarPath, []tar.Header{
+		{Name: "app/server.js", Typeflag: tar.TypeReg, Mode: 0o644},
+	}, map[string]string{"app/server.js": "x"})
+
+	spec := ParseStartSpec("FROM node:24-alpine\nWORKDIR /app\nEXPOSE 3000\nCMD [\"node\",\"server.js\"]\n")
+	if err := applyFixups(tarPath, Fixups{
+		AgentBinary: stageAgent(t), Start: spec,
+	}, false); err != nil {
+		t.Fatalf("applyFixups: %v", err)
+	}
+
+	f, err := os.Open(tarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	var body []byte
+	tr := tar.NewReader(f)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.TrimPrefix(h.Name, "./") == StartSpecPath {
+			if body, err = io.ReadAll(tr); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if body == nil {
+		t.Fatalf("%s is not in the image; nothing tells the agent what to start", StartSpecPath)
+	}
+
+	var got StartSpec
+	if err := json.Unmarshal(body, &got); err != nil {
+		t.Fatalf("the start spec in the image is not readable json: %v", err)
+	}
+	if len(got.Cmd) != 2 || got.Cmd[0] != "node" || got.WorkDir != "/app" || got.Port != 3000 {
+		t.Fatalf("the spec did not survive the round trip: %+v", got)
 	}
 }

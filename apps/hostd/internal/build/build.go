@@ -226,6 +226,24 @@ func (b *Builder) Build(ctx context.Context, id string, contextTar io.Reader,
 		return res, err
 	}
 
+	// Read before the build rather than after: it is the caller's Dockerfile
+	// either way, and a build that runs for ten minutes and then fails on an
+	// unparseable start spec has wasted ten minutes.
+	dockerfile, err := os.ReadFile(filepath.Join(ctxDir, "Dockerfile"))
+	if err != nil {
+		record(failure("receiving context", err))
+		return res, err
+	}
+	start := ParseStartSpec(string(dockerfile))
+	if start.Empty() {
+		// Not a failure. The Dockerfile may inherit its command from its base
+		// image, which the tar exporter cannot show us -- but a deploy that
+		// then has nothing to run should be able to see that this was known at
+		// build time rather than discovered at boot.
+		record(status(id, "this Dockerfile declares no CMD or ENTRYPOINT; the "+
+			"start command will have to come from the service spec"))
+	}
+
 	tarPath := filepath.Join(work, "rootfs.tar")
 	if err := b.solve(ctx, ctxDir, tarPath, record); err != nil {
 		return res, err
@@ -233,7 +251,7 @@ func (b *Builder) Build(ctx context.Context, id string, contextTar io.Reader,
 
 	record(status(id, "packing rootfs"))
 	imagePath := filepath.Join(work, "rootfs.ext4")
-	if err := b.buildImage(ctx, tarPath, imagePath); err != nil {
+	if err := b.buildImage(ctx, tarPath, imagePath, start); err != nil {
 		record(failure("packing rootfs", err))
 		return res, err
 	}
@@ -254,7 +272,7 @@ func (b *Builder) Build(ctx context.Context, id string, contextTar io.Reader,
 }
 
 // buildImage turns the flattened tarball into a bootable ext4.
-func (b *Builder) buildImage(ctx context.Context, tarPath, imagePath string) error {
+func (b *Builder) buildImage(ctx context.Context, tarPath, imagePath string, start StartSpec) error {
 	info, err := os.Stat(tarPath)
 	if err != nil {
 		return fmt.Errorf("build: the build produced no filesystem: %w", err)
@@ -267,6 +285,7 @@ func (b *Builder) buildImage(ctx context.Context, tarPath, imagePath string) err
 	if err := applyFixups(tarPath, Fixups{
 		AgentBinary: b.opts.AgentBinary,
 		AgentToken:  GuestAgentPlaceholderToken,
+		Start:       start,
 	}, hasSystemd); err != nil {
 		return err
 	}

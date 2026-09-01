@@ -118,6 +118,10 @@ type Fixups struct {
 	// machine gets its own; a shared one baked into an image would let any
 	// guest speak for any other.
 	AgentToken string
+	// Start is what the guest agent will exec once env has been delivered. The
+	// tar exporter carries no image metadata at all, so this is read out of
+	// the Dockerfile instead; see StartSpec for exactly how far that goes.
+	Start StartSpec
 }
 
 // resolvConf is the file the fixups write. Two public resolvers, matching the
@@ -194,6 +198,11 @@ func applyFixups(tarPath string, f Fixups, hasSystemd bool) error {
 		}
 	}
 
+	startSpec, err := f.Start.Marshal()
+	if err != nil {
+		return err
+	}
+
 	files := []struct {
 		name string
 		mode int64
@@ -202,6 +211,10 @@ func applyFixups(tarPath string, f Fixups, hasSystemd bool) error {
 		{"etc/resolv.conf", 0o644, []byte(f.resolvConf())},
 		{"opt/pilot-agent/guest-agent", 0o755, agent},
 		{"etc/pilot-agent/token", 0o600, []byte(f.AgentToken)},
+		// Not secret and deliberately world-readable: the guest agent reads it
+		// as whatever user it ends up running as, and an operator debugging a
+		// machine that will not start needs to be able to see it.
+		{StartSpecPath, 0o644, startSpec},
 	}
 	if hasSystemd {
 		files = append(files,

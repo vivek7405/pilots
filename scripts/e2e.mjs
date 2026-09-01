@@ -662,6 +662,9 @@ async function buildAssertions() {
         'FROM alpine:3.20',
         'RUN echo built-by-pilots > /etc/pilots-e2e',
         'COPY app.txt /app.txt',
+        'WORKDIR /',
+        'EXPOSE 8080',
+        'CMD ["/bin/sh", "-c", "while true; do sleep 3600; done"]',
         '',
       ].join('\n'),
       'app.txt': 'hello from the build context\n',
@@ -727,6 +730,22 @@ async function buildAssertions() {
       // call in this file rides on.
       const out = await exec(json.id, 'echo alive');
       assert(out === 'alive', `guest returned ${JSON.stringify(out)}`);
+    });
+
+    // The contract the golden template's "stops short of starting the
+    // application" rule needs from this side: something in the image has to
+    // say WHAT the agent should exec once env has been delivered. The tar
+    // exporter carries no image metadata at all, so the build reads it out of
+    // the Dockerfile and writes it in.
+    await step('the built image carries a start spec for the agent to exec', async () => {
+      assert(machine, 'no machine');
+      const raw = await exec(machine.id, 'cat /etc/pilot-agent/start.json');
+      const spec = JSON.parse(raw);
+      assert(Array.isArray(spec.cmd) && spec.cmd.length > 0,
+        `no start command in the image: ${raw}`);
+      assert(spec.from_dockerfile_only === true,
+        'the spec does not record that it only saw the Dockerfile, so a consumer ' +
+        'cannot tell "declares nothing" from "we could not see it"');
     });
 
     await step("the built machine is running the build's own filesystem", async () => {
