@@ -60,7 +60,10 @@ print(sum(1 for h in json.load(sys.stdin) if h.get('alive')))" 2>/dev/null || ec
 done
 
 say "2. A machine created on one host is visible and routable from every host"
-M=$(api "${IPS[0]}" POST /v1/machines '{"vcpus":1,"mem_mib":512}')
+# auto_stop off for the same reason step 5 turns it off: this machine is used
+# by every step below, minutes apart, and a machine that idle-suspends between
+# them fails those steps for a reason none of them are about.
+M=$(api "${IPS[0]}" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
 ID=$(echo "$M" | jf id); NAME=$(echo "$M" | jf name); URL=$(echo "$M" | jf url)
 [ -n "$ID" ] && ok "created ${ID} on ${IPS[0]}" || { bad "create failed: $M"; exit 1; }
 
@@ -114,9 +117,18 @@ if [ -n "$A_IP" ]; then
   # A create lands on the host that serves it, so aiming the two requests at
   # different hosts is how they end up on different hosts -- no placement API
   # and nothing to schedule.
-  WEB=$(api "$A_IP" POST /v1/machines "{\"app\":\"${APP}\",\"vcpus\":1,\"mem_mib\":512}")
+  # auto_stop off, because this step asserts DISCOVERY and not lifecycle.
+  #
+  # The default is to idle-suspend after a minute, and a suspended machine
+  # gives its slot back -- so it has no address and drops out of .internal,
+  # correctly. These machines sit idle between assertions while other hosts
+  # are being checked, so with the default they vanish mid-step and the
+  # failure reads as "the name did not resolve" rather than "the machine you
+  # were asking about went to sleep".
+  KNOBS='"knobs":{"auto_stop":"off"}'
+  WEB=$(api "$A_IP" POST /v1/machines "{\"app\":\"${APP}\",\"vcpus\":1,\"mem_mib\":512,${KNOBS}}")
   DB=$(api "$B_IP" POST /v1/machines \
-    "{\"app\":\"${APP}\",\"vcpus\":1,\"mem_mib\":512,\"cmd\":\"sleep 86400\",\"secret_env\":{\"DB_PASSWORD\":\"gate-secret-$$\"}}")
+    "{\"app\":\"${APP}\",\"vcpus\":1,\"mem_mib\":512,${KNOBS},\"cmd\":\"sleep 86400\",\"secret_env\":{\"DB_PASSWORD\":\"gate-secret-$$\"}}")
   WEB_ID=$(echo "$WEB" | jf id); WEB_NAME=$(echo "$WEB" | jf name)
   DB_ID=$(echo "$DB" | jf id);  DB_NAME=$(echo "$DB" | jf name)
   WEB_HOST=$(echo "$WEB" | jf host_id); DB_HOST=$(echo "$DB" | jf host_id)
