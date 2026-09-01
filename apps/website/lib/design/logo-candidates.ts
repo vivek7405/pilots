@@ -42,79 +42,6 @@ const ACCENT_INK = 'var(--logo-accent, currentColor)';
 /** Negative space that turns acid green when the container sets `--logo-accent`. */
 const ACCENT_VOID = 'var(--logo-accent, var(--logo-bg))';
 
-/**
- * The delta's geometry, before the lean, in its own 32-unit grid.
- *
- * Named because two candidates now share the drawing and because the cut is
- * derived from these points rather than typed as coordinates.
- */
-const D_APEX = { x: 16, y: 3.8 };
-const D_TIP_L = { x: 5.2, y: 27.6 };
-const D_TIP_R = { x: 26.8, y: 27.6 };
-const D_NOTCH = { x: 16, y: 21.4 };
-
-/**
- * The cut.
- *
- * It sits BELOW the notch apex, and that is the whole point of where it is.
- * The sibling brand's W carries the same device and does not show the same
- * problem, and measuring the two explained why: its cut breaks into three
- * segments because the letter has gaps between its strokes at that height,
- * the longest run being under a quarter of the mark's width. Ours ran clean
- * through a solid triangle as ONE channel spanning well over half the mark.
- *
- * A single long parallel-sided channel is a shape whose width the eye reads
- * directly, so irradiation (light areas appearing to swell into dark ones)
- * makes it look wider on paper than on ink even though it measures the same.
- * Broken into segments there is no continuous width left to compare, which is
- * why the W looks even in both themes.
- *
- * The delta has exactly one hole to break the cut on, its tail notch, so the
- * cut is placed low enough to cross it. That splits the mark into an upper
- * body and two separated wingtips, which is the same three-piece result the W
- * gets for free from its own strokes.
- */
-const CUT_TOP = 22.6;
-const CUT_BOTTOM = 24.4;
-
-/** x on the line from `a` to `b` at height y. */
-function xAt(a: { x: number; y: number }, b: { x: number; y: number }, y: number) {
-  return a.x + ((y - a.y) / (b.y - a.y)) * (b.x - a.x);
-}
-
-/**
- * The delta as SEPARATE PATHS with real air between them.
- *
- * This is the sibling brand's construction rather than a painted band: its W
- * ships as two path elements with a gap in the geometry, so one file is
- * correct on ink, on paper, and on a photograph. A bar filled in the
- * background colour only works where the container has declared that colour,
- * which every tile in this lab does and nothing outside it need.
- */
-function deltaArt(fill: string) {
-  const oL = (y: number) => xAt(D_APEX, D_TIP_L, y);
-  const oR = (y: number) => xAt(D_APEX, D_TIP_R, y);
-  const nL = (y: number) => xAt(D_NOTCH, D_TIP_L, y);
-  const nR = (y: number) => xAt(D_NOTCH, D_TIP_R, y);
-  const f = (n: number) => n.toFixed(2);
-  const body =
-    `M${D_APEX.x} ${D_APEX.y} L${f(oR(CUT_TOP))} ${CUT_TOP} L${f(nR(CUT_TOP))} ${CUT_TOP} ` +
-    `L${D_NOTCH.x} ${D_NOTCH.y} L${f(nL(CUT_TOP))} ${CUT_TOP} L${f(oL(CUT_TOP))} ${CUT_TOP} Z`;
-  const wingL =
-    `M${f(oL(CUT_BOTTOM))} ${CUT_BOTTOM} L${f(nL(CUT_BOTTOM))} ${CUT_BOTTOM} L${D_TIP_L.x} ${D_TIP_L.y} Z`;
-  const wingR =
-    `M${f(nR(CUT_BOTTOM))} ${CUT_BOTTOM} L${f(oR(CUT_BOTTOM))} ${CUT_BOTTOM} L${D_TIP_R.x} ${D_TIP_R.y} Z`;
-  return html`
-    <g transform="translate(5.4 0)">
-      <g transform="skewX(-11)">
-        <path d=${body} fill=${fill} />
-        <path d=${wingL} fill=${fill} />
-        <path d=${wingR} fill=${fill} />
-      </g>
-    </g>
-  `;
-}
-
 export const CANDIDATES: Candidate[] = [
   {
     id: 'horizon',
@@ -183,10 +110,21 @@ export const CANDIDATES: Candidate[] = [
     id: 'delta',
     name: 'Delta',
     idea:
-      'The aircraft symbol off a moving map, swept back and leaning forward. The only mark in the set that carries motion in the drawing itself. Its cut is real air rather than a painted bar, and it crosses the tail notch, so the mark ships as a body and two separated wingtips.',
+      'The aircraft symbol off a moving map, swept back and leaning forward. The only mark in the set that carries motion in the drawing itself.',
     cost:
-      'An upward triangle sits close to a play button, and the lean is the only thing holding the two apart. Placing the cut low enough to be broken also puts it low on the mark, and the wingtips it leaves behind are small enough to close up first at favicon size.',
-    art: () => deltaArt(ACCENT_INK),
+      'An upward triangle sits close to a play button, and the lean is the only thing holding the two apart.',
+    art: () => html`
+      <!-- skewX(-11) leans the nose forward. The translate re-centres what the
+           skew pushed left: tan(11 degrees) * 16 is about 3.1, and the shape
+           spans a further 2.3 to the left of centre, so 5.4 puts the drawn
+           bounds back on symmetric margins. -->
+      <g transform="translate(5.4 0)">
+        <g transform="skewX(-11)">
+          <path d="M16 3.8 L26.8 27.6 L16 21.4 L5.2 27.6 Z" fill=${ACCENT_INK} />
+        </g>
+      </g>
+      <rect x="3" y="17.6" width="26" height="2" fill="var(--logo-bg)" />
+    `,
   },
   {
     id: 'delta-90',
@@ -196,11 +134,21 @@ export const CANDIDATES: Candidate[] = [
     cost:
       'Turned this way it reads as a cursor or a play control before it reads as an aircraft, which are two of the most heavily spoken-for shapes in software. Pointing up, the climb was what kept it out of their company.',
     art: () => html`
-      <!-- The same three paths, turned. Rotating about the tile's centre rather
-           than the ink's costs nothing here, the two being within a third of a
-           unit of each other, and it keeps this readable beside the upright
-           version above. -->
-      <g transform="rotate(90 16 16)">${deltaArt(ACCENT_INK)}</g>
+      <!-- The quarter turn is applied to the whole mark, partition included, and
+           about the tile's centre rather than the ink's. The two are within a third of
+           a unit of each other, so turning about the tile costs nothing and
+           keeps this readable beside the upright version above.
+
+           The slice is emitted after the path, inside the same rotation, so it
+           still cuts what it cut before. -->
+      <g transform="rotate(90 16 16)">
+        <g transform="translate(5.4 0)">
+          <g transform="skewX(-11)">
+            <path d="M16 3.8 L26.8 27.6 L16 21.4 L5.2 27.6 Z" fill=${ACCENT_INK} />
+          </g>
+        </g>
+        <rect x="3" y="17.6" width="26" height="2" fill="var(--logo-bg)" />
+      </g>
     `,
   },
   {
