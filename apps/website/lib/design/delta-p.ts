@@ -63,6 +63,21 @@ export type DeltaP = {
   /** Stem weight, matched to the letters rather than to the mark. */
   stemW: number;
   stem: 'none' | 'baseline' | 'descender';
+  /**
+   * Carry the Delta half drawing: the hairline opened along the mark's own
+   * axis. Identical geometry to the candidate card, cut and all.
+   */
+  halved?: boolean;
+  /**
+   * Where the stem hangs, when the mark's partition cannot say.
+   *
+   * The halved drawing has no crossways partition left to hang from, its cut
+   * running along the axis instead, so that variant states the position rather
+   * than deriving one.
+   */
+  stemX?: number;
+  /** Where the stem starts, when the underside is not the edge it meets. */
+  stemTop?: number;
 };
 
 /** The delta, placed. Its ink centre lands on (cx, cy) whatever the rotation. */
@@ -72,7 +87,16 @@ function deltaAt(v: DeltaP) {
       transform="translate(${v.cx} ${v.cy}) scale(${v.size}) rotate(${v.rotate}) translate(${-D_CX} ${-D_CY})"
     >
       <g transform="translate(5.4 0)">
-        <g transform="skewX(-11)"><path d=${DELTA_D} fill=${ACCENT_INK} /></g>
+        <g transform="skewX(-11)">
+          <path d=${DELTA_D} fill=${ACCENT_INK} />
+          <!-- The Delta half cut, verbatim from the candidate card: a hairline
+               on x = 16, the line the delta is symmetric about before it is
+               leaned. Inside the skew, so it leans with the drawing and runs
+               tip to tail rather than crossing it. -->
+          ${v.halved
+            ? html`<rect x="15.7" y="2" width="0.6" height="28" fill="var(--logo-bg)" />`
+            : ''}
+        </g>
       </g>
     </g>
   `;
@@ -118,8 +142,8 @@ function undersideY(v: DeltaP, x: number): number {
 
 /** The mark: the delta, and the thin stem dropped from its partition. */
 export function deltaPLetter(v: DeltaP) {
-  const px = partitionX(v);
-  const top = undersideY(v, px) - 2;
+  const px = v.stemX ?? partitionX(v);
+  const top = v.stemTop ?? undersideY(v, px) - 2;
   const bottom = v.stem === 'descender' ? DESCENDER : BASELINE;
   return html`
     ${v.stem === 'none'
@@ -146,7 +170,7 @@ function markBox(v: DeltaP) {
   const ys = pts.map((p) => p.y);
   const stemLean = BASELINE * 0.15838;
   if (v.stem !== 'none') {
-    const px = partitionX(v);
+    const px = v.stemX ?? partitionX(v);
     xs.push(px - v.stemW / 2 - stemLean, px + v.stemW / 2);
     ys.push(v.stem === 'descender' ? DESCENDER : BASELINE);
   }
@@ -247,6 +271,21 @@ export const DELTA_PS: DeltaP[] = [
     stem: 'baseline',
   },
   {
+    id: 'raked-half',
+    name: 'Turned to the letters half',
+    idea:
+      'Turned to the letters with the plane opened along its axis, and nothing else altered. Same sixty-four degree turn, same size, same placement, same stem. The only difference on the card is the hairline.',
+    cost:
+      'The cut is not level here. Sixty-four degrees is the angle that puts the wing on the word, and seventy-nine is the one that lays the cut flat, so this carries the gap about fifteen degrees off horizontal. The two angles cannot both be had.',
+    rotate: 64,
+    size: 5.2,
+    cx: 50,
+    cy: -12.5,
+    stemW: 15,
+    stem: 'baseline',
+    halved: true,
+  },
+  {
     id: 'raked-bare',
     name: 'Turned, no stem',
     idea:
@@ -259,6 +298,23 @@ export const DELTA_PS: DeltaP[] = [
     cy: -12.5,
     stemW: 15,
     stem: 'none',
+  },
+  {
+    id: 'half-raked',
+    name: 'Delta half, over the letters',
+    idea:
+      'The Delta half drawing from the candidate round, unchanged, with a stem added and nothing else. It keeps its own seventy-nine degree turn, which is the angle that lays its cut flat, so the hairline stays level with the baseline instead of tilting to follow the wing.',
+    cost:
+      'Seventy-nine degrees is not the angle the word wants. The underside runs at twenty-five degrees against the forty the step from the i up to the l asks for, so setting the wing clear of the l leaves it riding well above the i. That gap is the price of keeping the cut flat.',
+    rotate: 79,
+    size: 4.2,
+    cx: 56,
+    cy: -8,
+    stemW: 15,
+    stem: 'baseline',
+    halved: true,
+    stemX: 40,
+    stemTop: 30,
   },
   {
     id: 'raked-descender',
