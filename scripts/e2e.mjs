@@ -867,7 +867,14 @@ async function internalAssertions() {
     db = await make(`db-${tag}`, appA);
     secret = await make(`vault-${tag}`, appB);
   } catch (err) {
-    console.log(`  ! could not create the machines for the .internal battery: ${err.message}`);
+    // FAIL, never skip. A battery that cannot set itself up has not proven
+    // anything, and returning here quietly retires every assertion below it at
+    // runtime -- which is exactly what happened: a bug in reading one column
+    // made every one of these creates fail, the battery returned, and the run
+    // reported 39 passed while nothing here had been exercised at all.
+    await step('the .internal battery can create its machines', async () => {
+      throw new Error(`setup failed, so nothing below ran: ${err.message}`);
+    });
     for (const id of created) await request(`/v1/machines/${id}`, { method: 'DELETE' });
     return;
   }
@@ -954,7 +961,12 @@ async function envAssertions() {
     },
   });
   if (status !== 201) {
-    console.log(`  ! could not create a machine with an environment: HTTP ${status} ${JSON.stringify(machine)}`);
+    // Fail rather than skip, for the same reason the .internal battery does:
+    // a setup that cannot run has proven nothing, and returning quietly here
+    // retires every assertion below it without saying so.
+    await step('the env battery can create a machine with an environment', async () => {
+      throw new Error(`setup failed, so nothing below ran: HTTP ${status} ${JSON.stringify(machine)}`);
+    });
     return;
   }
 
