@@ -13,6 +13,8 @@ type Deps struct {
 	HostID   string
 	Store    state.Store
 	Machines Manager
+	// Reflink is the startup probe's result; see HealthResponse.Reflink.
+	Reflink bool
 }
 
 // Routes registers the full public API. Phase 1 lands the shapes; the handlers
@@ -24,7 +26,9 @@ func Routes(d Deps) http.Handler {
 
 	// Unauthenticated: liveness and metrics.
 	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, HealthResponse{OK: true, HostID: d.HostID})
+		writeJSON(w, http.StatusOK, HealthResponse{
+			OK: true, HostID: d.HostID, Reflink: d.Reflink,
+		})
 	})
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")

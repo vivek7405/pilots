@@ -3,7 +3,10 @@ package machines
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -56,7 +59,35 @@ func (m *Manager) forgetToken(id string) {
 	_ = os.Remove(m.tokenPath(id))
 }
 
+// token is the credential hostd authenticates to a machine's guest agent with.
+//
+// DERIVED from a fleet-wide secret and the machine id, when one is configured.
+// That is what makes a rescued machine reachable: the host taking it over has
+// never held that machine's token, and the hash on its row authenticates a
+// caller TO hostd rather than hostd to the guest. Without derivation the
+// rescue succeeds -- right URL, right disk, machine running -- and every exec
+// into it returns 401, which is a machine that looks recovered and cannot be
+// used.
+//
+// Deriving also means no per-machine secret is ever written to replicated
+// state or shipped between hosts.
 func (m *Manager) token(id string) string {
+	// The template machine is the exception, and it has to be. It is booted
+	// once to be photographed and never goes through installToken, so its
+	// guest still carries the placeholder the golden rootfs ships with --
+	// which is also what every new machine's FIRST contact uses, before it
+	// installs its own. Deriving a token for it would lock hostd out of the
+	// very machine it is trying to snapshot.
+	if strings.HasPrefix(id, templateMachinePrefix) {
+		return templateToken
+	}
+
+	if secret := m.opts.AgentTokenSecret; secret != "" {
+		mac := hmac.New(sha256.New, []byte(secret))
+		_, _ = mac.Write([]byte(id))
+		return "agt-" + hex.EncodeToString(mac.Sum(nil))[:32]
+	}
+
 	if v, ok := tokens.Load(id); ok {
 		return v.(string)
 	}
@@ -72,6 +103,10 @@ func (m *Manager) token(id string) string {
 	// template's placeholder.
 	return templateToken
 }
+
+// templateMachinePrefix marks the throwaway machine a golden template is
+// captured from.
+const templateMachinePrefix = "tmpl-"
 
 // templateToken is what the golden rootfs ships with. Every machine replaces
 // it at create time, so it is only ever valid for a machine that has not been

@@ -50,7 +50,12 @@ func (m *Manager) Checkpoint(ctx context.Context, machineID, comment string) (*s
 		CreatedAt: time.Now().Unix(),
 	}
 
-	t, err := m.EnsureTemplate(ctx)
+	// Diff against the template this machine was built from; see templateFor.
+	row, err := m.opts.Store.GetMachine(ctx, machineID)
+	if err != nil {
+		return nil, err
+	}
+	t, err := m.templateFor(ctx, row)
 	if err != nil {
 		return nil, err
 	}
@@ -234,7 +239,7 @@ func (m *Manager) findCheckpoint(ctx context.Context, checkpointID string) (*sta
 func (m *Manager) restoreFromCheckpoint(ctx context.Context, row *state.Machine,
 	ckpt *state.Checkpoint) (*fc.Machine, error) {
 
-	t, err := m.EnsureTemplate(ctx)
+	t, err := m.templateFor(ctx, row)
 	if err != nil {
 		return nil, err
 	}

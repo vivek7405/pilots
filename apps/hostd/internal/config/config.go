@@ -47,7 +47,47 @@ type Config struct {
 	S3Bucket    string // PILOT_S3_BUCKET
 	S3AccessKey string // PILOT_S3_ACCESS_KEY
 	S3SecretKey string // PILOT_S3_SECRET_KEY
+
+	// StateBackend selects where cluster state lives: "sqlite" for a single
+	// box, "corrosion" for a fleet. Same Store interface behind both, so
+	// nothing downstream knows which is in use.
+	StateBackend string // PILOT_STATE_BACKEND
+
+	// CorrosionAddr is the local agent's API. Loopback by design: the agent
+	// is a sibling process, and its API is not something a peer talks to.
+	CorrosionAddr  string // PILOT_CORROSION_ADDR
+	CorrosionToken string // PILOT_CORROSION_TOKEN
+
+	// MeshEnabled brings up WireGuard. Off on a single box, where there is
+	// nothing to mesh with.
+	MeshEnabled bool // PILOT_MESH_ENABLED
+	// MeshBootstrap is the peer a joining host was given, as
+	// "<public-key>@<host>:<port>". It is the one edge that is configured
+	// rather than discovered, and without it a new host can never join: its
+	// peers come from the hosts table, the table arrives by gossip, and
+	// gossip rides the mesh.
+	MeshBootstrap string // PILOT_MESH_BOOTSTRAP
+
+	// AgentTokenSecret is what per-machine guest credentials are DERIVED
+	// from, fleet-wide. It is what lets a machine be rescued and still be
+	// reachable: the host that takes it over has never held that machine's
+	// token, and the hash on its row cannot authenticate to the guest.
+	AgentTokenSecret string // PILOT_AGENT_TOKEN_SECRET
 }
+
+// Fleet reports whether this host is part of a cluster.
+func (c *Config) Fleet() bool { return c.StateBackend == "corrosion" }
+
+// CorrosionDir holds the agent's database, schema and rendered config.
+func (c *Config) CorrosionDir() string { return "/var/lib/pilots/corrosion" }
+
+// CorrosionRunDir holds the agent's admin socket.
+func (c *Config) CorrosionRunDir() string { return "/run/pilots/corrosion" }
+
+// MeshKeyPath is this host's mesh identity. It must survive restarts: the
+// address is derived from it, so a regenerated key makes this a different host
+// to every peer.
+func (c *Config) MeshKeyPath() string { return "/var/lib/pilots/mesh.key" }
 
 // MachineStateRoot holds per-machine breadcrumbs. On persistent disk, not
 // /var/run: a host reboot must not orphan the bookkeeping for machines whose
@@ -101,10 +141,28 @@ func Load() (*Config, error) {
 		S3Bucket:    os.Getenv("PILOT_S3_BUCKET"),
 		S3AccessKey: os.Getenv("PILOT_S3_ACCESS_KEY"),
 		S3SecretKey: os.Getenv("PILOT_S3_SECRET_KEY"),
+
+		StateBackend:   env("PILOT_STATE_BACKEND", "sqlite"),
+		CorrosionAddr:  env("PILOT_CORROSION_ADDR", "127.0.0.1:51002"),
+		CorrosionToken: os.Getenv("PILOT_CORROSION_TOKEN"),
+		MeshEnabled:    os.Getenv("PILOT_MESH_ENABLED") == "1",
+		MeshBootstrap:  os.Getenv("PILOT_MESH_BOOTSTRAP"),
+
+		AgentTokenSecret: os.Getenv("PILOT_AGENT_TOKEN_SECRET"),
 	}
 
 	if c.HostID == "" {
 		return nil, fmt.Errorf("PILOT_HOST_ID is unset and the hostname is empty")
+	}
+	if c.Fleet() && !c.MeshEnabled {
+		// Refused rather than tolerated: such a host joins the replicated
+		// store and creates machines there, but never heartbeats and never
+		// runs the self-heal loops. Its peers judge it dead and rescue
+		// machines it is still serving -- silent dual-run, the exact failure
+		// the fleet exists to prevent.
+		return nil, fmt.Errorf("PILOT_STATE_BACKEND=corrosion requires PILOT_MESH_ENABLED=1: " +
+			"a fleet host that is not on the mesh never heartbeats, so its peers " +
+			"will judge it dead and rescue machines it is still serving")
 	}
 	return c, nil
 }

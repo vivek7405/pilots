@@ -43,3 +43,58 @@ func TestValidateNameAllowsLeadingDigitsWithoutHyphen(t *testing.T) {
 		t.Error("accepted a name the router would read as port 22")
 	}
 }
+
+// A rescued machine must still be reachable. The host taking it over has never
+// held that machine's token, and the hash on its row authenticates a caller TO
+// hostd rather than hostd to the guest -- so without derivation the rescue
+// succeeds and every exec into the machine returns 401: recovered in every
+// visible way, and unusable.
+func TestTokensAreDerivedSoAnyHostComputesTheSame(t *testing.T) {
+	const secret = "fleet-secret"
+
+	// Two hosts, same secret, nothing shared between them.
+	a := &Manager{opts: Options{HostID: "host-a", AgentTokenSecret: secret}}
+	b := &Manager{opts: Options{HostID: "host-b", AgentTokenSecret: secret}}
+
+	if a.token("m-1") != b.token("m-1") {
+		t.Error("two hosts derived different tokens for the same machine; a " +
+			"rescued machine would answer 401 to its new owner")
+	}
+	if a.token("m-1") == a.token("m-2") {
+		t.Error("two machines share a token")
+	}
+	if a.token("m-1") == "" {
+		t.Fatal("empty token")
+	}
+
+	// A different fleet must not produce the same credential.
+	other := &Manager{opts: Options{HostID: "host-a", AgentTokenSecret: "other-secret"}}
+	if other.token("m-1") == a.token("m-1") {
+		t.Error("the token does not depend on the fleet secret")
+	}
+}
+
+// With no secret -- a single box -- the previous per-host behaviour stands.
+func TestTokensFallBackToTheTemplatePlaceholderWithoutASecret(t *testing.T) {
+	m := &Manager{opts: Options{HostID: "host-a"}}
+	if got := m.token("m-unknown"); got != templateToken {
+		t.Errorf("token = %q, want the template placeholder", got)
+	}
+}
+
+// The template machine never goes through installToken -- it is booted once to
+// be photographed -- so its guest still carries the placeholder the golden
+// rootfs ships with. Deriving a token for it locks hostd out of the very
+// machine it is snapshotting, and the template build fails with a 401 that
+// names nothing useful.
+func TestTheTemplateMachineKeepsThePlaceholderToken(t *testing.T) {
+	m := &Manager{opts: Options{HostID: "host-a", AgentTokenSecret: "fleet-secret"}}
+
+	if got := m.token("tmpl-abc123"); got != templateToken {
+		t.Errorf("template machine token = %q, want the placeholder", got)
+	}
+	if got := m.token("m-abc123"); got == templateToken {
+		t.Error("a real machine got the placeholder; it would be reachable by " +
+			"anything holding the golden rootfs")
+	}
+}

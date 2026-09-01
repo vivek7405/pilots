@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -46,6 +47,16 @@ func (m *Manager) createFromTemplate(ctx context.Context, row *state.Machine, to
 		return nil, err
 	}
 
+	// Pin it. Every image this machine ever writes is a diff against this
+	// template, and the ranges it does not change resolve against the parent
+	// by offset -- so restoring it against a DIFFERENT template returns a
+	// guest stitched from two machines. Which template a host holds is not
+	// fleet-wide: it changes when the golden template is rebuilt, and a host
+	// whose cache was cleared mints its own. Recording it here is what lets
+	// any host restore this machine correctly, forever.
+	row.TemplateMemBuildID = t.MemBuildID.String()
+	row.TemplateRootfsBuildID = t.RootfsBuildID.String()
+
 	fcm, slot, err := m.restoreInstant(ctx, row, fc.Backends{
 		MemBuildID:        t.MemBuildID,
 		RootfsTemplateDir: m.rootfsTemplateDir(t),
@@ -70,7 +81,7 @@ func (m *Manager) createFromTemplate(ctx context.Context, row *state.Machine, to
 
 // wakeFromSuspend restores a machine from its own last suspend.
 func (m *Manager) wakeFromSuspend(ctx context.Context, row *state.Machine) (*fc.Machine, error) {
-	t, err := m.EnsureTemplate(ctx)
+	t, err := m.templateFor(ctx, row)
 	if err != nil {
 		return nil, err
 	}
@@ -182,3 +193,82 @@ func (m *Manager) snapshotOpts(t *Template) fc.SnapshotOpts {
 		BuildDir:          m.buildDir(),
 	}
 }
+
+// Rescue takes a machine from a host that has stopped responding and brings it
+// up here.
+//
+// Everything host-local is minted fresh: this host may never have seen the
+// machine, so there is no slot reservation, no netns, no local disk and no
+// breadcrumb to reuse. What survives is the row, and the row is enough --
+// which is only true because nothing host-specific ever enters a snapshot. A
+// guest sees the same addresses on every host, and all the slot-specific
+// routing lives in the namespace, rebuilt from scratch here.
+//
+// The URL does not change, because routing follows the row. The agent token
+// does not change, because its hash is on the row rather than on the old host.
+func (m *Manager) Rescue(ctx context.Context, row state.Machine) error {
+	lock := m.lockFor(row.ID)
+	lock.Lock()
+	defer lock.Unlock()
+
+	if _, ok := m.get(row.ID); ok {
+		return nil // already running here
+	}
+
+	// The claim re-checks the old owner's liveness inside the store: the gap
+	// between deciding to rescue and writing is exactly where a host returns.
+	if err := m.opts.Store.ClaimMachine(ctx, row.ID, m.opts.HostID, StateCreating,
+		state.WithDeadOwnerClaim(row.HostID)); err != nil {
+		return fmt.Errorf("machines: claim %s: %w", row.ID, err)
+	}
+
+	fresh, err := m.opts.Store.GetMachine(ctx, row.ID)
+	if err != nil {
+		return fmt.Errorf("machines: re-read %s after claiming it: %w", row.ID, err)
+	}
+
+	fcm, err := m.wakeFromSuspend(ctx, fresh)
+	if err != nil {
+		fresh.State = StateError
+		fresh.UpdatedAt = time.Now().Unix()
+		_ = m.opts.Store.PutMachine(ctx, fresh)
+		return fmt.Errorf("machines: restore %s here: %w", row.ID, err)
+	}
+	m.put(row.ID, fcm)
+
+	fresh.State = StateRunning
+	fresh.LastActivity = time.Now().Unix()
+	fresh.UpdatedAt = fresh.LastActivity
+	return m.opts.Store.PutMachine(ctx, fresh)
+}
+
+// StopLocal tears down a machine this host is running but no longer owns.
+//
+// Called by the self-heal loop when the row names another host. It stops the
+// processes and releases the slot WITHOUT touching the row: the row already
+// belongs to someone else, and writing to it would be the single-writer
+// violation this is cleaning up after.
+func (m *Manager) StopLocal(_ context.Context, id string) error {
+	lock := m.lockFor(id)
+	lock.Lock()
+	defer lock.Unlock()
+
+	fcm, ok := m.get(id)
+	if !ok {
+		return nil
+	}
+	slotIdx := 0
+	if fcm.Slot != nil {
+		slotIdx = fcm.Slot.Idx
+	}
+
+	err := fcm.Kill()
+	m.drop(id)
+	if slotIdx > 0 {
+		m.pool.Return(slotIdx)
+	}
+	return err
+}
+
+// RunningIDs lists the machines this host currently has processes for.
+func (m *Manager) RunningIDs() []string { return m.Running() }

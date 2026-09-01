@@ -19,8 +19,10 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver: hostd builds with CGO_ENABLED=0
 )
@@ -49,18 +51,25 @@ type Machine struct {
 	AgentTokenHash string
 	MemBuildID     string
 	RootfsBuildID  string
-	VolumeID       string
-	ServiceID      string
-	ReleaseID      string
-	LastActivity   int64
-	UpdatedAt      int64
+	// The template this machine was built from. Its images are diffs against
+	// these, and restoring against any other template is corruption.
+	TemplateMemBuildID    string
+	TemplateRootfsBuildID string
+	VolumeID              string
+	ServiceID             string
+	ReleaseID             string
+	LastActivity          int64
+	UpdatedAt             int64
 }
 
 // Host is one member of the fleet. Every host heartbeats its own row; a row
 // whose last_seen is stale is what triggers self-heal on the survivors.
 type Host struct {
-	ID         string
+	ID string
+	// WGAddr is DERIVED from WGPubKey, never assigned. Anything that hands out
+	// mesh addresses is an allocator, and an allocator is a control plane.
 	WGAddr     string
+	WGPubKey   string
 	PublicIP   string
 	CPUFree    int
 	MemFreeMiB int
@@ -86,6 +95,75 @@ type Checkpoint struct {
 	ResumeGapMS int64 `json:"-"`
 }
 
+// A host writes ONLY rows describing its own machines. Corrosion accepts a
+// violating write and merges it -- no error, no conflict, no log line -- and
+// the damage surfaces later as a row two hosts both believe they own. So the
+// rule is enforced in the driver, and the three sanctioned exceptions each
+// need an explicit option, so that none of them can happen by accident.
+
+// WriteOption authorises a write that would otherwise breach single-writer.
+type WriteOption func(*WriteAuth)
+
+// WriteAuth carries what a driver needs to check an exception.
+type WriteAuth struct {
+	// NameAllocation: this host is the deterministic owner of the name,
+	// hash(name) mod live_hosts == my rank.
+	NameAllocation bool
+	// DeadOwnerClaim names the host being claimed from. The driver re-checks
+	// that host's last_seen immediately before writing, because the claim is
+	// only legitimate while the owner is still gone.
+	DeadOwnerClaim string
+	// APIKeyWrite: the dashboard's host writing api_keys, the one table whose
+	// rows describe no machine.
+	APIKeyWrite bool
+}
+
+// WithNameAllocation authorises the write that reserves a machine name.
+func WithNameAllocation() WriteOption {
+	return func(a *WriteAuth) { a.NameAllocation = true }
+}
+
+// WithDeadOwnerClaim authorises taking a machine from a host that has stopped
+// heartbeating. The driver verifies that independently; passing the option
+// does not assert it.
+func WithDeadOwnerClaim(ownerID string) WriteOption {
+	return func(a *WriteAuth) { a.DeadOwnerClaim = ownerID }
+}
+
+// WithAPIKeyWrite authorises the dashboard host's api_keys writes.
+func WithAPIKeyWrite() WriteOption {
+	return func(a *WriteAuth) { a.APIKeyWrite = true }
+}
+
+// ResolveAuth collects options into one authorisation.
+func ResolveAuth(opts []WriteOption) WriteAuth {
+	var a WriteAuth
+	for _, opt := range opts {
+		opt(&a)
+	}
+	return a
+}
+
+// ErrNotOwner reports a write to a machine this host does not own.
+var ErrNotOwner = errors.New("state: this host does not own that machine")
+
+// StateDestroyed is the tombstone. Reads filter it; a reaper collects the rows
+// after a retention window.
+const StateDestroyed = "destroyed"
+
+// Template is the golden image machines are created from, shared by the whole
+// fleet. See the schema for why it cannot be per host.
+type Template struct {
+	ID            string
+	MemBuildID    string
+	RootfsBuildID string
+	SnapKey       string
+	CreatedAt     int64
+}
+
+// GoldenTemplate is the id of the default template's row.
+const GoldenTemplate = "golden"
+
 // APIKey is a hashed credential. Hashes replicate to every host so that each
 // one authenticates locally -- auth survives the loss of any host, including
 // the one running the dashboard.
@@ -100,8 +178,20 @@ type APIKey struct {
 type Store interface {
 	GetMachine(ctx context.Context, id string) (*Machine, error)
 	ListMachines(ctx context.Context) ([]Machine, error)
-	PutMachine(ctx context.Context, m *Machine) error
+	// PutMachine writes a machine's row. A replicated store REJECTS a write
+	// to a machine this host does not own unless an option authorises it --
+	// see WriteOption for why that check cannot live in review comments.
+	PutMachine(ctx context.Context, m *Machine, opts ...WriteOption) error
+	// DeleteMachine makes a machine invisible to every read. A replicated
+	// store tombstones rather than deleting, because a delete racing an
+	// update loses through the merge and the row comes back.
 	DeleteMachine(ctx context.Context, id string) error
+	// ClaimMachine takes ownership of a machine from a host that is provably
+	// gone, writing the owner and the state TOGETHER. They must move as one:
+	// merges are per column, so split across two writes a row can end up
+	// owned by the rescuer while still reporting what its dead owner last
+	// said about it.
+	ClaimMachine(ctx context.Context, id, newHostID, newState string, opts ...WriteOption) error
 	// TouchMachine updates only the activity columns. Callers recording use of
 	// a machine must not write the whole row, or they clobber a concurrent
 	// lifecycle change.
@@ -116,6 +206,11 @@ type Store interface {
 
 	GetAPIKeyByHash(ctx context.Context, hash string) (*APIKey, error)
 	PutAPIKey(ctx context.Context, k *APIKey) error
+
+	// GetTemplate reads the fleet's golden template. ErrNotFound means no host
+	// has built one yet.
+	GetTemplate(ctx context.Context, id string) (*Template, error)
+	PutTemplate(ctx context.Context, t *Template) error
 
 	Close() error
 }
@@ -145,14 +240,16 @@ func (s *sqliteStore) Close() error { return s.db.Close() }
 
 const machineCols = `id, name, host_id, state, kind_knobs, image_ref, vcpus, mem_mib,
 	domain, custom_domain, app_port, agent_port, agent_token_hash,
-	mem_build_id, rootfs_build_id, volume_id, service_id, release_id,
+	mem_build_id, rootfs_build_id, template_mem_build_id, template_rootfs_build_id,
+	volume_id, service_id, release_id,
 	last_activity, updated_at`
 
 func scanMachine(sc interface{ Scan(...any) error }) (*Machine, error) {
 	var m Machine
 	err := sc.Scan(&m.ID, &m.Name, &m.HostID, &m.State, &m.KindKnobs, &m.ImageRef,
 		&m.VCPUs, &m.MemMiB, &m.Domain, &m.CustomDomain, &m.AppPort, &m.AgentPort,
-		&m.AgentTokenHash, &m.MemBuildID, &m.RootfsBuildID, &m.VolumeID,
+		&m.AgentTokenHash, &m.MemBuildID, &m.RootfsBuildID,
+		&m.TemplateMemBuildID, &m.TemplateRootfsBuildID, &m.VolumeID,
 		&m.ServiceID, &m.ReleaseID, &m.LastActivity, &m.UpdatedAt)
 	return &m, err
 }
@@ -187,10 +284,12 @@ func (s *sqliteStore) ListMachines(ctx context.Context) ([]Machine, error) {
 	return out, rows.Err()
 }
 
-func (s *sqliteStore) PutMachine(ctx context.Context, m *Machine) error {
+// PutMachine ignores the write options: a single-box store has exactly one
+// writer, so there is no invariant here for them to guard.
+func (s *sqliteStore) PutMachine(ctx context.Context, m *Machine, _ ...WriteOption) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO machines (`+machineCols+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			name=excluded.name, host_id=excluded.host_id, state=excluded.state,
 			kind_knobs=excluded.kind_knobs, image_ref=excluded.image_ref,
@@ -198,15 +297,101 @@ func (s *sqliteStore) PutMachine(ctx context.Context, m *Machine) error {
 			custom_domain=excluded.custom_domain, app_port=excluded.app_port,
 			agent_port=excluded.agent_port, agent_token_hash=excluded.agent_token_hash,
 			mem_build_id=excluded.mem_build_id, rootfs_build_id=excluded.rootfs_build_id,
+			template_mem_build_id=excluded.template_mem_build_id,
+			template_rootfs_build_id=excluded.template_rootfs_build_id,
 			volume_id=excluded.volume_id, service_id=excluded.service_id,
 			release_id=excluded.release_id, last_activity=excluded.last_activity,
 			updated_at=excluded.updated_at`,
 		m.ID, m.Name, m.HostID, m.State, m.KindKnobs, m.ImageRef, m.VCPUs, m.MemMiB,
 		m.Domain, m.CustomDomain, m.AppPort, m.AgentPort, m.AgentTokenHash,
-		m.MemBuildID, m.RootfsBuildID, m.VolumeID, m.ServiceID, m.ReleaseID,
+		m.MemBuildID, m.RootfsBuildID, m.TemplateMemBuildID, m.TemplateRootfsBuildID,
+		m.VolumeID, m.ServiceID, m.ReleaseID,
 		m.LastActivity, m.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("state: put machine %q: %w", m.ID, err)
+	}
+	return nil
+}
+
+// templateDescriptor is the part of a template that must move as one value.
+//
+// The three fields are meaningless apart: a memory build, the disk build it
+// was captured beside, and the vmstate that ties them together. Storing them
+// in one column is what keeps a merge from inventing a combination no host
+// ever published. See the comment on the templates table.
+type templateDescriptor struct {
+	MemBuildID    string `json:"mem_build_id"`
+	RootfsBuildID string `json:"rootfs_build_id"`
+	SnapKey       string `json:"snap_key"`
+}
+
+// MarshalDescriptor renders the inseparable part of a template for storage.
+func MarshalDescriptor(t *Template) (string, error) {
+	b, err := json.Marshal(templateDescriptor{
+		MemBuildID: t.MemBuildID, RootfsBuildID: t.RootfsBuildID, SnapKey: t.SnapKey,
+	})
+	if err != nil {
+		return "", fmt.Errorf("state: encode template %q: %w", t.ID, err)
+	}
+	return string(b), nil
+}
+
+// UnmarshalDescriptor fills a template from a stored descriptor.
+func UnmarshalDescriptor(t *Template, descriptor string) error {
+	var d templateDescriptor
+	if err := json.Unmarshal([]byte(descriptor), &d); err != nil {
+		return fmt.Errorf("state: template %q has an unreadable descriptor: %w", t.ID, err)
+	}
+	t.MemBuildID, t.RootfsBuildID, t.SnapKey = d.MemBuildID, d.RootfsBuildID, d.SnapKey
+	return nil
+}
+
+func (s *sqliteStore) GetTemplate(ctx context.Context, id string) (*Template, error) {
+	var t Template
+	var descriptor string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, descriptor, created_at FROM templates WHERE id = ?`, id).
+		Scan(&t.ID, &descriptor, &t.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("state: template %q: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get template %q: %w", id, err)
+	}
+	if err := UnmarshalDescriptor(&t, descriptor); err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+func (s *sqliteStore) PutTemplate(ctx context.Context, t *Template) error {
+	descriptor, err := MarshalDescriptor(t)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO templates (id, descriptor, created_at)
+		VALUES (?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+			descriptor=excluded.descriptor, created_at=excluded.created_at`,
+		t.ID, descriptor, t.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put template %q: %w", t.ID, err)
+	}
+	return nil
+}
+
+// ClaimMachine writes the owner and the state together. On a single box this
+// is only ever the local host reclaiming its own row after a restart.
+func (s *sqliteStore) ClaimMachine(ctx context.Context, id, newHostID, newState string, _ ...WriteOption) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE machines SET host_id = ?, state = ?, updated_at = ? WHERE id = ?`,
+		newHostID, newState, time.Now().Unix(), id)
+	if err != nil {
+		return fmt.Errorf("state: claim machine %q: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("state: claim machine %q: %w", id, ErrNotFound)
 	}
 	return nil
 }
