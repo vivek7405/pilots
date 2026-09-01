@@ -31,7 +31,42 @@ type Cache struct {
 	mu       sync.RWMutex
 	machines map[string]state.Machine
 	hosts    map[string]state.Host
-	ready    bool
+	// heardAt is when THIS host last saw a peer's heartbeat change, by the
+	// local clock. Liveness is judged from it rather than from the last_seen
+	// the peer wrote, because that value is stamped by the peer's clock and
+	// compared against ours.
+	//
+	// Nothing keeps those two clocks together. A box whose time is a minute
+	// behind heartbeats every five seconds and still reads as long dead to
+	// every peer: they claim its machines while it is serving them, its own
+	// release loop stops them, and ownership oscillates. Skewed the other way,
+	// a genuinely dead host never looks dead and is never rescued from.
+	//
+	// An arrival is observed locally, so one clock decides -- and the same
+	// clock that measures the interval.
+	heardAt map[string]time.Time
+	ready   bool
+	now     func() time.Time
+}
+
+func (c *Cache) clock() time.Time {
+	if c.now != nil {
+		return c.now()
+	}
+	return time.Now()
+}
+
+// noteHeartbeat records that a host's heartbeat moved, or that it is new.
+//
+// Called with the lock held. A row that arrives unchanged -- a gossip
+// re-delivery, or an update to some other column -- is deliberately NOT
+// treated as a sign of life: only the heartbeat advancing means the host is
+// still there.
+func (c *Cache) noteHeartbeat(h state.Host) {
+	prev, known := c.hosts[h.ID]
+	if !known || prev.LastSeen != h.LastSeen {
+		c.heardAt[h.ID] = c.clock()
+	}
 }
 
 // NewCache subscribes to machines and hosts and returns once both have been
@@ -45,6 +80,7 @@ func NewCache(ctx context.Context, client *Client) (*Cache, error) {
 		client:   client,
 		machines: map[string]state.Machine{},
 		hosts:    map[string]state.Host{},
+		heardAt:  map[string]time.Time{},
 	}
 
 	machines, err := c.subscribeMachines(ctx)
@@ -121,6 +157,20 @@ func (c *Cache) subscribeHosts(ctx context.Context) (*Subscription, error) {
 	}
 
 	c.mu.Lock()
+	// Everything in the first snapshot counts as heard now. Their last_seen
+	// values were written before this host was watching, so there is no
+	// arrival to date them from -- and assuming the worst would have a
+	// starting host rescue the whole fleet out from under itself. They get one
+	// deadAfter window to prove they are still there.
+	seen := c.clock()
+	for id := range fresh {
+		c.heardAt[id] = seen
+	}
+	for id := range c.heardAt {
+		if _, ok := fresh[id]; !ok {
+			delete(c.heardAt, id)
+		}
+	}
 	c.hosts = fresh
 	c.mu.Unlock()
 	return sub, nil
@@ -206,8 +256,10 @@ func (c *Cache) apply(table string, change Change) {
 		}
 		if change.Kind == ChangeDelete {
 			delete(c.hosts, h.ID)
+			delete(c.heardAt, h.ID)
 			return
 		}
+		c.noteHeartbeat(h)
 		c.hosts[h.ID] = h
 	}
 }
@@ -309,7 +361,7 @@ func (c *Cache) LiveHosts(now time.Time, deadAfter time.Duration) []state.Host {
 
 	out := make([]state.Host, 0, len(c.hosts))
 	for _, h := range c.hosts {
-		if now.Sub(time.Unix(h.LastSeen, 0)) < deadAfter {
+		if heard, ok := c.heardAt[h.ID]; ok && now.Sub(heard) < deadAfter {
 			out = append(out, h)
 		}
 	}
@@ -318,13 +370,17 @@ func (c *Cache) LiveHosts(now time.Time, deadAfter time.Duration) []state.Host {
 }
 
 // IsLive reports whether a host is heartbeating.
+//
+// Measured from when its heartbeat last ARRIVED here, for the reason on
+// heardAt: last_seen is the peer's clock, and comparing it to ours makes a
+// host's liveness a function of how well two machines agree about the time.
 func (c *Cache) IsLive(id string, now time.Time, deadAfter time.Duration) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	h, ok := c.hosts[id]
-	if !ok {
+	if _, ok := c.hosts[id]; !ok {
 		return false
 	}
-	return now.Sub(time.Unix(h.LastSeen, 0)) < deadAfter
+	heard, ok := c.heardAt[id]
+	return ok && now.Sub(heard) < deadAfter
 }

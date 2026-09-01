@@ -195,12 +195,17 @@ func TestLiveHostsAreSortedAndFilteredByHeartbeat(t *testing.T) {
 		hostRows: []string{
 			hostRow("host-c", "fdcc::3", now.Unix()),
 			hostRow("host-a", "fdcc::1", now.Unix()),
-			hostRow("host-dead", "fdcc::9", now.Add(-5*time.Minute).Unix()),
 			hostRow("host-b", "fdcc::2", now.Unix()),
 		},
 	})
 
-	live := cache.LiveHosts(now, 30*time.Second)
+	// A host that has stopped arriving falls out, and the list stays sorted.
+	live := cache.LiveHosts(now.Add(time.Hour), 30*time.Second)
+	if len(live) != 0 {
+		t.Fatalf("got %d live hosts an hour after the last heartbeat: %+v", len(live), live)
+	}
+
+	live = cache.LiveHosts(now, 30*time.Second)
 	if len(live) != 3 {
 		t.Fatalf("got %d live hosts, want 3: %+v", len(live), live)
 	}
@@ -209,8 +214,32 @@ func TestLiveHostsAreSortedAndFilteredByHeartbeat(t *testing.T) {
 			t.Errorf("live[%d] = %s, want %s", i, live[i].ID, want)
 		}
 	}
-	if cache.IsLive("host-dead", now, 30*time.Second) {
-		t.Error("a host that stopped heartbeating is reported live")
+	if cache.IsLive("host-gone", now, 30*time.Second) {
+		t.Error("a host that was never in the fleet is reported live")
+	}
+}
+
+// A host whose clock disagrees with ours is not a dead host.
+//
+// last_seen is stamped by the peer and compared against our clock, so a box a
+// few minutes behind heartbeats steadily and still reads as long dead: peers
+// claim its machines while it is serving them, its own release loop stops
+// them, and ownership oscillates for as long as the skew lasts. Liveness is
+// measured from when the heartbeat ARRIVED here instead, which is one clock
+// deciding, and the same clock that measures the interval.
+func TestAHostWithASkewedClockIsNotMistakenForDead(t *testing.T) {
+	now := time.Now()
+	skewed := now.Add(-5 * time.Minute).Unix() // its clock runs five minutes behind
+
+	cache := startCache(t, &cacheServer{
+		hostRows: []string{hostRow("host-skewed", "fdcc::7", skewed)},
+	})
+
+	if !cache.IsLive("host-skewed", now, 30*time.Second) {
+		t.Error("a heartbeating host was called dead because its clock disagrees with ours")
+	}
+	if live := cache.LiveHosts(now, 30*time.Second); len(live) != 1 {
+		t.Errorf("got %d live hosts, want the skewed one counted: %+v", len(live), live)
 	}
 }
 
