@@ -29,6 +29,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/router"
 	"github.com/vivek7405/pilots/hostd/internal/s3"
 	"github.com/vivek7405/pilots/hostd/internal/selfheal"
+	"github.com/vivek7405/pilots/hostd/internal/volumes"
 )
 
 // shutdownTimeout bounds a graceful stop.
@@ -119,6 +120,21 @@ func run() error {
 		return err
 	}
 
+	// Volumes need the bucket: their data and their metadata replica both live
+	// in it. A host without one has no volumes at all, and says so on the
+	// first request rather than failing partway through a create.
+	var volumeManager machines.VolumeManager
+	if cfg.S3Bucket != "" {
+		volumeManager = volumes.New(volumes.Config{
+			HostID:    cfg.HostID,
+			Endpoint:  cfg.S3Endpoint,
+			Region:    cfg.S3Region,
+			Bucket:    cfg.S3Bucket,
+			AccessKey: cfg.S3AccessKey,
+			SecretKey: cfg.S3SecretKey,
+		})
+	}
+
 	mgr := machines.New(machines.Options{
 		HostID:     cfg.HostID,
 		Domain:     cfg.WorkloadDomain,
@@ -134,6 +150,7 @@ func run() error {
 		HandlerEnv: os.Environ(),
 		// Fleet-wide, so a host that rescues a machine can still reach it.
 		AgentTokenSecret: cfg.AgentTokenSecret,
+		Volumes:          volumeManager,
 		FCConfig: fc.Config{
 			KernelPath:     cfg.KernelPath,
 			TemplateRootfs: cfg.TemplateRootfs,

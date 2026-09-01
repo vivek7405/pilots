@@ -215,17 +215,28 @@ type PromoteRequest struct {
 	Health       *HealthCheck `json:"health,omitempty"`
 }
 
+// Volume is persistent, per-write-durable storage: one filesystem in object
+// storage holding one disk image, handed to a machine as a second drive.
+//
+// It is attached to at most one machine and mounted by at most one host, and
+// both of those are reported rather than inferred -- a volume that two hosts
+// believe they hold is not recoverable, so an operator has to be able to see
+// where it is.
 type Volume struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	SizeGiB   int    `json:"size_gib"`
 	MachineID string `json:"machine_id,omitempty"`
+	HostID    string `json:"host_id,omitempty"`
+	MountPath string `json:"mount_path"`
 	CreatedAt int64  `json:"created_at"`
 }
 
 type CreateVolumeRequest struct {
 	Name    string `json:"name"`
 	SizeGiB int    `json:"size_gib"`
+	// MountPath is where the guest mounts it. Defaults to /data.
+	MountPath string `json:"mount_path,omitempty"`
 }
 
 // Host is one member of the fleet, as seen by any host reading its local

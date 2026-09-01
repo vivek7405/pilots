@@ -72,8 +72,8 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("POST /v1/machines/{id}/promote", notImplemented)
 
 	// Volumes and fleet.
-	mux.HandleFunc("POST /v1/volumes", notImplemented)
-	mux.HandleFunc("GET /v1/volumes", notImplemented)
+	mux.HandleFunc("POST /v1/volumes", d.handleCreateVolume)
+	mux.HandleFunc("GET /v1/volumes", d.handleListVolumes)
 	mux.HandleFunc("GET /v1/hosts", d.handleListHosts)
 
 	return WithAuth(d, mux)

@@ -37,6 +37,21 @@ func checkpointSnapKey(machineID, checkpointID string) string {
 	return filepath.Join("machines", machineID, "checkpoints", checkpointID, fc.SnapFile)
 }
 
+// startNewMachine brings up a machine that has just been created.
+//
+// Two paths, and the split is forced by Firecracker rather than chosen: a
+// machine with a volume has to be booted, because a drive cannot be added to a
+// snapshot being restored. Everything else restores from the golden template,
+// which is what makes a create sub-second.
+func (m *Manager) startNewMachine(ctx context.Context, row *state.Machine,
+	token, volumeID string) (*fc.Machine, error) {
+
+	if volumeID != "" {
+		return m.createWithVolume(ctx, row, token, volumeID)
+	}
+	return m.createFromTemplate(ctx, row, token)
+}
+
 // createFromTemplate restores a brand-new machine from the golden template.
 //
 // A create is a restore. The alternative -- booting a kernel -- takes twenty
@@ -150,6 +165,18 @@ func (m *Manager) restoreInstantImmutable(ctx context.Context, row *state.Machin
 
 func (m *Manager) restore(ctx context.Context, row *state.Machine, backends fc.Backends,
 	snapKey, localDir string, immutable bool) (*fc.Machine, *netns.Slot, error) {
+
+	// A volume has to be mounted on THIS host before anything can open its
+	// image, and the claim is what stops two hosts mounting it at once. Every
+	// local bring-up funnels through here -- create, wake, rescue and
+	// checkpoint restore alike -- so there is one place this can be missed
+	// rather than four.
+	if row.VolumeID != "" {
+		if _, err := m.claimVolume(ctx, row.VolumeID, row.ID); err != nil {
+			return nil, nil, fmt.Errorf("machines: attach volume %s for %s: %w",
+				row.VolumeID, row.ID, err)
+		}
+	}
 
 	slot, err := m.pool.Take(row.ID)
 	if err != nil {

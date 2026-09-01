@@ -25,6 +25,12 @@ const BakedVolumePath = "/srv/pilots/volume.img"
 // /dev/vdb, the rootfs being /dev/vda.
 const VolumeDriveID = "volume"
 
+// GuestVolumeDevice is where the volume drive appears inside the guest: the
+// rootfs is vda and there is exactly one more drive. The guest agent has the
+// same value as its own default; it is repeated rather than shared because the
+// agent is a separate binary that runs inside the VM.
+const GuestVolumeDevice = "/dev/vdb"
+
 // CacheTypeWriteback is the ONLY correct cache type for a volume drive.
 //
 // Firecracker's default is "Unsafe", and Unsafe does not advertise the VirtIO
