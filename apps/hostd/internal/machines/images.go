@@ -160,7 +160,7 @@ func (m *Manager) bootMachine(ctx context.Context, row *state.Machine,
 		return nil, fmt.Errorf("install agent token: %w", err)
 	}
 	if vol != nil {
-		if err := m.mountVolumeInGuest(ctx, slot, row.ID, vol.MountPath); err != nil {
+		if err := m.mountVolumeInGuest(ctx, slot, row.ID, token, vol.MountPath); err != nil {
 			_ = fcm.Kill()
 			m.pool.Return(slot.Idx)
 			return nil, err

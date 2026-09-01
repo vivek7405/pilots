@@ -128,8 +128,13 @@ func (m *Manager) releaseVolume(ctx context.Context, volumeID string) error {
 // machine created from it. Fatal rather than best effort: a machine whose
 // volume did not mount is writing to its ephemeral root filesystem while
 // reporting that it has durable storage, which is worse than not starting.
+// The token is passed in rather than looked up with Manager.token: this runs
+// inside the create, before the machine's credential has been remembered, and
+// on a host with no fleet-wide AgentTokenSecret the lookup would fall back to
+// the template placeholder the guest has just stopped accepting -- a 401 that
+// fails every create with a volume.
 func (m *Manager) mountVolumeInGuest(ctx context.Context, slot *netns.Slot,
-	machineID, mountPath string) error {
+	machineID, token, mountPath string) error {
 
 	if mountPath == "" {
 		mountPath = volumes.DefaultMountPath
@@ -147,7 +152,7 @@ func (m *Manager) mountVolumeInGuest(ctx context.Context, slot *netns.Slot,
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+m.token(machineID))
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := (&http.Client{Timeout: 60 * time.Second}).Do(req)
 	if err != nil {
