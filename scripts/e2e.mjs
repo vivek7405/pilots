@@ -810,6 +810,209 @@ async function buildAssertions() {
     assert(/this-command-does-not-exist/.test(JSON.stringify(lines)),
       'nothing in the stream names the instruction that failed');
   });
+// Phase 5b: .internal, tenant isolation, and environment delivery.
+//
+// These need a golden template built from the CURRENT rootfs: one that names
+// 169.254.0.22 as its only resolver, carries fdee::21 and a route to
+// fdcd::/16, and ships pilot-app.service without enabling it. An older
+// template fails here rather than skipping, which is correct -- it is not
+// running the platform these assertions describe.
+//
+// The peer that gets talked to is the guest agent itself. Its /health endpoint
+// is unauthenticated on purpose (it is how the edge decides a machine is up),
+// so it is a listener every machine already has, and reaching it proves the
+// whole path: DNS answered, the address translated on both hosts, and the
+// tenant filter allowed it.
+// ---------------------------------------------------------------------------
+
+const AGENT_PORT = 3001;
+
+async function internalAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const appA = `e2e-shop-${tag}`;
+  const appB = `e2e-other-${tag}`;
+  const created = [];
+
+  async function make(name, app, extra = {}) {
+    const { status, json } = await request('/v1/machines', {
+      method: 'POST',
+      body: { name, app, vcpus: 1, mem_mib: 512, ...extra },
+    });
+    assert(status === 201, `create ${name}: HTTP ${status} ${JSON.stringify(json)}`);
+    created.push(json.id);
+    return json;
+  }
+
+  // reach runs a curl from inside a guest and reports what happened without
+  // throwing, because most of these assertions are about traffic that must
+  // NOT arrive.
+  async function reach(id, url, seconds = 5) {
+    const { json } = await request(`/v1/machines/${id}/exec`, {
+      method: 'POST',
+      body: {
+        cmd: `curl -s -o /dev/null -m ${seconds} -w '%{http_code} %{remote_ip}' ${url} || true`,
+        user: 'root',
+      },
+    });
+    const [code, ip] = (json?.stdout ?? '').trim().split(/\s+/);
+    return { code: code ?? '000', ip: ip ?? '' };
+  }
+
+  let web, db, secret;
+  try {
+    web = await make(`web-${tag}`, appA);
+    db = await make(`db-${tag}`, appA);
+    secret = await make(`vault-${tag}`, appB);
+  } catch (err) {
+    console.log(`  ! could not create the machines for the .internal battery: ${err.message}`);
+    for (const id of created) await request(`/v1/machines/${id}`, { method: 'DELETE' });
+    return;
+  }
+
+  try {
+    await step('two machines in one app find each other by name and exchange traffic', async () => {
+      // Both directions. One-way would pass with a filter that allows egress
+      // from web and happens to allow nothing back.
+      const forward = await reach(web.id, `http://${db.name}.internal:${AGENT_PORT}/health`);
+      assert(forward.code === '200',
+        `web could not reach ${db.name}.internal (curl said ${forward.code})`);
+      assert(forward.ip.startsWith('fdcd:'),
+        `.internal resolved to ${forward.ip}, which is not a machine address`);
+
+      const back = await reach(db.id, `http://${web.name}.internal:${AGENT_PORT}/health`);
+      assert(back.code === '200',
+        `db could not reach ${web.name}.internal (curl said ${back.code})`);
+    });
+
+    await step('a name outside the asking machine\'s app does not resolve', async () => {
+      const byName = await reach(web.id, `http://${secret.name}.internal:${AGENT_PORT}/health`);
+      assert(byName.code !== '200',
+        `a machine in ${appA} reached ${secret.name} in ${appB} by name`);
+      assert(byName.ip === '',
+        `${secret.name}.internal resolved to ${byName.ip} for a machine in another app`);
+    });
+
+    await step('a machine in another app is unreachable by its raw address too', async () => {
+      // The address comes from a machine that IS allowed to know it, because
+      // nothing outside the app can discover it -- which is the point. What is
+      // being tested is that knowing it is not enough.
+      const probe = await reach(secret.id, `http://${secret.name}.internal:${AGENT_PORT}/health`);
+      assert(probe.ip.startsWith('fdcd:'),
+        `could not learn ${secret.name}'s address from inside its own app (got ${probe.ip})`);
+
+      const raw = await reach(web.id, `http://[${probe.ip}]:${AGENT_PORT}/health`);
+      assert(raw.code !== '200',
+        `a machine in ${appA} reached ${probe.ip} in ${appB} by raw address; ` +
+        'name scoping is not a boundary, the filter is');
+    });
+
+    await step('a guest cannot reach a host on the mesh', async () => {
+      // The refusal must be at the NETWORK layer. hostd's internal listener is
+      // bearer-authenticated, so a 401 would prove only that auth was awake --
+      // and one leaked API key would then be fleet-wide exec.
+      const { json: hosts } = await request('/v1/hosts');
+      const target = (hosts ?? []).find((h) => (h.wg_addr ?? '').startsWith('fdcc:'));
+      if (!target) {
+        console.log('      - no host advertises a mesh address (single box, no fleet); skipped');
+        return;
+      }
+      const got = await reach(web.id, `http://[${target.wg_addr}]:51003/v1/machines`);
+      assert(got.code !== '401',
+        `the guest reached hostd at ${target.wg_addr}:51003 and was answered ` +
+        '401. Auth caught it; the network did not, and it should have');
+      assert(got.code === '000',
+        `the guest got HTTP ${got.code} from a host address; it must not get ` +
+        'a reply at all');
+    });
+  } finally {
+    for (const id of created) await request(`/v1/machines/${id}`, { method: 'DELETE' });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Environment delivery, and the asymmetry that is easy to get backwards.
+// ---------------------------------------------------------------------------
+
+async function envAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const name = `envy-${tag}`;
+  const secretValue = `s3cr3t-${tag}`;
+
+  const { status, json: machine } = await request('/v1/machines', {
+    method: 'POST',
+    body: {
+      name,
+      app: `e2e-env-${tag}`,
+      vcpus: 1,
+      mem_mib: 512,
+      cmd: 'sleep 86400',
+      env: { GREETING: 'hello from the deploy' },
+      secret_env: { API_SECRET: secretValue },
+    },
+  });
+  if (status !== 201) {
+    console.log(`  ! could not create a machine with an environment: HTTP ${status} ${JSON.stringify(machine)}`);
+    return;
+  }
+
+  const id = machine.id;
+  // mainPID and environ read the APPLICATION's process, not a shell the test
+  // started. Asserting on a fresh `env` would prove only that exec passes
+  // variables through, which it has done since phase 2.
+  const mainPID = () => exec(id, 'systemctl show -p MainPID --value pilot-app.service');
+  const environ = (pid) => exec(id, `tr '\\0' '\\n' < /proc/${pid}/environ | sort`);
+
+  try {
+    let pid, before;
+
+    await step('the application runs with the deployed env in its own environment block', async () => {
+      await waitFor(async () => (await mainPID()) !== '0',
+        { timeoutMs: 60_000, what: 'the application to be started by the agent' });
+
+      pid = await mainPID();
+      assert(pid && pid !== '0', 'the application unit has no main process');
+
+      before = await environ(pid);
+      assert(before.includes('GREETING=hello from the deploy'),
+        `the deployed environment is not in the application's block:\n${before}`);
+      assert(before.includes(`API_SECRET=${secretValue}`),
+        'the sealed secret did not reach the application');
+    });
+
+    await step('the secret is never handed back by the API', async () => {
+      const { text } = await request(`/v1/machines/${id}`, { raw: true });
+      assert(!text.includes(secretValue),
+        'the machine record contains the plaintext secret');
+      const { text: list } = await request('/v1/machines', { raw: true });
+      assert(!list.includes(secretValue), 'the machine list contains the plaintext secret');
+    });
+
+    await step('a suspend and wake leaves the process and its environment untouched', async () => {
+      // The failure this catches passes every other test in this file. A wake
+      // that re-execs the application produces a machine that is up, serving
+      // and correct in every visible way -- with the process the guest just
+      // spent its restore bringing back replaced by a new one, and whatever it
+      // held in memory gone.
+      assert(pid && pid !== '0', 'no application process to compare against');
+
+      const susp = await request(`/v1/machines/${id}/suspend`, { method: 'POST' });
+      assert(susp.status === 204, `suspend: expected 204, got ${susp.status}`);
+      const wake = await request(`/v1/machines/${id}/wake`, { method: 'POST' });
+      assert(wake.status === 204, `wake: expected 204, got ${wake.status}`);
+
+      const after = await mainPID();
+      assert(after === pid,
+        `the application was re-execed across a wake: pid ${pid} became ${after}. ` +
+        'Env delivery belongs on create and on nothing else');
+      assert((await environ(after)) === before,
+        "the application's environment changed across a wake");
+    });
+  } finally {
+    await step('destroy the machine that carried an environment', async () => {
+      const { status: gone } = await request(`/v1/machines/${id}`, { method: 'DELETE' });
+      assert(gone === 204, `expected 204, got ${gone}`);
+    });
+  }
 }
 
 async function main() {
@@ -821,6 +1024,8 @@ async function main() {
     await timingAssertions();
     await volumeAssertions();
     await buildAssertions();
+    await internalAssertions();
+    await envAssertions();
   } else {
     console.log('  - machine lifecycle skipped (set PILOTS_E2E_FULL=1 on a Firecracker host)');
   }
