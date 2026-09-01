@@ -3,7 +3,8 @@ import { section } from '#lib/ui/section.ts';
 import { pageHero } from '#lib/ui/page-hero.ts';
 import { PROSE, FIELD_LABEL, PANEL } from '#lib/design/recipes.ts';
 import { CANDIDATES, markSvg, type Candidate } from '#lib/design/logo-candidates.ts';
-import { FUSIONS, fusionMark, fusionLockup, type Fusion } from '#lib/design/logo-fusions.ts';
+import { FUSIONS, fusionMark, type Fusion } from '#lib/design/logo-fusions.ts';
+import { WORDMARKS, wordmark, type Wordmark } from '#lib/design/wordmarks.ts';
 
 /**
  * /logo-lab
@@ -42,7 +43,7 @@ const SMALL_SIZES = [32, 24, 20, 16];
  * wordmark is a strong instrument-panel signal and a weak brand signal: it
  * looks like a filename, which is fine in a header and thin on a title slide.
  */
-const WORDMARKS = [
+const WORD_FACES = [
   { id: 'mono', label: 'mono, semibold', cls: 'font-mono font-semibold tracking-tight' },
   { id: 'sans', label: 'sans, extrabold', cls: 'font-sans font-extrabold tracking-[-0.035em]' },
 ];
@@ -105,7 +106,7 @@ function lockupRow(c: Candidate) {
   return html`
     <div class="grid gap-5 items-center py-6 border-b border-rule mid:grid-cols-[9rem_1fr_1fr]">
       <code class="font-mono text-xs text-ink-subtle">${c.id}</code>
-      ${WORDMARKS.map(
+      ${WORD_FACES.map(
         (w) => html`
           <div class="lab-paper flex items-center gap-2.5">
             ${markSvg(c, 30)}
@@ -181,39 +182,39 @@ function fusionCard(f: Fusion) {
 }
 
 /**
- * One fusion's lockups, stacked so the four treatments sit directly above one
- * another. Comparing a sliced lockup against an unsliced one in two different
- * columns is comparing two positions on the page as much as two drawings.
+ * One whole-word treatment, shown in the three places a lockup has to survive:
+ * large on ink, at working size on paper in both faces, and small enough to
+ * sit in a header.
  */
-function lockupStack(f: Fusion) {
-  const rows: { label: string; face: 'sans' | 'mono'; slice: boolean; lean: boolean }[] = [
-    { label: 'sans, upright word', face: 'sans', slice: false, lean: false },
-    { label: 'sans, leaning word', face: 'sans', slice: false, lean: true },
-    { label: 'sans, leaning, sliced', face: 'sans', slice: true, lean: true },
-    { label: 'mono, leaning, sliced', face: 'mono', slice: true, lean: true },
-  ];
+function wordmarkCard(w: Wordmark) {
   return html`
     <article class="${PANEL} overflow-hidden">
-      <div class="lab-dark px-7 py-8 flex items-center justify-center">
-        ${fusionLockup(f, { height: 62, face: 'sans', slice: true, lean: true })}
+      <div class="lab-dark px-8 py-10 flex items-center justify-center">
+        ${wordmark(w, { height: 58, face: 'sans' })}
       </div>
-      <div class="flex items-baseline justify-between gap-3 px-5 pt-4 pb-1 border-t border-rule">
-        <h3 class="text-h3 font-bold m-0">${f.name}</h3>
-        <code class="font-mono text-xs text-ink-subtle">${f.id}</code>
+      <div class="flex items-baseline justify-between gap-3 px-5 pt-4 border-t border-rule">
+        <h3 class="text-h3 font-bold m-0">${w.name}</h3>
+        <code class="font-mono text-xs text-ink-subtle">${w.id}</code>
       </div>
-      <div class="lab-paper px-5 pb-5 divide-y divide-rule">
-        ${rows.map(
-          (r) => html`
-            <div class="py-4 flex flex-wrap items-center gap-x-6 gap-y-2">
-              ${fusionLockup(f, { height: 34, face: r.face, slice: r.slice, lean: r.lean })}
-              <span class=${FIELD_LABEL}>${r.label}</span>
-            </div>
-          `,
-        )}
-        <div class="py-4 flex flex-wrap items-center gap-x-6 gap-y-2">
-          ${fusionLockup(f, { height: 19, face: 'sans', slice: true, lean: true })}
+      <div class="lab-paper px-5 divide-y divide-rule">
+        <div class="py-5 flex flex-wrap items-center gap-x-6 gap-y-3">
+          ${wordmark(w, { height: 40, face: 'sans' })}
+          <span class=${FIELD_LABEL}>sans</span>
+        </div>
+        <div class="py-5 flex flex-wrap items-center gap-x-6 gap-y-3">
+          ${wordmark(w, { height: 40, face: 'mono' })}
+          <span class=${FIELD_LABEL}>mono</span>
+        </div>
+        <div class="py-5 flex flex-wrap items-center gap-x-6 gap-y-3">
+          ${wordmark(w, { height: 20, face: 'sans' })}
           <span class=${FIELD_LABEL}>at header size</span>
         </div>
+      </div>
+      <div class="px-5 py-5 border-t border-rule flex flex-col gap-3">
+        <p class="${PROSE} text-sm m-0">${w.idea}</p>
+        <p class="text-sm text-ink-subtle leading-[1.65] m-0">
+          <span class="text-ink font-semibold">The cost.</span> ${w.cost}
+        </p>
       </div>
     </article>
   `;
@@ -262,6 +263,18 @@ export default function LogoLabPage() {
         font-weight: 600;
         letter-spacing: -0.02em;
       }
+      /* The whole-word treatments. Heavier than the lockup faces above,
+         because here the type carries the mark rather than sitting beside a
+         drawn letter that was doing the carrying. */
+      .wm-sans {
+        font-family: var(--font-sans);
+        font-weight: 800;
+        letter-spacing: -0.03em;
+      }
+      .wm-mono {
+        font-family: var(--font-mono);
+        font-weight: 600;
+      }
     </style>
 
     ${pageHero({
@@ -307,18 +320,26 @@ export default function LogoLabPage() {
     })}
 
     ${section({
-      id: 'fusion-lockups',
-      heading: 'The whole word',
+      id: 'whole-word',
+      heading: 'The word, with the delta left alone',
+      layout: 'split',
+      lede: html`
+        Three arrangements that relate the mark to the name instead of welding
+        it into one. The word is set in a single face at a single weight in all
+        three, and stays lowercase, which is how the site sets it everywhere it
+        appears today.
+      `,
       body: html`
         <p class="${PROSE} mb-9">
-          The wordmark below is set without its first letter, because that is the
-          construction under test. If the word still spells the name once the
-          mark is taken away, the mark was a badge. The slice is painted here
-          rather than cut, so a shipped file would need it re-drawn as a real
-          gap in the geometry, which is how the sibling brand builds its own.
+          The round before this one made the mark supply the word's first
+          letter. It failed for a reason worth keeping: a hand-drawn letter
+          beside font-drawn letters reads as an object beside type no matter how
+          closely the weights are matched, and a bar through live text reads as
+          a strikethrough, because that is already what a bar through a word
+          means.
         </p>
-        <div class="grid gap-6 wide:grid-cols-2">
-          ${FUSIONS.map((f) => lockupStack(f))}
+        <div class="grid gap-6 wide:grid-cols-3">
+          ${WORDMARKS.map((w) => wordmarkCard(w))}
         </div>
       `,
     })}
@@ -336,7 +357,7 @@ export default function LogoLabPage() {
         <div class="border-t border-rule">
           <div class="hidden mid:grid grid-cols-[9rem_1fr_1fr] gap-5 pt-4">
             <span></span>
-            ${WORDMARKS.map((w) => html`<span class=${FIELD_LABEL}>${w.label}</span>`)}
+            ${WORD_FACES.map((w) => html`<span class=${FIELD_LABEL}>${w.label}</span>`)}
           </div>
           ${CANDIDATES.map((c) => lockupRow(c))}
         </div>
