@@ -61,8 +61,13 @@ say "Fleet"
 # Count hosts that are still heartbeating, not rows. A host that is retired --
 # or that was destroyed and not brought back -- leaves its row behind forever,
 # and counting rows would fail this check on a perfectly healthy fleet.
+# Poll. Gossip takes a few seconds to reach everyone after the last host comes
+# up, and asserting the instant the bootstrap returns fails a fleet that is
+# merely still converging -- the same mistake the gate's new-host step made.
 FLEET_OK=1
 for ip in "${IPS[@]}"; do
+  COUNT=0
+  for _ in $(seq 30); do
   COUNT=$(ssh $SSH_OPTS "root@${ip}" '
     source /etc/pilots/config
     curl -s --http2-prior-knowledge -X POST \
@@ -79,6 +84,9 @@ for line in sys.stdin:
 else:
     print(0)
 "' 2>/dev/null || echo 0)
+    [ "${COUNT:-0}" -eq "${#IPS[@]}" ] && break
+    sleep 2
+  done
   if [ "${COUNT:-0}" -eq "${#IPS[@]}" ]; then
     echo "  ${ip} sees ${COUNT} host(s)"
   else
