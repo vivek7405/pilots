@@ -277,6 +277,16 @@ func stageInstantJail(cfg InstantConfig, chrootDir, snap, device, uffdSock strin
 		return err
 	}
 
+	// The volume is staged but NOT re-declared to Firecracker. Its drive is
+	// already inside the snapshot being loaded -- the machine was created from
+	// a template captured with the drive attached -- and a restore has no
+	// window in which to add one: there is no documented way to touch the
+	// drive set between /snapshot/load and PATCH /vm Resumed. What the restore
+	// owes it is a file at the baked path, which is what this is.
+	if err := stageVolume(chrootDir, cfg.VolumeImage, cfg.JailUID, cfg.JailGID); err != nil {
+		return err
+	}
+
 	for _, p := range []string{
 		chrootDir,
 		filepath.Join(chrootDir, "run"),

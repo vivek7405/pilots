@@ -95,6 +95,13 @@ func (m *Machine) Kill() error {
 	}
 
 	if m.ChrootDir != "" {
+		// Before the removal, always. RemoveAll cannot unlink a mountpoint, so
+		// a volume still bound into the jail fails the teardown -- and keeps
+		// the volume's file open, so juicefs refuses to unmount and the volume
+		// stays pinned to a host that no longer runs its machine.
+		if err := unstageVolume(m.ChrootDir); err != nil {
+			errs = append(errs, err)
+		}
 		if err := os.RemoveAll(filepath.Dir(m.ChrootDir)); err != nil {
 			errs = append(errs, fmt.Errorf("remove chroot: %w", err))
 		}

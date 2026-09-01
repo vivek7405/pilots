@@ -71,6 +71,13 @@ type Config struct {
 	ChrootBase     string
 	StateDir       string // /var/lib/pilots/machines/<id>
 
+	// VolumeImage is the host path of this machine's persistent volume image,
+	// on the JuiceFS mount that makes its writes durable. Empty for a machine
+	// with no volume, which is most of them. It is bind-mounted onto
+	// BakedVolumePath inside the jail rather than copied, so the guest writes
+	// through to object storage.
+	VolumeImage string
+
 	JailUID int
 	JailGID int
 	Limits  Limits
@@ -172,6 +179,10 @@ func prepareJail(cfg Config) (chrootDir string, err error) {
 	rootfs := filepath.Join(chrootDir, BakedRootfsPath)
 	if err := reflinkCopy(cfg.TemplateRootfs, rootfs); err != nil {
 		return "", fmt.Errorf("fc: stage rootfs: %w", err)
+	}
+
+	if err := stageVolume(chrootDir, cfg.VolumeImage, cfg.JailUID, cfg.JailGID); err != nil {
+		return "", err
 	}
 
 	kernel := filepath.Join(chrootDir, "vmlinux.bin")
@@ -279,6 +290,14 @@ func (m *Machine) configure(ctx context.Context, cfg Config) error {
 		IsRootDevice: true, IsReadOnly: false,
 	}); err != nil {
 		return err
+	}
+	// The volume, when there is one. Pre-boot and never later: the drive set
+	// is baked into every snapshot this machine takes, and there is no
+	// documented way to add a drive to a machine being restored.
+	if cfg.VolumeImage != "" {
+		if err := m.Client.SetDrive(ctx, volumeDrive()); err != nil {
+			return err
+		}
 	}
 	if err := m.Client.SetNetworkInterface(ctx, NetworkInterface{
 		IfaceID: "eth0", HostDevName: netns.TapName, GuestMAC: cfg.MAC,
