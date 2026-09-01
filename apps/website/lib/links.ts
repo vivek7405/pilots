@@ -49,4 +49,5 @@ export const NAV = [
   { label: 'Deploy', href: '/deploy' },
   { label: 'Architecture', href: '/architecture' },
   { label: 'Roadmap', href: '/roadmap' },
+  { label: 'Brand', href: '/brand' },
 ];

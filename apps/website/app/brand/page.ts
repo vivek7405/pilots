@@ -6,15 +6,16 @@ import { CANDIDATES, markSvg, type Candidate } from '#lib/design/logo-candidates
 import { DELTA_PS, deltaPMark, deltaPLockup, type DeltaP } from '#lib/design/delta-p.ts';
 
 /**
- * /logo-lab
+ * /brand
  *
  * The working surface for choosing a mark. Not a brand page: a brand page
  * publishes a decision, and there is no decision yet.
  *
- * It is `noindex`, absent from the sitemap, and absent from the nav, because
- * a public route showing six competing logos for one product is a page that
- * makes the brand look undecided to anyone who finds it. It is reachable by
- * typing the address, which is all a review page needs.
+ * It sits in the nav, so anyone working on this can reach it, but it is
+ * `noindex` and out of the sitemap. A route showing several competing logos
+ * for one product is not what a stranger's first search result should be, and
+ * the two audiences want different things: the nav serves people who already
+ * know what this is, the index serves people who do not.
  *
  * The layout answers the three questions a mark actually has to survive, in
  * the order they kill candidates:
@@ -27,8 +28,16 @@ import { DELTA_PS, deltaPMark, deltaPLockup, type DeltaP } from '#lib/design/del
  *      alone is reviewed in a context it will never appear in.
  */
 export const metadata = {
-  title: 'Logo lab',
+  title: 'Brand',
   description: 'Candidate marks for pilots, drawn on one grid and compared at working sizes.',
+  /**
+   * Linked from the nav but kept out of the index, which is not a
+   * contradiction. The nav is for people who are already here and want to see
+   * where the mark stands. The index is for people arriving cold, and a
+   * stranger's first result for this product should not be a page of logos
+   * that disagree with each other. When one is chosen this becomes a real
+   * brand page and the flag comes off.
+   */
   robots: { index: false, follow: false },
 };
 
@@ -352,9 +361,10 @@ export default function LogoLabPage() {
     <div class="max-w-6xl mx-auto px-6 pb-20">
       <hr class="border-0 border-t border-rule m-0 mb-6" />
       <p class="text-sm text-ink-subtle max-w-[62ch] m-0">
-        This route is noindex and is not in the sitemap or the nav. When one mark
-        wins, it moves into a brand module beside the other design tokens, the
-        losing five come out of the repo, and this page goes with them.
+        This route is in the nav but stays out of the index and the sitemap
+        while the marks still disagree with each other. When one wins it moves
+        into a brand module beside the other design tokens, the losers come out
+        of the repo, and what is left here becomes a real brand page.
       </p>
     </div>
   `;
