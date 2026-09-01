@@ -157,29 +157,23 @@ func (m *Manager) installToken(ctx context.Context, slot *netns.Slot, token stri
 			out.ExitCode, strings.TrimSpace(out.Stderr))
 	}
 
-	// The agent reads its token once at startup, so where there IS an init to
-	// restart it, restarting is the cleanest way to pick the new one up. Done
-	// with the OLD token, which is still valid until the agent comes back.
+	// No restart, and no second wait for the agent to come back.
 	//
-	// Best effort on purpose: an image built from an ordinary Dockerfile has
-	// no systemd and nothing to restart, and the agent re-reads its token on
-	// an auth miss for exactly that reason. Failing here would refuse to
-	// create a machine whose token is already correctly installed.
-	restart, _ := json.Marshal(api.ExecRequest{
-		Cmd: "systemctl restart guest-agent", User: "root",
-	})
-	rreq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"http://"+slot.AgentAddr()+"/exec", bytes.NewReader(restart))
-	if err != nil {
-		return err
-	}
-	rreq.Header.Set("Content-Type", "application/json")
-	rreq.Header.Set("Authorization", "Bearer "+templateToken)
-	rresp, err := (&http.Client{Timeout: 30 * time.Second}).Do(rreq)
-	if err == nil {
-		rresp.Body.Close()
-	}
-	return waitForAgent(ctx, slot.AgentAddr(), 30*time.Second)
+	// The agent used to have to be restarted to notice a new token, because it
+	// read the file once at startup. It does not any more: an authentication
+	// miss re-reads the file, which is precisely this case and costs one small
+	// read on a request that was going to be rejected anyway.
+	//
+	// Restarting cost far more than it looked. It tore down the agent, then
+	// polled every 200ms for it to come back under systemd -- about two
+	// seconds on every create, on the critical path of the number this
+	// platform is named for. Create measured 2.7s against a 1.5s budget with
+	// the restore itself taking under 300ms.
+	//
+	// It was also wrong for half the fleet: an image built from an ordinary
+	// Dockerfile has no systemd, so the restart was a command that did not
+	// exist, and the reload path had to exist for those machines regardless.
+	return nil
 }
 
 // waitForAgent blocks until the guest's agent answers.
