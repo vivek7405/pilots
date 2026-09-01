@@ -62,6 +62,19 @@ export type DeltaP = {
   /** Stem weight, matched to the letters rather than to the mark. */
   stemW: number;
   stem: 'none' | 'baseline';
+  /** Where the stem hangs, overriding the position derived from the partition. */
+  stemX?: number;
+  /** Where the stem's top edge sits, overriding the one that meets the wing. */
+  stemTop?: number;
+  /**
+   * Set the i with its tittle.
+   *
+   * The other variants drop it: the wing passes through exactly the band a
+   * tittle occupies, so it would be swallowed. A variant whose stem stands
+   * apart from the plane needs it back, because without it the stem and the i
+   * are two identical bars and nothing says which is which.
+   */
+  dottedI?: boolean;
   /**
    * Carry the Delta half drawing: the hairline opened along the mark's own
    * axis. Identical geometry to the candidate card, cut and all.
@@ -131,8 +144,8 @@ function undersideY(v: DeltaP, x: number): number {
 
 /** The mark: the delta, and the thin stem dropped from its partition. */
 export function deltaPLetter(v: DeltaP) {
-  const px = partitionX(v);
-  const top = undersideY(v, px) - 2;
+  const px = v.stemX ?? partitionX(v);
+  const top = v.stemTop ?? undersideY(v, px) - 2;
   const bottom = BASELINE;
   return html`
     ${v.stem === 'none'
@@ -159,7 +172,7 @@ function markBox(v: DeltaP) {
   const ys = pts.map((p) => p.y);
   const stemLean = BASELINE * 0.15838;
   if (v.stem !== 'none') {
-    const px = partitionX(v);
+    const px = v.stemX ?? partitionX(v);
     xs.push(px - v.stemW / 2 - stemLean, px + v.stemW / 2);
     ys.push(BASELINE);
   }
@@ -222,7 +235,7 @@ export function deltaPLockup(v: DeltaP, opts: { height: number; face?: 'sans' | 
           class=${face === 'mono' ? 'dp-mono' : 'dp-sans'}
           fill="currentColor"
         >
-          ılots
+          ${v.dottedI ? 'ilots' : 'ılots'}
         </text>
       </g>
       ${deltaPLetter(v)}
@@ -259,6 +272,24 @@ export const DELTA_PS: DeltaP[] = [
     stemW: 15,
     stem: 'baseline',
     halved: true,
+  },
+  {
+    id: 'raked-half-stem',
+    name: 'Turned to the letters half stem',
+    idea:
+      'The halved lockup with its stem lifted off the plane and set down again a little to the right, so the two are separate shapes with air between them rather than one welded object. The mark keeps the gap the whole identity is built on, and the stem reads as the letter it is.',
+    cost:
+      'The plane no longer holds the stem up, so the stem has to earn its own place. It also cannot be tall: the wing hangs low over this part of the word, and every unit the stem gains at the top is a unit out of the gap.',
+    rotate: 64,
+    size: 5.2,
+    cx: 50,
+    cy: -12.5,
+    stemW: 15,
+    stem: 'baseline',
+    halved: true,
+    stemX: 50,
+    stemTop: 58,
+    dottedI: true,
   },
   {
     id: 'raked-bare',
