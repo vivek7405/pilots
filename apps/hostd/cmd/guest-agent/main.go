@@ -47,6 +47,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", handleHealth)
 	mux.HandleFunc("POST /init", requireAuth(handleInit))
+	mux.HandleFunc("POST /volume", requireAuth(handleVolume))
 	mux.HandleFunc("POST /exec", requireAuth(handleExec))
 	mux.HandleFunc("GET /exec/stream", requireAuth(handleExecStream))
 	mux.HandleFunc("GET /terminal", requireAuth(handleTerminal))
