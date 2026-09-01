@@ -934,6 +934,36 @@ async function internalAssertions() {
         `the guest got HTTP ${got.code} from a host address; it must not get ` +
         'a reply at all');
     });
+
+    // A machine that BOOTS rather than restores, which is every create
+    // carrying a volume or an image.
+    //
+    // This is the hole the rest of this battery had. Every machine above is
+    // template-backed, so all of them come up through the restore path -- and
+    // the responder was bound only on that path. A volume-backed machine got
+    // no resolver at all, and since the rootfs names the gateway as its ONLY
+    // nameserver, it could resolve nothing whatsoever. Forty-five green gate
+    // lines said otherwise, because not one of them booted a machine.
+    await step('a machine that boots rather than restores still resolves .internal', async () => {
+      const { status: vs, json: vol } = await request('/v1/volumes', {
+        method: 'POST',
+        body: { name: `e2e-dns-${tag}`, size_gib: 1, mount_path: '/data' },
+      });
+      if (vs !== 201) {
+        throw new Error(`could not create a volume to boot from: HTTP ${vs} ${JSON.stringify(vol)}`);
+      }
+
+      const booted = await make(`booted-${tag}`, appA, { volume: vol.id });
+      await waitFor(async () => (await reach(booted.id, `http://${db.name}.internal:3001/health`)).code === '200',
+        { timeoutMs: 120_000, what: 'the booted machine to resolve a peer by .internal' });
+
+      // And the other direction: the booted machine must be findable too, or
+      // it is a service nobody can address.
+      const back = await reach(web.id, `http://${booted.name}.internal:3001/health`);
+      assert(back.code === '200',
+        `${booted.name}.internal answered ${back.code} from a peer; a booted ` +
+        'machine must be reachable by name like any other');
+    });
   } finally {
     for (const id of created) await request(`/v1/machines/${id}`, { method: 'DELETE' });
   }
