@@ -113,11 +113,42 @@ func handleInit(w http.ResponseWriter, r *http.Request) {
 // false, and every branch below is skipped -- which is the asymmetry the whole
 // design turns on, and is what this shape makes testable without a microVM.
 func applyInit(req initRequest) (initResponse, error) {
-	if err := writeEnv(req.Env); err != nil {
+	// An explicit command wins; the build's declared spec is the fallback.
+	//
+	// Without the fallback a machine created from a user's Dockerfile has a
+	// start command sitting in /etc/pilot-agent/start.json that nothing reads,
+	// comes up, answers health checks, reports app_started, and runs no
+	// application. See startspec.go.
+	cmd, env := req.AppCmd, req.Env
+	if cmd == "" {
+		if spec, ok := readStartSpec(); ok {
+			cmd = spec.Command()
+			// The Dockerfile's ENV is the application's baseline. What the
+			// create supplied wins on a collision: a deploy-time value is
+			// meant to override what the image was built with.
+			if len(spec.Env) > 0 {
+				merged := make(map[string]string, len(spec.Env)+len(env))
+				for k, v := range spec.Env {
+					merged[k] = v
+				}
+				for k, v := range env {
+					merged[k] = v
+				}
+				env = merged
+			}
+			if spec.WorkDir != "" {
+				appWorkDir = spec.WorkDir
+			}
+			if spec.User != "" {
+				appUser = spec.User
+			}
+		}
+	}
+	if err := writeEnv(env); err != nil {
 		return initResponse{}, err
 	}
-	if req.AppCmd != "" {
-		if err := writeAppCmd(req.AppCmd); err != nil {
+	if cmd != "" {
+		if err := writeAppCmd(cmd); err != nil {
 			return initResponse{}, err
 		}
 	}
@@ -213,8 +244,18 @@ func writeAppCmd(cmd string) error {
 // turns on, and it cannot be answered by looking at the result.
 var (
 	startApp = func() (bool, string) {
-		if _, err := os.Stat(appPath); err != nil {
+		cmdline, env, err := readAppCmd()
+		if err != nil || cmdline == "" {
 			return false, "this image carries no application command"
+		}
+
+		// Which mechanism, decided by looking rather than by assuming. The
+		// golden template carries systemd and its unit; an image built from a
+		// user's Dockerfile carries neither, and `systemctl` there is not a
+		// failure to handle but a command that does not exist. See
+		// supervise.go.
+		if !systemdIsRunning() {
+			return appSupervisor.start(cmdline, env)
 		}
 		if run("systemctl", "is-active", "--quiet", appUnit) == nil {
 			return false, "the application is already running; not restarting it"
