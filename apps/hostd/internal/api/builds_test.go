@@ -269,3 +269,71 @@ func (c *cancelProbeBuilder) BuildLog(context.Context, string, bool) (
 	[]BuildLogLine, <-chan BuildLogLine, bool) {
 	return nil, nil, false
 }
+
+// The build must be able to read its context after the stream has started.
+//
+// The handler streams NDJSON progress, so it writes a response before the
+// build has read a byte of the upload. Go's server treats the request as
+// finished once that happens, and the next read of r.Body returns
+// "http: invalid Read on closed Body" -- so every build failed at its first
+// instruction, with an error naming the archive rather than the cause.
+//
+// Driven through a real http.Server rather than a ResponseRecorder: a recorder
+// has no request lifecycle and cannot reproduce this at all. That is exactly
+// why the unit tests were green while nothing on the fleet could build.
+func TestABuildReadsItsContextAfterStreamingBegins(t *testing.T) {
+	var got []byte
+	b := &readingBuilder{
+		read: func(r io.Reader, emit func(BuildLogLine)) error {
+			emit(BuildLogLine{Stream: "status", Line: "reading the context"})
+			var err error
+			got, err = io.ReadAll(r)
+			return err
+		},
+	}
+
+	srv := httptest.NewServer(newBuildServer(t, b))
+	defer srv.Close()
+
+	body := bytes.Repeat([]byte("context-bytes"), 1024)
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/v1/builds", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+
+	if !bytes.Equal(got, body) {
+		t.Fatalf("the build read %d of %d context bytes; the stream said:\n%s",
+			len(got), len(body), out)
+	}
+	if !bytes.Contains(out, []byte("rootfs-ok")) {
+		t.Errorf("the stream carried no result:\n%s", out)
+	}
+}
+
+// readingBuilder hands the context reader to a callback so a test can assert
+// what the build actually managed to read.
+type readingBuilder struct {
+	read func(io.Reader, func(BuildLogLine)) error
+}
+
+func (b *readingBuilder) NewBuildID() string { return "bld-reading" }
+
+func (b *readingBuilder) StartBuild(_ context.Context, _ string, r io.Reader,
+	emit func(BuildLogLine)) (string, error) {
+	if err := b.read(r, emit); err != nil {
+		return "", err
+	}
+	return "rootfs-ok", nil
+}
+
+func (b *readingBuilder) BuildLog(context.Context, string, bool) (
+	[]BuildLogLine, <-chan BuildLogLine, bool) {
+	return nil, nil, false
+}

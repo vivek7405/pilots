@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -41,6 +42,13 @@ const ndjson = "application/x-ndjson"
 // code is decided before the outcome is known, so it is always 200 and the
 // LAST line of the stream is what says whether the build worked. A line
 // carrying `result` is a success; one carrying `error` is not.
+// maxBuildContext bounds an upload.
+//
+// A build runs an arbitrary user Dockerfile on a host that also runs other
+// tenants' machines, so every input it takes needs a ceiling. 2 GiB is far
+// past any reasonable source tree and far short of filling a host's disk.
+const maxBuildContext = 2 << 30
+
 func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	if d.Builds == nil {
 		writeJSON(w, http.StatusNotImplemented,
@@ -56,6 +64,39 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := d.Builds.NewBuildID()
+
+	// Spool the context to disk BEFORE writing a single byte of response.
+	//
+	// Not an optimisation -- a correctness fix. Go's server treats the request
+	// as finished once the handler starts writing a streamed response, so the
+	// first read of r.Body after that returns "http: invalid Read on closed
+	// Body" and every build fails at its first instruction. The upload has to
+	// be fully consumed while the request is still a request.
+	//
+	// A file rather than memory: a context is arbitrary user data, and holding
+	// it in RAM on a host that also runs other tenants' machines makes a large
+	// upload a memory-exhaustion lever.
+	spool, err := os.CreateTemp("", "pilot-build-context-*.tar")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError,
+			ErrorResponse{Error: "cannot stage the build context: " + err.Error()})
+		return
+	}
+	defer func() {
+		spool.Close()
+		os.Remove(spool.Name())
+	}()
+
+	if _, err := io.Copy(spool, http.MaxBytesReader(w, r.Body, maxBuildContext)); err != nil {
+		writeJSON(w, http.StatusBadRequest,
+			ErrorResponse{Error: "reading the build context: " + err.Error()})
+		return
+	}
+	if _, err := spool.Seek(0, io.SeekStart); err != nil {
+		writeJSON(w, http.StatusInternalServerError,
+			ErrorResponse{Error: "cannot rewind the build context: " + err.Error()})
+		return
+	}
 
 	w.Header().Set("Content-Type", ndjson)
 	// The id in a header as well as the stream: a client that wants to reattach
@@ -77,7 +118,7 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	// that started it: a client that disconnects mid-build can reattach to the
 	// log, and killing a ten-minute build because a laptop closed its lid is
 	// not what anyone means by cancelling.
-	buildID, err := d.Builds.StartBuild(context.WithoutCancel(r.Context()), id, r.Body, write)
+	buildID, err := d.Builds.StartBuild(context.WithoutCancel(r.Context()), id, spool, write)
 	if err != nil {
 		// The failing step was already emitted by the builder. This is the
 		// terminal line, so that a consumer reading to the end always has a
