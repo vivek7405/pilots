@@ -39,7 +39,9 @@ mode: `autoStop: off|stop|suspend`, `autoStart: bool`,
 | Multi-tenant | jailer + cgroups v2 + egress firewall + quotas |
 
 Post-parity backlog (beyond every competitor): CoW memory fan-out (1→N
-fork), tenant Postgres-as-a-service, multi-region.
+fork), multi-region. (Tenant Postgres left this list: it is a shipped
+compose fragment on the ordinary primitives, not a product tier. See
+**Databases** below.)
 
 ---
 
@@ -109,6 +111,7 @@ CREATE TABLE machines (id TEXT PRIMARY KEY, name TEXT, host_id TEXT,
                        agent_token_hash TEXT,
                        mem_build_id TEXT, rootfs_build_id TEXT, -- latest snapshot
                        volume_id TEXT, service_id TEXT, release_id TEXT,
+                       app TEXT,     -- grouping only; there is no apps table
                        last_activity INTEGER, updated_at INTEGER);
                                                      -- writer: host_id only
 CREATE TABLE checkpoints (id TEXT PRIMARY KEY, machine_id TEXT, seq INTEGER,
@@ -120,6 +123,29 @@ CREATE TABLE api_keys (hash TEXT PRIMARY KEY, org_id TEXT, scopes TEXT,
 CREATE TABLE releases (id TEXT PRIMARY KEY, service_id TEXT,
                        rootfs_build_id TEXT, healthy INTEGER,
                        created_at INTEGER);
+CREATE TABLE services  (id TEXT PRIMARY KEY, name TEXT, app TEXT,
+                       release_id TEXT, replicas INTEGER,
+                       health TEXT,      -- json, tagged union (below)
+                       env TEXT,         -- json, non-secret only
+                       env_sealed TEXT,  -- sealed blob; never plaintext
+                       domain TEXT, custom_domain TEXT,
+                       repo TEXT, branch TEXT, autodeploy INTEGER,
+                       created_at INTEGER);           -- writer: host_id only
+
+-- Grouping is a property of the client's compose file, not a fleet object, so
+-- there is deliberately no apps table. App names take their uniqueness from
+-- the same hash(name) mod live_hosts owner that allocates machine names.
+--
+-- Health is a tagged union, because a database image ships a command check and
+-- not an HTTP one:
+--   {"type":"http","path":…,"interval":…,"timeout":…,"grace":…,
+--    "healthy_threshold":…}
+--   {"type":"cmd","test":["CMD-SHELL","pg_isready -U postgres"],
+--    "interval":…,"timeout":…,"grace":…,"retries":…}
+-- Docker semantics, so every stock image's own HEALTHCHECK maps straight in.
+-- A service with no domain still health-gates and still rolls back, but it has
+-- no concurrency signal -- so minMachinesRunning: 0 has no wake-on-request to
+-- fall back on and is REJECTED at validation rather than silently redefined.
 ```
 
 ### hostd HTTP API (public; every host serves it; bearer auth)
@@ -149,6 +175,100 @@ GET    /v1/hosts                     fleet view
 GET    /v1/health                    liveness (unauthenticated)
 GET    /metrics                      Prometheus (unauthenticated)
 ```
+
+### `.internal` service discovery and guest-to-guest traffic
+
+A guest cannot address a peer directly: invariant 5 gives every one of them the
+identical `169.254.0.21/30` with gateway `169.254.0.22`, which is exactly what
+makes a snapshot restorable anywhere. So discovery and reachability are both
+host-mediated, and everything host-specific lives where restore rebuilds it.
+
+**Names.** `<machine>.internal`, resolved by a DNS responder hostd binds on
+`169.254.0.22:53` inside each machine's netns. Answers come from the local
+Corrosion subscription cache, scoped to the querying machine's `app` and
+filtered to healthy. Everything else forwards upstream. The guest's
+`/etc/resolv.conf` is written at rootfs build time (post-export, beside the
+other fixups) and names only `169.254.0.22` — a constant, so snapshot-safe by
+construction.
+
+**Machine addresses are derived, never allocated.** A cluster-wide subnet
+allocator would be a control plane, which rule 1 forbids. Instead each host
+derives a second, domain-separated prefix from its own WireGuard key:
+
+```
+host    fd cc + pubkey[0:14]          /128   (unchanged; hostd listens here)
+machine fd cd + pubkey[0:12]          /112   machines at <prefix>::1 .. ::400
+```
+
+The machine prefix spends 16 bits of key material on the slot index, leaving
+96 bits of derivation entropy — a birthday collision sits past 2^48 hosts
+against a fleet of tens, and the slot index is the one the netns pool already
+allocates. Two prefixes rather than one widened prefix is deliberate: it makes
+the tenant boundary structural. **Guests may only ever reach `fdcd::/16`;
+hostd only ever listens under `fdcc::`.** One static rule enforces that, with
+nothing to reconcile and nothing to get wrong on a host added next year — where
+an enumerated deny ("block `::0` and the host service ports inside every
+machine prefix") would have to stay correct on every host forever. A peer
+therefore carries two `AllowedIPs` entries.
+
+**The data path.** Guests speak IPv4 and the mesh is IPv6, so the two are
+bridged at the host rather than wished away. Every guest additionally holds a
+constant `fdee::21` — identical on every guest for the same reason `.21` is,
+and equally snapshot-safe. DNS answers the peer's `fdcd` address; the root
+namespace NAT66s both ways: source-rewrite outbound to `<prefix>::<slot>`,
+destination-rewrite inbound into the target netns. Cross-host the packet routes
+over the mesh to the owning host and is translated there. Same path either way.
+
+**Tenant isolation belongs at that translation hop, in the root namespace.**
+Every guest sources from the same `169.254.0.21`, so classification by source
+address is impossible by construction — it is by ingress veth (→ machine →
+app). Doing it there costs one rule set per host, updated once per fleet
+change; doing it inside each netns would cost a set of every peer address in
+the app, in up to 1024 netns per host, re-reconciled on every fleet change and
+churning hardest during a rescue, which is precisely when the host is busiest.
+
+Landmines:
+
+- **Near-zero TTL, always.** A rescued machine lands on a new host with a new
+  slot, so its address changes. A guest holding a 300s answer talks to nothing.
+- **TTL does not save an established connection.** A pool holding an open
+  socket to a rescued machine's old address simply breaks. That is what every
+  failover does, but it means `.internal` clients need reconnect logic, and
+  "no human action" covers the platform, not the application's connections.
+- **Nothing here may enter a snapshot.** Routes, NAT66 and the filter are netns
+  and root-namespace state, rebuilt at restore. The guest knows `169.254.0.22`,
+  its own `fdee::21`, and whatever DNS returned.
+- **Key rotation is a readdressing event.** Machine addresses derive from the
+  host's key, so rotating it moves every machine that host runs: drain first,
+  or accept a connection-reset event for all of them plus an AllowedIPs and
+  NAT rebuild.
+
+### Environment and secrets
+
+Corrosion replicates every row to every host, so nothing secret may be written
+to one in the clear. The reference implementation gets this wrong in an
+instructive way — uncloud stores each container as JSON embedding the resolved
+env and inline config bodies, gossiping both fleet-wide.
+
+`secret://name` references are resolved **client-side**, before any spec is
+built, so the value never enters the repo. The CLI sends plaintext to hostd
+over TLS; hostd seals it with a fleet key from `/etc/pilots/config` before the
+row is written. Non-secret values live in `services.env`, sealed ones in
+`services.env_sealed`. No plaintext in a gossiped row, none in object storage.
+
+State the limit rather than implying more: this defends against gossip spread
+and against anything that reads a database file or a backup — **not** against a
+compromised host, since any host with the fleet key decrypts any org's
+secrets. Sealing per-host to the owner's key would break self-heal, because the
+rescuing host would need plaintext it cannot obtain. Real untrusted-host
+secrecy needs a KMS, which is a control plane, which is a rule-1 conversation.
+
+**Key custody is a stated exception to invariant 3.** The fleet key is
+operator-held, supplied out of band to `host-bootstrap.sh`, and lives only in
+`/etc/pilots/config`. Wipe every host and the sealed values are unrecoverable
+with object storage fully intact — so it is the one piece of state whose
+durability is the operator's job, in the same trust class as the SSH key that
+runs the bootstrap. Rotation requires a re-seal sweep over the affected rows.
 
 ### Guest-agent protocol (inside every VM, port 3001)
 
@@ -391,6 +511,21 @@ with no matching machine row (60s age guard). Snapshot a fresh boot only
 after the guest reaches `system-running` (~20s settle) — earlier captures a
 half-converged guest that can't serve after resume.
 
+**The golden template stops short of starting the application.** A create is a
+resume, so PID 1 and everything under it are already running when the machine
+appears — and you cannot inject environment into a running process. Docker's
+`environment:` semantics assume the process starts with its env block
+populated; there is no such moment here unless one is made. So the template
+settles the *base system* only, and the guest agent execs the application after
+env delivery, riding the `POST /init` poke that already fires post-resume.
+
+The asymmetry matters and is easy to get backwards: **delivery-and-exec happens
+on create from template, never on wake.** A wake resumes a snapshot in which
+the application is already running; re-execing there would restart the very
+process the guest just restored. Changing an env var therefore takes effect
+only through an explicit restart or roll of the machine — never through a
+suspend/wake cycle, which must leave the running process and its env untouched.
+
 **Router (in hostd):** TLS termination (wildcard + on-demand custom-domain
 certs) → hostname parse (`name` | `port-name` | custom domain) → local
 Corrosion lookup → if running-local: proxy into the netns (in-process Go
@@ -456,7 +591,22 @@ virtio-blk; chunks on the same S3 bucket; metadata engine is a per-host
 local Redis/SQLite kept durable via Litestream→S3 (no central metadata
 service). Volume machines pin to hosts only while mounted; on host death the
 volume remounts wherever the machine is rescued (per-write durability — this
-beats checkpoint-granularity disk state and is where app data belongs).
+beats checkpoint-granularity disk state and is where application data belongs).
+
+**Databases are the documented exception, and it is a default rather than a
+prohibition.** Per-write durability means an S3 round trip per fsync, which a
+Postgres data directory pays on every commit. So a database template *defaults*
+to a fast local data directory with WAL shipping (`archive_mode=on`,
+`archive_command` pushing to object storage, `archive_timeout=60`), giving
+point-in-time recovery with an RPO bounded by `archive_timeout` — seconds, not
+zero. A volume-backed data directory remains valid and supported where
+per-commit durability is genuinely worth the latency: low-write, high-value
+data. State which one is in use; do not imply the default is strictly better,
+because it trades RPO for commit latency.
+
+One consequence to carry into operations: **a rescued database has a different
+RTO from every other machine.** Everything else restores instantly from its
+snapshot; a database restores and then replays WAL.
 
 ---
 
