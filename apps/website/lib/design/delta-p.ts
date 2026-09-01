@@ -274,4 +274,19 @@ export const DELTA_PS: DeltaP[] = [
     stemW: 15,
     stem: 'none',
   },
+  {
+    id: 'raked-bare-half',
+    name: 'Turned, no stem half',
+    idea:
+      'The stemless wing with the plane opened along its axis, and nothing else altered. Same turn, same size, same placement, still no stem. The hairline is the only difference from the card before it.',
+    cost:
+      'Halving it takes away the last of the mass that was standing in for a letter. With no stem under it and no solid body left, there is less here to read as a P than in any other version on the page.',
+    rotate: 64,
+    size: 5.2,
+    cx: 50,
+    cy: -12.5,
+    stemW: 15,
+    stem: 'none',
+    halved: true,
+  },
 ];
