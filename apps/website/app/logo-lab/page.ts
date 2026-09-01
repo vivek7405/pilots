@@ -4,6 +4,7 @@ import { pageHero } from '#lib/ui/page-hero.ts';
 import { PROSE, FIELD_LABEL, PANEL } from '#lib/design/recipes.ts';
 import { CANDIDATES, markSvg, type Candidate } from '#lib/design/logo-candidates.ts';
 import { DELTA_PS, deltaPMark, deltaPLockup, type DeltaP } from '#lib/design/delta-p.ts';
+import { O_MARKS, oMark, oLockup, type OMark } from '#lib/design/letter-o.ts';
 
 /**
  * /logo-lab
@@ -195,6 +196,56 @@ function deltaPCard(v: DeltaP) {
   `;
 }
 
+/**
+ * One O candidate, shown as the two things it has to be at once: a mark on its
+ * own, and the o of the word. Both come off the same drawing, so a candidate
+ * that only works in one of the two has failed.
+ */
+function oCard(v: OMark) {
+  return html`
+    <article class="${PANEL} overflow-hidden">
+      <div class="flex border-b border-rule">
+        <div class="lab-dark flex-1 aspect-square grid place-items-center">${oMark(v, 88)}</div>
+        <div class="lab-light flex-1 aspect-square grid place-items-center">${oMark(v, 88)}</div>
+      </div>
+      <div class="flex items-baseline justify-between gap-3 px-5 pt-4">
+        <h3 class="text-h3 font-bold m-0">${v.name}</h3>
+        <code class="font-mono text-xs text-ink-subtle">${v.id}</code>
+      </div>
+      <div class="lab-paper px-5 divide-y divide-rule">
+        <div class="py-4 flex items-end gap-4">
+          ${SMALL_SIZES.map(
+            (px) => html`
+              <span class="flex flex-col items-center gap-1.5">
+                ${oMark(v, px)}
+                <span class="font-mono text-[10px] text-ink-subtle leading-none">${px}px</span>
+              </span>
+            `,
+          )}
+        </div>
+        <div class="py-5 flex flex-wrap items-center gap-x-6 gap-y-3">
+          ${oLockup(v, { height: 44 })}
+          <span class=${FIELD_LABEL}>at the o's own size</span>
+        </div>
+        <div class="py-5 flex flex-wrap items-center gap-x-6 gap-y-3">
+          ${oLockup(v, { height: 44, scale: 1.22 })}
+          <span class=${FIELD_LABEL}>overshooting</span>
+        </div>
+        <div class="py-5 flex flex-wrap items-center gap-x-6 gap-y-3">
+          ${oLockup(v, { height: 22 })}
+          <span class=${FIELD_LABEL}>at header size</span>
+        </div>
+      </div>
+      <div class="px-5 py-5 border-t border-rule flex flex-col gap-3">
+        <p class="${PROSE} text-sm m-0">${v.idea}</p>
+        <p class="text-sm text-ink-subtle leading-[1.65] m-0">
+          <span class="text-ink font-semibold">The cost.</span> ${v.cost}
+        </p>
+      </div>
+    </article>
+  `;
+}
+
 export default function LogoLabPage() {
   return html`
     <style>
@@ -309,6 +360,38 @@ export default function LogoLabPage() {
         </p>
         <div class="grid gap-6 mid:grid-cols-2">
           ${DELTA_PS.map((v) => deltaPCard(v))}
+        </div>
+      `,
+    })}
+
+    ${section({
+      id: 'letter-o',
+      heading: 'The o, as the mark',
+      layout: 'split',
+      lede: html`
+        A circle is already the shape of every instrument on a panel, so the one
+        letter in the name that is a circle is the one that can carry the
+        subject without illustrating it. Four dials, each shown alone and then
+        standing in for the o of the word.
+      `,
+      body: html`
+        <p class="${PROSE} mb-9">
+          The mark drops into the word at the o's own position. That position is
+          measured off the face, letter advance by letter advance, and the word
+          is set as two runs with the mark in the gap the o left, so the spacing
+          either side of it is the typeface's rather than a number nudged until
+          it looked right.
+        </p>
+        <p class="${PROSE} mb-9">
+          This word is set upright, unlike the delta lockups above, and that is
+          forced rather than chosen. Those lean because the delta leans, and a
+          mark cannot sit at one angle beside a word at another. Lean this word
+          and the o has to lean with it, but a leaned circle is an ellipse, and
+          an ellipse is a different letter. The circle is worth more than the
+          slant.
+        </p>
+        <div class="grid gap-6 mid:grid-cols-2">
+          ${O_MARKS.map((v) => oCard(v))}
         </div>
       `,
     })}
