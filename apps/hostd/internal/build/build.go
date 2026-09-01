@@ -60,6 +60,13 @@ type Options struct {
 	CacheBucket   string
 	CacheEndpoint string
 	CacheRegion   string
+	// The cache backend runs inside buildkitd, which has no credentials of its
+	// own: it is a rootless daemon running as another user, deliberately
+	// unaware of hostd's configuration. Without these it falls back to the
+	// default AWS chain, reaches for the EC2 metadata service, and fails the
+	// build after a context deadline that names IMDS rather than the cache.
+	CacheAccessKey string
+	CacheSecretKey string
 
 	// Limits. Every one of these exists because a build is arbitrary user code
 	// running beside other tenants' machines.

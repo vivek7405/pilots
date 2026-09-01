@@ -41,8 +41,22 @@ func (b *Builder) solveArgs(contextDir, out, cacheName string) []string {
 	// entirely when there is no bucket: a cache export to nowhere fails the
 	// build rather than being slower.
 	if b.opts.CacheBucket != "" && cacheName != "" {
-		spec := fmt.Sprintf("bucket=%s,endpoint_url=%s,region=%s,name=%s",
+		// use_path_style is not optional here: the bucket is addressed as a
+		// path on the endpoint, per the storage rule the rest of the engine
+		// follows, and virtual-host addressing resolves a hostname that does
+		// not exist.
+		//
+		// The credentials travel as cache attributes rather than in the
+		// daemon's environment, so they are scoped to the request instead of
+		// to every build the host ever runs. The cost is that they appear in
+		// this process's argv, which on this host is readable only by root and
+		// the build user -- the same user the daemon already runs as.
+		spec := fmt.Sprintf("bucket=%s,endpoint_url=%s,region=%s,name=%s,use_path_style=true",
 			b.opts.CacheBucket, b.opts.CacheEndpoint, b.opts.CacheRegion, cacheName)
+		if b.opts.CacheAccessKey != "" {
+			spec += fmt.Sprintf(",access_key_id=%s,secret_access_key=%s",
+				b.opts.CacheAccessKey, b.opts.CacheSecretKey)
+		}
 		args = append(args,
 			// mode=max caches intermediate layers too, not just the result.
 			"--export-cache", "type=s3,"+spec+",mode=max",

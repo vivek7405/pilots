@@ -171,14 +171,16 @@ func run() error {
 	var builder api.BuildRunner
 	if cfg.S3Bucket != "" {
 		builder = build.New(ctx, build.Options{
-			WorkRoot:      filepath.Join(cfg.CacheRoot(), "builds-work"),
-			BuildDir:      filepath.Join(cfg.CacheRoot(), "builds"),
-			Chunks:        chunks,
-			AgentBinary:   cfg.GuestAgentBin,
-			BuildkitSock:  cfg.BuildkitSock,
-			CacheBucket:   cfg.S3Bucket,
-			CacheEndpoint: cfg.S3Endpoint,
-			CacheRegion:   cfg.S3Region,
+			WorkRoot:       filepath.Join(cfg.CacheRoot(), "builds-work"),
+			BuildDir:       filepath.Join(cfg.CacheRoot(), "builds"),
+			Chunks:         chunks,
+			AgentBinary:    cfg.GuestAgentBin,
+			BuildkitSock:   cfg.BuildkitSock,
+			CacheBucket:    cfg.S3Bucket,
+			CacheEndpoint:  cfg.S3Endpoint,
+			CacheRegion:    cfg.S3Region,
+			CacheAccessKey: cfg.S3AccessKey,
+			CacheSecretKey: cfg.S3SecretKey,
 		})
 	} else {
 		slog.Warn("no object storage configured; builds are unavailable on this host")
