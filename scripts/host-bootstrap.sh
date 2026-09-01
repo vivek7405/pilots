@@ -138,8 +138,25 @@ on_host bash -euo pipefail -s <<'REMOTE'
 # that names nothing useful.
 cat >/etc/sysctl.d/60-pilots.conf <<'SYSCTL'
 vm.unprivileged_userfaultfd = 1
+# Ubuntu 23.10 and later ship AppArmor mediation of unprivileged user
+# namespaces, on by default. Rootless buildkitd cannot create one, so it dies
+# at startup with "fork/exec /proc/self/exe: operation not permitted" -- which
+# names neither AppArmor nor user namespaces, and reaches a caller as a build
+# that failed with exit status 1.
+#
+# The alternative is an AppArmor profile per binary. This host already runs
+# untrusted code inside Firecracker microVMs under jailer and cgroups rather
+# than relying on host-side mediation, and the build is the one place a user
+# namespace is deliberately created, so the mediation is buying nothing here
+# that the VM boundary does not already provide.
+#
+# The key does not exist on kernels without the patch, so this is written
+# through a file that tolerates it being unknown.
+kernel.apparmor_restrict_unprivileged_userns = 0
 SYSCTL
-sysctl -q --system
+# --system stops at the first unknown key on some releases; -e ignores keys
+# this kernel does not have, which is the whole point of the line above.
+sysctl -qe --system
 
 # The block server needs network block devices. nbds_max is fixed at load
 # time, so it goes in a modprobe conf rather than being set later.
@@ -260,6 +277,12 @@ BUILDKIT_URL="https://github.com/moby/buildkit/releases/download/v${BUILDKIT_VER
 for b in buildctl buildkitd buildkit-runc; do
   install_from_tarball "$BUILDKIT_URL" "$b" "/opt/pilots/bin/$b" "$BUILDKIT_VERSION"
 done
+
+# buildkitd finds its OCI worker by looking for a binary named `runc` on PATH.
+# BuildKit ships it as buildkit-runc, so without this the daemon starts, finds
+# no worker, and exits with "no worker found, rebuild the buildkit daemon?" --
+# which reads like a broken download rather than a missing symlink.
+ln -sf /opt/pilots/bin/buildkit-runc /opt/pilots/bin/runc
 
 install_from_tarball \
   "https://github.com/rootless-containers/rootlesskit/releases/download/v${ROOTLESSKIT_VERSION}/rootlesskit-x86_64.tar.gz" \
