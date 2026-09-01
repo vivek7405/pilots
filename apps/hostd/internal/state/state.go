@@ -19,6 +19,7 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -303,30 +304,68 @@ func (s *sqliteStore) PutMachine(ctx context.Context, m *Machine, _ ...WriteOpti
 	return nil
 }
 
+// templateDescriptor is the part of a template that must move as one value.
+//
+// The three fields are meaningless apart: a memory build, the disk build it
+// was captured beside, and the vmstate that ties them together. Storing them
+// in one column is what keeps a merge from inventing a combination no host
+// ever published. See the comment on the templates table.
+type templateDescriptor struct {
+	MemBuildID    string `json:"mem_build_id"`
+	RootfsBuildID string `json:"rootfs_build_id"`
+	SnapKey       string `json:"snap_key"`
+}
+
+// MarshalDescriptor renders the inseparable part of a template for storage.
+func MarshalDescriptor(t *Template) (string, error) {
+	b, err := json.Marshal(templateDescriptor{
+		MemBuildID: t.MemBuildID, RootfsBuildID: t.RootfsBuildID, SnapKey: t.SnapKey,
+	})
+	if err != nil {
+		return "", fmt.Errorf("state: encode template %q: %w", t.ID, err)
+	}
+	return string(b), nil
+}
+
+// UnmarshalDescriptor fills a template from a stored descriptor.
+func UnmarshalDescriptor(t *Template, descriptor string) error {
+	var d templateDescriptor
+	if err := json.Unmarshal([]byte(descriptor), &d); err != nil {
+		return fmt.Errorf("state: template %q has an unreadable descriptor: %w", t.ID, err)
+	}
+	t.MemBuildID, t.RootfsBuildID, t.SnapKey = d.MemBuildID, d.RootfsBuildID, d.SnapKey
+	return nil
+}
+
 func (s *sqliteStore) GetTemplate(ctx context.Context, id string) (*Template, error) {
 	var t Template
+	var descriptor string
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, mem_build_id, rootfs_build_id, snap_key, created_at
-		 FROM templates WHERE id = ?`, id).
-		Scan(&t.ID, &t.MemBuildID, &t.RootfsBuildID, &t.SnapKey, &t.CreatedAt)
+		`SELECT id, descriptor, created_at FROM templates WHERE id = ?`, id).
+		Scan(&t.ID, &descriptor, &t.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("state: template %q: %w", id, ErrNotFound)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("state: get template %q: %w", id, err)
 	}
+	if err := UnmarshalDescriptor(&t, descriptor); err != nil {
+		return nil, err
+	}
 	return &t, nil
 }
 
 func (s *sqliteStore) PutTemplate(ctx context.Context, t *Template) error {
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO templates (id, mem_build_id, rootfs_build_id, snap_key, created_at)
-		VALUES (?,?,?,?,?)
+	descriptor, err := MarshalDescriptor(t)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO templates (id, descriptor, created_at)
+		VALUES (?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
-			mem_build_id=excluded.mem_build_id,
-			rootfs_build_id=excluded.rootfs_build_id,
-			snap_key=excluded.snap_key, created_at=excluded.created_at`,
-		t.ID, t.MemBuildID, t.RootfsBuildID, t.SnapKey, t.CreatedAt)
+			descriptor=excluded.descriptor, created_at=excluded.created_at`,
+		t.ID, descriptor, t.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("state: put template %q: %w", t.ID, err)
 	}

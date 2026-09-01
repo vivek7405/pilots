@@ -84,12 +84,20 @@ CREATE TABLE IF NOT EXISTS api_keys (   -- writer: the dashboard's host
 -- to restore anyone else's machines -- which is the whole of cross-host
 -- rescue. A host that has never built one reads this row and pulls the builds
 -- it names from object storage.
+-- The golden template's parts live in ONE column, not three.
+--
+-- Merging is per column. Three columns are three independent last-write-wins
+-- races, so two hosts publishing at once could leave a row pairing one host's
+-- memory build with the other's disk build -- a template that never existed,
+-- pointing at a vmstate belonging to neither. Restores against it resolve
+-- unchanged pages from the wrong parent, which is silent guest-memory
+-- corruption, fleet-wide, with nothing to notice it.
+--
+-- One column cannot be merged into a value nobody wrote.
 CREATE TABLE IF NOT EXISTS templates (
-  id              TEXT NOT NULL PRIMARY KEY,   -- "golden"
-  mem_build_id    TEXT,
-  rootfs_build_id TEXT,
-  snap_key        TEXT,
-  created_at      INTEGER
+  id          TEXT NOT NULL PRIMARY KEY,   -- "golden"
+  descriptor  TEXT,                        -- json: {mem_build_id, rootfs_build_id, snap_key}
+  created_at  INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS releases (

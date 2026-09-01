@@ -365,8 +365,7 @@ func (s *Store) PutAPIKey(ctx context.Context, k *state.APIKey) error {
 
 func (s *Store) GetTemplate(ctx context.Context, id string) (*state.Template, error) {
 	rows, err := s.client.Query(ctx,
-		`SELECT id, mem_build_id, rootfs_build_id, snap_key, created_at
-		 FROM templates WHERE id = ?`, id)
+		`SELECT id, descriptor, created_at FROM templates WHERE id = ?`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -379,7 +378,11 @@ func (s *Store) GetTemplate(ctx context.Context, id string) (*state.Template, er
 		return nil, fmt.Errorf("state: template %q: %w", id, state.ErrNotFound)
 	}
 	var t state.Template
-	if err := rows.Scan(&t.ID, &t.MemBuildID, &t.RootfsBuildID, &t.SnapKey, &t.CreatedAt); err != nil {
+	var descriptor string
+	if err := rows.Scan(&t.ID, &descriptor, &t.CreatedAt); err != nil {
+		return nil, err
+	}
+	if err := state.UnmarshalDescriptor(&t, descriptor); err != nil {
 		return nil, err
 	}
 	return &t, rows.Err()
@@ -389,17 +392,22 @@ func (s *Store) GetTemplate(ctx context.Context, id string) (*state.Template, er
 //
 // Unguarded by single-writer on purpose: the template belongs to the fleet
 // rather than to a host, and the row is written once by whichever host finds
-// none. A concurrent second writer is resolved by re-reading afterwards and
-// adopting whatever won, which costs a wasted build and nothing else.
+// none. A concurrent second writer costs a wasted build and nothing else --
+// but only because the parts that must agree travel in one column, so a merge
+// cannot pair one host's memory build with another's disk build, and because
+// each build writes its vmstate under its own key rather than over the
+// other's.
 func (s *Store) PutTemplate(ctx context.Context, t *state.Template) error {
-	_, err := s.client.Exec(ctx, `
-		INSERT INTO templates (id, mem_build_id, rootfs_build_id, snap_key, created_at)
-		VALUES (?,?,?,?,?)
+	descriptor, err := state.MarshalDescriptor(t)
+	if err != nil {
+		return err
+	}
+	_, err = s.client.Exec(ctx, `
+		INSERT INTO templates (id, descriptor, created_at)
+		VALUES (?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
-			mem_build_id=excluded.mem_build_id,
-			rootfs_build_id=excluded.rootfs_build_id,
-			snap_key=excluded.snap_key, created_at=excluded.created_at`,
-		t.ID, t.MemBuildID, t.RootfsBuildID, t.SnapKey, t.CreatedAt)
+			descriptor=excluded.descriptor, created_at=excluded.created_at`,
+		t.ID, descriptor, t.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("state: put template %q: %w", t.ID, err)
 	}

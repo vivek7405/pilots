@@ -243,7 +243,19 @@ func (m *Manager) saveTemplate(t *Template) error {
 
 // buildTemplate boots one machine, lets it settle, and snapshots it.
 func (m *Manager) buildTemplate(ctx context.Context) (*Template, error) {
-	t := &Template{SnapKey: filepath.Join("template", fc.SnapFile), CreatedAt: time.Now().Unix()}
+	// A key of this build's own, not a constant.
+	//
+	// Two fresh hosts can each find no template and each build one. Under a
+	// shared key the second upload overwrites the first, so the losing host's
+	// published descriptor names a vmstate that now belongs to the winner --
+	// its memory build paired with someone else's machine state. Whoever
+	// restores against it gets a guest that was never captured.
+	//
+	// The wasted duplicate build is fine. Overwriting is not.
+	t := &Template{
+		SnapKey:   filepath.Join("template", uuid.NewString(), fc.SnapFile),
+		CreatedAt: time.Now().Unix(),
+	}
 
 	// The disk template needs no VM at all: it is the golden rootfs, chunked.
 	rootfsBuild := uuid.New()

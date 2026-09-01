@@ -3,6 +3,7 @@ package state
 import (
 	"context"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -226,5 +227,70 @@ func TestSchemaIsCRDTSafe(t *testing.T) {
 		if !strings.Contains(upper, "DEFAULT") {
 			t.Errorf("NOT NULL without a DEFAULT: %s", strings.TrimSpace(line))
 		}
+	}
+}
+
+// The golden template's parts must survive as a set.
+//
+// cr-sqlite merges per column, so three columns are three independent races.
+// Two hosts publishing at once could leave a row pairing one host's memory
+// build with the other's disk build: a template that never existed, whose
+// restores resolve unchanged pages against the wrong parent. That is silent
+// guest-memory corruption on every machine the fleet creates.
+//
+// The defence is structural -- one column -- so the test is structural too.
+func TestTheTemplateDescriptorIsNotSplitAcrossColumns(t *testing.T) {
+	schema, err := os.ReadFile("schema.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the templates table: machines legitimately carry these columns.
+	start := strings.Index(string(schema), "CREATE TABLE IF NOT EXISTS templates")
+	if start < 0 {
+		t.Fatal("no templates table in schema.sql")
+	}
+	body := string(schema)[start:]
+	end := strings.Index(body, ");")
+	if end < 0 {
+		t.Fatal("templates table is unterminated")
+	}
+	body = body[:end]
+
+	// Comments explain the rule and name the fields; they are not columns.
+	var columns []string
+	for _, line := range strings.Split(body, "\n") {
+		if cut := strings.Index(line, "--"); cut >= 0 {
+			line = line[:cut]
+		}
+		columns = append(columns, line)
+	}
+	declared := strings.Join(columns, "\n")
+
+	for _, split := range []string{"mem_build_id", "rootfs_build_id", "snap_key"} {
+		if strings.Contains(declared, split) {
+			t.Errorf("templates has a separate %q column: the parts of a template "+
+				"merge independently and can pair builds no host published", split)
+		}
+	}
+}
+
+// Round-tripping through the single column must not quietly lose a part.
+func TestTemplateRoundTrip(t *testing.T) {
+	s := openTest(t)
+	ctx := context.Background()
+
+	want := &Template{
+		ID: GoldenTemplate, MemBuildID: "mem-1", RootfsBuildID: "rootfs-1",
+		SnapKey: "template/abc/snap.bin", CreatedAt: 1234,
+	}
+	if err := s.PutTemplate(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.GetTemplate(ctx, GoldenTemplate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *got != *want {
+		t.Errorf("round trip changed the template:\n got %+v\nwant %+v", *got, *want)
 	}
 }
