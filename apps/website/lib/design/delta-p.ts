@@ -63,6 +63,16 @@ export type DeltaP = {
   stemW: number;
   stem: 'none' | 'baseline';
   /**
+   * Draw the plane as a border rather than a solid.
+   *
+   * The border's weight is not a number, it is `stemW / size`, so the outline
+   * and the stem come out the same thickness on the page whatever the mark is
+   * scaled to. The division is there because the plane is drawn inside a group
+   * scaled by `size`, so a stroke width set in its own space gets multiplied
+   * by that before it lands.
+   */
+  outline?: boolean;
+  /**
    * Carry the Delta half drawing: the hairline opened along the mark's own
    * axis. Identical geometry to the candidate card, cut and all.
    */
@@ -77,7 +87,15 @@ function deltaAt(v: DeltaP) {
     >
       <g transform="translate(5.4 0)">
         <g transform="skewX(-11)">
-          <path d=${DELTA_D} fill=${ACCENT_INK} />
+          ${v.outline
+            ? html`<path
+                d=${DELTA_D}
+                fill="none"
+                stroke=${ACCENT_INK}
+                stroke-width=${(v.stemW / v.size).toFixed(4)}
+                stroke-linejoin="miter"
+              />`
+            : html`<path d=${DELTA_D} fill=${ACCENT_INK} />`}
           <!-- The Delta half cut, verbatim from the candidate card: a hairline
                on x = 16, the line the delta is symmetric about before it is
                leaned. Inside the skew, so it leans with the drawing and runs
@@ -244,6 +262,21 @@ export const DELTA_PS: DeltaP[] = [
     cy: -12.5,
     stemW: 15,
     stem: 'baseline',
+  },
+  {
+    id: 'raked-p',
+    name: 'Turned to the letters P',
+    idea:
+      "The same lockup with the plane drawn as a border rather than a solid, which gives the letter the window a P is supposed to have. The border's weight is not chosen: it is the stem's weight divided by the mark's scale, so the outline and the stem come out identical on the page and the whole letter reads as one stroke width.",
+    cost:
+      'An outlined plane carries far less weight than a solid one, so beside the word it reads as a diagram of the mark rather than the mark. At small size the border and the space it encloses close together, and what is left is a smudge rather than the solid the other variants degrade to.',
+    rotate: 64,
+    size: 5.2,
+    cx: 50,
+    cy: -12.5,
+    stemW: 15,
+    stem: 'baseline',
+    outline: true,
   },
   {
     id: 'raked-half',
