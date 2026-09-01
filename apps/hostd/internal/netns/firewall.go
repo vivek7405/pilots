@@ -116,6 +116,36 @@ func applyNftables(ns vnetns.NsHandle, s *Slot) error {
 				&expr.Verdict{Kind: expr.VerdictDrop})})
 	}
 
+	// The IPv6 side of the same link, and the veth pair the namespace forwards
+	// over. These are not optional generosity: neighbour discovery replies
+	// arrive as unicast to the namespace's own fdee addresses, and dropping
+	// them under the fc00::/7 rule below leaves v6 forwarding failing in a way
+	// that presents as intermittent loss rather than a firewall.
+	if s.HasMesh() {
+		for _, allow := range []struct {
+			ip   net.IP
+			bits int
+		}{
+			{net.ParseIP(TapHostIP6).To16(), 126},
+			{net.IP(s.VEth6IP.AsSlice()), 127},
+		} {
+			c.AddRule(&nftables.Rule{Table: filter, Chain: fchain,
+				Exprs: append(matchIPv6Net(dstOffset6, allow.ip, allow.bits),
+					&expr.Verdict{Kind: expr.VerdictAccept})})
+		}
+
+		// The tenant boundary, stated here as well as in the root namespace.
+		// fdcc and fdcd differ by one bit, and leaving the host space to be
+		// caught by the fc00::/7 rule three lines down would mean an ordering
+		// mistake silently opens hostd's internal listener to every guest.
+		c.AddRule(&nftables.Rule{Table: filter, Chain: fchain,
+			Exprs: append(matchIPv6Net(dstOffset6, net.ParseIP("fdcc::").To16(), 16),
+				&expr.Verdict{Kind: expr.VerdictDrop})})
+		c.AddRule(&nftables.Rule{Table: filter, Chain: fchain,
+			Exprs: append(matchIPv6Net(dstOffset6, net.ParseIP("fdcd::").To16(), 16),
+				&expr.Verdict{Kind: expr.VerdictAccept})})
+	}
+
 	// IPv6 equivalents: loopback, unique-local, link-local.
 	for _, deny := range []struct {
 		cidr string
@@ -130,16 +160,76 @@ func applyNftables(ns vnetns.NsHandle, s *Slot) error {
 				&expr.Verdict{Kind: expr.VerdictDrop})})
 	}
 
+	if s.HasMesh() {
+		applyNAT66(c, s)
+	}
+
 	if err := c.Flush(); err != nil {
 		return fmt.Errorf("netns: apply nftables for slot %d: %w", s.Idx, err)
 	}
 	return nil
 }
 
+// applyNAT66 translates between the guest's constant IPv6 address and the
+// machine's address on the mesh.
+//
+// It lives HERE, in the namespace, and not in the root namespace, for a reason
+// that only shows up on a real host: after translation the address is
+// fdee::21, which is the same in every one of this host's namespaces. A root
+// namespace rule set would have nothing to route the translated packet at --
+// netfilter does not remember which interface a flow came in on when it makes
+// the routing decision, so both the inbound direction and the reply to an
+// outbound flow would be ambiguous across up to 1024 namespaces.
+//
+// Translating here means packets are already carrying the machine's unique
+// address by the time the root namespace sees them, so its routing decision
+// and its tenant filter both have something real to work with. Everything the
+// root namespace does is still classified by INGRESS VETH rather than by
+// source, because a compromised guest can put whatever it likes in a source
+// address and only the interface is the host's own knowledge.
+//
+// Like the v4 translation beside it, none of this is in the snapshot: it is
+// namespace state, rebuilt from scratch on every restore.
+func applyNAT66(c *nftables.Conn, s *Slot) {
+	guest := net.ParseIP(TapGuestIP6).To16()
+	machine := net.IP(s.Machine6.AsSlice())
+
+	nat := c.AddTable(&nftables.Table{Family: nftables.TableFamilyIPv6, Name: "pilots-nat6"})
+
+	post := c.AddChain(&nftables.Chain{
+		Name: "postrouting", Table: nat,
+		Type: nftables.ChainTypeNAT, Hooknum: nftables.ChainHookPostrouting,
+		Priority: nftables.ChainPriorityNATSource, Policy: chainPolicy(nftables.ChainPolicyAccept),
+	})
+	// Outbound: src fdee::21 -> src <machine prefix>::<slot>
+	c.AddRule(&nftables.Rule{
+		Table: nat, Chain: post,
+		Exprs: append(matchIPv6(srcOffset6, guest),
+			&expr.Immediate{Register: 1, Data: machine},
+			&expr.NAT{Type: expr.NATTypeSourceNAT, Family: unix.NFPROTO_IPV6, RegAddrMin: 1},
+		),
+	})
+
+	pre := c.AddChain(&nftables.Chain{
+		Name: "prerouting", Table: nat,
+		Type: nftables.ChainTypeNAT, Hooknum: nftables.ChainHookPrerouting,
+		Priority: nftables.ChainPriorityNATDest, Policy: chainPolicy(nftables.ChainPolicyAccept),
+	})
+	// Inbound: dst <machine prefix>::<slot> -> dst fdee::21
+	c.AddRule(&nftables.Rule{
+		Table: nat, Chain: pre,
+		Exprs: append(matchIPv6(dstOffset6, machine),
+			&expr.Immediate{Register: 1, Data: guest},
+			&expr.NAT{Type: expr.NATTypeDestNAT, Family: unix.NFPROTO_IPV6, RegAddrMin: 1},
+		),
+	})
+}
+
 // IPv4 header offsets for source and destination addresses.
 const (
 	srcOffset  = 12
 	dstOffset  = 16
+	srcOffset6 = 8  // IPv6 source
 	dstOffset6 = 24 // IPv6 destination
 )
 
@@ -169,6 +259,16 @@ func matchIPv4Net(offset uint32, ip net.IP, bits int) []expr.Any {
 		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: offset, Len: 4},
 		&expr.Bitwise{SourceRegister: 1, DestRegister: 1, Len: 4, Mask: mask, Xor: []byte{0, 0, 0, 0}},
 		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: network},
+	}
+}
+
+// matchIPv6 matches an exact IPv6 address at the given header offset.
+func matchIPv6(offset uint32, ip net.IP) []expr.Any {
+	return []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyNFPROTO, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.NFPROTO_IPV6}},
+		&expr.Payload{DestRegister: 1, Base: expr.PayloadBaseNetworkHeader, Offset: offset, Len: 16},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: ip.To16()},
 	}
 }
 

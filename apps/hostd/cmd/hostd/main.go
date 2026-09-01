@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -26,6 +27,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/config"
 	"github.com/vivek7405/pilots/hostd/internal/fc"
 	"github.com/vivek7405/pilots/hostd/internal/machines"
+	"github.com/vivek7405/pilots/hostd/internal/mesh"
 	"github.com/vivek7405/pilots/hostd/internal/nbd"
 	"github.com/vivek7405/pilots/hostd/internal/router"
 	"github.com/vivek7405/pilots/hostd/internal/s3"
@@ -113,6 +115,33 @@ func run() error {
 	// the manager can hand any out.
 	devices := nbd.NewDevicePool(nbd.DefaultMaxDevices)
 
+	// The host's mesh identity, loaded here rather than inside startMesh
+	// because every netns slot's address is derived from it -- the manager
+	// below cannot hand out a slot without it.
+	//
+	// Loaded even on a single box, where nothing peers: the derivation costs
+	// one file read, and without it same-host guest-to-guest traffic and
+	// .internal would work in a fleet and silently not on one machine, which
+	// is the worst place for a behavioural difference to hide.
+	var machinePrefix netip.Prefix
+	meshKeys, err := mesh.LoadOrCreateKeys(cfg.MeshKeyPath())
+	if err != nil {
+		if cfg.Fleet() {
+			return err
+		}
+		// A single box can still run machines; they just cannot reach each
+		// other. Said out loud, because the symptom is a name that does not
+		// resolve rather than an error anywhere.
+		//
+		// The prefix stays ZERO here rather than being derived from the
+		// zero-valued key, which would give every host in this state the same
+		// block and put their machines on each other's addresses.
+		slog.Warn("no mesh identity, so machines on this host cannot reach "+
+			"each other and .internal will not resolve", "err", err)
+	} else {
+		machinePrefix = meshKeys.MachinePrefix()
+	}
+
 	// A second client over the same bucket under the chunk prefix. Content-
 	// addressed builds are named by uuid alone, so they need their own
 	// namespace or a build id could collide with a machine's key.
@@ -152,6 +181,7 @@ func run() error {
 		// Fleet-wide, so a host that rescues a machine can still reach it.
 		AgentTokenSecret: cfg.AgentTokenSecret,
 		Volumes:          volumeManager,
+		MachinePrefix:    machinePrefix,
 		FCConfig: fc.Config{
 			KernelPath:     cfg.KernelPath,
 			TemplateRootfs: cfg.TemplateRootfs,
@@ -214,13 +244,27 @@ func run() error {
 	if cfg.Fleet() {
 		f = &fleet{store: store, cache: cache}
 		if cfg.MeshEnabled {
-			dev, keys, err := startMesh(ctx, cfg, cache)
+			dev, err := startMesh(ctx, cfg, cache, meshKeys)
 			if err != nil {
 				return fmt.Errorf("bring up the mesh: %w", err)
 			}
 			defer dev.Close()
-			f.dev, f.keys = dev, keys
+			f.dev, f.keys = dev, meshKeys
 		}
+	}
+
+	// The fleet's view of itself, and the rule that turns a row into an
+	// address. Both the tenant filter and the DNS responder read them, and
+	// both must read the SAME view or a machine can be resolvable and
+	// unreachable at once.
+	var view fleetView = storeView{store: store}
+	if f != nil && f.cache != nil {
+		view = f.cache
+	}
+	locator := mesh.NewLocator(cfg.HostID, meshKeys.Public, view)
+
+	if machinePrefix.IsValid() {
+		go runTenantFilter(ctx, cfg.HostID, view, locator)
 	}
 
 	routerOpts := router.Options{

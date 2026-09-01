@@ -260,6 +260,7 @@ func (m *Manager) Rescue(ctx context.Context, row state.Machine) error {
 	fcm, err := m.wakeFromSuspend(ctx, fresh)
 	if err != nil {
 		fresh.State = StateError
+		stampSlot(fresh, nil)
 		fresh.UpdatedAt = time.Now().Unix()
 		_ = m.opts.Store.PutMachine(ctx, fresh)
 		return fmt.Errorf("machines: restore %s here: %w", row.ID, err)
@@ -267,6 +268,9 @@ func (m *Manager) Rescue(ctx context.Context, row state.Machine) error {
 	m.put(row.ID, fcm)
 
 	fresh.State = StateRunning
+	// A rescued machine lands in a slot this host chose, so its mesh address
+	// changes. That is exactly why .internal answers carry a near-zero TTL.
+	stampSlot(fresh, fcm)
 	fresh.LastActivity = time.Now().Unix()
 	fresh.UpdatedAt = fresh.LastActivity
 	return m.opts.Store.PutMachine(ctx, fresh)

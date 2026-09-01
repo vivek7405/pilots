@@ -8,6 +8,7 @@ import (
 
 	"github.com/vishvananda/netlink"
 	vnetns "github.com/vishvananda/netns"
+	"golang.org/x/sys/unix"
 )
 
 // Setup builds the namespace for a slot: veth pair, tap, addresses, routes,
@@ -64,6 +65,11 @@ func Setup(s *Slot, macAddr string, tapOwnerUID int) (err error) {
 	if err := addAddrHost(veth, s.VEthCIDR()); err != nil {
 		return fmt.Errorf("netns: addr on %s: %w", s.VEthName, err)
 	}
+	if s.HasMesh() {
+		if err := addAddrHost(veth, s.VEth6CIDR()); err != nil {
+			return fmt.Errorf("netns: v6 addr on %s: %w", s.VEthName, err)
+		}
+	}
 
 	// Inside the namespace: lo, eth0, and the tap.
 	if lo, err := nlh.LinkByName("lo"); err == nil {
@@ -81,6 +87,11 @@ func Setup(s *Slot, macAddr string, tapOwnerUID int) (err error) {
 	}
 	if err := addAddrNS(nlh, peer, s.VPeerCIDR()); err != nil {
 		return fmt.Errorf("netns: addr on %s: %w", s.VPeerName, err)
+	}
+	if s.HasMesh() {
+		if err := addAddrNS(nlh, peer, s.VPeer6CIDR()); err != nil {
+			return fmt.Errorf("netns: v6 addr on %s: %w", s.VPeerName, err)
+		}
 	}
 
 	// The tap MUST be created from a thread that is inside the namespace, not
@@ -122,6 +133,15 @@ func Setup(s *Slot, macAddr string, tapOwnerUID int) (err error) {
 		if err := addAddrHost(tapLink, TapHostIP+"/30"); err != nil {
 			return fmt.Errorf("addr on tap: %w", err)
 		}
+		if s.HasMesh() {
+			// The v6 gateway the guest routes fdcd::/16 at. Same address in
+			// every namespace, which is fine because namespaces do not see
+			// each other's links -- and is what keeps it out of the snapshot's
+			// way of being host-specific.
+			if err := addAddrHost(tapLink, TapHostIP6+"/126"); err != nil {
+				return fmt.Errorf("v6 addr on tap: %w", err)
+			}
+		}
 		return nil
 	}); err != nil {
 		return fmt.Errorf("netns: tap setup: %w", err)
@@ -130,6 +150,15 @@ func Setup(s *Slot, macAddr string, tapOwnerUID int) (err error) {
 	// Default route out of the namespace, via the host end of the veth.
 	if err := nlh.RouteAdd(&netlink.Route{Gw: s.VEthIP}); err != nil {
 		return fmt.Errorf("netns: default route in ns: %w", err)
+	}
+	if s.HasMesh() {
+		// Its v6 counterpart, which is how a translated guest packet leaves
+		// for the root namespace and, from there, for the mesh.
+		if err := nlh.RouteAdd(&netlink.Route{
+			Gw: net.IP(s.VEth6IP.AsSlice()), Family: netlink.FAMILY_V6,
+		}); err != nil {
+			return fmt.Errorf("netns: default v6 route in ns: %w", err)
+		}
 	}
 
 	// The matching route on the HOST side. Without it the host has no way to
@@ -142,12 +171,29 @@ func Setup(s *Slot, macAddr string, tapOwnerUID int) (err error) {
 		return fmt.Errorf("netns: host route to %s: %w", s.HostIPCIDR(), err)
 	}
 
+	// The same thing for the machine's mesh address. This route is the ONLY
+	// reason the translation can live inside the namespace: the root namespace
+	// needs an unambiguous next hop for a packet addressed to this machine,
+	// and the post-translation address (fdee::21) is identical in every one of
+	// this host's namespaces, so it can never be that next hop.
+	if s.HasMesh() {
+		if err := netlink.RouteReplace(machineRoute(s)); err != nil {
+			return fmt.Errorf("netns: host route to %s: %w", s.Machine6, err)
+		}
+	}
+
 	// Forwarding, and then NAT + firewall, all inside the namespace.
 	if err := withNetns(nsHandle, func() error {
-		for _, knob := range []string{
+		knobs := []string{
 			"/proc/sys/net/ipv4/ip_forward",
 			"/proc/sys/net/ipv4/conf/all/forwarding",
-		} {
+		}
+		if s.HasMesh() {
+			// Guest-to-guest traffic is forwarded between the tap and the
+			// veth, so the namespace forwards v6 as well as v4.
+			knobs = append(knobs, "/proc/sys/net/ipv6/conf/all/forwarding")
+		}
+		for _, knob := range knobs {
 			if err := os.WriteFile(knob, []byte("1\n"), 0o644); err != nil {
 				return fmt.Errorf("netns: sysctl %s: %w", knob, err)
 			}
@@ -213,9 +259,18 @@ func withNetns(ns vnetns.NsHandle, fn func() error) error {
 	return fnErr
 }
 
+// machineRoute sends this machine's mesh address into its namespace.
+func machineRoute(s *Slot) *netlink.Route {
+	return &netlink.Route{
+		Dst:    &net.IPNet{IP: s.Machine6.AsSlice(), Mask: net.CIDRMask(128, 128)},
+		Gw:     net.IP(s.VPeer6IP.AsSlice()),
+		Family: netlink.FAMILY_V6,
+	}
+}
+
 // addAddrHost assigns an address in the host namespace.
 func addAddrHost(link netlink.Link, cidr string) error {
-	addr, err := netlink.ParseAddr(cidr)
+	addr, err := parseAddr(cidr)
 	if err != nil {
 		return err
 	}
@@ -224,9 +279,29 @@ func addAddrHost(link netlink.Link, cidr string) error {
 
 // addAddrNS assigns an address through a namespace-scoped handle.
 func addAddrNS(nlh *netlink.Handle, link netlink.Link, cidr string) error {
-	addr, err := netlink.ParseAddr(cidr)
+	addr, err := parseAddr(cidr)
 	if err != nil {
 		return err
 	}
 	return nlh.AddrAdd(link, addr)
+}
+
+// parseAddr reads a CIDR, marking IPv6 addresses as not needing duplicate
+// address detection.
+//
+// DAD would hold every v6 address tentative for about a second after it is
+// added, and an address in that state cannot be used -- so a machine created
+// and immediately asked to reach a peer would fail for reasons that look like
+// packet loss. There is nothing to detect: both ends of a /127 veth and the
+// two addresses on the tap are assigned by this function, on links with
+// exactly one other node.
+func parseAddr(cidr string) (*netlink.Addr, error) {
+	addr, err := netlink.ParseAddr(cidr)
+	if err != nil {
+		return nil, err
+	}
+	if addr.IP.To4() == nil {
+		addr.Flags |= unix.IFA_F_NODAD
+	}
+	return addr, nil
 }

@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sync"
@@ -76,6 +77,11 @@ type Options struct {
 	// object storage, where every volume operation is refused up front rather
 	// than failing somewhere inside a create.
 	Volumes VolumeManager
+	// MachinePrefix is this host's block of mesh addresses, derived from its
+	// WireGuard key. Every slot's address comes out of it, so a host without
+	// one runs machines that cannot reach a peer -- correct on a single box,
+	// where there is no peer to reach.
+	MachinePrefix netip.Prefix
 }
 
 // Manager is the per-host machine registry.
@@ -100,7 +106,7 @@ func New(opts Options) *Manager {
 	}
 	return &Manager{
 		opts:    opts,
-		pool:    netns.NewPool(opts.PoolSize),
+		pool:    netns.NewPool(opts.PoolSize, opts.MachinePrefix),
 		running: make(map[string]*fc.Machine),
 		flight:  newInFlight(),
 	}
@@ -225,6 +231,7 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 	fcm, err := m.startNewMachine(ctx, row, token, req.Volume, req.Image)
 	if err != nil {
 		row.State = StateError
+		stampSlot(row, nil)
 		row.UpdatedAt = time.Now().Unix()
 		_ = m.opts.Store.PutMachine(ctx, row)
 		return row, err
@@ -234,6 +241,7 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 	m.rememberToken(id, token)
 
 	row.State = StateRunning
+	stampSlot(row, fcm)
 	row.UpdatedAt = time.Now().Unix()
 	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
 		return row, err
@@ -422,6 +430,10 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 	superseded := []string{row.MemBuildID, row.RootfsBuildID}
 
 	row.State = StateSuspended
+	// The slot is gone: a suspended machine holds no index and is addressable
+	// nowhere until it wakes, possibly on another host and certainly in
+	// another slot.
+	stampSlot(row, nil)
 	row.MemBuildID = res.MemBuildID.String()
 	// An empty rootfs build is meaningful: the machine wrote nothing, so its
 	// next restore reads the template directly. Writing a zero uuid instead
@@ -494,6 +506,7 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 	fcm, err := m.wakeFromSuspend(ctx, row)
 	if err != nil {
 		row.State = StateError
+		stampSlot(row, nil)
 		row.UpdatedAt = time.Now().Unix()
 		_ = m.opts.Store.PutMachine(ctx, row)
 		return err
@@ -501,6 +514,7 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 	m.put(id, fcm)
 
 	row.State = StateRunning
+	stampSlot(row, fcm)
 	row.LastActivity = time.Now().Unix()
 	row.UpdatedAt = time.Now().Unix()
 	return m.opts.Store.PutMachine(ctx, row)

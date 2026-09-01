@@ -1,6 +1,7 @@
 package netns
 
 import (
+	"net/netip"
 	"os"
 	"os/exec"
 	"strings"
@@ -21,7 +22,7 @@ func requireRoot(t *testing.T) {
 // on the same box may hold.
 func testSlot(t *testing.T, idx int) *Slot {
 	t.Helper()
-	s := slotForIdx(idx, "pilotstest-"+strings.ReplaceAll(t.Name(), "/", "-"))
+	s := slotForIdx(idx, "pilotstest-"+strings.ReplaceAll(t.Name(), "/", "-"), testPrefix)
 	t.Cleanup(func() { _ = Teardown(s) })
 	return s
 }
@@ -98,7 +99,7 @@ func TestSetupIsIdempotent(t *testing.T) {
 // tolerate a slot that was never set up.
 func TestTeardownOnAbsentSlotIsNoError(t *testing.T) {
 	requireRoot(t)
-	s := slotForIdx(903, "pilotstest-never-created")
+	s := slotForIdx(903, "pilotstest-never-created", testPrefix)
 	if err := Teardown(s); err != nil {
 		t.Errorf("Teardown of an absent slot: %v", err)
 	}
@@ -174,7 +175,7 @@ func TestCreateDestroyChurnLeavesNothingBehind(t *testing.T) {
 		t.Skip("churn test skipped in -short")
 	}
 
-	pool := NewPool(64)
+	pool := NewPool(64, netip.MustParsePrefix("fdcd:1::/112"))
 	for i := 0; i < 10; i++ {
 		slot, err := pool.Take("pilotstest-churn")
 		if err != nil {

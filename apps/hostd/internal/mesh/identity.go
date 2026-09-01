@@ -134,11 +134,24 @@ const MaxMachineSlot = 0xffff
 // sentinel, so a zero-valued Slot must never derive an address that looks
 // real.
 func MachineAddr(publicKey wgtypes.Key, slot int) (netip.Addr, error) {
+	return MachineAddrIn(MachinePrefixFor(publicKey), slot)
+}
+
+// MachineAddrIn places a slot index inside an already-derived prefix.
+//
+// The same rule as MachineAddr, for the callers that hold a prefix rather than
+// a key: the netns pool knows this host's block and never sees a WireGuard
+// key, and the resolver derives a peer's block once and then walks its slots.
+func MachineAddrIn(prefix netip.Prefix, slot int) (netip.Addr, error) {
+	if !prefix.IsValid() || prefix.Bits() != MachinePrefixBits {
+		return netip.Addr{}, fmt.Errorf("mesh: %s is not a machine prefix (want a /%d)",
+			prefix, MachinePrefixBits)
+	}
 	if slot <= 0 || slot > MaxMachineSlot {
 		return netip.Addr{}, fmt.Errorf("mesh: slot %d is not addressable (want 1..%d)",
 			slot, MaxMachineSlot)
 	}
-	raw := MachinePrefixFor(publicKey).Addr().As16()
+	raw := prefix.Addr().As16()
 	raw[14], raw[15] = byte(slot>>8), byte(slot)
 	return netip.AddrFrom16(raw), nil
 }
