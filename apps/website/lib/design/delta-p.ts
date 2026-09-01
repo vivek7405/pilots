@@ -289,4 +289,19 @@ export const DELTA_PS: DeltaP[] = [
     stem: 'none',
     halved: true,
   },
+  {
+    id: 'raked-bare-half-p',
+    name: 'Turned, no stem half P',
+    idea:
+      "The same halved plane with nothing changed but where it sits: moved right until its tail lands on the i's stem. The mark carries no stem of its own and does not need one, because the i supplies it. Read one way the plane and that stroke are a P, read the other the stroke is the i, and the letter is counted twice.",
+    cost:
+      'It only works at one position. Short of it the plane and the i are two things side by side, past it the plane covers the i and the word loses a letter, and the window between those is about ten units wide.',
+    rotate: 64,
+    size: 5.2,
+    cx: 80,
+    cy: -12.5,
+    stemW: 15,
+    stem: 'none',
+    halved: true,
+  },
 ];
