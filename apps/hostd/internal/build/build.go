@@ -323,20 +323,29 @@ const GuestAgentPlaceholderToken = "placeholder-replaced-at-create"
 // restores exactly the way one created from the golden template does, so the
 // create path learns nothing about builds.
 func (b *Builder) publish(ctx context.Context, imagePath string) (uuid.UUID, error) {
+	// Checked BEFORE the chunkify, not after: chunkifying a multi-gigabyte
+	// image and only then discovering there is nowhere to put it costs minutes
+	// and leaves the result on disk for nothing.
+	if b.opts.Chunks == nil {
+		return uuid.Nil, errors.New("build: no chunk store is configured")
+	}
+
 	buildID := uuid.New()
 	outDir := filepath.Join(b.opts.BuildDir, buildID.String())
 
 	if _, _, err := block.Chunkify(ctx, block.ChunkifyOpts{
 		In: imagePath, OutDir: outDir, BuildID: buildID,
 	}); err != nil {
+		_ = os.RemoveAll(outDir)
 		return uuid.Nil, fmt.Errorf("build: chunkify the image: %w", err)
-	}
-	if b.opts.Chunks == nil {
-		return uuid.Nil, errors.New("build: no chunk store is configured")
 	}
 	for _, part := range []string{"data", "header"} {
 		if err := b.opts.Chunks.PutFile(ctx, buildID.String()+"/"+part,
 			filepath.Join(outDir, part)); err != nil {
+			// The build id is never returned, so nothing will ever read this
+			// directory again; leaving it fills the host's cache with the
+			// wreckage of every failed upload.
+			_ = os.RemoveAll(outDir)
 			return uuid.Nil, fmt.Errorf("build: upload %s: %w", part, err)
 		}
 	}

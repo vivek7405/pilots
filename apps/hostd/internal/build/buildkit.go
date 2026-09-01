@@ -81,6 +81,15 @@ func (b *Builder) solve(ctx context.Context, contextDir, out string,
 	// than leaving buildctl's children running against a daemon that has
 	// stopped being watched.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// CommandContext's default cancel signals the process alone, which with
+	// Setpgid is exactly the pid that is NOT the rest of the tree. Signal the
+	// group, or a timed-out build leaves buildctl's children running.
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 	cmd.Env = append(os.Environ(),
 		"AWS_ACCESS_KEY_ID="+os.Getenv("PILOT_S3_ACCESS_KEY"),
 		"AWS_SECRET_ACCESS_KEY="+os.Getenv("PILOT_S3_SECRET_KEY"))
