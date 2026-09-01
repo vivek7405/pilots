@@ -75,7 +75,24 @@ func handleExec(w http.ResponseWriter, r *http.Request) {
 // prepareCommand applies the user credential first, then the caller's cwd and
 // env on top, so an explicit cwd or env always wins over the account defaults.
 func prepareCommand(cmd *exec.Cmd, username, cwd string, env map[string]string) error {
+	// An explicitly requested user always fails closed if it is missing; see
+	// applyUserCredential. The DEFAULT is different, and the difference is not
+	// a loophole in that rule.
+	//
+	// `user` is an account the golden rootfs happens to bake in. An image
+	// built from someone's Dockerfile has no reason to have it -- alpine,
+	// distroless and slim images do not -- and Docker's own default there is
+	// root. Failing closed on an account the caller never asked for makes
+	// every exec on every built image fail with "user \"user\" does not
+	// exist", which is the machine refusing to run its owner's commands.
+	//
+	// So: no user requested and no default account present means run as the
+	// image's own default. Nothing unprivileged was asked for, so nothing was
+	// escalated away from.
 	if username == "" {
+		if _, err := user.Lookup(defaultGuestUser); err != nil {
+			return applyImageDefaultUser(cmd)
+		}
 		username = defaultGuestUser
 	}
 	if err := applyUserCredential(cmd, username); err != nil {
@@ -87,6 +104,18 @@ func prepareCommand(cmd *exec.Cmd, username, cwd string, env map[string]string) 
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
+	return nil
+}
+
+// applyImageDefaultUser leaves the command with the credentials the agent
+// itself runs under, which in an image with no unprivileged account is root --
+// the same default `docker run` gives that image.
+//
+// Separate from applyUserCredential so the fail-closed rule there stays a
+// single unqualified statement: a user that was ASKED for and is missing is
+// always an error.
+func applyImageDefaultUser(cmd *exec.Cmd) error {
+	cmd.SysProcAttr = nil
 	return nil
 }
 

@@ -274,3 +274,39 @@ func TestExitCodeOf(t *testing.T) {
 		t.Errorf("unstartable command -> %d, want 127", got)
 	}
 }
+
+// The fail-closed rule and its one exception, which must not become a loophole.
+//
+// An explicitly requested user that does not exist is always an error: the
+// predecessor logged a warning and continued as root, which silently turns an
+// unprivileged exec into a privileged one when the caller is untrusted code.
+//
+// A user that was never requested is a different question. `user` is an
+// account the golden rootfs bakes in; an image built from someone's Dockerfile
+// has no reason to carry it, and Docker's own default there is root. Failing
+// closed on it makes every exec on every built image fail.
+func TestAnExplicitlyRequestedMissingUserStillFails(t *testing.T) {
+	cmd := exec.Command("true")
+	err := prepareCommand(cmd, "definitely-not-a-real-account", "", nil)
+	if err == nil {
+		t.Fatal("a requested user that does not exist was silently ignored")
+	}
+	if !strings.Contains(err.Error(), "definitely-not-a-real-account") {
+		t.Errorf("the error does not name the user: %v", err)
+	}
+}
+
+func TestTheDefaultUserFallsBackToTheImagesOwn(t *testing.T) {
+	if _, err := user.Lookup(defaultGuestUser); err == nil {
+		t.Skipf("this host has a %q account, so the fallback cannot be observed here",
+			defaultGuestUser)
+	}
+	cmd := exec.Command("true")
+	if err := prepareCommand(cmd, "", "", nil); err != nil {
+		t.Fatalf("an exec with no user requested failed on an image with no %q account: %v",
+			defaultGuestUser, err)
+	}
+	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Credential != nil {
+		t.Error("a credential was applied for an account that does not exist")
+	}
+}
