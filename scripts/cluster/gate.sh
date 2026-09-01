@@ -363,7 +363,7 @@ else
     # to be one. A machine whose volume failed to mount reads and writes /data
     # perfectly well -- on a disk that disappears with it.
     VDEV=$(api "$VSURVIVOR" POST "/v1/machines/${VMID}/exec" \
-      '{"cmd":"findmnt -no SOURCE /data || echo none","user":"root"}' 2>/dev/null | jf stdout)
+      '{"cmd":"awk \u0027$2 == \"/data\" { print $1 }\u0027 /proc/self/mounts","user":"root"}' 2>/dev/null | jf stdout)
     echo "$VDEV" | grep -q vdb \
       && ok "/data is the volume drive on the rescuing host" \
       || bad "/data is backed by '${VDEV}', not the volume"

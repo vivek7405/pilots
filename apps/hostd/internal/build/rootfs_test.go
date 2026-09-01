@@ -420,3 +420,100 @@ func TestFixupsCarryTheStartSpecIntoTheImage(t *testing.T) {
 		t.Fatalf("the spec did not survive the round trip: %+v", got)
 	}
 }
+
+// The fallback path, exercised for real rather than assumed.
+//
+// A host whose e2fsprogs was built without libarchive takes packViaDirectory
+// instead, and the property that has to survive is the one the tarball route
+// exists to protect: ownership and the setuid bit, produced by an
+// unprivileged process. fakeroot is what makes that possible, and it only
+// works because the extract and the mke2fs share ONE session -- its uid map
+// lives in memory per session.
+func TestPackViaDirectoryKeepsOwnershipUnderFakeroot(t *testing.T) {
+	for _, bin := range []string{"mke2fs", "debugfs", "fakeroot", "tar"} {
+		if _, err := exec.LookPath(bin); err != nil {
+			t.Skipf("%s is not installed", bin)
+		}
+	}
+
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "rootfs.tar")
+	writeTar(t, tarPath, []tar.Header{
+		{Name: "usr/", Typeflag: tar.TypeDir, Mode: 0o755},
+		{Name: "usr/bin/", Typeflag: tar.TypeDir, Mode: 0o755},
+		{Name: "usr/bin/sudo", Typeflag: tar.TypeReg, Mode: 0o4755, Uid: 0, Gid: 0},
+		{Name: "home/", Typeflag: tar.TypeDir, Mode: 0o755},
+		{Name: "home/app.js", Typeflag: tar.TypeReg, Mode: 0o644, Uid: 1000, Gid: 1000},
+	}, map[string]string{"usr/bin/sudo": "ELF", "home/app.js": "console.log(1)\n"})
+
+	if err := applyFixups(tarPath, Fixups{
+		AgentBinary: stageAgent(t), AgentToken: GuestAgentPlaceholderToken,
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	// tarballInput false is the whole point: this is the path a host without
+	// libarchive takes, forced on regardless of what this machine can do.
+	b := &Builder{opts: Options{}, run: execRunner, tarballInput: false}
+	img := filepath.Join(dir, "rootfs.ext4")
+	if err := b.pack(context.Background(), tarPath, img, 32); err != nil {
+		t.Fatalf("packViaDirectory: %v", err)
+	}
+
+	home, err := exec.Command("debugfs", "-R", "ls -l /home", img).CombinedOutput()
+	if err != nil {
+		t.Fatalf("debugfs: %v: %s", err, home)
+	}
+	if !strings.Contains(string(home), "app.js") {
+		t.Fatalf("the fallback lost the build's own files:\n%s", home)
+	}
+	if !strings.Contains(string(home), "1000") {
+		t.Errorf("the fallback lost ownership:\n%s", home)
+	}
+
+	// The bit that vanishes silently if the extract and the mke2fs are split
+	// across two fakeroot sessions.
+	sudo, err := exec.Command("debugfs", "-R", "ls -l /usr/bin", img).CombinedOutput()
+	if err != nil {
+		t.Fatalf("debugfs: %v: %s", err, sudo)
+	}
+	if !strings.Contains(string(sudo), "104755") {
+		t.Errorf("the fallback lost the setuid bit; su would be broken in this "+
+			"image and nothing would say so:\n%s", sudo)
+	}
+
+	agent, err := exec.Command("debugfs", "-R", "ls -l /opt/pilot-agent", img).CombinedOutput()
+	if err != nil {
+		t.Fatalf("debugfs: %v: %s", err, agent)
+	}
+	if !strings.Contains(string(agent), "guest-agent") {
+		t.Fatalf("the fallback did not carry the fixups through:\n%s", agent)
+	}
+}
+
+// The probe itself. It has to answer for THIS host rather than assume, because
+// the fallback is a different code path that must be chosen before the build
+// starts, not after it has already produced output.
+func TestProbeTarballInputAgreesWithWhatPackDoes(t *testing.T) {
+	if _, err := exec.LookPath("mke2fs"); err != nil {
+		t.Skip("mke2fs is not installed")
+	}
+	ctx := context.Background()
+	supported := ProbeTarballInput(ctx)
+
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "probe.tar")
+	writeTar(t, tarPath, []tar.Header{
+		{Name: "file", Typeflag: tar.TypeReg, Mode: 0o644},
+	}, map[string]string{"file": "x"})
+
+	b := &Builder{opts: Options{}, run: execRunner, tarballInput: true}
+	err := b.pack(ctx, tarPath, filepath.Join(dir, "out.ext4"), 8)
+	if supported && err != nil {
+		t.Fatalf("the probe said tarball input works and it did not: %v", err)
+	}
+	if !supported && err == nil {
+		t.Fatal("the probe said tarball input does not work and it did; every " +
+			"build on this host would take the slow path for no reason")
+	}
+}

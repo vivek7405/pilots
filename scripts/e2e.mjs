@@ -614,9 +614,14 @@ async function volumeAssertions() {
       assert(json.device === '/dev/vdb', `device = ${json.device}`);
     });
 
+    // /proc/self/mounts rather than findmnt: findmnt is util-linux, which the
+    // golden rootfs happens to have and a built alpine image does not. /proc
+    // is there in every image by the time the agent is answering.
+    const mountSource = (path) =>
+      `awk '$2 == "${path}" { print $1 }' /proc/self/mounts`;
+
     await step('the volume is mounted in the guest and is writable', async () => {
-      const mounted = await exec(machine.id,
-        `findmnt -no SOURCE ${volume.mount_path} || echo none`);
+      const mounted = await exec(machine.id, `${mountSource(volume.mount_path)} || true`);
       assert(mounted.includes('vdb'),
         `${volume.mount_path} is backed by ${JSON.stringify(mounted)}, not the volume drive`);
 
@@ -641,8 +646,8 @@ async function volumeAssertions() {
     await step('the volume is not the root filesystem', async () => {
       // The failure this catches: a volume that never mounted leaves the
       // machine writing to its ephemeral root while reporting durable storage.
-      const rootDev = await exec(machine.id, 'findmnt -no SOURCE /');
-      const volDev = await exec(machine.id, `findmnt -no SOURCE ${volume.mount_path}`);
+      const rootDev = await exec(machine.id, mountSource('/'));
+      const volDev = await exec(machine.id, mountSource(volume.mount_path));
       assert(rootDev !== volDev,
         `${volume.mount_path} and / are the same device (${volDev}); the volume never mounted`);
     });
