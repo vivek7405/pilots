@@ -237,7 +237,7 @@ func (c *Cache) apply(table string, change Change) {
 			&m.ImageRef, &m.VCPUs, &m.MemMiB, &m.Domain, &m.CustomDomain,
 			&m.AppPort, &m.AgentPort, &m.AgentTokenHash, &m.MemBuildID,
 			&m.RootfsBuildID, &m.TemplateMemBuildID, &m.TemplateRootfsBuildID,
-			&m.VolumeID, &m.ServiceID, &m.ReleaseID,
+			&m.VolumeID, &m.ServiceID, &m.ReleaseID, &m.App, &m.Slot,
 			&m.LastActivity, &m.UpdatedAt); err != nil {
 			slog.Error("cluster cache could not read a machine change", "err", err)
 			return

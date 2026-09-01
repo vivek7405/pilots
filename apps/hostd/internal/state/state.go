@@ -58,8 +58,16 @@ type Machine struct {
 	VolumeID              string
 	ServiceID             string
 	ReleaseID             string
-	LastActivity          int64
-	UpdatedAt             int64
+	// App groups machines that may find and reach each other. Grouping only:
+	// there is no apps table, because an app is a property of the client's
+	// compose file rather than a fleet object.
+	App string
+	// Slot is the netns index this machine holds on HostID, and the low 16
+	// bits of its mesh address. It changes when the machine is rescued onto
+	// another host, which is why .internal answers cannot be cached.
+	Slot         int
+	LastActivity int64
+	UpdatedAt    int64
 }
 
 // Host is one member of the fleet. Every host heartbeats its own row; a row
@@ -182,6 +190,31 @@ type Volume struct {
 	CreatedAt int64
 }
 
+// Service is a set of machines sharing a name, a release and an environment.
+//
+// Only Env and EnvSealed are consumed in this phase; the rest of the row is
+// the rollout shape, which lands with the schema because adding a column later
+// is a fleet-wide re-bootstrap rather than a migration.
+type Service struct {
+	ID        string
+	Name      string
+	App       string
+	ReleaseID string
+	Replicas  int
+	Health    string // json, tagged union
+	// Env is the non-secret half, plain json. EnvSealed is the secret half as
+	// one sealed blob -- never plaintext, because every row here gossips to
+	// every host and lands in every backup.
+	Env          string
+	EnvSealed    string
+	Domain       string
+	CustomDomain string
+	Repo         string
+	Branch       string
+	Autodeploy   bool
+	CreatedAt    int64
+}
+
 // APIKey is a hashed credential. Hashes replicate to every host so that each
 // one authenticates locally -- auth survives the loss of any host, including
 // the one running the dashboard.
@@ -235,6 +268,14 @@ type Store interface {
 	// database and destroy it.
 	PutVolume(ctx context.Context, v *Volume, opts ...WriteOption) error
 
+	// GetService reads a service row. ErrNotFound means the machine carries a
+	// service_id whose row has not arrived yet, which on a create is normal
+	// for a moment and never for long.
+	GetService(ctx context.Context, id string) (*Service, error)
+	// PutService writes one. Nothing in the schema can enforce single-writer
+	// here -- a service row names no host -- so the rule is kept at the call
+	// site: only the host that owns a service's machines writes it.
+	PutService(ctx context.Context, svc *Service) error
 	// GetTemplate reads the fleet's golden template. ErrNotFound means no host
 	// has built one yet.
 	GetTemplate(ctx context.Context, id string) (*Template, error)
@@ -269,7 +310,7 @@ func (s *sqliteStore) Close() error { return s.db.Close() }
 const machineCols = `id, name, host_id, state, kind_knobs, image_ref, vcpus, mem_mib,
 	domain, custom_domain, app_port, agent_port, agent_token_hash,
 	mem_build_id, rootfs_build_id, template_mem_build_id, template_rootfs_build_id,
-	volume_id, service_id, release_id,
+	volume_id, service_id, release_id, app, slot,
 	last_activity, updated_at`
 
 func scanMachine(sc interface{ Scan(...any) error }) (*Machine, error) {
@@ -278,7 +319,7 @@ func scanMachine(sc interface{ Scan(...any) error }) (*Machine, error) {
 		&m.VCPUs, &m.MemMiB, &m.Domain, &m.CustomDomain, &m.AppPort, &m.AgentPort,
 		&m.AgentTokenHash, &m.MemBuildID, &m.RootfsBuildID,
 		&m.TemplateMemBuildID, &m.TemplateRootfsBuildID, &m.VolumeID,
-		&m.ServiceID, &m.ReleaseID, &m.LastActivity, &m.UpdatedAt)
+		&m.ServiceID, &m.ReleaseID, &m.App, &m.Slot, &m.LastActivity, &m.UpdatedAt)
 	return &m, err
 }
 
@@ -317,7 +358,7 @@ func (s *sqliteStore) ListMachines(ctx context.Context) ([]Machine, error) {
 func (s *sqliteStore) PutMachine(ctx context.Context, m *Machine, _ ...WriteOption) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO machines (`+machineCols+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			name=excluded.name, host_id=excluded.host_id, state=excluded.state,
 			kind_knobs=excluded.kind_knobs, image_ref=excluded.image_ref,
@@ -328,12 +369,13 @@ func (s *sqliteStore) PutMachine(ctx context.Context, m *Machine, _ ...WriteOpti
 			template_mem_build_id=excluded.template_mem_build_id,
 			template_rootfs_build_id=excluded.template_rootfs_build_id,
 			volume_id=excluded.volume_id, service_id=excluded.service_id,
-			release_id=excluded.release_id, last_activity=excluded.last_activity,
+			release_id=excluded.release_id, app=excluded.app, slot=excluded.slot,
+			last_activity=excluded.last_activity,
 			updated_at=excluded.updated_at`,
 		m.ID, m.Name, m.HostID, m.State, m.KindKnobs, m.ImageRef, m.VCPUs, m.MemMiB,
 		m.Domain, m.CustomDomain, m.AppPort, m.AgentPort, m.AgentTokenHash,
 		m.MemBuildID, m.RootfsBuildID, m.TemplateMemBuildID, m.TemplateRootfsBuildID,
-		m.VolumeID, m.ServiceID, m.ReleaseID,
+		m.VolumeID, m.ServiceID, m.ReleaseID, m.App, m.Slot,
 		m.LastActivity, m.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("state: put machine %q: %w", m.ID, err)
@@ -599,6 +641,49 @@ func (s *sqliteStore) PutVolume(ctx context.Context, v *Volume, _ ...WriteOption
 		v.ID, v.Name, v.MachineID, v.SizeMiB, v.S3Prefix, v.MountPath, v.HostID, v.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("state: put volume %q: %w", v.ID, err)
+	}
+	return nil
+}
+
+const serviceCols = `id, name, app, release_id, replicas, health, env, env_sealed,
+	domain, custom_domain, repo, branch, autodeploy, created_at`
+
+func scanService(sc interface{ Scan(...any) error }) (*Service, error) {
+	var svc Service
+	err := sc.Scan(&svc.ID, &svc.Name, &svc.App, &svc.ReleaseID, &svc.Replicas,
+		&svc.Health, &svc.Env, &svc.EnvSealed, &svc.Domain, &svc.CustomDomain,
+		&svc.Repo, &svc.Branch, &svc.Autodeploy, &svc.CreatedAt)
+	return &svc, err
+}
+
+func (s *sqliteStore) GetService(ctx context.Context, id string) (*Service, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+serviceCols+` FROM services WHERE id = ?`, id)
+	svc, err := scanService(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("state: service %q: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get service %q: %w", id, err)
+	}
+	return svc, nil
+}
+
+func (s *sqliteStore) PutService(ctx context.Context, svc *Service) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO services (`+serviceCols+`)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+			name=excluded.name, app=excluded.app, release_id=excluded.release_id,
+			replicas=excluded.replicas, health=excluded.health, env=excluded.env,
+			env_sealed=excluded.env_sealed, domain=excluded.domain,
+			custom_domain=excluded.custom_domain, repo=excluded.repo,
+			branch=excluded.branch, autodeploy=excluded.autodeploy,
+			created_at=excluded.created_at`,
+		svc.ID, svc.Name, svc.App, svc.ReleaseID, svc.Replicas, svc.Health,
+		svc.Env, svc.EnvSealed, svc.Domain, svc.CustomDomain, svc.Repo,
+		svc.Branch, svc.Autodeploy, svc.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put service %q: %w", svc.ID, err)
 	}
 	return nil
 }
