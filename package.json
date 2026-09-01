@@ -5,10 +5,13 @@
   "type": "module",
   "workspaces": [
     "apps/dashboard",
+    "apps/website",
     "packages/*",
     "sdks/js"
   ],
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "build:hostd": "cd apps/hostd && go build ./...",
     "test:hostd": "cd apps/hostd && go test ./...",
