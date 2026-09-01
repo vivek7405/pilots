@@ -385,12 +385,13 @@ async function timingAssertions() {
     console.log('        Put the machine store on btrfs, or on XFS made with -m reflink=1.');
   }
 
-  // Every assertion still asserts, on every host. A budget the filesystem
-  // makes unreachable is replaced, not dropped: the degraded ceiling is what
-  // the engine costs when each image copy is a real copy, measured on ext4
-  // with the 2GiB golden rootfs and left with roughly 2x headroom so it flags
-  // a regression rather than noise. A host with no ceiling of its own asserts
-  // nothing, which is how a real slowdown would hide here.
+  // Every assertion still asserts, on every host. Create and wake meet the
+  // engine targets even without extent sharing -- the copy the engine really
+  // runs skips zero blocks and costs ~134ms warm on ext4, so they are held to
+  // the real budget everywhere. Only the checkpoint pause genuinely breaks:
+  // it reflinks the snapshot and the cow while the guest is frozen, and
+  // without extent sharing it stops being independent of machine size. That
+  // one gets a ceiling measured on ext4 rather than no assertion at all.
   const enforce = (p50, budget, degraded, what) => {
     const limit = reflink ? budget : degraded;
     assert(p50 < limit, `${what} p50 was ${p50.toFixed(0)}ms, over the `
@@ -417,7 +418,7 @@ async function timingAssertions() {
       }
       const p50 = median(samples);
       console.log(`      create p50 ${p50.toFixed(0)}ms  [${samples.map((s) => s.toFixed(0)).join(', ')}]`);
-      enforce(p50, 1500, 5000, 'create');
+      enforce(p50, 1500, 1500, 'create');
     });
 
     const id = created[0];
