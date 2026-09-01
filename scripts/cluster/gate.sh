@@ -89,7 +89,170 @@ MEMBUILD=$($SSH "root@${IPS[0]}" "sqlite3 /var/lib/pilots/corrosion/store.db \
 [ -n "$MEMBUILD" ] && ok "machine has a snapshot (${MEMBUILD:0:8})" \
   || bad "no snapshot recorded; it could not be rescued"
 
-say "5. Hard-kill the host that owns it"
+say "5. Two machines in one app reach each other by name, across hosts"
+LIVE_IPS=()
+for ip in "${IPS[@]}" ${NEW_IP:-}; do
+  curl -sf -m 5 "http://${ip}:8080/v1/health" >/dev/null 2>&1 && LIVE_IPS+=("$ip")
+done
+echo "  live hosts: ${LIVE_IPS[*]}"
+
+APP="gate-shop-$$"
+A_IP=""; B_IP=""
+if [ "${#LIVE_IPS[@]}" -ge 2 ]; then
+  A_IP="${LIVE_IPS[0]}"; B_IP="${LIVE_IPS[1]}"
+else
+  bad "fewer than two hosts are alive; cross-host discovery cannot be asserted"
+fi
+
+WEB_ID=""; DB_ID=""; WEB_NAME=""; DB_NAME=""
+if [ -n "$A_IP" ]; then
+  # A create lands on the host that serves it, so aiming the two requests at
+  # different hosts is how they end up on different hosts -- no placement API
+  # and nothing to schedule.
+  WEB=$(api "$A_IP" POST /v1/machines "{\"app\":\"${APP}\",\"vcpus\":1,\"mem_mib\":512}")
+  DB=$(api "$B_IP" POST /v1/machines \
+    "{\"app\":\"${APP}\",\"vcpus\":1,\"mem_mib\":512,\"cmd\":\"sleep 86400\",\"secret_env\":{\"DB_PASSWORD\":\"gate-secret-$$\"}}")
+  WEB_ID=$(echo "$WEB" | jf id); WEB_NAME=$(echo "$WEB" | jf name)
+  DB_ID=$(echo "$DB" | jf id);  DB_NAME=$(echo "$DB" | jf name)
+  WEB_HOST=$(echo "$WEB" | jf host_id); DB_HOST=$(echo "$DB" | jf host_id)
+
+  if [ -z "$WEB_ID" ] || [ -z "$DB_ID" ]; then
+    bad "could not create the pair (web='${WEB}' db='${DB}')"
+  elif [ "$WEB_HOST" = "$DB_HOST" ]; then
+    bad "both machines landed on ${WEB_HOST}; this asserts nothing about crossing hosts"
+  else
+    ok "web on ${WEB_HOST}, db on ${DB_HOST}"
+  fi
+fi
+
+# curl_from <ip> <machine> <url> -> "<http_code> <resolved ip>"
+curl_from() {
+  api "$1" POST "/v1/machines/$2/exec" \
+    "{\"cmd\":\"curl -s -o /dev/null -m 8 -w '%{http_code} %{remote_ip}' $3 || true\",\"user\":\"root\"}" \
+    2>/dev/null | jf stdout | tr -d '\n'
+}
+
+if [ -n "$WEB_ID" ] && [ -n "$DB_ID" ]; then
+  # The listener is the peer's own guest agent: /health needs no credential,
+  # so every machine already has one and reaching it proves the whole path --
+  # the name resolved, the address translated at both ends, and the filter
+  # let it through.
+  OUT=$(curl_from "$A_IP" "$WEB_ID" "http://${DB_NAME}.internal:3001/health")
+  CODE=${OUT%% *}; PEER=${OUT##* }
+  [ "$CODE" = "200" ] && ok "web reached ${DB_NAME}.internal at ${PEER}" \
+    || bad "web could not reach ${DB_NAME}.internal (curl said '${OUT}')"
+  case "$PEER" in
+    fdcd:*) ok "the name resolved to a machine address, not a host one" ;;
+    *)      bad "the name resolved to '${PEER}'" ;;
+  esac
+
+  OUT=$(curl_from "$B_IP" "$DB_ID" "http://${WEB_NAME}.internal:3001/health")
+  [ "${OUT%% *}" = "200" ] && ok "and the reverse direction works too" \
+    || bad "db could not reach ${WEB_NAME}.internal (curl said '${OUT}')"
+fi
+
+say "6. A guest may not reach a host, and a sealed secret is on no host in the clear"
+if [ -n "$WEB_ID" ]; then
+  # hostd's internal listener is bearer-authenticated, so a 401 here would
+  # prove only that auth was awake. What is being asserted is that the packet
+  # never arrives: one leaked API key must not become fleet-wide exec.
+  HOST_MESH=$($SSH "root@${B_IP}" "/opt/pilots/bin/hostd mesh-addr" 2>/dev/null | tr -d '\n')
+  if [ -z "$HOST_MESH" ]; then
+    bad "could not read a peer host's mesh address"
+  else
+    OUT=$(curl_from "$A_IP" "$WEB_ID" "http://[${HOST_MESH}]:51003/v1/machines")
+    case "${OUT%% *}" in
+      000) ok "the guest got no reply at all from ${HOST_MESH}:51003" ;;
+      401) bad "the guest was answered 401 by hostd at ${HOST_MESH}:51003; auth caught it and the network did not" ;;
+      *)   bad "the guest got HTTP ${OUT%% *} from a host address" ;;
+    esac
+  fi
+fi
+
+if [ -n "$DB_ID" ]; then
+  # Dumped on a host that does not own the machine, because the point is what
+  # GOSSIP carries. The owner's disk holding the value would be a different
+  # and smaller claim.
+  for ip in "${LIVE_IPS[@]}"; do
+    [ "$ip" = "$B_IP" ] && continue
+    ROWS=$($SSH "root@${ip}" "sqlite3 /var/lib/pilots/corrosion/store.db \
+      \"SELECT COALESCE(env,'')||COALESCE(env_sealed,'') FROM services;\"" 2>/dev/null)
+    if echo "$ROWS" | grep -q "gate-secret-$$"; then
+      bad "${ip} holds the plaintext secret in a replicated row"
+    elif echo "$ROWS" | grep -q "pk1:"; then
+      ok "${ip} has the sealed row and cannot read it"
+    else
+      bad "${ip} has no services row at all; replication did not happen, so this proved nothing"
+    fi
+    break
+  done
+fi
+
+say "7. A name still resolves to the right machine after it is rescued"
+if [ -n "$WEB_ID" ] && [ -n "$DB_ID" ] && [ "${#LIVE_IPS[@]}" -ge 2 ]; then
+  # The db is suspended and woken first: only a machine with a snapshot in
+  # object storage can be rescued at all.
+  api "$B_IP" POST "/v1/machines/${DB_ID}/suspend" >/dev/null 2>&1
+  api "$B_IP" POST "/v1/machines/${DB_ID}/wake" >/dev/null 2>&1
+
+  BEFORE=$(curl_from "$A_IP" "$WEB_ID" "http://${DB_NAME}.internal:3001/health")
+  BEFORE_ADDR=${BEFORE##* }
+
+  DOM=$(sudo virsh list --name | while read -r d; do
+    [ -n "$d" ] && sudo virsh domifaddr "$d" --source lease 2>/dev/null | grep -q "$B_IP" && echo "$d"
+  done | head -1)
+  [ -n "$DOM" ] && sudo virsh destroy "$DOM" >/dev/null 2>&1 \
+    && ok "destroyed ${DOM}, which was running ${DB_NAME}" \
+    || bad "could not destroy the db's host"
+
+  # A rescued machine lands in a new slot on a new host, so its address
+  # CHANGES. That is the whole reason answers carry a near-zero TTL, and the
+  # assertion is that a client asking again gets the new one.
+  START=$SECONDS; AFTER=""
+  while [ $((SECONDS - START)) -lt 300 ]; do
+    AFTER=$(curl_from "$A_IP" "$WEB_ID" "http://${DB_NAME}.internal:3001/health")
+    [ "${AFTER%% *}" = "200" ] && [ "${AFTER##* }" != "$BEFORE_ADDR" ] && break
+    sleep 10
+  done
+  AFTER_ADDR=${AFTER##* }
+  if [ "${AFTER%% *}" = "200" ] && [ -n "$AFTER_ADDR" ]; then
+    ok "${DB_NAME}.internal now answers at ${AFTER_ADDR} (was ${BEFORE_ADDR}) after $((SECONDS - START))s"
+    [ "$AFTER_ADDR" != "$BEFORE_ADDR" ] && ok "the address moved with the machine" \
+      || bad "the address did not change; the machine was not actually rescued"
+  else
+    bad "${DB_NAME}.internal never came back after the rescue (last: '${AFTER}')"
+  fi
+fi
+
+for id in ${WEB_ID:-} ${DB_ID:-}; do
+  for ip in "${LIVE_IPS[@]}"; do
+    api "$ip" DELETE "/v1/machines/${id}" >/dev/null 2>&1 && break
+  done
+done
+
+# Put the host back before the fleet steps start killing their own.
+#
+# The step above proved its property by destroying one, and everything after
+# this needs a full fleet: the steps below hard-kill an owner, kill a host
+# mid-request, and kill the host holding a volume, each of which has to find a
+# live host to take the work. Leaving this one down means those steps run out
+# of fleet and report a broken platform when what actually broke is the gate.
+#
+# The wait is for the host to be SERVING, not merely booted: a host that has
+# not rejoined gossip cannot rescue anything, and a step that starts against
+# one fails for a reason that has nothing to do with what it asserts.
+if [ -n "${DOM:-}" ]; then
+  sudo virsh start "$DOM" >/dev/null 2>&1
+  for _ in $(seq 60); do
+    curl -sf -m 3 "http://${B_IP}:8080/v1/health" >/dev/null 2>&1 && break
+    sleep 2
+  done
+  curl -sf -m 3 "http://${B_IP}:8080/v1/health" >/dev/null 2>&1 \
+    && ok "brought ${DOM} back for the fleet steps" \
+    || bad "${DOM} did not come back; the steps below have no fleet to work with"
+fi
+
+say "8. Hard-kill the host that owns it"
 OWNER=$(api "${IPS[0]}" GET "/v1/machines/${ID}" | jf host_id)
 OWNER_IP=""
 for ip in "${IPS[@]}"; do
@@ -107,7 +270,7 @@ done | head -1)
 [ -n "$DOMAIN" ] && sudo virsh destroy "$DOMAIN" >/dev/null && ok "destroyed ${DOMAIN} (hard power-off, no shutdown)" \
   || bad "could not destroy the owner's VM"
 
-say "6. The machine returns on a survivor, same URL, no human action"
+say "9. The machine returns on a survivor, same URL, no human action"
 DEADLINE=$((SECONDS + 180))
 NEWOWNER=""
 while [ $SECONDS -lt $DEADLINE ]; do
@@ -122,7 +285,7 @@ done
 NEWURL=$(api "$SURVIVOR" GET "/v1/machines/${ID}" | jf url)
 [ "$NEWURL" = "$URL" ] && ok "URL unchanged: ${URL}" || bad "URL changed: ${URL} -> ${NEWURL}"
 
-say "7. The rescued machine serves, with its disk intact"
+say "10. The rescued machine serves, with its disk intact"
 DEADLINE=$((SECONDS + 120))
 OUT=""
 while [ $SECONDS -lt $DEADLINE ]; do
@@ -134,7 +297,7 @@ done
   && ok "the machine came back with what it had written" \
   || bad "exec after rescue returned '${OUT}'"
 
-say "8. One command turns a new IP into a serving host"
+say "11. One command turns a new IP into a serving host"
 # "Add a host = give an IP" is the claim. On real hardware the machine is
 # already racked and already has an address, so provisioning one more VM is
 # the local stand-in for that and is not part of what is being asserted. What
@@ -211,7 +374,7 @@ print(sum(1 for h in json.load(sys.stdin) if h.get('alive')))" 2>/dev/null || ec
     || bad "the new host could not serve it (got '${OUT}')"
 fi
 
-say "9. Killing the host a client is mid-request against"
+say "12. Killing the host a client is mid-request against"
 # The client is talking to the machine's owner when that host dies. Every
 # workload name resolves to every host, so the client's retry lands somewhere
 # else -- and that host has to be able to finish the job, which means claiming
@@ -268,7 +431,7 @@ else
     || bad "the retry never succeeded (got '${OUT}')"
 fi
 
-say "10. A volume survives the death of the host that had it mounted"
+say "13. A volume survives the death of the host that had it mounted"
 # The two gate lines that a naive test passes without.
 #
 # A volume is durable because every write goes through to object storage
@@ -387,147 +550,6 @@ fi
 # awkward here -- two hosts powered off, one added mid-run -- and a name that
 # only resolves on a pristine fleet is not the property being claimed.
 # ---------------------------------------------------------------------------
-
-say "10. Two machines in one app reach each other by name, across hosts"
-LIVE_IPS=()
-for ip in "${IPS[@]}" ${NEW_IP:-}; do
-  curl -sf -m 5 "http://${ip}:8080/v1/health" >/dev/null 2>&1 && LIVE_IPS+=("$ip")
-done
-echo "  live hosts: ${LIVE_IPS[*]}"
-
-APP="gate-shop-$$"
-A_IP=""; B_IP=""
-if [ "${#LIVE_IPS[@]}" -ge 2 ]; then
-  A_IP="${LIVE_IPS[0]}"; B_IP="${LIVE_IPS[1]}"
-else
-  bad "fewer than two hosts are alive; cross-host discovery cannot be asserted"
-fi
-
-WEB_ID=""; DB_ID=""; WEB_NAME=""; DB_NAME=""
-if [ -n "$A_IP" ]; then
-  # A create lands on the host that serves it, so aiming the two requests at
-  # different hosts is how they end up on different hosts -- no placement API
-  # and nothing to schedule.
-  WEB=$(api "$A_IP" POST /v1/machines "{\"app\":\"${APP}\",\"vcpus\":1,\"mem_mib\":512}")
-  DB=$(api "$B_IP" POST /v1/machines \
-    "{\"app\":\"${APP}\",\"vcpus\":1,\"mem_mib\":512,\"cmd\":\"sleep 86400\",\"secret_env\":{\"DB_PASSWORD\":\"gate-secret-$$\"}}")
-  WEB_ID=$(echo "$WEB" | jf id); WEB_NAME=$(echo "$WEB" | jf name)
-  DB_ID=$(echo "$DB" | jf id);  DB_NAME=$(echo "$DB" | jf name)
-  WEB_HOST=$(echo "$WEB" | jf host_id); DB_HOST=$(echo "$DB" | jf host_id)
-
-  if [ -z "$WEB_ID" ] || [ -z "$DB_ID" ]; then
-    bad "could not create the pair (web='${WEB}' db='${DB}')"
-  elif [ "$WEB_HOST" = "$DB_HOST" ]; then
-    bad "both machines landed on ${WEB_HOST}; this asserts nothing about crossing hosts"
-  else
-    ok "web on ${WEB_HOST}, db on ${DB_HOST}"
-  fi
-fi
-
-# curl_from <ip> <machine> <url> -> "<http_code> <resolved ip>"
-curl_from() {
-  api "$1" POST "/v1/machines/$2/exec" \
-    "{\"cmd\":\"curl -s -o /dev/null -m 8 -w '%{http_code} %{remote_ip}' $3 || true\",\"user\":\"root\"}" \
-    2>/dev/null | jf stdout | tr -d '\n'
-}
-
-if [ -n "$WEB_ID" ] && [ -n "$DB_ID" ]; then
-  # The listener is the peer's own guest agent: /health needs no credential,
-  # so every machine already has one and reaching it proves the whole path --
-  # the name resolved, the address translated at both ends, and the filter
-  # let it through.
-  OUT=$(curl_from "$A_IP" "$WEB_ID" "http://${DB_NAME}.internal:3001/health")
-  CODE=${OUT%% *}; PEER=${OUT##* }
-  [ "$CODE" = "200" ] && ok "web reached ${DB_NAME}.internal at ${PEER}" \
-    || bad "web could not reach ${DB_NAME}.internal (curl said '${OUT}')"
-  case "$PEER" in
-    fdcd:*) ok "the name resolved to a machine address, not a host one" ;;
-    *)      bad "the name resolved to '${PEER}'" ;;
-  esac
-
-  OUT=$(curl_from "$B_IP" "$DB_ID" "http://${WEB_NAME}.internal:3001/health")
-  [ "${OUT%% *}" = "200" ] && ok "and the reverse direction works too" \
-    || bad "db could not reach ${WEB_NAME}.internal (curl said '${OUT}')"
-fi
-
-say "11. A guest may not reach a host, and a sealed secret is on no host in the clear"
-if [ -n "$WEB_ID" ]; then
-  # hostd's internal listener is bearer-authenticated, so a 401 here would
-  # prove only that auth was awake. What is being asserted is that the packet
-  # never arrives: one leaked API key must not become fleet-wide exec.
-  HOST_MESH=$($SSH "root@${B_IP}" "/opt/pilots/bin/hostd mesh-addr" 2>/dev/null | tr -d '\n')
-  if [ -z "$HOST_MESH" ]; then
-    bad "could not read a peer host's mesh address"
-  else
-    OUT=$(curl_from "$A_IP" "$WEB_ID" "http://[${HOST_MESH}]:51003/v1/machines")
-    case "${OUT%% *}" in
-      000) ok "the guest got no reply at all from ${HOST_MESH}:51003" ;;
-      401) bad "the guest was answered 401 by hostd at ${HOST_MESH}:51003; auth caught it and the network did not" ;;
-      *)   bad "the guest got HTTP ${OUT%% *} from a host address" ;;
-    esac
-  fi
-fi
-
-if [ -n "$DB_ID" ]; then
-  # Dumped on a host that does not own the machine, because the point is what
-  # GOSSIP carries. The owner's disk holding the value would be a different
-  # and smaller claim.
-  for ip in "${LIVE_IPS[@]}"; do
-    [ "$ip" = "$B_IP" ] && continue
-    ROWS=$($SSH "root@${ip}" "sqlite3 /var/lib/pilots/corrosion/store.db \
-      \"SELECT COALESCE(env,'')||COALESCE(env_sealed,'') FROM services;\"" 2>/dev/null)
-    if echo "$ROWS" | grep -q "gate-secret-$$"; then
-      bad "${ip} holds the plaintext secret in a replicated row"
-    elif echo "$ROWS" | grep -q "pk1:"; then
-      ok "${ip} has the sealed row and cannot read it"
-    else
-      bad "${ip} has no services row at all; replication did not happen, so this proved nothing"
-    fi
-    break
-  done
-fi
-
-say "12. A name still resolves to the right machine after it is rescued"
-if [ -n "$WEB_ID" ] && [ -n "$DB_ID" ] && [ "${#LIVE_IPS[@]}" -ge 2 ]; then
-  # The db is suspended and woken first: only a machine with a snapshot in
-  # object storage can be rescued at all.
-  api "$B_IP" POST "/v1/machines/${DB_ID}/suspend" >/dev/null 2>&1
-  api "$B_IP" POST "/v1/machines/${DB_ID}/wake" >/dev/null 2>&1
-
-  BEFORE=$(curl_from "$A_IP" "$WEB_ID" "http://${DB_NAME}.internal:3001/health")
-  BEFORE_ADDR=${BEFORE##* }
-
-  DOM=$(sudo virsh list --name | while read -r d; do
-    [ -n "$d" ] && sudo virsh domifaddr "$d" --source lease 2>/dev/null | grep -q "$B_IP" && echo "$d"
-  done | head -1)
-  [ -n "$DOM" ] && sudo virsh destroy "$DOM" >/dev/null 2>&1 \
-    && ok "destroyed ${DOM}, which was running ${DB_NAME}" \
-    || bad "could not destroy the db's host"
-
-  # A rescued machine lands in a new slot on a new host, so its address
-  # CHANGES. That is the whole reason answers carry a near-zero TTL, and the
-  # assertion is that a client asking again gets the new one.
-  START=$SECONDS; AFTER=""
-  while [ $((SECONDS - START)) -lt 300 ]; do
-    AFTER=$(curl_from "$A_IP" "$WEB_ID" "http://${DB_NAME}.internal:3001/health")
-    [ "${AFTER%% *}" = "200" ] && [ "${AFTER##* }" != "$BEFORE_ADDR" ] && break
-    sleep 10
-  done
-  AFTER_ADDR=${AFTER##* }
-  if [ "${AFTER%% *}" = "200" ] && [ -n "$AFTER_ADDR" ]; then
-    ok "${DB_NAME}.internal now answers at ${AFTER_ADDR} (was ${BEFORE_ADDR}) after $((SECONDS - START))s"
-    [ "$AFTER_ADDR" != "$BEFORE_ADDR" ] && ok "the address moved with the machine" \
-      || bad "the address did not change; the machine was not actually rescued"
-  else
-    bad "${DB_NAME}.internal never came back after the rescue (last: '${AFTER}')"
-  fi
-fi
-
-for id in ${WEB_ID:-} ${DB_ID:-}; do
-  for ip in "${LIVE_IPS[@]}"; do
-    api "$ip" DELETE "/v1/machines/${id}" >/dev/null 2>&1 && break
-  done
-done
 
 say "Result"
 echo "  ${PASS} passed, ${FAIL} failed"
