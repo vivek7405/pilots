@@ -63,11 +63,70 @@ export type DeltaP = {
   stemW: number;
   stem: 'none' | 'baseline';
   /**
+   * Cut the backward tail flag loose from the rest of the mark.
+   *
+   * The delta's tail is two prongs either side of the notch. Turned, the one
+   * at tipL sweeps back and up, and it is that prong the reference drawing
+   * separates with a crease running from the notch out to the leading edge.
+   *
+   * There is no angle to set. The crack runs PARALLEL TO THE STEM, and the
+   * direction that makes it so is solved backwards through the transforms:
+   * the stem is drawn inside a nine degree lean so it points along
+   * (-tan 9, 1) on the page, and the delta is drawn inside an eleven degree
+   * lean and then turned, so the crack's direction in the delta's own space
+   * is that vector run back through the turn and then through the skew. Set
+   * to any other angle it is a slash across the mark rather than a fold in it.
+   */
+  flagCrack?: boolean;
+  /**
    * Carry the Delta half drawing: the hairline opened along the mark's own
    * axis. Identical geometry to the candidate card, cut and all.
    */
   halved?: boolean;
 };
+
+/** The delta's notch vertex, before the lean. The crease starts here. */
+const D_NOTCH: [number, number] = [16, 21.4];
+
+/**
+ * The crease that frees the backward flag, as a path in the drawing's space.
+ *
+ * Its direction is derived, never chosen. On the page the crack must be
+ * parallel to the stem, which is drawn inside a nine degree lean and so points
+ * along (-tan 9, 1). Running that back through the variant's turn and then
+ * back through the drawing's own eleven degree lean gives the direction to use
+ * here, so the crack stays parallel to the stem whatever the turn is set to.
+ *
+ * It starts a little the far side of the notch, in the void the notch already
+ * is, and over-runs the leading edge at the other end. A band stopping exactly
+ * on an edge leaves an antialiased whisker holding the two pieces together.
+ */
+function flagCrackPath(v: DeltaP): string {
+  const r = v.rotate * RAD;
+  const m = Math.tan(9 * RAD);
+  const k = Math.tan(11 * RAD);
+  /* The stem's on-page direction, carried back through the turn. */
+  const bx = -m * Math.cos(r) + Math.sin(r);
+  const by = m * Math.sin(r) + Math.cos(r);
+  /* Then back through the drawing's own lean. */
+  const dx = bx + by * k;
+  const dy = by;
+  const len = Math.hypot(dx, dy);
+  const ux = -dx / len;
+  const uy = -dy / len;
+  const half = 0.3;
+  const nx = -uy * half;
+  const ny = ux * half;
+  const ax = D_NOTCH[0] - ux * 2.5;
+  const ay = D_NOTCH[1] - uy * 2.5;
+  const cx = D_NOTCH[0] + ux * 11;
+  const cy = D_NOTCH[1] + uy * 11;
+  const f = (n: number) => n.toFixed(3);
+  return (
+    `M${f(ax + nx)} ${f(ay + ny)} L${f(cx + nx)} ${f(cy + ny)} ` +
+    `L${f(cx - nx)} ${f(cy - ny)} L${f(ax - nx)} ${f(ay - ny)} Z`
+  );
+}
 
 /** The delta, placed. Its ink centre lands on (cx, cy) whatever the rotation. */
 function deltaAt(v: DeltaP) {
@@ -78,6 +137,7 @@ function deltaAt(v: DeltaP) {
       <g transform="translate(5.4 0)">
         <g transform="skewX(-11)">
           <path d=${DELTA_D} fill=${ACCENT_INK} />
+          ${v.flagCrack ? html`<path d=${flagCrackPath(v)} fill="var(--logo-bg)" />` : ''}
           <!-- The Delta half cut, verbatim from the candidate card: a hairline
                on x = 16, the line the delta is symmetric about before it is
                leaned. Inside the skew, so it leans with the drawing and runs
@@ -244,6 +304,21 @@ export const DELTA_PS: DeltaP[] = [
     cy: -12.5,
     stemW: 15,
     stem: 'baseline',
+  },
+  {
+    id: 'raked-p',
+    name: 'Turned to the letters P',
+    idea:
+      "The same lockup with the backward tail flag cut loose, the way the reference drawing separates it. The crease runs from the notch out through the leading edge, and its angle is not chosen: it is the stem's own direction solved back through the turn and the lean, so the two run parallel on the page whatever the mark is turned to.",
+    cost:
+      'The flag it frees is the thinnest part of the drawing, so at small size the piece and the crack close up together and the mark goes back to being one solid plane. It also takes a bite out of the silhouette exactly where the plane already narrows.',
+    rotate: 64,
+    size: 5.2,
+    cx: 50,
+    cy: -12.5,
+    stemW: 15,
+    stem: 'baseline',
+    flagCrack: true,
   },
   {
     id: 'raked-half',
