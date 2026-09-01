@@ -13,6 +13,13 @@
 // a 300-second answer for a machine that has been rescued is talking to
 // nothing, and it will keep doing so long after the platform has finished
 // recovering.
+//
+// What a short TTL does NOT do is save a connection that is already open. A
+// pool holding a socket to a rescued machine's old address simply breaks --
+// which is what every failover does, but it means anything talking over
+// .internal needs reconnect logic of its own. "No human action" is a claim
+// about the platform; it has never been a claim about an application's
+// connections, and this is the place that distinction becomes visible.
 package dns
 
 import (
