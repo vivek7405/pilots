@@ -91,6 +91,11 @@ func (m *Manager) createFromTemplate(ctx context.Context, row *state.Machine,
 	// falls back to the placeholder, and everything keeps working -- on a
 	// credential every machine created from this template also has.
 	if err := m.installToken(ctx, slot, token); err != nil {
+		// The restore above already bound the responder inside this
+		// namespace, and Kill takes the namespace with it. Unbound here, the
+		// socket keeps the dead namespace alive and its goroutines run for
+		// the life of the process.
+		m.releaseDiscovery(row.ID)
 		_ = fcm.Kill()
 		m.pool.Return(slot.Idx)
 		return nil, fmt.Errorf("install agent token: %w", err)
@@ -100,6 +105,7 @@ func (m *Manager) createFromTemplate(ctx context.Context, row *state.Machine,
 	// resumes a snapshot in which the application is already running, and has
 	// no business delivering an environment to it.
 	if err := m.deliverEnv(ctx, row, slot, appCmd); err != nil {
+		m.releaseDiscovery(row.ID)
 		_ = fcm.Kill()
 		m.pool.Return(slot.Idx)
 		return nil, fmt.Errorf("deliver env: %w", err)

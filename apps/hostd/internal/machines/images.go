@@ -154,13 +154,22 @@ func (m *Manager) bootMachine(ctx context.Context, row *state.Machine,
 		return nil, fmt.Errorf("machines: boot %s: %w", row.ID, err)
 	}
 
+	// A booted machine needs the responder exactly as much as a restored one.
+	// The restore path binds inside m.restore, which this path never touches
+	// -- and the golden rootfs names the gateway as its ONLY nameserver, so a
+	// machine that boots it with nothing listening there resolves nothing at
+	// all, .internal and the public internet alike.
+	m.bindDiscovery(row.ID, slot)
+
 	if err := m.installToken(ctx, slot, token); err != nil {
+		m.releaseDiscovery(row.ID)
 		_ = fcm.Kill()
 		m.pool.Return(slot.Idx)
 		return nil, fmt.Errorf("install agent token: %w", err)
 	}
 	if vol != nil {
 		if err := m.mountVolumeInGuest(ctx, slot, row.ID, token, vol.MountPath); err != nil {
+			m.releaseDiscovery(row.ID)
 			_ = fcm.Kill()
 			m.pool.Return(slot.Idx)
 			return nil, err
@@ -176,6 +185,7 @@ func (m *Manager) bootMachine(ctx context.Context, row *state.Machine,
 	// Dockerfile carries no command in the row at all, so appCmd is usually
 	// empty here and the start spec baked into the image supplies it.
 	if err := m.deliverEnv(ctx, row, slot, appCmd); err != nil {
+		m.releaseDiscovery(row.ID)
 		_ = fcm.Kill()
 		m.pool.Return(slot.Idx)
 		return nil, fmt.Errorf("deliver env: %w", err)

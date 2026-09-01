@@ -174,6 +174,12 @@ func (m *Manager) RestoreCheckpoint(ctx context.Context, checkpointID string) (*
 		if fcm.Slot != nil {
 			slotIdx = fcm.Slot.Idx
 		}
+		// Before the namespace goes away, and before the restore below binds
+		// again. Bind is idempotent by machine id, so a responder left
+		// registered here is kept and the NEW namespace gets nothing --
+		// leaving the guest with no resolver at all, since its only
+		// nameserver is the gateway this serves on.
+		m.releaseDiscovery(row.ID)
 		if err := fcm.Kill(); err != nil {
 			return nil, err
 		}
