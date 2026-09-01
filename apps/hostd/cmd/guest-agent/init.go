@@ -96,16 +96,29 @@ func handleInit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Everything below is create-only, because the host only ever asks for it
-	// on a create. The clock correction above runs on every resume.
-	if err := writeEnv(req.Env); err != nil {
+	resp, err := applyInit(req)
+	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// applyInit is everything a CREATE asks for, and everything a wake does not.
+//
+// Split out from the clock correction above because the clock correction is
+// the only part a wake wants: hostd pokes /init after every resume to unfreeze
+// CLOCK_REALTIME, and that poke carries a timestamp and nothing else. A wake
+// therefore arrives here with a nil environment, no command and StartApp
+// false, and every branch below is skipped -- which is the asymmetry the whole
+// design turns on, and is what this shape makes testable without a microVM.
+func applyInit(req initRequest) (initResponse, error) {
+	if err := writeEnv(req.Env); err != nil {
+		return initResponse{}, err
+	}
 	if req.AppCmd != "" {
 		if err := writeAppCmd(req.AppCmd); err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-			return
+			return initResponse{}, err
 		}
 	}
 
@@ -113,7 +126,7 @@ func handleInit(w http.ResponseWriter, r *http.Request) {
 	if req.StartApp {
 		resp.AppStarted, resp.AppReason = startApp()
 	}
-	writeJSON(w, http.StatusOK, resp)
+	return resp, nil
 }
 
 // writeEnv renders the application's environment where the app unit reads it.
@@ -195,26 +208,31 @@ func writeAppCmd(cmd string) error {
 // app -- looks like success from the outside: the machine is up and serving,
 // and the process the guest spent its snapshot restoring is gone. So it is
 // reported rather than silently tolerated, and the host logs it.
-func startApp() (bool, string) {
-	if _, err := os.Stat(appPath); err != nil {
-		return false, "this image carries no application command"
+// Variables rather than functions so a test can observe whether a start was
+// even attempted. "Was startApp called at all" is the question the wake path
+// turns on, and it cannot be answered by looking at the result.
+var (
+	startApp = func() (bool, string) {
+		if _, err := os.Stat(appPath); err != nil {
+			return false, "this image carries no application command"
+		}
+		if run("systemctl", "is-active", "--quiet", appUnit) == nil {
+			return false, "the application is already running; not restarting it"
+		}
+		if err := run("systemctl", "start", appUnit); err != nil {
+			return false, "systemctl start " + appUnit + ": " + err.Error()
+		}
+		return true, ""
 	}
-	if run("systemctl", "is-active", "--quiet", appUnit) == nil {
-		return false, "the application is already running; not restarting it"
-	}
-	if err := run("systemctl", "start", appUnit); err != nil {
-		return false, "systemctl start " + appUnit + ": " + err.Error()
-	}
-	return true, ""
-}
 
-func run(name string, args ...string) error {
-	out, err := exec.Command(name, args...).CombinedOutput()
-	if err != nil && len(out) > 0 {
-		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+	run = func(name string, args ...string) error {
+		out, err := exec.Command(name, args...).CombinedOutput()
+		if err != nil && len(out) > 0 {
+			return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+		}
+		return err
 	}
-	return err
-}
+)
 
 // proxyToLocalPort forwards a request to 127.0.0.1:<port> inside the guest.
 //

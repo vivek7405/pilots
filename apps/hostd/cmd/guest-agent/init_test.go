@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -134,5 +135,131 @@ func TestStartingWithNoApplicationCommandSaysSo(t *testing.T) {
 	}
 	if !strings.Contains(reason, "no application command") {
 		t.Errorf("reason is %q", reason)
+	}
+}
+
+// stubStart replaces the real start with a recorder.
+func stubStart(t *testing.T, started bool, reason string) *int {
+	t.Helper()
+	calls := 0
+	old := startApp
+	startApp = func() (bool, string) { calls++; return started, reason }
+	t.Cleanup(func() { startApp = old })
+	return &calls
+}
+
+// The asymmetry, from the guest's end.
+//
+// hostd pokes /init after EVERY resume to unfreeze the wall clock, and that
+// poke carries a timestamp and nothing else. So a wake has to arrive here and
+// change nothing: not the environment file, not the command, and above all not
+// the running process. Re-execing there restarts the very process the guest
+// just spent its restore bringing back, and the machine looks perfectly
+// healthy afterwards.
+func TestAWakeShapedInitChangesNothing(t *testing.T) {
+	redirect(t)
+	calls := stubStart(t, true, "")
+
+	// A create first: environment delivered, command recorded, application
+	// started.
+	resp, err := applyInit(initRequest{
+		TimestampNanos: 1,
+		Env:            map[string]string{"GREETING": "hello"},
+		AppCmd:         "/usr/bin/server",
+		StartApp:       true,
+	})
+	if err != nil {
+		t.Fatalf("create-shaped init: %v", err)
+	}
+	if !resp.AppStarted || *calls != 1 {
+		t.Fatalf("a create did not start the application (started=%v calls=%d)",
+			resp.AppStarted, *calls)
+	}
+	envBefore, _ := os.ReadFile(envPath)
+	appBefore, _ := os.ReadFile(appPath)
+
+	// Now the wake: a timestamp and nothing else, which is exactly what
+	// pokeGuestClock sends.
+	resp, err = applyInit(initRequest{TimestampNanos: 2})
+	if err != nil {
+		t.Fatalf("wake-shaped init: %v", err)
+	}
+
+	if *calls != 1 {
+		t.Errorf("a wake tried to start the application; env delivery belongs " +
+			"on create and on nothing else")
+	}
+	if resp.AppStarted {
+		t.Error("a wake reported starting the application")
+	}
+	envAfter, _ := os.ReadFile(envPath)
+	if string(envAfter) != string(envBefore) {
+		t.Errorf("a wake rewrote the environment:\nbefore %q\nafter  %q", envBefore, envAfter)
+	}
+	appAfter, _ := os.ReadFile(appPath)
+	if string(appAfter) != string(appBefore) {
+		t.Errorf("a wake rewrote the application command:\nbefore %q\nafter %q",
+			appBefore, appAfter)
+	}
+}
+
+// The guard that makes the mistake visible rather than silent. If a start is
+// ever asked for while the application is running, the host is told so and
+// logs it -- on a create that can only mean the golden template stopped
+// stopping short of starting applications.
+func TestStartingAnAlreadyRunningApplicationIsRefusedAndReported(t *testing.T) {
+	redirect(t)
+	if err := writeAppCmd("/usr/bin/server"); err != nil {
+		t.Fatal(err)
+	}
+
+	var asked []string
+	old := run
+	run = func(name string, args ...string) error {
+		asked = append(asked, name+" "+strings.Join(args, " "))
+		if len(args) > 0 && args[0] == "is-active" {
+			return nil // already running
+		}
+		return nil
+	}
+	t.Cleanup(func() { run = old })
+
+	started, reason := startApp()
+	if started {
+		t.Error("a running application was restarted")
+	}
+	if !strings.Contains(reason, "already running") {
+		t.Errorf("reason is %q, which does not say what happened", reason)
+	}
+	for _, cmd := range asked {
+		if strings.Contains(cmd, "start ") {
+			t.Errorf("systemctl start was issued anyway: %q", cmd)
+		}
+	}
+}
+
+// A start that genuinely fails must say so rather than reporting success: the
+// machine is up and serving either way, so nothing else would notice.
+func TestAFailedStartIsReported(t *testing.T) {
+	redirect(t)
+	if err := writeAppCmd("/usr/bin/server"); err != nil {
+		t.Fatal(err)
+	}
+
+	old := run
+	run = func(name string, args ...string) error {
+		if len(args) > 0 && args[0] == "is-active" {
+			return errors.New("inactive")
+		}
+		return errors.New("Unit pilot-app.service not found")
+	}
+	t.Cleanup(func() { run = old })
+
+	started, reason := startApp()
+	if started {
+		t.Error("a failed start reported success")
+	}
+	if !strings.Contains(reason, "not found") {
+		t.Errorf("reason is %q and does not carry systemd's own words", reason)
 	}
 }
