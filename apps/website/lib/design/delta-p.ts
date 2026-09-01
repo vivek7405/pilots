@@ -63,16 +63,6 @@ export type DeltaP = {
   stemW: number;
   stem: 'none' | 'baseline';
   /**
-   * Where the stem hangs, overriding the mark's partition.
-   *
-   * Only the variant that runs its stem up to meet the cut needs this: the
-   * derived position sits too far right for the stem's top to reach the cut's
-   * tail end, so that one states where it goes.
-   */
-  stemX?: number;
-  /** Where the stem's top edge sits, when it is meant to reach the cut. */
-  stemTop?: number;
-  /**
    * Carry the Delta half drawing: the hairline opened along the mark's own
    * axis. Identical geometry to the candidate card, cut and all.
    */
@@ -141,8 +131,8 @@ function undersideY(v: DeltaP, x: number): number {
 
 /** The mark: the delta, and the thin stem dropped from its partition. */
 export function deltaPLetter(v: DeltaP) {
-  const px = v.stemX ?? partitionX(v);
-  const top = v.stemTop ?? undersideY(v, px) - 2;
+  const px = partitionX(v);
+  const top = undersideY(v, px) - 2;
   const bottom = BASELINE;
   return html`
     ${v.stem === 'none'
@@ -169,7 +159,7 @@ function markBox(v: DeltaP) {
   const ys = pts.map((p) => p.y);
   const stemLean = BASELINE * 0.15838;
   if (v.stem !== 'none') {
-    const px = v.stemX ?? partitionX(v);
+    const px = partitionX(v);
     xs.push(px - v.stemW / 2 - stemLean, px + v.stemW / 2);
     ys.push(BASELINE);
   }
@@ -269,23 +259,6 @@ export const DELTA_PS: DeltaP[] = [
     stemW: 15,
     stem: 'baseline',
     halved: true,
-  },
-  {
-    id: 'raked-half-stem',
-    name: 'Turned to the letters half stem',
-    idea:
-      "The halved lockup with its stem moved left and run up to meet the cut, so the partition carries on past the plane instead of stopping at it. The stem's top lands on the cut's tail end, which puts the whole hairline on one line from the tip of the plane to the foot of the letter.",
-    cost:
-      'A stem this long is mostly bare. Above the letters it has nothing beside it, so the lockup reads as a tall thin stroke with a plane balanced on top rather than as a letter with a bowl.',
-    rotate: 64,
-    size: 5.2,
-    cx: 50,
-    cy: -12.5,
-    stemW: 15,
-    stem: 'baseline',
-    halved: true,
-    stemX: 26,
-    stemTop: 2,
   },
   {
     id: 'raked-bare',
