@@ -118,6 +118,15 @@ func New(ctx context.Context, opts Options) *Builder {
 		opts.BuildctlBin = "/opt/pilots/bin/buildctl"
 	}
 	if opts.BuildkitSock == "" {
+		// Only correct when the daemon runs as THIS user, which on a real host
+		// it deliberately does not: buildkitd runs rootless as `pilot` so that
+		// an arbitrary user Dockerfile is not built by root beside other
+		// tenants' machines. hostd is root, so deriving the path from its own
+		// uid points at /run/user/0 and the dial fails with a bare "no such
+		// file or directory" that names nothing about users.
+		//
+		// So this default exists for a single-user dev box and nothing else;
+		// host-bootstrap.sh writes PILOT_BUILDKIT_SOCK on every real host.
 		opts.BuildkitSock = fmt.Sprintf("unix:///run/user/%d/buildkit/buildkitd.sock", os.Getuid())
 	}
 	if opts.AgentBinary == "" {

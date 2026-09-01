@@ -175,6 +175,7 @@ func run() error {
 			BuildDir:      filepath.Join(cfg.CacheRoot(), "builds"),
 			Chunks:        chunks,
 			AgentBinary:   cfg.GuestAgentBin,
+			BuildkitSock:  cfg.BuildkitSock,
 			CacheBucket:   cfg.S3Bucket,
 			CacheEndpoint: cfg.S3Endpoint,
 			CacheRegion:   cfg.S3Region,

@@ -416,6 +416,16 @@ PILOT_S3_BUCKET=${BUCKET}
 PILOT_S3_ACCESS_KEY=${S3_KEY}
 PILOT_S3_SECRET_KEY=${S3_SECRET}
 PILOT_TEMPLATE_ROOTFS=/var/lib/pilots/templates/golden.ext4
+# buildkitd runs rootless as the pilot user, so its socket lives under THAT
+# user's runtime directory. hostd is root and would derive /run/user/0, where
+# there is no socket and the dial fails naming nothing about users.
+#
+# The uid is resolved by the remote shell at write time, not here: PILOT_UID
+# is set inside an earlier heredoc whose shell has already exited, so a local
+# expansion would silently produce /run/user//buildkit and fail identically.
+# No backticks anywhere in this block -- the enclosing heredoc is unquoted, so
+# they would run as a command substitution on the way out.
+PILOT_BUILDKIT_SOCK=unix:///run/user/\$(id -u pilot)/buildkit/buildkitd.sock
 PILOT_GUEST_AGENT=/opt/pilots/bin/guest-agent
 PILOT_KERNEL=/opt/pilots/kernels/vmlinux-${KERNEL_VERSION}/vmlinux.bin
 PILOT_FIRECRACKER=/opt/pilots/bin/firecracker
