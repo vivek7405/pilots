@@ -127,6 +127,31 @@ export const CANDIDATES: Candidate[] = [
     `,
   },
   {
+    id: 'delta-90',
+    name: 'Delta 90',
+    idea:
+      'The same drawing given a quarter turn, nose on a heading rather than climbing. Nothing else changes: the same path, the same lean, the same partition, which now stands up as a vertical cut instead of lying across the mark.',
+    cost:
+      'Turned this way it reads as a cursor or a play control before it reads as an aircraft, which are two of the most heavily spoken-for shapes in software. Pointing up, the climb was what kept it out of their company.',
+    art: () => html`
+      <!-- The quarter turn is applied to the whole mark, partition included,
+           and about the tile's centre rather than the ink's. The two are within
+           a third of a unit of each other here, so turning about the tile costs
+           nothing and keeps this readable beside the upright version above.
+
+           The slice is emitted after the path, inside the same rotation, so it
+           still cuts what it cut before. -->
+      <g transform="rotate(90 16 16)">
+        <g transform="translate(5.4 0)">
+          <g transform="skewX(-11)">
+            <path d="M16 3.8 L26.8 27.6 L16 21.4 L5.2 27.6 Z" fill=${ACCENT_INK} />
+          </g>
+        </g>
+        <rect x="3" y="17.6" width="26" height="2" fill="var(--logo-bg)" />
+      </g>
+    `,
+  },
+  {
     id: 'two-faces',
     name: 'Two faces',
     idea:
@@ -157,7 +182,7 @@ export const CANDIDATES: Candidate[] = [
     idea:
       'Four identical peers with nothing in the middle of them. Every host runs the same stack and none of them is the one that matters, which is the hardest thing about pilots to say in words.',
     cost:
-      'The weakest of the six, and the reason is worth stating. Every literal drawing of this idea lands on a glyph that already means something else, so it is fighting for a reading before it starts.',
+      'The weakest of the set, and the reason is worth stating. Every literal drawing of this idea lands on a glyph that already means something else, so it is fighting for a reading before it starts.',
     art: () => html`
       <!-- Third attempt at this one, and the failures are the useful part.
            Four nodes joined by hairlines fused into a d-pad. A dashed ring
@@ -176,7 +201,7 @@ export const CANDIDATES: Candidate[] = [
     idea:
       'A runway in perspective with its centreline punched out. The negative space is the marking, so the cut does real work here rather than being applied on top.',
     cost:
-      'It says aviation louder than it says compute, and the perspective wants room, so it is the weakest of the six in a cramped placement.',
+      'It says aviation louder than it says compute, and the perspective wants room, so it is the first of these to fail in a cramped placement.',
     art: () => html`
       <path d="M11.4 28.4 L20.6 28.4 L18.4 5 L13.6 5 Z" fill="currentColor" />
       <rect x="15" y="24.6" width="2" height="2.8" fill=${ACCENT_VOID} />
