@@ -26,7 +26,11 @@ type Config struct {
 	FirecrackerBin string // PILOT_FIRECRACKER
 	JailerBin      string // PILOT_JAILER
 	TemplateRootfs string // PILOT_TEMPLATE_ROOTFS
-	BuildCacheDir  string // PILOT_BUILD_CACHE
+	// GuestAgentBin is the agent injected into every image a build produces.
+	// Without it a built machine boots and is unreachable: exec, the clock
+	// poke and the port proxy all go through the agent.
+	GuestAgentBin string // PILOT_GUEST_AGENT
+	BuildCacheDir string // PILOT_BUILD_CACHE
 	// ChrootBase must be on a filesystem that allows device nodes. The jailer
 	// creates /dev/{net/tun,kvm,userfaultfd} inside each machine's chroot, and
 	// on a nodev mount (any default /tmp) they can be created but never
@@ -129,6 +133,7 @@ func Load() (*Config, error) {
 		FirecrackerBin: env("PILOT_FIRECRACKER", "/opt/pilots/bin/firecracker"),
 		JailerBin:      env("PILOT_JAILER", "/opt/pilots/bin/jailer"),
 		TemplateRootfs: env("PILOT_TEMPLATE_ROOTFS", "/var/lib/pilots/templates/golden.ext4"),
+		GuestAgentBin:  env("PILOT_GUEST_AGENT", "/opt/pilots/bin/guest-agent"),
 		BuildCacheDir:  env("PILOT_BUILD_CACHE", "/var/cache/pilot-build"),
 		ChrootBase:     env("PILOT_CHROOT_BASE", "/var/lib/pilots/jailer"),
 		CPUTemplate:    os.Getenv("PILOT_CPU_TEMPLATE"),

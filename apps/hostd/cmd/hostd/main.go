@@ -22,6 +22,7 @@ import (
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/block"
+	"github.com/vivek7405/pilots/hostd/internal/build"
 	"github.com/vivek7405/pilots/hostd/internal/config"
 	"github.com/vivek7405/pilots/hostd/internal/fc"
 	"github.com/vivek7405/pilots/hostd/internal/machines"
@@ -164,6 +165,24 @@ func run() error {
 		},
 	})
 
+	// The builder probes the local toolchain once at startup -- mke2fs here
+	// may or may not read a tarball -- so it is constructed before anything
+	// can post a build rather than on the first request.
+	var builder api.BuildRunner
+	if cfg.S3Bucket != "" {
+		builder = build.New(ctx, build.Options{
+			WorkRoot:      filepath.Join(cfg.CacheRoot(), "builds-work"),
+			BuildDir:      filepath.Join(cfg.CacheRoot(), "builds"),
+			Chunks:        chunks,
+			AgentBinary:   cfg.GuestAgentBin,
+			CacheBucket:   cfg.S3Bucket,
+			CacheEndpoint: cfg.S3Endpoint,
+			CacheRegion:   cfg.S3Region,
+		})
+	} else {
+		slog.Warn("no object storage configured; builds are unavailable on this host")
+	}
+
 	// Re-adopt machines that outlived the previous hostd. This is what makes a
 	// restart safe: the processes are still serving, and picking them back up
 	// costs nothing.
@@ -231,6 +250,7 @@ func run() error {
 	// on one port means a host needs exactly one address to be useful.
 	controlAPI := api.Routes(api.Deps{
 		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink,
+		Builds: builder,
 	})
 
 	// Machine-scoped API calls go to the host that owns the machine. Without

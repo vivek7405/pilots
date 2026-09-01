@@ -15,6 +15,9 @@ type Deps struct {
 	Machines Manager
 	// Reflink is the startup probe's result; see HealthResponse.Reflink.
 	Reflink bool
+	// Builds turns a Dockerfile context into a rootfs build. Nil on a host
+	// with no object storage, where a build has nowhere to publish to.
+	Builds BuildRunner
 }
 
 // Routes registers the full public API. Phase 1 lands the shapes; the handlers
@@ -58,7 +61,8 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("GET /v1/checkpoints/{id}", d.handleCheckpointStatus)
 
 	// Builds: any Dockerfile to a bootable rootfs, with streamed NDJSON logs.
-	mux.HandleFunc("POST /v1/builds", notImplemented)
+	mux.HandleFunc("POST /v1/builds", d.handleBuild)
+	mux.HandleFunc("GET /v1/builds/{id}/logs", d.handleBuildLogs)
 
 	// Services and rollout.
 	mux.HandleFunc("POST /v1/services", notImplemented)
