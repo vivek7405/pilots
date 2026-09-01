@@ -155,7 +155,7 @@ export const CANDIDATES: Candidate[] = [
     id: 'delta-half',
     name: 'Delta half',
     idea:
-      'Delta 90 opened along its own axis, so the flyer is two mirror halves rather than one body. The tail notch already began that split and the cut only carries it through to the tip.',
+      'The mark opened along its own axis, so the flyer is two mirror halves rather than one body. The tail notch already began that split and the cut only carries it through to the tip. The turn is set so the gap lies flat rather than following the tile.',
     cost:
       'Nothing joins the halves, so the mark depends entirely on the reader closing the gap themselves. It is also the one drawing here with no solid mass at all, which is what a favicon has the least of to work with.',
     art: () => html`
@@ -167,8 +167,24 @@ export const CANDIDATES: Candidate[] = [
            mark's own axis rather than the tile's, which is what makes it run
            tip to tail instead of merely crossing the shape.
 
-           The quarter turn then lays that axis over, so the cut reads
-           horizontal in the rendered mark.
+           The turn is seventy-nine degrees, not ninety, and that number is
+           forced rather than chosen. The skew has already tilted the band
+           eleven degrees off vertical, so laying it over with a full quarter
+           turn would leave it eleven degrees off horizontal. Turning by
+           ninety minus eleven lands it flat: the band's direction after the
+           skew is (-tan 11, 1), and rotating that by seventy-nine gives a
+           vertical component of -tan 11 times sin 79 plus cos 79, which is
+           zero to six decimal places.
+
+           Turning by less than a quarter also throws the mark off centre in
+           the tile, so the translate puts the ink back. Its two numbers were
+           measured off the render rather than derived, because the cut runs
+           through the apex as well as the body: the tip is split, both halves
+           end short of where the original point was, and the bounding box is
+           not the one the four path vertices predict.
+
+           Delta and Delta 90 need no such correction, a quarter turn happening
+           to leave them centred.
 
            The band runs into the tail notch, which is already a void on the
            same line. The two join, and the halves come apart cleanly rather
@@ -177,7 +193,7 @@ export const CANDIDATES: Candidate[] = [
            There is no second partition here. Keeping the one from Delta 90 as
            well would cross this at right angles and leave four pieces, and the
            brief was two halves. -->
-      <g transform="rotate(90 16 16)">
+      <g transform="translate(1.35 -2.22) rotate(79 16 16)">
         <g transform="translate(5.4 0)">
           <g transform="skewX(-11)">
             <path d="M16 3.8 L26.8 27.6 L16 21.4 L5.2 27.6 Z" fill=${ACCENT_INK} />
