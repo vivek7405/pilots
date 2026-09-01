@@ -24,6 +24,30 @@ const defaultGuestUser = "user"
 
 const defaultExecTimeout = 30 * time.Second
 
+// guestShell is the shell to run a command with.
+//
+// bash is what the golden rootfs has and what the exec contract is written
+// against. An image built from someone's Dockerfile very often does not have
+// it: alpine ships busybox ash as /bin/sh and no bash at all, and the slim and
+// distroless images are the same. Running /bin/bash there fails with exit
+// status 127 and an EMPTY stderr, because the shell that would have reported
+// the problem is the thing that is missing -- so the caller sees a command
+// that did nothing and said nothing.
+//
+// Resolved per call rather than cached: it costs one stat, and an image can
+// gain a shell between calls (a deploy that installs one) without the agent
+// having to be restarted to notice.
+func guestShell() string {
+	for _, sh := range []string{"/bin/bash", "/bin/sh"} {
+		if _, err := os.Stat(sh); err == nil {
+			return sh
+		}
+	}
+	// Nothing found: return bash so the failure names the thing that is
+	// missing rather than silently succeeding at nothing.
+	return "/bin/bash"
+}
+
 type execRequest struct {
 	Cmd       string            `json:"cmd"`
 	Cwd       string            `json:"cwd,omitempty"`
@@ -56,7 +80,7 @@ func handleExec(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "/bin/bash", "-c", req.Cmd)
+	cmd := exec.CommandContext(ctx, guestShell(), "-c", req.Cmd)
 	if err := prepareCommand(cmd, req.User, req.Cwd, req.Env); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return

@@ -36,7 +36,7 @@ func handleTerminal(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "/bin/bash", "-l")
+	cmd := exec.CommandContext(ctx, guestShell(), "-l")
 	tw := &termWriter{conn: conn, ctx: ctx}
 
 	if err := prepareCommand(cmd, r.URL.Query().Get("user"), r.URL.Query().Get("dir"), nil); err != nil {

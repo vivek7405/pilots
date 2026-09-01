@@ -310,3 +310,24 @@ func TestTheDefaultUserFallsBackToTheImagesOwn(t *testing.T) {
 		t.Error("a credential was applied for an account that does not exist")
 	}
 }
+
+// An image with no bash must still run commands.
+//
+// alpine, slim and distroless images ship busybox ash as /bin/sh and no bash
+// at all. Running /bin/bash there exits 127 with an EMPTY stderr, because the
+// shell that would have reported the problem is the thing that is missing --
+// so a caller sees a command that did nothing and explained nothing.
+func TestGuestShellFallsBackWhenBashIsAbsent(t *testing.T) {
+	sh := guestShell()
+	if _, err := os.Stat(sh); err != nil {
+		t.Fatalf("guestShell returned %q, which does not exist: %v", sh, err)
+	}
+	// Whatever it picked must actually be able to run a command.
+	out, err := exec.Command(sh, "-c", "echo ok").Output()
+	if err != nil {
+		t.Fatalf("%s could not run a command: %v", sh, err)
+	}
+	if strings.TrimSpace(string(out)) != "ok" {
+		t.Errorf("%s produced %q", sh, out)
+	}
+}

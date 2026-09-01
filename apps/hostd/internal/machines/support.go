@@ -141,9 +141,30 @@ func (m *Manager) installToken(ctx context.Context, slot *netns.Slot, token stri
 		return fmt.Errorf("machines: install token: status %d", resp.StatusCode)
 	}
 
-	// The agent reads its token once at startup, so it has to restart to pick
-	// up the new one. Done with the OLD token, which is still valid until the
-	// agent comes back.
+	// The EXIT CODE, not just the status. A 200 means the agent ran something;
+	// it says nothing about whether that something worked. This function once
+	// returned success against exit 127 -- the guest had no /bin/bash, so the
+	// write never happened -- and the machine came up reporting healthy with
+	// the template's placeholder still in its token file. hostd then held a
+	// credential the guest had never heard of, and every later call failed
+	// with 401: three steps removed from the shell that was missing.
+	var out api.ExecResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return fmt.Errorf("machines: install token: unreadable response: %w", err)
+	}
+	if out.ExitCode != 0 {
+		return fmt.Errorf("machines: install token: the guest exited %d: %s",
+			out.ExitCode, strings.TrimSpace(out.Stderr))
+	}
+
+	// The agent reads its token once at startup, so where there IS an init to
+	// restart it, restarting is the cleanest way to pick the new one up. Done
+	// with the OLD token, which is still valid until the agent comes back.
+	//
+	// Best effort on purpose: an image built from an ordinary Dockerfile has
+	// no systemd and nothing to restart, and the agent re-reads its token on
+	// an auth miss for exactly that reason. Failing here would refuse to
+	// create a machine whose token is already correctly installed.
 	restart, _ := json.Marshal(api.ExecRequest{
 		Cmd: "systemctl restart guest-agent", User: "root",
 	})
