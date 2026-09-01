@@ -13,3 +13,4 @@ vmlinux*
 
 # Local cluster state, written by scripts/cluster/cluster-up.sh
 scripts/cluster/cluster.env
+apps/hostd/hostd
