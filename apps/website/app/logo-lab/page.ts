@@ -145,46 +145,43 @@ function headerMock(c: Candidate) {
 }
 
 /**
- * One delta-P, shown as the two things it has to be at once: a monogram on its
- * own, and the first letter of the word. Both are the same paths, so a variant
- * that only works in one of the two has failed.
+ * One construction, shown as the mark alone and as the whole name.
+ *
+ * Both come off the same drawing, so a variant that only works in one of the
+ * two has failed. The mark is not forced into a square: a quarter-turned delta
+ * is wider than it is tall, and the sibling brand's own monogram file is a
+ * wide crop for the same reason.
  */
 function deltaPCard(v: DeltaP) {
   return html`
     <article class="${PANEL} overflow-hidden">
-      <div class="flex border-b border-rule">
-        <div class="lab-dark flex-1 aspect-square grid place-items-center">
-          ${deltaPMark(v, 82, { sliced: true })}
-        </div>
-        <div class="lab-light flex-1 aspect-square grid place-items-center">
-          ${deltaPMark(v, 82, { sliced: false })}
-        </div>
+      <div class="lab-dark px-8 py-9 flex items-center justify-center">
+        ${deltaPLockup(v, { height: 58 })}
       </div>
-      <div class="flex items-baseline justify-between gap-3 px-5 pt-4">
+      <div class="flex items-baseline justify-between gap-3 px-5 pt-4 border-t border-rule">
         <h3 class="text-h3 font-bold m-0">${v.name}</h3>
         <code class="font-mono text-xs text-ink-subtle">${v.id}</code>
       </div>
       <div class="lab-paper px-5 divide-y divide-rule">
-        <div class="py-4 flex items-end gap-4">
-          ${SMALL_SIZES.map(
-            (px) => html`
-              <span class="flex flex-col items-center gap-1.5">
-                ${deltaPMark(v, px, { sliced: false })}
-                <span class="font-mono text-[10px] text-ink-subtle leading-none">${px}px</span>
-              </span>
-            `,
-          )}
+        <div class="py-5 flex flex-wrap items-center gap-x-8 gap-y-4">
+          ${deltaPMark(v, 60)}
+          <span class="flex items-end gap-4">
+            ${SMALL_SIZES.map(
+              (px) => html`
+                <span class="flex flex-col items-center gap-1.5">
+                  ${deltaPMark(v, px)}
+                  <span class="font-mono text-[10px] text-ink-subtle leading-none">${px}px</span>
+                </span>
+              `,
+            )}
+          </span>
         </div>
         <div class="py-5 flex flex-wrap items-center gap-x-6 gap-y-3">
-          ${deltaPLockup(v, { height: 40, face: 'sans', sliced: true })}
-          <span class=${FIELD_LABEL}>sliced</span>
+          ${deltaPLockup(v, { height: 38 })}
+          <span class=${FIELD_LABEL}>sans</span>
         </div>
         <div class="py-5 flex flex-wrap items-center gap-x-6 gap-y-3">
-          ${deltaPLockup(v, { height: 40, face: 'sans', sliced: false })}
-          <span class=${FIELD_LABEL}>whole</span>
-        </div>
-        <div class="py-5 flex flex-wrap items-center gap-x-6 gap-y-3">
-          ${deltaPLockup(v, { height: 20, face: 'sans', sliced: true })}
+          ${deltaPLockup(v, { height: 20 })}
           <span class=${FIELD_LABEL}>at header size</span>
         </div>
       </div>
@@ -283,29 +280,32 @@ export default function LogoLabPage() {
 
     ${section({
       id: 'delta-p',
-      heading: 'The flap over the i',
+      heading: 'The delta over the word',
       layout: 'split',
       lede: html`
-        The flap sheared upward so it hangs over the i rather than stopping
-        short of it. A plain ninety degree rotation cannot do this: it puts the
-        apex at the bowl's mid-height, so the flap falls away towards the next
-        letter instead of clearing it. Four versions, differing in how hard the
-        apex is raked and how far it reaches.
+        The delta exactly as drawn, turned and set above the word so it sits
+        over the i and the l rather than across them, with a thin stem dropped
+        from the cut the mark already carries. Nothing here reshapes it.
       `,
       body: html`
         <p class="${PROSE} mb-9">
-          Each card shows one drawing twice. The monogram is not a second file,
-          it is these exact paths with the word cropped off, which is how the
-          sibling brand builds its own and the reason its mark and its lockup
-          cannot drift apart.
+          A quarter turn on its own cannot clear both letters. The wing's
+          underside runs at about fifteen degrees there, while the step from the
+          i's shoulder up to the l's ascender is nearer forty. Lift it clear of
+          the l and it floats far above the i. Turning the mark back to
+          sixty-four degrees puts that underside on the slope the word actually
+          makes, so the wing follows the letters instead of ignoring them.
+          Which edge is even the underside changes with the turn, so the drawing
+          is measured rather than reasoned about: the lean means the mark's own
+          axis is already some twenty degrees off vertical, and working from the
+          upright shape gets the angle wrong by that much.
         </p>
         <p class="${PROSE} mb-9">
-          The word starts where the flap's trailing edge crosses the shoulder
-          line of the letters, plus a hair. That position is calculated from the
-          drawing rather than chosen, so the gap cannot open up again when the
-          bowl changes size. The i is dotless because the flap is standing in
-          for its tittle, which is the trade that lets the two shapes share a
-          space instead of queueing up next to each other.
+          The stem is the mark's own partition, carried through the same
+          transform and run down to the baseline, drawn at the weight of the
+          letters around it. The word sits at ordinary spacing in every variant
+          and the delta is what moves, which is what keeps a gap from opening up
+          beside the i. The i is dotless, since the wing is over it.
         </p>
         <div class="grid gap-6 mid:grid-cols-2">
           ${DELTA_PS.map((v) => deltaPCard(v))}
@@ -345,33 +345,6 @@ export default function LogoLabPage() {
       body: html`
         <div class="grid gap-4 wide:grid-cols-2">
           ${CANDIDATES.map((c) => headerMock(c))}
-        </div>
-      `,
-    })}
-
-    ${section({
-      id: 'accent',
-      heading: 'The accent question',
-      body: html`
-        <p class="${PROSE} mb-8">
-          Below, one part of each mark is painted acid green. The sibling brand
-          keeps its marks greyscale and this site rations the accent to the thing
-          you click and the state that is live, so the monochrome row above is
-          the default and this row is the thing being questioned. Look at it in
-          both themes before answering.
-        </p>
-        <div class="lab-accent grid gap-4 grid-cols-2 mid:grid-cols-3 wide:grid-cols-6">
-          ${CANDIDATES.map(
-            (c) => html`
-              <div class="${PANEL} overflow-hidden">
-                <div class="lab-dark aspect-square grid place-items-center">${markSvg(c, 52)}</div>
-                <div class="lab-light aspect-square grid place-items-center border-t border-rule">
-                  ${markSvg(c, 52)}
-                </div>
-                <p class="font-mono text-[11px] text-ink-subtle text-center py-2 m-0">${c.id}</p>
-              </div>
-            `,
-          )}
         </div>
       `,
     })}
