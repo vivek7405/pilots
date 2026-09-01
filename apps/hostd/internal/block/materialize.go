@@ -45,8 +45,19 @@ func Materialize(ctx context.Context, src Slicer, dest string) (err error) {
 	// A megabyte at a time: large enough that the per-call overhead disappears
 	// and small enough that materialising a large image does not hold a large
 	// image in memory.
+	// Advance by what Slice RETURNED, never by what it was asked for.
+	//
+	// A Slicer clamps its answer to the mapping the offset lands in, so a read
+	// spanning a mapping boundary comes back short -- which is most reads on
+	// any real image, because zero elision cuts a disk into many mappings.
+	// Advancing by the request instead skipped every byte between the end of
+	// the short read and the end of the window, so everything after the first
+	// gap was simply absent from the output. The file still had the right
+	// length and its first megabyte was right, so it looked plausible: a built
+	// image panicked the guest kernel at mount_block_root with a corrupt
+	// journal inode, which names nothing about offsets.
 	const chunk = 1 << 20
-	for off := int64(0); off < size; off += chunk {
+	for off := int64(0); off < size; {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -58,14 +69,19 @@ func Materialize(ctx context.Context, src Slicer, dest string) (err error) {
 		if err != nil {
 			return fmt.Errorf("block: read %d+%d: %w", off, length, err)
 		}
-		if allZeroBytes(buf) {
-			// Left as a hole. The file was already truncated to full size, so
-			// the range reads back as zeros either way.
-			continue
+		if len(buf) == 0 {
+			// No progress is possible from here, and looping would spin
+			// forever on a truncated or malformed header.
+			return fmt.Errorf("block: read %d+%d returned nothing", off, length)
 		}
-		if _, err := f.WriteAt(buf, off); err != nil {
-			return fmt.Errorf("block: write %d: %w", off, err)
+		if !allZeroBytes(buf) {
+			if _, err := f.WriteAt(buf, off); err != nil {
+				return fmt.Errorf("block: write %d: %w", off, err)
+			}
 		}
+		// A zero run is left as a hole: the file was truncated to full size,
+		// so the range reads back as zeros either way.
+		off += int64(len(buf))
 	}
 
 	if err := f.Sync(); err != nil {

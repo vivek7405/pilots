@@ -665,7 +665,13 @@ async function buildAssertions() {
     const res = await postTar('/v1/builds', tarball({
       'Dockerfile': [
         'FROM alpine:3.20',
-        'RUN echo built-by-pilots > /etc/pilots-e2e',
+        // Prints AND writes. The assertion below is that build output reaches
+        // the stream, which is the whole reason the stream is structured: an
+        // agent reads a failure here and patches its own Dockerfile. A RUN
+        // that only redirects to a file produces no output to assert on, and
+        // the test then passes or fails on whether BuildKit happened to say
+        // anything of its own.
+        'RUN echo built-by-pilots | tee /etc/pilots-e2e',
         'COPY app.txt /app.txt',
         'WORKDIR /',
         'EXPOSE 8080',
