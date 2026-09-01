@@ -662,9 +662,19 @@ async function buildAssertions() {
   let rootfsBuildID;
 
   await step('POST /v1/builds streams NDJSON and ends with a rootfs build id', async () => {
+    // A token that differs every run, so the RUN below is never a cache hit.
+    //
+    // Not paranoia about the cache: the cache WORKING is what breaks this.
+    // A cached layer is not re-executed, so it emits no output, and the
+    // assertion that build output reaches the stream then passes exactly once
+    // -- on the first cold run -- and fails on every run after it. What is
+    // being tested is that an agent watching its own build sees the output of
+    // the steps that actually ran.
+    const token = `e2e-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const res = await postTar('/v1/builds', tarball({
       'Dockerfile': [
         'FROM alpine:3.20',
+        `RUN echo ${token} > /etc/pilots-build-token`,
         // Prints AND writes. The assertion below is that build output reaches
         // the stream, which is the whole reason the stream is structured: an
         // agent reads a failure here and patches its own Dockerfile. A RUN
@@ -694,13 +704,16 @@ async function buildAssertions() {
       assert(typeof line.ts === 'number' && line.ts > 0,
         `a line has no timestamp: ${JSON.stringify(line)}`);
     }
+    // The verdict FIRST. A build that failed produces no stdout either, so
+    // asserting on the stream before the outcome reports "no build output"
+    // for every failure and hides the reason the build actually gave.
+    const last = lines[lines.length - 1];
+    assert(!last.error, `the build failed: ${last.error}`);
+
     assert(lines.some((l) => l.stream === 'stdout' || l.stream === 'stderr'),
       'no build output reached the stream at all');
     assert(lines.some((l) => typeof l.step === 'string' && l.step.length > 0),
       'no line names the step it came from');
-
-    const last = lines[lines.length - 1];
-    assert(!last.error, `the build failed: ${last.error}`);
     assert(last.result, `the stream does not end with a rootfs build id: ${JSON.stringify(last)}`);
     rootfsBuildID = last.result;
   });

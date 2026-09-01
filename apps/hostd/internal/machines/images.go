@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vivek7405/pilots/hostd/internal/block"
+	"github.com/vivek7405/pilots/hostd/internal/build"
 	"github.com/vivek7405/pilots/hostd/internal/fc"
 	"github.com/vivek7405/pilots/hostd/internal/netns"
 	"github.com/vivek7405/pilots/hostd/internal/state"
@@ -83,6 +84,7 @@ func (m *Manager) bootMachine(ctx context.Context, row *state.Machine,
 	token, volumeID, image string) (*fc.Machine, error) {
 
 	rootfs := m.opts.FCConfig.TemplateRootfs
+	initPath := ""
 
 	if image != "" {
 		buildID, err := uuid.Parse(image)
@@ -93,6 +95,10 @@ func (m *Manager) bootMachine(ctx context.Context, row *state.Machine,
 			return nil, err
 		}
 		row.ImageRef = image
+		// The kernel is told what to run, rather than the image being edited
+		// to say it: a base image that ships its own init keeps it, and tar
+		// cannot override an existing /sbin/init symlink anyway.
+		initPath = build.AgentPathInImage
 		// The build IS this machine's disk template. Its later snapshots are
 		// diffs whose unchanged ranges resolve against it by offset, and the
 		// bytes it booted from are exactly this build's -- so pinning anything
@@ -139,6 +145,7 @@ func (m *Manager) bootMachine(ctx context.Context, row *state.Machine,
 
 	cfg := m.machineFCConfig(row, slot, mac)
 	cfg.TemplateRootfs = rootfs
+	cfg.InitPath = initPath
 
 	fcm, err := fc.Boot(ctx, cfg)
 	if err != nil {

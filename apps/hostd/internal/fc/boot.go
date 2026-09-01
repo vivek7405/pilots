@@ -42,6 +42,20 @@ const BootArgs = "console=ttyS0 reboot=k panic=1 pci=off ro root=/dev/vda " +
 	"ipv6.disable=0 ipv6.autoconf=1 " +
 	"ip=" + netns.TapGuestIP + "::" + netns.TapHostIP + ":255.255.255.252:instance:eth0:off:"
 
+// bootArgsFor renders the guest command line for one machine.
+//
+// The kernel decides what PID 1 is, so an image that ships its own init is
+// overridden here rather than inside the image. Rewriting /sbin/init in the
+// image cannot work: the build's fixups are appended to its tar, and GNU tar
+// keeps the FIRST symlink entry for a path and silently ignores a later one,
+// with or without --overwrite.
+func bootArgsFor(cfg Config) string {
+	if cfg.InitPath == "" {
+		return BootArgs
+	}
+	return BootArgs + " init=" + cfg.InitPath
+}
+
 // Limits are the cgroup v2 constraints applied to a machine.
 //
 // These are not optional. Firecracker isolates the guest from the host kernel,
@@ -65,6 +79,10 @@ type Config struct {
 	KernelPath     string
 	TemplateRootfs string
 	CPUTemplate    string
+	// InitPath overrides what the kernel runs as PID 1, for an image that
+	// ships an init of its own. Empty for the golden template, whose /sbin/init
+	// is already what it should be.
+	InitPath string
 
 	FirecrackerBin string
 	JailerBin      string
@@ -281,7 +299,7 @@ func (m *Machine) configure(ctx context.Context, cfg Config) error {
 		return err
 	}
 	if err := m.Client.SetBootSource(ctx, BootSource{
-		KernelImagePath: "/vmlinux.bin", BootArgs: BootArgs,
+		KernelImagePath: "/vmlinux.bin", BootArgs: bootArgsFor(cfg),
 	}); err != nil {
 		return err
 	}

@@ -138,6 +138,12 @@ func (f Fixups) resolvConf() string {
 	return b.String()
 }
 
+// AgentPathInImage is where the build installs the guest agent inside an
+// image, and therefore what the kernel is told to run as PID 1 when the image
+// carries no init of its own. Exported so the boot path names the same path
+// this one writes, rather than repeating the string.
+const AgentPathInImage = "/opt/pilot-agent/guest-agent"
+
 // guestAgentUnit starts the agent under systemd, for an image that has one.
 const guestAgentUnit = `[Unit]
 Description=pilots in-VM guest agent
@@ -258,7 +264,7 @@ func applyFixups(tarPath string, f Fixups, hasSystemd bool) error {
 		// mounts the pseudo-filesystems, remounts the root read-write, and
 		// reaps orphans. See the guest agent's PID 1 path.
 		links = append(links,
-			struct{ name, target string }{"sbin/init", "/opt/pilot-agent/guest-agent"})
+			struct{ name, target string }{"sbin/init", AgentPathInImage})
 	}
 	for _, l := range links {
 		if err := tw.WriteHeader(&tar.Header{
