@@ -3,6 +3,7 @@ import { section } from '#lib/ui/section.ts';
 import { pageHero } from '#lib/ui/page-hero.ts';
 import { PROSE, FIELD_LABEL, PANEL } from '#lib/design/recipes.ts';
 import { CANDIDATES, markSvg, type Candidate } from '#lib/design/logo-candidates.ts';
+import { FUSIONS, fusionMark, fusionLockup, type Fusion } from '#lib/design/logo-fusions.ts';
 
 /**
  * /logo-lab
@@ -143,6 +144,81 @@ function headerMock(c: Candidate) {
   `;
 }
 
+/**
+ * A fusion monogram card. Tighter than a candidate card: these four are four
+ * drawings of ONE idea, so the review question is which construction survives,
+ * not which concept wins.
+ */
+function fusionCard(f: Fusion) {
+  return html`
+    <article class="${PANEL} overflow-hidden flex flex-col">
+      <div class="flex border-b border-rule">
+        <div class="lab-dark flex-1 aspect-4/3 grid place-items-center">${fusionMark(f, 58)}</div>
+        <div class="lab-light flex-1 aspect-4/3 grid place-items-center">${fusionMark(f, 58)}</div>
+      </div>
+      <div class="p-5 flex flex-col gap-3.5 flex-1">
+        <div class="flex items-baseline justify-between gap-3">
+          <h3 class="text-h3 font-bold m-0">${f.name}</h3>
+          <code class="font-mono text-xs text-ink-subtle">${f.initial}</code>
+        </div>
+        <div class="lab-paper flex items-end gap-4 border-y border-rule py-3">
+          ${SMALL_SIZES.map(
+            (px) => html`
+              <span class="flex flex-col items-center gap-1.5">
+                ${fusionMark(f, px)}
+                <span class="font-mono text-[10px] text-ink-subtle leading-none">${px}px</span>
+              </span>
+            `,
+          )}
+        </div>
+        <p class="${PROSE} text-sm m-0">${f.idea}</p>
+        <p class="text-sm text-ink-subtle leading-[1.65] m-0 mt-auto pt-1">
+          <span class="text-ink font-semibold">The cost.</span> ${f.cost}
+        </p>
+      </div>
+    </article>
+  `;
+}
+
+/**
+ * One fusion's lockups, stacked so the four treatments sit directly above one
+ * another. Comparing a sliced lockup against an unsliced one in two different
+ * columns is comparing two positions on the page as much as two drawings.
+ */
+function lockupStack(f: Fusion) {
+  const rows: { label: string; face: 'sans' | 'mono'; slice: boolean; lean: boolean }[] = [
+    { label: 'sans, upright word', face: 'sans', slice: false, lean: false },
+    { label: 'sans, leaning word', face: 'sans', slice: false, lean: true },
+    { label: 'sans, leaning, sliced', face: 'sans', slice: true, lean: true },
+    { label: 'mono, leaning, sliced', face: 'mono', slice: true, lean: true },
+  ];
+  return html`
+    <article class="${PANEL} overflow-hidden">
+      <div class="lab-dark px-7 py-8 flex items-center justify-center">
+        ${fusionLockup(f, { height: 62, face: 'sans', slice: true, lean: true })}
+      </div>
+      <div class="flex items-baseline justify-between gap-3 px-5 pt-4 pb-1 border-t border-rule">
+        <h3 class="text-h3 font-bold m-0">${f.name}</h3>
+        <code class="font-mono text-xs text-ink-subtle">${f.id}</code>
+      </div>
+      <div class="lab-paper px-5 pb-5 divide-y divide-rule">
+        ${rows.map(
+          (r) => html`
+            <div class="py-4 flex flex-wrap items-center gap-x-6 gap-y-2">
+              ${fusionLockup(f, { height: 34, face: r.face, slice: r.slice, lean: r.lean })}
+              <span class=${FIELD_LABEL}>${r.label}</span>
+            </div>
+          `,
+        )}
+        <div class="py-4 flex flex-wrap items-center gap-x-6 gap-y-2">
+          ${fusionLockup(f, { height: 19, face: 'sans', slice: true, lean: true })}
+          <span class=${FIELD_LABEL}>at header size</span>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
 export default function LogoLabPage() {
   return html`
     <style>
@@ -173,6 +249,19 @@ export default function LogoLabPage() {
       .lab-accent {
         --logo-accent: var(--signal);
       }
+      /* The wordmark faces. Set on the SVG text rather than passed as a
+         font-family attribute, because the attribute does not resolve a
+         custom property and the whole point is to use the site's own stack. */
+      .lockup-sans {
+        font-family: var(--font-sans);
+        font-weight: 900;
+        letter-spacing: -0.04em;
+      }
+      .lockup-mono {
+        font-family: var(--font-mono);
+        font-weight: 600;
+        letter-spacing: -0.02em;
+      }
     </style>
 
     ${pageHero({
@@ -197,6 +286,39 @@ export default function LogoLabPage() {
       body: html`
         <div class="grid gap-6 mid:grid-cols-2 wide:grid-cols-3">
           ${CANDIDATES.map((c) => card(c))}
+        </div>
+      `,
+    })}
+
+    ${section({
+      id: 'fusion',
+      heading: 'Delta, fused into the P',
+      layout: 'split',
+      lede: html`
+        Four ways to make the delta carry the initial rather than sit beside it.
+        The question each one answers differently is what gives way when an
+        arrowhead and a letter want the same space.
+      `,
+      body: html`
+        <div class="grid gap-6 mid:grid-cols-2 wide:grid-cols-4">
+          ${FUSIONS.map((f) => fusionCard(f))}
+        </div>
+      `,
+    })}
+
+    ${section({
+      id: 'fusion-lockups',
+      heading: 'The whole word',
+      body: html`
+        <p class="${PROSE} mb-9">
+          The wordmark below is set without its first letter, because that is the
+          construction under test. If the word still spells the name once the
+          mark is taken away, the mark was a badge. The slice is painted here
+          rather than cut, so a shipped file would need it re-drawn as a real
+          gap in the geometry, which is how the sibling brand builds its own.
+        </p>
+        <div class="grid gap-6 wide:grid-cols-2">
+          ${FUSIONS.map((f) => lockupStack(f))}
         </div>
       `,
     })}
