@@ -63,6 +63,24 @@ export type DeltaP = {
   stemW: number;
   stem: 'none' | 'baseline';
   /**
+   * Put the stem somewhere other than under the mark's own partition.
+   *
+   * The derived position sits in the middle of the plane, which is right when
+   * the stem is meant to hang from it. A variant that stands the stem at the
+   * far left, ahead of the plane rather than beneath it, has to say where.
+   */
+  stemX?: number;
+  /** Where the stem's top edge sits, when the derived one does not apply. */
+  stemTop?: number;
+  /**
+   * Where the word starts, when it is not the shared position.
+   *
+   * Every other variant leaves the word alone and moves the plane. This one
+   * moves both, because a stem at the far left only reads as a letter if the
+   * word closes up behind it.
+   */
+  wordX?: number;
+  /**
    * Carry the Delta half drawing: the hairline opened along the mark's own
    * axis. Identical geometry to the candidate card, cut and all.
    */
@@ -131,8 +149,8 @@ function undersideY(v: DeltaP, x: number): number {
 
 /** The mark: the delta, and the thin stem dropped from its partition. */
 export function deltaPLetter(v: DeltaP) {
-  const px = partitionX(v);
-  const top = undersideY(v, px) - 2;
+  const px = v.stemX ?? partitionX(v);
+  const top = v.stemTop ?? undersideY(v, px) - 2;
   const bottom = BASELINE;
   return html`
     ${v.stem === 'none'
@@ -159,7 +177,7 @@ function markBox(v: DeltaP) {
   const ys = pts.map((p) => p.y);
   const stemLean = BASELINE * 0.15838;
   if (v.stem !== 'none') {
-    const px = partitionX(v);
+    const px = v.stemX ?? partitionX(v);
     xs.push(px - v.stemW / 2 - stemLean, px + v.stemW / 2);
     ys.push(BASELINE);
   }
@@ -200,10 +218,11 @@ export function deltaPLockup(v: DeltaP, opts: { height: number; face?: 'sans' | 
   const fontSize = face === 'mono' ? 126 : FONT_SIZE;
   const leanShift = BASELINE * 0.15838;
   const b = markBox(v);
-  const left = Math.min(b.left, WORD_X - 14);
+  const wx = v.wordX ?? WORD_X;
+  const left = Math.min(b.left, wx - 14);
   const top = Math.min(b.top, -12);
   const bottom = Math.max(b.top + b.h, BASELINE + 14);
-  const right = Math.max(b.left + b.w, WORD_X + leanShift + (face === 'mono' ? 350 : 292));
+  const right = Math.max(b.left + b.w, wx + leanShift + (face === 'mono' ? 350 : 292));
   const h = bottom - top;
   return html`
     <svg
@@ -216,7 +235,7 @@ export function deltaPLockup(v: DeltaP, opts: { height: number; face?: 'sans' | 
     >
       <g transform="translate(${leanShift.toFixed(2)} 0) skewX(-9)">
         <text
-          x=${WORD_X}
+          x=${v.wordX ?? WORD_X}
           y=${BASELINE}
           font-size=${fontSize}
           class=${face === 'mono' ? 'dp-mono' : 'dp-sans'}
@@ -244,6 +263,23 @@ export const DELTA_PS: DeltaP[] = [
     cy: -12.5,
     stemW: 15,
     stem: 'baseline',
+  },
+  {
+    id: 'raked-ahead',
+    name: 'Stem ahead of the plane',
+    idea:
+      'The stem moved out from under the plane and stood at the front of the lockup, with the word closed up behind it, so the order is the one a P has: stroke first, bowl to the right of it. The two are not joined, which the sketch this came from also shows.',
+    cost:
+      'It does not read as a P, and the reason is in the drawing rather than the placement. The plane\'s tail sweeps UP as it goes left, so a stem set ahead of the plane always has the plane\'s mass high above it rather than beside it, where a bowl belongs. What the eye gets is a bar standing next to a plane. Measured, the two are separate shapes, and nothing about moving them closer changes which direction the tail runs.',
+    rotate: 64,
+    size: 5.2,
+    cx: 50,
+    cy: -12.5,
+    stemW: 20,
+    stem: 'baseline',
+    stemX: 2,
+    stemTop: 8,
+    wordX: 30,
   },
   {
     id: 'raked-half',
