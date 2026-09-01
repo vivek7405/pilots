@@ -82,6 +82,14 @@ apt-get update -qq
 apt-get install -y -qq curl ca-certificates iproute2 iptables nftables \
   e2fsprogs wireguard-tools sqlite3 >/dev/null
 
+# Clock sync is load-bearing, not hygiene: liveness compares a heartbeat
+# stamped by one host's clock against another host's clock with a 30s
+# threshold. A fresh box running tens of seconds off makes a live host
+# "provably dead" -- and its machines get claimed while it serves them.
+apt-get install -y -qq systemd-timesyncd >/dev/null 2>&1 || true
+systemctl enable --now systemd-timesyncd >/dev/null 2>&1 || true
+timedatectl set-ntp true
+
 # The uid Firecracker is jailed to. Never root, and in the kvm group so it can
 # open /dev/kvm from inside the jail.
 id -u pilot-vm >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin pilot-vm
