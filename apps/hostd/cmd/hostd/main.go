@@ -195,6 +195,8 @@ func run() error {
 		// A host that finds the owner gone rescues the machine HERE, holding
 		// the client, rather than failing until the rescue loop's next tick.
 		routerOpts.Rescue = mgr.Rescue
+		// The hot path reads the subscription cache, not the agent.
+		routerOpts.Lookup = f.cache.MachineByName
 	}
 	rtr := router.New(routerOpts)
 
@@ -209,7 +211,14 @@ func run() error {
 	// this, "every host serves the full API" means every host answers and
 	// most of them are wrong -- an exec against a machine running elsewhere
 	// simply fails.
-	handler := dispatch(cfg, rtr, rtr.ForwardAPI(machineOwner(store), controlAPI))
+	owner := machineOwner(store)
+	if f != nil {
+		owner = cachedOwner(f.cache, owner)
+	}
+	// The forwarding marker is a fleet-internal signal set by peers proxying
+	// over the mesh. Stripped here so a client on the public listener cannot
+	// forge it and make a non-owner host act on a machine-scoped call.
+	handler := router.StripForwardMarker(dispatch(cfg, rtr, rtr.ForwardAPI(owner, controlAPI)))
 
 	if f != nil && f.dev != nil {
 		// Peers reach the same dispatch, guarded so a forwarded request is

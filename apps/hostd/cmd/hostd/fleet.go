@@ -206,6 +206,19 @@ func splitLines(s string) func(func(string) bool) {
 	}
 }
 
+// cachedOwner answers ownership from the subscription cache when it can -- a
+// mutex and a map lookup instead of a query to the corrosion agent per
+// machine-scoped API call -- falling back to the store for rows the
+// subscription has not delivered yet.
+func cachedOwner(cache *corrosion.Cache, fallback router.MachineOwner) router.MachineOwner {
+	return func(ctx context.Context, machineID string) (string, bool) {
+		if m, ok := cache.Machine(machineID); ok {
+			return m.HostID, true
+		}
+		return fallback(ctx, machineID)
+	}
+}
+
 // machineOwner resolves which host owns a machine, for API forwarding.
 //
 // A local read of replicated state, so it costs nothing and does not depend on

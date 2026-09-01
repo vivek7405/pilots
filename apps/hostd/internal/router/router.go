@@ -50,6 +50,13 @@ type Options struct {
 	// that a host dying mid-request costs one slow request rather than an
 	// outage lasting until a background loop notices.
 	Rescue func(ctx context.Context, m state.Machine) error
+
+	// Lookup resolves a machine by name from an in-memory replica, sparing
+	// the routing hot path a store query per request -- which in a fleet is
+	// an HTTP round trip to the corrosion agent. Optional; nil, and a miss
+	// (a row the subscription has not delivered yet, or a custom domain),
+	// fall back to Store.ListMachines.
+	Lookup func(name string) (state.Machine, bool)
 }
 
 // Router proxies inbound requests to machines, waking them if needed.
@@ -103,6 +110,16 @@ func (r *Router) resolve(ctx context.Context, host string) (*Target, error) {
 	name, port, ok := ParseHost(host, r.opts.Domain)
 	if !ok {
 		return nil, fmt.Errorf("router: %q is not a machine hostname", host)
+	}
+
+	// The subscription cache first: a mutex and a map lookup, no query at
+	// all. A miss falls through to the store, so a machine the subscription
+	// has not delivered yet -- or one reached by custom domain -- still
+	// resolves.
+	if r.opts.Lookup != nil {
+		if m, ok := r.opts.Lookup(name); ok {
+			return &Target{Machine: m, Port: port}, nil
+		}
 	}
 
 	// A local read. This is the whole point: routing must not depend on any

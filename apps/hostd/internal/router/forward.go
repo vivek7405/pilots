@@ -52,9 +52,33 @@ func (r *Router) ForwardAPI(owner MachineOwner, next http.Handler) http.Handler 
 			return
 		}
 		if !r.opts.Peers.IsLive(hostID) {
-			// The owner is gone. Serving it here means rescuing it here, which
-			// the machine layer does under its own lock -- so hand it to the
-			// local handler and let the rescue happen on the way.
+			// The owner is gone. The local handler cannot serve another
+			// host's machine on its own -- nothing below the API claims
+			// ownership, so a bare local wake leaves the VM running unclaimed
+			// while every row write after it fails ErrNotOwner. Rescue the
+			// machine here first, exactly as the workload router does, then
+			// let the local handler treat it as this host's own.
+			if r.opts.Rescue == nil || r.opts.Store == nil {
+				http.Error(w, `{"error":"machine unavailable: its host is not responding"}`,
+					http.StatusServiceUnavailable)
+				return
+			}
+			row, err := r.opts.Store.GetMachine(req.Context(), m[1])
+			if err != nil {
+				http.Error(w, `{"error":"machine unavailable"}`, http.StatusServiceUnavailable)
+				return
+			}
+			if row.HostID != r.opts.HostID {
+				// Detached from the client for the same reason as the
+				// router's rescue: the claim must not be stranded half-done
+				// by a client that gives up mid-restore.
+				if err := r.opts.Rescue(context.WithoutCancel(req.Context()), *row); err != nil {
+					slog.Error("could not rescue a machine to serve an API call",
+						"machine", m[1], "dead_host", hostID, "err", err)
+					http.Error(w, `{"error":"machine unavailable"}`, http.StatusServiceUnavailable)
+					return
+				}
+			}
 			next.ServeHTTP(w, req)
 			return
 		}
@@ -78,9 +102,23 @@ func (r *Router) ForwardAPI(owner MachineOwner, next http.Handler) http.Handler 
 			http.Error(w, `{"error":"machine unavailable"}`, http.StatusBadGateway)
 		}
 
-		ctx, cancel := context.WithTimeout(req.Context(), forwardTimeout)
-		defer cancel()
-		proxy.ServeHTTP(w, req.WithContext(ctx))
+		proxy.Transport = forwardTransport
+		proxy.ServeHTTP(w, req)
+	})
+}
+
+// StripForwardMarker removes the fleet-internal forwarding marker from
+// requests arriving on the public listener.
+//
+// The marker is a transport fact -- only a peer proxying over the mesh sets
+// it, and the internal listener is the only place it may be believed. A copy
+// arriving from outside is forged: trusting it would let any client make a
+// non-owner host act on a machine-scoped call locally, skipping both the
+// forwarding and the liveness logic.
+func StripForwardMarker(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		req.Header.Del(forwardedHeader)
+		next.ServeHTTP(w, req)
 	})
 }
 

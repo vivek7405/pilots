@@ -36,9 +36,28 @@ func InternalAddrOf(meshAddr string) string {
 // forwardedHeader marks a request that has already been forwarded once.
 const forwardedHeader = "X-Pilot-Forwarded"
 
-// forwardTimeout bounds a cross-host request, including a wake on the far
-// side. Generous: the owner may have to restore the machine first.
+// forwardTimeout bounds how long a forwarded request may take to reach the
+// owner and produce response HEADERS, including a wake on the far side.
+// Generous: the owner may have to restore the machine first.
+//
+// Headers, not the whole exchange: exec streams, log follows and SSE are
+// long-lived by design -- main.go sets no WriteTimeout for exactly that
+// reason -- and a machine's behavior must not depend on whether the client's
+// DNS pick happened to land on the owning host.
 const forwardTimeout = 120 * time.Second
+
+// forwardTransport carries forwarded requests over the mesh. Shared, so
+// cross-host requests pool connections, and the place forwardTimeout is
+// enforced without putting a deadline on the request itself.
+var forwardTransport = &http.Transport{
+	DialContext: (&net.Dialer{
+		Timeout:   10 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}).DialContext,
+	MaxIdleConns:          100,
+	IdleConnTimeout:       90 * time.Second,
+	ResponseHeaderTimeout: forwardTimeout,
+}
 
 // Peers resolves other hosts on the mesh.
 type Peers interface {
@@ -83,9 +102,8 @@ func (r *Router) forwardToOwner(w http.ResponseWriter, req *http.Request, m stat
 		http.Error(w, "machine unavailable", http.StatusBadGateway)
 	}
 
-	ctx, cancel := context.WithTimeout(req.Context(), forwardTimeout)
-	defer cancel()
-	proxy.ServeHTTP(w, req.WithContext(ctx))
+	proxy.Transport = forwardTransport
+	proxy.ServeHTTP(w, req)
 }
 
 // InternalHandler serves requests forwarded by peers.
@@ -151,7 +169,11 @@ func (r *Router) serveOrForward(w http.ResponseWriter, req *http.Request, target
 	slog.Info("serving a machine whose host is gone by rescuing it here",
 		"machine", m.ID, "dead_host", m.HostID)
 
-	if err := r.opts.Rescue(req.Context(), m); err != nil {
+	// Detached from the client: ClaimMachine commits early in the rescue, and
+	// a client that gives up mid-restore must not strand the machine claimed
+	// by this host but never restored -- the same reasoning as ensureAwake's
+	// context.WithoutCancel.
+	if err := r.opts.Rescue(context.WithoutCancel(req.Context()), m); err != nil {
 		slog.Error("could not rescue a machine to serve a request",
 			"machine", m.ID, "err", err)
 		http.Error(w, "machine unavailable", http.StatusServiceUnavailable)

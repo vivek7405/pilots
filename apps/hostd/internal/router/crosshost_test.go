@@ -246,15 +246,25 @@ func TestAForwardedAPICallIsNotForwardedAgain(t *testing.T) {
 	}
 }
 
-// When the owner is gone the call is handled locally, where the machine layer
-// rescues it under its own lock -- rather than proxying into a dead host.
-func TestAnAPICallForADeadOwnerIsHandledLocally(t *testing.T) {
+// When the owner is gone the call is handled locally -- but only AFTER the
+// machine has been rescued (claimed) here. The local handler cannot serve a
+// foreign machine on its own: without the claim, the wake leaves an unclaimed
+// VM running and every row write after it fails ErrNotOwner.
+func TestAnAPICallForADeadOwnerIsRescuedThenHandledLocally(t *testing.T) {
 	served := false
+	rescued := ""
 	r := New(Options{
 		Domain: "pilotrun.app", HostID: "host-a",
+		Store: &stubStore{machines: []state.Machine{
+			{ID: "m-1", Name: "alpha", HostID: "host-dead"},
+		}},
 		Peers: &stubPeers{
 			addrs: map[string]string{"host-dead": "unused"},
 			dead:  map[string]bool{"host-dead": true},
+		},
+		Rescue: func(_ context.Context, m state.Machine) error {
+			rescued = m.ID
+			return nil
 		},
 	})
 	h := r.ForwardAPI(func(context.Context, string) (string, bool) { return "host-dead", true },
@@ -262,6 +272,9 @@ func TestAnAPICallForADeadOwnerIsHandledLocally(t *testing.T) {
 
 	h.ServeHTTP(httptest.NewRecorder(),
 		httptest.NewRequest(http.MethodPost, "/v1/machines/m-1/exec", nil))
+	if rescued != "m-1" {
+		t.Error("the machine was not rescued before the call was served locally")
+	}
 	if !served {
 		t.Error("a call for a dead owner was proxied into it")
 	}
