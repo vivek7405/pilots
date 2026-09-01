@@ -259,3 +259,46 @@ func TestNilMemoryParentIsNotTreatedAsUnset(t *testing.T) {
 			"coincidentally identical page would resolve from another machine", got)
 	}
 }
+
+// A machine with no volume is a 404 rather than an empty answer. A client that
+// cannot tell "no volume" from "a volume with no cache type" learns nothing
+// from either.
+func TestMachineVolumeOnAMachineWithoutOne(t *testing.T) {
+	ctx := context.Background()
+	m, _, st := newVolumeTestManager(t)
+
+	if err := st.PutMachine(ctx, &state.Machine{ID: "m-1", HostID: "host-a"}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := m.MachineVolume(ctx, "m-1")
+	if !errors.Is(err, state.ErrNotFound) {
+		t.Fatalf("got %v, want ErrNotFound", err)
+	}
+}
+
+// A suspended machine has no VMM to ask. Reporting the intended cache type
+// there would be exactly the lie the endpoint exists to catch, so the field
+// stays empty instead.
+func TestMachineVolumeLeavesCacheTypeEmptyWhenNothingIsRunning(t *testing.T) {
+	ctx := context.Background()
+	m, _, st := newVolumeTestManager(t)
+
+	if err := st.PutVolume(ctx, &state.Volume{ID: "vol-1", MountPath: "/data", HostID: "host-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutMachine(ctx, &state.Machine{ID: "m-1", HostID: "host-a", VolumeID: "vol-1"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := m.MachineVolume(ctx, "m-1")
+	if err != nil {
+		t.Fatalf("MachineVolume: %v", err)
+	}
+	if got.CacheType != "" {
+		t.Fatalf("cache_type is %q for a machine with no running VMM; that value "+
+			"was never read from anything", got.CacheType)
+	}
+	if got.MountPath != "/data" || got.VolumeID != "vol-1" {
+		t.Fatalf("got %+v", got)
+	}
+}

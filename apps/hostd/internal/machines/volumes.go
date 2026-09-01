@@ -160,3 +160,41 @@ func (m *Manager) mountVolumeInGuest(ctx context.Context, slot *netns.Slot,
 	}
 	return nil
 }
+
+// MachineVolume reports the volume drive a running machine actually has.
+//
+// The cache type is read back out of Firecracker rather than repeated from
+// what this process meant to configure, and that is the point of the endpoint.
+// Firecracker's default does not advertise the VirtIO flush feature, so a
+// guest fsync to a drive left at the default returns success with the data
+// only in the host's page cache. Nothing errors, nothing logs, and the
+// durability the volume exists for is simply not happening -- so the value
+// that gets checked has to be the one the VMM holds.
+func (m *Manager) MachineVolume(ctx context.Context, machineID string) (*api.MachineVolume, error) {
+	row, err := m.opts.Store.GetMachine(ctx, machineID)
+	if err != nil {
+		return nil, err
+	}
+	if row.VolumeID == "" {
+		return nil, fmt.Errorf("machines: %s has no volume: %w", machineID, state.ErrNotFound)
+	}
+
+	out := &api.MachineVolume{VolumeID: row.VolumeID, Device: fc.GuestVolumeDevice}
+	if v, err := m.opts.Store.GetVolume(ctx, row.VolumeID); err == nil {
+		out.MountPath = v.MountPath
+	}
+
+	fcm, ok := m.get(machineID)
+	if !ok {
+		// Suspended or owned elsewhere: there is no VMM to ask, and reporting
+		// the intended value here would be exactly the lie this exists to
+		// catch. The field stays empty.
+		return out, nil
+	}
+	drive, err := fcm.Client.DriveConfig(ctx, fc.VolumeDriveID)
+	if err != nil {
+		return nil, fmt.Errorf("machines: read the volume drive of %s: %w", machineID, err)
+	}
+	out.CacheType = drive.CacheType
+	return out, nil
+}

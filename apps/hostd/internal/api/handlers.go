@@ -26,6 +26,7 @@ type Manager interface {
 	Logs(ctx context.Context, machineID string) ([]byte, error)
 	CreateVolume(ctx context.Context, req CreateVolumeRequest) (*state.Volume, error)
 	ListVolumes(ctx context.Context) ([]state.Volume, error)
+	MachineVolume(ctx context.Context, machineID string) (*MachineVolume, error)
 }
 
 // toAPI converts a stored row to the wire shape.
@@ -253,6 +254,16 @@ func (d Deps) handleListVolumes(w http.ResponseWriter, r *http.Request) {
 		out = append(out, toAPIVolume(v))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// handleMachineVolume reports the volume drive Firecracker is really running.
+func (d Deps) handleMachineVolume(w http.ResponseWriter, r *http.Request) {
+	v, err := d.Machines.MachineVolume(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
 }
 
 func (d Deps) handleListHosts(w http.ResponseWriter, r *http.Request) {

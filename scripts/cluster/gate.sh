@@ -5,7 +5,8 @@
 #
 # Asserts the properties that make this a fleet rather than three machines:
 # a host can die and its work comes back somewhere else, with the same URLs
-# and no human involved.
+# and no human involved -- including, as of Phase 5a, a host that dies with a
+# volume mounted and a guest write fsynced to it seconds earlier.
 set -uo pipefail
 
 cd "$(dirname "$0")"
@@ -266,11 +267,114 @@ else
     || bad "the retry never succeeded (got '${OUT}')"
 fi
 
+say "10. A volume survives the death of the host that had it mounted"
+# The two gate lines that a naive test passes without.
+#
+# A volume is durable because every write goes through to object storage
+# before it is acknowledged -- not because it survives a graceful move. So the
+# host is hard powered off with the data only ever having been fsynced, and the
+# marker has to come back somewhere else. Two defects both pass a gentler
+# version of this: a drive left at Firecracker's default cache type, where the
+# guest's fsync never reaches the disk at all, and a juicefs mount given
+# --writeback, where the acknowledgement happens before the upload.
+LIVE_IPS=()
+for ip in "${IPS[@]}" ${NEW_IP:-}; do
+  [ "$ip" = "$OWNER_IP" ] && continue
+  [ "$ip" = "${CUR_IP:-}" ] && continue
+  curl -sf -m 5 "http://${ip}:8080/v1/health" >/dev/null 2>&1 && LIVE_IPS+=("$ip")
+done
+
+if [ "${#LIVE_IPS[@]}" -lt 2 ]; then
+  bad "need two live hosts for the volume failover; have ${#LIVE_IPS[@]}"
+else
+  VHOST="${LIVE_IPS[0]}"
+  VSURVIVOR="${LIVE_IPS[1]}"
+
+  VOL=$(api "$VHOST" POST /v1/volumes '{"name":"gate-volume","size_gib":1,"mount_path":"/data"}')
+  VOLID=$(echo "$VOL" | jf id)
+  [ -n "$VOLID" ] && ok "created volume ${VOLID} on ${VHOST}" || bad "volume create failed: $VOL"
+
+  if [ -n "$VOLID" ]; then
+    VM=$(api "$VHOST" POST /v1/machines "{\"vcpus\":1,\"mem_mib\":512,\"volume\":\"${VOLID}\"}")
+    VMID=$(echo "$VM" | jf id); VMURL=$(echo "$VM" | jf url)
+    [ -n "$VMID" ] && ok "machine ${VMID} has the volume attached" || bad "create failed: $VM"
+  fi
+
+  if [ -n "${VMID:-}" ]; then
+    # Read out of the running VMM, not out of what hostd meant to configure.
+    # The default cache type does not advertise the VirtIO flush feature, so
+    # the guest's fsync returns success with the data in the host page cache
+    # and nothing anywhere says so.
+    CACHE=$(api "$VHOST" GET "/v1/machines/${VMID}/volume" | jf cache_type)
+    [ "$CACHE" = "Writeback" ] \
+      && ok "the volume drive is running with cache_type Writeback" \
+      || bad "cache_type is '${CACHE}', so a guest fsync does not reach the disk"
+
+    # fsync, not just write. This is the byte the rest of the step is about.
+    api "$VHOST" POST "/v1/machines/${VMID}/exec" \
+      '{"cmd":"echo durable-marker > /data/marker && dd if=/data/marker of=/data/marker.sync conv=fsync 2>/dev/null && sync","user":"root"}' >/dev/null
+    MARK=$(api "$VHOST" POST "/v1/machines/${VMID}/exec" '{"cmd":"cat /data/marker","user":"root"}' | jf stdout)
+    [ "$(echo "$MARK" | tr -d '[:space:]')" = "durable-marker" ] \
+      && ok "the guest wrote and fsynced to the volume" \
+      || bad "the guest could not write to the volume (got '${MARK}')"
+
+    # A machine can only be rescued from a snapshot in object storage, so give
+    # it one -- exactly as step 4 does for the ordinary machine.
+    api "$VHOST" POST "/v1/machines/${VMID}/suspend" >/dev/null && ok "suspended"
+    api "$VHOST" POST "/v1/machines/${VMID}/wake" >/dev/null && ok "woke"
+
+    VDOM=$(sudo virsh list --name | while read -r d; do
+      [ -n "$d" ] && sudo virsh domifaddr "$d" --source lease 2>/dev/null | grep -q "$VHOST" && echo "$d"
+    done | head -1)
+    [ -n "$VDOM" ] && sudo virsh destroy "$VDOM" >/dev/null 2>&1 \
+      && ok "hard powered off ${VDOM}, the host that had the volume mounted" \
+      || bad "could not destroy the volume's host"
+
+    VOWNER=""
+    START=$SECONDS
+    while [ $((SECONDS - START)) -lt 240 ]; do
+      VOWNER=$(api "$VSURVIVOR" GET "/v1/machines/${VMID}" 2>/dev/null | jf host_id)
+      [ -n "$VOWNER" ] && [ "$VOWNER" != "$(echo "$VM" | jf host_id)" ] && break
+      sleep 5
+    done
+    [ -n "$VOWNER" ] && [ "$VOWNER" != "$(echo "$VM" | jf host_id)" ] \
+      && ok "the machine was rescued onto ${VOWNER}" \
+      || bad "the volume machine was never rescued"
+
+    NEWVURL=$(api "$VSURVIVOR" GET "/v1/machines/${VMID}" | jf url)
+    [ "$NEWVURL" = "$VMURL" ] && ok "URL unchanged: ${VMURL}" \
+      || bad "URL changed across the volume failover: ${VMURL} -> ${NEWVURL}"
+
+    # The whole point. The marker was fsynced on a host that then lost power,
+    # and it has to be readable on a different one -- which means it reached
+    # object storage before the write was acknowledged.
+    START=$SECONDS; OUT=""
+    while [ $((SECONDS - START)) -lt 180 ]; do
+      OUT=$(api "$VSURVIVOR" POST "/v1/machines/${VMID}/exec" \
+        '{"cmd":"cat /data/marker","user":"root"}' 2>/dev/null | jf stdout)
+      [ -n "$(echo "$OUT" | tr -d '[:space:]')" ] && break
+      sleep 5
+    done
+    [ "$(echo "$OUT" | tr -d '[:space:]')" = "durable-marker" ] \
+      && ok "the fsynced write survived a hard host kill and came back elsewhere" \
+      || bad "the volume lost its data across the failover (got '${OUT}')"
+
+    # And it is a volume on the new host too, not the ephemeral root pretending
+    # to be one. A machine whose volume failed to mount reads and writes /data
+    # perfectly well -- on a disk that disappears with it.
+    VDEV=$(api "$VSURVIVOR" POST "/v1/machines/${VMID}/exec" \
+      '{"cmd":"findmnt -no SOURCE /data || echo none","user":"root"}' 2>/dev/null | jf stdout)
+    echo "$VDEV" | grep -q vdb \
+      && ok "/data is the volume drive on the rescuing host" \
+      || bad "/data is backed by '${VDEV}', not the volume"
+  fi
+fi
+
 say "Result"
 echo "  ${PASS} passed, ${FAIL} failed"
 echo
 echo "This run left the rig changed on purpose:"
-echo "  - two hosts are powered off (steps 5 and 9); sudo virsh start <domain>"
+echo "  - three hosts are powered off (steps 5, 9 and 10); sudo virsh start <domain>"
 echo "  - the fleet is one host bigger (step 8), and cluster.env records it,"
 echo "    so the next run adds another. cluster-down.sh resets it."
 [ "$FAIL" = 0 ] || exit 1

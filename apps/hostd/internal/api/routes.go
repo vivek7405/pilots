@@ -78,6 +78,10 @@ func Routes(d Deps) http.Handler {
 	// Volumes and fleet.
 	mux.HandleFunc("POST /v1/volumes", d.handleCreateVolume)
 	mux.HandleFunc("GET /v1/volumes", d.handleListVolumes)
+	// The volume drive as Firecracker holds it, not as hostd meant to set it.
+	// See MachineVolume: the difference between the two is a durability
+	// guarantee that fails silently.
+	mux.HandleFunc("GET /v1/machines/{id}/volume", d.handleMachineVolume)
 	mux.HandleFunc("GET /v1/hosts", d.handleListHosts)
 
 	return WithAuth(d, mux)

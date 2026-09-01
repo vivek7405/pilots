@@ -91,3 +91,36 @@ func TestVolumeRoutesRequireAuth(t *testing.T) {
 		}
 	}
 }
+
+// The gate line, at the API surface: a machine's volume drive reports the
+// cache type Firecracker is really running with. Reporting what hostd meant to
+// set would pass this test and still leave every fsync a no-op.
+func TestMachineVolumeReportsTheLiveCacheType(t *testing.T) {
+	h, _, _ := newTestServerWithManager(t)
+
+	rec := do(t, h, "GET", "/v1/machines/m_1/volume", testKey)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var got MachineVolume
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.CacheType != "Writeback" {
+		t.Fatalf("cache_type is %q; anything but Writeback means the guest's "+
+			"fsync does not reach the disk", got.CacheType)
+	}
+	if got.Device != "/dev/vdb" {
+		t.Errorf("device is %q, want /dev/vdb", got.Device)
+	}
+	if got.MountPath == "" {
+		t.Error("no mount path")
+	}
+}
+
+func TestMachineVolumeRequiresAuth(t *testing.T) {
+	h, _ := newTestServer(t)
+	if rec := do(t, h, "GET", "/v1/machines/m_1/volume", ""); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401", rec.Code)
+	}
+}

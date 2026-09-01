@@ -232,6 +232,21 @@ type Volume struct {
 	CreatedAt int64  `json:"created_at"`
 }
 
+// MachineVolume reports the volume drive a running machine actually has.
+//
+// CacheType is read back out of Firecracker rather than repeated from what
+// hostd meant to configure. That is the entire reason this shape exists: the
+// default cache type does not advertise the VirtIO flush feature, so a guest
+// fsync on a drive left at the default returns success with the data only in
+// the host's page cache -- and the intent and the reality can differ with
+// nothing anywhere to notice.
+type MachineVolume struct {
+	VolumeID  string `json:"volume_id"`
+	MountPath string `json:"mount_path"`
+	Device    string `json:"device"`
+	CacheType string `json:"cache_type"`
+}
+
 type CreateVolumeRequest struct {
 	Name    string `json:"name"`
 	SizeGiB int    `json:"size_gib"`

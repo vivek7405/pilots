@@ -66,3 +66,9 @@ func (f *fakeManager) CreateVolume(context.Context, CreateVolumeRequest) (*state
 func (f *fakeManager) ListVolumes(context.Context) ([]state.Volume, error) {
 	return []state.Volume{*f.volume}, f.err
 }
+func (f *fakeManager) MachineVolume(context.Context, string) (*MachineVolume, error) {
+	return &MachineVolume{
+		VolumeID: f.volume.ID, MountPath: f.volume.MountPath,
+		Device: "/dev/vdb", CacheType: "Writeback",
+	}, f.err
+}
