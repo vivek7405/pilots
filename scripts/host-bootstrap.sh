@@ -24,6 +24,18 @@ set -euo pipefail
 FC_VERSION="1.16.1"
 CORROSION_VERSION="1.0.0"
 KERNEL_VERSION="6.1.158"
+# The volume and build toolchain. Pinned for the same reason Firecracker is:
+# a host that quietly installed a different JuiceFS would write chunks its
+# peers cannot read, and a different BuildKit would produce images the fleet
+# has never booted.
+#
+# Litestream is deliberately held at 0.3.x rather than the newest release --
+# hostd writes its configuration file and drives `litestream restore` by flag,
+# and both are contracts with a specific major line.
+JUICEFS_VERSION="1.4.1"
+LITESTREAM_VERSION="0.3.13"
+BUILDKIT_VERSION="0.32.2"
+ROOTLESSKIT_VERSION="3.1.0"
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 IP="${1:-}"
@@ -80,7 +92,13 @@ on_host bash -euo pipefail -s <<'REMOTE'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq curl ca-certificates iproute2 iptables nftables \
-  e2fsprogs wireguard-tools sqlite3 >/dev/null
+  e2fsprogs wireguard-tools sqlite3 \
+  fuse3 uidmap slirp4netns fakeroot >/dev/null
+# fuse3 is what a JuiceFS mount is; uidmap and slirp4netns are what rootless
+# BuildKit needs to have a user namespace and a network without root; fakeroot
+# is the fallback when this box's mke2fs cannot read a tarball, and it is the
+# only way an unprivileged build can produce a rootfs whose files are
+# root-owned.
 
 # Clock sync is load-bearing, not hygiene: liveness compares a heartbeat
 # stamped by one host's clock against another host's clock with a 30s
@@ -95,8 +113,21 @@ timedatectl set-ntp true
 id -u pilot-vm >/dev/null 2>&1 || useradd --system --no-create-home --shell /usr/sbin/nologin pilot-vm
 usermod -aG kvm pilot-vm
 
+# The user builds run as. Never root: a build is an arbitrary user Dockerfile
+# executing on a box that is also running other tenants' machines.
+id -u pilot >/dev/null 2>&1 || useradd --system --create-home --shell /bin/bash pilot
+grep -q "^pilot:" /etc/subuid || echo "pilot:100000:65536" >> /etc/subuid
+grep -q "^pilot:" /etc/subgid || echo "pilot:100000:65536" >> /etc/subgid
+# Without lingering, the user manager stops when nobody is logged in and
+# buildkitd goes with it -- so the first build after a reboot fails against a
+# socket that no longer exists.
+loginctl enable-linger pilot >/dev/null 2>&1 || true
+
 mkdir -p /var/lib/pilots/{machines,templates,corrosion} \
-         /var/cache/pilots /run/pilots/corrosion /opt/pilots/{bin,kernels} /etc/pilots
+         /var/cache/pilots /run/pilots/corrosion /opt/pilots/{bin,kernels} /etc/pilots \
+         /var/lib/pilot-volumes /mnt/pilot-volumes /var/cache/pilot-volumes \
+         /etc/pilots/litestream
+chmod 0700 /etc/pilots/litestream
 REMOTE
 
 # ---------------------------------------------------------------------------
@@ -190,11 +221,138 @@ if [ -f "/opt/pilots/kernels/vmlinux-${KERNEL_VERSION}/vmlinux.bin" ]; then
 fi
 
 # ---------------------------------------------------------------------------
-say "[6/10] hostd"
+say "[5b/10] Volume and build toolchain"
+# The heredoc is QUOTED, so nothing in it expands locally -- which is what
+# keeps the systemd units below intact, backslash continuations and all. The
+# versions travel as positional arguments instead.
+on_host bash -euo pipefail -s \
+  "$JUICEFS_VERSION" "$LITESTREAM_VERSION" "$BUILDKIT_VERSION" "$ROOTLESSKIT_VERSION" <<'REMOTE'
+JUICEFS_VERSION="$1"; LITESTREAM_VERSION="$2"
+BUILDKIT_VERSION="$3"; ROOTLESSKIT_VERSION="$4"
+
+# Checked against a marker file rather than --version: several of these report
+# a version string that does not match their release tag, so a version grep
+# never matches and every re-run downloads the lot again.
+install_from_tarball() {
+  url="$1"; binary="$2"; dest="$3"; version="$4"
+  if [ -x "$dest" ] && [ "$(cat "$dest.version" 2>/dev/null)" = "$version" ]; then
+    echo "  $(basename "$dest") already at $version"
+    return
+  fi
+  tmp=$(mktemp -d)
+  curl -fsSL "$url" -o "$tmp/dl.tgz"
+  tar -xzf "$tmp/dl.tgz" -C "$tmp"
+  install -m 0755 "$(find "$tmp" -name "$binary" -type f | head -1)" "$dest"
+  echo "$version" > "$dest.version"
+  rm -rf "$tmp"
+  echo "  installed $(basename "$dest") $version"
+}
+
+install_from_tarball \
+  "https://github.com/juicedata/juicefs/releases/download/v${JUICEFS_VERSION}/juicefs-${JUICEFS_VERSION}-linux-amd64.tar.gz" \
+  juicefs /opt/pilots/bin/juicefs "$JUICEFS_VERSION"
+
+install_from_tarball \
+  "https://github.com/benbjohnson/litestream/releases/download/v${LITESTREAM_VERSION}/litestream-v${LITESTREAM_VERSION}-linux-amd64.tar.gz" \
+  litestream /opt/pilots/bin/litestream "$LITESTREAM_VERSION"
+
+BUILDKIT_URL="https://github.com/moby/buildkit/releases/download/v${BUILDKIT_VERSION}/buildkit-v${BUILDKIT_VERSION}.linux-amd64.tar.gz"
+for b in buildctl buildkitd buildkit-runc; do
+  install_from_tarball "$BUILDKIT_URL" "$b" "/opt/pilots/bin/$b" "$BUILDKIT_VERSION"
+done
+
+install_from_tarball \
+  "https://github.com/rootless-containers/rootlesskit/releases/download/v${ROOTLESSKIT_VERSION}/rootlesskit-x86_64.tar.gz" \
+  rootlesskit /opt/pilots/bin/rootlesskit "$ROOTLESSKIT_VERSION"
+
+# Litestream replicates one volume's metadata database: a template unit, one
+# instance per volume, started by hostd when it creates or takes over that
+# volume.
+#
+# systemd's rather than a child of hostd, for the same reason the machines are
+# systemd's: the durability it provides must not be a property of whether the
+# daemon happens to be up. The stop timeout is load-bearing -- litestream
+# flushes on a graceful shutdown, and a volume handover STOPS the unit to make
+# that flush happen, so a short timeout turns the handover into a lost final
+# upload.
+cat >/etc/systemd/system/litestream@.service <<'UNIT'
+[Unit]
+Description=pilots volume metadata replication (%i)
+After=network-online.target
+
+[Service]
+ExecStart=/opt/pilots/bin/litestream replicate -config /etc/pilots/litestream/%i.yml
+Restart=always
+RestartSec=2
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+# Rootless BuildKit, as the unprivileged pilot user and never as root.
+#
+# --disable-host-loopback is load-bearing rather than hygiene: without it a
+# Dockerfile can reach whatever is bound to the host's loopback, and on a
+# pilots host that is the corrosion API and hostd's own control plane.
+install -d -o pilot -g pilot /home/pilot/.config/systemd/user
+cat >/home/pilot/.config/systemd/user/buildkitd.service <<'UNIT'
+[Unit]
+Description=pilots rootless buildkitd
+
+[Service]
+Environment=PATH=/opt/pilots/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/opt/pilots/bin/rootlesskit --net=slirp4netns --copy-up=/etc --copy-up=/run --disable-host-loopback /opt/pilots/bin/buildkitd --oci-worker-snapshotter=overlayfs
+Restart=always
+RestartSec=2
+# A build is arbitrary user code running beside other tenants' machines. An
+# unbounded one OOMs the host and takes every machine on it down with it.
+MemoryMax=8G
+CPUQuota=400%
+TasksMax=4096
+
+[Install]
+WantedBy=default.target
+UNIT
+chown -R pilot:pilot /home/pilot/.config
+
+# cgroup v2 delegation, so the rootless daemon can put each build in its own
+# slice. Without it buildkitd starts happily and every build fails on a cgroup
+# write, which reads as a permission problem and is not one.
+mkdir -p /etc/systemd/system/user@.service.d
+cat >/etc/systemd/system/user@.service.d/delegate.conf <<'CONF'
+[Service]
+Delegate=cpu cpuset io memory pids
+CONF
+
+systemctl daemon-reload
+PILOT_UID=$(id -u pilot)
+runuser -u pilot -- env XDG_RUNTIME_DIR="/run/user/$PILOT_UID" \
+  systemctl --user daemon-reload >/dev/null 2>&1 || true
+if runuser -u pilot -- env XDG_RUNTIME_DIR="/run/user/$PILOT_UID" \
+     systemctl --user enable --now buildkitd >/dev/null 2>&1; then
+  echo "  buildkitd running"
+else
+  echo "  WARNING: buildkitd did not start; builds will fail on this host" >&2
+fi
+REMOTE
+
+# ---------------------------------------------------------------------------
+say "[6/10] hostd and the guest agent"
 ( cd "${REPO}/apps/hostd" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/pilots-hostd ./cmd/hostd )
 scp $SSH_OPTS -q /tmp/pilots-hostd "root@${IP}:/opt/pilots/bin/hostd.new"
 on_host "chmod 0755 /opt/pilots/bin/hostd.new && mv /opt/pilots/bin/hostd.new /opt/pilots/bin/hostd"
 rm -f /tmp/pilots-hostd
+
+# The agent is injected into every image a build produces. Without it a built
+# machine boots and is unreachable: exec, the clock poke and the port proxy all
+# go through it. Static, because the guest has no toolchain and no shared
+# libraries we control -- and it may end up as the guest's PID 1.
+( cd "${REPO}/apps/hostd" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    go build -ldflags="-s -w" -o /tmp/pilots-guest-agent ./cmd/guest-agent )
+scp $SSH_OPTS -q /tmp/pilots-guest-agent "root@${IP}:/opt/pilots/bin/guest-agent.new"
+on_host "chmod 0755 /opt/pilots/bin/guest-agent.new && mv /opt/pilots/bin/guest-agent.new /opt/pilots/bin/guest-agent"
+rm -f /tmp/pilots-guest-agent
 
 # ---------------------------------------------------------------------------
 say "[7/10] Mesh identity and host configuration"
@@ -235,6 +393,7 @@ PILOT_S3_BUCKET=${BUCKET}
 PILOT_S3_ACCESS_KEY=${S3_KEY}
 PILOT_S3_SECRET_KEY=${S3_SECRET}
 PILOT_TEMPLATE_ROOTFS=/var/lib/pilots/templates/golden.ext4
+PILOT_GUEST_AGENT=/opt/pilots/bin/guest-agent
 PILOT_KERNEL=/opt/pilots/kernels/vmlinux-${KERNEL_VERSION}/vmlinux.bin
 PILOT_FIRECRACKER=/opt/pilots/bin/firecracker
 PILOT_JAILER=/opt/pilots/bin/jailer
@@ -385,6 +544,33 @@ systemctl is-active --quiet corrosion && echo "  corrosion running"
 # still passes every correctness test -- it is just several times slower at
 # the two operations the product is named for, with nothing anywhere saying
 # so. That is worth a loud line at the end of a bootstrap.
+# mke2fs -d can read a tarball only if e2fsprogs was built with libarchive AND
+# the shared library is there at run time. Neither is guaranteed, and a host
+# missing it fails every build with an error that names neither. hostd probes
+# the same thing at startup and falls back to unpacking under fakeroot; this
+# says so out loud at bootstrap, because the fallback is slower and the
+# operator should know which path this host is on.
+PROBE=$(mktemp -d)
+: > "$PROBE/empty"
+tar -cf "$PROBE/probe.tar" -C "$PROBE" empty
+if mke2fs -q -F -t ext4 -b 4096 -d "$PROBE/probe.tar" "$PROBE/probe.ext4" 2M >/dev/null 2>&1; then
+  echo "  mke2fs tarball input: yes"
+else
+  echo "  mke2fs tarball input: NO -- e2fsprogs here has no libarchive support."
+  echo "    Builds will unpack under fakeroot instead, which works and is slower."
+fi
+rm -rf "$PROBE"
+
+# The rootless build daemon. A host whose buildkitd is not listening still
+# serves machines perfectly well and cannot build anything, which is worth a
+# line rather than a surprise on the first deploy.
+PILOT_UID=$(id -u pilot 2>/dev/null || echo 0)
+if [ -S "/run/user/${PILOT_UID}/buildkit/buildkitd.sock" ]; then
+  echo "  buildkitd: listening"
+else
+  echo "  buildkitd: NOT listening -- builds will fail on this host" >&2
+fi
+
 REFLINK=$(curl -sf http://127.0.0.1:8080/v1/health |
   python3 -c 'import sys,json;print(json.load(sys.stdin).get("reflink"))' 2>/dev/null || echo None)
 if [ "$REFLINK" = True ]; then
