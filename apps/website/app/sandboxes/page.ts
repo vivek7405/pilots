@@ -5,6 +5,7 @@ import { section } from '#lib/ui/section.ts';
 import { readout, inlineFact } from '#lib/ui/stat.ts';
 import { PANEL, PROSE, LINK, FIELD_LABEL, BTN_PRIMARY, BTN_GHOST } from '#lib/design/recipes.ts';
 import { WORKLOAD_APEX, GH_URL, NEW_TAB } from '#lib/links.ts';
+import { pageHero } from '#lib/ui/page-hero.ts';
 
 /**
  * The sandbox face.
@@ -24,19 +25,15 @@ export const metadata = {
 
 export default function Sandboxes() {
   return html`
-    <div class="border-b border-rule">
-      <div class="max-w-6xl mx-auto px-6 pt-16 pb-14 mid:pt-20">
-        <p class="${FIELD_LABEL} m-0 mb-4">Sandboxes</p>
-        <h1 class="text-display font-bold leading-[1.02] m-0 max-w-[18ch]">
-          Somewhere safe to run code nobody has read
-        </h1>
-        <p class="${PROSE} text-lede mt-6">
-          An agent writes code and needs to run it immediately, in a place where the worst outcome is
-          a machine you throw away. A real virtual machine gives you that boundary. Restoring one
-          from a snapshot instead of booting it is what makes the boundary affordable.
-        </p>
-      </div>
-    </div>
+    ${pageHero({
+      eyebrow: 'Sandboxes',
+      heading: 'Somewhere safe to run code nobody has read',
+      lede: html`An agent writes code and needs to run it immediately, in a place where the worst outcome is
+        a machine you throw away. A real virtual machine gives you that boundary. Restoring one from a
+        snapshot instead of booting it is what makes the boundary affordable.`,
+      actions: html`<a class=${BTN_PRIMARY} href="/deploy">Then promote it</a>
+        <a class=${BTN_GHOST} href=${GH_URL} target="_blank" rel="noopener">Read the source${NEW_TAB}</a>`,
+    })}
 
     ${section({
       id: 'speed',

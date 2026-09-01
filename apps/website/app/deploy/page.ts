@@ -3,6 +3,7 @@ import { terminal } from '#lib/ui/terminal.ts';
 import { section } from '#lib/ui/section.ts';
 import { PANEL, PROSE, LINK, FIELD_LABEL, BTN_PRIMARY, BTN_GHOST, HAIRLINE } from '#lib/design/recipes.ts';
 import { WORKLOAD_APEX, WEBJS_URL, GH_URL, NEW_TAB } from '#lib/links.ts';
+import { pageHero } from '#lib/ui/page-hero.ts';
 
 /**
  * The PaaS face.
@@ -22,20 +23,14 @@ export const metadata = {
 
 export default function Deploy() {
   return html`
-    <div class="border-b border-rule">
-      <div class="max-w-6xl mx-auto px-6 pt-16 pb-14 mid:pt-20">
-        <p class="${FIELD_LABEL} m-0 mb-4">Services</p>
-        <h1 class="text-display font-bold leading-[1.02] m-0 max-w-[17ch]">
-          Ship a Dockerfile, keep the old one running
-        </h1>
-        <p class="${PROSE} text-lede mt-6">
-          Point pilots at any repository with a Dockerfile and it builds a microVM image, starts it
-          behind a health check, and cuts traffic over only once the new release answers. The
-          previous release stays alive until then, which is what makes a rollback instant rather
-          than a rebuild.
-        </p>
-      </div>
-    </div>
+    ${pageHero({
+      eyebrow: 'Services',
+      heading: 'Ship a Dockerfile, keep the old one running',
+      lede: html`Point pilots at any repository with a Dockerfile and it builds a microVM image, starts it
+        behind a health check, and cuts traffic over only once the new release answers. The previous
+        release stays alive until then, which is what makes a rollback instant rather than a rebuild.`,
+      actions: html`<a class=${BTN_PRIMARY} href="/architecture">How it works underneath</a>`,
+    })}
 
     ${section({
       id: 'build',

@@ -28,7 +28,8 @@ import { GH_URL, WEBJS_URL, WORKLOAD_APEX, NEW_TAB } from '#lib/links.ts';
  * That rule outranks the hand-off between sections whenever they conflict.
  */
 
-const HERO_TRANSCRIPT = terminal('one machine, from scratch pad to production', [
+function heroTranscript() {
+  return terminal('one machine, from scratch pad to production', [
   { kind: 'cmd', text: 'pilot create --template node' },
   { kind: 'mark', text: `bold-otter.${WORKLOAD_APEX}` },
   { kind: 'cmd', text: 'pilot exec bold-otter -- npm test' },
@@ -37,8 +38,9 @@ const HERO_TRANSCRIPT = terminal('one machine, from scratch pad to production', 
   { kind: 'out', text: 'checkpoint green (uploading in background)' },
   { kind: 'cmd', text: 'pilot promote bold-otter' },
   { kind: 'mark', text: `bold-otter.${WORKLOAD_APEX}` },
-  { kind: 'note', text: 'same address, now a production service' },
-]);
+    { kind: 'note', text: 'same address, now a production service' },
+  ]);
+}
 
 export default function Home() {
   return html`
@@ -77,7 +79,7 @@ export default function Home() {
             </p>
           </div>
 
-          <div class="wide:pl-4">${HERO_TRANSCRIPT}</div>
+          <div class="wide:pl-4">${heroTranscript()}</div>
         </div>
       </div>
     </div>

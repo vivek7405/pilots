@@ -3,6 +3,7 @@ import { section } from '#lib/ui/section.ts';
 import { PROSE, LINK, FIELD_LABEL, BTN_GHOST } from '#lib/design/recipes.ts';
 import { inlineFact } from '#lib/ui/stat.ts';
 import { GH_URL, GH_BOARD_URL, NEW_TAB } from '#lib/links.ts';
+import { pageHero } from '#lib/ui/page-hero.ts';
 
 /**
  * The roadmap.
@@ -113,25 +114,15 @@ const STATUS_LABEL: Record<Status, string> = {
 
 export default function Roadmap() {
   return html`
-    <div class="border-b border-rule">
-      <div class="max-w-6xl mx-auto px-6 pt-16 pb-14 mid:pt-20">
-        <p class="${FIELD_LABEL} m-0 mb-4">Roadmap</p>
-        <h1 class="text-display font-bold leading-[1.02] m-0 max-w-[16ch]">
-          Four phases closed, one being built
-        </h1>
-        <p class="${PROSE} text-lede mt-6">
-          A phase closes when its gate passes, not when its code is written. That is the rule the
-          repository holds itself to, so it is the rule this page reports against. The gates are
-          below in full, including the ones that have not been met.
-        </p>
-        <div class="flex flex-wrap gap-3 mt-8">
-          <a class=${BTN_GHOST} href=${GH_BOARD_URL} target="_blank" rel="noopener"
-            >The project board${NEW_TAB}</a
-          >
-          <a class=${BTN_GHOST} href=${GH_URL} target="_blank" rel="noopener">The source${NEW_TAB}</a>
-        </div>
-      </div>
-    </div>
+    ${pageHero({
+      eyebrow: 'Roadmap',
+      heading: 'Four phases closed, one being built',
+      lede: html`A phase closes when its gate passes, not when its code is written. That is the rule the
+        repository holds itself to, so it is the rule this page reports against. The gates are below
+        in full, including the ones that have not been met.`,
+      actions: html`<a class=${BTN_GHOST} href=${GH_BOARD_URL} target="_blank" rel="noopener">The project board${NEW_TAB}</a>
+        <a class=${BTN_GHOST} href=${GH_URL} target="_blank" rel="noopener">The source${NEW_TAB}</a>`,
+    })}
 
     ${section({
       id: 'phases',
