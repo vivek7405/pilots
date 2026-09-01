@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -297,5 +298,72 @@ func TestImageSizeMiB(t *testing.T) {
 	// from taking the host with it.
 	if got := imageSizeMiB(100_000*mib, 2048, 32768); got != 32768 {
 		t.Errorf("got %d MiB, want the ceiling of 32768", got)
+	}
+}
+
+// The bug the read-based terminator lookup exists for.
+//
+// An entry whose own content ends with 512 zero bytes pads out to a zero
+// record that is byte-identical to the end-of-archive marker. A truncation
+// that walks back over trailing zeros from the end of the file eats into that
+// entry, and the archive is silently cut mid-content -- an image missing
+// whatever came last, with nothing to report it.
+func TestFixupsSurviveAnEntryThatEndsInZeros(t *testing.T) {
+	dir := t.TempDir()
+	tarPath := filepath.Join(dir, "rootfs.tar")
+
+	body := make([]byte, 1536) // three whole records, the last two all zeros
+	copy(body, []byte("real content"))
+	writeTar(t, tarPath, []tar.Header{
+		{Name: "data.bin", Typeflag: tar.TypeReg, Mode: 0o644},
+	}, map[string]string{"data.bin": string(body)})
+
+	if err := applyFixups(tarPath, Fixups{AgentBinary: stageAgent(t)}, false); err != nil {
+		t.Fatalf("applyFixups: %v", err)
+	}
+
+	f, err := os.Open(tarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+
+	var seenData, seenAgent bool
+	tr := tar.NewReader(f)
+	for {
+		h, err := tr.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatalf("the archive is no longer readable: %v", err)
+		}
+		switch strings.TrimPrefix(h.Name, "./") {
+		case "data.bin":
+			got, err := io.ReadAll(tr)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != len(body) || !bytes.Equal(got, body) {
+				t.Fatalf("the entry was truncated: %d bytes back, want %d", len(got), len(body))
+			}
+			seenData = true
+		case "opt/pilot-agent/guest-agent":
+			seenAgent = true
+		}
+	}
+	if !seenData {
+		t.Error("the original entry disappeared")
+	}
+	if !seenAgent {
+		t.Error("the fixups were not appended")
+	}
+}
+
+func TestTruncateTarTerminatorRejectsAnEmptyArchive(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "empty.tar")
+	writeTar(t, p, nil, nil)
+	if err := truncateTarTerminator(p); err == nil {
+		t.Fatal("an archive with no entries was accepted; there is nothing to build from it")
 	}
 }

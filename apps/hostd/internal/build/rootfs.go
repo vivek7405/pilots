@@ -258,16 +258,17 @@ func applyFixups(tarPath string, f Fixups, hasSystemd bool) error {
 	return nil
 }
 
-// tarTerminator is the two zero blocks that end a tar archive.
-const tarTerminator = 2 * 512
+// tarBlock is the archive's fixed record size.
+const tarBlock = 512
 
 // truncateTarTerminator removes the end-of-archive marker so entries can be
 // appended.
 //
-// The marker is two 512-byte zero blocks, and a reader stops at the first one.
-// Some writers pad the archive out to a larger block factor afterwards, so the
-// trailing zeros can run longer than 1024 bytes -- every one of them has to go,
-// or the appended entries sit behind a terminator and are never read.
+// The offset is found by READING the archive rather than by walking back over
+// trailing zero blocks from the end. The walk-back version is the obvious one
+// and it is wrong: a file whose own last bytes happen to be zeros pads out to
+// a zero block that is indistinguishable from the terminator, so the walk eats
+// into real content and the archive is silently truncated mid-entry.
 func truncateTarTerminator(path string) error {
 	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
 	if err != nil {
@@ -279,37 +280,59 @@ func truncateTarTerminator(path string) error {
 	if err != nil {
 		return fmt.Errorf("build: stat %s: %w", path, err)
 	}
-	size := info.Size()
-	if size < tarTerminator {
-		return fmt.Errorf("build: %s is too short to be a tar archive (%d bytes)", path, size)
-	}
 
-	// Walk back over whole zero blocks from the end.
-	block := make([]byte, 512)
-	end := size
-	for end >= 512 {
-		if _, err := f.ReadAt(block, end-512); err != nil && err != io.EOF {
-			return fmt.Errorf("build: read %s: %w", path, err)
-		}
-		if !allZero(block) {
+	counter := &countingReader{r: f}
+	tr := tar.NewReader(counter)
+
+	var end int64
+	var entries int
+	for {
+		_, err := tr.Next()
+		if err == io.EOF {
 			break
 		}
-		end -= 512
+		if err != nil {
+			return fmt.Errorf("build: %s is not a readable tar archive: %w", path, err)
+		}
+		// Consume the entry so the counter is past its data. The padding to
+		// the next record boundary is consumed by the following Next(), so it
+		// is accounted for by rounding rather than by reading.
+		if _, err := io.Copy(io.Discard, tr); err != nil {
+			return fmt.Errorf("build: read %s: %w", path, err)
+		}
+		end = roundUpToBlock(counter.n)
+		entries++
 	}
-	if end == size {
+
+	if entries == 0 {
+		return fmt.Errorf("build: %s contains no entries; it is not a filesystem "+
+			"archive", path)
+	}
+	if end >= info.Size() {
 		return fmt.Errorf("build: %s has no end-of-archive marker; it is not a "+
 			"complete tar archive", path)
 	}
 	return f.Truncate(end)
 }
 
-func allZero(b []byte) bool {
-	for _, c := range b {
-		if c != 0 {
-			return false
-		}
+// countingReader reports how many bytes have been consumed, which is how the
+// end of the last entry is located exactly.
+type countingReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += int64(n)
+	return n, err
+}
+
+func roundUpToBlock(n int64) int64 {
+	if rem := n % tarBlock; rem != 0 {
+		return n + tarBlock - rem
 	}
-	return true
+	return n
 }
 
 // tarHasSystemd reports whether the built image carries systemd.
