@@ -13,6 +13,7 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/state"
@@ -220,10 +221,16 @@ func rescue(ctx context.Context, opts Options, m state.Machine) {
 	// suspended or checkpointed, so there is nothing in object storage to
 	// bring back. Looping on it every tick forever helps nobody.
 	if m.MemBuildID == "" {
-		slog.Error("a machine cannot be rescued: it has no snapshot in object "+
-			"storage, so its state did not survive its host",
-			"machine", m.ID, "dead_host", m.HostID)
-		markUnrescuable(ctx, opts, m)
+		// Nothing is written to the row. Claiming a machine this host cannot
+		// restore would be destruction, not rescue: the owner may only be
+		// partitioned, still running the machine -- a claim here makes the
+		// returning owner kill its own healthy VM, with nothing anywhere to
+		// bring back. Logged once per machine instead of every tick.
+		if _, seen := unrescuable.LoadOrStore(m.ID, struct{}{}); !seen {
+			slog.Error("a machine cannot be rescued: it has no snapshot in object "+
+				"storage, so its state did not survive its host",
+				"machine", m.ID, "dead_host", m.HostID)
+		}
 		return
 	}
 
@@ -251,14 +258,11 @@ func rescue(ctx context.Context, opts Options, m state.Machine) {
 	slog.Info("machine rescued", "machine", m.ID, "url", m.Domain)
 }
 
-// markUnrescuable records why a machine will not come back, once, rather than
-// retrying it on every tick forever.
-func markUnrescuable(ctx context.Context, opts Options, m state.Machine) {
-	if err := opts.Store.ClaimMachine(ctx, m.ID, opts.HostID, "error",
-		state.WithDeadOwnerClaim(m.HostID)); err != nil {
-		slog.Debug("could not mark an unrescuable machine", "machine", m.ID, "err", err)
-	}
-}
+// unrescuable remembers machines this process has already given up on, so the
+// rescue loop logs each of them once rather than on every tick. In-memory on
+// purpose: it suppresses a log line, never a rescue -- a machine that later
+// gains a snapshot takes the rescue path and never consults this set.
+var unrescuable sync.Map
 
 // sortedByID puts the live set in the one order every host must agree on.
 func sortedByID(hosts []state.Host) []state.Host {

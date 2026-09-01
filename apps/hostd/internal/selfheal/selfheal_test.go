@@ -325,10 +325,13 @@ func TestAMachineWithNoSnapshotIsNotRetriedForever(t *testing.T) {
 	if restores != 0 {
 		t.Errorf("tried to restore a machine with no snapshot %d times", restores)
 	}
+	// The row must be left alone: the owner may only be partitioned and still
+	// serving the machine, and a claim from a host with nothing to restore
+	// would make the returning owner kill its own healthy VM.
 	if got, err := store.GetMachine(context.Background(), "m-1"); err != nil {
 		t.Fatal(err)
-	} else if got.State != "error" {
-		t.Errorf("state = %q, want error so it stops being retried", got.State)
+	} else if got.HostID != "host-dead" {
+		t.Errorf("host_id = %q; a machine with no snapshot must never be claimed", got.HostID)
 	}
 }
 
