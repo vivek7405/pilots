@@ -154,5 +154,15 @@ func Load() (*Config, error) {
 	if c.HostID == "" {
 		return nil, fmt.Errorf("PILOT_HOST_ID is unset and the hostname is empty")
 	}
+	if c.Fleet() && !c.MeshEnabled {
+		// Refused rather than tolerated: such a host joins the replicated
+		// store and creates machines there, but never heartbeats and never
+		// runs the self-heal loops. Its peers judge it dead and rescue
+		// machines it is still serving -- silent dual-run, the exact failure
+		// the fleet exists to prevent.
+		return nil, fmt.Errorf("PILOT_STATE_BACKEND=corrosion requires PILOT_MESH_ENABLED=1: " +
+			"a fleet host that is not on the mesh never heartbeats, so its peers " +
+			"will judge it dead and rescue machines it is still serving")
+	}
 	return c, nil
 }
