@@ -202,6 +202,15 @@ func prepareJail(cfg Config) (chrootDir string, err error) {
 	if err := stageVolume(chrootDir, cfg.VolumeImage, cfg.JailUID, cfg.JailGID); err != nil {
 		return "", err
 	}
+	// A bind mount left behind by a prepare that then failed keeps the
+	// volume's image open, so `juicefs umount` refuses and the volume is
+	// pinned to a host that never even started a machine. There is no Machine
+	// yet whose Kill would release it, so release it here.
+	defer func() {
+		if err != nil {
+			_ = unstageVolume(chrootDir)
+		}
+	}()
 
 	kernel := filepath.Join(chrootDir, "vmlinux.bin")
 	if err := hardlinkOrCopy(cfg.KernelPath, kernel); err != nil {
@@ -229,6 +238,7 @@ func Boot(ctx context.Context, cfg Config) (*Machine, error) {
 	serialLog := filepath.Join(cfg.StateDir, "lifecycle.log")
 	logFile, err := os.Create(serialLog)
 	if err != nil {
+		_ = unstageVolume(chrootDir)
 		return nil, fmt.Errorf("fc: create serial log: %w", err)
 	}
 	defer logFile.Close()
@@ -265,6 +275,9 @@ func Boot(ctx context.Context, cfg Config) (*Machine, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
+		// Nothing is holding the volume's image but this bind mount, and no
+		// Machine exists to release it later.
+		_ = unstageVolume(chrootDir)
 		return nil, fmt.Errorf("fc: start jailer: %w", err)
 	}
 
