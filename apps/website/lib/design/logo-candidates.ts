@@ -127,27 +127,21 @@ export const CANDIDATES: Candidate[] = [
     `,
   },
   {
-    id: 'delta-100',
-    name: 'Delta 100',
+    id: 'delta-90',
+    name: 'Delta 90',
     idea:
-      'The same drawing turned a quarter and a further ten degrees, so the nose settles just under the horizontal rather than sitting level on it. Nothing else changes: the same path, the same lean, the same partition, which now stands up as a near-vertical cut instead of lying across the mark.',
+      'The same drawing given a quarter turn, nose on a heading rather than climbing. Nothing else changes: the same path, the same lean, the same partition, which now stands up as a vertical cut instead of lying across the mark.',
     cost:
-      'Turned this way it still reads as a cursor before it reads as an aircraft, and the extra ten degrees buy less separation from that than they cost in balance. The mark now leans out of the tile rather than sitting square in it.',
+      'Turned this way it reads as a cursor or a play control before it reads as an aircraft, which are two of the most heavily spoken-for shapes in software. Pointing up, the climb was what kept it out of their company.',
     art: () => html`
-      <!-- The turn is applied to the whole mark, partition included, and about
-           the tile's centre rather than the ink's. The two are within a third of
+      <!-- The quarter turn is applied to the whole mark, partition included, and
+           about the tile's centre rather than the ink's. The two are within a third of
            a unit of each other, so turning about the tile costs nothing and
            keeps this readable beside the upright version above.
 
-           Past ninety the ink no longer sits centred in the tile: it settles
-           towards the upper left, because the drawing's own lean means its axis
-           was already off vertical before any of this was applied. Nothing here
-           corrects for that, since the point of the card is to show the turn
-           rather than a tidied version of it.
-
            The slice is emitted after the path, inside the same rotation, so it
            still cuts what it cut before. -->
-      <g transform="rotate(100 16 16)">
+      <g transform="rotate(90 16 16)">
         <g transform="translate(5.4 0)">
           <g transform="skewX(-11)">
             <path d="M16 3.8 L26.8 27.6 L16 21.4 L5.2 27.6 Z" fill=${ACCENT_INK} />
