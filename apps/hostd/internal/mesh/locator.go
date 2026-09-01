@@ -61,6 +61,14 @@ func (l *Locator) MachineAddress(m state.Machine) (netip.Addr, bool) {
 // prefixFor is the machine block a host owns.
 func (l *Locator) prefixFor(hostID string) (netip.Prefix, bool) {
 	if hostID == l.selfID {
+		// A host that failed to load its identity holds the ZERO key, and
+		// every host in that state derives the same block -- so answering
+		// here would put unrelated machines on each other's addresses. The
+		// same reason main.go leaves the machine prefix zero rather than
+		// deriving one from a key it does not have.
+		if l.selfKey == (wgtypes.Key{}) {
+			return netip.Prefix{}, false
+		}
 		return MachinePrefixFor(l.selfKey), true
 	}
 	if l.hosts == nil {

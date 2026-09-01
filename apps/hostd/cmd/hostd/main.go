@@ -177,18 +177,22 @@ func run() error {
 	locator := mesh.NewLocator(cfg.HostID, meshKeys.Public, view)
 
 	// The .internal responder. Built here because the machine manager tells it
-	// when a namespace appears; a host with no mesh identity gets none, and
-	// its machines simply have nothing to resolve.
-	var discovery machines.Discovery
-	if machinePrefix.IsValid() {
-		upstreams, err := dns.ParseUpstreams(cfg.DNSUpstream)
-		if err != nil {
-			return err
-		}
-		responder := dns.New(dns.NewFleetResolver(view, locator), upstreams)
-		defer responder.Close()
-		discovery = responder
+	// when a namespace appears.
+	//
+	// Built UNCONDITIONALLY, including on a host with no mesh identity. The
+	// guest rootfs names the gateway as its ONLY nameserver, so this is not
+	// merely where .internal is answered -- it is where every lookup a guest
+	// makes is answered, and a host without it runs machines that cannot
+	// resolve anything at all. Without a mesh identity the resolver simply
+	// finds no machine addresses and everything is forwarded upstream, which
+	// is the honest version of "nothing to discover".
+	upstreams, err := dns.ParseUpstreams(cfg.DNSUpstream)
+	if err != nil {
+		return err
 	}
+	responder := dns.New(dns.NewFleetResolver(view, locator), upstreams)
+	defer responder.Close()
+	var discovery machines.Discovery = responder
 
 	// The fleet key. Parsed at startup so a malformed one is a host that
 	// refuses to start rather than a create that fails much later, after a
