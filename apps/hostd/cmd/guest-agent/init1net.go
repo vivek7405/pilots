@@ -1,13 +1,15 @@
 package main
 
 import (
+	"errors"
 	"log"
 	"net"
 
 	"github.com/vishvananda/netlink"
+	"golang.org/x/sys/unix"
 )
 
-// The guest's IPv6 half of its link, configured by the agent when it is PID 1.
+// The guest's IPv6 half of its link, configured by the agent at startup.
 //
 // These are the same constants scripts/rootfs/eth0.network declares, and they
 // have to stay identical: every guest in the fleet shares them, which is what
@@ -21,8 +23,10 @@ const (
 // configureNetwork gives eth0 its IPv6 address and the route to its peers.
 //
 // The golden rootfs gets these from systemd-networkd. An image built from a
-// user's Dockerfile has no init at all -- this binary IS its init -- so
-// nothing configures them, and nothing ever reported that: the kernel's ip=
+// user's Dockerfile gets them from nowhere: with no init of its own this
+// binary IS its init, and with systemd present the build makes this a unit
+// and systemd-networkd is not enabled to read a .network file the build does
+// not write either. Nothing ever reported that: the kernel's ip=
 // boot argument sets up IPv4, the machine boots, serves, and answers health
 // checks, and only .internal is quietly missing. DNS still resolves a peer's
 // name because that is answered on the host, and the tenant filter still
@@ -48,11 +52,11 @@ func configureNetwork() {
 		log.Printf("guest-agent: bad guest address %q: %v", guestIP6, err)
 		return
 	}
-	if err := netlink.AddrAdd(link, addr); err != nil {
-		// Already present is not a failure: the image may carry an init that
-		// configured it, in which case this is a no-op and the route below
-		// still needs attempting.
-		log.Printf("guest-agent: could not add %s (may already be set): %v", guestIP6, err)
+	// EEXIST is success. This runs on every agent start, including a restart
+	// of the systemd unit and an image whose own init already configured the
+	// link, and in those cases the address is simply already there.
+	if err := netlink.AddrAdd(link, addr); err != nil && !errors.Is(err, unix.EEXIST) {
+		log.Printf("guest-agent: could not add %s: %v", guestIP6, err)
 	}
 
 	if err := netlink.LinkSetUp(link); err != nil {
@@ -77,7 +81,7 @@ func configureNetwork() {
 		LinkIndex: link.Attrs().Index,
 		Dst:       dst,
 		Gw:        gw,
-	}); err != nil {
+	}); err != nil && !errors.Is(err, unix.EEXIST) {
 		log.Printf("guest-agent: could not route %s via %s, so peers are "+
 			"unreachable by name: %v", peerPrefix, gateway6, err)
 	}

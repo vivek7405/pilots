@@ -70,6 +70,21 @@ func main() {
 		runAsInit()
 	}
 
+	// The guest's own addressing, and NOT under isPID1.
+	//
+	// A built image that carries systemd gets /sbin/init pointed at systemd by
+	// the build, and this agent runs as a unit instead of as init -- so gating
+	// this on PID 1 fixed alpine and left `FROM ubuntu:24.04` with no fdee::21
+	// and no route to its peers, which is the identical silent failure the
+	// PID-1 path exists to prevent. The build writes no .network file either;
+	// the golden rootfs's comes from scripts/rootfs/eth0.network, which a
+	// Dockerfile build never sees.
+	//
+	// Safe to run in both cases because it is idempotent: an address or route
+	// already configured (by systemd-networkd, or by a previous restart of
+	// this unit) reports EEXIST and is treated as success.
+	configureNetwork()
+
 	raw, err := os.ReadFile(tokenFile)
 	if err != nil {
 		die("read %s: %v", tokenFile, err)

@@ -88,10 +88,6 @@ func runAsInit() {
 		}
 	}
 
-	// Only PID 1 does this, and only an image with no init of its own reaches
-	// here -- the golden rootfs runs systemd, which configures eth0 itself.
-	configureNetwork()
-
 	go reapChildren()
 }
 
