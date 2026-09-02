@@ -1177,30 +1177,51 @@ async function multiServiceAssertions() {
   }
 
   async function runMultiService() {
-    // One build serves both services: this is about wiring them together, not
-    // about their contents differing.
-    let build;
-    await step('a build for the multi-service app', async () => {
-      const res = await postTar('/v1/builds', tarball({
-        'Dockerfile': [
-          'FROM alpine:3.20',
-          // curl, not busybox wget: the assertion below reads the resolved peer
-          // address out of curl's -w, which is how it tells "reached the right
-          // machine" from "reached something".
-          'RUN apk add --no-cache curl',
-          `RUN echo ${tag} > /etc/pilots-app-marker`,
-          'CMD ["/bin/sh", "-c", "while true; do sleep 3600; done"]',
-          '',
-        ].join('\n'),
-      }));
-      assert(res.status === 200, `build: HTTP ${res.status}`);
-      const text = await res.text();
-      for (const line of text.trim().split('\n')) {
-        try { const o = JSON.parse(line); if (o.result) build = o.result; } catch {}
-      }
-      assert(build, `no rootfs id:\n${text.slice(-300)}`);
-    });
-    if (!build) return;
+    // TWO builds, because the guest's addressing comes from a different place
+    // in each and only one of them was ever covered.
+    //
+    // A rootfs with no init of its own gets the guest agent as PID 1. A rootfs
+    // that carries systemd gets /sbin/init pointed at systemd and the agent
+    // installed as a unit instead -- a different code path to the same
+    // addresses, and the one a `FROM ubuntu` service actually takes. Building
+    // both proves .internal across the pair rather than on the easy half.
+    const builds = {};
+    const dockerfiles = {
+      // curl, not busybox wget: the assertion below reads the resolved peer
+      // address out of curl's -w, which is how it tells "reached the right
+      // machine" from "reached something".
+      web: [
+        'FROM alpine:3.20',
+        'RUN apk add --no-cache curl',
+        `RUN echo ${tag} > /etc/pilots-app-marker`,
+        'CMD ["/bin/sh", "-c", "while true; do sleep 3600; done"]',
+        '',
+      ].join('\n'),
+      // systemd is what makes this the other path -- tarHasSystemd looks for
+      // /usr/lib/systemd/systemd, which the bare ubuntu image does NOT carry,
+      // so installing it is the point rather than incidental.
+      db: [
+        'FROM ubuntu:24.04',
+        'ENV DEBIAN_FRONTEND=noninteractive',
+        'RUN apt-get update && apt-get install -y --no-install-recommends systemd curl ' +
+          '&& rm -rf /var/lib/apt/lists/*',
+        `RUN echo ${tag} > /etc/pilots-app-marker`,
+        'CMD ["/bin/sh", "-c", "while true; do sleep 3600; done"]',
+        '',
+      ].join('\n'),
+    };
+    for (const role of ['web', 'db']) {
+      await step(`a ${role} build for the multi-service app`, async () => {
+        const res = await postTar('/v1/builds', tarball({ 'Dockerfile': dockerfiles[role] }));
+        assert(res.status === 200, `build ${role}: HTTP ${res.status}`);
+        const text = await res.text();
+        for (const line of text.trim().split('\n')) {
+          try { const o = JSON.parse(line); if (o.result) builds[role] = o.result; } catch {}
+        }
+        assert(builds[role], `no rootfs id for ${role}:\n${text.slice(-300)}`);
+      });
+    }
+    if (!builds.web || !builds.db) return;
 
     // Both services carry an environment, and both are health-gated on a command
     // check so neither needs an HTTP listener of its own.
@@ -1216,7 +1237,7 @@ async function multiServiceAssertions() {
         assert(status === 201, `create ${role}: ${status} ${JSON.stringify(svc)}`);
 
         const { status: dstatus, json: rel } = await request(`/v1/services/${svc.id}/deploy`, {
-          method: 'POST', body: { build },
+          method: 'POST', body: { build: builds[role] },
         });
         assert(dstatus === 200, `deploy ${role}: ${dstatus} ${JSON.stringify(rel)}`);
         assert(rel.healthy,
@@ -1269,9 +1290,23 @@ async function multiServiceAssertions() {
       }
     });
 
-    // The line Phase 5 exists to prove: one service reaching another by name.
-    await step('web reaches db by <name>.internal', async () => {
-      const url = `http://${replicas.db.name}.internal:${AGENT_PORT}/health`;
+    // The line Phase 5 exists to prove: one service reaching another by the name
+    // the OPERATOR chose.
+    //
+    // The service name, never the replica's. createReplica does not set Name, so
+    // a replica is called something like amber-lagoon-x9f2 and gets a new one on
+    // every rollout -- asserting on that proves machine-to-machine discovery,
+    // which internalAssertions already covers, and leaves the thing an
+    // application would actually write (postgres://db.internal:5432) untested.
+    // An earlier version of this assertion did exactly that and passed while
+    // service names resolved to nothing.
+    await step('web reaches db by <service>.internal', async () => {
+      // Guarded, because an absent name would build "undefined.internal" and
+      // spend the full two-minute timeout proving nothing about discovery.
+      const dbName = services.db.svc.name;
+      assert(dbName, 'the service create response carried no name, so there is ' +
+        'no service name to resolve');
+      const url = `http://${dbName}.internal:${AGENT_PORT}/health`;
       let last = '';
       try {
         await waitFor(async () => {
@@ -1281,7 +1316,7 @@ async function multiServiceAssertions() {
           });
           last = (json?.stdout ?? '').trim();
           return last.startsWith('200');
-        }, { timeoutMs: 120_000, what: `web to reach ${replicas.db.name}.internal` });
+        }, { timeoutMs: 120_000, what: `web to reach ${dbName}.internal` });
       } catch (err) {
         // The last curl is the whole diagnostic, and it has to be read AFTER the
         // wait: interpolating it into `what` captures the empty string the loop
@@ -1323,9 +1358,10 @@ async function multiServiceAssertions() {
         `the outsider cannot even reach its own agent (curl said ${control || '(nothing)'}); ` +
         'the refusal below would prove nothing');
 
-      const code = await probe(`http://${replicas.db.name}.internal:${AGENT_PORT}/health`);
+      const dbName = services.db.svc.name;
+      const code = await probe(`http://${dbName}.internal:${AGENT_PORT}/health`);
       assert(code === '000',
-        `a machine in another app reached ${replicas.db.name}.internal (got ${code}); ` +
+        `a machine in another app reached ${dbName}.internal (got ${code}); ` +
         'the app boundary is not holding');
     });
   }
