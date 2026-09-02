@@ -364,10 +364,14 @@ restore_fleet_definition() {
   # and it recurs on EVERY gate run because adding a host is one of the
   # assertions. Leaving it to whoever runs the gate next to notice is not a
   # fix, it is a note.
+  # Literal sudo, like every other virsh call in this file. $SUDO is
+  # cluster-up.sh's convention and is EMPTY here, so the first version of this
+  # ran virsh unprivileged, failed the dominfo probe, and skipped the cleanup
+  # silently -- the gate passed 45/0 and left the host behind anyway.
   local added="${NODE_PREFIX}-$(( FLEET_NODES + 1 ))"
-  if $SUDO virsh dominfo "$added" >/dev/null 2>&1; then
-    $SUDO virsh destroy "$added" >/dev/null 2>&1 || true
-    $SUDO virsh undefine "$added" --remove-all-storage >/dev/null 2>&1 || true
+  if sudo virsh dominfo "$added" >/dev/null 2>&1; then
+    sudo virsh destroy "$added" >/dev/null 2>&1 || true
+    sudo virsh undefine "$added" --remove-all-storage >/dev/null 2>&1 || true
     echo "  cleaned up ${added}, the host this run added"
   fi
 }
