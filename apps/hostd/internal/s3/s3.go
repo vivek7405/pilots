@@ -20,6 +20,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -275,4 +276,50 @@ func isRangeNotSatisfiable(err error) bool {
 	}
 	return strings.Contains(err.Error(), "InvalidRange") ||
 		strings.Contains(err.Error(), "416")
+}
+
+// ObjectInfo is what List reports about one key.
+type ObjectInfo struct {
+	Key      string
+	Size     int64
+	Modified time.Time
+}
+
+// List returns every object under a prefix.
+//
+// Paginated in full rather than stopping at the first page: a caller asking
+// what is under a prefix and silently getting the first thousand is the kind
+// of truncation that reads as "the rest was deleted".
+func (c *Client) List(ctx context.Context, prefix string) ([]ObjectInfo, error) {
+	full := c.key(prefix)
+	var out []ObjectInfo
+	var token *string
+	for {
+		page, err := c.api.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            &c.bucket,
+			Prefix:            &full,
+			ContinuationToken: token,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("s3: list %q: %w", prefix, err)
+		}
+		for _, obj := range page.Contents {
+			key := aws.ToString(obj.Key)
+			// Hand back the caller's namespace, not ours: the prefix is this
+			// client's business and a caller that has to strip it will
+			// eventually forget to.
+			if c.prefix != "" {
+				key = strings.TrimPrefix(key, c.prefix+"/")
+			}
+			out = append(out, ObjectInfo{
+				Key:      key,
+				Size:     aws.ToInt64(obj.Size),
+				Modified: aws.ToTime(obj.LastModified),
+			})
+		}
+		if !aws.ToBool(page.IsTruncated) {
+			return out, nil
+		}
+		token = page.NextContinuationToken
+	}
 }

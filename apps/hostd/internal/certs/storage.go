@@ -1,0 +1,195 @@
+// Package certs backs certmagic with the fleet's object storage, so any host
+// can answer a TLS handshake for any name.
+package certs
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io/fs"
+	"path"
+	"strings"
+	"time"
+
+	"github.com/caddyserver/certmagic"
+
+	"github.com/vivek7405/pilots/hostd/internal/s3"
+)
+
+// Storage is certmagic.Storage over the same bucket everything else uses.
+//
+// Shared storage is not a convenience here, it is what makes ACME work at all
+// on a fleet with no coordinator. Wildcard DNS points *.pilotrun.app at EVERY
+// host, so an HTTP-01 challenge for a custom domain lands on whichever host
+// the client resolved -- almost never the one that started the order. certmagic
+// solves that with a distributed solver that writes the challenge token to
+// Storage, and every host answers from there. With per-host storage the
+// challenge fails (N-1)/N of the time on an N-host fleet, which looks like
+// flaky Let's Encrypt rather than a configuration mistake.
+//
+// It is also why the lock below has to be real.
+type Storage struct {
+	s3     *s3.Client
+	prefix string
+	// hostID identifies who holds a lock, so a stuck one names the host to go
+	// look at rather than just a timestamp.
+	hostID string
+}
+
+func New(client *s3.Client, hostID string) *Storage {
+	return &Storage{s3: client, prefix: "certs", hostID: hostID}
+}
+
+func (st *Storage) objectKey(key string) string {
+	return path.Join(st.prefix, key)
+}
+
+func (st *Storage) Store(ctx context.Context, key string, value []byte) error {
+	return st.s3.Put(ctx, st.objectKey(key), value)
+}
+
+func (st *Storage) Load(ctx context.Context, key string) ([]byte, error) {
+	b, err := st.s3.Get(ctx, st.objectKey(key))
+	if err != nil {
+		// certmagic tests for this exact sentinel to decide "no certificate
+		// yet, go get one" versus "storage is broken, do not touch anything".
+		// Returning a generic error here turns a first-time issue into a
+		// hard failure.
+		if errors.Is(err, s3.ErrNotFound) {
+			return nil, fs.ErrNotExist
+		}
+		return nil, err
+	}
+	return b, nil
+}
+
+func (st *Storage) Delete(ctx context.Context, key string) error {
+	// A directory delete has to remove everything under it: certmagic deletes
+	// an asset by its logical name and expects the whole subtree to go.
+	objs, err := st.s3.List(ctx, st.objectKey(key)+"/")
+	if err == nil && len(objs) > 0 {
+		for _, o := range objs {
+			if err := st.s3.Delete(ctx, o.Key); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return st.s3.Delete(ctx, st.objectKey(key))
+}
+
+func (st *Storage) Exists(ctx context.Context, key string) bool {
+	if _, err := st.s3.Get(ctx, st.objectKey(key)); err == nil {
+		return true
+	}
+	objs, err := st.s3.List(ctx, st.objectKey(key)+"/")
+	return err == nil && len(objs) > 0
+}
+
+func (st *Storage) List(ctx context.Context, prefix string, recursive bool) ([]string, error) {
+	full := st.objectKey(prefix)
+	objs, err := st.s3.List(ctx, full+"/")
+	if err != nil {
+		return nil, err
+	}
+
+	seen := map[string]struct{}{}
+	var out []string
+	for _, o := range objs {
+		rel := strings.TrimPrefix(o.Key, st.prefix+"/")
+		if recursive {
+			out = append(out, rel)
+			continue
+		}
+		// Non-recursive means immediate children only, with a "directory"
+		// reported once rather than once per object beneath it.
+		tail := strings.TrimPrefix(rel, strings.TrimPrefix(full, st.prefix+"/")+"/")
+		if i := strings.Index(tail, "/"); i >= 0 {
+			tail = tail[:i]
+		}
+		child := path.Join(prefix, tail)
+		if _, dup := seen[child]; dup {
+			continue
+		}
+		seen[child] = struct{}{}
+		out = append(out, child)
+	}
+	return out, nil
+}
+
+func (st *Storage) Stat(ctx context.Context, key string) (certmagic.KeyInfo, error) {
+	objs, err := st.s3.List(ctx, st.objectKey(key))
+	if err != nil {
+		return certmagic.KeyInfo{}, err
+	}
+	for _, o := range objs {
+		if o.Key == st.objectKey(key) {
+			return certmagic.KeyInfo{
+				Key: key, Modified: o.Modified, Size: o.Size, IsTerminal: true,
+			}, nil
+		}
+	}
+	if len(objs) > 0 {
+		return certmagic.KeyInfo{Key: key, IsTerminal: false}, nil
+	}
+	return certmagic.KeyInfo{}, fs.ErrNotExist
+}
+
+// lockInfo is what a held lock records, so an operator looking at a stuck
+// order can see which host to go and check.
+type lockInfo struct {
+	Host    string    `json:"host"`
+	Created time.Time `json:"created"`
+	Expires time.Time `json:"expires"`
+}
+
+// lockTTL bounds how long a lock survives its holder.
+//
+// A host that dies mid-order must not block every other host from ever issuing
+// that certificate again, and there is no coordinator to notice it died. The
+// TTL is the whole recovery mechanism, so it is short enough to matter and
+// long enough that a slow ACME round trip does not lose its own lock.
+const lockTTL = 5 * time.Minute
+
+// pollInterval is how often a waiter re-checks. Object storage has no watch,
+// so this is a poll by necessity rather than by choice.
+const pollInterval = 2 * time.Second
+
+func (st *Storage) Lock(ctx context.Context, name string) error {
+	key := st.objectKey("locks/" + name + ".json")
+	for {
+		raw, err := st.s3.Get(ctx, key)
+		switch {
+		case err != nil:
+			// Free. Take it.
+			return st.writeLock(ctx, key)
+		default:
+			var info lockInfo
+			if json.Unmarshal(raw, &info) != nil || time.Now().After(info.Expires) {
+				// Expired or unreadable: the holder is gone or never wrote a
+				// usable record. Either way it must not block the fleet.
+				return st.writeLock(ctx, key)
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+}
+
+func (st *Storage) writeLock(ctx context.Context, key string) error {
+	now := time.Now()
+	raw, err := json.Marshal(lockInfo{Host: st.hostID, Created: now, Expires: now.Add(lockTTL)})
+	if err != nil {
+		return err
+	}
+	return st.s3.Put(ctx, key, raw)
+}
+
+func (st *Storage) Unlock(ctx context.Context, name string) error {
+	return st.s3.Delete(ctx, st.objectKey("locks/"+name+".json"))
+}
+
+var _ certmagic.Storage = (*Storage)(nil)
