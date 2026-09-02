@@ -201,7 +201,19 @@ func writeEnv(env map[string]string) error {
 // point the application receives a truncated secret and fails somewhere else
 // entirely.
 func quoteEnvValue(v string) string {
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\r", `\r`)
+	// Only the backslash and the quote. A newline is written as ITSELF,
+	// inside the quotes, because that is the one form systemd understands:
+	// its EnvironmentFile parser takes the byte after a backslash literally
+	// and has no \n escape, so "one\ntwo" reached the application as the
+	// eleven characters o n e \ n t w o. A PEM key delivered through
+	// secret_env arrived unusable -- but only on images carrying systemd,
+	// since the supervisor's own reader did understand \n. Same machine
+	// definition, two behaviours, decided by whether the image happened to
+	// ship an init.
+	//
+	// A quoted value may span lines, which is why the reader parses rather
+	// than splits.
+	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`)
 	return `"` + r.Replace(v) + `"`
 }
 

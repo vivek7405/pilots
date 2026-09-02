@@ -49,16 +49,30 @@ func TestEnvValuesAreQuotedForSystemd(t *testing.T) {
 		`HASHED="pass#word"`,
 		`QUOTED="say \"hi\""`,
 		`SLASHED="a\\b"`,
-		`MULTLINE="one\ntwo"`,
+		"MULTLINE=\"one\ntwo\"",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("env file does not contain %s\ngot:\n%s", want, got)
 		}
 	}
-	// One line per variable: a literal newline inside a value would make
-	// systemd read the rest of the secret as another variable.
-	if lines := strings.Count(strings.TrimSpace(got), "\n") + 1; lines != 6 {
-		t.Errorf("env file has %d lines for 6 variables:\n%s", lines, got)
+
+	// A newline inside a quoted value is written as ITSELF, and this test
+	// used to assert the opposite -- one line per variable, with newlines
+	// escaped as \n. That is what a shell would read, and systemd is not a
+	// shell: its EnvironmentFile parser takes the byte after a backslash
+	// literally and has no \n, so the escaped form reached the application
+	// as a literal backslash and n. Verified against real systemd:
+	//
+	//	A="one\ntwo"     -> A=one\ntwo      (wrong: 8 characters)
+	//	B="real<LF>nl"   -> B=real<LF>nl    (right)
+	//
+	// So the multi-line value is expected to span lines, and the file has
+	// more lines than it has variables.
+	if !strings.Contains(got, "MULTLINE=\"one\ntwo\"") {
+		t.Errorf("the newline was not written literally:\n%s", got)
+	}
+	if strings.Contains(got, `\n`) {
+		t.Errorf("a value was escaped as \\n, which systemd does not decode:\n%s", got)
 	}
 }
 

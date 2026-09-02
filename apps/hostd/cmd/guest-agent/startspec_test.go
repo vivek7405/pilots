@@ -1,8 +1,11 @@
 package main
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -173,4 +176,69 @@ func TestEnvValuesRoundTrip(t *testing.T) {
 			t.Errorf("round trip of %q gave %q", v, got)
 		}
 	}
+}
+
+// The values must survive SYSTEMD, not merely our own inverse.
+//
+// TestEnvValuesRoundTrip proves quoteEnvValue and unquoteEnvValue agree with
+// each other, which they did all along -- while both disagreed with systemd.
+// That is the failure this covers: pilot-app.service reads these files with
+// systemd's EnvironmentFile parser on an image that carries systemd, and the
+// supervisor reads them with unquoteEnvValue on one that does not, so a
+// disagreement means the same machine definition runs a different command
+// depending on what its base image happened to ship.
+//
+// A PEM key was the case that mattered: written as \n, it reached the
+// application as a literal backslash and n and was unusable.
+func TestSystemdReadsBackWhatWeWrote(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("systemd-run needs root")
+	}
+	if _, err := exec.LookPath("systemd-run"); err != nil {
+		t.Skip("systemd-run is not available")
+	}
+
+	values := map[string]string{
+		"PLAIN":   "value",
+		"SPACED":  "two words",
+		"QUOTED":  `say "hi"`,
+		"SLASHED": `a\b`,
+		"PEM":     "-----BEGIN KEY-----\nMIIBOgIBAAJB\n-----END KEY-----",
+		"TRAIL":   "trailing space ",
+	}
+
+	dir := t.TempDir()
+	envFile := filepath.Join(dir, "env")
+	var b strings.Builder
+	for k, v := range values {
+		fmt.Fprintf(&b, "%s=%s\n", k, quoteEnvValue(v))
+	}
+	if err := os.WriteFile(envFile, []byte(b.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := exec.Command("systemd-run", "--quiet", "--wait", "--collect", "--pipe",
+		"-p", "EnvironmentFile="+envFile, "/usr/bin/env").Output()
+	if err != nil {
+		t.Skipf("systemd-run: %v", err)
+	}
+
+	// env's output is ambiguous for multi-line values, so check each one by
+	// asking the shell for it rather than parsing the dump.
+	for k, want := range values {
+		got, err := exec.Command("systemd-run", "--quiet", "--wait", "--collect", "--pipe",
+			"-p", "EnvironmentFile="+envFile,
+			"/bin/sh", "-c", "printf %s \"$"+k+"\"").Output()
+		if err != nil {
+			t.Fatalf("reading %s back: %v", k, err)
+		}
+		if string(got) != want {
+			t.Errorf("systemd gave %s = %q, want %q", k, got, want)
+		}
+		// And our own reader must agree with systemd, which is the whole point.
+		if mine := parseEnvFile(b.String())[k]; mine != want {
+			t.Errorf("parseEnvFile gave %s = %q, want %q", k, mine, want)
+		}
+	}
+	_ = out
 }

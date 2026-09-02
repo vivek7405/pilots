@@ -125,25 +125,105 @@ func readAppCmd() (string, map[string]string, error) {
 	if err != nil {
 		return "", nil, err
 	}
-	cmd := unquoteEnvValue(strings.TrimPrefix(strings.TrimSpace(string(appRaw)), "PILOT_APP_CMD="))
+	cmd := parseEnvFile(string(appRaw))["PILOT_APP_CMD"]
 
 	env := map[string]string{}
 	// A machine can have a command and no environment; the reverse is nothing
 	// to start. So a missing env file is not an error here.
 	if envRaw, err := os.ReadFile(envPath); err == nil {
-		for _, line := range strings.Split(string(envRaw), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			k, v, ok := strings.Cut(line, "=")
-			if !ok {
-				continue
-			}
-			env[k] = unquoteEnvValue(v)
-		}
+		env = parseEnvFile(string(envRaw))
 	}
 	return cmd, env, nil
+}
+
+// parseEnvFile reads the EnvironmentFile format systemd reads.
+//
+// It parses rather than splitting on newlines, because a quoted value may
+// CONTAIN newlines -- that is how an embedded newline is represented at all,
+// systemd having no \n escape. Splitting per line truncated every multi-line
+// value at its first newline and left the remainder to be read as garbage
+// keys.
+func parseEnvFile(raw string) map[string]string {
+	out := map[string]string{}
+	for i := 0; i < len(raw); {
+		// Skip whitespace and blank lines between entries.
+		for i < len(raw) && (raw[i] == '\n' || raw[i] == '\r' || raw[i] == ' ' || raw[i] == '\t') {
+			i++
+		}
+		if i >= len(raw) {
+			break
+		}
+		// A comment runs to the end of its line.
+		if raw[i] == '#' {
+			for i < len(raw) && raw[i] != '\n' {
+				i++
+			}
+			continue
+		}
+
+		key := i
+		for i < len(raw) && raw[i] != '=' && raw[i] != '\n' {
+			i++
+		}
+		if i >= len(raw) || raw[i] != '=' {
+			// No '=' on this line: not an assignment, skip it.
+			for i < len(raw) && raw[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		name := strings.TrimSpace(raw[key:i])
+		i++ // past '='
+
+		var value string
+		value, i = scanEnvValue(raw, i)
+		if name != "" {
+			out[name] = value
+		}
+	}
+	return out
+}
+
+// scanEnvValue reads one value, starting at i, and returns it with the offset
+// just past it.
+func scanEnvValue(raw string, i int) (string, int) {
+	if i < len(raw) && raw[i] == '"' {
+		i++
+		var b strings.Builder
+		for i < len(raw) {
+			switch raw[i] {
+			case '\\':
+				// systemd takes the next byte literally. There is no \n, which
+				// is the whole reason a real newline is written as itself.
+				if i+1 < len(raw) {
+					b.WriteByte(raw[i+1])
+					i += 2
+					continue
+				}
+				i++
+			case '"':
+				i++
+				// Anything trailing the closing quote is not part of the
+				// value; skip to end of line.
+				for i < len(raw) && raw[i] != '\n' {
+					i++
+				}
+				return b.String(), i
+			default:
+				b.WriteByte(raw[i])
+				i++
+			}
+		}
+		// Unterminated quote: take what there is rather than lose the value.
+		return b.String(), i
+	}
+
+	// Unquoted: to end of line, trimmed, exactly as systemd treats it.
+	start := i
+	for i < len(raw) && raw[i] != '\n' {
+		i++
+	}
+	return strings.TrimSpace(raw[start:i]), i
 }
 
 // unquoteEnvValue reverses quoteEnvValue, whose escaping is systemd's
