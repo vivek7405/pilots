@@ -28,7 +28,7 @@ func TestACNAMEPointingHereVerifies(t *testing.T) {
 	res := fakeResolver{cname: map[string]string{
 		"app.example.com": "shop.pilotrun.app.",
 	}}
-	if err := verifyCNAME(context.Background(), res, "app.example.com", "shop.pilotrun.app"); err != nil {
+	if err := VerifyHostname(context.Background(), res, "app.example.com", "shop.pilotrun.app"); err != nil {
 		t.Errorf("a correct CNAME was refused: %v", err)
 	}
 }
@@ -43,7 +43,7 @@ func TestACNAMEPointingElsewhereIsRefused(t *testing.T) {
 			"shop.pilotrun.app": {"1.2.3.4"},
 		},
 	}
-	if err := verifyCNAME(context.Background(), res, "app.example.com", "shop.pilotrun.app"); err == nil {
+	if err := VerifyHostname(context.Background(), res, "app.example.com", "shop.pilotrun.app"); err == nil {
 		t.Error("a hostname pointing at someone else was accepted")
 	}
 }
@@ -58,7 +58,7 @@ func TestAnApexARecordVerifies(t *testing.T) {
 			"shop.pilotrun.app": {"1.2.3.4", "5.6.7.8"},
 		},
 	}
-	if err := verifyCNAME(context.Background(), res, "example.com", "shop.pilotrun.app"); err != nil {
+	if err := VerifyHostname(context.Background(), res, "example.com", "shop.pilotrun.app"); err != nil {
 		t.Errorf("an apex A record onto the fleet was refused: %v", err)
 	}
 }
@@ -68,7 +68,7 @@ func TestVerificationNormalisesTheAnswer(t *testing.T) {
 	res := fakeResolver{cname: map[string]string{
 		"app.example.com": "SHOP.PilotRun.App.",
 	}}
-	if err := verifyCNAME(context.Background(), res, "app.example.com", "shop.pilotrun.app"); err != nil {
+	if err := VerifyHostname(context.Background(), res, "app.example.com", "shop.pilotrun.app"); err != nil {
 		t.Errorf("a correct CNAME differing in case was refused: %v", err)
 	}
 }

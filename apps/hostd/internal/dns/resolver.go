@@ -106,10 +106,11 @@ func healthy(m state.Machine) bool {
 	// held while the router wakes it, but a peer asking for the same machine
 	// by name got NXDOMAIN and a connection error.
 	//
-	// Scoped to service replicas on purpose. A suspended sandbox has no slot
+	// Scoped to service REPLICAS on purpose -- a machine a rollout placed,
+	// which is what ReleaseID records. A suspended sandbox has no slot
 	// and nothing waiting to bring it back, so answering for it would point
 	// traffic at an address with nothing behind it and no way to fix that.
-	return m.State == "suspended" && m.ServiceID != "" && m.Slot > 0
+	return m.State == "suspended" && m.ServiceID != "" && m.ReleaseID != "" && m.Slot > 0
 }
 
 // shuffled spreads clients that take the first answer across the machines

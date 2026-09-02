@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -178,6 +179,16 @@ func (m *Manager) scaleService(ctx context.Context, load Load, svc *state.Servic
 		// Suspended, never destroyed: destroying the last machine that
 		// references a service takes the row -- and its sealed environment --
 		// with it, and a scale-down is not a delete.
+		//
+		// Addressed to its owner for the same reason waking is: a Suspend
+		// against a machine this host does not hold finds nothing running and
+		// silently does nothing, so multi-host scale-down never happened at
+		// all and the idle clock simply reset on the next pass.
+		for _, mach := range machines {
+			if mach.ID == d.Down && mach.HostID != m.opts.HostID {
+				return m.remote(ctx, mach.HostID, d.Down, "suspend")
+			}
+		}
 		return m.opts.Machines.Suspend(ctx, d.Down)
 	}
 	return nil
@@ -191,9 +202,22 @@ func (m *Manager) scaleService(ctx context.Context, load Load, svc *state.Servic
 // service that has never had that many replicas.
 func (m *Manager) scaleUp(ctx context.Context, svc *state.Service, machines []state.Machine) error {
 	for _, mach := range machines {
-		if mach.State == "suspended" || mach.State == "stopped" {
-			return m.opts.Machines.Wake(ctx, mach.ID)
+		if mach.State != "suspended" && mach.State != "stopped" {
+			continue
 		}
+		// Only its OWNER may wake it. The arbiter for a service is
+		// hash(id) mod live_hosts and moves as hosts come and go, so the host
+		// deciding to scale is routinely not the host holding the replicas --
+		// and Wake restores the guest locally before any row write is refused,
+		// which means a second copy of a machine already running elsewhere.
+		// The waker enforces the same check for the same reason.
+		if mach.HostID != m.opts.HostID {
+			if err := m.remote(ctx, mach.HostID, mach.ID, "wake"); err != nil {
+				return fmt.Errorf("services: waking %s on %s: %w", mach.ID, mach.HostID, err)
+			}
+			return nil
+		}
+		return m.opts.Machines.Wake(ctx, mach.ID)
 	}
 	rel, err := m.opts.Store.GetRelease(ctx, svc.ReleaseID)
 	if err != nil {

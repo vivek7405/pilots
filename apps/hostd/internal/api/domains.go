@@ -54,6 +54,13 @@ func (d Deps) handleAddDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Only the service's arbiter may write its domain row, so forward rather
+	// than refuse -- PutDomain enforces the same rule and would otherwise 409
+	// on two hosts in three.
+	if d.forwardToArbiter(w, r, req.ServiceID) {
+		return
+	}
+
 	svc, err := d.Store.GetService(r.Context(), req.ServiceID)
 	if err != nil {
 		writeStoreError(w, err)
@@ -64,7 +71,7 @@ func (d Deps) handleAddDomain(w http.ResponseWriter, r *http.Request) {
 	row := &state.Domain{
 		Hostname: host, ServiceID: svc.ID, CreatedAt: time.Now().Unix(),
 	}
-	if err := verifyCNAME(r.Context(), d.Resolver, host, target); err == nil {
+	if err := VerifyHostname(r.Context(), d.Resolver, host, target); err == nil {
 		row.VerifiedAt = time.Now().Unix()
 	}
 
@@ -109,6 +116,18 @@ func (d Deps) handleListDomains(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d Deps) handleDeleteDomain(w http.ResponseWriter, r *http.Request) {
+	// Guarded, unlike the bare delete this used to be: DeleteDomain runs an
+	// unconditional DELETE, so without an ownership check any host could
+	// remove another service's hostname -- and the row would vanish fleet-wide
+	// with nothing reporting who did it.
+	row, err := d.Store.GetDomain(r.Context(), r.PathValue("hostname"))
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if d.forwardToArbiter(w, r, row.ServiceID) {
+		return
+	}
 	if err := d.Store.DeleteDomain(r.Context(), r.PathValue("hostname")); err != nil {
 		writeStoreError(w, err)
 		return
@@ -129,7 +148,7 @@ type Resolver interface {
 // pointing at an address the fleet's own name resolves to is accepted as well
 // -- otherwise every customer using their root domain would be refused for
 // following their registrar's rules.
-func verifyCNAME(ctx context.Context, res Resolver, host, target string) error {
+func VerifyHostname(ctx context.Context, res Resolver, host, target string) error {
 	if res == nil {
 		res = netResolver{}
 	}

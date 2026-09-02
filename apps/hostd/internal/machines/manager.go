@@ -523,7 +523,15 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 	//
 	// Slots are cheap (1024 per host) and this reserves one only for a machine
 	// that is expected back.
-	keepSlot := row.ServiceID != ""
+	// A service REPLICA, not merely a machine that has a service row.
+	//
+	// provisionService mints one for any machine created with an app or an
+	// environment, which is most sandboxes -- so testing ServiceID alone kept
+	// slots reserved for machines nothing was ever going to wake, leaked them
+	// out of the 1024 a host has, and put suspended sandboxes back into
+	// .internal answers pointing at an address with nothing behind it. A
+	// replica is a machine a rollout placed, which is what ReleaseID records.
+	keepSlot := row.ServiceID != "" && row.ReleaseID != ""
 	if slotIdx > 0 && !keepSlot {
 		m.pool.Return(slotIdx)
 	}

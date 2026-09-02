@@ -97,6 +97,21 @@ func (r TenantRules) Fingerprint() string {
 		}
 		fmt.Fprintln(h)
 	}
+	// The wake set is part of the desired state, so it belongs in the
+	// fingerprint. Omitted, a change confined to it -- a suspended replica
+	// destroyed, or a new one suspended -- leaves Local and Apps identical,
+	// the rules are never rebuilt, and a counted-drop rule survives for an
+	// address the slot pool can hand to a different machine.
+	wake := make([]string, 0, len(r.Wake))
+	for _, t := range r.Wake {
+		wake = append(wake, t.MachineID+"@"+t.Addr.String())
+	}
+	sort.Strings(wake)
+	for _, w := range wake {
+		h.Write([]byte(w))
+		h.Write([]byte{0})
+	}
+
 	return hex.EncodeToString(h.Sum(nil))
 }
 

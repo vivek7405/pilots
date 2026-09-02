@@ -371,7 +371,57 @@ func Open(dsn string) (Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("state: apply schema: %w", err)
 	}
+	if err := addMissingColumns(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &sqliteStore{db: db}, nil
+}
+
+// addMissingColumns brings an existing database up to the declared schema.
+//
+// Schema is CREATE TABLE IF NOT EXISTS throughout, which is what Corrosion
+// needs -- it loads the same file at agent start and cr-sqlite reconciles the
+// declared shape against the database. SQLite does not: IF NOT EXISTS skips
+// the whole statement when the table exists, so a column added to a table that
+// a host already has is simply never created, and the first query naming it
+// fails with "no such column" on a host that upgraded in place.
+//
+// So the column adds live here rather than in Schema. They must NOT go in the
+// .sql file: Corrosion reads it too, and a bare ALTER there would either be
+// rejected or replicate DDL, which is the fleet-wide backfill this project
+// otherwise goes out of its way to avoid.
+//
+// Each entry is idempotent by inspection of the table, so this is safe to run
+// on every Open, which is when it runs.
+func addMissingColumns(db *sql.DB) error {
+	wanted := []struct{ table, column, decl string }{
+		// Added by 5c so a release can name the memory build its replicas
+		// restore from.
+		{"releases", "mem_build_id", "TEXT"},
+	}
+	for _, w := range wanted {
+		has, err := hasColumn(db, w.table, w.column)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := db.Exec("ALTER TABLE " + w.table + " ADD COLUMN " + w.column + " " + w.decl); err != nil {
+			return fmt.Errorf("state: add %s.%s: %w", w.table, w.column, err)
+		}
+	}
+	return nil
+}
+
+func hasColumn(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query("SELECT 1 FROM pragma_table_info(?) WHERE name = ?", table, column)
+	if err != nil {
+		return false, fmt.Errorf("state: inspect %s: %w", table, err)
+	}
+	defer rows.Close()
+	return rows.Next(), rows.Err()
 }
 
 func (s *sqliteStore) Close() error { return s.db.Close() }

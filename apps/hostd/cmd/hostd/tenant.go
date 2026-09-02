@@ -111,7 +111,7 @@ func tenantRules(hostID string, view fleetView, loc *mesh.Locator) netns.TenantR
 		// a reserved slot and an address that peers still resolve. It gets a
 		// counted drop rather than a forwarding rule: the count is what brings
 		// it back.
-		if m.State == "suspended" {
+		if m.State == "suspended" && m.ReleaseID != "" {
 			rules.Wake = append(rules.Wake, netns.WakeTarget{MachineID: m.ID, Addr: addr})
 			continue
 		}

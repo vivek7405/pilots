@@ -43,6 +43,20 @@ type Options struct {
 	HostID   string
 	Store    state.Store
 	Machines MachineManager
+	// Peers reaches another host's internal API. Nil on a single box, where
+	// every machine is local and there is nowhere to forward to.
+	Peers PeerCaller
+}
+
+// PeerCaller performs a lifecycle call against a machine held by another host.
+//
+// The local Suspend and Wake act on a guest THIS host is running, so calling
+// them for a machine held elsewhere either does nothing or starts a second
+// copy of it. The arbiter deciding a service's scale is routinely not the host
+// holding its replicas, so the distinction is the normal case rather than an
+// edge one.
+type PeerCaller interface {
+	Post(ctx context.Context, hostID, path string) error
 }
 
 type Manager struct{ opts Options }
@@ -263,7 +277,17 @@ func (m *Manager) Rollback(ctx context.Context, serviceID string) (*state.Releas
 	if len(machines) == 0 {
 		// Its machines were pruned. Still recoverable: the release's build
 		// pair is the whole machine, so roll forward onto it instead.
-		if _, err := m.rollOut(ctx, svc, target, health, max(svc.Replicas, 1)); err != nil {
+		fresh, err := m.rollOut(ctx, svc, target, health, max(svc.Replicas, 1))
+		if err != nil {
+			// Same cleanup Deploy does in the same situation. rollOut returns
+			// what it created precisely so a failure does not leave half a
+			// rollout running and billing with nothing pointing at it.
+			for _, id := range fresh {
+				if derr := m.opts.Machines.Destroy(ctx, id); derr != nil {
+					slog.Error("could not clean up a failed rollback's machine",
+						"machine", id, "service", serviceID, "err", derr)
+				}
+			}
 			return nil, err
 		}
 	} else {
@@ -282,8 +306,20 @@ func (m *Manager) Rollback(ctx context.Context, serviceID string) (*state.Releas
 	if err := m.opts.Store.CASServiceRelease(ctx, serviceID, svc.ReleaseID, target.ID); err != nil {
 		return nil, err
 	}
-	for _, mach := range must(m.replicasOf(ctx, serviceID, svc.ReleaseID)) {
-		_ = m.opts.Machines.Suspend(ctx, mach.ID)
+	superseded, err := m.replicasOf(ctx, serviceID, svc.ReleaseID)
+	if err != nil {
+		// The flip already happened, so the rollback succeeded; report the
+		// leftovers rather than swallowing them. Left unsaid, the release just
+		// rolled away from keeps serving and billing with nothing pointing at
+		// it.
+		return target, fmt.Errorf("rolled back to %s, but could not list the "+
+			"superseded replicas to stop them: %w", target.ID, err)
+	}
+	for _, mach := range superseded {
+		if err := m.opts.Machines.Suspend(ctx, mach.ID); err != nil {
+			slog.Warn("could not suspend a superseded replica after rollback",
+				"machine", mach.ID, "service", serviceID, "err", err)
+		}
 	}
 	return target, nil
 }
@@ -328,8 +364,6 @@ func (m *Manager) replicasOf(ctx context.Context, serviceID, releaseID string) (
 	return out, nil
 }
 
-func must[T any](v T, err error) T { return v }
-
 func max(a, b int) int {
 	if a > b {
 		return a
@@ -352,4 +386,13 @@ func (m *Manager) replicaKnobs(ctx context.Context, svc *state.Service) json.Raw
 		}
 	}
 	return json.RawMessage(`{"auto_stop":"off","min_machines_running":1}`)
+}
+
+// remote asks another host to suspend or wake one of its machines.
+func (m *Manager) remote(ctx context.Context, hostID, machineID, action string) error {
+	if m.opts.Peers == nil {
+		return fmt.Errorf("services: %s is held by %s and this host cannot reach it",
+			machineID, hostID)
+	}
+	return m.opts.Peers.Post(ctx, hostID, "/v1/machines/"+machineID+"/"+action)
 }

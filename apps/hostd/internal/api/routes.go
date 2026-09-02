@@ -26,6 +26,10 @@ type Deps struct {
 	// Resolver verifies that a custom hostname points here. Nil uses the
 	// system resolver; a test supplies its own.
 	Resolver Resolver
+	// FleetKey seals secret environments before they are written. A service
+	// create carrying secrets is refused without it rather than stored in the
+	// clear -- those rows replicate to every host and into every backup.
+	FleetKey Sealer
 	// Peers resolves other hosts, so a service write that arrived at the
 	// wrong host can be forwarded to the one allowed to perform it.
 	Peers PeerLookup
@@ -127,4 +131,10 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(v)
+}
+
+// Sealer seals a secret environment. Satisfied by seal.Key.
+type Sealer interface {
+	IsSet() bool
+	Seal([]byte) (string, error)
 }

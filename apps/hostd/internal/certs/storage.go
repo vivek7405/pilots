@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"path"
 	"strings"
@@ -176,15 +177,28 @@ func (st *Storage) Lock(ctx context.Context, name string) error {
 	for {
 		raw, err := st.s3.Get(ctx, key)
 		switch {
+		case errors.Is(err, s3.ErrNotFound):
+			// Genuinely absent. Take it.
+			if err := st.tryTake(ctx, key); err == nil {
+				return nil
+			}
+			// Lost the race to another host writing the same key. Fall through
+			// and wait rather than proceeding: two holders is the duplicate
+			// issuance this lock exists to prevent.
 		case err != nil:
-			// Free. Take it.
-			return st.writeLock(ctx, key)
+			// A read that FAILED is not a free lock. Treating it as one turns
+			// a transient bucket error into every host issuing at once, which
+			// spends the fleet's shared Let's Encrypt rate limit. Wait and ask
+			// again; ctx bounds how long.
 		default:
 			var info lockInfo
 			if json.Unmarshal(raw, &info) != nil || time.Now().After(info.Expires) {
-				// Expired or unreadable: the holder is gone or never wrote a
-				// usable record. Either way it must not block the fleet.
-				return st.writeLock(ctx, key)
+				// Expired or unreadable: the holder is gone, or never wrote a
+				// usable record. Either way it must not block the fleet
+				// forever -- there is no coordinator to notice it died.
+				if err := st.tryTake(ctx, key); err == nil {
+					return nil
+				}
 			}
 		}
 		select {
@@ -193,6 +207,41 @@ func (st *Storage) Lock(ctx context.Context, name string) error {
 		case <-time.After(pollInterval):
 		}
 	}
+}
+
+// tryTake claims the lock and confirms it is the holder.
+//
+// Object storage gives no compare-and-set, so this writes and then reads back
+// to see whose record survived. Last-writer-wins means exactly one host reads
+// its own id back, and the others see someone else's and keep waiting -- which
+// is the property the lock needs, without pretending the bucket offers an
+// atomic primitive it does not.
+//
+// The read-back is deliberately after a short settle: an immediately
+// consistent store returns the winner straight away, and an eventually
+// consistent one is given a moment rather than being trusted blindly.
+func (st *Storage) tryTake(ctx context.Context, key string) error {
+	if err := st.writeLock(ctx, key); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(250 * time.Millisecond):
+	}
+
+	raw, err := st.s3.Get(ctx, key)
+	if err != nil {
+		return err
+	}
+	var info lockInfo
+	if err := json.Unmarshal(raw, &info); err != nil {
+		return err
+	}
+	if info.Host != st.hostID {
+		return fmt.Errorf("certs: %s holds the lock", info.Host)
+	}
+	return nil
 }
 
 func (st *Storage) writeLock(ctx context.Context, key string) error {

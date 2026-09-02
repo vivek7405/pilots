@@ -335,6 +335,7 @@ func run() error {
 	// deploy's replicas are ordinary machines with ordinary lifecycles.
 	rollout := services.New(services.Options{
 		HostID: cfg.HostID, Store: store, Machines: mgr,
+		Peers: peerCaller(f),
 	})
 
 	// Only the arbiter for a service acts on it, so every host can run this
@@ -345,6 +346,10 @@ func run() error {
 	// Traffic to a suspended service replica's address brings it back. Runs
 	// beside the tenant filter that writes the counters it reads.
 	go runWaker(ctx, cfg.HostID, view, mgr)
+
+	// Custom domains verify on a loop, not only at registration: a CNAME is
+	// almost always set after the domain is registered.
+	go runDomainVerifier(ctx, cfg.HostID, store, cfg.WorkloadDomain)
 
 	// Push-to-deploy and pull-request previews. The webhook is an ordinary
 	// route on every host; exactly one acts on any delivery.
@@ -570,4 +575,24 @@ func peerLookup(f *fleet) api.PeerLookup {
 		return nil
 	}
 	return peers{f.cache}
+}
+
+// sealerOrNil hands the API the seal key when this host has one.
+//
+// An untyped nil rather than a typed one: a typed nil satisfies the interface
+// and would then be asked IsSet on a nil receiver, so the absence of a key has
+// to be visible as a nil interface value.
+func sealerOrNil(k seal.Key) api.Sealer {
+	if !k.IsSet() {
+		return nil
+	}
+	return k
+}
+
+// peerCaller lets the rollout act on machines other hosts hold.
+func peerCaller(f *fleet) services.PeerCaller {
+	if f == nil {
+		return nil
+	}
+	return peerAPI{cache: f.cache, http: &http.Client{Timeout: 2 * time.Minute}}
 }

@@ -80,8 +80,41 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 		svc.Health = string(raw)
 	}
 	if len(req.Env) > 0 {
-		raw, _ := json.Marshal(req.Env)
+		raw, err := json.Marshal(req.Env)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
+			return
+		}
 		svc.Env = string(raw)
+	}
+
+	// Sealed HERE, never dropped. This path used to marshal Env and ignore
+	// SecretEnv entirely: a create carrying secrets answered 201, stored
+	// nothing, and deployed a service whose secrets were simply absent, with
+	// nothing anywhere reporting it. The machine path has always sealed
+	// (machines/env.go); the service path did not.
+	if len(req.SecretEnv) > 0 {
+		if d.FleetKey == nil || !d.FleetKey.IsSet() {
+			// Refused rather than degraded, for the same reason the machine
+			// path refuses: writing these in the clear replicates them to
+			// every host and into every backup, and nothing downstream would
+			// report that it had happened.
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "this host has " +
+				"no fleet key, so it cannot store secrets; set PILOT_FLEET_KEY"})
+			return
+		}
+		raw, err := json.Marshal(req.SecretEnv)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
+			return
+		}
+		sealed, err := d.FleetKey.Seal(raw)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError,
+				ErrorResponse{Error: "sealing the environment: " + err.Error()})
+			return
+		}
+		svc.EnvSealed = sealed
 	}
 
 	if err := d.Store.PutService(r.Context(), svc); err != nil {
