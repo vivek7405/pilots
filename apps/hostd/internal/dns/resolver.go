@@ -16,6 +16,10 @@ import (
 // the moment nothing else has gone wrong yet.
 type FleetView interface {
 	Machines() []state.Machine
+	// Services is the name half of service discovery. A replica's machine row
+	// carries the service id but never the service NAME, so without this a
+	// name like db.internal has nothing to match against.
+	Services() []state.Service
 }
 
 // FleetResolver answers .internal from replicated rows.
@@ -61,18 +65,72 @@ func (r *FleetResolver) Resolve(q Query) []netip.Addr {
 		here  []netip.Addr
 		there []netip.Addr
 	)
-	for _, m := range rows {
-		if m.Name != q.Name || m.App != asker.App || !healthy(m) {
-			continue
-		}
+	add := func(m state.Machine) {
 		addr, ok := r.loc.MachineAddress(m)
 		if !ok {
-			continue
+			return
 		}
 		if m.HostID == asker.HostID {
 			here = append(here, addr)
 		} else {
 			there = append(there, addr)
+		}
+	}
+
+	// nameClaimed records that a healthy machine matched the NAME, not that
+	// it produced an address. The distinction is the precedence below: a
+	// claimed machine whose host row has not gossiped in yet must keep the
+	// name (and answer nothing) rather than let it fall through to a service
+	// and flip back when the row arrives.
+	nameClaimed := false
+	for _, m := range rows {
+		if m.Name != q.Name || m.App != asker.App || !healthy(m) {
+			continue
+		}
+		nameClaimed = true
+		add(m)
+	}
+
+	// A SERVICE NAME, when no machine claimed one.
+	//
+	// Machine names win a collision. Not because a machine is the better
+	// answer, but because it was the answer before services existed and a
+	// name that quietly changes what it points at is worse than either
+	// choice. Replica names are generated (amber-lagoon-x9f2), so the
+	// collision needs a machine someone named by hand after a service.
+	//
+	// This is the layer a multi-service app actually addresses. A replica's
+	// name is generated and is replaced on every rollout, so nothing an
+	// application could write in a config file would survive a deploy --
+	// which is why postgres://db.internal:5432 has to resolve here and not
+	// through the machine path above.
+	if !nameClaimed {
+		// Every matching service id, not just the first: corrosion cannot
+		// enforce uniqueness, so two hosts that disagreed during a membership
+		// change can each hold a service row with this name, and answering
+		// from only one of them would make the name resolve to half its
+		// replicas. The scope comes from the asker's ROW, exactly as it does
+		// for machine names, so a guest cannot reach another app's database
+		// by naming it.
+		ids := map[string]bool{}
+		for _, svc := range r.view.Services() {
+			if svc.Name == q.Name && svc.App == asker.App {
+				ids[svc.ID] = true
+			}
+		}
+		if len(ids) > 0 {
+			for _, m := range rows {
+				// The app is re-checked on the machine row, not just on the
+				// service row: the two tables merge independently, so nothing
+				// forces a replica's app to agree with its service's. An
+				// answer from another app is either unreachable through the
+				// app-keyed tenant filter -- a name that resolves and then
+				// hangs -- or a cross-app address disclosure.
+				if !ids[m.ServiceID] || m.App != asker.App || !healthy(m) {
+					continue
+				}
+				add(m)
+			}
 		}
 	}
 

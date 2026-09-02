@@ -31,6 +31,11 @@ type Cache struct {
 	mu       sync.RWMutex
 	machines map[string]state.Machine
 	hosts    map[string]state.Host
+	// services carries ONLY id, name and app -- what .internal needs to turn a
+	// service name into its replicas. Deliberately not the whole row: a
+	// service holds the sealed environment, and a second in-memory copy of
+	// every app's secrets on every host is a cost with no reader.
+	services map[string]state.Service
 	// heardAt is when THIS host last saw a peer's heartbeat change, by the
 	// local clock. Liveness is judged from it rather than from the last_seen
 	// the peer wrote, because that value is stamped by the peer's clock and
@@ -86,6 +91,7 @@ func NewCache(ctx context.Context, client *Client) (*Cache, error) {
 		client:       client,
 		machines:     map[string]state.Machine{},
 		hosts:        map[string]state.Host{},
+		services:     map[string]state.Service{},
 		heardAt:      map[string]time.Time{},
 		hostsChanged: make(chan struct{}, 1),
 	}
@@ -99,6 +105,12 @@ func NewCache(ctx context.Context, client *Client) (*Cache, error) {
 		machines.Close()
 		return nil, err
 	}
+	services, err := c.subscribeServices(ctx)
+	if err != nil {
+		machines.Close()
+		hosts.Close()
+		return nil, err
+	}
 
 	c.mu.Lock()
 	c.ready = true
@@ -106,6 +118,7 @@ func NewCache(ctx context.Context, client *Client) (*Cache, error) {
 
 	go c.follow(ctx, machines, "machines", c.subscribeMachines)
 	go c.follow(ctx, hosts, "hosts", c.subscribeHosts)
+	go c.follow(ctx, services, "services", c.subscribeServices)
 	return c, nil
 }
 
@@ -179,6 +192,36 @@ func (c *Cache) subscribeHosts(ctx context.Context) (*Subscription, error) {
 		}
 	}
 	c.hosts = fresh
+	c.mu.Unlock()
+	return sub, nil
+}
+
+// subscribeServices materializes the name half of .internal.
+//
+// Three columns, not the whole row. See the services field on Cache.
+func (c *Cache) subscribeServices(ctx context.Context) (*Subscription, error) {
+	sub, err := c.client.Subscribe(ctx, `SELECT id, name, app FROM services`)
+	if err != nil {
+		return nil, err
+	}
+
+	fresh := map[string]state.Service{}
+	rows := sub.Rows()
+	for rows.Next() {
+		var svc state.Service
+		if err := rows.Scan(&svc.ID, &svc.Name, &svc.App); err != nil {
+			sub.Close()
+			return nil, err
+		}
+		fresh[svc.ID] = svc
+	}
+	if err := rows.Err(); err != nil {
+		sub.Close()
+		return nil, err
+	}
+
+	c.mu.Lock()
+	c.services = fresh
 	c.mu.Unlock()
 	return sub, nil
 }
@@ -279,7 +322,35 @@ func (c *Cache) apply(table string, change Change) {
 		}
 		c.noteHeartbeat(h)
 		c.hosts[h.ID] = h
+
+	case "services":
+		var svc state.Service
+		if err := change.Scan(&svc.ID, &svc.Name, &svc.App); err != nil {
+			slog.Error("cluster cache could not read a service change", "err", err)
+			return
+		}
+		if change.Kind == ChangeDelete {
+			delete(c.services, svc.ID)
+			return
+		}
+		c.services[svc.ID] = svc
 	}
+}
+
+// Services returns the id, name and app of every service in the fleet.
+//
+// Unordered on purpose. The one caller is the resolver, which filters by
+// name and shuffles what it answers, so a sort here would run on every
+// .internal query and have no reader.
+func (c *Cache) Services() []state.Service {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	out := make([]state.Service, 0, len(c.services))
+	for _, svc := range c.services {
+		out = append(out, svc)
+	}
+	return out
 }
 
 // Machine returns a machine by id. Destroyed machines are invisible.
