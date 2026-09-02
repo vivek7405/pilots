@@ -65,6 +65,11 @@ type TenantRules struct {
 	// in a conversation consult their own copy, so the two sides agree only
 	// because they read the same replicated rows.
 	Apps map[string][]netip.Addr
+	// Wake is every suspended service replica this host holds a reserved slot
+	// for. Traffic addressed to one is counted and dropped, and the count is
+	// what brings the machine back -- the mechanism that lets a service scale
+	// to zero and stay reachable by name.
+	Wake []WakeTarget
 }
 
 // Fingerprint is a stable summary of the desired state.
@@ -92,6 +97,21 @@ func (r TenantRules) Fingerprint() string {
 		}
 		fmt.Fprintln(h)
 	}
+	// The wake set is part of the desired state, so it belongs in the
+	// fingerprint. Omitted, a change confined to it -- a suspended replica
+	// destroyed, or a new one suspended -- leaves Local and Apps identical,
+	// the rules are never rebuilt, and a counted-drop rule survives for an
+	// address the slot pool can hand to a different machine.
+	wake := make([]string, 0, len(r.Wake))
+	for _, t := range r.Wake {
+		wake = append(wake, t.MachineID+"@"+t.Addr.String())
+	}
+	sort.Strings(wake)
+	for _, w := range wake {
+		h.Write([]byte(w))
+		h.Write([]byte{0})
+	}
+
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -227,6 +247,8 @@ func ApplyTenantFilter(r TenantRules) error {
 		c.AddRule(&nftables.Rule{Table: table, Chain: chain,
 			Exprs: concat(inbound, []expr.Any{&expr.Verdict{Kind: expr.VerdictDrop}})})
 	}
+
+	applyWakeRules(c, table, r.Wake)
 
 	if err := c.Flush(); err != nil {
 		return fmt.Errorf("netns: apply the tenant filter: %w", err)

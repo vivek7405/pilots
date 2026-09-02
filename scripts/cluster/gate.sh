@@ -354,6 +354,26 @@ restore_fleet_definition() {
   [ -n "${FLEET_NODES:-}" ] || return 0
   sed -i "s/^NODES=.*/NODES=${FLEET_NODES}/; s|^NODE_IPS=.*|NODE_IPS=\"${FLEET_NODE_IPS}\"|" \
     "$STATE_FILE" 2>/dev/null || true
+
+  # And REMOVE the host this run added, not just its entry in the state file.
+  #
+  # Restoring the definition without destroying the domain leaves a VM nobody
+  # counts: it keeps its old state, rejoins the mesh on the next boot, and
+  # gossips rows for machines that no longer exist. That stray host was the
+  # real cause of a long run of Phase 5 failures first attributed to the code,
+  # and it recurs on EVERY gate run because adding a host is one of the
+  # assertions. Leaving it to whoever runs the gate next to notice is not a
+  # fix, it is a note.
+  # Literal sudo, like every other virsh call in this file. $SUDO is
+  # cluster-up.sh's convention and is EMPTY here, so the first version of this
+  # ran virsh unprivileged, failed the dominfo probe, and skipped the cleanup
+  # silently -- the gate passed 45/0 and left the host behind anyway.
+  local added="${NODE_PREFIX}-$(( FLEET_NODES + 1 ))"
+  if sudo virsh dominfo "$added" >/dev/null 2>&1; then
+    sudo virsh destroy "$added" >/dev/null 2>&1 || true
+    sudo virsh undefine "$added" --remove-all-storage >/dev/null 2>&1 || true
+    echo "  cleaned up ${added}, the host this run added"
+  fi
 }
 FLEET_NODES="$NODES"
 FLEET_NODE_IPS="${IPS[*]}"

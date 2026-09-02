@@ -300,11 +300,10 @@ func rankOf(live []state.Host, hostID string) int {
 // It sorts its own input for the same reason Tick does: rank is a position in
 // a list, and two hosts that order it differently compute different owners.
 func RescuerFor(machineID string, live []state.Host) (string, bool) {
-	sorted := sortedByID(live)
-	if len(sorted) == 0 {
-		return "", false
-	}
-	return sorted[int(hashID(machineID)%uint32(len(sorted)))].ID, true
+	// One implementation, because the service arbiter in the corrosion store
+	// has to compute owners the same way this does. Two copies of a
+	// consensus-free ownership rule is two chances to disagree.
+	return state.OwnerFor(machineID, live)
 }
 
 func hashID(s string) uint32 {

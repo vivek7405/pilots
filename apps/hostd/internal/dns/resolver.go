@@ -94,7 +94,23 @@ func (r *FleetResolver) Resolve(q Query) []netip.Addr {
 // that is suspended has no slot and is filtered out a step later anyway; this
 // catches the ones that are stopped or errored and still hold one.
 func healthy(m state.Machine) bool {
-	return m.State == "running"
+	if m.State == "running" {
+		return true
+	}
+	// A SUSPENDED SERVICE REPLICA still resolves.
+	//
+	// It kept its slot, so it kept its address, and traffic to that address is
+	// counted in the root namespace and wakes it. Dropping it from DNS instead
+	// is what made min_machines_running: 0 unusable for anything another
+	// service depends on: an inbound HTTP request to a suspended machine is
+	// held while the router wakes it, but a peer asking for the same machine
+	// by name got NXDOMAIN and a connection error.
+	//
+	// Scoped to service REPLICAS on purpose -- a machine a rollout placed,
+	// which is what ReleaseID records. A suspended sandbox has no slot
+	// and nothing waiting to bring it back, so answering for it would point
+	// traffic at an address with nothing behind it and no way to fix that.
+	return m.State == "suspended" && m.ServiceID != "" && m.ReleaseID != "" && m.Slot > 0
 }
 
 // shuffled spreads clients that take the first answer across the machines

@@ -244,14 +244,22 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 	// row that exists -- rather than a machine whose environment was never
 	// written anywhere and cannot be recovered from the request that is gone.
 	env := createEnv{App: req.App, Cmd: req.Cmd, Env: req.Env, SecretEnv: req.SecretEnv}
-	serviceID, err := m.provisionService(ctx, name, env)
-	if err != nil {
-		return nil, err
+	// A replica joins its service's existing row rather than minting one.
+	// provisionService mints per create, which is right for a standalone
+	// machine and wrong for the second replica of a rollout -- that would give
+	// one service N rows, each with its own copy of the sealed environment.
+	serviceID := req.Service
+	if serviceID == "" {
+		var err error
+		if serviceID, err = m.provisionService(ctx, name, env); err != nil {
+			return nil, err
+		}
 	}
 
 	row := &state.Machine{
 		ID: id, Name: name, HostID: m.opts.HostID, State: StateCreating,
 		App: req.App, ServiceID: serviceID,
+		ReleaseID: req.Release,
 		KindKnobs: knobsJSON,
 		VCPUs:     orDefault(req.VCPUs, 1),
 		MemMiB:    orDefault(req.MemMiB, 512),
@@ -265,7 +273,15 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 		return nil, err
 	}
 
-	fcm, err := m.startNewMachine(ctx, row, token, req.Volume, req.Image, env.Cmd)
+	// A release restore takes precedence over the image: the rollout passes
+	// both so a replica can fall back to booting when the release has no
+	// memory image yet, and the pair is the fast path when it does.
+	var fcm *fc.Machine
+	if req.MemBuildID != "" {
+		fcm, err = m.startForRelease(ctx, row, token, req.MemBuildID, req.RootfsBuildID)
+	} else {
+		fcm, err = m.startNewMachine(ctx, row, token, req.Volume, req.Image, env.Cmd)
+	}
 	if err != nil {
 		row.State = StateError
 		stampSlot(row, nil)
@@ -493,7 +509,30 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 		return err
 	}
 	m.drop(id)
-	if slotIdx > 0 {
+
+	// A service replica KEEPS its slot index reserved while suspended.
+	//
+	// Everything else gives the index back, because a suspended sandbox is
+	// addressable nowhere until it wakes. A service replica has to stay
+	// addressable: its peers resolve it by <name>.internal, and a name that
+	// stops resolving is what makes min_machines_running: 0 unusable for
+	// anything another service depends on -- a database being the obvious
+	// case. Holding the index keeps the address stable across the suspend, so
+	// the DNS answer a peer already has stays correct and traffic to it is
+	// counted by the wake rule instead of vanishing.
+	//
+	// Slots are cheap (1024 per host) and this reserves one only for a machine
+	// that is expected back.
+	// A service REPLICA, not merely a machine that has a service row.
+	//
+	// provisionService mints one for any machine created with an app or an
+	// environment, which is most sandboxes -- so testing ServiceID alone kept
+	// slots reserved for machines nothing was ever going to wake, leaked them
+	// out of the 1024 a host has, and put suspended sandboxes back into
+	// .internal answers pointing at an address with nothing behind it. A
+	// replica is a machine a rollout placed, which is what ReleaseID records.
+	keepSlot := row.ServiceID != "" && row.ReleaseID != ""
+	if slotIdx > 0 && !keepSlot {
 		m.pool.Return(slotIdx)
 	}
 	// A suspended machine holds no namespace and no address, so it stops being
@@ -508,10 +547,14 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 	superseded := []string{row.MemBuildID, row.RootfsBuildID}
 
 	row.State = StateSuspended
-	// The slot is gone: a suspended machine holds no index and is addressable
-	// nowhere until it wakes, possibly on another host and certainly in
-	// another slot.
-	stampSlot(row, nil)
+	// The slot is gone for an ordinary machine: it holds no index and is
+	// addressable nowhere until it wakes, possibly on another host and
+	// certainly in another slot. A service replica keeps the index it
+	// reserved above, and with it its address, so .internal keeps resolving
+	// and the wake rule has something to match on.
+	if !keepSlot {
+		stampSlot(row, nil)
+	}
 	row.MemBuildID = res.MemBuildID.String()
 	// An empty rootfs build is meaningful: the machine wrote nothing, so its
 	// next restore reads the template directly. Writing a zero uuid instead

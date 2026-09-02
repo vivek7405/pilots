@@ -18,6 +18,25 @@ type Deps struct {
 	// Builds turns a Dockerfile context into a rootfs build. Nil on a host
 	// with no object storage, where a build has nowhere to publish to.
 	Builds BuildRunner
+	// Rollout deploys, rolls back, and promotes. Nil for the same reason
+	// Builds is: a release has nowhere to come from without object storage.
+	Rollout Rollout
+	// Domain is the fleet's domain, for rendering a service's URL.
+	Domain string
+	// Resolver verifies that a custom hostname points here. Nil uses the
+	// system resolver; a test supplies its own.
+	Resolver Resolver
+	// FleetKey seals secret environments before they are written. A service
+	// create carrying secrets is refused without it rather than stored in the
+	// clear -- those rows replicate to every host and into every backup.
+	FleetKey Sealer
+	// Peers resolves other hosts, so a service write that arrived at the
+	// wrong host can be forwarded to the one allowed to perform it.
+	Peers PeerLookup
+	// GitHub handles webhook deliveries. Nil when no app is configured, in
+	// which case the route answers 503 rather than accepting deliveries it
+	// cannot verify.
+	GitHub http.HandlerFunc
 }
 
 // Routes registers the full public API. Phase 1 lands the shapes; the handlers
@@ -65,15 +84,32 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("GET /v1/builds/{id}/logs", d.handleBuildLogs)
 
 	// Services and rollout.
-	mux.HandleFunc("POST /v1/services", notImplemented)
-	mux.HandleFunc("GET /v1/services", notImplemented)
-	mux.HandleFunc("GET /v1/services/{id}", notImplemented)
-	mux.HandleFunc("POST /v1/services/{id}/deploy", notImplemented)
-	mux.HandleFunc("POST /v1/services/{id}/rollback", notImplemented)
+	mux.HandleFunc("POST /v1/services", d.handleCreateService)
+	mux.HandleFunc("GET /v1/services", d.handleListServices)
+	mux.HandleFunc("GET /v1/services/{id}", d.handleGetService)
+	mux.HandleFunc("POST /v1/services/{id}/deploy", d.handleDeploy)
+	mux.HandleFunc("POST /v1/services/{id}/rollback", d.handleRollback)
 
 	// Promote: the sandbox-to-production step, and the whole point of one
 	// primitive serving both faces.
-	mux.HandleFunc("POST /v1/machines/{id}/promote", notImplemented)
+	mux.HandleFunc("POST /v1/machines/{id}/promote", d.handlePromote)
+
+	// Custom domains. Verification is what stops a caller spending the
+	// fleet's shared certificate rate limit on a name they do not own.
+	// The GitHub webhook. Unauthenticated by API key on purpose: it carries
+	// its own HMAC signature, which is the only credential GitHub can present.
+	if d.GitHub != nil {
+		mux.HandleFunc("POST /v1/github/webhook", d.GitHub)
+	} else {
+		mux.HandleFunc("POST /v1/github/webhook", func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusServiceUnavailable,
+				ErrorResponse{Error: "no github app is configured on this fleet"})
+		})
+	}
+
+	mux.HandleFunc("POST /v1/domains", d.handleAddDomain)
+	mux.HandleFunc("GET /v1/domains", d.handleListDomains)
+	mux.HandleFunc("DELETE /v1/domains/{hostname}", d.handleDeleteDomain)
 
 	// Volumes and fleet.
 	mux.HandleFunc("POST /v1/volumes", d.handleCreateVolume)
@@ -95,4 +131,10 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(v)
+}
+
+// Sealer seals a secret environment. Satisfied by seal.Key.
+type Sealer interface {
+	IsSet() bool
+	Seal([]byte) (string, error)
 }

@@ -104,9 +104,18 @@ func tenantRules(hostID string, view fleetView, loc *mesh.Locator) netns.TenantR
 		if m.App != "" {
 			rules.Apps[m.App] = append(rules.Apps[m.App], addr)
 		}
-		if m.HostID == hostID {
-			local[m.Slot] = append(local[m.Slot], m)
+		if m.HostID != hostID {
+			continue
 		}
+		// A suspended service replica is not in the running set, but it holds
+		// a reserved slot and an address that peers still resolve. It gets a
+		// counted drop rather than a forwarding rule: the count is what brings
+		// it back.
+		if m.State == "suspended" && m.ReleaseID != "" {
+			rules.Wake = append(rules.Wake, netns.WakeTarget{MachineID: m.ID, Addr: addr})
+			continue
+		}
+		local[m.Slot] = append(local[m.Slot], m)
 	}
 
 	// One slot, one machine. Two rows claiming the same slot is not a

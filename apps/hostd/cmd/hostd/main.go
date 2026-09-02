@@ -27,6 +27,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/config"
 	"github.com/vivek7405/pilots/hostd/internal/dns"
 	"github.com/vivek7405/pilots/hostd/internal/fc"
+	"github.com/vivek7405/pilots/hostd/internal/github"
 	"github.com/vivek7405/pilots/hostd/internal/machines"
 	"github.com/vivek7405/pilots/hostd/internal/mesh"
 	"github.com/vivek7405/pilots/hostd/internal/nbd"
@@ -34,6 +35,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/s3"
 	"github.com/vivek7405/pilots/hostd/internal/seal"
 	"github.com/vivek7405/pilots/hostd/internal/selfheal"
+	"github.com/vivek7405/pilots/hostd/internal/services"
 	"github.com/vivek7405/pilots/hostd/internal/volumes"
 )
 
@@ -329,9 +331,41 @@ func run() error {
 	// One listener, two audiences: requests for a workload hostname are
 	// proxied into a machine, everything else is the control API. Keeping them
 	// on one port means a host needs exactly one address to be useful.
+	// The rollout drives machines through the same manager the API does, so a
+	// deploy's replicas are ordinary machines with ordinary lifecycles.
+	rollout := services.New(services.Options{
+		HostID: cfg.HostID, Store: store, Machines: mgr,
+		Peers: peerCaller(f),
+	})
+
+	// Only the arbiter for a service acts on it, so every host can run this
+	// loop: they all see every service in their local replica, and all but one
+	// will decline for any given service.
+	go rollout.RunAutoscaler(ctx, mgr)
+
+	// Traffic to a suspended service replica's address brings it back. Runs
+	// beside the tenant filter that writes the counters it reads.
+	go runWaker(ctx, cfg.HostID, view, mgr)
+
+	// Custom domains verify on a loop, not only at registration: a CNAME is
+	// almost always set after the domain is registered.
+	go runDomainVerifier(ctx, cfg.HostID, store, cfg.WorkloadDomain)
+
+	// Push-to-deploy and pull-request previews. The webhook is an ordinary
+	// route on every host; exactly one acts on any delivery.
+	ghApp, err := github.LoadApp(cfg.GitHubAppID, cfg.GitHubKeyPath, cfg.GitHubWebhookKey)
+	if err != nil {
+		return err
+	}
+
 	controlAPI := api.Routes(api.Deps{
 		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink,
-		Builds: builder,
+		Builds: builder, Rollout: rollout, Domain: cfg.WorkloadDomain,
+		Peers: peerLookup(f),
+		GitHub: github.Handler(github.Deps{
+			HostID: cfg.HostID, App: ghApp, Store: store, Builds: builder,
+			Rollout: rollout, Machines: mgr, Domain: cfg.WorkloadDomain,
+		}),
 	})
 
 	// Machine-scoped API calls go to the host that owns the machine. Without
@@ -368,6 +402,17 @@ func run() error {
 	// Bind before announcing readiness. Doing this inside the serving goroutine
 	// would let notifyReady() fire while the bind was still failing, and under
 	// Type=notify systemd would consider the host up while it served nothing.
+	// TLS, when the fleet can share certificates. Serves the same handler on
+	// :443 with on-demand issuance; the plain listener below stays for the
+	// internal mesh and for fleets without object storage.
+	if certClient, cerr := newCertStore(cfg); cerr == nil && certClient != nil {
+		if err := startTLS(ctx, cfg, store, certClient, handler); err != nil {
+			return err
+		}
+	} else if cerr != nil {
+		slog.Warn("TLS is off: could not open the certificate store", "err", cerr)
+	}
+
 	ln, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
 		return err
@@ -505,4 +550,49 @@ func notifyReady() {
 	if _, err := conn.Write([]byte("READY=1\n")); err != nil {
 		slog.Warn("sd_notify write failed", "err", err)
 	}
+}
+
+// newCertStore opens the bucket certificates are shared through.
+//
+// The same bucket as everything else, under its own prefix: certificates have
+// to be readable by every host for the same reason machine images do, and a
+// second bucket would be a second thing to configure and a second thing to get
+// wrong.
+func newCertStore(cfg *config.Config) (*s3.Client, error) {
+	if cfg.S3Bucket == "" {
+		return nil, nil
+	}
+	return s3.New(context.Background(), s3.Config{
+		Endpoint: cfg.S3Endpoint, Region: cfg.S3Region, Bucket: cfg.S3Bucket,
+		Prefix: "certs", AccessKey: cfg.S3AccessKey, SecretKey: cfg.S3SecretKey,
+	})
+}
+
+// peerLookup resolves other hosts for service-write forwarding. Nil on a
+// single box, where there is no one to forward to.
+func peerLookup(f *fleet) api.PeerLookup {
+	if f == nil {
+		return nil
+	}
+	return peers{f.cache}
+}
+
+// sealerOrNil hands the API the seal key when this host has one.
+//
+// An untyped nil rather than a typed one: a typed nil satisfies the interface
+// and would then be asked IsSet on a nil receiver, so the absence of a key has
+// to be visible as a nil interface value.
+func sealerOrNil(k seal.Key) api.Sealer {
+	if !k.IsSet() {
+		return nil
+	}
+	return k
+}
+
+// peerCaller lets the rollout act on machines other hosts hold.
+func peerCaller(f *fleet) services.PeerCaller {
+	if f == nil {
+		return nil
+	}
+	return peerAPI{cache: f.cache, http: &http.Client{Timeout: 2 * time.Minute}}
 }

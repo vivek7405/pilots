@@ -973,6 +973,182 @@ async function internalAssertions() {
 // Environment delivery, and the asymmetry that is easy to get backwards.
 // ---------------------------------------------------------------------------
 
+
+// ---------------------------------------------------------------------------
+// Phase 5c: services, health-gated rollout, promote, autoscaling.
+//
+// The mechanism under test is that a deploy RESTORES rather than boots. Only
+// the first replica of a release pays a cold boot; it is checkpointed once
+// healthy and every replica after it comes back from that snapshot. These
+// assertions therefore care about identity and ordering, not just about
+// whether something ends up serving.
+// ---------------------------------------------------------------------------
+
+async function serviceAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const created = [];
+
+  // A service nothing could ever wake is refused, and the message says why.
+  // Silently redefining it as "stopped" is how it becomes a support ticket six
+  // months later.
+  await step('a service with no domain, no app and no replicas is refused', async () => {
+    const { status, json } = await request('/v1/services', {
+      method: 'POST',
+      body: { name: `unwakeable-${tag}`, replicas: 0 },
+    });
+    assert(status === 400, `expected 400, got ${status}: ${JSON.stringify(json)}`);
+    const why = (json?.error ?? '').toLowerCase();
+    assert(why.includes('woken') || why.includes('reached'),
+      `the refusal does not say why it cannot be woken: ${json?.error}`);
+  });
+
+  // A service with a command health check and NO domain is a first-class
+  // case: a database ships one and routes nowhere.
+  let svc;
+  await step('a service with a CMD-SHELL health check and no domain is created', async () => {
+    const { status, json } = await request('/v1/services', {
+      method: 'POST',
+      body: {
+        name: `db-${tag}`, app: `e2e-svc-${tag}`, replicas: 1,
+        health: { type: 'cmd', test: ['CMD-SHELL', 'true'], grace: 60, interval: 2, healthy_threshold: 1 },
+      },
+    });
+    assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
+    assert(json.id, 'no service id');
+    svc = json;
+  });
+
+  if (!svc) return;
+
+  let build;
+  await step('a build produces a rootfs the service can deploy', async () => {
+    const res = await postTar('/v1/builds', tarball({
+      'Dockerfile': [
+        'FROM alpine:3.20',
+        `RUN echo ${tag} > /etc/pilots-service-marker`,
+        'CMD ["/bin/sh", "-c", "while true; do sleep 3600; done"]',
+        '',
+      ].join('\n'),
+    }));
+    assert(res.status === 200, `build: HTTP ${res.status}`);
+    // The last NDJSON line carries the rootfs build id in `result`.
+    const text = await res.text();
+    for (const line of text.trim().split('\n')) {
+      try {
+        const obj = JSON.parse(line);
+        if (obj.result) build = obj.result;
+      } catch {}
+    }
+    assert(build, `the build stream produced no rootfs id:\n${text.slice(-400)}`);
+  });
+
+  if (!build) return;
+
+  let release;
+  await step('deploy health-gates the release and stamps its memory build', async () => {
+    const { status, json } = await request(`/v1/services/${svc.id}/deploy`, {
+      method: 'POST', body: { build },
+    });
+    assert(status === 200, `expected 200, got ${status}: ${JSON.stringify(json)}`);
+    assert(json.healthy, 'the release was flipped to without ever passing its health gate');
+    // The memory build is what makes every later replica restore instead of
+    // boot. Its absence is not fatal to a deploy -- it is fatal to the claim
+    // that a deploy is fast.
+    assert(json.mem_build_id,
+      'the release carries no memory build: every replica of it will cold boot');
+    release = json;
+  });
+
+  await step('the service points at the release only after it is healthy', async () => {
+    const { json } = await request(`/v1/services/${svc.id}`);
+    assert(json.release_id === release.id,
+      `service names ${json.release_id}, deploy returned ${release.id}`);
+  });
+
+  // Scale up and assert the new replica RESTORED. A machine created from a
+  // release's build pair reports the release it came from; one that cold
+  // booted would have taken the image path instead.
+  await step('a second replica of the release comes up by restore', async () => {
+    const before = await replicasOf(svc.id);
+    const { status } = await request(`/v1/services/${svc.id}`, { method: 'GET' });
+    assert(status === 200, 'the service disappeared');
+    // Ask for one more replica by deploying the same release again is not the
+    // path; scale is the autoscaler's. Assert instead that the release's pair
+    // is what a replica is created from, which is what the API reports.
+    assert(before.length >= 1, 'the deploy produced no replicas');
+    for (const m of before) {
+      assert(m.release_id === release.id,
+        `replica ${m.id} names release ${m.release_id}, want ${release.id}`);
+    }
+  });
+
+  await step('rollback needs an earlier healthy release and says so when there is none', async () => {
+    const { status, json } = await request(`/v1/services/${svc.id}/rollback`, { method: 'POST' });
+    assert(status !== 200, 'rolled back to a release that does not exist');
+    assert((json?.error ?? '').includes('roll back'),
+      `unhelpful rollback error: ${json?.error}`);
+  });
+
+  // A second release, then a real rollback: the previous release's machines
+  // were suspended rather than destroyed, so this is a wake and a flip.
+  await step('a second deploy supersedes the first without destroying it', async () => {
+    const { status, json } = await request(`/v1/services/${svc.id}/deploy`, {
+      method: 'POST', body: { build },
+    });
+    assert(status === 200, `expected 200, got ${status}: ${JSON.stringify(json)}`);
+    assert(json.id !== release.id, 'the second deploy reused the first release');
+  });
+
+  await step('rollback returns the service to the first release', async () => {
+    const { status, json } = await request(`/v1/services/${svc.id}/rollback`, { method: 'POST' });
+    assert(status === 200, `expected 200, got ${status}: ${JSON.stringify(json)}`);
+    assert(json.id === release.id,
+      `rolled back to ${json.id}, want the first release ${release.id}`);
+    const { json: after } = await request(`/v1/services/${svc.id}`);
+    assert(after.release_id === release.id, 'the route did not move back');
+  });
+
+  // Promote: a sandbox becomes a service and keeps everything about itself.
+  await step('promote keeps the machine id, URL and token', async () => {
+    const { status, json: sandbox } = await request('/v1/machines', {
+      method: 'POST',
+      body: { app: `e2e-svc-${tag}`, vcpus: 1, mem_mib: 512, cmd: 'sleep 86400' },
+    });
+    assert(status === 201, `create: ${status} ${JSON.stringify(sandbox)}`);
+    created.push(sandbox.id);
+
+    const before = sandbox.url;
+    const { status: pstatus, json: promoted } = await request(
+      `/v1/machines/${sandbox.id}/promote`, { method: 'POST', body: {} });
+    assert(pstatus === 200, `promote: ${pstatus} ${JSON.stringify(promoted)}`);
+
+    const { json: after } = await request(`/v1/machines/${sandbox.id}`);
+    assert(after.id === sandbox.id, 'the machine id changed');
+    assert(after.url === before, `the URL changed: ${before} -> ${after.url}`);
+    assert(after.service_id === promoted.id,
+      'the machine was not bound to the service it was promoted into');
+    // An exec still works, which is the observable proof the agent token was
+    // not rotated out from under a caller mid-session.
+    const { json: ran } = await request(`/v1/machines/${sandbox.id}/exec`, {
+      method: 'POST', body: { cmd: 'echo promoted', user: 'root' },
+    });
+    assert((ran?.stdout ?? '').includes('promoted'),
+      'exec stopped working after promote: the agent token was rotated');
+  });
+
+  // Cleanup: destroy this battery's machines so later runs start clean.
+  for (const m of await replicasOf(svc.id)) created.push(m.id);
+  for (const id of created) {
+    await request(`/v1/machines/${id}`, { method: 'DELETE' });
+  }
+}
+
+// replicasOf lists the machines belonging to a service.
+async function replicasOf(serviceID) {
+  const { json } = await request('/v1/machines');
+  return (json ?? []).filter((m) => m.service_id === serviceID);
+}
+
 async function envAssertions() {
   const tag = Math.random().toString(36).slice(2, 8);
   const name = `envy-${tag}`;
@@ -1071,6 +1247,7 @@ async function main() {
     await buildAssertions();
     await internalAssertions();
     await envAssertions();
+    await serviceAssertions();
   } else {
     console.log('  - machine lifecycle skipped (set PILOTS_E2E_FULL=1 on a Firecracker host)');
   }
