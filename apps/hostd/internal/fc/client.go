@@ -104,11 +104,54 @@ type Drive struct {
 	PathOnHost   string `json:"path_on_host"`
 	IsRootDevice bool   `json:"is_root_device"`
 	IsReadOnly   bool   `json:"is_read_only"`
+	// CacheType is "Unsafe" (Firecracker's default) or "Writeback". Omitted
+	// leaves the default, which does not advertise the VirtIO flush feature --
+	// so the guest's fsync is a no-op. Every drive holding data a user expects
+	// to survive must set CacheTypeWriteback; see the constant.
+	CacheType string `json:"cache_type,omitempty"`
 }
 
 func (c *Client) SetDrive(ctx context.Context, d Drive) error {
 	_, err := c.do(ctx, http.MethodPut, "/drives/"+d.DriveID, d)
 	return err
+}
+
+// VMConfig is the configuration Firecracker reports it is actually running.
+type VMConfig struct {
+	Drives []Drive `json:"drives"`
+}
+
+// GetVMConfig reads the machine's live configuration back out of Firecracker.
+//
+// Asking the VMM rather than reporting what hostd meant to configure is the
+// entire point. A volume drive's cache type is the difference between a
+// durable fsync and a lie, it is set in one place and baked into every
+// snapshot after that, and the failure mode is silent -- so the value that
+// gets checked has to be the one Firecracker holds, not the one we intended.
+func (c *Client) GetVMConfig(ctx context.Context) (*VMConfig, error) {
+	raw, err := c.do(ctx, http.MethodGet, "/vm/config", nil)
+	if err != nil {
+		return nil, err
+	}
+	var cfg VMConfig
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil, fmt.Errorf("fc: decode vm config: %w", err)
+	}
+	return &cfg, nil
+}
+
+// DriveConfig returns the live configuration of one drive.
+func (c *Client) DriveConfig(ctx context.Context, driveID string) (*Drive, error) {
+	cfg, err := c.GetVMConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range cfg.Drives {
+		if cfg.Drives[i].DriveID == driveID {
+			return &cfg.Drives[i], nil
+		}
+	}
+	return nil, fmt.Errorf("fc: no drive %q is attached", driveID)
 }
 
 type NetworkInterface struct {

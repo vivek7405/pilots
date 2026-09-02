@@ -116,3 +116,29 @@ CREATE TABLE IF NOT EXISTS releases (
   healthy         INTEGER,
   created_at      INTEGER
 );
+
+-- A persistent volume: one JuiceFS filesystem whose data lives in the same
+-- bucket as everything else, holding one raw ext4 image that a machine gets
+-- as a second virtio-blk drive.
+--
+-- host_id is the writer AND the lock, and that is not a policy choice. The
+-- JuiceFS metadata engine is a single SQLite file replicated by Litestream,
+-- and two hosts mounting one of those corrupts it -- so a volume is mounted by
+-- exactly one host at a time, the host running its machine. The row moves only
+-- when the machine moves, and a rescuing host takes it the same way it takes
+-- the machine: by claiming it from an owner that has provably stopped
+-- heartbeating.
+--
+-- There is no size column in mebibytes for decoration: size_mib is the size of
+-- disk.img, fixed at create, because the guest formats it once and every later
+-- boot expects the same block count.
+CREATE TABLE IF NOT EXISTS volumes (    -- writer: host_id only
+  id         TEXT NOT NULL PRIMARY KEY,
+  name       TEXT,
+  machine_id TEXT,
+  size_mib   INTEGER,
+  s3_prefix  TEXT,     -- volumes/<id>/ in the bucket; data and meta both
+  mount_path TEXT,     -- where the guest mounts /dev/vdb
+  host_id    TEXT,
+  created_at INTEGER
+);

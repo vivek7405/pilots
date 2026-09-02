@@ -215,17 +215,43 @@ type PromoteRequest struct {
 	Health       *HealthCheck `json:"health,omitempty"`
 }
 
+// Volume is persistent, per-write-durable storage: one filesystem in object
+// storage holding one disk image, handed to a machine as a second drive.
+//
+// It is attached to at most one machine and mounted by at most one host, and
+// both of those are reported rather than inferred -- a volume that two hosts
+// believe they hold is not recoverable, so an operator has to be able to see
+// where it is.
 type Volume struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	SizeGiB   int    `json:"size_gib"`
 	MachineID string `json:"machine_id,omitempty"`
+	HostID    string `json:"host_id,omitempty"`
+	MountPath string `json:"mount_path"`
 	CreatedAt int64  `json:"created_at"`
+}
+
+// MachineVolume reports the volume drive a running machine actually has.
+//
+// CacheType is read back out of Firecracker rather than repeated from what
+// hostd meant to configure. That is the entire reason this shape exists: the
+// default cache type does not advertise the VirtIO flush feature, so a guest
+// fsync on a drive left at the default returns success with the data only in
+// the host's page cache -- and the intent and the reality can differ with
+// nothing anywhere to notice.
+type MachineVolume struct {
+	VolumeID  string `json:"volume_id"`
+	MountPath string `json:"mount_path"`
+	Device    string `json:"device"`
+	CacheType string `json:"cache_type"`
 }
 
 type CreateVolumeRequest struct {
 	Name    string `json:"name"`
 	SizeGiB int    `json:"size_gib"`
+	// MountPath is where the guest mounts it. Defaults to /data.
+	MountPath string `json:"mount_path,omitempty"`
 }
 
 // Host is one member of the fleet, as seen by any host reading its local
