@@ -34,6 +34,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/s3"
 	"github.com/vivek7405/pilots/hostd/internal/seal"
 	"github.com/vivek7405/pilots/hostd/internal/selfheal"
+	"github.com/vivek7405/pilots/hostd/internal/services"
 	"github.com/vivek7405/pilots/hostd/internal/volumes"
 )
 
@@ -329,9 +330,15 @@ func run() error {
 	// One listener, two audiences: requests for a workload hostname are
 	// proxied into a machine, everything else is the control API. Keeping them
 	// on one port means a host needs exactly one address to be useful.
+	// The rollout drives machines through the same manager the API does, so a
+	// deploy's replicas are ordinary machines with ordinary lifecycles.
+	rollout := services.New(services.Options{
+		HostID: cfg.HostID, Store: store, Machines: mgr,
+	})
+
 	controlAPI := api.Routes(api.Deps{
 		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink,
-		Builds: builder,
+		Builds: builder, Rollout: rollout, Domain: cfg.WorkloadDomain,
 	})
 
 	// Machine-scoped API calls go to the host that owns the machine. Without

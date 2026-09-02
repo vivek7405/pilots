@@ -18,6 +18,11 @@ type Deps struct {
 	// Builds turns a Dockerfile context into a rootfs build. Nil on a host
 	// with no object storage, where a build has nowhere to publish to.
 	Builds BuildRunner
+	// Rollout deploys, rolls back, and promotes. Nil for the same reason
+	// Builds is: a release has nowhere to come from without object storage.
+	Rollout Rollout
+	// Domain is the fleet's domain, for rendering a service's URL.
+	Domain string
 }
 
 // Routes registers the full public API. Phase 1 lands the shapes; the handlers
@@ -65,15 +70,15 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("GET /v1/builds/{id}/logs", d.handleBuildLogs)
 
 	// Services and rollout.
-	mux.HandleFunc("POST /v1/services", notImplemented)
-	mux.HandleFunc("GET /v1/services", notImplemented)
-	mux.HandleFunc("GET /v1/services/{id}", notImplemented)
-	mux.HandleFunc("POST /v1/services/{id}/deploy", notImplemented)
-	mux.HandleFunc("POST /v1/services/{id}/rollback", notImplemented)
+	mux.HandleFunc("POST /v1/services", d.handleCreateService)
+	mux.HandleFunc("GET /v1/services", d.handleListServices)
+	mux.HandleFunc("GET /v1/services/{id}", d.handleGetService)
+	mux.HandleFunc("POST /v1/services/{id}/deploy", d.handleDeploy)
+	mux.HandleFunc("POST /v1/services/{id}/rollback", d.handleRollback)
 
 	// Promote: the sandbox-to-production step, and the whole point of one
 	// primitive serving both faces.
-	mux.HandleFunc("POST /v1/machines/{id}/promote", notImplemented)
+	mux.HandleFunc("POST /v1/machines/{id}/promote", d.handlePromote)
 
 	// Volumes and fleet.
 	mux.HandleFunc("POST /v1/volumes", d.handleCreateVolume)

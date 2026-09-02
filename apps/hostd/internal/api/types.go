@@ -211,32 +211,66 @@ type BuildLogLine struct {
 }
 
 // HealthCheck gates a rollout: a new release takes traffic only once healthy.
+//
+// A tagged union rather than an HTTP path, because a database ships a command
+// check and not an endpoint, and every stock image already declares one. The
+// shape is Docker's, so an image's own HEALTHCHECK maps straight in.
+//
+//	{"type":"http","path":"/__webjs/ready","grace":40,"healthy_threshold":2}
+//	{"type":"cmd","test":["CMD-SHELL","pg_isready -U postgres"],"retries":5}
 type HealthCheck struct {
-	Path        string `json:"path,omitempty"`
-	IntervalMS  int    `json:"interval_ms,omitempty"`
-	TimeoutMS   int    `json:"timeout_ms,omitempty"`
-	GracePeriod int    `json:"grace_period_ms,omitempty"`
+	Type string `json:"type,omitempty"` // "http" (default) | "cmd" | "none"
+	Path string `json:"path,omitempty"`
+	// Test is Docker's form: ["CMD-SHELL", "..."], ["CMD", argv...], ["NONE"].
+	Test []string `json:"test,omitempty"`
+
+	// Seconds, matching Docker and the Dockerfile HEALTHCHECK this parses from.
+	IntervalSec      int `json:"interval,omitempty"`
+	TimeoutSec       int `json:"timeout,omitempty"`
+	GraceSec         int `json:"grace,omitempty"`
+	HealthyThreshold int `json:"healthy_threshold,omitempty"`
 }
 
 type Service struct {
-	ID           string       `json:"id"`
-	Name         string       `json:"name"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// App groups services that may find each other by <name>.internal.
+	App          string       `json:"app,omitempty"`
 	Replicas     int          `json:"replicas"`
 	Knobs        Knobs        `json:"knobs"`
 	Health       *HealthCheck `json:"health,omitempty"`
+	URL          string       `json:"url,omitempty"`
 	CustomDomain string       `json:"custom_domain,omitempty"`
 	ReleaseID    string       `json:"release_id,omitempty"`
+	Repo         string       `json:"repo,omitempty"`
+	Branch       string       `json:"branch,omitempty"`
+	Autodeploy   bool         `json:"autodeploy"`
 	CreatedAt    int64        `json:"created_at"`
 }
 
 type CreateServiceRequest struct {
-	Name         string       `json:"name"`
-	Release      string       `json:"release,omitempty"`
-	Build        string       `json:"build,omitempty"`
-	Replicas     int          `json:"replicas,omitempty"`
-	Knobs        *Knobs       `json:"knobs,omitempty"`
-	Health       *HealthCheck `json:"health,omitempty"`
-	CustomDomain string       `json:"custom_domain,omitempty"`
+	Name     string       `json:"name"`
+	App      string       `json:"app,omitempty"`
+	Release  string       `json:"release,omitempty"`
+	Build    string       `json:"build,omitempty"`
+	Replicas int          `json:"replicas,omitempty"`
+	Knobs    *Knobs       `json:"knobs,omitempty"`
+	Health   *HealthCheck `json:"health,omitempty"`
+	// Domain is the subdomain label under the fleet's domain. Empty means the
+	// service mints no route rows -- legal, and reachable by peers over
+	// <name>.internal instead.
+	Domain       string `json:"domain,omitempty"`
+	CustomDomain string `json:"custom_domain,omitempty"`
+
+	Env map[string]string `json:"env,omitempty"`
+	// SecretEnv is plaintext over TLS and sealed by hostd with the fleet key
+	// before any row is written -- never by the client, which would need the
+	// fleet key to do it.
+	SecretEnv map[string]string `json:"secret_env,omitempty"`
+
+	Repo       string `json:"repo,omitempty"`
+	Branch     string `json:"branch,omitempty"`
+	Autodeploy bool   `json:"autodeploy,omitempty"`
 }
 
 // DeployRequest cuts a new release over, health-gated, keeping the previous

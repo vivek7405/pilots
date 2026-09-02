@@ -305,3 +305,77 @@ func TestRollbackWakesThepreviousRelease(t *testing.T) {
 		t.Errorf("rollback rebuilt instead of waking: %v", fm.events)
 	}
 }
+
+// Promote must not touch the machine's identity.
+//
+// An agent iterating against a sandbox has been using its URL for an hour, and
+// every checkpoint it took restores into that machine. A promote that mints a
+// new machine has failed even if everything serves -- the URL its user has
+// open stops working, and its checkpoint history points at a machine that is
+// no longer the one running.
+func TestPromoteKeepsTheMachinesIdentity(t *testing.T) {
+	ctx := context.Background()
+	m, fm, store, _ := fixture(t, 1)
+
+	sandbox := &state.Machine{
+		ID: "m-sandbox", Name: "lively-hill-42", HostID: "host-a", State: "running",
+		Domain: "lively-hill-42.pilotrun.app", App: "shop",
+		AgentTokenHash: "hash-abc",
+	}
+	if err := store.PutMachine(ctx, sandbox); err != nil {
+		t.Fatal(err)
+	}
+
+	svc, err := m.Promote(ctx, "m-sandbox", api.PromoteRequest{})
+	if err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+
+	after, err := store.GetMachine(ctx, "m-sandbox")
+	if err != nil {
+		t.Fatalf("the promoted machine is gone: %v", err)
+	}
+	if after.ID != sandbox.ID || after.Name != sandbox.Name || after.Domain != sandbox.Domain {
+		t.Errorf("identity changed: id %q->%q name %q->%q domain %q->%q",
+			sandbox.ID, after.ID, sandbox.Name, after.Name, sandbox.Domain, after.Domain)
+	}
+	if after.AgentTokenHash != sandbox.AgentTokenHash {
+		t.Error("the agent token changed; every exec the caller had open is now unauthorized")
+	}
+	if after.ServiceID != svc.ID || after.ReleaseID == "" {
+		t.Errorf("the machine was not bound to its new service/release: %+v", after)
+	}
+	// It became replica one, not a second machine.
+	for _, e := range fm.events {
+		if strings.HasPrefix(e, "create:") {
+			t.Errorf("promote created a machine instead of adopting the sandbox: %v", fm.events)
+		}
+	}
+}
+
+// The promoted release is snapshotted with the placeholder credential, like
+// any other release, or its scale-up replicas cannot install their own tokens.
+func TestPromoteResetsTheTokenBeforeSnapshotting(t *testing.T) {
+	ctx := context.Background()
+	m, fm, store, _ := fixture(t, 1)
+	if err := store.PutMachine(ctx, &state.Machine{
+		ID: "m-sandbox", Name: "sandbox", HostID: "host-a", State: "running",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Promote(ctx, "m-sandbox", api.PromoteRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	reset, ckpt := -1, -1
+	for i, e := range fm.events {
+		if e == "reset-token:m-sandbox" {
+			reset = i
+		}
+		if e == "checkpoint:m-sandbox" {
+			ckpt = i
+		}
+	}
+	if reset < 0 || ckpt < 0 || reset > ckpt {
+		t.Errorf("token reset (%d) must precede the snapshot (%d): %v", reset, ckpt, fm.events)
+	}
+}

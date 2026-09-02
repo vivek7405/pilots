@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/vivek7405/pilots/hostd/internal/state"
@@ -136,8 +137,13 @@ func TestEveryRouteIsRegistered(t *testing.T) {
 
 	for _, r := range routes {
 		rec := do(t, h, r.method, r.path, testKey)
-		if rec.Code == http.StatusNotFound {
-			t.Errorf("%s %s: 404 -- route not registered", r.method, r.path)
+		// A 404 is ambiguous now that these handlers are real: an unregistered
+		// pattern and a registered handler that could not find the row both
+		// answer 404. Go's mux writes a bare "404 page not found" for the
+		// former, while a handler answers the JSON error shape -- so the body
+		// is what distinguishes them.
+		if rec.Code == http.StatusNotFound && !strings.Contains(rec.Body.String(), "{") {
+			t.Errorf("%s %s: 404 with no JSON body -- route not registered", r.method, r.path)
 		}
 		// Anything that is not a 404 proves the pattern matched. Handlers that
 		// are still unimplemented answer 501; implemented ones answer for real.
