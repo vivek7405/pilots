@@ -7,18 +7,25 @@ import (
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
+
+	"github.com/vivek7405/pilots/hostd/internal/mesh"
+	"github.com/vivek7405/pilots/hostd/internal/netns"
 )
 
 // The guest's IPv6 half of its link, configured by the agent when it is PID 1.
 //
-// These are the same constants scripts/rootfs/eth0.network declares, and they
-// have to stay identical: every guest in the fleet shares them, which is what
-// makes a snapshot host-agnostic.
+// Imported from the packages that OWN these values rather than copied: the
+// agent is always compiled inside this module (build-golden-rootfs.sh and
+// host-bootstrap.sh both build ./cmd/guest-agent from apps/hostd, and only
+// the binary is copied into an image), so the guest can never drift from
+// what the host translates. scripts/rootfs/eth0.network carries the same
+// values for the golden rootfs; netns's tests pin that copy.
 const (
-	guestIP6   = "fdee::21/126"
-	gateway6   = "fdee::22"
-	peerPrefix = "fdcd::/16"
+	guestIP6 = netns.TapGuestIP6 + "/126"
+	gateway6 = netns.TapHostIP6
 )
+
+var peerPrefix = mesh.MachineSpace.String()
 
 // configureNetwork gives eth0 its IPv6 address and the route to its peers.
 //
