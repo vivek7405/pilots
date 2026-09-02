@@ -154,13 +154,15 @@ func TestAMissingSpecIsNotAnError(t *testing.T) {
 	}
 }
 
-// quoteEnvValue and unquoteEnvValue must be exact inverses.
+// What we write must read back as what we wrote -- through the ONE reader.
 //
-// pilot-app.service reads these files through systemd's EnvironmentFile
-// parser and the supervisor reads them through unquoteEnvValue. If the two
-// disagree, one machine runs a different command from another for no reason
-// the operator can see, decided by whether its image happened to carry
-// systemd.
+// This used to check quoteEnvValue against unquoteEnvValue, a second reader
+// that existed only to be the Go inverse. The two agreed with each other and
+// both disagreed with systemd, which is exactly how a newline-bearing secret
+// came out corrupt on an image carrying systemd and intact on one without.
+// unquoteEnvValue is gone; parseEnvFile is what the supervisor uses and what
+// TestSystemdReadsBackWhatWeWrote pins against real systemd, so agreement is
+// structural rather than something two functions have to keep promising.
 func TestEnvValuesRoundTrip(t *testing.T) {
 	for _, v := range []string{
 		"plain",
@@ -170,10 +172,33 @@ func TestEnvValuesRoundTrip(t *testing.T) {
 		"trailing space ",
 		"node server.js > /var/log/app.log",
 		`{"json":"value"}`,
+		"a\nb",   // real newline
+		"a\r\nb", // CRLF
+		"-----BEGIN KEY-----\nMIIB\n-----END-----", // the case that broke
+		"tab\there",
+		"dollar $HOME and `backtick`",
 		"",
 	} {
-		if got := unquoteEnvValue(quoteEnvValue(v)); got != v {
+		got := parseEnvFile("V=" + quoteEnvValue(v) + "\n")["V"]
+		if got != v {
 			t.Errorf("round trip of %q gave %q", v, got)
+		}
+	}
+}
+
+// A backslash before anything other than a backslash or a quote is KEPT,
+// because that is what systemd does with it. Decoding it away here would put
+// the two readers back out of step for exactly the values -- Windows paths,
+// regexes, escaped sequences in a config blob -- most likely to carry one.
+func TestABackslashBeforeAnOrdinaryByteSurvives(t *testing.T) {
+	for raw, want := range map[string]string{
+		`V="a\zb"`: `a\zb`,
+		`V="a\\b"`: `a\b`,
+		`V="a\"b"`: `a"b`,
+		`V="a\nb"`: `a\nb`, // literal backslash and n, NOT a newline
+	} {
+		if got := parseEnvFile(raw + "\n")["V"]; got != want {
+			t.Errorf("%s gave %q, want %q", raw, got, want)
 		}
 	}
 }
@@ -199,12 +224,16 @@ func TestSystemdReadsBackWhatWeWrote(t *testing.T) {
 	}
 
 	values := map[string]string{
-		"PLAIN":   "value",
-		"SPACED":  "two words",
-		"QUOTED":  `say "hi"`,
-		"SLASHED": `a\b`,
-		"PEM":     "-----BEGIN KEY-----\nMIIBOgIBAAJB\n-----END KEY-----",
-		"TRAIL":   "trailing space ",
+		"PLAIN":    "value",
+		"SPACED":   "two words",
+		"QUOTED":   `say "hi"`,
+		"SLASHED":  `a\b`,
+		"PEM":      "-----BEGIN KEY-----\nMIIBOgIBAAJB\n-----END KEY-----",
+		"TRAIL":    "trailing space ",
+		"CRLF":     "line\r\nline",
+		"ORDINARY": `a\zb`, // backslash before an ordinary byte: systemd keeps it
+		"DOLLAR":   "$HOME and `backtick` and #hash",
+		"TAB":      "a\tb",
 	}
 
 	dir := t.TempDir()

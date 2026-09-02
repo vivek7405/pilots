@@ -193,13 +193,21 @@ func scanEnvValue(raw string, i int) (string, int) {
 		for i < len(raw) {
 			switch raw[i] {
 			case '\\':
-				// systemd takes the next byte literally. There is no \n, which
-				// is the whole reason a real newline is written as itself.
-				if i+1 < len(raw) {
+				// Exactly systemd's rule, verified against it: a backslash
+				// unescapes ONLY \\ and \", and before any other byte it is
+				// KEPT, both bytes surviving into the value.
+				//
+				//	"a\\b" -> a\b      "a\"b" -> a"b      "a\zb" -> a\zb
+				//
+				// Dropping it for the third case would be a new version of
+				// the bug this file exists to fix: a value that reads one way
+				// through systemd and another through here.
+				if i+1 < len(raw) && (raw[i+1] == '\\' || raw[i+1] == '"') {
 					b.WriteByte(raw[i+1])
 					i += 2
 					continue
 				}
+				b.WriteByte(raw[i])
 				i++
 			case '"':
 				i++
@@ -224,40 +232,4 @@ func scanEnvValue(raw string, i int) (string, int) {
 		i++
 	}
 	return strings.TrimSpace(raw[start:i]), i
-}
-
-// unquoteEnvValue reverses quoteEnvValue, whose escaping is systemd's
-// EnvironmentFile format: the value is wrapped in double quotes with
-// backslash, quote, newline and carriage return escaped inside it.
-//
-// It must stay the exact inverse. The supervisor and pilot-app.service read
-// the same two files, so a disagreement here means one mechanism runs a
-// different command from the other -- on the same machine, decided by whether
-// the image happened to carry systemd.
-func unquoteEnvValue(v string) string {
-	v = strings.TrimSpace(v)
-	if len(v) < 2 || v[0] != '"' || v[len(v)-1] != '"' {
-		return v
-	}
-	inner := v[1 : len(v)-1]
-
-	var b strings.Builder
-	for i := 0; i < len(inner); i++ {
-		if inner[i] != '\\' || i+1 >= len(inner) {
-			b.WriteByte(inner[i])
-			continue
-		}
-		i++
-		switch inner[i] {
-		case 'n':
-			b.WriteByte('\n')
-		case 'r':
-			b.WriteByte('\r')
-		default:
-			// Covers the backslash and double-quote cases, and leaves any
-			// other escaped byte as itself rather than inventing a meaning.
-			b.WriteByte(inner[i])
-		}
-	}
-	return b.String()
 }
