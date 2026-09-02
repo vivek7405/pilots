@@ -16,11 +16,16 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
-// machineRow renders one machine as the subscription's 22 columns.
+// machineRow renders one machine as the subscription's columns.
 func machineRow(id, name, hostID, machineState string) string {
+	return machineRowInApp(id, name, hostID, machineState, "", 0)
+}
+
+// machineRowInApp is the same row with its grouping and netns slot filled in.
+func machineRowInApp(id, name, hostID, machineState, app string, slot int) string {
 	return fmt.Sprintf(
-		`["%s","%s","%s","%s","","",1,512,"%s.pilotrun.app","",8080,3001,"","","","","","","","",0,0]`,
-		id, name, hostID, machineState, name)
+		`["%s","%s","%s","%s","","",1,512,"%s.pilotrun.app","",8080,3001,"","","","","","","","","%s",%d,0,0]`,
+		id, name, hostID, machineState, name, app, slot)
 }
 
 func hostRow(id, addr string, lastSeen int64) string {
@@ -60,7 +65,7 @@ func startCache(t *testing.T, s *cacheServer) *Cache {
 				flushLine(w, `{"row":[1,`+row+`]}`)
 			}
 		} else {
-			flushLine(w, `{"columns":["id","name","host_id","state","kind_knobs","image_ref","vcpus","mem_mib","domain","custom_domain","app_port","agent_port","agent_token_hash","mem_build_id","rootfs_build_id","template_mem_build_id","template_rootfs_build_id","volume_id","service_id","release_id","last_activity","updated_at"]}`)
+			flushLine(w, `{"columns":["id","name","host_id","state","kind_knobs","image_ref","vcpus","mem_mib","domain","custom_domain","app_port","agent_port","agent_token_hash","mem_build_id","rootfs_build_id","template_mem_build_id","template_rootfs_build_id","volume_id","service_id","release_id","app","slot","last_activity","updated_at"]}`)
 			for _, row := range s.machineRows {
 				flushLine(w, `{"row":[1,`+row+`]}`)
 			}
@@ -269,7 +274,7 @@ func TestCacheRebuildsWhenItsSubscriptionIsGone(t *testing.T) {
 		}
 
 		n := subscribes.Add(1)
-		flushLine(w, `{"columns":["id","name","host_id","state","kind_knobs","image_ref","vcpus","mem_mib","domain","custom_domain","app_port","agent_port","agent_token_hash","mem_build_id","rootfs_build_id","template_mem_build_id","template_rootfs_build_id","volume_id","service_id","release_id","last_activity","updated_at"]}`)
+		flushLine(w, `{"columns":["id","name","host_id","state","kind_knobs","image_ref","vcpus","mem_mib","domain","custom_domain","app_port","agent_port","agent_token_hash","mem_build_id","rootfs_build_id","template_mem_build_id","template_rootfs_build_id","volume_id","service_id","release_id","app","slot","last_activity","updated_at"]}`)
 		for _, row := range rows {
 			flushLine(w, `{"row":[1,`+row+`]}`)
 		}
@@ -319,4 +324,50 @@ func waitFor(t *testing.T, cond func() bool, what string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+// A host arriving must be announced, not merely stored.
+//
+// The mesh reconciles on a 15-second ticker whose comment called itself a
+// safety net and said the cache pushed changes as they happened. It did not:
+// nothing here signalled anyone, so the ticker WAS the mechanism. A host that
+// had just joined could therefore see the whole fleet through Corrosion while
+// having a route to none of it, and for those seconds every request it was
+// asked to forward on another host's behalf timed out -- which is what the
+// phase gate caught, as a freshly bootstrapped third host failing to serve an
+// exec for a machine it did not own.
+func TestAHostChangeIsAnnounced(t *testing.T) {
+	changes := make(chan string)
+	cache := startCache(t, &cacheServer{
+		machineRows: []string{machineRow("m-1", "alpha", "host-a", "running")},
+		hostRows:    []string{hostRow("host-a", "fdcc::1", time.Now().Unix())},
+		hostChanges: changes,
+	})
+
+	// Drain the signal the initial load may have left.
+	select {
+	case <-cache.HostsChanged():
+	default:
+	}
+
+	changes <- `{"change":["insert",2,` + hostRow("host-b", "fdcc::2", time.Now().Unix()) + `,3]}`
+
+	select {
+	case <-cache.HostsChanged():
+	case <-time.After(5 * time.Second):
+		t.Fatal("a host joined and nothing was told about it; the mesh would " +
+			"not route to it until its next tick")
+	}
+
+	// And the signal does not depend on anyone draining it promptly: a second
+	// change while one is pending must not block the cache.
+	changes <- `{"change":["insert",3,` + hostRow("host-c", "fdcc::3", time.Now().Unix()) + `,4]}`
+	waitFor(t, func() bool {
+		for _, h := range cache.Hosts() {
+			if h.ID == "host-c" {
+				return true
+			}
+		}
+		return false
+	}, "the second host to reach the cache")
 }

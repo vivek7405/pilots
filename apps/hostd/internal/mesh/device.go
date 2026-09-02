@@ -156,10 +156,11 @@ func peerConfig(p Peer) wgtypes.PeerConfig {
 	interval := keepalive
 	cfg := wgtypes.PeerConfig{
 		PublicKey: p.PublicKey,
-		// The peer's mesh address and nothing else. AllowedIPs is WireGuard's
-		// routing table AND its inbound filter, so a wider range would let one
-		// host claim traffic for addresses that are not its own.
-		AllowedIPs:                  []net.IPNet{hostRoute(p.Address)},
+		// Exactly what the peer's own key derives to, and nothing else.
+		// AllowedIPs is WireGuard's routing table AND its inbound filter, so a
+		// wider range would let one host claim traffic for addresses that are
+		// not its own.
+		AllowedIPs:                  peerRoutes(p),
 		ReplaceAllowedIPs:           true,
 		PersistentKeepaliveInterval: &interval,
 	}
@@ -183,12 +184,46 @@ func peerMatches(have wgtypes.Peer, want Peer) bool {
 			return false
 		}
 	}
-	route := hostRoute(want.Address)
-	if len(have.AllowedIPs) != 1 {
+	// TWO prefixes now: the peer host itself, and the block its machines sit
+	// in. The count check is load-bearing rather than defensive -- it is what
+	// makes Sync idempotent, so a peer whose device still carries only the
+	// host address (a hostd from before machine addressing existed) is seen as
+	// changed and gets reconfigured exactly once.
+	want6 := peerRoutes(want)
+	if len(have.AllowedIPs) != len(want6) {
 		return false
 	}
-	return have.AllowedIPs[0].IP.Equal(route.IP) &&
-		have.AllowedIPs[0].Mask.String() == route.Mask.String()
+	// Compared as a set: WireGuard reports AllowedIPs in whatever order the
+	// kernel holds them, and treating a reordering as a change would rebuild
+	// every tunnel on every reconcile.
+	for _, w := range want6 {
+		found := false
+		for _, h := range have.AllowedIPs {
+			if h.IP.Equal(w.IP) && h.Mask.String() == w.Mask.String() {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// peerRoutes is everything a peer is allowed to send and receive on.
+//
+// Both are DERIVED from the peer's public key, never taken from p.Address --
+// the row a peer's address arrives in is only ever checked against the host
+// that wrote it, so trusting a published address would let one host claim
+// another's traffic. PeersFrom derives Address the same way; deriving again
+// here means the two cannot disagree.
+func peerRoutes(p Peer) []net.IPNet {
+	machines := MachinePrefixFor(p.PublicKey)
+	return []net.IPNet{
+		hostRoute(p.Address),
+		{IP: machines.Addr().AsSlice(), Mask: net.CIDRMask(machines.Bits(), 128)},
+	}
 }
 
 // syncRoutes adds a route to each peer through the mesh interface.
@@ -207,13 +242,14 @@ func (d *Device) syncRoutes(peers []Peer) error {
 		if p.PublicKey == d.keys.Public {
 			continue
 		}
-		route := hostRoute(p.Address)
-		if err := netlink.RouteReplace(&netlink.Route{
-			LinkIndex: link.Attrs().Index,
-			Dst:       &route,
-			Scope:     netlink.SCOPE_LINK,
-		}); err != nil {
-			errs = append(errs, fmt.Errorf("mesh: route to %s: %w", p.Address, err))
+		for _, route := range peerRoutes(p) {
+			if err := netlink.RouteReplace(&netlink.Route{
+				LinkIndex: link.Attrs().Index,
+				Dst:       &route,
+				Scope:     netlink.SCOPE_LINK,
+			}); err != nil {
+				errs = append(errs, fmt.Errorf("mesh: route to %s: %w", &route, err))
+			}
 		}
 	}
 	return errors.Join(errs...)

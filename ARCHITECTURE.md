@@ -214,18 +214,42 @@ therefore carries two `AllowedIPs` entries.
 **The data path.** Guests speak IPv4 and the mesh is IPv6, so the two are
 bridged at the host rather than wished away. Every guest additionally holds a
 constant `fdee::21` — identical on every guest for the same reason `.21` is,
-and equally snapshot-safe. DNS answers the peer's `fdcd` address; the root
-namespace NAT66s both ways: source-rewrite outbound to `<prefix>::<slot>`,
-destination-rewrite inbound into the target netns. Cross-host the packet routes
-over the mesh to the owning host and is translated there. Same path either way.
+and equally snapshot-safe. DNS answers the peer's `fdcd` address, and the
+**namespace** NAT66s both ways: source-rewrite outbound `fdee::21` to
+`<prefix>::<slot>`, destination-rewrite inbound back to `fdee::21`. The root
+namespace routes and filters and never translates — it carries one
+`<prefix>::<slot>/128 via <veth-peer> dev veth-N` route per machine, the same
+shape as the `10.11.x.y/32` route already beside it. Cross-host the packet
+routes over the mesh to the owning host and is translated in the target
+namespace there. Same path either way.
 
-**Tenant isolation belongs at that translation hop, in the root namespace.**
-Every guest sources from the same `169.254.0.21`, so classification by source
-address is impossible by construction — it is by ingress veth (→ machine →
-app). Doing it there costs one rule set per host, updated once per fleet
-change; doing it inside each netns would cost a set of every peer address in
-the app, in up to 1024 netns per host, re-reconciled on every fleet change and
-churning hardest during a rescue, which is precisely when the host is busiest.
+**Translating in the root namespace instead cannot work**, and the reason is
+worth keeping because the arrangement looks natural until it is tried. After
+translation the address is `fdee::21`, which is the same address in all 1024 of
+a host's namespaces. Netfilter makes the routing decision *after* the
+prerouting DNAT and does not carry the ingress interface into it, so both the
+inbound direction and the reply to an outbound flow arrive at a thousand
+candidate veths with nothing to choose between them. Recovering the answer
+needs a connmark and a policy-routing table per namespace: a second addressing
+scheme layered on the derived one, reconciled on every machine that moves.
+Translating one hop earlier means the packet already carries an address that is
+unique on the host by the time anything has to route it.
+
+**Tenant isolation belongs at that root-namespace hop.** Every guest sources
+from the same `169.254.0.21`, so classification by source address is impossible
+by construction — it is by ingress veth (→ machine → app). Doing it there costs
+one rule set per host, updated once per fleet change; doing it inside each netns
+would cost a set of every peer address in the app, in up to 1024 netns per host,
+re-reconciled on every fleet change and churning hardest during a rescue, which
+is precisely when the host is busiest.
+
+The same rules drop, per veth, any IPv6 whose source is not that slot's own
+machine address. By the time the root namespace sees a packet the source *is*
+unique, so against the ingress-veth match this looks redundant. It is not.
+Without it a guest can put a peer's address in packets it sends: the reply goes
+to the real owner so it steals no traffic, but the receiving machine's filter
+sees a connection opening from inside its own app and accepts it. The ingress
+veth is the host's own knowledge; a source address is the guest's.
 
 Landmines:
 

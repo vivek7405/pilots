@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sync"
@@ -26,6 +27,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/fc"
 	"github.com/vivek7405/pilots/hostd/internal/nbd"
 	"github.com/vivek7405/pilots/hostd/internal/netns"
+	"github.com/vivek7405/pilots/hostd/internal/seal"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -37,6 +39,20 @@ const (
 	StateStopped   = "stopped"
 	StateError     = "error"
 )
+
+// Discovery is notified about the lifetime of a machine's namespace.
+//
+// An interface so the lifecycle does not depend on what is listening in there
+// -- and so a host with nothing to discover simply has none, rather than a
+// responder resolving names for a fleet of one that has no peers.
+type Discovery interface {
+	// Bind starts serving inside a namespace that has just been built.
+	Bind(machineID, netnsName string) error
+	// Release stops, before the namespace is torn down. A responder left
+	// bound to a namespace that no longer exists is a goroutine per machine
+	// for the life of the process.
+	Release(machineID string)
+}
 
 // ErrNotFound wraps the store's sentinel so errors.Is works across the
 // package boundary and the API layer can map it to a 404 without importing
@@ -76,6 +92,22 @@ type Options struct {
 	// object storage, where every volume operation is refused up front rather
 	// than failing somewhere inside a create.
 	Volumes VolumeManager
+	// FleetKey seals secret environment values before they are written to a
+	// row. Held by hostd rather than by clients: if a client sealed, every
+	// laptop would need the key and it would stop being fleet infrastructure.
+	FleetKey seal.Key
+
+	// Discovery follows a machine's network namespace: it is told when one
+	// appears and when it goes away, so the .internal responder can bind a
+	// socket inside it. Nil on a host with no mesh identity, where there is
+	// nothing for a name to resolve to.
+	Discovery Discovery
+
+	// MachinePrefix is this host's block of mesh addresses, derived from its
+	// WireGuard key. Every slot's address comes out of it, so a host without
+	// one runs machines that cannot reach a peer -- correct on a single box,
+	// where there is no peer to reach.
+	MachinePrefix netip.Prefix
 }
 
 // Manager is the per-host machine registry.
@@ -100,7 +132,7 @@ func New(opts Options) *Manager {
 	}
 	return &Manager{
 		opts:    opts,
-		pool:    netns.NewPool(opts.PoolSize),
+		pool:    netns.NewPool(opts.PoolSize, opts.MachinePrefix),
 		running: make(map[string]*fc.Machine),
 		flight:  newInFlight(),
 	}
@@ -207,8 +239,19 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 		return nil, err
 	}
 
+	// The grouping and the environment are recorded BEFORE the machine is
+	// built, so that a create which dies partway leaves a row naming a service
+	// row that exists -- rather than a machine whose environment was never
+	// written anywhere and cannot be recovered from the request that is gone.
+	env := createEnv{App: req.App, Cmd: req.Cmd, Env: req.Env, SecretEnv: req.SecretEnv}
+	serviceID, err := m.provisionService(ctx, name, env)
+	if err != nil {
+		return nil, err
+	}
+
 	row := &state.Machine{
 		ID: id, Name: name, HostID: m.opts.HostID, State: StateCreating,
+		App: req.App, ServiceID: serviceID,
 		KindKnobs: knobsJSON,
 		VCPUs:     orDefault(req.VCPUs, 1),
 		MemMiB:    orDefault(req.MemMiB, 512),
@@ -222,9 +265,10 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 		return nil, err
 	}
 
-	fcm, err := m.startNewMachine(ctx, row, token, req.Volume, req.Image)
+	fcm, err := m.startNewMachine(ctx, row, token, req.Volume, req.Image, env.Cmd)
 	if err != nil {
 		row.State = StateError
+		stampSlot(row, nil)
 		row.UpdatedAt = time.Now().Unix()
 		_ = m.opts.Store.PutMachine(ctx, row)
 		return row, err
@@ -234,6 +278,7 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 	m.rememberToken(id, token)
 
 	row.State = StateRunning
+	stampSlot(row, fcm)
 	row.UpdatedAt = time.Now().Unix()
 	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
 		return row, err
@@ -260,6 +305,8 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	}
 
 	var errs []error
+
+	m.releaseDiscovery(id)
 
 	if fcm, ok := m.get(id); ok {
 		// The copy-on-write file holds every write since the last snapshot.
@@ -307,7 +354,41 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	if err := m.opts.Store.DeleteMachine(ctx, id); err != nil {
 		errs = append(errs, fmt.Errorf("delete row: %w", err))
 	}
+	if err := m.releaseService(ctx, row); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
+}
+
+// releaseService drops the machine's service row once nothing uses it.
+//
+// The row carries the machine's sealed environment, so one left behind is a
+// secret still replicated to every host in the fleet, for a machine that no
+// longer exists. A create mints a service per machine today, but 5c gives one
+// service many machines -- so the last user turns the light off rather than
+// the first one out of the room.
+func (m *Manager) releaseService(ctx context.Context, row *state.Machine) error {
+	if row == nil || row.ServiceID == "" {
+		return nil
+	}
+
+	others, err := m.opts.Store.ListMachines(ctx)
+	if err != nil {
+		// Better to leak the row than to delete one still in use: the leak is
+		// a secret nobody can reach, the mistake is a running machine losing
+		// its environment on its next restore.
+		return fmt.Errorf("check whether service %s is still in use: %w", row.ServiceID, err)
+	}
+	for _, other := range others {
+		if other.ID != row.ID && other.ServiceID == row.ServiceID &&
+			other.State != state.StateDestroyed {
+			return nil
+		}
+	}
+	if err := m.opts.Store.DeleteService(ctx, row.ServiceID); err != nil {
+		return fmt.Errorf("delete service %s: %w", row.ServiceID, err)
+	}
+	return nil
 }
 
 // deleteRemoteState removes a machine's objects.
@@ -415,6 +496,11 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 	if slotIdx > 0 {
 		m.pool.Return(slotIdx)
 	}
+	// A suspended machine holds no namespace and no address, so it stops being
+	// resolvable here -- AFTER the snapshot succeeded, not before. A suspend
+	// that failed leaves the machine running and serving, and it must keep
+	// answering its own guest's lookups.
+	m.releaseDiscovery(id)
 
 	// The builds this suspend replaces. Nothing else can be reading them: a
 	// checkpoint mints its own ids, so a machine's suspend builds are named by
@@ -422,6 +508,10 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 	superseded := []string{row.MemBuildID, row.RootfsBuildID}
 
 	row.State = StateSuspended
+	// The slot is gone: a suspended machine holds no index and is addressable
+	// nowhere until it wakes, possibly on another host and certainly in
+	// another slot.
+	stampSlot(row, nil)
 	row.MemBuildID = res.MemBuildID.String()
 	// An empty rootfs build is meaningful: the machine wrote nothing, so its
 	// next restore reads the template directly. Writing a zero uuid instead
@@ -494,6 +584,7 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 	fcm, err := m.wakeFromSuspend(ctx, row)
 	if err != nil {
 		row.State = StateError
+		stampSlot(row, nil)
 		row.UpdatedAt = time.Now().Unix()
 		_ = m.opts.Store.PutMachine(ctx, row)
 		return err
@@ -501,9 +592,33 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 	m.put(id, fcm)
 
 	row.State = StateRunning
+	stampSlot(row, fcm)
 	row.LastActivity = time.Now().Unix()
 	row.UpdatedAt = time.Now().Unix()
 	return m.opts.Store.PutMachine(ctx, row)
+}
+
+// bindDiscovery starts the .internal responder inside a machine's namespace.
+//
+// Never fatal to the operation that triggered it. A machine whose responder
+// failed to bind is running, routable and serving; it simply cannot resolve
+// its peers by name, which is worth an error line and is not worth killing a
+// guest over.
+func (m *Manager) bindDiscovery(machineID string, slot *netns.Slot) {
+	if m.opts.Discovery == nil || slot == nil {
+		return
+	}
+	if err := m.opts.Discovery.Bind(machineID, slot.NetnsName); err != nil {
+		slog.Error("could not serve .internal inside this machine; it will not "+
+			"resolve its peers by name", "machine", machineID, "err", err)
+	}
+}
+
+// releaseDiscovery stops the responder before the namespace goes away.
+func (m *Manager) releaseDiscovery(machineID string) {
+	if m.opts.Discovery != nil {
+		m.opts.Discovery.Release(machineID)
+	}
 }
 
 // Adopt re-registers a machine that survived a hostd restart.
@@ -524,6 +639,10 @@ func (m *Manager) Adopt(id string, fcm *fc.Machine, slotIdx int) error {
 	}
 	fcm.Slot = slot
 	m.put(id, fcm)
+	// The previous hostd's responder died with it, so an adopted machine has a
+	// namespace with nothing listening on its DNS port. Without this, every
+	// machine that survived a restart resolves nothing until it next moves.
+	m.bindDiscovery(id, slot)
 	return nil
 }
 

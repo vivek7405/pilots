@@ -65,14 +65,16 @@ func openState(ctx context.Context, cfg *config.Config) (state.Store, *corrosion
 }
 
 // startMesh brings up WireGuard and keeps its peers matching the fleet.
-func startMesh(ctx context.Context, cfg *config.Config, cache *corrosion.Cache) (*mesh.Device, mesh.Keys, error) {
-	keys, err := mesh.LoadOrCreateKeys(cfg.MeshKeyPath())
-	if err != nil {
-		return nil, mesh.Keys{}, err
-	}
+//
+// The keys arrive from the caller because they are loaded before the machine
+// manager: a slot's mesh address derives from them, so they cannot wait for
+// the mesh to come up.
+func startMesh(ctx context.Context, cfg *config.Config, cache *corrosion.Cache,
+	keys mesh.Keys) (*mesh.Device, error) {
+
 	dev, err := mesh.Open(keys)
 	if err != nil {
-		return nil, keys, err
+		return nil, err
 	}
 
 	// The peer this host was told about, if any. The first host in a cluster
@@ -82,7 +84,7 @@ func startMesh(ctx context.Context, cfg *config.Config, cache *corrosion.Cache) 
 		peer, err := mesh.ParseBootstrapPeer(cfg.MeshBootstrap)
 		if err != nil {
 			dev.Close()
-			return nil, keys, err
+			return nil, err
 		}
 		bootstrap = append(bootstrap, peer)
 		slog.Info("joining through a bootstrap peer",
@@ -91,7 +93,7 @@ func startMesh(ctx context.Context, cfg *config.Config, cache *corrosion.Cache) 
 
 	slog.Info("mesh up", "addr", dev.Address(), "pubkey", dev.PublicKey().String())
 	go mesh.Reconcile(ctx, dev, cache, cfg.HostID, bootstrap)
-	return dev, keys, nil
+	return dev, nil
 }
 
 // peers resolves other hosts for the router, from the same cache everything

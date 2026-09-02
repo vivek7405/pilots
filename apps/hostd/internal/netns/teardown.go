@@ -36,6 +36,14 @@ func Teardown(s *Slot) error {
 	if err := netlink.RouteDel(route); err != nil && !isNotFound(err) {
 		errs = append(errs, fmt.Errorf("route del %s: %w", s.HostIPCIDR(), err))
 	}
+	// The mesh route goes with it. Left behind, it points the whole host at a
+	// veth that is about to disappear, and the next machine to land on this
+	// slot inherits a route to an address that is now someone else's.
+	if s.HasMesh() {
+		if err := netlink.RouteDel(machineRoute(s)); err != nil && !isNotFound(err) {
+			errs = append(errs, fmt.Errorf("route del %s: %w", s.Machine6, err))
+		}
+	}
 
 	// Deleting the namespace takes the veth peer and the tap with it; the
 	// host-side veth goes too, since a veth cannot outlive its peer.

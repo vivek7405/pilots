@@ -81,7 +81,7 @@ func (m *Manager) imageForBuild(ctx context.Context, buildID uuid.UUID) (string,
 // machine's first suspend captures its own memory, and every wake after that
 // is the ordinary instant restore.
 func (m *Manager) bootMachine(ctx context.Context, row *state.Machine,
-	token, volumeID, image string) (*fc.Machine, error) {
+	token, volumeID, image, appCmd string) (*fc.Machine, error) {
 
 	rootfs := m.opts.FCConfig.TemplateRootfs
 	initPath := ""
@@ -154,17 +154,41 @@ func (m *Manager) bootMachine(ctx context.Context, row *state.Machine,
 		return nil, fmt.Errorf("machines: boot %s: %w", row.ID, err)
 	}
 
+	// A booted machine needs the responder exactly as much as a restored one.
+	// The restore path binds inside m.restore, which this path never touches
+	// -- and the golden rootfs names the gateway as its ONLY nameserver, so a
+	// machine that boots it with nothing listening there resolves nothing at
+	// all, .internal and the public internet alike.
+	m.bindDiscovery(row.ID, slot)
+
 	if err := m.installToken(ctx, slot, token); err != nil {
+		m.releaseDiscovery(row.ID)
 		_ = fcm.Kill()
 		m.pool.Return(slot.Idx)
 		return nil, fmt.Errorf("install agent token: %w", err)
 	}
 	if vol != nil {
 		if err := m.mountVolumeInGuest(ctx, slot, row.ID, token, vol.MountPath); err != nil {
+			m.releaseDiscovery(row.ID)
 			_ = fcm.Kill()
 			m.pool.Return(slot.Idx)
 			return nil, err
 		}
+	}
+
+	// The environment goes in after the volume is mounted, because an
+	// application started here may expect to find its data already there.
+	//
+	// A machine that booted needs this exactly as much as one that restored:
+	// it is a create either way, and it is the only moment an application can
+	// be handed an environment it did not start with. An image built from a
+	// Dockerfile carries no command in the row at all, so appCmd is usually
+	// empty here and the start spec baked into the image supplies it.
+	if err := m.deliverEnv(ctx, row, slot, appCmd); err != nil {
+		m.releaseDiscovery(row.ID)
+		_ = fcm.Kill()
+		m.pool.Return(slot.Idx)
+		return nil, fmt.Errorf("deliver env: %w", err)
 	}
 
 	if err := fcm.Persist(); err != nil {

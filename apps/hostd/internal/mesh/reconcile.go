@@ -26,6 +26,15 @@ type HostSource interface {
 	Hosts() []state.Host
 }
 
+// HostChangeNotifier is a HostSource that can say WHEN its answer changed.
+//
+// Optional, and asserted for rather than required, so a test can pass a fixed
+// slice. Where it is implemented the timer stops being the mechanism and goes
+// back to being what its comment claims: a safety net.
+type HostChangeNotifier interface {
+	HostsChanged() <-chan struct{}
+}
+
 // Reconcile keeps the device's peers matching the fleet until ctx is done.
 //
 // Driven by the hosts table, which every host writes only its own row of. A
@@ -48,6 +57,13 @@ func Reconcile(ctx context.Context, dev *Device, hosts HostSource, selfID string
 	tick := time.NewTicker(reconcileInterval)
 	defer tick.Stop()
 
+	// A nil channel blocks forever, so a source that cannot notify simply
+	// falls back to the ticker.
+	var changed <-chan struct{}
+	if n, ok := hosts.(HostChangeNotifier); ok {
+		changed = n.HostsChanged()
+	}
+
 	for {
 		if err := dev.Sync(withBootstrap(PeersFrom(hosts.Hosts(), selfID), bootstrap)); err != nil {
 			slog.Error("could not reconcile mesh peers", "err", err)
@@ -56,6 +72,12 @@ func Reconcile(ctx context.Context, dev *Device, hosts HostSource, selfID string
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+		case <-changed:
+			// A host appeared or left. Reconciling on the next tick instead
+			// would leave a newly joined host up to reconcileInterval without
+			// a route to anyone -- visible to it through Corrosion, and
+			// unreachable -- during which every request it is asked to
+			// forward on another host's behalf times out.
 		}
 	}
 }
@@ -108,11 +130,39 @@ func ParseBootstrapPeer(spec string) (Peer, error) {
 // reading the table: trusting it would let a host publish someone else's
 // address and take over their traffic, since a row is only ever checked
 // against the host that wrote it.
+// AbandonAfter is how long a host must be silent before the mesh stops
+// carrying it as a peer.
+//
+// Far longer than the liveness threshold on purpose. Thirty seconds of silence
+// means "do not send this host work"; it must not mean "forget how to reach
+// it", because a reboot, a partition or a slow upgrade all cross that line and
+// the host has to be reachable the moment it comes back.
+//
+// The reason there is any limit at all is that a peer which will NEVER answer
+// is not free. Corrosion gossips to every peer the mesh holds, and its
+// outbound queue backs up behind one that always times out -- until it starts
+// DROPPING changes, which it reports once and then continues. The fleet then
+// looks healthy while machine rows silently stop replicating: names do not
+// resolve, and a tenant filter built from a partial view drops legitimate
+// traffic. That is what a decommissioned host did on this rig.
+const AbandonAfter = 30 * time.Minute
+
+// PeersFrom turns the fleet's host rows into mesh peers.
 func PeersFrom(hosts []state.Host, selfID string) []Peer {
 	peers := make([]Peer, 0, len(hosts))
+	now := time.Now()
 
 	for _, h := range hosts {
 		if h.ID == selfID || h.WGPubKey == "" {
+			continue
+		}
+		if h.LastSeen > 0 && now.Sub(time.Unix(h.LastSeen, 0)) > AbandonAfter {
+			// Gone long enough to be gone. Said once per reconcile rather than
+			// silently, because the alternative failure -- replication quietly
+			// degrading fleet-wide -- names nothing at all.
+			slog.Warn("host has been silent long enough to stop carrying it on the mesh; "+
+				"gossip to a peer that never answers backs up until changes are dropped",
+				"host", h.ID, "silent_for", now.Sub(time.Unix(h.LastSeen, 0)).Round(time.Second))
 			continue
 		}
 		key, err := wgtypes.ParseKey(h.WGPubKey)

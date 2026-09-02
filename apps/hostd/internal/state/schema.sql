@@ -63,6 +63,22 @@ CREATE TABLE IF NOT EXISTS machines (   -- writer: host_id only
   volume_id        TEXT,
   service_id       TEXT,
   release_id       TEXT,
+  -- The app this machine belongs to. Grouping ONLY: it scopes .internal
+  -- resolution and the tenant filter, and nothing reads it as a foreign key,
+  -- because there is no apps table to point at.
+  app              TEXT,
+  -- The netns slot this machine holds on host_id, which is the low 16 bits of
+  -- its mesh address.
+  --
+  -- Published rather than derived here because it is host-local knowledge:
+  -- only the owner knows which slot it handed out. Every host then derives the
+  -- ADDRESS from the owner's public key plus this index, exactly as it derives
+  -- the owner's own address -- the address itself is never published, for the
+  -- same reason hosts.wg_addr is never trusted.
+  --
+  -- It moves when a machine is rescued, which is why .internal answers carry a
+  -- near-zero TTL.
+  slot             INTEGER,
   last_activity    INTEGER,
   updated_at       INTEGER
 );
@@ -142,3 +158,42 @@ CREATE TABLE IF NOT EXISTS volumes (    -- writer: host_id only
   host_id    TEXT,
   created_at INTEGER
 );
+
+-- A service is a set of machines that share a name, a release and an
+-- environment. In this phase only its environment is consumed; the rollout
+-- columns are here because a schema change is a fleet-wide re-bootstrap
+-- (corrosion does not replicate DDL), so the shape lands once.
+--
+-- env holds non-secret values as json. env_sealed holds the secret ones as a
+-- single sealed blob, and it is the ONLY form a secret may take here:
+-- corrosion replicates every row to every host, so a plaintext value written
+-- to one gossips to all of them and lands in every backup. The reference
+-- implementation gets this wrong instructively -- uncloud stores each
+-- container as json embedding its resolved env, fleet-wide.
+--
+-- Sealing happens in HOSTD, never in the client. A client that sealed would
+-- need the fleet key, and the key would stop being fleet infrastructure the
+-- moment it was handed to every laptop.
+--
+-- Health is a tagged union because a database image ships a command check and
+-- not an HTTP one:
+--   {"type":"http","path":...,"interval":...,"timeout":...,"grace":...,
+--    "healthy_threshold":...}
+--   {"type":"cmd","test":["CMD-SHELL","pg_isready -U postgres"],
+--    "interval":...,"timeout":...,"grace":...,"retries":...}
+-- Docker semantics, so every stock image's own HEALTHCHECK maps straight in.
+CREATE TABLE IF NOT EXISTS services (  -- writer: host_id of the owning machines
+  id            TEXT NOT NULL PRIMARY KEY,
+  name          TEXT,
+  app           TEXT,
+  release_id    TEXT,
+  replicas      INTEGER,
+  health        TEXT,    -- json, tagged union (above)
+  env           TEXT,    -- json, non-secret only
+  env_sealed    TEXT,    -- sealed blob; never plaintext
+  domain        TEXT,
+  custom_domain TEXT,
+  repo          TEXT,
+  branch        TEXT,
+  autodeploy    INTEGER,
+  created_at    INTEGER);

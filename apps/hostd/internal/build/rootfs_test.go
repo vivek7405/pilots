@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/vivek7405/pilots/hostd/internal/netns"
 )
 
 // writeTar builds a flattened filesystem tarball of the shape BuildKit's tar
@@ -515,5 +517,26 @@ func TestProbeTarballInputAgreesWithWhatPackDoes(t *testing.T) {
 	if !supported && err == nil {
 		t.Fatal("the probe said tarball input does not work and it did; every " +
 			"build on this host would take the slow path for no reason")
+	}
+}
+
+// A built image must resolve through the namespace gateway.
+//
+// Nameservers was never set by the build path, so every image it produced
+// carried public resolvers and could not resolve .internal at all -- and
+// build-backed machines are precisely the ones the feature exists for. The
+// failure was invisible from outside: the machine booted, answered health
+// checks, resolved github.com, and only service discovery was missing.
+//
+// Both the explicit value and the zero value are checked. The zero value is
+// the one that caused this, so it must be safe on its own rather than safe
+// because one caller remembers.
+func TestABuiltImageResolvesThroughTheGateway(t *testing.T) {
+	if got := (Fixups{}).resolvConf(); !strings.Contains(got, netns.TapHostIP) {
+		t.Errorf("a Fixups with no nameservers wrote %q; it must name the "+
+			"gateway, or the image cannot resolve .internal", got)
+	}
+	if got := (Fixups{Nameservers: []string{"9.9.9.9"}}).resolvConf(); !strings.Contains(got, "9.9.9.9") {
+		t.Errorf("an explicit nameserver was dropped: %q", got)
 	}
 }
