@@ -90,3 +90,27 @@ func TestVolumeRoundTripThroughTheAgent(t *testing.T) {
 		t.Fatalf("ListVolumes returned %+v", list)
 	}
 }
+
+// A released volume must be claimable again, by any host.
+//
+// releaseVolume clears the row's owner, and the guard used to admit only the
+// host already named in it -- so a row reading host_id='' matched nobody and
+// the volume could never be picked up again. The way it failed hid it: while
+// release left host_id naming the old host, every other host took the rescue
+// branch instead, asked to claim the volume from a host that was alive and
+// heartbeating, and was correctly refused. Permanently. A volume detached
+// cleanly on one host could never be attached on another.
+func TestAnUnownedVolumeCanBeClaimed(t *testing.T) {
+	store, agent := newTestStore(t, "host-b")
+	agent.exec(t, `INSERT INTO volumes (id, host_id) VALUES ('vol-1','')`)
+
+	// No dead-owner claim: nobody owns it. That is the whole point -- the
+	// releasing host may well still be alive, and asking to take it from a
+	// live host is exactly what used to be refused.
+	if err := store.PutVolume(context.Background(), volume("vol-1", "host-b")); err != nil {
+		t.Fatalf("claiming an unowned volume: %v", err)
+	}
+	if got := agent.scalar(t, `SELECT host_id FROM volumes WHERE id='vol-1'`); got != "host-b" {
+		t.Errorf("host_id = %q, want host-b; the claim did not land", got)
+	}
+}

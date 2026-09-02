@@ -475,7 +475,11 @@ func (s *Store) ListVolumes(ctx context.Context) ([]state.Volume, error) {
 func (s *Store) PutVolume(ctx context.Context, v *state.Volume, opts ...state.WriteOption) error {
 	auth := state.ResolveAuth(opts)
 
-	guard := ` WHERE volumes.host_id = ?`
+	// An unowned row is claimable by anyone: releaseVolume clears host_id, and
+	// a volume nobody owns is by definition mounted nowhere. Without this the
+	// guard admits only the current owner, so a released volume could never be
+	// picked up again -- not by another host, and not even by this one.
+	guard := ` WHERE volumes.host_id = ? OR volumes.host_id = ''`
 	params := []any{v.ID, v.Name, v.MachineID, v.SizeMiB, v.S3Prefix,
 		v.MountPath, v.HostID, v.CreatedAt}
 

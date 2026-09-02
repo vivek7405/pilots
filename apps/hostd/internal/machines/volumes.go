@@ -113,7 +113,14 @@ func (m *Manager) releaseVolume(ctx context.Context, volumeID string) error {
 		errs = append(errs, err)
 	}
 	if v, err := m.opts.Store.GetVolume(ctx, volumeID); err == nil {
+		// The host as well as the machine. A row that still names this host
+		// is a row every OTHER host has to treat as owned: claimVolume sees a
+		// foreign owner, asks to take it from a host that is alive and well,
+		// and the store correctly refuses -- forever. The volume is then
+		// pinned to a host that is not using it, which is the opposite of
+		// what releasing it means.
 		v.MachineID = ""
+		v.HostID = ""
 		if err := m.opts.Store.PutVolume(ctx, v); err != nil {
 			errs = append(errs, err)
 		}
