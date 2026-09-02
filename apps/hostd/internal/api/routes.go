@@ -23,6 +23,9 @@ type Deps struct {
 	Rollout Rollout
 	// Domain is the fleet's domain, for rendering a service's URL.
 	Domain string
+	// Resolver verifies that a custom hostname points here. Nil uses the
+	// system resolver; a test supplies its own.
+	Resolver Resolver
 }
 
 // Routes registers the full public API. Phase 1 lands the shapes; the handlers
@@ -79,6 +82,12 @@ func Routes(d Deps) http.Handler {
 	// Promote: the sandbox-to-production step, and the whole point of one
 	// primitive serving both faces.
 	mux.HandleFunc("POST /v1/machines/{id}/promote", d.handlePromote)
+
+	// Custom domains. Verification is what stops a caller spending the
+	// fleet's shared certificate rate limit on a name they do not own.
+	mux.HandleFunc("POST /v1/domains", d.handleAddDomain)
+	mux.HandleFunc("GET /v1/domains", d.handleListDomains)
+	mux.HandleFunc("DELETE /v1/domains/{hostname}", d.handleDeleteDomain)
 
 	// Volumes and fleet.
 	mux.HandleFunc("POST /v1/volumes", d.handleCreateVolume)

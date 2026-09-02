@@ -141,6 +141,29 @@ CREATE TABLE IF NOT EXISTS templates (
 -- here because nothing has ever written this table -- zero rows, so the
 -- backfill is a no-op. Once releases carries data, that door is closed: a
 -- later shape change is a new table plus a dual-read migration.
+-- A custom hostname pointed at a service.
+--
+-- A NEW table rather than a column on services, and that is deliberate: this
+-- schema is loaded by corrosion at agent start, and cr-sqlite backfills every
+-- row of a table whose columns change. Adding one to services -- which already
+-- carries rows -- is the fleet-wide gossip storm that took fly's fleet down
+-- twice for ~11.5h. A new table backfills nothing because it has no rows.
+--
+-- The router matches on hostname at SNI time from its local replica, so the
+-- lookup is a map hit rather than a query, and certmagic's on-demand decision
+-- reads the same rows: a name that is not here gets no certificate, which is
+-- what stops anyone who points DNS at our IPs from minting certs on our rate
+-- limit.
+CREATE TABLE IF NOT EXISTS domains (
+  hostname   TEXT NOT NULL PRIMARY KEY,
+  service_id TEXT,
+  -- verified_at is 0 until the CNAME has been observed pointing at us. An
+  -- unverified row never gets a certificate: issuance would burn rate limit
+  -- on a name whose owner has not proved they want it here.
+  verified_at INTEGER,
+  created_at  INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS releases (
   id              TEXT NOT NULL PRIMARY KEY,
   service_id      TEXT,

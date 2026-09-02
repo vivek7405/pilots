@@ -797,3 +797,71 @@ func scanRelease(rows *Rows) (*state.Release, error) {
 	r.Healthy = healthy != 0
 	return &r, nil
 }
+
+const domainCols = `hostname, service_id, verified_at, created_at`
+
+func (s *Store) GetDomain(ctx context.Context, hostname string) (*state.Domain, error) {
+	rows, err := s.client.Query(ctx, `SELECT `+domainCols+` FROM domains WHERE hostname = ?`, hostname)
+	if err != nil {
+		return nil, fmt.Errorf("state: get domain %q: %w", hostname, err)
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("state: domain %q: %w", hostname, state.ErrNotFound)
+	}
+	var d state.Domain
+	if err := rows.Scan(&d.Hostname, &d.ServiceID, &d.VerifiedAt, &d.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &d, rows.Err()
+}
+
+// PutDomain writes a custom hostname.
+//
+// Guarded by the service's arbiter for the same reason PutService is: a domain
+// row names a service rather than a host, so there is no column to enforce
+// single-writer on, and two hosts pointing one hostname at different services
+// would merge under last-write-wins into whichever wrote last.
+func (s *Store) PutDomain(ctx context.Context, d *state.Domain) error {
+	if err := s.assertServiceWriter(ctx, d.ServiceID); err != nil {
+		return err
+	}
+	_, err := s.client.Exec(ctx, `
+		INSERT INTO domains (`+domainCols+`) VALUES (?,?,?,?)
+		ON CONFLICT(hostname) DO UPDATE SET
+			service_id=excluded.service_id, verified_at=excluded.verified_at,
+			created_at=excluded.created_at`,
+		d.Hostname, d.ServiceID, d.VerifiedAt, d.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put domain %q: %w", d.Hostname, err)
+	}
+	return nil
+}
+
+func (s *Store) DeleteDomain(ctx context.Context, hostname string) error {
+	if _, err := s.client.Exec(ctx, `DELETE FROM domains WHERE hostname = ?`, hostname); err != nil {
+		return fmt.Errorf("state: delete domain %q: %w", hostname, err)
+	}
+	return nil
+}
+
+func (s *Store) ListDomains(ctx context.Context) ([]state.Domain, error) {
+	rows, err := s.client.Query(ctx, `SELECT `+domainCols+` FROM domains`)
+	if err != nil {
+		return nil, fmt.Errorf("state: list domains: %w", err)
+	}
+	defer rows.Close()
+	var out []state.Domain
+	for rows.Next() {
+		var d state.Domain
+		if err := rows.Scan(&d.Hostname, &d.ServiceID, &d.VerifiedAt, &d.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}

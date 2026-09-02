@@ -218,6 +218,18 @@ type Release struct {
 	CreatedAt int64
 }
 
+// Domain is a custom hostname pointed at a service.
+type Domain struct {
+	Hostname  string
+	ServiceID string
+	// VerifiedAt is when the CNAME was last observed pointing at this fleet.
+	// Zero means unverified, and an unverified domain never gets a
+	// certificate -- issuing for a name whose owner has not proved they want
+	// it here burns the fleet's rate limit on someone else's typo.
+	VerifiedAt int64
+	CreatedAt  int64
+}
+
 type Service struct {
 	ID        string
 	Name      string
@@ -312,6 +324,15 @@ type Store interface {
 	// ListServices returns every service row. Reads are local and cheap; the
 	// rollout and autoscale loops run on this.
 	ListServices(ctx context.Context) ([]Service, error)
+
+	// GetDomain reads one custom hostname. PutDomain writes one, DeleteDomain
+	// removes it, and ListDomains is what the router and the TLS decision
+	// function both read -- from the local replica, so a handshake costs a map
+	// lookup rather than a query.
+	GetDomain(ctx context.Context, hostname string) (*Domain, error)
+	PutDomain(ctx context.Context, d *Domain) error
+	DeleteDomain(ctx context.Context, hostname string) error
+	ListDomains(ctx context.Context) ([]Domain, error)
 
 	// GetRelease reads one release. PutRelease writes one.
 	//
@@ -876,4 +897,56 @@ func (s *sqliteStore) CASServiceRelease(ctx context.Context, id, from, to string
 			id, from, ErrNotOwner)
 	}
 	return nil
+}
+
+const domainCols = `hostname, service_id, verified_at, created_at`
+
+func (s *sqliteStore) GetDomain(ctx context.Context, hostname string) (*Domain, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+domainCols+` FROM domains WHERE hostname = ?`, hostname)
+	var d Domain
+	err := row.Scan(&d.Hostname, &d.ServiceID, &d.VerifiedAt, &d.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("state: domain %q: %w", hostname, ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get domain %q: %w", hostname, err)
+	}
+	return &d, nil
+}
+
+func (s *sqliteStore) PutDomain(ctx context.Context, d *Domain) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO domains (`+domainCols+`) VALUES (?,?,?,?)
+		ON CONFLICT(hostname) DO UPDATE SET
+			service_id=excluded.service_id, verified_at=excluded.verified_at,
+			created_at=excluded.created_at`,
+		d.Hostname, d.ServiceID, d.VerifiedAt, d.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put domain %q: %w", d.Hostname, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) DeleteDomain(ctx context.Context, hostname string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM domains WHERE hostname = ?`, hostname); err != nil {
+		return fmt.Errorf("state: delete domain %q: %w", hostname, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) ListDomains(ctx context.Context) ([]Domain, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+domainCols+` FROM domains`)
+	if err != nil {
+		return nil, fmt.Errorf("state: list domains: %w", err)
+	}
+	defer rows.Close()
+	var out []Domain
+	for rows.Next() {
+		var d Domain
+		if err := rows.Scan(&d.Hostname, &d.ServiceID, &d.VerifiedAt, &d.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }
