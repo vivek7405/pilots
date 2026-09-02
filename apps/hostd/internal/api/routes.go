@@ -26,6 +26,9 @@ type Deps struct {
 	// Resolver verifies that a custom hostname points here. Nil uses the
 	// system resolver; a test supplies its own.
 	Resolver Resolver
+	// Peers resolves other hosts, so a service write that arrived at the
+	// wrong host can be forwarded to the one allowed to perform it.
+	Peers PeerLookup
 	// GitHub handles webhook deliveries. Nil when no app is configured, in
 	// which case the route answers 503 rather than accepting deliveries it
 	// cannot verify.

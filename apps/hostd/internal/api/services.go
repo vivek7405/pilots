@@ -68,7 +68,9 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	}
 
 	svc := &state.Service{
-		ID: "svc_" + uuid.NewString(), Name: req.Name, App: req.App,
+		// An id this host arbitrates, so the create is not refused by the
+		// guard that protects every later write. See services.NewServiceID.
+		ID: d.newServiceID(r.Context()), Name: req.Name, App: req.App,
 		Replicas: req.Replicas, Domain: req.Domain, CustomDomain: req.CustomDomain,
 		Repo: req.Repo, Branch: req.Branch, Autodeploy: req.Autodeploy,
 		CreatedAt: time.Now().Unix(),
@@ -112,6 +114,10 @@ func (d Deps) handleGetService(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d Deps) handleDeploy(w http.ResponseWriter, r *http.Request) {
+	// Only the arbiter may write this service; forward rather than refuse.
+	if d.forwardToArbiter(w, r, r.PathValue("id")) {
+		return
+	}
 	if d.Rollout == nil {
 		writeJSON(w, http.StatusServiceUnavailable,
 			ErrorResponse{Error: "this host cannot deploy: no object storage is configured"})
@@ -135,6 +141,10 @@ func (d Deps) handleDeploy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d Deps) handleRollback(w http.ResponseWriter, r *http.Request) {
+	// Only the arbiter may write this service; forward rather than refuse.
+	if d.forwardToArbiter(w, r, r.PathValue("id")) {
+		return
+	}
 	if d.Rollout == nil {
 		writeJSON(w, http.StatusServiceUnavailable,
 			ErrorResponse{Error: "this host cannot roll back: no object storage is configured"})
@@ -198,4 +208,13 @@ func writeStoreError(w http.ResponseWriter, err error) {
 	default:
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
 	}
+}
+
+// newServiceID mints an id this host is allowed to write. See state.NewOwnedID.
+func (d Deps) newServiceID(ctx context.Context) string {
+	hosts, err := d.Store.ListHosts(ctx)
+	if err != nil {
+		return "svc_" + uuid.NewString()
+	}
+	return state.NewOwnedID("svc_", d.HostID, state.LiveHosts(hosts))
 }

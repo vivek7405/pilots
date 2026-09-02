@@ -54,7 +54,8 @@ func (m *Manager) Promote(ctx context.Context, machineID string, req api.Promote
 		}
 	}
 	if svc.ID == "" {
-		svc.ID = "svc_" + uuid.NewString()
+		hosts, _ := m.opts.Store.ListHosts(ctx)
+		svc.ID = state.NewOwnedID("svc_", m.opts.HostID, state.LiveHosts(hosts))
 		svc.CreatedAt = time.Now().Unix()
 	}
 	svc.Name = row.Name

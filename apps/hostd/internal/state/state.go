@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
 	"hash/fnv"
 	"sort"
 	"time"
@@ -949,4 +950,47 @@ func (s *sqliteStore) ListDomains(ctx context.Context) ([]Domain, error) {
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+// NewOwnedID mints an id with the given prefix whose owner is this host.
+//
+// Ownership is hash(id) mod live_hosts, and some ids are minted by the host
+// that will immediately write the row -- a service create being the case that
+// forced this. On an N-host fleet a naive uuid gives the creating host a
+// 1-in-N chance of being allowed to write what it just made, and forwarding
+// cannot fix it the way it fixes a later write: the id does not exist yet, so
+// a forwarded create would mint a DIFFERENT id on the far host and move the
+// problem rather than solve it.
+//
+// So the id is chosen rather than accepted. This is create-time placement, the
+// same shape as machine name allocation, and it states something true: the
+// host that created a thing is the one that owns writing it. Ownership still
+// moves with fleet membership afterwards, exactly as a machine's rescuer does
+// -- the rule has to be agreed at any instant, not fixed forever.
+//
+// Expected attempts is the fleet size. The bound stops a host whose live set
+// is momentarily empty or inconsistent from spinning; falling back to an
+// unowned id is safe because the store's guard still decides, and will refuse.
+func NewOwnedID(prefix, hostID string, live []Host) string {
+	if len(live) <= 1 {
+		return prefix + uuid.NewString()
+	}
+	for attempt := 0; attempt < 10*len(live); attempt++ {
+		id := prefix + uuid.NewString()
+		if owner, ok := OwnerFor(id, live); ok && owner == hostID {
+			return id
+		}
+	}
+	return prefix + uuid.NewString()
+}
+
+// LiveHosts filters a host list to those still heartbeating.
+func LiveHosts(hosts []Host) []Host {
+	out := make([]Host, 0, len(hosts))
+	for _, h := range hosts {
+		if time.Since(time.Unix(h.LastSeen, 0)) < 90*time.Second {
+			out = append(out, h)
+		}
+	}
+	return out
 }

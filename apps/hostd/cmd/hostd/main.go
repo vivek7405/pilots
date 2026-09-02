@@ -356,6 +356,7 @@ func run() error {
 	controlAPI := api.Routes(api.Deps{
 		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink,
 		Builds: builder, Rollout: rollout, Domain: cfg.WorkloadDomain,
+		Peers: peerLookup(f),
 		GitHub: github.Handler(github.Deps{
 			HostID: cfg.HostID, App: ghApp, Store: store, Builds: builder,
 			Rollout: rollout, Machines: mgr, Domain: cfg.WorkloadDomain,
@@ -560,4 +561,13 @@ func newCertStore(cfg *config.Config) (*s3.Client, error) {
 		Endpoint: cfg.S3Endpoint, Region: cfg.S3Region, Bucket: cfg.S3Bucket,
 		Prefix: "certs", AccessKey: cfg.S3AccessKey, SecretKey: cfg.S3SecretKey,
 	})
+}
+
+// peerLookup resolves other hosts for service-write forwarding. Nil on a
+// single box, where there is no one to forward to.
+func peerLookup(f *fleet) api.PeerLookup {
+	if f == nil {
+		return nil
+	}
+	return peers{f.cache}
 }
