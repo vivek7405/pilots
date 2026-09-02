@@ -113,5 +113,55 @@ ABI details that are expensive to rediscover:
 - the **uffd handler** (`cmd/pilot-uffd-handler`, ~881 LOC)
 - the **NBD handler** (`cmd/pilot-nbd-handler`, ~560 LOC)
 
-`~/Documents/Projects/sandbox/e2b-infra` is a second reference for the same
-mechanics (Apache-2.0, `packages/orchestrator/pkg/sandbox/`).
+### e2b-infra: read it BEFORE the second attempt
+
+`~/Documents/Projects/sandbox/e2b-infra` is a complete, open-source (Apache-2.0)
+implementation of this product's hard half, cloned locally. Every line is
+there. **When you are stuck, about to guess, or brainstorming an approach, go
+read it first** -- not after two rounds of trial and error. That ordering is
+the rule, and it is a rule because the alternative has already cost time here:
+two round trips were spent rediscovering Alpine's non-usr-merged `/sbin` and
+the OpenRC inittab swap, both of which
+`packages/orchestrator/pkg/template/build/phases/base/provision.sh` handles
+outright.
+
+Where the answers live:
+
+| Question | Look at |
+|---|---|
+| microVM lifecycle, create/pause/resume | `packages/orchestrator/pkg/sandbox/` |
+| userfaultfd handling | `packages/orchestrator/pkg/sandbox/uffd/` |
+| block devices, chunking, caching | `packages/orchestrator/pkg/sandbox/block/` |
+| netns, tap, addressing | `packages/orchestrator/pkg/sandbox/network/` |
+| guest image fixups (init, `/sbin`, resolv.conf) | `packages/orchestrator/pkg/template/build/phases/base/provision.sh` |
+| how to MEASURE snapshot/restore | `packages/orchestrator/benchmarks/benchmark_test.go` (`BenchmarkBaseImageLaunch`, cycles `start-and-pause` and `start-pause-resume`) |
+| making the pause window small | `packages/orchestrator/cmd/resume-build/fph_bench.go` -- pause time vs memfile size, free page reporting (FPR) and free page hinting (FPH) |
+| what a build artifact contains | `packages/orchestrator/cmd/inspect-build/`, `cmd/copy-build/` -- note a build carries a **memfile**, which is why a deployed app there RESTORES instead of booting |
+
+Two caveats, both the same shape as the `pilots-old` one:
+
+- **Take mechanics, not architecture.** e2b has a central control plane -- an
+  API tier over Postgres, with placement decided centrally. That is precisely
+  what this repo exists to replace. Copy how they touch the kernel, never how
+  they decide who runs what.
+- **It ships no benchmark numbers.** The harness is committed; no threshold,
+  SLO, or millisecond figure is. Do not cite a latency target as coming from
+  the repo -- run the harness, or find their published figures.
+
+For what the competition actually MEASURES at, `pilots-old` carries empirical
+sprites.dev figures taken by driving its CLI rather than read off a blog:
+`apps/cloud/host-scripts/PHASE3-NOTES.md` (the warm/cold tier table) and the
+reference note it points to. Summarised, so the target is concrete:
+
+| sprites.dev | measured |
+|---|---|
+| warm resume (snapshot on local NVMe) | ~150ms |
+| cold resume (snapshot from object storage) | ~775ms |
+| create (from a pre-warmed pool) | ~2s |
+| checkpoint create (CoW metadata, no data copy) | <1s |
+| checkpoint restore (data fetched from S3) | ~8-10s |
+
+Their warm tier exists for two reasons, and the second is the one that is easy
+to miss: writing a 2GiB snapshot to a remote object store over 1Gbit/s takes
+~16s against ~2s to local NVMe, so the local tier is the fast WRITE target as
+much as the fast read one.
