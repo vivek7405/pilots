@@ -340,3 +340,65 @@ func TestAServiceNameIsInvisibleToAnUngroupedMachine(t *testing.T) {
 		t.Fatalf("a machine with no app resolved a service name: %v", addrs)
 	}
 }
+
+// A machine row whose App disagrees with its service's must not be answered.
+//
+// The two tables merge independently under LWW, and Manager.Create does not
+// cross-validate a request's app against its service's -- so the row is
+// creatable through the public API, not merely a corruption. Without the app
+// re-check on the MACHINE row, the fallback matches on service id alone and
+// hands the asker an address in another app: unreachable through the
+// app-keyed tenant filter at best, a cross-app disclosure at worst.
+func TestAServiceAnswerRechecksTheMachinesApp(t *testing.T) {
+	selfKey := keyFor(1)
+	fleet := fakeFleet{
+		hosts: []state.Host{{ID: "host-a", WGPubKey: selfKey.String()}},
+		machines: []state.Machine{
+			{ID: "m-asker", Name: "amber-lagoon-x9f2", HostID: "host-a",
+				State: "running", App: "shop", Slot: 1, ServiceID: "svc-web", ReleaseID: "rel-1"},
+			// Claims shop's svc-db, but sits in another app.
+			{ID: "m-stray", Name: "quiet-harbor-4c1a", HostID: "host-a",
+				State: "running", App: "other", Slot: 2, ServiceID: "svc-db", ReleaseID: "rel-1"},
+		},
+		services: []state.Service{
+			{ID: "svc-web", Name: "web", App: "shop"},
+			{ID: "svc-db", Name: "db", App: "shop"},
+		},
+	}
+	r := NewFleetResolver(fleet, mesh.NewLocator("host-a", selfKey, fleet))
+
+	if addrs := r.Resolve(Query{MachineID: "m-asker", Name: "db"}); len(addrs) != 0 {
+		t.Fatalf("db.internal answered a machine from another app: %v", addrs)
+	}
+}
+
+// A machine that claims a name but yields no address keeps the name.
+//
+// Its host row may simply not have gossiped in yet. If the fallback triggered
+// on "no addresses" rather than "no claim", the name would resolve to the
+// service now and flip back to the machine when the host row arrives -- the
+// meaning of a name changing with gossip timing, which is the exact thing the
+// precedence rule exists to prevent.
+func TestAClaimedNameWithNoAddressDoesNotFallThrough(t *testing.T) {
+	selfKey := keyFor(1)
+	fleet := fakeFleet{
+		hosts: []state.Host{{ID: "host-a", WGPubKey: selfKey.String()}},
+		machines: []state.Machine{
+			{ID: "m-asker", Name: "amber-lagoon-x9f2", HostID: "host-a",
+				State: "running", App: "shop", Slot: 1, ServiceID: "svc-web", ReleaseID: "rel-1"},
+			// Hand-named db, healthy, in-app -- on a host with NO host row,
+			// so it produces no address.
+			{ID: "m-hand", Name: "db", HostID: "host-ghost", State: "running", App: "shop", Slot: 2},
+			// A service also named db, whose replica WOULD resolve.
+			{ID: "m-db", Name: "quiet-harbor-4c1a", HostID: "host-a",
+				State: "running", App: "shop", Slot: 3, ServiceID: "svc-db", ReleaseID: "rel-1"},
+		},
+		services: []state.Service{{ID: "svc-db", Name: "db", App: "shop"}},
+	}
+	r := NewFleetResolver(fleet, mesh.NewLocator("host-a", selfKey, fleet))
+
+	if addrs := r.Resolve(Query{MachineID: "m-asker", Name: "db"}); len(addrs) != 0 {
+		t.Fatalf("a claimed name fell through to the service while its "+
+			"machine's host row was missing: %v", addrs)
+	}
+}
