@@ -94,8 +94,8 @@ func TestVolumeRoundTripThroughTheAgent(t *testing.T) {
 // A released volume must be claimable again, by any host.
 //
 // releaseVolume clears the row's owner, and the guard used to admit only the
-// host already named in it -- so a row reading host_id='' matched nobody and
-// the volume could never be picked up again. The way it failed hid it: while
+// host already named in it -- so a row whose host_id is empty matched nobody
+// and the volume could never be picked up again. The way it failed hid it: while
 // release left host_id naming the old host, every other host took the rescue
 // branch instead, asked to claim the volume from a host that was alive and
 // heartbeating, and was correctly refused. Permanently. A volume detached
