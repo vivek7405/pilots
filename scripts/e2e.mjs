@@ -74,6 +74,20 @@ async function exec(id, cmd, opts = {}) {
   return json.stdout.trim();
 }
 
+// reach runs a curl from inside a guest and reports what happened without
+// throwing, because many assertions are about traffic that must NOT arrive.
+async function reach(id, url, seconds = 5) {
+  const { json } = await request(`/v1/machines/${id}/exec`, {
+    method: 'POST',
+    body: {
+      cmd: `curl -s -o /dev/null -m ${seconds} -w '%{http_code} %{remote_ip}' ${url} || true`,
+      user: 'root',
+    },
+  });
+  const [code, ip] = (json?.stdout ?? '').trim().split(/\s+/);
+  return { code: code ?? '000', ip: ip ?? '' };
+}
+
 async function waitFor(fn, { timeoutMs = 120_000, everyMs = 500, what = 'condition' } = {}) {
   const deadline = Date.now() + timeoutMs;
   let lastErr;
@@ -846,21 +860,6 @@ async function internalAssertions() {
     return json;
   }
 
-  // reach runs a curl from inside a guest and reports what happened without
-  // throwing, because most of these assertions are about traffic that must
-  // NOT arrive.
-  async function reach(id, url, seconds = 5) {
-    const { json } = await request(`/v1/machines/${id}/exec`, {
-      method: 'POST',
-      body: {
-        cmd: `curl -s -o /dev/null -m ${seconds} -w '%{http_code} %{remote_ip}' ${url} || true`,
-        user: 'root',
-      },
-    });
-    const [code, ip] = (json?.stdout ?? '').trim().split(/\s+/);
-    return { code: code ?? '000', ip: ip ?? '' };
-  }
-
   let web, db, secret;
   try {
     web = await make(`web-${tag}`, appA);
@@ -1165,15 +1164,29 @@ async function multiServiceAssertions() {
   const tag = Math.random().toString(36).slice(2, 8);
   const app = `e2e-app-${tag}`;
   const created = [];
+  const serviceIDs = [];
 
   // Every early return below is a battery that could not set itself up, and it
   // still owns whatever it already created. Cleanup therefore runs in a
   // finally: a run that fails halfway must not leave replicas behind for the
   // next one to trip over.
+  //
+  // Swept by service id rather than by what the steps recorded: a deploy that
+  // failed a later assert still booted replicas, and there is no DELETE
+  // /v1/services -- a service row dies with its last machine, and while it
+  // lives the autoscaler resurrects deleted replicas. Each delete is guarded
+  // so one unreachable hostd during teardown cannot abort the rest or replace
+  // the run's real result.
   try {
     await runMultiService();
   } finally {
-    for (const id of created) await request(`/v1/machines/${id}`, { method: 'DELETE' });
+    const doomed = new Set(created);
+    for (const id of serviceIDs) {
+      try { for (const m of await replicasOf(id)) doomed.add(m.id); } catch { /* best effort */ }
+    }
+    for (const id of doomed) {
+      try { await request(`/v1/machines/${id}`, { method: 'DELETE' }); } catch { /* best effort */ }
+    }
   }
 
   async function runMultiService() {
@@ -1216,11 +1229,10 @@ async function multiServiceAssertions() {
       await step(`a ${role} build for the multi-service app`, async () => {
         const res = await postTar('/v1/builds', tarball({ 'Dockerfile': dockerfiles[role] }));
         assert(res.status === 200, `build ${role}: HTTP ${res.status}`);
-        const text = await res.text();
-        for (const line of text.trim().split('\n')) {
-          try { const o = JSON.parse(line); if (o.result) builds[role] = o.result; } catch {}
-        }
-        assert(builds[role], `no rootfs id for ${role}:\n${text.slice(-300)}`);
+        const lines = await readNDJSON(res);
+        builds[role] = lines.findLast((o) => o.result)?.result;
+        assert(builds[role],
+          `no rootfs id for ${role}:\n${JSON.stringify(lines.slice(-3))}`);
       });
     }
     if (!builds.web || !builds.db) return;
@@ -1237,6 +1249,7 @@ async function multiServiceAssertions() {
           body: { name: `${role}-${tag}`, app, replicas: 1, health, env },
         });
         assert(status === 201, `create ${role}: ${status} ${JSON.stringify(svc)}`);
+        serviceIDs.push(svc.id);
 
         const { status: dstatus, json: rel } = await request(`/v1/services/${svc.id}/deploy`, {
           method: 'POST', body: { build: builds[role] },
@@ -1252,17 +1265,15 @@ async function multiServiceAssertions() {
     // The replicas the rollout produced, which is what .internal has to resolve.
     const replicas = {};
     await step('both services have a running replica', async () => {
-      const { json: machines } = await request('/v1/machines');
       for (const role of ['db', 'web']) {
         // Running, not merely present. A superseded or errored replica still
         // carries the service id, and the resolver filters anything that is not
         // running out of .internal -- so picking one here turns a green rollout
         // into a two-minute DNS timeout three assertions later.
-        const mine = (machines ?? []).filter(
-          (m) => m.service_id === services[role].svc.id && m.state === 'running');
+        const mine = (await replicasOf(services[role].svc.id))
+          .filter((m) => m.state === 'running');
         assert(mine.length >= 1, `${role} has no running replica`);
         replicas[role] = mine[0];
-        created.push(mine[0].id);
         assert(mine[0].release_id === services[role].rel.id,
           `${role}'s replica names release ${mine[0].release_id}, want ${services[role].rel.id}`);
       }
@@ -1280,11 +1291,7 @@ async function multiServiceAssertions() {
         `if tr '\\0' '\\n' < $p 2>/dev/null | grep -q '^ROLE='; then ` +
         `tr '\\0' '\\n' < $p | sort; break; fi; done`;
       for (const role of ['db', 'web']) {
-        const { status, json } = await request(`/v1/machines/${replicas[role].id}/exec`, {
-          method: 'POST', body: { cmd: findEnv, user: 'root' },
-        });
-        assert(status === 200, `exec in ${role} returned HTTP ${status}, so nothing was checked`);
-        const out = json?.stdout ?? '';
+        const out = await exec(replicas[role].id, findEnv);
         assert(out.includes(`ROLE=${role}`),
           `no process in ${role} carries ROLE=${role}; its application did not ` +
           `receive the service's environment:\n${out || '(no process matched)'}`);
@@ -1309,24 +1316,21 @@ async function multiServiceAssertions() {
       assert(dbName, 'the service create response carried no name, so there is ' +
         'no service name to resolve');
       const url = `http://${dbName}.internal:${AGENT_PORT}/health`;
-      let last = '';
+      let last = { code: '', ip: '' };
       try {
         await waitFor(async () => {
-          const { json } = await request(`/v1/machines/${replicas.web.id}/exec`, {
-            method: 'POST',
-            body: { cmd: `curl -s -o /dev/null -m 8 -w '%{http_code} %{remote_ip}' ${url} || true`, user: 'root' },
-          });
-          last = (json?.stdout ?? '').trim();
-          return last.startsWith('200');
+          last = await reach(replicas.web.id, url, 8);
+          return last.code === '200';
         }, { timeoutMs: 120_000, what: `web to reach ${dbName}.internal` });
       } catch (err) {
         // The last curl is the whole diagnostic, and it has to be read AFTER the
         // wait: interpolating it into `what` captures the empty string the loop
         // started with, so the message never carried anything.
-        throw new Error(`${err.message} (last curl: ${last || '(no output)'})`);
+        throw new Error(
+          `${err.message} (last curl: ${`${last.code} ${last.ip}`.trim() || '(no output)'})`);
       }
 
-      const addr = last.split(/\s+/)[1] ?? '';
+      const addr = last.ip;
       assert(addr.startsWith('fdcd:'),
         `web reached db at ${addr}, which is not a machine mesh address -- ` +
         'the name resolved to something other than the peer');
@@ -1342,14 +1346,7 @@ async function multiServiceAssertions() {
       assert(status === 201, `outsider create: ${status}`);
       created.push(outsider.id);
 
-      async function probe(target) {
-        const { status: es, json } = await request(`/v1/machines/${outsider.id}/exec`, {
-          method: 'POST',
-          body: { cmd: `curl -s -o /dev/null -m 5 -w '%{http_code}' ${target} || true`, user: 'root' },
-        });
-        assert(es === 200, `exec in the outsider returned HTTP ${es}, so nothing was probed`);
-        return (json?.stdout ?? '').trim();
-      }
+      const probe = async (target) => (await reach(outsider.id, target)).code;
 
       // The positive control first. An empty answer here means curl never ran --
       // no curl in the image, an agent not serving yet, an exec that failed --
