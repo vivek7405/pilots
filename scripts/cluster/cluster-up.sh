@@ -183,6 +183,43 @@ for i in "${!IPS[@]}"; do
   done
 done
 
+# A started VM is not a clean host.
+#
+# Its /var/lib/pilots survives a reboot, so without this the "new" fleet comes
+# up carrying the previous generation's corrosion database, machine rows,
+# network namespaces and running Firecrackers. The gate then measures
+# something that is not what the branch does: during Phase 5 that cost several
+# 25-minute runs to rows from machines destroyed generations earlier claiming
+# slots, to hosts abandoned as silent because they belonged to a fleet that no
+# longer existed, and to one run that failed entirely on leftover state.
+#
+# Deliberately AFTER the ssh wait, so every node has an address and is
+# reachable. Skipped under NEW_ONLY, which extends a LIVE fleet -- wiping an
+# existing member there would destroy the thing being extended. KEEP_STATE=1
+# opts out, for inspecting what a previous run left behind.
+if [ "${NEW_ONLY:-0}" != 1 ] && [ "${KEEP_STATE:-0}" != 1 ]; then
+  say "Wiping per-host state"
+  for ip in "${IPS[@]}"; do
+    if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=5 -i "$SSH_KEY" "root@${ip}" '
+          systemctl stop hostd corrosion 2>/dev/null
+          systemctl list-units --all --no-legend "litestream@*" 2>/dev/null |
+            awk "{print \$1}" | xargs -r systemctl stop 2>/dev/null
+          for ns in $(ip netns list 2>/dev/null | awk "{print \$1}"); do
+            ip netns del "$ns" 2>/dev/null
+          done
+          pkill -9 firecracker 2>/dev/null
+          rm -rf /var/lib/pilots
+        ' >/dev/null 2>&1; then
+      echo "  ${ip} wiped"
+    else
+      # Not fatal: a node that cannot be reached is a problem the bootstrap
+      # reports properly, and failing here would name the wrong one.
+      echo "  ${ip} unreachable; state NOT wiped" >&2
+    fi
+  done
+fi
+
 # Keep keys this script does not own. cluster-bootstrap.sh puts the cluster's
 # shared secrets here, and truncating the file on a later cluster-up would
 # take the fleet's corrosion token and agent secret with it -- leaving a live
