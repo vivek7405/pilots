@@ -3,6 +3,7 @@ package corrosion
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -325,5 +326,136 @@ func TestServiceRoundTripsThroughCorrosion(t *testing.T) {
 	}
 	if got.App != want.App || got.EnvSealed != want.EnvSealed {
 		t.Errorf("round trip changed the row: %+v", got)
+	}
+}
+
+// hostRows for the arbiter tests: a live fleet the store can compute over.
+func liveFleet(t *testing.T, agent *fakeAgent, ids ...string) {
+	t.Helper()
+	now := time.Now().Unix()
+	for _, id := range ids {
+		agent.exec(t, `INSERT INTO hosts (id, last_seen) VALUES (`+
+			`'`+id+`', `+fmt.Sprint(now)+`)`)
+	}
+}
+
+// A service row has exactly one writer, and it is not "whoever asked".
+//
+// PutMachine enforces single-writer in SQL because a machine names its host.
+// A service names machines, so there is no column to guard on -- the guard is
+// the deterministic arbiter every host computes identically from the live set.
+// Without it, 5c's new writers (a deploy flipping release_id, an autoscaler
+// writing replicas) merge under last-write-wins: no error, no conflict, half
+// of each write kept.
+func TestOnlyTheArbiterWritesAService(t *testing.T) {
+	ctx := context.Background()
+
+	// Find a service id and a fleet where host-a is NOT the arbiter, so the
+	// test proves refusal rather than accidentally landing on the owner.
+	fleet := []state.Host{{ID: "host-a"}, {ID: "host-b"}, {ID: "host-c"}}
+	var owned, foreign string
+	for _, id := range []string{"svc-1", "svc-2", "svc-3", "svc-4", "svc-5", "svc-6"} {
+		o, _ := state.OwnerFor(id, fleet)
+		if o == "host-a" && owned == "" {
+			owned = id
+		}
+		if o != "host-a" && foreign == "" {
+			foreign = id
+		}
+	}
+	if owned == "" || foreign == "" {
+		t.Fatal("could not find both an owned and a foreign service id")
+	}
+
+	store, agent := newTestStore(t, "host-a")
+	liveFleet(t, agent, "host-a", "host-b", "host-c")
+
+	// The one it owns: allowed.
+	if err := store.PutService(ctx, &state.Service{ID: owned, Name: "web", App: "shop"}); err != nil {
+		t.Fatalf("the arbiter was refused its own service: %v", err)
+	}
+	// The one it does not: refused, and the row must not exist.
+	err := store.PutService(ctx, &state.Service{ID: foreign, Name: "web", App: "shop"})
+	if !errors.Is(err, state.ErrNotOwner) {
+		t.Fatalf("writing a service this host does not arbitrate returned %v, want ErrNotOwner", err)
+	}
+	if got := agent.scalar(t, `SELECT count(*) FROM services WHERE id='`+foreign+`'`); got != "0" {
+		t.Errorf("the refused write landed anyway: count=%s", got)
+	}
+}
+
+// A single box has no one to race, and must not deadlock on its own arbiter.
+func TestASingleHostArbitratesEverything(t *testing.T) {
+	store, agent := newTestStore(t, "host-a")
+	liveFleet(t, agent, "host-a")
+
+	for _, id := range []string{"svc-1", "svc-2", "svc-3"} {
+		if err := store.PutService(context.Background(),
+			&state.Service{ID: id, Name: "web", App: "shop"}); err != nil {
+			t.Fatalf("single-host write of %s: %v", id, err)
+		}
+	}
+}
+
+// The deploy flip is compare-and-swap, so two interleaving deploys cannot
+// leave the service pointing at one release while another's machines run.
+func TestTheReleaseFlipIsCompareAndSwap(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newTestStore(t, "host-a")
+	liveFleet(t, agent, "host-a")
+
+	if err := store.PutService(ctx, &state.Service{
+		ID: "svc-1", Name: "web", App: "shop", ReleaseID: "rel-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The winner swaps from what it saw.
+	if err := store.CASServiceRelease(ctx, "svc-1", "rel-1", "rel-2"); err != nil {
+		t.Fatalf("the first flip was refused: %v", err)
+	}
+	if got := agent.scalar(t, `SELECT release_id FROM services WHERE id='svc-1'`); got != "rel-2" {
+		t.Fatalf("release_id = %q, want rel-2", got)
+	}
+
+	// The loser of the race still believes the release is rel-1, and is told no.
+	err := store.CASServiceRelease(ctx, "svc-1", "rel-1", "rel-3")
+	if !errors.Is(err, state.ErrNotOwner) {
+		t.Fatalf("a stale flip returned %v, want ErrNotOwner", err)
+	}
+	if got := agent.scalar(t, `SELECT release_id FROM services WHERE id='svc-1'`); got != "rel-2" {
+		t.Errorf("the losing flip landed anyway: release_id = %q", got)
+	}
+}
+
+// A release round-trips, including the mem build that makes deploys restore
+// rather than boot, and the integer-bool that corrosion returns as a number.
+func TestReleaseRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newTestStore(t, "host-a")
+	liveFleet(t, agent, "host-a")
+
+	rel := &state.Release{
+		ID: "rel-1", ServiceID: "svc-1", RootfsBuildID: "build-rootfs",
+		MemBuildID: "build-mem", Healthy: true, CreatedAt: 1700000000,
+	}
+	if err := store.PutRelease(ctx, rel); err != nil {
+		t.Fatalf("PutRelease: %v", err)
+	}
+	got, err := store.GetRelease(ctx, "rel-1")
+	if err != nil {
+		t.Fatalf("GetRelease: %v", err)
+	}
+	if got.MemBuildID != "build-mem" || got.RootfsBuildID != "build-rootfs" {
+		t.Errorf("build pair did not survive: %+v", got)
+	}
+	if !got.Healthy {
+		t.Error("healthy came back false; the integer-bool was mis-scanned and " +
+			"this release would never be a rollback target")
+	}
+
+	list, err := store.ReleasesFor(ctx, "svc-1")
+	if err != nil || len(list) != 1 {
+		t.Fatalf("ReleasesFor: %v (%d rows)", err, len(list))
 	}
 }

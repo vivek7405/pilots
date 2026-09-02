@@ -582,7 +582,35 @@ func (s *Store) GetService(ctx context.Context, id string) (*state.Service, erro
 // guards on ownership -- a service names machines, not a host. The rule is
 // kept where it can be: the only caller is the create path, which runs on the
 // host that is about to own the machine.
+// PutService writes a service row, and refuses if this host is not its writer.
+//
+// PutMachine can enforce single-writer in SQL because a machine row names its
+// host; a service row names machines, so there is no column to guard on. The
+// guard is instead the deterministic arbiter every host computes identically
+// from the live set (state.OwnerFor — the same function that decides which
+// host rescues a machine). Non-arbiter hosts forward the API call over the
+// mesh, so by the time this runs on the arbiter, self IS the arbiter and no
+// forwarding mark is needed.
+//
+// This matters because 5c gives services more writers than the create path
+// that 5b left them with: a deploy flips release_id, an autoscaler writes
+// replicas. Two hosts writing one row under last-write-wins does not error,
+// does not conflict, and silently keeps half of each write -- the exact
+// failure mode fly designed Corrosion's usage around ("workers own their own
+// state, so updates from different workers almost never conflict",
+// fly.io/blog/corrosion).
+//
+// The residual window is arbiter flicker: while two hosts disagree about
+// liveness they can each believe they are the writer. That window is bounded
+// by heartbeat divergence and is the same exposure Phase 4 already accepted
+// for rescue. Deliberately not closed with a distributed lock -- there is no
+// coordinator here by design, and a fake one would be worse than a documented
+// window. The deploy path additionally CASes on the value it replaces
+// (CASServiceRelease) so the one race that corrupts is refused outright.
 func (s *Store) PutService(ctx context.Context, svc *state.Service) error {
+	if err := s.assertServiceWriter(ctx, svc.ID); err != nil {
+		return err
+	}
 	_, err := s.client.Exec(ctx, `
 		INSERT INTO services (`+serviceCols+`)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -600,4 +628,240 @@ func (s *Store) PutService(ctx context.Context, svc *state.Service) error {
 		return fmt.Errorf("state: put service %q: %w", svc.ID, err)
 	}
 	return nil
+}
+
+// assertServiceWriter refuses a service write on a host that is not the
+// arbiter for it.
+//
+// A fleet with no live hosts in its own table is a host that has not finished
+// starting; allow the write rather than deadlock a single-box bring-up, since
+// with no peers there is no one to race.
+func (s *Store) assertServiceWriter(ctx context.Context, serviceID string) error {
+	live, err := s.liveHosts(ctx)
+	if err != nil {
+		return fmt.Errorf("state: service writer check for %q: %w", serviceID, err)
+	}
+	owner, ok := state.OwnerFor(serviceID, live)
+	if !ok || owner == s.hostID {
+		return nil
+	}
+	return fmt.Errorf("state: service %q is written by %s, not this host: %w",
+		serviceID, owner, state.ErrNotOwner)
+}
+
+// liveHosts is the membership the arbiter is computed from.
+//
+// Deliberately the same deadAfter cutoff hostIsLive uses, so a host that is
+// too dead to have its machines claimed is also too dead to be a service
+// writer. Two different liveness views would put the two mechanisms out of
+// step during exactly the partition where that hurts most.
+func (s *Store) liveHosts(ctx context.Context) ([]state.Host, error) {
+	all, err := s.ListHosts(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]state.Host, 0, len(all))
+	for _, h := range all {
+		if time.Since(time.Unix(h.LastSeen, 0)) < deadAfter {
+			out = append(out, h)
+		}
+	}
+	return out, nil
+}
+
+// CASServiceRelease flips a service to a new release only if it still carries
+// the release the caller last saw.
+//
+// The deploy path's one genuinely corrupting race: two deploys interleaving
+// leave a service pointing at one release while the other's machines are the
+// ones actually running. The arbiter makes this rare; the compare-and-swap
+// makes it impossible to lose silently. Deliberately a targeted UPDATE rather
+// than a whole-row write with a version column -- services already carries
+// rows, and adding a column to a populated Corrosion table is the fleet-wide
+// backfill that took fly down twice.
+func (s *Store) CASServiceRelease(ctx context.Context, id, from, to string) error {
+	if err := s.assertServiceWriter(ctx, id); err != nil {
+		return err
+	}
+	res, err := s.client.Exec(ctx,
+		`UPDATE services SET release_id = ? WHERE id = ? AND release_id = ?`,
+		to, id, from)
+	if err != nil {
+		return fmt.Errorf("state: flip service %q to release %q: %w", id, to, err)
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("state: service %q no longer carries release %q: %w",
+			id, from, state.ErrNotOwner)
+	}
+	return nil
+}
+
+// releaseCols is the column list, in the order rows are scanned.
+const releaseCols = `id, service_id, rootfs_build_id, mem_build_id, healthy, created_at`
+
+func (s *Store) GetRelease(ctx context.Context, id string) (*state.Release, error) {
+	rows, err := s.client.Query(ctx, `SELECT `+releaseCols+` FROM releases WHERE id = ?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("state: get release %q: %w", id, err)
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("state: release %q: %w", id, state.ErrNotFound)
+	}
+	r, err := scanRelease(rows)
+	if err != nil {
+		return nil, fmt.Errorf("state: scan release %q: %w", id, err)
+	}
+	return r, rows.Err()
+}
+
+func (s *Store) PutRelease(ctx context.Context, r *state.Release) error {
+	// A release inherits its service's writer rather than having an arbiter of
+	// its own: it is only ever written by the host running that service's
+	// deploy, which the service arbiter already selected.
+	if err := s.assertServiceWriter(ctx, r.ServiceID); err != nil {
+		return err
+	}
+	_, err := s.client.Exec(ctx, `
+		INSERT INTO releases (`+releaseCols+`)
+		VALUES (?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+			service_id=excluded.service_id,
+			rootfs_build_id=excluded.rootfs_build_id,
+			mem_build_id=excluded.mem_build_id,
+			healthy=excluded.healthy,
+			created_at=excluded.created_at`,
+		r.ID, r.ServiceID, r.RootfsBuildID, r.MemBuildID, boolToInt(r.Healthy), r.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put release %q: %w", r.ID, err)
+	}
+	return nil
+}
+
+func (s *Store) ReleasesFor(ctx context.Context, serviceID string) ([]state.Release, error) {
+	rows, err := s.client.Query(ctx, `SELECT `+releaseCols+
+		` FROM releases WHERE service_id = ? ORDER BY created_at DESC`, serviceID)
+	if err != nil {
+		return nil, fmt.Errorf("state: releases for %q: %w", serviceID, err)
+	}
+	defer rows.Close()
+
+	var out []state.Release
+	for rows.Next() {
+		r, err := scanRelease(rows)
+		if err != nil {
+			return nil, fmt.Errorf("state: scan release: %w", err)
+		}
+		out = append(out, *r)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListServices(ctx context.Context) ([]state.Service, error) {
+	rows, err := s.client.Query(ctx, `SELECT `+serviceCols+` FROM services`)
+	if err != nil {
+		return nil, fmt.Errorf("state: list services: %w", err)
+	}
+	defer rows.Close()
+
+	var out []state.Service
+	for rows.Next() {
+		// Same integer-bool handling as GetService: corrosion returns a JSON
+		// number for autodeploy, never a bool.
+		var autodeploy int
+		var svc state.Service
+		if err := rows.Scan(&svc.ID, &svc.Name, &svc.App, &svc.ReleaseID, &svc.Replicas,
+			&svc.Health, &svc.Env, &svc.EnvSealed, &svc.Domain, &svc.CustomDomain,
+			&svc.Repo, &svc.Branch, &autodeploy, &svc.CreatedAt); err != nil {
+			return nil, fmt.Errorf("state: scan service: %w", err)
+		}
+		svc.Autodeploy = autodeploy != 0
+		out = append(out, svc)
+	}
+	return out, rows.Err()
+}
+
+// scanRelease reads one release row. healthy arrives as a JSON number from
+// corrosion, never a bool -- SQLite has no bool type.
+func scanRelease(rows *Rows) (*state.Release, error) {
+	var r state.Release
+	var healthy int
+	if err := rows.Scan(&r.ID, &r.ServiceID, &r.RootfsBuildID, &r.MemBuildID,
+		&healthy, &r.CreatedAt); err != nil {
+		return nil, err
+	}
+	r.Healthy = healthy != 0
+	return &r, nil
+}
+
+const domainCols = `hostname, service_id, verified_at, created_at`
+
+func (s *Store) GetDomain(ctx context.Context, hostname string) (*state.Domain, error) {
+	rows, err := s.client.Query(ctx, `SELECT `+domainCols+` FROM domains WHERE hostname = ?`, hostname)
+	if err != nil {
+		return nil, fmt.Errorf("state: get domain %q: %w", hostname, err)
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("state: domain %q: %w", hostname, state.ErrNotFound)
+	}
+	var d state.Domain
+	if err := rows.Scan(&d.Hostname, &d.ServiceID, &d.VerifiedAt, &d.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &d, rows.Err()
+}
+
+// PutDomain writes a custom hostname.
+//
+// Guarded by the service's arbiter for the same reason PutService is: a domain
+// row names a service rather than a host, so there is no column to enforce
+// single-writer on, and two hosts pointing one hostname at different services
+// would merge under last-write-wins into whichever wrote last.
+func (s *Store) PutDomain(ctx context.Context, d *state.Domain) error {
+	if err := s.assertServiceWriter(ctx, d.ServiceID); err != nil {
+		return err
+	}
+	_, err := s.client.Exec(ctx, `
+		INSERT INTO domains (`+domainCols+`) VALUES (?,?,?,?)
+		ON CONFLICT(hostname) DO UPDATE SET
+			service_id=excluded.service_id, verified_at=excluded.verified_at,
+			created_at=excluded.created_at`,
+		d.Hostname, d.ServiceID, d.VerifiedAt, d.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put domain %q: %w", d.Hostname, err)
+	}
+	return nil
+}
+
+func (s *Store) DeleteDomain(ctx context.Context, hostname string) error {
+	if _, err := s.client.Exec(ctx, `DELETE FROM domains WHERE hostname = ?`, hostname); err != nil {
+		return fmt.Errorf("state: delete domain %q: %w", hostname, err)
+	}
+	return nil
+}
+
+func (s *Store) ListDomains(ctx context.Context) ([]state.Domain, error) {
+	rows, err := s.client.Query(ctx, `SELECT `+domainCols+` FROM domains`)
+	if err != nil {
+		return nil, fmt.Errorf("state: list domains: %w", err)
+	}
+	defer rows.Close()
+	var out []state.Domain
+	for rows.Next() {
+		var d state.Domain
+		if err := rows.Scan(&d.Hostname, &d.ServiceID, &d.VerifiedAt, &d.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
 }

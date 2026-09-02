@@ -22,6 +22,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/google/uuid"
+	"hash/fnv"
+	"sort"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver: hostd builds with CGO_ENABLED=0
@@ -195,6 +198,39 @@ type Volume struct {
 // Only Env and EnvSealed are consumed in this phase; the rest of the row is
 // the rollout shape, which lands with the schema because adding a column later
 // is a fleet-wide re-bootstrap rather than a migration.
+// Release is one deployable version of a service.
+//
+// The build pair is the point. rootfs_build_id is what the FIRST replica of
+// this release boots from; mem_build_id is stamped after that replica passes
+// its health gate and is checkpointed, and every replica after it restores
+// from the pair. A release with no mem build yet is not broken -- it is a
+// release whose first replica has not finished proving itself, and callers
+// fall back to booting.
+type Release struct {
+	ID            string
+	ServiceID     string
+	RootfsBuildID string
+	// MemBuildID is empty until the first replica of this release has passed
+	// its health gate and been checkpointed.
+	MemBuildID string
+	// Healthy records that a replica of this release reached its health gate
+	// at least once. A release that never did is never a rollback target.
+	Healthy   bool
+	CreatedAt int64
+}
+
+// Domain is a custom hostname pointed at a service.
+type Domain struct {
+	Hostname  string
+	ServiceID string
+	// VerifiedAt is when the CNAME was last observed pointing at this fleet.
+	// Zero means unverified, and an unverified domain never gets a
+	// certificate -- issuing for a name whose owner has not proved they want
+	// it here burns the fleet's rate limit on someone else's typo.
+	VerifiedAt int64
+	CreatedAt  int64
+}
+
 type Service struct {
 	ID        string
 	Name      string
@@ -281,6 +317,34 @@ type Store interface {
 	// a secret replicated to every host in the fleet, forever, for a machine
 	// that no longer exists.
 	DeleteService(ctx context.Context, id string) error
+	// CASServiceRelease flips a service to a new release only if it still
+	// carries the one the caller last saw. The deploy path's one genuinely
+	// corrupting race is two deploys interleaving, which leaves a service
+	// naming one release while another's machines are the ones running.
+	CASServiceRelease(ctx context.Context, id, from, to string) error
+	// ListServices returns every service row. Reads are local and cheap; the
+	// rollout and autoscale loops run on this.
+	ListServices(ctx context.Context) ([]Service, error)
+
+	// GetDomain reads one custom hostname. PutDomain writes one, DeleteDomain
+	// removes it, and ListDomains is what the router and the TLS decision
+	// function both read -- from the local replica, so a handshake costs a map
+	// lookup rather than a query.
+	GetDomain(ctx context.Context, hostname string) (*Domain, error)
+	PutDomain(ctx context.Context, d *Domain) error
+	DeleteDomain(ctx context.Context, hostname string) error
+	ListDomains(ctx context.Context) ([]Domain, error)
+
+	// GetRelease reads one release. PutRelease writes one.
+	//
+	// A release is written only by the host deploying it, which is the same
+	// host the service arbiter chose -- releases inherit the service's writer
+	// rather than needing an arbiter of their own.
+	GetRelease(ctx context.Context, id string) (*Release, error)
+	PutRelease(ctx context.Context, r *Release) error
+	// ReleasesFor returns a service's releases, newest first. The rollback
+	// target is the newest healthy release that is not the current one.
+	ReleasesFor(ctx context.Context, serviceID string) ([]Release, error)
 	// GetTemplate reads the fleet's golden template. ErrNotFound means no host
 	// has built one yet.
 	GetTemplate(ctx context.Context, id string) (*Template, error)
@@ -307,7 +371,57 @@ func Open(dsn string) (Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("state: apply schema: %w", err)
 	}
+	if err := addMissingColumns(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &sqliteStore{db: db}, nil
+}
+
+// addMissingColumns brings an existing database up to the declared schema.
+//
+// Schema is CREATE TABLE IF NOT EXISTS throughout, which is what Corrosion
+// needs -- it loads the same file at agent start and cr-sqlite reconciles the
+// declared shape against the database. SQLite does not: IF NOT EXISTS skips
+// the whole statement when the table exists, so a column added to a table that
+// a host already has is simply never created, and the first query naming it
+// fails with "no such column" on a host that upgraded in place.
+//
+// So the column adds live here rather than in Schema. They must NOT go in the
+// .sql file: Corrosion reads it too, and a bare ALTER there would either be
+// rejected or replicate DDL, which is the fleet-wide backfill this project
+// otherwise goes out of its way to avoid.
+//
+// Each entry is idempotent by inspection of the table, so this is safe to run
+// on every Open, which is when it runs.
+func addMissingColumns(db *sql.DB) error {
+	wanted := []struct{ table, column, decl string }{
+		// Added by 5c so a release can name the memory build its replicas
+		// restore from.
+		{"releases", "mem_build_id", "TEXT"},
+	}
+	for _, w := range wanted {
+		has, err := hasColumn(db, w.table, w.column)
+		if err != nil {
+			return err
+		}
+		if has {
+			continue
+		}
+		if _, err := db.Exec("ALTER TABLE " + w.table + " ADD COLUMN " + w.column + " " + w.decl); err != nil {
+			return fmt.Errorf("state: add %s.%s: %w", w.table, w.column, err)
+		}
+	}
+	return nil
+}
+
+func hasColumn(db *sql.DB, table, column string) (bool, error) {
+	rows, err := db.Query("SELECT 1 FROM pragma_table_info(?) WHERE name = ?", table, column)
+	if err != nil {
+		return false, fmt.Errorf("state: inspect %s: %w", table, err)
+	}
+	defer rows.Close()
+	return rows.Next(), rows.Err()
 }
 
 func (s *sqliteStore) Close() error { return s.db.Close() }
@@ -698,4 +812,235 @@ func (s *sqliteStore) PutService(ctx context.Context, svc *Service) error {
 		return fmt.Errorf("state: put service %q: %w", svc.ID, err)
 	}
 	return nil
+}
+
+// releaseCols is the column list, in the order rows are scanned.
+const releaseCols = `id, service_id, rootfs_build_id, mem_build_id, healthy, created_at`
+
+func scanRelease(row interface{ Scan(...any) error }) (*Release, error) {
+	var r Release
+	var healthy int
+	if err := row.Scan(&r.ID, &r.ServiceID, &r.RootfsBuildID, &r.MemBuildID,
+		&healthy, &r.CreatedAt); err != nil {
+		return nil, err
+	}
+	// SQLite has no bool, and corrosion hands back a JSON number for this
+	// column -- the same shape the services.autodeploy scan already handles.
+	r.Healthy = healthy != 0
+	return &r, nil
+}
+
+func (s *sqliteStore) GetRelease(ctx context.Context, id string) (*Release, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+releaseCols+` FROM releases WHERE id = ?`, id)
+	r, err := scanRelease(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("state: release %q: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get release %q: %w", id, err)
+	}
+	return r, nil
+}
+
+func (s *sqliteStore) PutRelease(ctx context.Context, r *Release) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO releases (`+releaseCols+`)
+		VALUES (?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+			service_id=excluded.service_id,
+			rootfs_build_id=excluded.rootfs_build_id,
+			mem_build_id=excluded.mem_build_id,
+			healthy=excluded.healthy,
+			created_at=excluded.created_at`,
+		r.ID, r.ServiceID, r.RootfsBuildID, r.MemBuildID, boolToInt(r.Healthy), r.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put release %q: %w", r.ID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) ReleasesFor(ctx context.Context, serviceID string) ([]Release, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+releaseCols+
+		` FROM releases WHERE service_id = ? ORDER BY created_at DESC`, serviceID)
+	if err != nil {
+		return nil, fmt.Errorf("state: releases for %q: %w", serviceID, err)
+	}
+	defer rows.Close()
+
+	var out []Release
+	for rows.Next() {
+		r, err := scanRelease(rows)
+		if err != nil {
+			return nil, fmt.Errorf("state: scan release: %w", err)
+		}
+		out = append(out, *r)
+	}
+	return out, rows.Err()
+}
+
+func (s *sqliteStore) ListServices(ctx context.Context) ([]Service, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+serviceCols+` FROM services`)
+	if err != nil {
+		return nil, fmt.Errorf("state: list services: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Service
+	for rows.Next() {
+		svc, err := scanService(rows)
+		if err != nil {
+			return nil, fmt.Errorf("state: scan service: %w", err)
+		}
+		out = append(out, *svc)
+	}
+	return out, rows.Err()
+}
+
+// boolToInt is the SQLite bool convention used throughout this file.
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// OwnerFor names the ONE host responsible for a key, from the live set.
+//
+// The fleet has no coordinator, so every host has to reach the same answer
+// from the same inputs or two of them act on one object. That is why the hash
+// is FNV-1a over the key rather than Go's built-in map hash: the built-in is
+// seeded per process, so two hosts running identical code would compute
+// different buckets for the same key.
+//
+// It sorts its own input because rank is a position in a list, and two hosts
+// that order the live set differently compute different owners from the same
+// membership.
+//
+// Used for two things that must not diverge: which host rescues a machine
+// whose owner died (selfheal.RescuerFor delegates here), and which host is
+// allowed to write a service row -- services name machines rather than a host,
+// so there is no column to guard single-writer on and the arbiter IS the
+// guard.
+func OwnerFor(key string, live []Host) (string, bool) {
+	if len(live) == 0 {
+		return "", false
+	}
+	sorted := append([]Host(nil), live...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(key))
+	return sorted[int(h.Sum32()%uint32(len(sorted)))].ID, true
+}
+
+func (s *sqliteStore) CASServiceRelease(ctx context.Context, id, from, to string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE services SET release_id = ? WHERE id = ? AND release_id = ?`, to, id, from)
+	if err != nil {
+		return fmt.Errorf("state: flip service %q: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("state: service %q no longer carries release %q: %w",
+			id, from, ErrNotOwner)
+	}
+	return nil
+}
+
+const domainCols = `hostname, service_id, verified_at, created_at`
+
+func (s *sqliteStore) GetDomain(ctx context.Context, hostname string) (*Domain, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+domainCols+` FROM domains WHERE hostname = ?`, hostname)
+	var d Domain
+	err := row.Scan(&d.Hostname, &d.ServiceID, &d.VerifiedAt, &d.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("state: domain %q: %w", hostname, ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get domain %q: %w", hostname, err)
+	}
+	return &d, nil
+}
+
+func (s *sqliteStore) PutDomain(ctx context.Context, d *Domain) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO domains (`+domainCols+`) VALUES (?,?,?,?)
+		ON CONFLICT(hostname) DO UPDATE SET
+			service_id=excluded.service_id, verified_at=excluded.verified_at,
+			created_at=excluded.created_at`,
+		d.Hostname, d.ServiceID, d.VerifiedAt, d.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put domain %q: %w", d.Hostname, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) DeleteDomain(ctx context.Context, hostname string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM domains WHERE hostname = ?`, hostname); err != nil {
+		return fmt.Errorf("state: delete domain %q: %w", hostname, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) ListDomains(ctx context.Context) ([]Domain, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+domainCols+` FROM domains`)
+	if err != nil {
+		return nil, fmt.Errorf("state: list domains: %w", err)
+	}
+	defer rows.Close()
+	var out []Domain
+	for rows.Next() {
+		var d Domain
+		if err := rows.Scan(&d.Hostname, &d.ServiceID, &d.VerifiedAt, &d.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// NewOwnedID mints an id with the given prefix whose owner is this host.
+//
+// Ownership is hash(id) mod live_hosts, and some ids are minted by the host
+// that will immediately write the row -- a service create being the case that
+// forced this. On an N-host fleet a naive uuid gives the creating host a
+// 1-in-N chance of being allowed to write what it just made, and forwarding
+// cannot fix it the way it fixes a later write: the id does not exist yet, so
+// a forwarded create would mint a DIFFERENT id on the far host and move the
+// problem rather than solve it.
+//
+// So the id is chosen rather than accepted. This is create-time placement, the
+// same shape as machine name allocation, and it states something true: the
+// host that created a thing is the one that owns writing it. Ownership still
+// moves with fleet membership afterwards, exactly as a machine's rescuer does
+// -- the rule has to be agreed at any instant, not fixed forever.
+//
+// Expected attempts is the fleet size. The bound stops a host whose live set
+// is momentarily empty or inconsistent from spinning; falling back to an
+// unowned id is safe because the store's guard still decides, and will refuse.
+func NewOwnedID(prefix, hostID string, live []Host) string {
+	if len(live) <= 1 {
+		return prefix + uuid.NewString()
+	}
+	for attempt := 0; attempt < 10*len(live); attempt++ {
+		id := prefix + uuid.NewString()
+		if owner, ok := OwnerFor(id, live); ok && owner == hostID {
+			return id
+		}
+	}
+	return prefix + uuid.NewString()
+}
+
+// LiveHosts filters a host list to those still heartbeating.
+func LiveHosts(hosts []Host) []Host {
+	out := make([]Host, 0, len(hosts))
+	for _, h := range hosts {
+		if time.Since(time.Unix(h.LastSeen, 0)) < 90*time.Second {
+			out = append(out, h)
+		}
+	}
+	return out
 }

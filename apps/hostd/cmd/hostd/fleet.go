@@ -235,3 +235,37 @@ func machineOwner(store state.Store) router.MachineOwner {
 		return m.HostID, true
 	}
 }
+
+// peerAPI calls another host's internal API.
+//
+// The internal listener serves the same routes as the public one, so a
+// lifecycle call against a machine another host holds is the ordinary endpoint
+// reached over the mesh rather than a second protocol.
+type peerAPI struct {
+	cache *corrosion.Cache
+	http  *http.Client
+}
+
+func (p peerAPI) Post(ctx context.Context, hostID, path string) error {
+	h, ok := p.cache.Host(hostID)
+	if !ok || h.WGAddr == "" {
+		return fmt.Errorf("hostd: %s has no mesh address", hostID)
+	}
+	url := "http://" + router.InternalAddrOf(h.WGAddr) + path
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		return err
+	}
+	// Marked as forwarded so the far side does not forward it onward.
+	req.Header.Set("X-Pilots-Forwarded-By", "autoscaler")
+
+	resp, err := p.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("hostd: %s %s: %s", hostID, path, resp.Status)
+	}
+	return nil
+}

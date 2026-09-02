@@ -52,7 +52,12 @@ func (m *Manager) provisionService(ctx context.Context, name string,
 	}
 
 	svc := &state.Service{
-		ID: "svc_" + uuid.NewString(), Name: name, App: req.App,
+		// An id this host owns writing. The arbiter is hash(id) mod
+		// live_hosts, so a plain uuid would leave two hosts in three unable to
+		// write the row they just minted -- which surfaces as a create failing
+		// with "this host does not own that machine" about a service that did
+		// not exist a moment ago. See state.NewOwnedID.
+		ID: m.newServiceID(ctx), Name: name, App: req.App,
 		Replicas: 1, CreatedAt: time.Now().Unix(),
 	}
 
@@ -216,4 +221,13 @@ func (m *Manager) deliverEnv(ctx context.Context, row *state.Machine,
 			"machine", row.ID, "reason", out.AppReason)
 	}
 	return nil
+}
+
+// newServiceID mints a service id this host is allowed to write.
+func (m *Manager) newServiceID(ctx context.Context) string {
+	hosts, err := m.opts.Store.ListHosts(ctx)
+	if err != nil {
+		return "svc_" + uuid.NewString()
+	}
+	return state.NewOwnedID("svc_", m.opts.HostID, state.LiveHosts(hosts))
 }

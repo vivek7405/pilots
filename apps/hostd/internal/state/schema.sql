@@ -125,10 +125,50 @@ CREATE TABLE IF NOT EXISTS templates (
   created_at  INTEGER
 );
 
+-- One deployable version of a service.
+--
+-- mem_build_id is what makes a deploy fast. The first replica of a release
+-- boots from rootfs_build_id, passes its health gate, and is checkpointed --
+-- and the resulting memory build is stamped here. Every later replica of the
+-- same release, every scale-up, every rollback and every rescue then RESTORES
+-- from that pair instead of booting, which is the difference between the
+-- measured sub-second restore path and a cold boot nobody has budgeted.
+--
+-- Adding this column to a table that already carried rows would be the
+-- fleet-killer: corrosion reads schema_paths at startup and cr-sqlite
+-- backfills every existing row on a column add, which took fly's fleet down
+-- twice for ~11.5h (fly.io/infra-log/2024-11-30). It is safe here and only
+-- here because nothing has ever written this table -- zero rows, so the
+-- backfill is a no-op. Once releases carries data, that door is closed: a
+-- later shape change is a new table plus a dual-read migration.
+-- A custom hostname pointed at a service.
+--
+-- A NEW table rather than a column on services, and that is deliberate: this
+-- schema is loaded by corrosion at agent start, and cr-sqlite backfills every
+-- row of a table whose columns change. Adding one to services -- which already
+-- carries rows -- is the fleet-wide gossip storm that took fly's fleet down
+-- twice for ~11.5h. A new table backfills nothing because it has no rows.
+--
+-- The router matches on hostname at SNI time from its local replica, so the
+-- lookup is a map hit rather than a query, and certmagic's on-demand decision
+-- reads the same rows: a name that is not here gets no certificate, which is
+-- what stops anyone who points DNS at our IPs from minting certs on our rate
+-- limit.
+CREATE TABLE IF NOT EXISTS domains (
+  hostname   TEXT NOT NULL PRIMARY KEY,
+  service_id TEXT,
+  -- verified_at is 0 until the CNAME has been observed pointing at us. An
+  -- unverified row never gets a certificate: issuance would burn rate limit
+  -- on a name whose owner has not proved they want it here.
+  verified_at INTEGER,
+  created_at  INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS releases (
   id              TEXT NOT NULL PRIMARY KEY,
   service_id      TEXT,
   rootfs_build_id TEXT,
+  mem_build_id    TEXT,
   healthy         INTEGER,
   created_at      INTEGER
 );

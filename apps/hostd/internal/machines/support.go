@@ -133,6 +133,16 @@ const templateToken = "placeholder-replaced-at-create"
 
 // installToken gives a freshly booted guest its own credential.
 func (m *Manager) installToken(ctx context.Context, slot *netns.Slot, token string) error {
+	return m.installTokenAs(ctx, slot, templateToken, token)
+}
+
+// installTokenAs writes a credential into the guest, authenticating with the
+// one it currently carries.
+//
+// Split out because the rollout needs the reverse direction: before a release
+// snapshot it puts the PLACEHOLDER back, authenticating with the machine's own
+// token. Same request, different pair.
+func (m *Manager) installTokenAs(ctx context.Context, slot *netns.Slot, authAs, token string) error {
 	// Wait for the agent to be listening before trying.
 	if err := waitForAgent(ctx, slot.AgentAddr(), 90*time.Second); err != nil {
 		return err
@@ -148,7 +158,7 @@ func (m *Manager) installToken(ctx context.Context, slot *netns.Slot, token stri
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+templateToken)
+	req.Header.Set("Authorization", "Bearer "+authAs)
 
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
