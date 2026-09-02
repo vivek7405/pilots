@@ -62,12 +62,21 @@ func configureNetwork() {
 
 	_, dst, err := net.ParseCIDR(peerPrefix)
 	if err != nil {
+		log.Printf("guest-agent: bad peer prefix %q: %v", peerPrefix, err)
+		return
+	}
+	// Checked rather than passed straight in. netlink treats a nil Gw as "no
+	// gateway", so a typo in the constant would install an on-link route that
+	// looks right in `ip -6 route` and silently reaches nobody.
+	gw := net.ParseIP(gateway6)
+	if gw == nil {
+		log.Printf("guest-agent: bad gateway address %q", gateway6)
 		return
 	}
 	if err := netlink.RouteAdd(&netlink.Route{
 		LinkIndex: link.Attrs().Index,
 		Dst:       dst,
-		Gw:        net.ParseIP(gateway6),
+		Gw:        gw,
 	}); err != nil {
 		log.Printf("guest-agent: could not route %s via %s, so peers are "+
 			"unreachable by name: %v", peerPrefix, gateway6, err)
