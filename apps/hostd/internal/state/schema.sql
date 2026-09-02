@@ -125,10 +125,27 @@ CREATE TABLE IF NOT EXISTS templates (
   created_at  INTEGER
 );
 
+-- One deployable version of a service.
+--
+-- mem_build_id is what makes a deploy fast. The first replica of a release
+-- boots from rootfs_build_id, passes its health gate, and is checkpointed --
+-- and the resulting memory build is stamped here. Every later replica of the
+-- same release, every scale-up, every rollback and every rescue then RESTORES
+-- from that pair instead of booting, which is the difference between the
+-- measured sub-second restore path and a cold boot nobody has budgeted.
+--
+-- Adding this column to a table that already carried rows would be the
+-- fleet-killer: corrosion reads schema_paths at startup and cr-sqlite
+-- backfills every existing row on a column add, which took fly's fleet down
+-- twice for ~11.5h (fly.io/infra-log/2024-11-30). It is safe here and only
+-- here because nothing has ever written this table -- zero rows, so the
+-- backfill is a no-op. Once releases carries data, that door is closed: a
+-- later shape change is a new table plus a dual-read migration.
 CREATE TABLE IF NOT EXISTS releases (
   id              TEXT NOT NULL PRIMARY KEY,
   service_id      TEXT,
   rootfs_build_id TEXT,
+  mem_build_id    TEXT,
   healthy         INTEGER,
   created_at      INTEGER
 );

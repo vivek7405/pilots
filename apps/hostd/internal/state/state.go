@@ -22,6 +22,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
+	"sort"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver: hostd builds with CGO_ENABLED=0
@@ -195,6 +197,27 @@ type Volume struct {
 // Only Env and EnvSealed are consumed in this phase; the rest of the row is
 // the rollout shape, which lands with the schema because adding a column later
 // is a fleet-wide re-bootstrap rather than a migration.
+// Release is one deployable version of a service.
+//
+// The build pair is the point. rootfs_build_id is what the FIRST replica of
+// this release boots from; mem_build_id is stamped after that replica passes
+// its health gate and is checkpointed, and every replica after it restores
+// from the pair. A release with no mem build yet is not broken -- it is a
+// release whose first replica has not finished proving itself, and callers
+// fall back to booting.
+type Release struct {
+	ID            string
+	ServiceID     string
+	RootfsBuildID string
+	// MemBuildID is empty until the first replica of this release has passed
+	// its health gate and been checkpointed.
+	MemBuildID string
+	// Healthy records that a replica of this release reached its health gate
+	// at least once. A release that never did is never a rollback target.
+	Healthy   bool
+	CreatedAt int64
+}
+
 type Service struct {
 	ID        string
 	Name      string
@@ -281,6 +304,20 @@ type Store interface {
 	// a secret replicated to every host in the fleet, forever, for a machine
 	// that no longer exists.
 	DeleteService(ctx context.Context, id string) error
+	// ListServices returns every service row. Reads are local and cheap; the
+	// rollout and autoscale loops run on this.
+	ListServices(ctx context.Context) ([]Service, error)
+
+	// GetRelease reads one release. PutRelease writes one.
+	//
+	// A release is written only by the host deploying it, which is the same
+	// host the service arbiter chose -- releases inherit the service's writer
+	// rather than needing an arbiter of their own.
+	GetRelease(ctx context.Context, id string) (*Release, error)
+	PutRelease(ctx context.Context, r *Release) error
+	// ReleasesFor returns a service's releases, newest first. The rollback
+	// target is the newest healthy release that is not the current one.
+	ReleasesFor(ctx context.Context, serviceID string) ([]Release, error)
 	// GetTemplate reads the fleet's golden template. ErrNotFound means no host
 	// has built one yet.
 	GetTemplate(ctx context.Context, id string) (*Template, error)
@@ -698,4 +735,123 @@ func (s *sqliteStore) PutService(ctx context.Context, svc *Service) error {
 		return fmt.Errorf("state: put service %q: %w", svc.ID, err)
 	}
 	return nil
+}
+
+// releaseCols is the column list, in the order rows are scanned.
+const releaseCols = `id, service_id, rootfs_build_id, mem_build_id, healthy, created_at`
+
+func scanRelease(row interface{ Scan(...any) error }) (*Release, error) {
+	var r Release
+	var healthy int
+	if err := row.Scan(&r.ID, &r.ServiceID, &r.RootfsBuildID, &r.MemBuildID,
+		&healthy, &r.CreatedAt); err != nil {
+		return nil, err
+	}
+	// SQLite has no bool, and corrosion hands back a JSON number for this
+	// column -- the same shape the services.autodeploy scan already handles.
+	r.Healthy = healthy != 0
+	return &r, nil
+}
+
+func (s *sqliteStore) GetRelease(ctx context.Context, id string) (*Release, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+releaseCols+` FROM releases WHERE id = ?`, id)
+	r, err := scanRelease(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("state: release %q: %w", id, ErrNotFound)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get release %q: %w", id, err)
+	}
+	return r, nil
+}
+
+func (s *sqliteStore) PutRelease(ctx context.Context, r *Release) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO releases (`+releaseCols+`)
+		VALUES (?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+			service_id=excluded.service_id,
+			rootfs_build_id=excluded.rootfs_build_id,
+			mem_build_id=excluded.mem_build_id,
+			healthy=excluded.healthy,
+			created_at=excluded.created_at`,
+		r.ID, r.ServiceID, r.RootfsBuildID, r.MemBuildID, boolToInt(r.Healthy), r.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put release %q: %w", r.ID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) ReleasesFor(ctx context.Context, serviceID string) ([]Release, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+releaseCols+
+		` FROM releases WHERE service_id = ? ORDER BY created_at DESC`, serviceID)
+	if err != nil {
+		return nil, fmt.Errorf("state: releases for %q: %w", serviceID, err)
+	}
+	defer rows.Close()
+
+	var out []Release
+	for rows.Next() {
+		r, err := scanRelease(rows)
+		if err != nil {
+			return nil, fmt.Errorf("state: scan release: %w", err)
+		}
+		out = append(out, *r)
+	}
+	return out, rows.Err()
+}
+
+func (s *sqliteStore) ListServices(ctx context.Context) ([]Service, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+serviceCols+` FROM services`)
+	if err != nil {
+		return nil, fmt.Errorf("state: list services: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Service
+	for rows.Next() {
+		svc, err := scanService(rows)
+		if err != nil {
+			return nil, fmt.Errorf("state: scan service: %w", err)
+		}
+		out = append(out, *svc)
+	}
+	return out, rows.Err()
+}
+
+// boolToInt is the SQLite bool convention used throughout this file.
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// OwnerFor names the ONE host responsible for a key, from the live set.
+//
+// The fleet has no coordinator, so every host has to reach the same answer
+// from the same inputs or two of them act on one object. That is why the hash
+// is FNV-1a over the key rather than Go's built-in map hash: the built-in is
+// seeded per process, so two hosts running identical code would compute
+// different buckets for the same key.
+//
+// It sorts its own input because rank is a position in a list, and two hosts
+// that order the live set differently compute different owners from the same
+// membership.
+//
+// Used for two things that must not diverge: which host rescues a machine
+// whose owner died (selfheal.RescuerFor delegates here), and which host is
+// allowed to write a service row -- services name machines rather than a host,
+// so there is no column to guard single-writer on and the arbiter IS the
+// guard.
+func OwnerFor(key string, live []Host) (string, bool) {
+	if len(live) == 0 {
+		return "", false
+	}
+	sorted := append([]Host(nil), live...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(key))
+	return sorted[int(h.Sum32()%uint32(len(sorted)))].ID, true
 }
