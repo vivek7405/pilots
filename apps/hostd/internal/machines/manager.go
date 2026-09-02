@@ -244,14 +244,22 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 	// row that exists -- rather than a machine whose environment was never
 	// written anywhere and cannot be recovered from the request that is gone.
 	env := createEnv{App: req.App, Cmd: req.Cmd, Env: req.Env, SecretEnv: req.SecretEnv}
-	serviceID, err := m.provisionService(ctx, name, env)
-	if err != nil {
-		return nil, err
+	// A replica joins its service's existing row rather than minting one.
+	// provisionService mints per create, which is right for a standalone
+	// machine and wrong for the second replica of a rollout -- that would give
+	// one service N rows, each with its own copy of the sealed environment.
+	serviceID := req.Service
+	if serviceID == "" {
+		var err error
+		if serviceID, err = m.provisionService(ctx, name, env); err != nil {
+			return nil, err
+		}
 	}
 
 	row := &state.Machine{
 		ID: id, Name: name, HostID: m.opts.HostID, State: StateCreating,
 		App: req.App, ServiceID: serviceID,
+		ReleaseID: req.Release,
 		KindKnobs: knobsJSON,
 		VCPUs:     orDefault(req.VCPUs, 1),
 		MemMiB:    orDefault(req.MemMiB, 512),
@@ -265,7 +273,15 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 		return nil, err
 	}
 
-	fcm, err := m.startNewMachine(ctx, row, token, req.Volume, req.Image, env.Cmd)
+	// A release restore takes precedence over the image: the rollout passes
+	// both so a replica can fall back to booting when the release has no
+	// memory image yet, and the pair is the fast path when it does.
+	var fcm *fc.Machine
+	if req.MemBuildID != "" {
+		fcm, err = m.startForRelease(ctx, row, token, req.MemBuildID, req.RootfsBuildID)
+	} else {
+		fcm, err = m.startNewMachine(ctx, row, token, req.Volume, req.Image, env.Cmd)
+	}
 	if err != nil {
 		row.State = StateError
 		stampSlot(row, nil)

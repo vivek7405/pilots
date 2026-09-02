@@ -123,6 +123,20 @@ type CreateMachineRequest struct {
 	// environment it did not start with.
 	Cmd string `json:"cmd,omitempty"`
 
+	// MemBuildID and RootfsBuildID create a machine by RESTORING a build pair
+	// rather than booting an image -- how every replica of a release after the
+	// first comes up, and what makes a deploy land on the measured sub-second
+	// path instead of a cold boot. Internal: set by the rollout, not by a
+	// client, and ignored unless both are present.
+	MemBuildID    string `json:"mem_build_id,omitempty"`
+	RootfsBuildID string `json:"rootfs_build_id,omitempty"`
+
+	// Service and Release record which service's rollout this machine belongs
+	// to, so a deploy can find its own replicas and a rollback can find the
+	// previous ones.
+	Service string `json:"service,omitempty"`
+	Release string `json:"release,omitempty"`
+
 	// Env is the non-secret environment, stored as-is.
 	Env map[string]string `json:"env,omitempty"`
 

@@ -304,6 +304,11 @@ type Store interface {
 	// a secret replicated to every host in the fleet, forever, for a machine
 	// that no longer exists.
 	DeleteService(ctx context.Context, id string) error
+	// CASServiceRelease flips a service to a new release only if it still
+	// carries the one the caller last saw. The deploy path's one genuinely
+	// corrupting race is two deploys interleaving, which leaves a service
+	// naming one release while another's machines are the ones running.
+	CASServiceRelease(ctx context.Context, id, from, to string) error
 	// ListServices returns every service row. Reads are local and cheap; the
 	// rollout and autoscale loops run on this.
 	ListServices(ctx context.Context) ([]Service, error)
@@ -854,4 +859,21 @@ func OwnerFor(key string, live []Host) (string, bool) {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(key))
 	return sorted[int(h.Sum32()%uint32(len(sorted)))].ID, true
+}
+
+func (s *sqliteStore) CASServiceRelease(ctx context.Context, id, from, to string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE services SET release_id = ? WHERE id = ? AND release_id = ?`, to, id, from)
+	if err != nil {
+		return fmt.Errorf("state: flip service %q: %w", id, err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("state: service %q no longer carries release %q: %w",
+			id, from, ErrNotOwner)
+	}
+	return nil
 }
