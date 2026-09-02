@@ -52,6 +52,7 @@ func handleTerminal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer ptmx.Close()
+	defer trackPID(cmd.Process)()
 
 	tw.send(terminalFrame{Type: "session"})
 

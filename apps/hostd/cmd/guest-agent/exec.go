@@ -89,7 +89,7 @@ func handleExec(w http.ResponseWriter, r *http.Request) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 
-	err := cmd.Run()
+	err := runTracked(cmd)
 	resp := execResponse{Stdout: stdout.String(), Stderr: stderr.String()}
 	resp.ExitCode = exitCodeOf(err)
 

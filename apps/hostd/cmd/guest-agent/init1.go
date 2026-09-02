@@ -1,9 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"log"
 	"os"
+	"os/exec"
 	"os/signal"
+	"sync"
+	"time"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -95,13 +100,105 @@ func runAsInit() {
 func reapChildren() {
 	ch := make(chan os.Signal, 16)
 	signal.Notify(ch, unix.SIGCHLD)
-	for range ch {
-		for {
-			var status unix.WaitStatus
-			pid, err := unix.Wait4(-1, &status, unix.WNOHANG, nil)
-			if pid <= 0 || err != nil {
-				break
-			}
+
+	// A tick as well as the signal. Standard signals do not queue, so two
+	// children exiting close together can raise ONE SIGCHLD -- and a sweep
+	// that stops early because the first corpse it found belongs to os/exec
+	// would otherwise leave the second lying there until something else
+	// happened to die.
+	tick := time.NewTicker(10 * time.Second)
+	defer tick.Stop()
+
+	for {
+		select {
+		case <-ch:
+		case <-tick.C:
+		}
+		reapOrphans()
+	}
+}
+
+// reapOrphans collects the dead this process is responsible for, and only
+// those.
+//
+// Wait4(-1) reaps ANY child, which on PID 1 includes the ones os/exec is in
+// the middle of waiting for. When the reaper won that race the caller's Wait
+// returned ECHILD, exitCodeOf turned it into 127, and a command that had
+// actually succeeded was reported as having failed -- mke2fs on the volume
+// mount path being the one that mattered, since a machine then came up
+// believing its volume was unformatted.
+//
+// So each corpse is identified BEFORE it is collected. WNOWAIT reports who
+// died without consuming the status, leaving it for os/exec if os/exec owns
+// it.
+func reapOrphans() {
+	for {
+		pid, ok := peekDeadChild()
+		if !ok {
+			return
+		}
+		if _, owned := ownedPIDs.Load(pid); owned {
+			// Leave it. Its owner is about to collect it, and the next tick
+			// picks up anything queued behind it.
+			return
+		}
+		var status unix.WaitStatus
+		if _, err := unix.Wait4(pid, &status, unix.WNOHANG, nil); err != nil {
+			return
 		}
 	}
+}
+
+// peekDeadChild names a child that has exited without reaping it.
+func peekDeadChild() (int, bool) {
+	var info siginfoChld
+	err := unix.Waitid(unix.P_ALL, 0, (*unix.Siginfo)(unsafe.Pointer(&info)),
+		unix.WEXITED|unix.WNOWAIT|unix.WNOHANG, nil)
+	if err != nil || info.Pid == 0 {
+		return 0, false
+	}
+	return int(info.Pid), true
+}
+
+// siginfoChld is siginfo_t as the kernel fills it in for SIGCHLD.
+//
+// x/sys/unix models the union as opaque padding, so there is no exported way
+// to read si_pid out of it. Same size and layout, with the fields this needs
+// named.
+type siginfoChld struct {
+	Signo, Errno, Code int32
+	_                  int32
+	Pid, Uid           int32
+	Status             int32
+	_                  [100]byte
+}
+
+// ownedPIDs are the children os/exec is waiting for. The reaper must not
+// collect these; whoever started them is going to.
+var ownedPIDs sync.Map
+
+// trackPID marks a child as owned until the returned function is called.
+func trackPID(p *os.Process) func() {
+	if p == nil {
+		return func() {}
+	}
+	ownedPIDs.Store(p.Pid, struct{}{})
+	return func() { ownedPIDs.Delete(p.Pid) }
+}
+
+// runTracked is Run for a process the reaper must keep its hands off.
+func runTracked(cmd *exec.Cmd) error {
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	defer trackPID(cmd.Process)()
+	return cmd.Wait()
+}
+
+// combinedOutputTracked is CombinedOutput with the same protection.
+func combinedOutputTracked(cmd *exec.Cmd) ([]byte, error) {
+	var buf bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &buf, &buf
+	err := runTracked(cmd)
+	return buf.Bytes(), err
 }

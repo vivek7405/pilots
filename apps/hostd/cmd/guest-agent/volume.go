@@ -86,7 +86,7 @@ func mountVolume(device, mountPath string) error {
 	}
 	if !formatted {
 		log.Printf("guest-agent: %s has no filesystem; creating ext4", device)
-		if out, err := exec.Command("mke2fs", "-q", "-t", "ext4", device).CombinedOutput(); err != nil {
+		if out, err := combinedOutputTracked(exec.Command("mke2fs", "-q", "-t", "ext4", device)); err != nil {
 			return fmt.Errorf("mke2fs %s: %w: %s", device, err, strings.TrimSpace(string(out)))
 		}
 	}
