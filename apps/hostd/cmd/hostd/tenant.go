@@ -29,6 +29,7 @@ const tenantInterval = 2 * time.Second
 type fleetView interface {
 	Machines() []state.Machine
 	Hosts() []state.Host
+	Services() []state.Service
 }
 
 // storeView is the single-box fleetView: a local SQLite read, with no agent
@@ -45,6 +46,19 @@ func (v storeView) Machines() []state.Machine {
 	rows, err := v.store.ListMachines(context.Background())
 	if err != nil {
 		slog.Error("could not read machines for the tenant filter", "err", err)
+		return nil
+	}
+	return rows
+}
+
+// Services is how a lone box resolves a service name. See storeView's doc: the
+// single-box path has to behave like a fleet of one, and .internal naming a
+// service is exactly the kind of difference that would otherwise appear only
+// after someone added a second host.
+func (v storeView) Services() []state.Service {
+	rows, err := v.store.ListServices(context.Background())
+	if err != nil {
+		slog.Error("could not read services for .internal", "err", err)
 		return nil
 	}
 	return rows

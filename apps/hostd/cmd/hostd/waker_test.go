@@ -11,6 +11,7 @@ type staticView struct{ machines []state.Machine }
 
 func (v staticView) Machines() []state.Machine { return v.machines }
 func (v staticView) Hosts() []state.Host       { return nil }
+func (v staticView) Services() []state.Service { return nil }
 
 // The waker must never act on a machine this host no longer owns.
 //

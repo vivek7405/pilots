@@ -16,6 +16,10 @@ import (
 // the moment nothing else has gone wrong yet.
 type FleetView interface {
 	Machines() []state.Machine
+	// Services is the name half of service discovery. A replica's machine row
+	// carries the service id but never the service NAME, so without this a
+	// name like db.internal has nothing to match against.
+	Services() []state.Service
 }
 
 // FleetResolver answers .internal from replicated rows.
@@ -61,18 +65,46 @@ func (r *FleetResolver) Resolve(q Query) []netip.Addr {
 		here  []netip.Addr
 		there []netip.Addr
 	)
-	for _, m := range rows {
-		if m.Name != q.Name || m.App != asker.App || !healthy(m) {
-			continue
-		}
+	add := func(m state.Machine) {
 		addr, ok := r.loc.MachineAddress(m)
 		if !ok {
-			continue
+			return
 		}
 		if m.HostID == asker.HostID {
 			here = append(here, addr)
 		} else {
 			there = append(there, addr)
+		}
+	}
+
+	for _, m := range rows {
+		if m.Name != q.Name || m.App != asker.App || !healthy(m) {
+			continue
+		}
+		add(m)
+	}
+
+	// A SERVICE NAME, when no machine claimed one.
+	//
+	// Machine names win a collision. Not because a machine is the better
+	// answer, but because it was the answer before services existed and a
+	// name that quietly changes what it points at is worse than either
+	// choice. Replica names are generated (amber-lagoon-x9f2), so the
+	// collision needs a machine someone named by hand after a service.
+	//
+	// This is the layer a multi-service app actually addresses. A replica's
+	// name is generated and is replaced on every rollout, so nothing an
+	// application could write in a config file would survive a deploy --
+	// which is why postgres://db.internal:5432 has to resolve here and not
+	// through the machine path above.
+	if len(here) == 0 && len(there) == 0 {
+		for _, id := range r.serviceIDs(q.Name, asker.App) {
+			for _, m := range rows {
+				if m.ServiceID != id || !healthy(m) {
+					continue
+				}
+				add(m)
+			}
 		}
 	}
 
@@ -111,6 +143,24 @@ func healthy(m state.Machine) bool {
 	// and nothing waiting to bring it back, so answering for it would point
 	// traffic at an address with nothing behind it and no way to fix that.
 	return m.State == "suspended" && m.ServiceID != "" && m.ReleaseID != "" && m.Slot > 0
+}
+
+// serviceIDs returns the ids of the services an app names q.
+//
+// Scoped to the asker's app for the same reason machine names are: the scope
+// comes from the asker's ROW, so a guest cannot reach another app's database
+// by naming it. Returns every match rather than the first -- corrosion cannot
+// enforce uniqueness, so two hosts that disagreed during a membership change
+// can each hold a service row with this name, and answering from only one of
+// them would make the name resolve to half its replicas.
+func (r *FleetResolver) serviceIDs(name, app string) []string {
+	var ids []string
+	for _, svc := range r.view.Services() {
+		if svc.Name == name && svc.App == app {
+			ids = append(ids, svc.ID)
+		}
+	}
+	return ids
 }
 
 // shuffled spreads clients that take the first answer across the machines

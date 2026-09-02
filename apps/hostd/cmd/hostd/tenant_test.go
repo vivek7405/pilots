@@ -16,6 +16,7 @@ type fakeView struct {
 
 func (v fakeView) Machines() []state.Machine { return v.machines }
 func (v fakeView) Hosts() []state.Host       { return v.hosts }
+func (v fakeView) Services() []state.Service { return nil }
 
 func testLocator(t *testing.T, selfID string) *mesh.Locator {
 	t.Helper()
