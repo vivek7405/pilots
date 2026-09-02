@@ -96,9 +96,9 @@ func runAsInit() {
 	// and systemd-networkd configures eth0, so this correctly does not run.
 	//
 	// That kernel argument is what makes gating on PID 1 correct. It is pinned
-	// by TestABuiltImageBootsTheAgentAsInit; if it ever stops being passed, a
-	// systemd-carrying base would boot systemd instead and lose .internal with
-	// nothing else failing.
+	// by internal/fc's TestInitPathReachesTheKernelCommandLine; if it ever stops
+	// being passed, a systemd-carrying base would boot systemd instead and lose
+	// .internal with nothing else failing.
 	configureNetwork()
 
 	go reapChildren()
