@@ -77,10 +77,17 @@ func (r *FleetResolver) Resolve(q Query) []netip.Addr {
 		}
 	}
 
+	// nameClaimed records that a healthy machine matched the NAME, not that
+	// it produced an address. The distinction is the precedence below: a
+	// claimed machine whose host row has not gossiped in yet must keep the
+	// name (and answer nothing) rather than let it fall through to a service
+	// and flip back when the row arrives.
+	nameClaimed := false
 	for _, m := range rows {
 		if m.Name != q.Name || m.App != asker.App || !healthy(m) {
 			continue
 		}
+		nameClaimed = true
 		add(m)
 	}
 
@@ -97,7 +104,7 @@ func (r *FleetResolver) Resolve(q Query) []netip.Addr {
 	// application could write in a config file would survive a deploy --
 	// which is why postgres://db.internal:5432 has to resolve here and not
 	// through the machine path above.
-	if len(here) == 0 && len(there) == 0 {
+	if !nameClaimed {
 		for _, id := range r.serviceIDs(q.Name, asker.App) {
 			for _, m := range rows {
 				// The app is re-checked on the machine row, not just on the
