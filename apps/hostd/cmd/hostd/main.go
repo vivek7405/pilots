@@ -384,6 +384,17 @@ func run() error {
 	// Bind before announcing readiness. Doing this inside the serving goroutine
 	// would let notifyReady() fire while the bind was still failing, and under
 	// Type=notify systemd would consider the host up while it served nothing.
+	// TLS, when the fleet can share certificates. Serves the same handler on
+	// :443 with on-demand issuance; the plain listener below stays for the
+	// internal mesh and for fleets without object storage.
+	if certClient, cerr := newCertStore(cfg); cerr == nil && certClient != nil {
+		if err := startTLS(ctx, cfg, store, certClient, handler); err != nil {
+			return err
+		}
+	} else if cerr != nil {
+		slog.Warn("TLS is off: could not open the certificate store", "err", cerr)
+	}
+
 	ln, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
 		return err
@@ -521,4 +532,20 @@ func notifyReady() {
 	if _, err := conn.Write([]byte("READY=1\n")); err != nil {
 		slog.Warn("sd_notify write failed", "err", err)
 	}
+}
+
+// newCertStore opens the bucket certificates are shared through.
+//
+// The same bucket as everything else, under its own prefix: certificates have
+// to be readable by every host for the same reason machine images do, and a
+// second bucket would be a second thing to configure and a second thing to get
+// wrong.
+func newCertStore(cfg *config.Config) (*s3.Client, error) {
+	if cfg.S3Bucket == "" {
+		return nil, nil
+	}
+	return s3.New(context.Background(), s3.Config{
+		Endpoint: cfg.S3Endpoint, Region: cfg.S3Region, Bucket: cfg.S3Bucket,
+		Prefix: "certs", AccessKey: cfg.S3AccessKey, SecretKey: cfg.S3SecretKey,
+	})
 }

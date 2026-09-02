@@ -51,6 +51,11 @@ type Config struct {
 	// cookies scoped to it.
 	WorkloadDomain string // PILOT_WORKLOAD_DOMAIN
 
+	// ACMEEmail is the contact Let's Encrypt requires. Empty turns TLS off
+	// entirely rather than issuing without one: a fleet that cannot be
+	// notified about expiring certificates should not be holding any.
+	ACMEEmail string // PILOT_ACME_EMAIL
+
 	// Object storage: the only truth for machine state. Local disk is cache.
 	S3Endpoint  string // PILOT_S3_ENDPOINT
 	S3Region    string // PILOT_S3_REGION
@@ -163,6 +168,7 @@ func Load() (*Config, error) {
 		JailUID:        envInt("PILOT_JAIL_UID", 0),
 		JailGID:        envInt("PILOT_JAIL_GID", 0),
 		WorkloadDomain: env("PILOT_WORKLOAD_DOMAIN", "pilotrun.app"),
+		ACMEEmail:      env("PILOT_ACME_EMAIL", ""),
 
 		S3Endpoint:  os.Getenv("PILOT_S3_ENDPOINT"),
 		S3Region:    env("PILOT_S3_REGION", "eu-central-1"),

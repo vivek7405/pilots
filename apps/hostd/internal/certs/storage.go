@@ -36,11 +36,20 @@ type Storage struct {
 	hostID string
 }
 
+// New wraps a client that is ALREADY scoped to the certificate area.
+//
+// No prefix is added here: the caller builds the client with one, the way
+// every other store in the process is built, and adding a second would put
+// certificates under certs/certs/ -- consistent, so nothing would break, and
+// wrong in a way that only shows up when someone goes looking in the bucket.
 func New(client *s3.Client, hostID string) *Storage {
-	return &Storage{s3: client, prefix: "certs", hostID: hostID}
+	return &Storage{s3: client, hostID: hostID}
 }
 
 func (st *Storage) objectKey(key string) string {
+	if st.prefix == "" {
+		return key
+	}
 	return path.Join(st.prefix, key)
 }
 
@@ -96,14 +105,21 @@ func (st *Storage) List(ctx context.Context, prefix string, recursive bool) ([]s
 	seen := map[string]struct{}{}
 	var out []string
 	for _, o := range objs {
-		rel := strings.TrimPrefix(o.Key, st.prefix+"/")
+		rel := o.Key
+		if st.prefix != "" {
+			rel = strings.TrimPrefix(rel, st.prefix+"/")
+		}
 		if recursive {
 			out = append(out, rel)
 			continue
 		}
 		// Non-recursive means immediate children only, with a "directory"
 		// reported once rather than once per object beneath it.
-		tail := strings.TrimPrefix(rel, strings.TrimPrefix(full, st.prefix+"/")+"/")
+		base := full
+		if st.prefix != "" {
+			base = strings.TrimPrefix(full, st.prefix+"/")
+		}
+		tail := strings.TrimPrefix(rel, base+"/")
 		if i := strings.Index(tail, "/"); i >= 0 {
 			tail = tail[:i]
 		}
