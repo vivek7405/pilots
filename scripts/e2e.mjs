@@ -1174,6 +1174,10 @@ async function multiServiceAssertions() {
     const res = await postTar('/v1/builds', tarball({
       'Dockerfile': [
         'FROM alpine:3.20',
+        // curl, not busybox wget: the assertion below reads the resolved peer
+        // address out of curl's -w, which is how it tells "reached the right
+        // machine" from "reached something".
+        'RUN apk add --no-cache curl',
         `RUN echo ${tag} > /etc/pilots-app-marker`,
         'CMD ["/bin/sh", "-c", "while true; do sleep 3600; done"]',
         '',
@@ -1227,14 +1231,23 @@ async function multiServiceAssertions() {
   if (!replicas.web || !replicas.db) return;
 
   await step('the deployed environment reached BOTH services', async () => {
+    // Found by scanning /proc rather than by asking systemd for the unit's
+    // MainPID. A built image is not the golden template: alpine carries no
+    // systemd, so its application is started by the guest agent's supervisor
+    // instead -- and 5b's whole point is that both mechanisms deliver the same
+    // environment. An assertion that only works on one of them would prove
+    // half of the thing it is named after.
+    const findEnv = `for p in /proc/[0-9]*/environ; do ` +
+      `if tr '\\0' '\\n' < $p 2>/dev/null | grep -q '^ROLE='; then ` +
+      `tr '\\0' '\\n' < $p | sort; break; fi; done`;
     for (const role of ['db', 'web']) {
       const { json } = await request(`/v1/machines/${replicas[role].id}/exec`, {
-        method: 'POST',
-        body: { cmd: `tr '\\0' '\\n' < /proc/$(systemctl show -p MainPID --value pilot-app.service)/environ | sort`, user: 'root' },
+        method: 'POST', body: { cmd: findEnv, user: 'root' },
       });
       const out = json?.stdout ?? '';
       assert(out.includes(`ROLE=${role}`),
-        `${role}'s application does not carry ROLE=${role}:\n${out}`);
+        `no process in ${role} carries ROLE=${role}; its application did not ` +
+        `receive the service's environment:\n${out || '(no process matched)'}`);
       assert(out.includes(`TAG=${tag}`), `${role}'s application does not carry TAG`);
     }
   });
