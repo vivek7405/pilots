@@ -88,6 +88,19 @@ func runAsInit() {
 		}
 	}
 
+	// Only PID 1 does this, and for a BUILT image that is always this binary --
+	// bootMachine passes init=/opt/pilot-agent/guest-agent on the kernel
+	// command line for every image != "", so a base that ships its own init
+	// (systemd included) is overridden by the kernel rather than by editing
+	// the image. The golden rootfs is the other case: systemd is PID 1 there
+	// and systemd-networkd configures eth0, so this correctly does not run.
+	//
+	// That kernel argument is what makes gating on PID 1 correct. It is pinned
+	// by TestABuiltImageBootsTheAgentAsInit; if it ever stops being passed, a
+	// systemd-carrying base would boot systemd instead and lose .internal with
+	// nothing else failing.
+	configureNetwork()
+
 	go reapChildren()
 }
 

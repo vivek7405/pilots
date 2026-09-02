@@ -1177,14 +1177,16 @@ async function multiServiceAssertions() {
   }
 
   async function runMultiService() {
-    // TWO builds, because the guest's addressing comes from a different place
-    // in each and only one of them was ever covered.
+    // TWO builds, because every service here was alpine and a whole class of
+    // base image went untested.
     //
-    // A rootfs with no init of its own gets the guest agent as PID 1. A rootfs
-    // that carries systemd gets /sbin/init pointed at systemd and the agent
-    // installed as a unit instead -- a different code path to the same
-    // addresses, and the one a `FROM ubuntu` service actually takes. Building
-    // both proves .internal across the pair rather than on the easy half.
+    // A built image always runs the agent as PID 1 -- bootMachine passes
+    // init=/opt/pilot-agent/guest-agent for any image, so a base that ships
+    // its own init is overridden by the kernel. That is the invariant the
+    // agent's PID-1 network setup depends on, and this is where it is checked
+    // against a base that actually ships one: if the init override were ever
+    // dropped, systemd would boot instead, nothing would configure eth0's
+    // IPv6, and this pair would stop reaching each other by name.
     const builds = {};
     const dockerfiles = {
       // curl, not busybox wget: the assertion below reads the resolved peer
@@ -1197,9 +1199,9 @@ async function multiServiceAssertions() {
         'CMD ["/bin/sh", "-c", "while true; do sleep 3600; done"]',
         '',
       ].join('\n'),
-      // systemd is what makes this the other path -- tarHasSystemd looks for
-      // /usr/lib/systemd/systemd, which the bare ubuntu image does NOT carry,
-      // so installing it is the point rather than incidental.
+      // systemd installed on purpose: the bare ubuntu image does NOT carry
+      // /usr/lib/systemd/systemd, and an image with an init of its own is
+      // exactly the case the kernel's init= override has to win.
       db: [
         'FROM ubuntu:24.04',
         'ENV DEBIAN_FRONTEND=noninteractive',

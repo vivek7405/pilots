@@ -9,7 +9,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// The guest's IPv6 half of its link, configured by the agent at startup.
+// The guest's IPv6 half of its link, configured by the agent when it is PID 1.
 //
 // These are the same constants scripts/rootfs/eth0.network declares, and they
 // have to stay identical: every guest in the fleet shares them, which is what
@@ -23,10 +23,9 @@ const (
 // configureNetwork gives eth0 its IPv6 address and the route to its peers.
 //
 // The golden rootfs gets these from systemd-networkd. An image built from a
-// user's Dockerfile gets them from nowhere: with no init of its own this
-// binary IS its init, and with systemd present the build makes this a unit
-// and systemd-networkd is not enabled to read a .network file the build does
-// not write either. Nothing ever reported that: the kernel's ip=
+// user's Dockerfile does not: the kernel is told to run this binary as init,
+// so whatever the image would have started never does, and nothing else
+// configures the link. Nothing ever reported that: the kernel's ip=
 // boot argument sets up IPv4, the machine boots, serves, and answers health
 // checks, and only .internal is quietly missing. DNS still resolves a peer's
 // name because that is answered on the host, and the tenant filter still
