@@ -58,6 +58,13 @@ func (m *Manager) buildDir() string { return filepath.Join(m.opts.CacheRoot, "bu
 // snapshot is diffed against. A machine that changed a tenth of its memory
 // stores a tenth of its memory.
 func (m *Manager) memParentDir(t *Template) string {
+	// A machine that was BOOTED rather than restored has no memory parent, and
+	// must not be given one: its pages are not a divergence from the
+	// template's photographed memory, so recording the identical ones as
+	// pointers into that image would resolve them from a different machine.
+	if t.MemBuildID == uuid.Nil {
+		return ""
+	}
 	return filepath.Join(m.buildDir(), t.MemBuildID.String())
 }
 
@@ -403,6 +410,11 @@ func (m *Manager) templateFor(ctx context.Context, row *state.Machine) (*Templat
 	// rebuild -- the same path adoptFleetTemplate takes, and what makes a
 	// machine restorable on a host that has never seen its template.
 	for _, id := range []uuid.UUID{memID, rootfsID} {
+		// The nil memory build is the recorded absence of a parent, written by
+		// a machine that booted. There is nothing to fetch.
+		if id == uuid.Nil {
+			continue
+		}
 		if err := m.materializeBuild(ctx, id); err != nil {
 			return nil, fmt.Errorf("machines: fetch the template machine %s was built from: %w",
 				row.ID, err)

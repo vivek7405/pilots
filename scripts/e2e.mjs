@@ -498,6 +498,320 @@ async function timingAssertions() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 5a: volumes and the build path.
+//
+// Two mechanisms, and both of them fail SILENTLY when they fail. A volume
+// whose drive kept Firecracker's default cache type passes every test that
+// writes a marker and reads it back, and loses the write the one time it
+// matters. A build that reported success and produced nothing hangs a deploy
+// rather than failing it. So these assertions go out of their way to check
+// the thing rather than its shadow: the cache type is read back out of the
+// VMM, and a failed build is required to name the step that broke.
+// ---------------------------------------------------------------------------
+
+// postTar uploads a build context. The body is a tar, not JSON, and the
+// response is a stream, so this cannot go through request().
+async function postTar(path, body) {
+  const headers = { 'Content-Type': 'application/x-tar' };
+  if (KEY) headers.Authorization = `Bearer ${KEY}`;
+  return fetch(`${API}${path}`, { method: 'POST', headers, body });
+}
+
+// readNDJSON consumes a streamed build log into lines. It reads to the end
+// rather than sampling: the verdict is the LAST line, because the response
+// status is decided before the build's outcome is known.
+async function readNDJSON(res) {
+  const text = await res.text();
+  return text
+    .split('\n')
+    .filter((line) => line.trim().length > 0)
+    .map((line) => JSON.parse(line));
+}
+
+// tarball builds a POSIX ustar archive in memory. Hand-rolled rather than
+// shelled out to tar(1), so the battery stays a pure API client with no
+// dependency on what the machine running it happens to have installed.
+function tarball(files) {
+  const blocks = [];
+  for (const [name, content] of Object.entries(files)) {
+    const body = Buffer.from(content, 'utf8');
+    const header = Buffer.alloc(512);
+    header.write(name, 0, 100, 'utf8');
+    header.write('000644 \0', 100, 8, 'utf8');            // mode
+    header.write('000000 \0', 108, 8, 'utf8');            // uid
+    header.write('000000 \0', 116, 8, 'utf8');            // gid
+    header.write(body.length.toString(8).padStart(11, '0') + ' ', 124, 12, 'utf8');
+    header.write('00000000000 ', 136, 12, 'utf8');        // mtime
+    header.write('        ', 148, 8, 'utf8');             // checksum placeholder
+    header.write('0', 156, 1, 'utf8');                    // regular file
+    header.write('ustar\0' + '00', 257, 8, 'utf8');
+
+    let sum = 0;
+    for (const byte of header) sum += byte;
+    header.write(sum.toString(8).padStart(6, '0') + '\0 ', 148, 8, 'utf8');
+
+    blocks.push(header, body, Buffer.alloc((512 - (body.length % 512)) % 512));
+  }
+  blocks.push(Buffer.alloc(1024)); // end-of-archive
+  return Buffer.concat(blocks);
+}
+
+async function volumeAssertions() {
+  let volume;
+
+  await step('POST /v1/volumes creates a volume', async () => {
+    const { status, json } = await request('/v1/volumes', {
+      method: 'POST', body: { name: `e2e-${Date.now()}`, size_gib: 1, mount_path: '/data' },
+    });
+    assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
+    assert(json.id, 'no volume id');
+    // Created in gibibytes and reported in gibibytes. A volume that comes back
+    // as 1024 has been through a unit conversion nobody asked for.
+    assert(json.size_gib === 1, `size_gib = ${json.size_gib}`);
+    assert(json.mount_path === '/data', `mount_path = ${json.mount_path}`);
+    assert(json.host_id, 'no host_id: nothing says where the volume is mounted, ' +
+      'which is the one thing that matters when two hosts think they hold it');
+    volume = json;
+  });
+
+  await step('GET /v1/volumes lists it', async () => {
+    assert(volume, 'no volume was created');
+    const { status, json } = await request('/v1/volumes');
+    assert(status === 200, `expected 200, got ${status}`);
+    assert(json.some((v) => v.id === volume.id), 'the new volume is not listed');
+  });
+
+  if (!volume) return;
+
+  let machine;
+  try {
+    await step('a machine can be created with a volume attached', async () => {
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST', body: { vcpus: 1, mem_mib: 512, volume: volume.id },
+      });
+      assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
+      assert(json.volume_id === volume.id, `volume_id = ${json.volume_id}`);
+      machine = json;
+    });
+
+    if (!machine) return;
+
+    // The gate line that exists because a naive test passes without it.
+    //
+    // Firecracker's default cache type does not advertise the VirtIO flush
+    // feature at all, so the guest's fsync returns success with the data
+    // sitting in the host's page cache. Every read-back test still passes.
+    // The value asserted here is read out of the running VMM, not out of what
+    // hostd meant to configure -- the whole failure mode is that those two can
+    // differ with nothing to notice.
+    await step('the volume drive is configured with cache_type Writeback', async () => {
+      const { status, json } = await request(`/v1/machines/${machine.id}/volume`);
+      assert(status === 200, `expected 200, got ${status}: ${JSON.stringify(json)}`);
+      assert(json.cache_type === 'Writeback',
+        `cache_type is ${JSON.stringify(json.cache_type)}; anything else means the ` +
+        'guest fsync is a no-op and the volume is not durable');
+      assert(json.device === '/dev/vdb', `device = ${json.device}`);
+    });
+
+    // /proc/self/mounts rather than findmnt: findmnt is util-linux, which the
+    // golden rootfs happens to have and a built alpine image does not. /proc
+    // is there in every image by the time the agent is answering.
+    const mountSource = (path) =>
+      `awk '$2 == "${path}" { print $1 }' /proc/self/mounts`;
+
+    await step('the volume is mounted in the guest and is writable', async () => {
+      const mounted = await exec(machine.id, `${mountSource(volume.mount_path)} || true`);
+      assert(mounted.includes('vdb'),
+        `${volume.mount_path} is backed by ${JSON.stringify(mounted)}, not the volume drive`);
+
+      await exec(machine.id, `echo volume-marker > ${volume.mount_path}/marker`);
+      const back = await exec(machine.id, `cat ${volume.mount_path}/marker`);
+      assert(back === 'volume-marker', `read back ${JSON.stringify(back)}`);
+    });
+
+    // A write that the guest fsynced must be on the disk, not in a page cache
+    // somewhere. This cannot prove durability across a host kill from inside
+    // one host -- scripts/cluster/gate.sh does that -- but it does prove the
+    // guest's fsync returns without error against a drive that advertises
+    // flush, which is the half that silently disappears with the wrong cache
+    // type.
+    await step('a guest fsync to the volume completes', async () => {
+      const out = await exec(machine.id,
+        `dd if=/dev/urandom of=${volume.mount_path}/fsync-probe bs=4096 count=64 conv=fsync 2>&1 ` +
+        `&& sync && echo synced`);
+      assert(out.includes('synced'), `fsync to the volume failed: ${out}`);
+    });
+
+    await step('the volume is not the root filesystem', async () => {
+      // The failure this catches: a volume that never mounted leaves the
+      // machine writing to its ephemeral root while reporting durable storage.
+      const rootDev = await exec(machine.id, mountSource('/'));
+      const volDev = await exec(machine.id, mountSource(volume.mount_path));
+      assert(rootDev !== volDev,
+        `${volume.mount_path} and / are the same device (${volDev}); the volume never mounted`);
+    });
+  } finally {
+    if (machine) {
+      await request(`/v1/machines/${machine.id}`, { method: 'DELETE' });
+    }
+  }
+}
+
+async function buildAssertions() {
+  let rootfsBuildID;
+
+  await step('POST /v1/builds streams NDJSON and ends with a rootfs build id', async () => {
+    // A token that differs every run, so the RUN below is never a cache hit.
+    //
+    // Not paranoia about the cache: the cache WORKING is what breaks this.
+    // A cached layer is not re-executed, so it emits no output, and the
+    // assertion that build output reaches the stream then passes exactly once
+    // -- on the first cold run -- and fails on every run after it. What is
+    // being tested is that an agent watching its own build sees the output of
+    // the steps that actually ran.
+    const token = `e2e-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const res = await postTar('/v1/builds', tarball({
+      'Dockerfile': [
+        'FROM alpine:3.20',
+        `RUN echo ${token} > /etc/pilots-build-token`,
+        // Prints AND writes. The assertion below is that build output reaches
+        // the stream, which is the whole reason the stream is structured: an
+        // agent reads a failure here and patches its own Dockerfile. A RUN
+        // that only redirects to a file produces no output to assert on, and
+        // the test then passes or fails on whether BuildKit happened to say
+        // anything of its own.
+        'RUN echo built-by-pilots | tee /etc/pilots-e2e',
+        'COPY app.txt /app.txt',
+        'WORKDIR /',
+        'EXPOSE 8080',
+        'CMD ["/bin/sh", "-c", "while true; do sleep 3600; done"]',
+        '',
+      ].join('\n'),
+      'app.txt': 'hello from the build context\n',
+    }));
+    assert(res.status === 200, `expected 200, got ${res.status}`);
+    assert((res.headers.get('content-type') ?? '').includes('ndjson'),
+      `content-type is ${res.headers.get('content-type')}`);
+    assert(res.headers.get('x-pilot-build-id'),
+      'no build id header, so a client that loses the stream cannot reattach');
+
+    const lines = await readNDJSON(res);
+    assert(lines.length > 1, `only ${lines.length} lines came back`);
+
+    // The contract from ARCHITECTURE.md.
+    for (const line of lines) {
+      assert(typeof line.ts === 'number' && line.ts > 0,
+        `a line has no timestamp: ${JSON.stringify(line)}`);
+    }
+    // The verdict FIRST. A build that failed produces no stdout either, so
+    // asserting on the stream before the outcome reports "no build output"
+    // for every failure and hides the reason the build actually gave.
+    const last = lines[lines.length - 1];
+    assert(!last.error, `the build failed: ${last.error}`);
+
+    assert(lines.some((l) => l.stream === 'stdout' || l.stream === 'stderr'),
+      'no build output reached the stream at all');
+    assert(lines.some((l) => typeof l.step === 'string' && l.step.length > 0),
+      'no line names the step it came from');
+    assert(last.result, `the stream does not end with a rootfs build id: ${JSON.stringify(last)}`);
+    rootfsBuildID = last.result;
+  });
+
+  await step('a build log can be replayed after the fact', async () => {
+    assert(rootfsBuildID, 'no build to read the log of');
+    // The id came back in the header of the streaming response; a client that
+    // dropped the connection reattaches with exactly that.
+    const res = await postTar('/v1/builds', tarball({
+      'Dockerfile': 'FROM alpine:3.20\nRUN echo replayed\n',
+    }));
+    const id = res.headers.get('x-pilot-build-id');
+    await readNDJSON(res);
+
+    const { status, text } = await request(`/v1/builds/${id}/logs`, { raw: true });
+    assert(status === 200, `expected 200, got ${status}`);
+    const replayed = text.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l));
+    assert(replayed.length > 0, 'the recorded log is empty');
+  });
+
+  await step('a build id this host does not have is a 404, not an empty log', async () => {
+    const { status } = await request('/v1/builds/bld-does-not-exist/logs');
+    assert(status === 404, `expected 404, got ${status}`);
+  });
+
+  let machine;
+  try {
+    await step('a machine created from that build id boots and serves', async () => {
+      assert(rootfsBuildID, 'no build id to create from');
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST', body: { image: rootfsBuildID, vcpus: 1, mem_mib: 512 },
+      });
+      assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
+      assert(json.state === 'running', `state is ${json.state}`);
+      machine = json;
+
+      // Serving means the guest agent answers, which is what every other API
+      // call in this file rides on.
+      const out = await exec(json.id, 'echo alive');
+      assert(out === 'alive', `guest returned ${JSON.stringify(out)}`);
+    });
+
+    // The contract the golden template's "stops short of starting the
+    // application" rule needs from this side: something in the image has to
+    // say WHAT the agent should exec once env has been delivered. The tar
+    // exporter carries no image metadata at all, so the build reads it out of
+    // the Dockerfile and writes it in.
+    await step('the built image carries a start spec for the agent to exec', async () => {
+      assert(machine, 'no machine');
+      const raw = await exec(machine.id, 'cat /etc/pilot-agent/start.json');
+      const spec = JSON.parse(raw);
+      assert(Array.isArray(spec.cmd) && spec.cmd.length > 0,
+        `no start command in the image: ${raw}`);
+      assert(spec.from_dockerfile_only === true,
+        'the spec does not record that it only saw the Dockerfile, so a consumer ' +
+        'cannot tell "declares nothing" from "we could not see it"');
+    });
+
+    await step("the built machine is running the build's own filesystem", async () => {
+      assert(machine, 'no machine');
+      // Not the golden rootfs. The file was written by the Dockerfile, so its
+      // presence is proof the image booted rather than the template.
+      const marker = await exec(machine.id, 'cat /etc/pilots-e2e');
+      assert(marker === 'built-by-pilots', `read back ${JSON.stringify(marker)}`);
+
+      const fromContext = await exec(machine.id, 'cat /app.txt');
+      assert(fromContext === 'hello from the build context',
+        `the build context did not reach the image: ${JSON.stringify(fromContext)}`);
+    });
+  } finally {
+    if (machine) {
+      await request(`/v1/machines/${machine.id}`, { method: 'DELETE' });
+    }
+  }
+
+  // The gate line about failure. A build that hangs or reports success is
+  // worse than one that fails, because the agent driving it has nothing to
+  // act on.
+  await step('a failing build surfaces the failing step rather than hanging', async () => {
+    const res = await postTar('/v1/builds', tarball({
+      'Dockerfile': [
+        'FROM alpine:3.20',
+        'RUN echo about-to-fail',
+        'RUN this-command-does-not-exist',
+        '',
+      ].join('\n'),
+    }));
+    assert(res.status === 200, `expected 200, got ${res.status}`);
+
+    const lines = await readNDJSON(res);
+    const last = lines[lines.length - 1];
+    assert(last.error, `the failing build ended without a verdict: ${JSON.stringify(last)}`);
+    assert(!last.result, `a failing build handed back a rootfs build id: ${JSON.stringify(last)}`);
+    assert(/this-command-does-not-exist/.test(JSON.stringify(lines)),
+      'nothing in the stream names the instruction that failed');
+  });
+}
+
 async function main() {
   console.log(`e2e: ${API}${FULL ? ' (full lifecycle)' : ' (process only)'}`);
 
@@ -505,6 +819,8 @@ async function main() {
   if (FULL) {
     await lifecycleAssertions();
     await timingAssertions();
+    await volumeAssertions();
+    await buildAssertions();
   } else {
     console.log('  - machine lifecycle skipped (set PILOTS_E2E_FULL=1 on a Firecracker host)');
   }

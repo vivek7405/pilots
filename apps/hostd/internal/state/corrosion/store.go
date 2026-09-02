@@ -419,6 +419,103 @@ func (s *Store) PutTemplate(ctx context.Context, t *state.Template) error {
 	return nil
 }
 
+const volumeCols = `id, name, machine_id, size_mib, s3_prefix, mount_path, host_id, created_at`
+
+func (s *Store) GetVolume(ctx context.Context, id string) (*state.Volume, error) {
+	rows, err := s.client.Query(ctx, `SELECT `+volumeCols+` FROM volumes WHERE id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("state: volume %q: %w", id, state.ErrNotFound)
+	}
+	var v state.Volume
+	if err := rows.Scan(&v.ID, &v.Name, &v.MachineID, &v.SizeMiB, &v.S3Prefix,
+		&v.MountPath, &v.HostID, &v.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &v, rows.Err()
+}
+
+func (s *Store) ListVolumes(ctx context.Context) ([]state.Volume, error) {
+	rows, err := s.client.Query(ctx, `SELECT `+volumeCols+` FROM volumes ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []state.Volume
+	for rows.Next() {
+		var v state.Volume
+		if err := rows.Scan(&v.ID, &v.Name, &v.MachineID, &v.SizeMiB, &v.S3Prefix,
+			&v.MountPath, &v.HostID, &v.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+// PutVolume writes a volume's row, guarded by the same `WHERE host_id = ?`
+// that guards a machine.
+//
+// The guard is doing more work here than it does for a machine. A machine two
+// hosts both believe they own is a state bug that surfaces as a duplicate
+// process; a VOLUME two hosts both believe they own is two juicefs mounts
+// against one SQLite metadata database, which is how the volume stops
+// existing. The single legitimate exception is a rescuer taking it from an
+// owner that has stopped heartbeating, and the liveness of that owner is
+// re-read here rather than trusted from the caller -- the gap between deciding
+// to rescue and writing is exactly where a host comes back.
+func (s *Store) PutVolume(ctx context.Context, v *state.Volume, opts ...state.WriteOption) error {
+	auth := state.ResolveAuth(opts)
+
+	// An unowned row is claimable by anyone: releaseVolume clears host_id, and
+	// a volume nobody owns is by definition mounted nowhere. Without this the
+	// guard admits only the current owner, so a released volume could never be
+	// picked up again -- not by another host, and not even by this one.
+	guard := ` WHERE volumes.host_id = ? OR volumes.host_id = ''`
+	params := []any{v.ID, v.Name, v.MachineID, v.SizeMiB, v.S3Prefix,
+		v.MountPath, v.HostID, v.CreatedAt}
+
+	if auth.DeadOwnerClaim != "" {
+		alive, err := s.hostIsLive(ctx, auth.DeadOwnerClaim)
+		if err != nil {
+			return err
+		}
+		if alive {
+			return fmt.Errorf("state: refusing to take volume %q from %s, which is "+
+				"still heartbeating and may still have it mounted: %w",
+				v.ID, auth.DeadOwnerClaim, state.ErrNotOwner)
+		}
+		params = append(params, auth.DeadOwnerClaim)
+	} else {
+		params = append(params, s.hostID)
+	}
+
+	res, err := s.client.Exec(ctx, `
+		INSERT INTO volumes (`+volumeCols+`)
+		VALUES (?,?,?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+			name=excluded.name, machine_id=excluded.machine_id,
+			size_mib=excluded.size_mib, s3_prefix=excluded.s3_prefix,
+			mount_path=excluded.mount_path, host_id=excluded.host_id,
+			created_at=excluded.created_at`+guard,
+		params...)
+	if err != nil {
+		return fmt.Errorf("state: put volume %q: %w", v.ID, err)
+	}
+	if res.RowsAffected == 0 {
+		return fmt.Errorf("state: put volume %q: %w", v.ID, state.ErrNotOwner)
+	}
+	return nil
+}
+
 // Close releases the store. The agent is a separate process with its own
 // lifetime, so there is nothing here to shut down.
 func (s *Store) Close() error { return nil }

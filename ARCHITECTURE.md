@@ -549,10 +549,49 @@ authority on their own capacity (a create/rescue targeting a full host is
 refused and re-hashed).
 
 **Build path:** `POST /v1/builds` accepts a Dockerfile context → BuildKit
-(rootless buildkitd on each host) → image → flatten (`ctr`/`skopeo` export
-or `docker export` equivalent) → `mke2fs -d` into an ext4 → chunkify as a
-generation-0 template build → S3. Structured NDJSON log stream
-(`{step, stream, line, ts}`) so an agent can parse failures and loop.
+(rootless buildkitd on each host) → **BuildKit's `tar` exporter**, which
+already emits the flattened filesystem, so no layered image is unpacked →
+`mke2fs -d` into an ext4 → chunkify as a generation-0 template build → S3.
+Structured NDJSON log stream (`{step, stream, line, ts}`) so an agent can
+parse failures and loop.
+
+`mke2fs -d` takes the tarball directly, reading uid, gid and setuid straight
+out of the tar headers. That is why the fixups are appended to the tarball
+rather than merged into a directory: an unprivileged unpack loses all three
+and yields a rootfs where nothing is root-owned. Tarball input needs
+e2fsprogs built with libarchive, probed at startup, with a `fakeroot`
+extract-and-pack in ONE session as the fallback.
+
+The fixups are what Docker does for a container and the kernel does not do
+for a VM: `/etc/resolv.conf` (which cannot be written in a Dockerfile —
+BuildKit bind-mounts over it), the guest agent plus its placeholder token,
+and `/sbin/init`. **Most real base images carry no init at all**
+(`node:alpine`, `python:slim`, distroless), so `/sbin/init` becomes the
+guest agent, which mounts the pseudo-filesystems, remounts `/` read-write
+and reaps orphans before serving. Images that do carry systemd keep it, and
+the agent runs as a unit with `systemd-networkd-wait-online` masked.
+
+The `tar` exporter carries the filesystem and **no image metadata** — no CMD,
+ENTRYPOINT, WORKDIR or ENV. That is the price of taking the flattened
+filesystem instead of a layered image, and it leaves the agent nothing to
+exec once env has been delivered. So the build reads the start spec out of
+the **Dockerfile's final stage** and writes it into the image at
+`/etc/pilot-agent/start.json`, recording `from_dockerfile_only: true`. Read
+that field: a Dockerfile that inherits its command from its base image yields
+an empty spec, and a consumer must be able to tell that from "this
+application declares no start command" and fall back to the service spec.
+
+**A machine with its own image, or with a volume, BOOTS rather than
+restoring.** Both are forced. The golden template's memory describes the
+golden template's disk, so resuming it against another root filesystem is a
+guest whose memory and disk have never met; and a drive cannot be added to a
+snapshot being loaded, while a template captured *with* a volume drive would
+carry that drive's capacity in its device state and therefore fit exactly one
+volume size. Such a machine records the **nil** memory build to mean "no
+parent" — an empty value already means "an old row, use the host's template",
+which for a booted guest resolves its pages from a different machine. Its
+first suspend captures its own memory; every wake after that is the ordinary
+instant restore.
 
 **Prompt-to-URL deploy (the AI-agent front door):** the headline UX is
 "deploy this app" pointed at ANY codebase (Django, Rails, Next.js, Remix,
@@ -586,12 +625,30 @@ status` — so "deploy this app on pilots" is one agent conversation with a
 URL at the end. This flow IS the product demo and gets its own e2e: point
 an agent at a bare Django app with no Dockerfile → live URL, no human.
 
-**Volumes:** JuiceFS mounted into the guest via virtio-fs or a second
-virtio-blk; chunks on the same S3 bucket; metadata engine is a per-host
-local Redis/SQLite kept durable via Litestream→S3 (no central metadata
-service). Volume machines pin to hosts only while mounted; on host death the
-volume remounts wherever the machine is rescued (per-write durability — this
-beats checkpoint-granularity disk state and is where application data belongs).
+**Volumes:** one JuiceFS filesystem per volume, holding a single raw ext4
+image handed to the guest as a **second virtio-blk drive**. Not virtio-fs:
+Firecracker does not have it, the upstream request is open and the p9
+implementation was rejected on security grounds — the devices available are
+virtio-blk, virtio-net, virtio-vsock, balloon and rng. Chunks live in the
+same S3 bucket under `volumes/<id>/`. The metadata engine is a **local SQLite
+file, one per volume**, kept durable via Litestream→S3 (no central metadata
+service; a shared Redis or Postgres would be exactly the control plane rule 1
+forbids, and would make every volume unavailable when one box dies). SQLite's
+single-writer constraint is a feature here: it enforces one-host-at-a-time
+mounting, which the volume row's owner also guards.
+
+Two flags carry the durability and both fail silently if they drift. The
+drive's `cache_type` must be `Writeback` — Firecracker's default, `Unsafe`,
+does not advertise the VirtIO flush feature at all, so a guest `fsync`
+returns success with the data in the host page cache. And `juicefs mount`
+must NOT be given `--writeback`, which acknowledges a write before it is
+uploaded. A host taking a volume over runs `litestream restore` **before**
+mounting: a stale local metadata database mounts without complaint and comes
+back missing whatever the previous host wrote.
+
+Volume machines pin to hosts only while mounted; on host death the volume
+remounts wherever the machine is rescued (per-write durability — this beats
+checkpoint-granularity disk state and is where application data belongs).
 
 **Databases are the documented exception, and it is a default rather than a
 prohibition.** Per-write durability means an S3 round trip per fsync, which a

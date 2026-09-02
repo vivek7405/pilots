@@ -18,7 +18,7 @@ import (
 )
 
 func TestMain(m *testing.M) {
-	agentToken = "test-token"
+	agentToken.Store("test-token")
 	os.Exit(m.Run())
 }
 
@@ -38,7 +38,7 @@ func postExec(t *testing.T, body execRequest, auth bool) *httptest.ResponseRecor
 	raw, _ := json.Marshal(body)
 	req := httptest.NewRequest("POST", "/exec", bytes.NewReader(raw))
 	if auth {
-		req.Header.Set("Authorization", "Bearer "+agentToken)
+		req.Header.Set("Authorization", "Bearer "+currentToken())
 	}
 	rec := httptest.NewRecorder()
 	requireAuth(handleExec)(rec, req)
@@ -149,7 +149,7 @@ func TestExecFailsClosedOnUnknownUser(t *testing.T) {
 func TestAuthAcceptsQueryTokenForWebSockets(t *testing.T) {
 	// Browsers cannot set headers on a WebSocket handshake, so the token is
 	// also accepted as a query parameter.
-	req := httptest.NewRequest("GET", "/exec/stream?token="+agentToken, nil)
+	req := httptest.NewRequest("GET", "/exec/stream?token="+currentToken(), nil)
 	if !authOK(req) {
 		t.Error("query-parameter token was rejected")
 	}
@@ -159,7 +159,7 @@ func TestAuthAcceptsQueryTokenForWebSockets(t *testing.T) {
 }
 
 func TestAuthRejectsMalformedHeaders(t *testing.T) {
-	for _, h := range []string{"", "Basic abc", "Bearer", "Bearer wrong", agentToken} {
+	for _, h := range []string{"", "Basic abc", "Bearer", "Bearer wrong", currentToken()} {
 		req := httptest.NewRequest("GET", "/health", nil)
 		if h != "" {
 			req.Header.Set("Authorization", h)
@@ -272,5 +272,62 @@ func TestExitCodeOf(t *testing.T) {
 	// so it is distinguishable from any code the command itself could return.
 	if got := exitCodeOf(exec.Command("/nonexistent-binary").Run()); got != 127 {
 		t.Errorf("unstartable command -> %d, want 127", got)
+	}
+}
+
+// The fail-closed rule and its one exception, which must not become a loophole.
+//
+// An explicitly requested user that does not exist is always an error: the
+// predecessor logged a warning and continued as root, which silently turns an
+// unprivileged exec into a privileged one when the caller is untrusted code.
+//
+// A user that was never requested is a different question. `user` is an
+// account the golden rootfs bakes in; an image built from someone's Dockerfile
+// has no reason to carry it, and Docker's own default there is root. Failing
+// closed on it makes every exec on every built image fail.
+func TestAnExplicitlyRequestedMissingUserStillFails(t *testing.T) {
+	cmd := exec.Command("true")
+	err := prepareCommand(cmd, "definitely-not-a-real-account", "", nil)
+	if err == nil {
+		t.Fatal("a requested user that does not exist was silently ignored")
+	}
+	if !strings.Contains(err.Error(), "definitely-not-a-real-account") {
+		t.Errorf("the error does not name the user: %v", err)
+	}
+}
+
+func TestTheDefaultUserFallsBackToTheImagesOwn(t *testing.T) {
+	if _, err := user.Lookup(defaultGuestUser); err == nil {
+		t.Skipf("this host has a %q account, so the fallback cannot be observed here",
+			defaultGuestUser)
+	}
+	cmd := exec.Command("true")
+	if err := prepareCommand(cmd, "", "", nil); err != nil {
+		t.Fatalf("an exec with no user requested failed on an image with no %q account: %v",
+			defaultGuestUser, err)
+	}
+	if cmd.SysProcAttr != nil && cmd.SysProcAttr.Credential != nil {
+		t.Error("a credential was applied for an account that does not exist")
+	}
+}
+
+// An image with no bash must still run commands.
+//
+// alpine, slim and distroless images ship busybox ash as /bin/sh and no bash
+// at all. Running /bin/bash there exits 127 with an EMPTY stderr, because the
+// shell that would have reported the problem is the thing that is missing --
+// so a caller sees a command that did nothing and explained nothing.
+func TestGuestShellFallsBackWhenBashIsAbsent(t *testing.T) {
+	sh := guestShell()
+	if _, err := os.Stat(sh); err != nil {
+		t.Fatalf("guestShell returned %q, which does not exist: %v", sh, err)
+	}
+	// Whatever it picked must actually be able to run a command.
+	out, err := exec.Command(sh, "-c", "echo ok").Output()
+	if err != nil {
+		t.Fatalf("%s could not run a command: %v", sh, err)
+	}
+	if strings.TrimSpace(string(out)) != "ok" {
+		t.Errorf("%s produced %q", sh, out)
 	}
 }

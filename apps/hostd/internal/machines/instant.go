@@ -2,6 +2,7 @@ package machines
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -35,6 +36,23 @@ func prefetchKey(machineID string) string {
 // its own id, so it is never overwritten by a later suspend.
 func checkpointSnapKey(machineID, checkpointID string) string {
 	return filepath.Join("machines", machineID, "checkpoints", checkpointID, fc.SnapFile)
+}
+
+// startNewMachine brings up a machine that has just been created.
+//
+// Two paths, and the split is forced rather than chosen. A machine with a
+// volume has to boot, because a drive cannot be added to a snapshot being
+// restored; a machine with its own image has to boot, because the golden
+// template's memory describes the golden template's disk and resuming it
+// against another root filesystem is a guest whose memory and disk have never
+// met. Everything else restores, which is what makes a create sub-second.
+func (m *Manager) startNewMachine(ctx context.Context, row *state.Machine,
+	token, volumeID, image string) (*fc.Machine, error) {
+
+	if volumeID != "" || image != "" {
+		return m.bootMachine(ctx, row, token, volumeID, image)
+	}
+	return m.createFromTemplate(ctx, row, token)
 }
 
 // createFromTemplate restores a brand-new machine from the golden template.
@@ -151,6 +169,18 @@ func (m *Manager) restoreInstantImmutable(ctx context.Context, row *state.Machin
 func (m *Manager) restore(ctx context.Context, row *state.Machine, backends fc.Backends,
 	snapKey, localDir string, immutable bool) (*fc.Machine, *netns.Slot, error) {
 
+	// A volume has to be mounted on THIS host before anything can open its
+	// image, and the claim is what stops two hosts mounting it at once. Every
+	// local bring-up funnels through here -- create, wake, rescue and
+	// checkpoint restore alike -- so there is one place this can be missed
+	// rather than four.
+	if row.VolumeID != "" {
+		if _, err := m.claimVolume(ctx, row.VolumeID, row.ID); err != nil {
+			return nil, nil, fmt.Errorf("machines: attach volume %s for %s: %w",
+				row.VolumeID, row.ID, err)
+		}
+	}
+
 	slot, err := m.pool.Take(row.ID)
 	if err != nil {
 		return nil, nil, err
@@ -248,7 +278,7 @@ func (m *Manager) Rescue(ctx context.Context, row state.Machine) error {
 // processes and releases the slot WITHOUT touching the row: the row already
 // belongs to someone else, and writing to it would be the single-writer
 // violation this is cleaning up after.
-func (m *Manager) StopLocal(_ context.Context, id string) error {
+func (m *Manager) StopLocal(ctx context.Context, id string) error {
 	lock := m.lockFor(id)
 	lock.Lock()
 	defer lock.Unlock()
@@ -266,6 +296,21 @@ func (m *Manager) StopLocal(_ context.Context, id string) error {
 	m.drop(id)
 	if slotIdx > 0 {
 		m.pool.Return(slotIdx)
+	}
+
+	// And let go of its volume's filesystem, which killing Firecracker does
+	// not do. This host was partitioned and the machine has been rescued
+	// elsewhere, so the rescuer has already restored that volume's metadata
+	// and mounted it -- and a second juicefs mount here, still holding the
+	// database this host had, writes into the same object-storage prefix
+	// behind the new owner's back. Nothing about the row: it belongs to
+	// someone else now, and writing to it is the violation this is cleaning
+	// up after.
+	if row, rerr := m.opts.Store.GetMachine(ctx, id); rerr == nil &&
+		row.VolumeID != "" && m.opts.Volumes != nil {
+		if verr := m.opts.Volumes.Detach(ctx, row.VolumeID); verr != nil {
+			err = errors.Join(err, fmt.Errorf("release volume %s: %w", row.VolumeID, verr))
+		}
 	}
 	return err
 }

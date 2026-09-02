@@ -24,6 +24,30 @@ const defaultGuestUser = "user"
 
 const defaultExecTimeout = 30 * time.Second
 
+// guestShell is the shell to run a command with.
+//
+// bash is what the golden rootfs has and what the exec contract is written
+// against. An image built from someone's Dockerfile very often does not have
+// it: alpine ships busybox ash as /bin/sh and no bash at all, and the slim and
+// distroless images are the same. Running /bin/bash there fails with exit
+// status 127 and an EMPTY stderr, because the shell that would have reported
+// the problem is the thing that is missing -- so the caller sees a command
+// that did nothing and said nothing.
+//
+// Resolved per call rather than cached: it costs one stat, and an image can
+// gain a shell between calls (a deploy that installs one) without the agent
+// having to be restarted to notice.
+func guestShell() string {
+	for _, sh := range []string{"/bin/bash", "/bin/sh"} {
+		if _, err := os.Stat(sh); err == nil {
+			return sh
+		}
+	}
+	// Nothing found: return bash so the failure names the thing that is
+	// missing rather than silently succeeding at nothing.
+	return "/bin/bash"
+}
+
 type execRequest struct {
 	Cmd       string            `json:"cmd"`
 	Cwd       string            `json:"cwd,omitempty"`
@@ -56,7 +80,7 @@ func handleExec(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "/bin/bash", "-c", req.Cmd)
+	cmd := exec.CommandContext(ctx, guestShell(), "-c", req.Cmd)
 	if err := prepareCommand(cmd, req.User, req.Cwd, req.Env); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
@@ -65,7 +89,7 @@ func handleExec(w http.ResponseWriter, r *http.Request) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 
-	err := cmd.Run()
+	err := runTracked(cmd)
 	resp := execResponse{Stdout: stdout.String(), Stderr: stderr.String()}
 	resp.ExitCode = exitCodeOf(err)
 
@@ -75,11 +99,38 @@ func handleExec(w http.ResponseWriter, r *http.Request) {
 // prepareCommand applies the user credential first, then the caller's cwd and
 // env on top, so an explicit cwd or env always wins over the account defaults.
 func prepareCommand(cmd *exec.Cmd, username, cwd string, env map[string]string) error {
+	// An explicitly requested user always fails closed if it is missing; see
+	// applyUserCredential. The DEFAULT is different, and the difference is not
+	// a loophole in that rule.
+	//
+	// `user` is an account the golden rootfs happens to bake in. An image
+	// built from someone's Dockerfile has no reason to have it -- alpine,
+	// distroless and slim images do not -- and Docker's own default there is
+	// root. Failing closed on an account the caller never asked for makes
+	// every exec on every built image fail with "user \"user\" does not
+	// exist", which is the machine refusing to run its owner's commands.
+	//
+	// So: no user requested and no default account present means run as the
+	// image's own default. Nothing unprivileged was asked for, so nothing was
+	// escalated away from.
 	if username == "" {
-		username = defaultGuestUser
+		if _, err := user.Lookup(defaultGuestUser); err != nil {
+			// The image has no unprivileged default account, so run as
+			// whatever the agent is -- but STILL apply the caller's cwd and
+			// env below. Returning here dropped both, so an exec asking for a
+			// working directory or an environment silently got neither.
+			if err := applyImageDefaultUser(cmd); err != nil {
+				return err
+			}
+			username = ""
+		} else {
+			username = defaultGuestUser
+		}
 	}
-	if err := applyUserCredential(cmd, username); err != nil {
-		return err
+	if username != "" {
+		if err := applyUserCredential(cmd, username); err != nil {
+			return err
+		}
 	}
 	if cwd != "" {
 		cmd.Dir = cwd
@@ -87,6 +138,18 @@ func prepareCommand(cmd *exec.Cmd, username, cwd string, env map[string]string) 
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
+	return nil
+}
+
+// applyImageDefaultUser leaves the command with the credentials the agent
+// itself runs under, which in an image with no unprivileged account is root --
+// the same default `docker run` gives that image.
+//
+// Separate from applyUserCredential so the fail-closed rule there stays a
+// single unqualified statement: a user that was ASKED for and is missing is
+// always an error.
+func applyImageDefaultUser(cmd *exec.Cmd) error {
+	cmd.SysProcAttr = nil
 	return nil
 }
 

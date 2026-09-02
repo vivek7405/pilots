@@ -71,6 +71,11 @@ type Options struct {
 	// AgentTokenSecret derives each machine's guest credential. See
 	// Manager.token for why a rescued machine is unreachable without it.
 	AgentTokenSecret string
+
+	// Volumes creates and mounts persistent disks. Nil on a host with no
+	// object storage, where every volume operation is refused up front rather
+	// than failing somewhere inside a create.
+	Volumes VolumeManager
 }
 
 // Manager is the per-host machine registry.
@@ -217,7 +222,7 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 		return nil, err
 	}
 
-	fcm, err := m.createFromTemplate(ctx, row, token)
+	fcm, err := m.startNewMachine(ctx, row, token, req.Volume, req.Image)
 	if err != nil {
 		row.State = StateError
 		row.UpdatedAt = time.Now().Unix()
@@ -249,7 +254,8 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	lock.Lock()
 	defer lock.Unlock()
 
-	if _, err := m.opts.Store.GetMachine(ctx, id); err != nil {
+	row, err := m.opts.Store.GetMachine(ctx, id)
+	if err != nil {
 		return err
 	}
 
@@ -273,6 +279,12 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 		if slotIdx > 0 {
 			m.pool.Return(slotIdx)
 		}
+	}
+
+	// After the process is gone, never before: unmounting a volume under a
+	// live guest loses its last writes silently rather than failing.
+	if err := m.releaseVolume(ctx, row.VolumeID); err != nil {
+		errs = append(errs, fmt.Errorf("release volume: %w", err))
 	}
 
 	if err := os.RemoveAll(m.stateDir(id)); err != nil {
@@ -543,6 +555,14 @@ func (m *Manager) machineFCConfig(row *state.Machine, slot *netns.Slot, mac stri
 
 	if cfg.Limits.PidsMax == 0 {
 		cfg.Limits.PidsMax = 2048
+	}
+
+	// The volume image, for every path that brings this machine up: a boot
+	// declares the drive from it, and a restore has the drive already in its
+	// snapshot and needs a file at the baked path for it to resolve against.
+	// One place, so neither can be forgotten.
+	if row.VolumeID != "" && m.opts.Volumes != nil {
+		cfg.VolumeImage = m.opts.Volumes.ImagePath(row.VolumeID)
 	}
 	return cfg
 }

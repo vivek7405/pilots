@@ -141,24 +141,39 @@ func (m *Manager) installToken(ctx context.Context, slot *netns.Slot, token stri
 		return fmt.Errorf("machines: install token: status %d", resp.StatusCode)
 	}
 
-	// The agent reads its token once at startup, so it has to restart to pick
-	// up the new one. Done with the OLD token, which is still valid until the
-	// agent comes back.
-	restart, _ := json.Marshal(api.ExecRequest{
-		Cmd: "systemctl restart guest-agent", User: "root",
-	})
-	rreq, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		"http://"+slot.AgentAddr()+"/exec", bytes.NewReader(restart))
-	if err != nil {
-		return err
+	// The EXIT CODE, not just the status. A 200 means the agent ran something;
+	// it says nothing about whether that something worked. This function once
+	// returned success against exit 127 -- the guest had no /bin/bash, so the
+	// write never happened -- and the machine came up reporting healthy with
+	// the template's placeholder still in its token file. hostd then held a
+	// credential the guest had never heard of, and every later call failed
+	// with 401: three steps removed from the shell that was missing.
+	var out api.ExecResponse
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return fmt.Errorf("machines: install token: unreadable response: %w", err)
 	}
-	rreq.Header.Set("Content-Type", "application/json")
-	rreq.Header.Set("Authorization", "Bearer "+templateToken)
-	rresp, err := (&http.Client{Timeout: 30 * time.Second}).Do(rreq)
-	if err == nil {
-		rresp.Body.Close()
+	if out.ExitCode != 0 {
+		return fmt.Errorf("machines: install token: the guest exited %d: %s",
+			out.ExitCode, strings.TrimSpace(out.Stderr))
 	}
-	return waitForAgent(ctx, slot.AgentAddr(), 30*time.Second)
+
+	// No restart, and no second wait for the agent to come back.
+	//
+	// The agent used to have to be restarted to notice a new token, because it
+	// read the file once at startup. It does not any more: an authentication
+	// miss re-reads the file, which is precisely this case and costs one small
+	// read on a request that was going to be rejected anyway.
+	//
+	// Restarting cost far more than it looked. It tore down the agent, then
+	// polled every 200ms for it to come back under systemd -- about two
+	// seconds on every create, on the critical path of the number this
+	// platform is named for. Create measured 2.7s against a 1.5s budget with
+	// the restore itself taking under 300ms.
+	//
+	// It was also wrong for half the fleet: an image built from an ordinary
+	// Dockerfile has no systemd, so the restart was a command that did not
+	// exist, and the reload path had to exist for those machines regardless.
+	return nil
 }
 
 // waitForAgent blocks until the guest's agent answers.

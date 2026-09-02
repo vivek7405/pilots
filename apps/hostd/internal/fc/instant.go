@@ -277,6 +277,16 @@ func stageInstantJail(cfg InstantConfig, chrootDir, snap, device, uffdSock strin
 		return err
 	}
 
+	// The volume is staged but NOT re-declared to Firecracker. Its drive is
+	// already inside the snapshot being loaded -- the machine was created from
+	// a template captured with the drive attached -- and a restore has no
+	// window in which to add one: there is no documented way to touch the
+	// drive set between /snapshot/load and PATCH /vm Resumed. What the restore
+	// owes it is a file at the baked path, which is what this is.
+	if err := stageVolume(chrootDir, cfg.VolumeImage, cfg.JailUID, cfg.JailGID); err != nil {
+		return err
+	}
+
 	for _, p := range []string{
 		chrootDir,
 		filepath.Join(chrootDir, "run"),
@@ -372,6 +382,41 @@ func (m *Machine) Chunkify(ctx context.Context, opts SnapshotOpts) (InstantSnaps
 	out.MemBuildID = memBuild
 
 	if m.NBD == nil {
+		// No block server means this machine was BOOTED rather than restored,
+		// and its disk is a plain file in the jail. That happens for exactly
+		// two machines: the throwaway one a golden template is photographed
+		// from, which has no disk worth keeping and says so by leaving
+		// RootfsTemplateDir empty, and a machine created with a volume, which
+		// has to be booted because a drive cannot be added to a snapshot being
+		// restored.
+		//
+		// The second one's disk very much matters. Skipping it here is silent:
+		// the machine suspends, wakes from the template alone, and every write
+		// it made to its root filesystem is gone with nothing reporting it.
+		//
+		// Diffing the file wholesale is correct here in a way it would not be
+		// for a copy-on-write cache. This file is a full copy of the template,
+		// not a sparse overlay, so every block holds real data and a block
+		// that matches the parent genuinely is unchanged -- which is exactly
+		// the ambiguity the dirty bitmap exists to resolve for a cow.
+		if opts.RootfsTemplateDir == "" {
+			return out, nil
+		}
+		bootedRootfs := filepath.Join(m.ChrootDir, BakedRootfsPath)
+		if _, statErr := os.Stat(bootedRootfs); statErr != nil {
+			return out, nil
+		}
+
+		rootfsBuild := uuid.New()
+		if _, _, err := block.Chunkify(ctx, block.ChunkifyOpts{
+			In:        bootedRootfs,
+			OutDir:    filepath.Join(opts.BuildDir, rootfsBuild.String()),
+			BuildID:   rootfsBuild,
+			ParentDir: opts.RootfsTemplateDir,
+		}); err != nil {
+			return out, fmt.Errorf("fc: chunkify booted disk: %w", err)
+		}
+		out.RootfsBuildID = rootfsBuild
 		return out, nil
 	}
 

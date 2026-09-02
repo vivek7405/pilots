@@ -15,6 +15,9 @@ type Deps struct {
 	Machines Manager
 	// Reflink is the startup probe's result; see HealthResponse.Reflink.
 	Reflink bool
+	// Builds turns a Dockerfile context into a rootfs build. Nil on a host
+	// with no object storage, where a build has nowhere to publish to.
+	Builds BuildRunner
 }
 
 // Routes registers the full public API. Phase 1 lands the shapes; the handlers
@@ -58,7 +61,8 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("GET /v1/checkpoints/{id}", d.handleCheckpointStatus)
 
 	// Builds: any Dockerfile to a bootable rootfs, with streamed NDJSON logs.
-	mux.HandleFunc("POST /v1/builds", notImplemented)
+	mux.HandleFunc("POST /v1/builds", d.handleBuild)
+	mux.HandleFunc("GET /v1/builds/{id}/logs", d.handleBuildLogs)
 
 	// Services and rollout.
 	mux.HandleFunc("POST /v1/services", notImplemented)
@@ -72,8 +76,12 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("POST /v1/machines/{id}/promote", notImplemented)
 
 	// Volumes and fleet.
-	mux.HandleFunc("POST /v1/volumes", notImplemented)
-	mux.HandleFunc("GET /v1/volumes", notImplemented)
+	mux.HandleFunc("POST /v1/volumes", d.handleCreateVolume)
+	mux.HandleFunc("GET /v1/volumes", d.handleListVolumes)
+	// The volume drive as Firecracker holds it, not as hostd meant to set it.
+	// See MachineVolume: the difference between the two is a durability
+	// guarantee that fails silently.
+	mux.HandleFunc("GET /v1/machines/{id}/volume", d.handleMachineVolume)
 	mux.HandleFunc("GET /v1/hosts", d.handleListHosts)
 
 	return WithAuth(d, mux)

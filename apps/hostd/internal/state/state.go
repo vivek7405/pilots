@@ -164,6 +164,24 @@ type Template struct {
 // GoldenTemplate is the id of the default template's row.
 const GoldenTemplate = "golden"
 
+// Volume is a persistent disk: a JuiceFS filesystem holding one raw ext4
+// image, handed to a machine as a second virtio-blk drive.
+//
+// HostID is the writer and the mount lock at once. The metadata engine behind
+// a volume is a single SQLite file, so two hosts mounting one corrupts it; the
+// row naming an owner is what keeps that from happening, and it moves only
+// when the machine does.
+type Volume struct {
+	ID        string
+	Name      string
+	MachineID string
+	SizeMiB   int
+	S3Prefix  string
+	MountPath string
+	HostID    string
+	CreatedAt int64
+}
+
 // APIKey is a hashed credential. Hashes replicate to every host so that each
 // one authenticates locally -- auth survives the loss of any host, including
 // the one running the dashboard.
@@ -206,6 +224,16 @@ type Store interface {
 
 	GetAPIKeyByHash(ctx context.Context, hash string) (*APIKey, error)
 	PutAPIKey(ctx context.Context, k *APIKey) error
+
+	GetVolume(ctx context.Context, id string) (*Volume, error)
+	ListVolumes(ctx context.Context) ([]Volume, error)
+	// PutVolume writes a volume's row. Like a machine, a volume belongs to one
+	// host, and a replicated store REJECTS a write from anyone else -- the
+	// exception being a rescuer taking it from an owner that has stopped
+	// heartbeating, which needs WithDeadOwnerClaim. Two hosts believing they
+	// own a volume is not a bookkeeping error: they both mount its metadata
+	// database and destroy it.
+	PutVolume(ctx context.Context, v *Volume, opts ...WriteOption) error
 
 	// GetTemplate reads the fleet's golden template. ErrNotFound means no host
 	// has built one yet.
@@ -514,6 +542,63 @@ func (s *sqliteStore) PutAPIKey(ctx context.Context, k *APIKey) error {
 		k.Hash, k.OrgID, k.Scopes, k.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("state: put api key: %w", err)
+	}
+	return nil
+}
+
+const volumeCols = `id, name, machine_id, size_mib, s3_prefix, mount_path, host_id, created_at`
+
+func scanVolume(sc interface{ Scan(...any) error }) (*Volume, error) {
+	var v Volume
+	err := sc.Scan(&v.ID, &v.Name, &v.MachineID, &v.SizeMiB, &v.S3Prefix,
+		&v.MountPath, &v.HostID, &v.CreatedAt)
+	return &v, err
+}
+
+func (s *sqliteStore) GetVolume(ctx context.Context, id string) (*Volume, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+volumeCols+` FROM volumes WHERE id = ?`, id)
+	v, err := scanVolume(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get volume %q: %w", id, err)
+	}
+	return v, nil
+}
+
+func (s *sqliteStore) ListVolumes(ctx context.Context) ([]Volume, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+volumeCols+` FROM volumes ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("state: list volumes: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Volume
+	for rows.Next() {
+		v, err := scanVolume(rows)
+		if err != nil {
+			return nil, fmt.Errorf("state: scan volume: %w", err)
+		}
+		out = append(out, *v)
+	}
+	return out, rows.Err()
+}
+
+// PutVolume ignores the write options for the same reason PutMachine does: a
+// single box has one writer, so there is no invariant here to guard.
+func (s *sqliteStore) PutVolume(ctx context.Context, v *Volume, _ ...WriteOption) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO volumes (`+volumeCols+`)
+		VALUES (?,?,?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+			name=excluded.name, machine_id=excluded.machine_id,
+			size_mib=excluded.size_mib, s3_prefix=excluded.s3_prefix,
+			mount_path=excluded.mount_path, host_id=excluded.host_id,
+			created_at=excluded.created_at`,
+		v.ID, v.Name, v.MachineID, v.SizeMiB, v.S3Prefix, v.MountPath, v.HostID, v.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put volume %q: %w", v.ID, err)
 	}
 	return nil
 }

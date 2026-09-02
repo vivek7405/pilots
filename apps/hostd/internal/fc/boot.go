@@ -42,6 +42,20 @@ const BootArgs = "console=ttyS0 reboot=k panic=1 pci=off ro root=/dev/vda " +
 	"ipv6.disable=0 ipv6.autoconf=1 " +
 	"ip=" + netns.TapGuestIP + "::" + netns.TapHostIP + ":255.255.255.252:instance:eth0:off:"
 
+// bootArgsFor renders the guest command line for one machine.
+//
+// The kernel decides what PID 1 is, so an image that ships its own init is
+// overridden here rather than inside the image. Rewriting /sbin/init in the
+// image cannot work: the build's fixups are appended to its tar, and GNU tar
+// keeps the FIRST symlink entry for a path and silently ignores a later one,
+// with or without --overwrite.
+func bootArgsFor(cfg Config) string {
+	if cfg.InitPath == "" {
+		return BootArgs
+	}
+	return BootArgs + " init=" + cfg.InitPath
+}
+
 // Limits are the cgroup v2 constraints applied to a machine.
 //
 // These are not optional. Firecracker isolates the guest from the host kernel,
@@ -65,11 +79,22 @@ type Config struct {
 	KernelPath     string
 	TemplateRootfs string
 	CPUTemplate    string
+	// InitPath overrides what the kernel runs as PID 1, for an image that
+	// ships an init of its own. Empty for the golden template, whose /sbin/init
+	// is already what it should be.
+	InitPath string
 
 	FirecrackerBin string
 	JailerBin      string
 	ChrootBase     string
 	StateDir       string // /var/lib/pilots/machines/<id>
+
+	// VolumeImage is the host path of this machine's persistent volume image,
+	// on the JuiceFS mount that makes its writes durable. Empty for a machine
+	// with no volume, which is most of them. It is bind-mounted onto
+	// BakedVolumePath inside the jail rather than copied, so the guest writes
+	// through to object storage.
+	VolumeImage string
 
 	JailUID int
 	JailGID int
@@ -174,6 +199,19 @@ func prepareJail(cfg Config) (chrootDir string, err error) {
 		return "", fmt.Errorf("fc: stage rootfs: %w", err)
 	}
 
+	if err := stageVolume(chrootDir, cfg.VolumeImage, cfg.JailUID, cfg.JailGID); err != nil {
+		return "", err
+	}
+	// A bind mount left behind by a prepare that then failed keeps the
+	// volume's image open, so `juicefs umount` refuses and the volume is
+	// pinned to a host that never even started a machine. There is no Machine
+	// yet whose Kill would release it, so release it here.
+	defer func() {
+		if err != nil {
+			_ = unstageVolume(chrootDir)
+		}
+	}()
+
 	kernel := filepath.Join(chrootDir, "vmlinux.bin")
 	if err := hardlinkOrCopy(cfg.KernelPath, kernel); err != nil {
 		return "", fmt.Errorf("fc: stage kernel: %w", err)
@@ -200,6 +238,7 @@ func Boot(ctx context.Context, cfg Config) (*Machine, error) {
 	serialLog := filepath.Join(cfg.StateDir, "lifecycle.log")
 	logFile, err := os.Create(serialLog)
 	if err != nil {
+		_ = unstageVolume(chrootDir)
 		return nil, fmt.Errorf("fc: create serial log: %w", err)
 	}
 	defer logFile.Close()
@@ -236,6 +275,9 @@ func Boot(ctx context.Context, cfg Config) (*Machine, error) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
+		// Nothing is holding the volume's image but this bind mount, and no
+		// Machine exists to release it later.
+		_ = unstageVolume(chrootDir)
 		return nil, fmt.Errorf("fc: start jailer: %w", err)
 	}
 
@@ -270,7 +312,7 @@ func (m *Machine) configure(ctx context.Context, cfg Config) error {
 		return err
 	}
 	if err := m.Client.SetBootSource(ctx, BootSource{
-		KernelImagePath: "/vmlinux.bin", BootArgs: BootArgs,
+		KernelImagePath: "/vmlinux.bin", BootArgs: bootArgsFor(cfg),
 	}); err != nil {
 		return err
 	}
@@ -279,6 +321,14 @@ func (m *Machine) configure(ctx context.Context, cfg Config) error {
 		IsRootDevice: true, IsReadOnly: false,
 	}); err != nil {
 		return err
+	}
+	// The volume, when there is one. Pre-boot and never later: the drive set
+	// is baked into every snapshot this machine takes, and there is no
+	// documented way to add a drive to a machine being restored.
+	if cfg.VolumeImage != "" {
+		if err := m.Client.SetDrive(ctx, volumeDrive()); err != nil {
+			return err
+		}
 	}
 	if err := m.Client.SetNetworkInterface(ctx, NetworkInterface{
 		IfaceID: "eth0", HostDevName: netns.TapName, GuestMAC: cfg.MAC,

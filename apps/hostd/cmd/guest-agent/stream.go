@@ -91,6 +91,7 @@ func handleExecStream(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Close(websocket.StatusNormalClosure, "start failed")
 		return
 	}
+	defer trackPID(cmd.Process)()
 
 	var pumps sync.WaitGroup
 	pumps.Add(2)

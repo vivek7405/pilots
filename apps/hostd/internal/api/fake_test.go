@@ -11,9 +11,11 @@ import (
 type fakeManager struct {
 	machine    *state.Machine
 	checkpoint *state.Checkpoint
+	volume     *state.Volume
 	err        error
 
 	created, destroyed, suspended, woken, restored int
+	volumesCreated                                 int
 }
 
 func newFakeManager() *fakeManager {
@@ -23,6 +25,10 @@ func newFakeManager() *fakeManager {
 			Domain: "webapp.pilotrun.app", VCPUs: 1, MemMiB: 512,
 		},
 		checkpoint: &state.Checkpoint{ID: "ck_1", MachineID: "m_1", Seq: 1},
+		volume: &state.Volume{
+			ID: "vol-1", Name: "data", SizeMiB: 10240, HostID: "host-test",
+			MountPath: "/data",
+		},
 	}
 }
 
@@ -52,4 +58,17 @@ func (f *fakeManager) Exec(context.Context, string, ExecRequest) (*ExecResponse,
 }
 func (f *fakeManager) Logs(context.Context, string) ([]byte, error) {
 	return []byte("boot log"), f.err
+}
+func (f *fakeManager) CreateVolume(context.Context, CreateVolumeRequest) (*state.Volume, error) {
+	f.volumesCreated++
+	return f.volume, f.err
+}
+func (f *fakeManager) ListVolumes(context.Context) ([]state.Volume, error) {
+	return []state.Volume{*f.volume}, f.err
+}
+func (f *fakeManager) MachineVolume(context.Context, string) (*MachineVolume, error) {
+	return &MachineVolume{
+		VolumeID: f.volume.ID, MountPath: f.volume.MountPath,
+		Device: "/dev/vdb", CacheType: "Writeback",
+	}, f.err
 }

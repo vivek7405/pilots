@@ -24,6 +24,9 @@ type Manager interface {
 	GetCheckpoint(ctx context.Context, checkpointID string) (*state.Checkpoint, error)
 	Exec(ctx context.Context, machineID string, req ExecRequest) (*ExecResponse, error)
 	Logs(ctx context.Context, machineID string) ([]byte, error)
+	CreateVolume(ctx context.Context, req CreateVolumeRequest) (*state.Volume, error)
+	ListVolumes(ctx context.Context) ([]state.Volume, error)
+	MachineVolume(ctx context.Context, machineID string) (*MachineVolume, error)
 }
 
 // toAPI converts a stored row to the wire shape.
@@ -207,6 +210,60 @@ func (d Deps) handleLogs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(logs)
+}
+
+// toAPIVolume converts a stored volume row to the wire shape.
+//
+// Sizes are stored in mebibytes and reported in gibibytes, because a volume is
+// created in gibibytes and the two must round-trip: a 10 GiB volume that comes
+// back as 10240 of something is a client bug waiting to happen.
+func toAPIVolume(v state.Volume) Volume {
+	return Volume{
+		ID: v.ID, Name: v.Name, SizeGiB: v.SizeMiB / 1024,
+		MachineID: v.MachineID, HostID: v.HostID, MountPath: v.MountPath,
+		CreatedAt: v.CreatedAt,
+	}
+}
+
+func (d Deps) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
+	var req CreateVolumeRequest
+	if err := decodeBody(r, &req); err != nil && !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad request body"})
+		return
+	}
+	if req.SizeGiB <= 0 {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "size_gib is required"})
+		return
+	}
+	v, err := d.Machines.CreateVolume(r.Context(), req)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, toAPIVolume(*v))
+}
+
+func (d Deps) handleListVolumes(w http.ResponseWriter, r *http.Request) {
+	rows, err := d.Machines.ListVolumes(r.Context())
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	out := make([]Volume, 0, len(rows))
+	for _, v := range rows {
+		out = append(out, toAPIVolume(v))
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleMachineVolume reports the volume drive Firecracker is really running.
+func (d Deps) handleMachineVolume(w http.ResponseWriter, r *http.Request) {
+	v, err := d.Machines.MachineVolume(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
 }
 
 func (d Deps) handleListHosts(w http.ResponseWriter, r *http.Request) {
