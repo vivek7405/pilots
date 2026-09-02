@@ -17,6 +17,7 @@ import { SITE_ORIGIN } from '#lib/links.ts';
 const PRIORITY: Record<string, number> = {
   '/': 1.0,
   '/architecture': 0.9,
+  '/architecture/internals': 0.9,
   '/sandboxes': 0.8,
   '/deploy': 0.8,
   '/roadmap': 0.6,

@@ -59,7 +59,8 @@ export default function Architecture() {
       lede: html`Every host runs the identical stack and serves the entire API. There is no scheduler to
         register with, no database to fail over, and no appliance in front. The tradeoffs that choice
         forces are the interesting part, and they are all below.`,
-      actions: html`<a class=${BTN_GHOST} href=${GH_URL} target="_blank" rel="noopener">Read ARCHITECTURE.md${NEW_TAB}</a>`,
+      actions: html`<a class=${BTN_GHOST} href="/architecture/internals">The internals, with diagrams</a>
+        <a class=${BTN_GHOST} href=${GH_URL} target="_blank" rel="noopener">Read ARCHITECTURE.md${NEW_TAB}</a>`,
     })}
 
     ${section({
@@ -271,8 +272,9 @@ export default function Architecture() {
 
         <p class="${PROSE} mt-10">
           If this is the kind of thing you want to argue with, the design is written down in full and
-          the code is next to it.
-          <a class=${LINK} href="/roadmap">The roadmap</a> says which parts are finished.
+          the code is next to it. <a class=${LINK} href="/architecture/internals">The internals page</a>
+          draws all of it, one mechanism at a time, and
+          <a class=${LINK} href="/roadmap">the roadmap</a> says which parts are finished.
         </p>
       `,
     })}

@@ -48,6 +48,7 @@ export const NAV = [
   { label: 'Sandboxes', href: '/sandboxes' },
   { label: 'Deploy', href: '/deploy' },
   { label: 'Architecture', href: '/architecture' },
+  { label: 'Internals', href: '/architecture/internals' },
   { label: 'Roadmap', href: '/roadmap' },
   { label: 'Brand', href: '/brand' },
 ];
