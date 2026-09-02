@@ -341,6 +341,24 @@ say "11. One command turns a new IP into a serving host"
 # NEW_ONLY matters here. A host is deliberately powered off at this point, and
 # a plain cluster-up would start it back up and quietly undo step 5.
 NEW_N=$(( ${#IPS[@]} + 1 ))
+
+# The added host is this run's, not the fleet's.
+#
+# cluster-up.sh records NODES and NODE_IPS in the state file, so growing the
+# fleet here grows the DEFINITION of the fleet permanently. The next run then
+# starts by trying to bootstrap a host that no longer exists, and during Phase
+# 5 that left NODES=4 with an address that had no VM behind it -- one whole
+# run hung in bootstrap and never reached a single assertion. Restored on the
+# way out, however this script exits.
+restore_fleet_definition() {
+  [ -n "${FLEET_NODES:-}" ] || return 0
+  sed -i "s/^NODES=.*/NODES=${FLEET_NODES}/; s|^NODE_IPS=.*|NODE_IPS=\"${FLEET_NODE_IPS}\"|" \
+    "$STATE_FILE" 2>/dev/null || true
+}
+FLEET_NODES="$NODES"
+FLEET_NODE_IPS="${IPS[*]}"
+trap restore_fleet_definition EXIT
+
 if NODES=$NEW_N NEW_ONLY=1 ./cluster-up.sh >/dev/null 2>&1; then
   NEW_IP=$(sed -n 's/^NODE_IPS="\(.*\)"$/\1/p' "$STATE_FILE" | tail -1 | awk -v n="$NEW_N" '{print $n}')
 else
