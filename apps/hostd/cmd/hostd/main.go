@@ -341,6 +341,10 @@ func run() error {
 	// will decline for any given service.
 	go rollout.RunAutoscaler(ctx, mgr)
 
+	// Traffic to a suspended service replica's address brings it back. Runs
+	// beside the tenant filter that writes the counters it reads.
+	go runWaker(ctx, cfg.HostID, view, mgr)
+
 	controlAPI := api.Routes(api.Deps{
 		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink,
 		Builds: builder, Rollout: rollout, Domain: cfg.WorkloadDomain,

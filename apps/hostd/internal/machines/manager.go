@@ -509,7 +509,22 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 		return err
 	}
 	m.drop(id)
-	if slotIdx > 0 {
+
+	// A service replica KEEPS its slot index reserved while suspended.
+	//
+	// Everything else gives the index back, because a suspended sandbox is
+	// addressable nowhere until it wakes. A service replica has to stay
+	// addressable: its peers resolve it by <name>.internal, and a name that
+	// stops resolving is what makes min_machines_running: 0 unusable for
+	// anything another service depends on -- a database being the obvious
+	// case. Holding the index keeps the address stable across the suspend, so
+	// the DNS answer a peer already has stays correct and traffic to it is
+	// counted by the wake rule instead of vanishing.
+	//
+	// Slots are cheap (1024 per host) and this reserves one only for a machine
+	// that is expected back.
+	keepSlot := row.ServiceID != ""
+	if slotIdx > 0 && !keepSlot {
 		m.pool.Return(slotIdx)
 	}
 	// A suspended machine holds no namespace and no address, so it stops being
@@ -524,10 +539,14 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 	superseded := []string{row.MemBuildID, row.RootfsBuildID}
 
 	row.State = StateSuspended
-	// The slot is gone: a suspended machine holds no index and is addressable
-	// nowhere until it wakes, possibly on another host and certainly in
-	// another slot.
-	stampSlot(row, nil)
+	// The slot is gone for an ordinary machine: it holds no index and is
+	// addressable nowhere until it wakes, possibly on another host and
+	// certainly in another slot. A service replica keeps the index it
+	// reserved above, and with it its address, so .internal keeps resolving
+	// and the wake rule has something to match on.
+	if !keepSlot {
+		stampSlot(row, nil)
+	}
 	row.MemBuildID = res.MemBuildID.String()
 	// An empty rootfs build is meaningful: the machine wrote nothing, so its
 	// next restore reads the template directly. Writing a zero uuid instead
