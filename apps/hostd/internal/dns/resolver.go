@@ -100,7 +100,13 @@ func (r *FleetResolver) Resolve(q Query) []netip.Addr {
 	if len(here) == 0 && len(there) == 0 {
 		for _, id := range r.serviceIDs(q.Name, asker.App) {
 			for _, m := range rows {
-				if m.ServiceID != id || !healthy(m) {
+				// The app is re-checked on the machine row, not just on the
+				// service row: the two tables merge independently, so nothing
+				// forces a replica's app to agree with its service's. An
+				// answer from another app is either unreachable through the
+				// app-keyed tenant filter -- a name that resolves and then
+				// hangs -- or a cross-app address disclosure.
+				if m.ServiceID != id || m.App != asker.App || !healthy(m) {
 					continue
 				}
 				add(m)

@@ -225,17 +225,18 @@ func TestAServiceIsReachableByItsName(t *testing.T) {
 	}
 }
 
-// A service name is scoped to the app exactly as a machine name is. The other
-// app also has a service named db, and it must be invisible.
+// A service name is scoped to the app exactly as a machine name is. Asked
+// from the OTHER app's machine, db must mean that app's own service -- its
+// single replica -- and never shop's two. Resolving from m-asker again would
+// re-run TestAServiceIsReachableByItsName under a different name; this is the
+// query that can actually cross the boundary.
 func TestAServiceNameDoesNotCrossApps(t *testing.T) {
 	r := serviceFleet(t)
 
-	// The asker is in shop, which has two db replicas. Three would mean the
-	// other app's replica came back too.
-	addrs := r.Resolve(Query{MachineID: "m-asker", Name: "db"})
-	if len(addrs) != 2 {
-		t.Fatalf("db.internal returned %d addresses, want exactly the 2 in this app: %v",
-			len(addrs), addrs)
+	addrs := r.Resolve(Query{MachineID: "m-db-x", Name: "db"})
+	if len(addrs) != 1 {
+		t.Fatalf("db.internal asked from the other app returned %d addresses, "+
+			"want only that app's own replica: %v", len(addrs), addrs)
 	}
 }
 
