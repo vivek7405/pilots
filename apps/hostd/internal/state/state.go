@@ -276,6 +276,11 @@ type Store interface {
 	// here -- a service row names no host -- so the rule is kept at the call
 	// site: only the host that owns a service's machines writes it.
 	PutService(ctx context.Context, svc *Service) error
+	// DeleteService removes one. A service row carries the machine's sealed
+	// environment, so a row left behind after its last machine is destroyed is
+	// a secret replicated to every host in the fleet, forever, for a machine
+	// that no longer exists.
+	DeleteService(ctx context.Context, id string) error
 	// GetTemplate reads the fleet's golden template. ErrNotFound means no host
 	// has built one yet.
 	GetTemplate(ctx context.Context, id string) (*Template, error)
@@ -654,6 +659,13 @@ func scanService(sc interface{ Scan(...any) error }) (*Service, error) {
 		&svc.Health, &svc.Env, &svc.EnvSealed, &svc.Domain, &svc.CustomDomain,
 		&svc.Repo, &svc.Branch, &svc.Autodeploy, &svc.CreatedAt)
 	return &svc, err
+}
+
+func (s *sqliteStore) DeleteService(ctx context.Context, id string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM services WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("state: delete service %q: %w", id, err)
+	}
+	return nil
 }
 
 func (s *sqliteStore) GetService(ctx context.Context, id string) (*Service, error) {

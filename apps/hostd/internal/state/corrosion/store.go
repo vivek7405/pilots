@@ -535,6 +535,18 @@ var _ state.Store = (*Store)(nil)
 const serviceCols = `id, name, app, release_id, replicas, health, env, env_sealed,
 	domain, custom_domain, repo, branch, autodeploy, created_at`
 
+// DeleteService removes a service row.
+//
+// A real delete rather than a tombstone column: unlike a machine, nothing
+// routes to a service by id after it is gone, and the row carries the sealed
+// environment -- so the point is that it stops being replicated at all.
+func (s *Store) DeleteService(ctx context.Context, id string) error {
+	if _, err := s.client.Exec(ctx, `DELETE FROM services WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("state: delete service %q: %w", id, err)
+	}
+	return nil
+}
+
 func (s *Store) GetService(ctx context.Context, id string) (*state.Service, error) {
 	rows, err := s.client.Query(ctx, `SELECT `+serviceCols+` FROM services WHERE id = ?`, id)
 	if err != nil {

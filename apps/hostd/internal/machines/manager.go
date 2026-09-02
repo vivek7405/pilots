@@ -354,7 +354,41 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	if err := m.opts.Store.DeleteMachine(ctx, id); err != nil {
 		errs = append(errs, fmt.Errorf("delete row: %w", err))
 	}
+	if err := m.releaseService(ctx, row); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
+}
+
+// releaseService drops the machine's service row once nothing uses it.
+//
+// The row carries the machine's sealed environment, so one left behind is a
+// secret still replicated to every host in the fleet, for a machine that no
+// longer exists. A create mints a service per machine today, but 5c gives one
+// service many machines -- so the last user turns the light off rather than
+// the first one out of the room.
+func (m *Manager) releaseService(ctx context.Context, row *state.Machine) error {
+	if row == nil || row.ServiceID == "" {
+		return nil
+	}
+
+	others, err := m.opts.Store.ListMachines(ctx)
+	if err != nil {
+		// Better to leak the row than to delete one still in use: the leak is
+		// a secret nobody can reach, the mistake is a running machine losing
+		// its environment on its next restore.
+		return fmt.Errorf("check whether service %s is still in use: %w", row.ServiceID, err)
+	}
+	for _, other := range others {
+		if other.ID != row.ID && other.ServiceID == row.ServiceID &&
+			other.State != state.StateDestroyed {
+			return nil
+		}
+	}
+	if err := m.opts.Store.DeleteService(ctx, row.ServiceID); err != nil {
+		return fmt.Errorf("delete service %s: %w", row.ServiceID, err)
+	}
+	return nil
 }
 
 // deleteRemoteState removes a machine's objects.

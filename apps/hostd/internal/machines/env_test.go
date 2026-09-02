@@ -3,6 +3,7 @@ package machines
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"strings"
 	"testing"
 
@@ -157,5 +158,64 @@ func TestAnAppAloneStillRecordsAService(t *testing.T) {
 	}
 	if svc.App != "shop" || svc.Replicas != 1 {
 		t.Errorf("service row is %+v", svc)
+	}
+}
+
+// A destroyed machine must not leave its sealed environment behind.
+//
+// provisionService mints a service row per create, and Destroy never removed
+// it. The row carries the machine's sealed secrets, so every destroyed
+// machine left a secret replicated to every host in the fleet, indefinitely,
+// for a machine that no longer exists.
+func TestReleasingTheLastMachineDeletesItsService(t *testing.T) {
+	ctx := context.Background()
+	m, store := envManager(t, true)
+
+	svcID, err := m.provisionService(ctx, "web", createEnv{App: "shop", SecretEnv: map[string]string{"API_KEY": "sekrit"}})
+	if err != nil {
+		t.Fatalf("provisionService: %v", err)
+	}
+	row := &state.Machine{ID: "m-1", HostID: "host-a", ServiceID: svcID, State: "running"}
+	if err := store.PutMachine(ctx, row); err != nil {
+		t.Fatalf("PutMachine: %v", err)
+	}
+	if err := store.DeleteMachine(ctx, row.ID); err != nil {
+		t.Fatalf("DeleteMachine: %v", err)
+	}
+
+	if err := m.releaseService(ctx, row); err != nil {
+		t.Fatalf("releaseService: %v", err)
+	}
+	if _, err := store.GetService(ctx, svcID); !errors.Is(err, state.ErrNotFound) {
+		t.Errorf("the service row survived its last machine: err=%v", err)
+	}
+}
+
+// And a service still carrying machines must survive, or destroying one
+// replica takes the environment away from its siblings.
+func TestAServiceWithMachinesLeftIsKept(t *testing.T) {
+	ctx := context.Background()
+	m, store := envManager(t, true)
+
+	svcID, err := m.provisionService(ctx, "web", createEnv{App: "shop", SecretEnv: map[string]string{"API_KEY": "sekrit"}})
+	if err != nil {
+		t.Fatalf("provisionService: %v", err)
+	}
+	going := &state.Machine{ID: "m-1", HostID: "host-a", ServiceID: svcID, State: "running"}
+	staying := &state.Machine{ID: "m-2", HostID: "host-a", ServiceID: svcID, State: "running"}
+	for _, row := range []*state.Machine{going, staying} {
+		if err := store.PutMachine(ctx, row); err != nil {
+			t.Fatalf("PutMachine %s: %v", row.ID, err)
+		}
+	}
+	if err := store.DeleteMachine(ctx, going.ID); err != nil {
+		t.Fatalf("DeleteMachine: %v", err)
+	}
+
+	if err := m.releaseService(ctx, going); err != nil {
+		t.Fatalf("releaseService: %v", err)
+	}
+	if _, err := store.GetService(ctx, svcID); err != nil {
+		t.Errorf("the service was deleted while %s still uses it: %v", staying.ID, err)
 	}
 }
