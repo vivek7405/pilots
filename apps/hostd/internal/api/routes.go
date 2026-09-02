@@ -26,6 +26,10 @@ type Deps struct {
 	// Resolver verifies that a custom hostname points here. Nil uses the
 	// system resolver; a test supplies its own.
 	Resolver Resolver
+	// GitHub handles webhook deliveries. Nil when no app is configured, in
+	// which case the route answers 503 rather than accepting deliveries it
+	// cannot verify.
+	GitHub http.HandlerFunc
 }
 
 // Routes registers the full public API. Phase 1 lands the shapes; the handlers
@@ -85,6 +89,17 @@ func Routes(d Deps) http.Handler {
 
 	// Custom domains. Verification is what stops a caller spending the
 	// fleet's shared certificate rate limit on a name they do not own.
+	// The GitHub webhook. Unauthenticated by API key on purpose: it carries
+	// its own HMAC signature, which is the only credential GitHub can present.
+	if d.GitHub != nil {
+		mux.HandleFunc("POST /v1/github/webhook", d.GitHub)
+	} else {
+		mux.HandleFunc("POST /v1/github/webhook", func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusServiceUnavailable,
+				ErrorResponse{Error: "no github app is configured on this fleet"})
+		})
+	}
+
 	mux.HandleFunc("POST /v1/domains", d.handleAddDomain)
 	mux.HandleFunc("GET /v1/domains", d.handleListDomains)
 	mux.HandleFunc("DELETE /v1/domains/{hostname}", d.handleDeleteDomain)

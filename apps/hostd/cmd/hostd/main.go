@@ -27,6 +27,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/config"
 	"github.com/vivek7405/pilots/hostd/internal/dns"
 	"github.com/vivek7405/pilots/hostd/internal/fc"
+	"github.com/vivek7405/pilots/hostd/internal/github"
 	"github.com/vivek7405/pilots/hostd/internal/machines"
 	"github.com/vivek7405/pilots/hostd/internal/mesh"
 	"github.com/vivek7405/pilots/hostd/internal/nbd"
@@ -345,9 +346,20 @@ func run() error {
 	// beside the tenant filter that writes the counters it reads.
 	go runWaker(ctx, cfg.HostID, view, mgr)
 
+	// Push-to-deploy and pull-request previews. The webhook is an ordinary
+	// route on every host; exactly one acts on any delivery.
+	ghApp, err := github.LoadApp(cfg.GitHubAppID, cfg.GitHubKeyPath, cfg.GitHubWebhookKey)
+	if err != nil {
+		return err
+	}
+
 	controlAPI := api.Routes(api.Deps{
 		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink,
 		Builds: builder, Rollout: rollout, Domain: cfg.WorkloadDomain,
+		GitHub: github.Handler(github.Deps{
+			HostID: cfg.HostID, App: ghApp, Store: store, Builds: builder,
+			Rollout: rollout, Machines: mgr, Domain: cfg.WorkloadDomain,
+		}),
 	})
 
 	// Machine-scoped API calls go to the host that owns the machine. Without

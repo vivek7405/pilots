@@ -28,6 +28,13 @@ func OrgID(ctx context.Context) string {
 var exemptPaths = map[string]bool{
 	"/v1/health": true,
 	"/metrics":   true,
+	// The GitHub webhook carries its own credential: an HMAC over the raw
+	// body, which is the only thing GitHub can present. It is verified in the
+	// handler before the payload is parsed, and an unverified delivery is
+	// refused there with 401. Requiring an API key as well would mean putting
+	// one into GitHub's webhook configuration, which is a fleet-wide
+	// credential sitting in a third party's settings page.
+	"/v1/github/webhook": true,
 }
 
 // WithAuth authenticates bearer API keys against the local state replica.

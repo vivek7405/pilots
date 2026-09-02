@@ -56,6 +56,13 @@ type Config struct {
 	// notified about expiring certificates should not be holding any.
 	ACMEEmail string // PILOT_ACME_EMAIL
 
+	// The GitHub App, for push-to-deploy and pull-request previews. All three
+	// empty turns the webhook route off rather than half-configuring it: a
+	// route that accepts deliveries it cannot verify is worse than no route.
+	GitHubAppID      int64  // PILOT_GITHUB_APP_ID
+	GitHubKeyPath    string // PILOT_GITHUB_APP_KEY
+	GitHubWebhookKey string // PILOT_GITHUB_WEBHOOK_SECRET
+
 	// Object storage: the only truth for machine state. Local disk is cache.
 	S3Endpoint  string // PILOT_S3_ENDPOINT
 	S3Region    string // PILOT_S3_REGION
@@ -156,19 +163,22 @@ func Load() (*Config, error) {
 
 		StateDSN: env("PILOT_STATE_DSN", "/var/lib/pilots/state.db"),
 
-		KernelPath:     env("PILOT_KERNEL", "/opt/pilots/kernels/vmlinux-6.1.158/vmlinux.bin"),
-		FirecrackerBin: env("PILOT_FIRECRACKER", "/opt/pilots/bin/firecracker"),
-		JailerBin:      env("PILOT_JAILER", "/opt/pilots/bin/jailer"),
-		TemplateRootfs: env("PILOT_TEMPLATE_ROOTFS", "/var/lib/pilots/templates/golden.ext4"),
-		GuestAgentBin:  env("PILOT_GUEST_AGENT", "/opt/pilots/bin/guest-agent"),
-		BuildCacheDir:  env("PILOT_BUILD_CACHE", "/var/cache/pilot-build"),
-		BuildkitSock:   os.Getenv("PILOT_BUILDKIT_SOCK"),
-		ChrootBase:     env("PILOT_CHROOT_BASE", "/var/lib/pilots/jailer"),
-		CPUTemplate:    os.Getenv("PILOT_CPU_TEMPLATE"),
-		JailUID:        envInt("PILOT_JAIL_UID", 0),
-		JailGID:        envInt("PILOT_JAIL_GID", 0),
-		WorkloadDomain: env("PILOT_WORKLOAD_DOMAIN", "pilotrun.app"),
-		ACMEEmail:      env("PILOT_ACME_EMAIL", ""),
+		KernelPath:       env("PILOT_KERNEL", "/opt/pilots/kernels/vmlinux-6.1.158/vmlinux.bin"),
+		FirecrackerBin:   env("PILOT_FIRECRACKER", "/opt/pilots/bin/firecracker"),
+		JailerBin:        env("PILOT_JAILER", "/opt/pilots/bin/jailer"),
+		TemplateRootfs:   env("PILOT_TEMPLATE_ROOTFS", "/var/lib/pilots/templates/golden.ext4"),
+		GuestAgentBin:    env("PILOT_GUEST_AGENT", "/opt/pilots/bin/guest-agent"),
+		BuildCacheDir:    env("PILOT_BUILD_CACHE", "/var/cache/pilot-build"),
+		BuildkitSock:     os.Getenv("PILOT_BUILDKIT_SOCK"),
+		ChrootBase:       env("PILOT_CHROOT_BASE", "/var/lib/pilots/jailer"),
+		CPUTemplate:      os.Getenv("PILOT_CPU_TEMPLATE"),
+		JailUID:          envInt("PILOT_JAIL_UID", 0),
+		JailGID:          envInt("PILOT_JAIL_GID", 0),
+		WorkloadDomain:   env("PILOT_WORKLOAD_DOMAIN", "pilotrun.app"),
+		ACMEEmail:        env("PILOT_ACME_EMAIL", ""),
+		GitHubAppID:      int64(envInt("PILOT_GITHUB_APP_ID", 0)),
+		GitHubKeyPath:    env("PILOT_GITHUB_APP_KEY", ""),
+		GitHubWebhookKey: env("PILOT_GITHUB_WEBHOOK_SECRET", ""),
 
 		S3Endpoint:  os.Getenv("PILOT_S3_ENDPOINT"),
 		S3Region:    env("PILOT_S3_REGION", "eu-central-1"),
