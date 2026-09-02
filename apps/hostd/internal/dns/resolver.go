@@ -105,7 +105,20 @@ func (r *FleetResolver) Resolve(q Query) []netip.Addr {
 	// which is why postgres://db.internal:5432 has to resolve here and not
 	// through the machine path above.
 	if !nameClaimed {
-		for _, id := range r.serviceIDs(q.Name, asker.App) {
+		// Every matching service id, not just the first: corrosion cannot
+		// enforce uniqueness, so two hosts that disagreed during a membership
+		// change can each hold a service row with this name, and answering
+		// from only one of them would make the name resolve to half its
+		// replicas. The scope comes from the asker's ROW, exactly as it does
+		// for machine names, so a guest cannot reach another app's database
+		// by naming it.
+		ids := map[string]bool{}
+		for _, svc := range r.view.Services() {
+			if svc.Name == q.Name && svc.App == asker.App {
+				ids[svc.ID] = true
+			}
+		}
+		if len(ids) > 0 {
 			for _, m := range rows {
 				// The app is re-checked on the machine row, not just on the
 				// service row: the two tables merge independently, so nothing
@@ -113,7 +126,7 @@ func (r *FleetResolver) Resolve(q Query) []netip.Addr {
 				// answer from another app is either unreachable through the
 				// app-keyed tenant filter -- a name that resolves and then
 				// hangs -- or a cross-app address disclosure.
-				if m.ServiceID != id || m.App != asker.App || !healthy(m) {
+				if !ids[m.ServiceID] || m.App != asker.App || !healthy(m) {
 					continue
 				}
 				add(m)
@@ -156,24 +169,6 @@ func healthy(m state.Machine) bool {
 	// and nothing waiting to bring it back, so answering for it would point
 	// traffic at an address with nothing behind it and no way to fix that.
 	return m.State == "suspended" && m.ServiceID != "" && m.ReleaseID != "" && m.Slot > 0
-}
-
-// serviceIDs returns the ids of the services an app names q.
-//
-// Scoped to the asker's app for the same reason machine names are: the scope
-// comes from the asker's ROW, so a guest cannot reach another app's database
-// by naming it. Returns every match rather than the first -- corrosion cannot
-// enforce uniqueness, so two hosts that disagreed during a membership change
-// can each hold a service row with this name, and answering from only one of
-// them would make the name resolve to half its replicas.
-func (r *FleetResolver) serviceIDs(name, app string) []string {
-	var ids []string
-	for _, svc := range r.view.Services() {
-		if svc.Name == name && svc.App == app {
-			ids = append(ids, svc.ID)
-		}
-	}
-	return ids
 }
 
 // shuffled spreads clients that take the first answer across the machines

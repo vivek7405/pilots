@@ -338,6 +338,10 @@ func (c *Cache) apply(table string, change Change) {
 }
 
 // Services returns the id, name and app of every service in the fleet.
+//
+// Unordered on purpose. The one caller is the resolver, which filters by
+// name and shuffles what it answers, so a sort here would run on every
+// .internal query and have no reader.
 func (c *Cache) Services() []state.Service {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -346,7 +350,6 @@ func (c *Cache) Services() []state.Service {
 	for _, svc := range c.services {
 		out = append(out, svc)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
 	return out
 }
 
