@@ -86,7 +86,13 @@ func (m *Manager) ResetAgentToken(ctx context.Context, machineID string) error {
 	if !ok {
 		return fmt.Errorf("machines: %s holds no slot on this host", machineID)
 	}
-	return m.installTokenAs(ctx, slot, templateToken, m.token(machineID))
+	// Authenticate as the credential the guest currently HAS, and install the
+	// placeholder. The arguments read the wrong way round at a glance, which
+	// is exactly how they were written the first time: the guest is holding
+	// this machine's own token, so that is what opens the door, and the
+	// placeholder is what goes in. Reversed, every release snapshot fails with
+	// a 401 and the deploy silently falls back to booting every replica.
+	return m.installTokenAs(ctx, slot, m.token(machineID), templateToken)
 }
 
 // AppAddr is where this host reaches a machine's application port.
