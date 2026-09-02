@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"context"
 	"fmt"
+	"github.com/vivek7405/pilots/hostd/internal/netns"
 	"io"
 	"os"
 	"os/exec"
@@ -124,12 +125,21 @@ type Fixups struct {
 	Start StartSpec
 }
 
-// resolvConf is the file the fixups write. Two public resolvers, matching the
-// golden rootfs.
+// resolvConf is the file the fixups write.
+//
+// The default is only a fallback for a caller that names no resolver; every
+// real build points at the namespace gateway the way the golden rootfs does,
+// because that is where .internal is answered.
 func (f Fixups) resolvConf() string {
 	ns := f.Nameservers
 	if len(ns) == 0 {
-		ns = []string{"8.8.8.8", "1.1.1.1"}
+		// The gateway, not a public resolver. A caller that names none used
+		// to get 8.8.8.8 here, and the image it built could not resolve
+		// .internal at all -- which is how build-backed machines, the ones
+		// the feature exists for, silently had no service discovery. The
+		// responder forwards anything that is not .internal upstream, so
+		// this costs the image no public resolution.
+		ns = []string{netns.TapHostIP}
 	}
 	var b strings.Builder
 	for _, addr := range ns {

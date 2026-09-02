@@ -6,5 +6,24 @@ Name=eth0
 [Network]
 Address=169.254.0.21/30
 Gateway=169.254.0.22
-DNS=8.8.8.8
-DNS=1.1.1.1
+# The IPv6 half of the same link, and constant for the same reason. The mesh
+# is IPv6, so a guest reaches its peers over v6 -- but it does so from an
+# address every guest in the fleet shares. Everything that makes a packet
+# individually routable is a translation on the host, in namespace state that
+# is rebuilt on every restore and can therefore never be captured in a
+# snapshot.
+Address=fdee::21/126
+# hostd answers .internal here, inside this machine's namespace. Everything
+# else it forwards upstream.
+DNS=169.254.0.22
+# There is no router on this link and no advertisement to accept. Left on, the
+# guest spends its boot waiting for one.
+IPv6AcceptRA=no
+
+# Peers live under fdcd::/16, reached through the same gateway. Note what is
+# NOT here: any address belonging to a host. hostd listens under fdcc::/16 and
+# a guest may not reach it, which the host enforces at the network layer
+# rather than trusting this file.
+[Route]
+Destination=fdcd::/16
+Gateway=fdee::22

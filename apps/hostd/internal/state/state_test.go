@@ -327,3 +327,52 @@ func TestAMachineRemembersTheTemplateItWasBuiltFrom(t *testing.T) {
 			want.TemplateMemBuildID, want.TemplateRootfsBuildID)
 	}
 }
+
+// A machine's app and slot must survive the round trip: the app is what scopes
+// .internal resolution and the tenant filter, and the slot is the low half of
+// the machine's mesh address. A column added to the schema but forgotten in
+// the column list reads back empty on every host except the writer's, which
+// looks like a machine that belongs to no app.
+func TestMachineCarriesItsAppAndSlot(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+
+	want := &Machine{
+		ID: "m_app", Name: "api", HostID: "host-a", State: "running",
+		App: "shop", Slot: 7,
+	}
+	if err := s.PutMachine(ctx, want); err != nil {
+		t.Fatalf("PutMachine: %v", err)
+	}
+	got, err := s.GetMachine(ctx, "m_app")
+	if err != nil {
+		t.Fatalf("GetMachine: %v", err)
+	}
+	if got.App != "shop" || got.Slot != 7 {
+		t.Errorf("app/slot did not survive: app=%q slot=%d", got.App, got.Slot)
+	}
+}
+
+func TestServiceRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+
+	want := &Service{
+		ID: "svc_1", Name: "api", App: "shop", Replicas: 2,
+		Env: `{"PORT":"8080"}`, EnvSealed: "sealed:opaque", CreatedAt: 1700000000,
+	}
+	if err := s.PutService(ctx, want); err != nil {
+		t.Fatalf("PutService: %v", err)
+	}
+	got, err := s.GetService(ctx, "svc_1")
+	if err != nil {
+		t.Fatalf("GetService: %v", err)
+	}
+	if *got != *want {
+		t.Errorf("round trip mismatch:\n got %+v\nwant %+v", *got, *want)
+	}
+
+	if _, err := s.GetService(ctx, "svc_missing"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("a missing service returned %v, want ErrNotFound", err)
+	}
+}

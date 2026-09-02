@@ -46,6 +46,7 @@ S3_KEY="${PILOT_S3_ACCESS_KEY:-}"
 S3_SECRET="${PILOT_S3_SECRET_KEY:-}"
 CORROSION_TOKEN="${PILOT_CORROSION_TOKEN:-}"
 AGENT_SECRET="${PILOT_AGENT_TOKEN_SECRET:-}"
+FLEET_KEY="${PILOT_FLEET_KEY:-}"
 DOMAIN="${PILOT_WORKLOAD_DOMAIN:-pilotrun.app}"
 SSH_OPTS="${SSH_OPTS:--o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null}"
 
@@ -65,6 +66,21 @@ done
 [ -n "$AGENT_SECRET" ] || {
   echo "PILOT_AGENT_TOKEN_SECRET must be set: machine credentials are derived" >&2
   echo "from it, and a host that rescues a machine computes the same one." >&2
+  exit 2
+}
+# The fleet key is the one piece of state whose durability is YOURS, not the
+# platform's. Everything else lives in object storage and survives wiping every
+# host; sealed environment values do not. It is deliberately not generated
+# here: a script that minted one per host would produce a fleet where each host
+# could only read the secrets it wrote, and the failure would not appear until
+# the first rescue.
+[ -n "$FLEET_KEY" ] || {
+  echo "PILOT_FLEET_KEY must be set: it seals secret environment values before" >&2
+  echo "they are written to a replicated row, and it must be the SAME on every" >&2
+  echo "host. Keep it somewhere that outlives the fleet -- wipe every host and" >&2
+  echo "sealed values are unrecoverable with object storage fully intact." >&2
+  echo >&2
+  echo "  export PILOT_FLEET_KEY=\$(openssl rand -base64 32)   # once, for the fleet" >&2
   exit 2
 }
 
@@ -136,6 +152,12 @@ on_host bash -euo pipefail -s <<'REMOTE'
 # The fault handler needs userfaultfd from an unprivileged process. Without
 # this every restore fails at the handshake, reported as a permission error
 # that names nothing useful.
+# accept_ra=2 goes in BEFORE anything turns forwarding on. hostd enables
+# net.ipv6.conf.all.forwarding so guest-to-guest traffic can cross from a
+# machine's veth to the mesh -- and the kernel stops honouring router
+# advertisements on a forwarding box, because a forwarding box is a router.
+# A host that learned its IPv6 default route from an RA loses it the first
+# time hostd starts, which looks like hostd breaking the host's networking.
 cat >/etc/sysctl.d/60-pilots.conf <<'SYSCTL'
 vm.unprivileged_userfaultfd = 1
 # Ubuntu 23.10 and later ship AppArmor mediation of unprivileged user
@@ -153,6 +175,8 @@ vm.unprivileged_userfaultfd = 1
 # The key does not exist on kernels without the patch, so this is written
 # through a file that tolerates it being unknown.
 kernel.apparmor_restrict_unprivileged_userns = 0
+net.ipv6.conf.all.accept_ra = 2
+net.ipv6.conf.default.accept_ra = 2
 SYSCTL
 # --system stops at the first unknown key on some releases; -e ignores keys
 # this kernel does not have, which is the whole point of the line above.
@@ -411,6 +435,7 @@ PILOT_MESH_BOOTSTRAP=${PEER_BOOTSTRAP}
 PILOT_CORROSION_ADDR=127.0.0.1:51002
 PILOT_CORROSION_TOKEN=${CORROSION_TOKEN}
 PILOT_AGENT_TOKEN_SECRET=${AGENT_SECRET}
+PILOT_FLEET_KEY=${FLEET_KEY}
 PILOT_S3_ENDPOINT=${S3_ENDPOINT}
 PILOT_S3_BUCKET=${BUCKET}
 PILOT_S3_ACCESS_KEY=${S3_KEY}

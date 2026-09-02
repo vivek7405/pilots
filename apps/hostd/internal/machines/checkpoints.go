@@ -174,6 +174,12 @@ func (m *Manager) RestoreCheckpoint(ctx context.Context, checkpointID string) (*
 		if fcm.Slot != nil {
 			slotIdx = fcm.Slot.Idx
 		}
+		// Before the namespace goes away, and before the restore below binds
+		// again. Bind is idempotent by machine id, so a responder left
+		// registered here is kept and the NEW namespace gets nothing --
+		// leaving the guest with no resolver at all, since its only
+		// nameserver is the gateway this serves on.
+		m.releaseDiscovery(row.ID)
 		if err := fcm.Kill(); err != nil {
 			return nil, err
 		}
@@ -186,6 +192,7 @@ func (m *Manager) RestoreCheckpoint(ctx context.Context, checkpointID string) (*
 	fcm, err := m.restoreFromCheckpoint(ctx, row, ckpt)
 	if err != nil {
 		row.State = StateError
+		stampSlot(row, nil)
 		row.UpdatedAt = time.Now().Unix()
 		_ = m.opts.Store.PutMachine(ctx, row)
 		return row, err
@@ -193,6 +200,7 @@ func (m *Manager) RestoreCheckpoint(ctx context.Context, checkpointID string) (*
 	m.put(row.ID, fcm)
 
 	row.State = StateRunning
+	stampSlot(row, fcm)
 	row.LastActivity = time.Now().Unix()
 	row.UpdatedAt = time.Now().Unix()
 	if err := m.opts.Store.PutMachine(ctx, row); err != nil {

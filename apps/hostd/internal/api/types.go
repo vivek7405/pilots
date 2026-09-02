@@ -91,6 +91,7 @@ type Machine struct {
 	VolumeID     string `json:"volume_id,omitempty"`
 	ServiceID    string `json:"service_id,omitempty"`
 	ReleaseID    string `json:"release_id,omitempty"`
+	App          string `json:"app,omitempty"`
 	CreatedAt    int64  `json:"created_at"`
 	LastActivity int64  `json:"last_activity"`
 }
@@ -109,6 +110,30 @@ type CreateMachineRequest struct {
 	// replacing them. See DecodeKnobs.
 	Knobs  json.RawMessage `json:"knobs,omitempty"`
 	Volume string          `json:"volume,omitempty"`
+
+	// App groups machines that may find and reach each other by name. Grouping
+	// only: there is no apps table, because an app is a property of the
+	// client's compose file rather than a fleet object.
+	App string `json:"app,omitempty"`
+
+	// Cmd is the application this machine runs, as a shell command. It is
+	// written inside the guest and started after the environment is delivered
+	// -- the golden template deliberately stops short of starting anything,
+	// because a create is a resume and a running process cannot be handed an
+	// environment it did not start with.
+	Cmd string `json:"cmd,omitempty"`
+
+	// Env is the non-secret environment, stored as-is.
+	Env map[string]string `json:"env,omitempty"`
+
+	// SecretEnv is the secret half, sent in PLAINTEXT over TLS and sealed by
+	// hostd with the fleet key before any row is written.
+	//
+	// secret:// references are resolved CLIENT-side, before a request is
+	// built, so the value never enters a repository. And the sealing happens
+	// HERE rather than in the client: a client that sealed would need the
+	// fleet key, and a key on every laptop is not fleet infrastructure.
+	SecretEnv map[string]string `json:"secret_env,omitempty"`
 }
 
 // ExecRequest runs a command inside a machine. Cwd and Env are required on

@@ -3,6 +3,7 @@ package mesh
 import (
 	"net/netip"
 	"testing"
+	"time"
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
@@ -161,5 +162,58 @@ func TestParseBootstrapPeer(t *testing.T) {
 		if _, err := ParseBootstrapPeer(bad); err == nil {
 			t.Errorf("accepted %q", bad)
 		}
+	}
+}
+
+// A host that will never answer must not stay on the mesh.
+//
+// Corrosion gossips to every peer the mesh holds, and its outbound queue backs
+// up behind one that always times out -- until it starts DROPPING changes,
+// which it reports once and then carries on. The fleet looks healthy while
+// machine rows silently stop replicating: names do not resolve, and a tenant
+// filter built from a partial view drops legitimate traffic. A decommissioned
+// host did exactly that on the three-node rig.
+func TestALongDeadHostIsDroppedFromTheMesh(t *testing.T) {
+	now := time.Now()
+	key := wgtypes.Key{1, 2, 3}.String()
+	other := wgtypes.Key{4, 5, 6}.String()
+
+	hosts := []state.Host{
+		{ID: "host-live", WGPubKey: key, LastSeen: now.Unix()},
+		{ID: "host-gone", WGPubKey: other, LastSeen: now.Add(-2 * AbandonAfter).Unix()},
+	}
+	peers := PeersFrom(hosts, "host-self")
+
+	if len(peers) != 1 {
+		t.Fatalf("got %d peers, want only the live one", len(peers))
+	}
+	if peers[0].PublicKey.String() != key {
+		t.Errorf("kept the wrong peer: %s", peers[0].PublicKey)
+	}
+}
+
+// Briefly silent is not gone. A reboot, a partition or a slow upgrade all
+// cross the liveness threshold, and the host has to be reachable the instant
+// it comes back -- so the mesh keeps carrying it.
+func TestABrieflySilentHostStaysOnTheMesh(t *testing.T) {
+	now := time.Now()
+	hosts := []state.Host{{
+		ID: "host-rebooting", WGPubKey: wgtypes.Key{7, 8, 9}.String(),
+		LastSeen: now.Add(-5 * time.Minute).Unix(),
+	}}
+	if peers := PeersFrom(hosts, "host-self"); len(peers) != 1 {
+		t.Errorf("a host silent for five minutes was dropped from the mesh")
+	}
+}
+
+// A row with no heartbeat at all is a host that has just been introduced by a
+// peer and has not written its own row yet. Dropping it would keep a joining
+// host off the mesh precisely when it needs to reach someone.
+func TestAHostThatHasNeverHeartbeatedIsKept(t *testing.T) {
+	hosts := []state.Host{{
+		ID: "host-joining", WGPubKey: wgtypes.Key{10, 11, 12}.String(), LastSeen: 0,
+	}}
+	if peers := PeersFrom(hosts, "host-self"); len(peers) != 1 {
+		t.Errorf("a host that has not heartbeated yet was dropped from the mesh")
 	}
 }

@@ -47,19 +47,20 @@ func checkpointSnapKey(machineID, checkpointID string) string {
 // against another root filesystem is a guest whose memory and disk have never
 // met. Everything else restores, which is what makes a create sub-second.
 func (m *Manager) startNewMachine(ctx context.Context, row *state.Machine,
-	token, volumeID, image string) (*fc.Machine, error) {
+	token, volumeID, image, appCmd string) (*fc.Machine, error) {
 
 	if volumeID != "" || image != "" {
-		return m.bootMachine(ctx, row, token, volumeID, image)
+		return m.bootMachine(ctx, row, token, volumeID, image, appCmd)
 	}
-	return m.createFromTemplate(ctx, row, token)
+	return m.createFromTemplate(ctx, row, token, appCmd)
 }
 
 // createFromTemplate restores a brand-new machine from the golden template.
 //
 // A create is a restore. The alternative -- booting a kernel -- takes twenty
 // seconds and produces a machine indistinguishable from this one.
-func (m *Manager) createFromTemplate(ctx context.Context, row *state.Machine, token string) (*fc.Machine, error) {
+func (m *Manager) createFromTemplate(ctx context.Context, row *state.Machine,
+	token, appCmd string) (*fc.Machine, error) {
 	t, err := m.EnsureTemplate(ctx)
 	if err != nil {
 		return nil, err
@@ -90,9 +91,24 @@ func (m *Manager) createFromTemplate(ctx context.Context, row *state.Machine, to
 	// falls back to the placeholder, and everything keeps working -- on a
 	// credential every machine created from this template also has.
 	if err := m.installToken(ctx, slot, token); err != nil {
+		// The restore above already bound the responder inside this
+		// namespace, and Kill takes the namespace with it. Unbound here, the
+		// socket keeps the dead namespace alive and its goroutines run for
+		// the life of the process.
+		m.releaseDiscovery(row.ID)
 		_ = fcm.Kill()
 		m.pool.Return(slot.Idx)
 		return nil, fmt.Errorf("install agent token: %w", err)
+	}
+
+	// The ONE call site. See the note at the top of env.go: the wake path
+	// resumes a snapshot in which the application is already running, and has
+	// no business delivering an environment to it.
+	if err := m.deliverEnv(ctx, row, slot, appCmd); err != nil {
+		m.releaseDiscovery(row.ID)
+		_ = fcm.Kill()
+		m.pool.Return(slot.Idx)
+		return nil, fmt.Errorf("deliver env: %w", err)
 	}
 	return fcm, nil
 }
@@ -206,6 +222,11 @@ func (m *Manager) restore(ctx context.Context, row *state.Machine, backends fc.B
 		return nil, nil, err
 	}
 
+	// Every restore lands here -- create, wake, rescue, checkpoint rollback --
+	// so this is the one place a namespace becomes servable, and the one place
+	// the responder has to follow it to.
+	m.bindDiscovery(row.ID, slot)
+
 	if err := fcm.Persist(); err != nil {
 		// Not fatal: the machine is running and serving. But a restart will
 		// not re-adopt it, which is worth shouting about.
@@ -260,6 +281,7 @@ func (m *Manager) Rescue(ctx context.Context, row state.Machine) error {
 	fcm, err := m.wakeFromSuspend(ctx, fresh)
 	if err != nil {
 		fresh.State = StateError
+		stampSlot(fresh, nil)
 		fresh.UpdatedAt = time.Now().Unix()
 		_ = m.opts.Store.PutMachine(ctx, fresh)
 		return fmt.Errorf("machines: restore %s here: %w", row.ID, err)
@@ -267,6 +289,9 @@ func (m *Manager) Rescue(ctx context.Context, row state.Machine) error {
 	m.put(row.ID, fcm)
 
 	fresh.State = StateRunning
+	// A rescued machine lands in a slot this host chose, so its mesh address
+	// changes. That is exactly why .internal answers carry a near-zero TTL.
+	stampSlot(fresh, fcm)
 	fresh.LastActivity = time.Now().Unix()
 	fresh.UpdatedAt = fresh.LastActivity
 	return m.opts.Store.PutMachine(ctx, fresh)
@@ -291,6 +316,7 @@ func (m *Manager) StopLocal(ctx context.Context, id string) error {
 	if fcm.Slot != nil {
 		slotIdx = fcm.Slot.Idx
 	}
+	m.releaseDiscovery(id)
 
 	err := fcm.Kill()
 	m.drop(id)

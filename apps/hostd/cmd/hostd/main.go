@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -24,11 +25,14 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/block"
 	"github.com/vivek7405/pilots/hostd/internal/build"
 	"github.com/vivek7405/pilots/hostd/internal/config"
+	"github.com/vivek7405/pilots/hostd/internal/dns"
 	"github.com/vivek7405/pilots/hostd/internal/fc"
 	"github.com/vivek7405/pilots/hostd/internal/machines"
+	"github.com/vivek7405/pilots/hostd/internal/mesh"
 	"github.com/vivek7405/pilots/hostd/internal/nbd"
 	"github.com/vivek7405/pilots/hostd/internal/router"
 	"github.com/vivek7405/pilots/hostd/internal/s3"
+	"github.com/vivek7405/pilots/hostd/internal/seal"
 	"github.com/vivek7405/pilots/hostd/internal/selfheal"
 	"github.com/vivek7405/pilots/hostd/internal/volumes"
 )
@@ -113,6 +117,33 @@ func run() error {
 	// the manager can hand any out.
 	devices := nbd.NewDevicePool(nbd.DefaultMaxDevices)
 
+	// The host's mesh identity, loaded here rather than inside startMesh
+	// because every netns slot's address is derived from it -- the manager
+	// below cannot hand out a slot without it.
+	//
+	// Loaded even on a single box, where nothing peers: the derivation costs
+	// one file read, and without it same-host guest-to-guest traffic and
+	// .internal would work in a fleet and silently not on one machine, which
+	// is the worst place for a behavioural difference to hide.
+	var machinePrefix netip.Prefix
+	meshKeys, err := mesh.LoadOrCreateKeys(cfg.MeshKeyPath())
+	if err != nil {
+		if cfg.Fleet() {
+			return err
+		}
+		// A single box can still run machines; they just cannot reach each
+		// other. Said out loud, because the symptom is a name that does not
+		// resolve rather than an error anywhere.
+		//
+		// The prefix stays ZERO here rather than being derived from the
+		// zero-valued key, which would give every host in this state the same
+		// block and put their machines on each other's addresses.
+		slog.Warn("no mesh identity, so machines on this host cannot reach "+
+			"each other and .internal will not resolve", "err", err)
+	} else {
+		machinePrefix = meshKeys.MachinePrefix()
+	}
+
 	// A second client over the same bucket under the chunk prefix. Content-
 	// addressed builds are named by uuid alone, so they need their own
 	// namespace or a build id could collide with a machine's key.
@@ -136,6 +167,46 @@ func run() error {
 		})
 	}
 
+	// The fleet's view of itself, and the rule that turns a row into an
+	// address. The tenant filter and the DNS responder read the SAME view, or
+	// a machine could be resolvable and unreachable at the same instant.
+	var view fleetView = storeView{store: store}
+	if cache != nil {
+		view = cache
+	}
+	locator := mesh.NewLocator(cfg.HostID, meshKeys.Public, view)
+
+	// The .internal responder. Built here because the machine manager tells it
+	// when a namespace appears.
+	//
+	// Built UNCONDITIONALLY, including on a host with no mesh identity. The
+	// guest rootfs names the gateway as its ONLY nameserver, so this is not
+	// merely where .internal is answered -- it is where every lookup a guest
+	// makes is answered, and a host without it runs machines that cannot
+	// resolve anything at all. Without a mesh identity the resolver simply
+	// finds no machine addresses and everything is forwarded upstream, which
+	// is the honest version of "nothing to discover".
+	upstreams, err := dns.ParseUpstreams(cfg.DNSUpstream)
+	if err != nil {
+		return err
+	}
+	responder := dns.New(dns.NewFleetResolver(view, locator), upstreams)
+	defer responder.Close()
+	var discovery machines.Discovery = responder
+
+	// The fleet key. Parsed at startup so a malformed one is a host that
+	// refuses to start rather than a create that fails much later, after a
+	// client has already handed over a secret.
+	fleetKey, err := seal.ParseKey(cfg.FleetKey)
+	if err != nil {
+		return err
+	}
+	if !fleetKey.IsSet() {
+		slog.Warn("no fleet key, so this host cannot store secrets: creates " +
+			"carrying secret_env will be refused. Set PILOT_FLEET_KEY to the " +
+			"same value on every host.")
+	}
+
 	mgr := machines.New(machines.Options{
 		HostID:     cfg.HostID,
 		Domain:     cfg.WorkloadDomain,
@@ -152,6 +223,9 @@ func run() error {
 		// Fleet-wide, so a host that rescues a machine can still reach it.
 		AgentTokenSecret: cfg.AgentTokenSecret,
 		Volumes:          volumeManager,
+		MachinePrefix:    machinePrefix,
+		Discovery:        discovery,
+		FleetKey:         fleetKey,
 		FCConfig: fc.Config{
 			KernelPath:     cfg.KernelPath,
 			TemplateRootfs: cfg.TemplateRootfs,
@@ -214,13 +288,17 @@ func run() error {
 	if cfg.Fleet() {
 		f = &fleet{store: store, cache: cache}
 		if cfg.MeshEnabled {
-			dev, keys, err := startMesh(ctx, cfg, cache)
+			dev, err := startMesh(ctx, cfg, cache, meshKeys)
 			if err != nil {
 				return fmt.Errorf("bring up the mesh: %w", err)
 			}
 			defer dev.Close()
-			f.dev, f.keys = dev, keys
+			f.dev, f.keys = dev, meshKeys
 		}
+	}
+
+	if machinePrefix.IsValid() {
+		go runTenantFilter(ctx, cfg.HostID, view, locator)
 	}
 
 	routerOpts := router.Options{

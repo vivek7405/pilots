@@ -13,6 +13,11 @@ require (
 	github.com/edsrzf/mmap-go v1.2.0
 	github.com/google/nftables v0.3.0
 	github.com/google/uuid v1.6.0
+	// Pinned deliberately. A newer miekg/dns drags golang.org/x/tools in, and
+	// that in turn pulls golang.org/x/net forward -- which is the HTTP/2 stack
+	// the corrosion client speaks prior-knowledge h2c over. A DNS responder is
+	// not a reason to move the transport under the state store.
+	github.com/miekg/dns v1.1.57
 	github.com/vishvananda/netlink v1.3.1
 	github.com/vishvananda/netns v0.0.5
 	golang.org/x/net v0.33.0

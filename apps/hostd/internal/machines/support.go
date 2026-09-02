@@ -19,7 +19,9 @@ import (
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/vivek7405/pilots/hostd/internal/fc"
 	"github.com/vivek7405/pilots/hostd/internal/netns"
+	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
 // tokens holds the plaintext agent token for every machine this host drives.
@@ -102,6 +104,22 @@ func (m *Manager) token(id string) string {
 	// A machine that has not been through installToken yet still has the
 	// template's placeholder.
 	return templateToken
+}
+
+// stampSlot records which netns slot a machine landed in, or clears it when
+// the machine is not running here.
+//
+// The slot is the low 16 bits of the machine's mesh address, so every peer
+// derives where to send from this number plus the owner's public key. A row
+// naming a slot the machine no longer holds sends that traffic into whichever
+// machine took the index next -- on the right host, through a route that
+// exists, to the wrong guest. Clearing it on the way down is therefore as
+// load-bearing as setting it on the way up.
+func stampSlot(row *state.Machine, fcm *fc.Machine) {
+	row.Slot = 0
+	if fcm != nil && fcm.Slot != nil {
+		row.Slot = fcm.Slot.Idx
+	}
 }
 
 // templateMachinePrefix marks the throwaway machine a golden template is

@@ -1,0 +1,27 @@
+[Unit]
+Description=the application this machine runs
+After=network.target
+
+[Service]
+# Both files are written by the guest agent when the machine is created, and
+# neither exists in the golden template. That is the template's contract: it
+# settles the base system and stops short of starting an application, because
+# a create is a RESUME -- the process would already be running by the time the
+# machine appeared, and nothing can hand a running process an environment it
+# did not start with.
+#
+# /etc/pilot/app is required and /etc/pilot/env is not: a machine can have a
+# command and no environment, but an environment with no command is nothing to
+# start.
+EnvironmentFile=/etc/pilot/app
+EnvironmentFile=-/etc/pilot/env
+ExecStart=/bin/sh -c 'exec ${PILOT_APP_CMD}'
+Restart=always
+RestartSec=1
+# The application may fork; a stop must take the whole tree with it.
+KillMode=mixed
+
+# Deliberately no [Install] section, so this unit CANNOT be enabled. It is
+# started by the guest agent after the environment is in place, and only ever
+# on a create -- a wake resumes a snapshot in which it is already running, and
+# starting it there would restart the very process the guest just restored.

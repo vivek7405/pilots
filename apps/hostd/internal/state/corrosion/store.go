@@ -34,7 +34,7 @@ func NewStore(client *Client, hostID string) *Store {
 const machineCols = `id, name, host_id, state, kind_knobs, image_ref, vcpus, mem_mib,
 	domain, custom_domain, app_port, agent_port, agent_token_hash,
 	mem_build_id, rootfs_build_id, template_mem_build_id, template_rootfs_build_id,
-	volume_id, service_id, release_id,
+	volume_id, service_id, release_id, app, slot,
 	last_activity, updated_at`
 
 func scanMachine(rows *Rows, m *state.Machine) error {
@@ -42,7 +42,7 @@ func scanMachine(rows *Rows, m *state.Machine) error {
 		&m.VCPUs, &m.MemMiB, &m.Domain, &m.CustomDomain, &m.AppPort, &m.AgentPort,
 		&m.AgentTokenHash, &m.MemBuildID, &m.RootfsBuildID,
 		&m.TemplateMemBuildID, &m.TemplateRootfsBuildID, &m.VolumeID,
-		&m.ServiceID, &m.ReleaseID, &m.LastActivity, &m.UpdatedAt)
+		&m.ServiceID, &m.ReleaseID, &m.App, &m.Slot, &m.LastActivity, &m.UpdatedAt)
 }
 
 func (s *Store) GetMachine(ctx context.Context, id string) (*state.Machine, error) {
@@ -111,7 +111,7 @@ func (s *Store) PutMachine(ctx context.Context, m *state.Machine, opts ...state.
 		m.ID, m.Name, m.HostID, m.State, m.KindKnobs, m.ImageRef, m.VCPUs, m.MemMiB,
 		m.Domain, m.CustomDomain, m.AppPort, m.AgentPort, m.AgentTokenHash,
 		m.MemBuildID, m.RootfsBuildID, m.TemplateMemBuildID, m.TemplateRootfsBuildID,
-		m.VolumeID, m.ServiceID, m.ReleaseID,
+		m.VolumeID, m.ServiceID, m.ReleaseID, m.App, m.Slot,
 		m.LastActivity, m.UpdatedAt,
 	}
 	if auth.NameAllocation || auth.DeadOwnerClaim != "" {
@@ -122,7 +122,7 @@ func (s *Store) PutMachine(ctx context.Context, m *state.Machine, opts ...state.
 
 	res, err := s.client.Exec(ctx, `
 		INSERT INTO machines (`+machineCols+`)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 		ON CONFLICT(id) DO UPDATE SET
 			name=excluded.name, state=excluded.state,
 			kind_knobs=excluded.kind_knobs, image_ref=excluded.image_ref,
@@ -133,7 +133,8 @@ func (s *Store) PutMachine(ctx context.Context, m *state.Machine, opts ...state.
 			template_mem_build_id=excluded.template_mem_build_id,
 			template_rootfs_build_id=excluded.template_rootfs_build_id,
 			volume_id=excluded.volume_id, service_id=excluded.service_id,
-			release_id=excluded.release_id, last_activity=excluded.last_activity,
+			release_id=excluded.release_id, app=excluded.app, slot=excluded.slot,
+			last_activity=excluded.last_activity,
 			updated_at=excluded.updated_at`+guard,
 		params...)
 	if err != nil {
@@ -529,3 +530,74 @@ func boolToInt(b bool) int {
 
 // Store satisfies the interface every other package depends on.
 var _ state.Store = (*Store)(nil)
+
+// serviceCols is the column list, in the order rows are scanned.
+const serviceCols = `id, name, app, release_id, replicas, health, env, env_sealed,
+	domain, custom_domain, repo, branch, autodeploy, created_at`
+
+// DeleteService removes a service row.
+//
+// A real delete rather than a tombstone column: unlike a machine, nothing
+// routes to a service by id after it is gone, and the row carries the sealed
+// environment -- so the point is that it stops being replicated at all.
+func (s *Store) DeleteService(ctx context.Context, id string) error {
+	if _, err := s.client.Exec(ctx, `DELETE FROM services WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("state: delete service %q: %w", id, err)
+	}
+	return nil
+}
+
+func (s *Store) GetService(ctx context.Context, id string) (*state.Service, error) {
+	rows, err := s.client.Query(ctx, `SELECT `+serviceCols+` FROM services WHERE id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("state: service %q: %w", id, state.ErrNotFound)
+	}
+	// SQLite has no boolean, so the column is an INTEGER and corrosion hands it
+	// back as a JSON number. Scanning it straight into a bool fails at the
+	// decoder with a message about types rather than about the column, and it
+	// fails on every read of the table -- which reached a caller as a create
+	// that could not deliver an environment.
+	var autodeploy int
+	var svc state.Service
+	if err := rows.Scan(&svc.ID, &svc.Name, &svc.App, &svc.ReleaseID, &svc.Replicas,
+		&svc.Health, &svc.Env, &svc.EnvSealed, &svc.Domain, &svc.CustomDomain,
+		&svc.Repo, &svc.Branch, &autodeploy, &svc.CreatedAt); err != nil {
+		return nil, err
+	}
+	svc.Autodeploy = autodeploy != 0
+	return &svc, rows.Err()
+}
+
+// PutService writes a service row.
+//
+// There is no host_id on a service to guard the write with, the way PutMachine
+// guards on ownership -- a service names machines, not a host. The rule is
+// kept where it can be: the only caller is the create path, which runs on the
+// host that is about to own the machine.
+func (s *Store) PutService(ctx context.Context, svc *state.Service) error {
+	_, err := s.client.Exec(ctx, `
+		INSERT INTO services (`+serviceCols+`)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+			name=excluded.name, app=excluded.app, release_id=excluded.release_id,
+			replicas=excluded.replicas, health=excluded.health, env=excluded.env,
+			env_sealed=excluded.env_sealed, domain=excluded.domain,
+			custom_domain=excluded.custom_domain, repo=excluded.repo,
+			branch=excluded.branch, autodeploy=excluded.autodeploy,
+			created_at=excluded.created_at`,
+		svc.ID, svc.Name, svc.App, svc.ReleaseID, svc.Replicas, svc.Health,
+		svc.Env, svc.EnvSealed, svc.Domain, svc.CustomDomain, svc.Repo,
+		svc.Branch, boolToInt(svc.Autodeploy), svc.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put service %q: %w", svc.ID, err)
+	}
+	return nil
+}

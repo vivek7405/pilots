@@ -23,6 +23,14 @@ RUN install -d -m0755 /etc/pilot-agent \
 COPY guest-agent.service /etc/systemd/system/guest-agent.service
 RUN systemctl enable guest-agent.service
 
+# The application's unit, installed and deliberately NOT enabled. The golden
+# template settles the base system and stops there; the guest agent starts this
+# once the machine has been given an environment. Enabling it would start an
+# application inside the template itself, and every machine created from that
+# snapshot would resume with a process that had never seen its own env.
+COPY pilot-app.service /etc/systemd/system/pilot-app.service
+RUN install -d -m0700 /etc/pilot
+
 # Static eth0 matching the FC kernel ip= arg exactly. These addresses are
 # constant for EVERY machine on EVERY host: that is what keeps snapshots
 # host-agnostic. Per-slot addressing lives in the host's netns NAT, never here.

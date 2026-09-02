@@ -45,6 +45,7 @@ func toAPI(row state.Machine) Machine {
 		VolumeID:     row.VolumeID,
 		ServiceID:    row.ServiceID,
 		ReleaseID:    row.ReleaseID,
+		App:          row.App,
 		CreatedAt:    row.UpdatedAt,
 		LastActivity: row.LastActivity,
 	}

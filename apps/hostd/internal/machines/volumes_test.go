@@ -229,7 +229,7 @@ func TestBootFromABuildPinsThatBuildAsTheDiskTemplate(t *testing.T) {
 	row := &state.Machine{ID: "m-1", VCPUs: 1, MemMiB: 512}
 	// The boot itself needs Firecracker; what is asserted here is what the row
 	// records before anything is started, which is the part that is permanent.
-	_, err := m.bootMachine(ctx, row, "tok", "", "not-a-uuid")
+	_, err := m.bootMachine(ctx, row, "tok", "", "not-a-uuid", "")
 	if err == nil || !strings.Contains(err.Error(), "not a build id") {
 		t.Fatalf("got %v, want a refusal naming the unusable build id", err)
 	}

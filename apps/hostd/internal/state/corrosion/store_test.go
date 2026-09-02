@@ -295,3 +295,35 @@ func TestAPIKeysRoundTrip(t *testing.T) {
 		t.Errorf("an absent key returned %v, want ErrNotFound", err)
 	}
 }
+
+// A service row must survive a round trip through corrosion.
+//
+// SQLite has no boolean, so autodeploy is an INTEGER and corrosion hands it
+// back as a JSON number. Scanning it straight into a Go bool fails in the
+// decoder with a message about types rather than about the column, and it
+// fails on EVERY read of the table -- which reached a caller as a create that
+// could not deliver an environment, naming neither services nor autodeploy.
+func TestServiceRoundTripsThroughCorrosion(t *testing.T) {
+	store, _ := newTestStore(t, "host-a")
+	ctx := context.Background()
+
+	want := &state.Service{
+		ID: "svc-1", Name: "web", App: "shop", Replicas: 2,
+		Env: `{"PORT":"8080"}`, EnvSealed: "sealed-blob",
+		Repo: "vivek7405/pilots", Branch: "main", Autodeploy: true,
+		CreatedAt: 1234,
+	}
+	if err := store.PutService(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := store.GetService(ctx, "svc-1")
+	if err != nil {
+		t.Fatalf("reading back a service failed: %v", err)
+	}
+	if got.Autodeploy != want.Autodeploy {
+		t.Errorf("autodeploy = %v, want %v", got.Autodeploy, want.Autodeploy)
+	}
+	if got.App != want.App || got.EnvSealed != want.EnvSealed {
+		t.Errorf("round trip changed the row: %+v", got)
+	}
+}

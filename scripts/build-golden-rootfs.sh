@@ -47,8 +47,14 @@ TAR="$TAR" ROOT="$ROOT" OUT="$OUT" SIZE_MB="$SIZE_MB" fakeroot sh -euc '
 
   # Docker bind-mounts /etc/resolv.conf during build, so it cannot be written
   # in the Dockerfile -- it has to be written here, after export.
+  #
+  # ONE nameserver, and it is the gateway. hostd answers .internal there and
+  # forwards everything else upstream, so listing a public resolver as well
+  # would not be a fallback: a resolver that gets NXDOMAIN from the first
+  # server does not try the second, and every .internal lookup that raced a
+  # hostd restart would resolve to a public NXDOMAIN instead.
   rm -f "$ROOT/etc/resolv.conf"
-  printf "nameserver 8.8.8.8\nnameserver 1.1.1.1\n" > "$ROOT/etc/resolv.conf"
+  printf "nameserver %s\noptions timeout:1 attempts:2\n" "169.254.0.22" > "$ROOT/etc/resolv.conf"
 
   # The kernel boots /sbin/init; systemd lives elsewhere in the image.
   ln -sf /lib/systemd/systemd "$ROOT/sbin/init"
