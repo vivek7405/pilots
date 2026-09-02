@@ -56,7 +56,7 @@ func (v storeView) Machines() []state.Machine {
 // service is exactly the kind of difference that would otherwise appear only
 // after someone added a second host.
 func (v storeView) Services() []state.Service {
-	rows, err := v.store.ListServices(context.Background())
+	rows, err := v.store.ListServiceNames(context.Background())
 	if err != nil {
 		slog.Error("could not read services for .internal", "err", err)
 		return nil

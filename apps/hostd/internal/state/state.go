@@ -325,6 +325,11 @@ type Store interface {
 	// ListServices returns every service row. Reads are local and cheap; the
 	// rollout and autoscale loops run on this.
 	ListServices(ctx context.Context) ([]Service, error)
+	// ListServiceNames returns only id, name and app -- what .internal needs
+	// to turn a service name into its replicas. The full row carries the
+	// sealed environment, and the resolver runs per DNS query; deserializing
+	// every app's secrets on that path is a cost with no reader.
+	ListServiceNames(ctx context.Context) ([]Service, error)
 
 	// GetDomain reads one custom hostname. PutDomain writes one, DeleteDomain
 	// removes it, and ListDomains is what the router and the TLS decision
@@ -892,6 +897,24 @@ func (s *sqliteStore) ListServices(ctx context.Context) ([]Service, error) {
 			return nil, fmt.Errorf("state: scan service: %w", err)
 		}
 		out = append(out, *svc)
+	}
+	return out, rows.Err()
+}
+
+func (s *sqliteStore) ListServiceNames(ctx context.Context) ([]Service, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, name, app FROM services`)
+	if err != nil {
+		return nil, fmt.Errorf("state: list service names: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Service
+	for rows.Next() {
+		var svc Service
+		if err := rows.Scan(&svc.ID, &svc.Name, &svc.App); err != nil {
+			return nil, fmt.Errorf("state: scan service name: %w", err)
+		}
+		out = append(out, svc)
 	}
 	return out, rows.Err()
 }

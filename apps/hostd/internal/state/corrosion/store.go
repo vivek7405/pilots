@@ -785,6 +785,24 @@ func (s *Store) ListServices(ctx context.Context) ([]state.Service, error) {
 	return out, rows.Err()
 }
 
+func (s *Store) ListServiceNames(ctx context.Context) ([]state.Service, error) {
+	rows, err := s.client.Query(ctx, `SELECT id, name, app FROM services`)
+	if err != nil {
+		return nil, fmt.Errorf("state: list service names: %w", err)
+	}
+	defer rows.Close()
+
+	var out []state.Service
+	for rows.Next() {
+		var svc state.Service
+		if err := rows.Scan(&svc.ID, &svc.Name, &svc.App); err != nil {
+			return nil, fmt.Errorf("state: scan service name: %w", err)
+		}
+		out = append(out, svc)
+	}
+	return out, rows.Err()
+}
+
 // scanRelease reads one release row. healthy arrives as a JSON number from
 // corrosion, never a bool -- SQLite has no bool type.
 func scanRelease(rows *Rows) (*state.Release, error) {
