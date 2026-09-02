@@ -325,3 +325,49 @@ func waitFor(t *testing.T, cond func() bool, what string) {
 	}
 	t.Fatalf("timed out waiting for %s", what)
 }
+
+// A host arriving must be announced, not merely stored.
+//
+// The mesh reconciles on a 15-second ticker whose comment called itself a
+// safety net and said the cache pushed changes as they happened. It did not:
+// nothing here signalled anyone, so the ticker WAS the mechanism. A host that
+// had just joined could therefore see the whole fleet through Corrosion while
+// having a route to none of it, and for those seconds every request it was
+// asked to forward on another host's behalf timed out -- which is what the
+// phase gate caught, as a freshly bootstrapped third host failing to serve an
+// exec for a machine it did not own.
+func TestAHostChangeIsAnnounced(t *testing.T) {
+	changes := make(chan string)
+	cache := startCache(t, &cacheServer{
+		machineRows: []string{machineRow("m-1", "alpha", "host-a", "running")},
+		hostRows:    []string{hostRow("host-a", "fdcc::1", time.Now().Unix())},
+		hostChanges: changes,
+	})
+
+	// Drain the signal the initial load may have left.
+	select {
+	case <-cache.HostsChanged():
+	default:
+	}
+
+	changes <- `{"change":["insert",2,` + hostRow("host-b", "fdcc::2", time.Now().Unix()) + `,3]}`
+
+	select {
+	case <-cache.HostsChanged():
+	case <-time.After(5 * time.Second):
+		t.Fatal("a host joined and nothing was told about it; the mesh would " +
+			"not route to it until its next tick")
+	}
+
+	// And the signal does not depend on anyone draining it promptly: a second
+	// change while one is pending must not block the cache.
+	changes <- `{"change":["insert",3,` + hostRow("host-c", "fdcc::3", time.Now().Unix()) + `,4]}`
+	waitFor(t, func() bool {
+		for _, h := range cache.Hosts() {
+			if h.ID == "host-c" {
+				return true
+			}
+		}
+		return false
+	}, "the second host to reach the cache")
+}

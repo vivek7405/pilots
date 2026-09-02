@@ -47,6 +47,12 @@ type Cache struct {
 	heardAt map[string]time.Time
 	ready   bool
 	now     func() time.Time
+
+	// hostsChanged wakes anything that has to act on a host appearing or
+	// leaving, rather than discover it on its next sweep. Buffered by one and
+	// written without blocking: it says "something changed", not what, so a
+	// pending signal already covers a second change.
+	hostsChanged chan struct{}
 }
 
 func (c *Cache) clock() time.Time {
@@ -77,10 +83,11 @@ func (c *Cache) noteHeartbeat(h state.Host) {
 // machine on the host for as long as it took the first rows to arrive.
 func NewCache(ctx context.Context, client *Client) (*Cache, error) {
 	c := &Cache{
-		client:   client,
-		machines: map[string]state.Machine{},
-		hosts:    map[string]state.Host{},
-		heardAt:  map[string]time.Time{},
+		client:       client,
+		machines:     map[string]state.Machine{},
+		hosts:        map[string]state.Host{},
+		heardAt:      map[string]time.Time{},
+		hostsChanged: make(chan struct{}, 1),
 	}
 
 	machines, err := c.subscribeMachines(ctx)
@@ -229,6 +236,16 @@ func (c *Cache) follow(ctx context.Context, sub *Subscription, table string,
 func (c *Cache) apply(table string, change Change) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	if table == "hosts" {
+		// Non-blocking: a signal already waiting says the same thing.
+		defer func() {
+			select {
+			case c.hostsChanged <- struct{}{}:
+			default:
+			}
+		}()
+	}
 
 	switch table {
 	case "machines":
@@ -385,3 +402,11 @@ func (c *Cache) IsLive(id string, now time.Time, deadAfter time.Duration) bool {
 	heard, ok := c.heardAt[id]
 	return ok && now.Sub(heard) < deadAfter
 }
+
+// HostsChanged fires when the hosts table changes.
+//
+// The mesh reconciles on a timer as a safety net, but a host that has just
+// joined must become routable when its row ARRIVES, not up to one tick later:
+// until then it can see the whole fleet through Corrosion while having no
+// route to any of it, and every request it is asked to forward times out.
+func (c *Cache) HostsChanged() <-chan struct{} { return c.hostsChanged }

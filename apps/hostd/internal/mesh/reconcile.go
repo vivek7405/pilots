@@ -26,6 +26,15 @@ type HostSource interface {
 	Hosts() []state.Host
 }
 
+// HostChangeNotifier is a HostSource that can say WHEN its answer changed.
+//
+// Optional, and asserted for rather than required, so a test can pass a fixed
+// slice. Where it is implemented the timer stops being the mechanism and goes
+// back to being what its comment claims: a safety net.
+type HostChangeNotifier interface {
+	HostsChanged() <-chan struct{}
+}
+
 // Reconcile keeps the device's peers matching the fleet until ctx is done.
 //
 // Driven by the hosts table, which every host writes only its own row of. A
@@ -48,6 +57,13 @@ func Reconcile(ctx context.Context, dev *Device, hosts HostSource, selfID string
 	tick := time.NewTicker(reconcileInterval)
 	defer tick.Stop()
 
+	// A nil channel blocks forever, so a source that cannot notify simply
+	// falls back to the ticker.
+	var changed <-chan struct{}
+	if n, ok := hosts.(HostChangeNotifier); ok {
+		changed = n.HostsChanged()
+	}
+
 	for {
 		if err := dev.Sync(withBootstrap(PeersFrom(hosts.Hosts(), selfID), bootstrap)); err != nil {
 			slog.Error("could not reconcile mesh peers", "err", err)
@@ -56,6 +72,12 @@ func Reconcile(ctx context.Context, dev *Device, hosts HostSource, selfID string
 		case <-ctx.Done():
 			return
 		case <-tick.C:
+		case <-changed:
+			// A host appeared or left. Reconciling on the next tick instead
+			// would leave a newly joined host up to reconcileInterval without
+			// a route to anyone -- visible to it through Corrosion, and
+			// unreachable -- during which every request it is asked to
+			// forward on another host's behalf times out.
 		}
 	}
 }
