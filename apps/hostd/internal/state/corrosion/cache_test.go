@@ -32,13 +32,15 @@ func hostRow(id, addr string, lastSeen int64) string {
 	return fmt.Sprintf(`["%s","%s","pk-%s","203.0.113.1",8,4096,%d]`, id, addr, id, lastSeen)
 }
 
-// cacheServer serves the two subscriptions a Cache opens.
+// cacheServer serves the three subscriptions a Cache opens.
 type cacheServer struct {
 	machineRows []string
 	hostRows    []string
+	serviceRows []string
 
 	machineChanges chan string
 	hostChanges    chan string
+	serviceChanges chan string
 	subscribes     atomic.Int32
 }
 
@@ -51,15 +53,24 @@ func startCache(t *testing.T, s *cacheServer) *Cache {
 	if s.hostChanges == nil {
 		s.hostChanges = make(chan string)
 	}
+	if s.serviceChanges == nil {
+		s.serviceChanges = make(chan string)
+	}
 
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		body := make([]byte, r.ContentLength)
 		_, _ = r.Body.Read(body)
 		isHosts := strings.Contains(string(body), "FROM hosts")
+		isServices := strings.Contains(string(body), "FROM services")
 
 		s.subscribes.Add(1)
 		w.Header().Set("corro-query-id", "sub")
-		if isHosts {
+		if isServices {
+			flushLine(w, `{"columns":["id","name","app"]}`)
+			for _, row := range s.serviceRows {
+				flushLine(w, `{"row":[1,`+row+`]}`)
+			}
+		} else if isHosts {
 			flushLine(w, `{"columns":["id","wg_addr","wg_pubkey","public_ip","cpu_free","mem_free_mib","last_seen"]}`)
 			for _, row := range s.hostRows {
 				flushLine(w, `{"row":[1,`+row+`]}`)
@@ -73,7 +84,10 @@ func startCache(t *testing.T, s *cacheServer) *Cache {
 		flushLine(w, `{"eoq":{"time":0,"change_id":1}}`)
 
 		ch := s.machineChanges
-		if isHosts {
+		switch {
+		case isServices:
+			ch = s.serviceChanges
+		case isHosts:
 			ch = s.hostChanges
 		}
 		for {
@@ -268,6 +282,12 @@ func TestCacheRebuildsWhenItsSubscriptionIsGone(t *testing.T) {
 		w.Header().Set("corro-query-id", "sub")
 		if isHosts {
 			flushLine(w, `{"columns":["id","wg_addr","wg_pubkey","public_ip","cpu_free","mem_free_mib","last_seen"]}`)
+			flushLine(w, `{"eoq":{"time":0,"change_id":1}}`)
+			<-r.Context().Done()
+			return
+		}
+		if strings.Contains(string(body), "FROM services") {
+			flushLine(w, `{"columns":["id","name","app"]}`)
 			flushLine(w, `{"eoq":{"time":0,"change_id":1}}`)
 			<-r.Context().Done()
 			return

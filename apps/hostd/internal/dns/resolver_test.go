@@ -14,10 +14,12 @@ import (
 type fakeFleet struct {
 	machines []state.Machine
 	hosts    []state.Host
+	services []state.Service
 }
 
 func (f fakeFleet) Machines() []state.Machine { return f.machines }
 func (f fakeFleet) Hosts() []state.Host       { return f.hosts }
+func (f fakeFleet) Services() []state.Service { return f.services }
 
 // keyFor makes a deterministic host key, so a test can assert the address a
 // name resolves to rather than only that it resolved to something.
@@ -172,5 +174,231 @@ func TestInternalNameParsing(t *testing.T) {
 		if name != tc.name || mode != tc.mode {
 			t.Errorf("%q parsed as (%q,%v), want (%q,%v)", tc.qname, name, mode, tc.name, tc.mode)
 		}
+	}
+}
+
+// serviceFleet is an app whose replicas carry GENERATED names, which is what a
+// rollout actually produces: createReplica never sets Name.
+//
+// So nothing here is reachable by the name an application would write down.
+// That is the whole point -- the only usable name is the service's.
+func serviceFleet(t *testing.T) *FleetResolver {
+	t.Helper()
+
+	selfKey, peerKey := keyFor(1), keyFor(90)
+	fleet := fakeFleet{
+		hosts: []state.Host{
+			{ID: "host-a", WGPubKey: selfKey.String()},
+			{ID: "host-b", WGPubKey: peerKey.String()},
+		},
+		machines: []state.Machine{
+			{ID: "m-asker", Name: "amber-lagoon-x9f2", HostID: "host-a",
+				State: "running", App: "shop", Slot: 1, ServiceID: "svc-web", ReleaseID: "rel-1"},
+			{ID: "m-db-a", Name: "quiet-harbor-4c1a", HostID: "host-a",
+				State: "running", App: "shop", Slot: 2, ServiceID: "svc-db", ReleaseID: "rel-1"},
+			{ID: "m-db-b", Name: "silver-meadow-77bd", HostID: "host-b",
+				State: "running", App: "shop", Slot: 3, ServiceID: "svc-db", ReleaseID: "rel-1"},
+			// A service named db in ANOTHER app. Must never be reachable.
+			{ID: "m-db-x", Name: "hidden-valley-01ff", HostID: "host-b",
+				State: "running", App: "other", Slot: 4, ServiceID: "svc-db-other", ReleaseID: "rel-9"},
+		},
+		services: []state.Service{
+			{ID: "svc-web", Name: "web", App: "shop"},
+			{ID: "svc-db", Name: "db", App: "shop"},
+			{ID: "svc-db-other", Name: "db", App: "other"},
+		},
+	}
+	return NewFleetResolver(fleet, mesh.NewLocator("host-a", selfKey, fleet))
+}
+
+// The line Phase 5 exists to prove, at the resolver.
+//
+// postgres://db.internal:5432 in a Dockerfile has to reach the db service. Its
+// replicas are named quiet-harbor-4c1a and silver-meadow-77bd, so if this
+// resolves only machine names it resolves nothing an app could have written.
+func TestAServiceIsReachableByItsName(t *testing.T) {
+	r := serviceFleet(t)
+
+	addrs := r.Resolve(Query{MachineID: "m-asker", Name: "db"})
+	if len(addrs) != 2 {
+		t.Fatalf("db.internal returned %d addresses, want both replicas: %v", len(addrs), addrs)
+	}
+}
+
+// A service name is scoped to the app exactly as a machine name is. Asked
+// from the OTHER app's machine, db must mean that app's own service -- its
+// single replica -- and never shop's two. Resolving from m-asker again would
+// re-run TestAServiceIsReachableByItsName under a different name; this is the
+// query that can actually cross the boundary.
+func TestAServiceNameDoesNotCrossApps(t *testing.T) {
+	r := serviceFleet(t)
+
+	addrs := r.Resolve(Query{MachineID: "m-db-x", Name: "db"})
+	if len(addrs) != 1 {
+		t.Fatalf("db.internal asked from the other app returned %d addresses, "+
+			"want only that app's own replica: %v", len(addrs), addrs)
+	}
+}
+
+// A rollout replaces every replica and every generated name with it. The
+// service name has to survive that, or it is no better than a machine name.
+func TestAServiceNameSurvivesAReplicaReplacement(t *testing.T) {
+	selfKey := keyFor(1)
+	fleet := fakeFleet{
+		hosts: []state.Host{{ID: "host-a", WGPubKey: selfKey.String()}},
+		machines: []state.Machine{
+			{ID: "m-asker", Name: "amber-lagoon-x9f2", HostID: "host-a",
+				State: "running", App: "shop", Slot: 1, ServiceID: "svc-web", ReleaseID: "rel-2"},
+			// The superseded replica is gone; a NEW one with a new name and a
+			// new release id is what the service points at now.
+			{ID: "m-db-new", Name: "crimson-summit-9a02", HostID: "host-a",
+				State: "running", App: "shop", Slot: 7, ServiceID: "svc-db", ReleaseID: "rel-2"},
+		},
+		services: []state.Service{
+			{ID: "svc-web", Name: "web", App: "shop"},
+			{ID: "svc-db", Name: "db", App: "shop"},
+		},
+	}
+	r := NewFleetResolver(fleet, mesh.NewLocator("host-a", selfKey, fleet))
+
+	if addrs := r.Resolve(Query{MachineID: "m-asker", Name: "db"}); len(addrs) != 1 {
+		t.Fatalf("db.internal returned %d addresses after a rollout, want the new replica: %v",
+			len(addrs), addrs)
+	}
+}
+
+// A machine name wins a collision, because that is what resolved before
+// services had names and a name that changes meaning is worse than either
+// choice. Pinned so the precedence is a decision rather than an accident.
+func TestAMachineNameWinsAgainstAServiceName(t *testing.T) {
+	selfKey, peerKey := keyFor(1), keyFor(90)
+	fleet := fakeFleet{
+		hosts: []state.Host{
+			{ID: "host-a", WGPubKey: selfKey.String()},
+			{ID: "host-b", WGPubKey: peerKey.String()},
+		},
+		machines: []state.Machine{
+			{ID: "m-asker", Name: "amber-lagoon-x9f2", HostID: "host-a",
+				State: "running", App: "shop", Slot: 1, ServiceID: "svc-web", ReleaseID: "rel-1"},
+			// Named by hand, and colliding with the service below.
+			{ID: "m-hand", Name: "db", HostID: "host-a", State: "running", App: "shop", Slot: 2},
+			// Two replicas of a service that is also called db.
+			{ID: "m-db-a", Name: "quiet-harbor-4c1a", HostID: "host-b",
+				State: "running", App: "shop", Slot: 3, ServiceID: "svc-db", ReleaseID: "rel-1"},
+			{ID: "m-db-b", Name: "silver-meadow-77bd", HostID: "host-b",
+				State: "running", App: "shop", Slot: 4, ServiceID: "svc-db", ReleaseID: "rel-1"},
+		},
+		services: []state.Service{{ID: "svc-db", Name: "db", App: "shop"}},
+	}
+	r := NewFleetResolver(fleet, mesh.NewLocator("host-a", selfKey, fleet))
+
+	addrs := r.Resolve(Query{MachineID: "m-asker", Name: "db"})
+	if len(addrs) != 1 {
+		t.Fatalf("db.internal returned %d addresses, want only the hand-named machine: %v",
+			len(addrs), addrs)
+	}
+}
+
+// A suspended replica keeps resolving, so traffic reaches the address that
+// wakes it. Dropping it is what made min_machines_running: 0 unusable for a
+// dependency, and the service path must not reintroduce that.
+func TestASuspendedReplicaStillResolvesByServiceName(t *testing.T) {
+	selfKey := keyFor(1)
+	fleet := fakeFleet{
+		hosts: []state.Host{{ID: "host-a", WGPubKey: selfKey.String()}},
+		machines: []state.Machine{
+			{ID: "m-asker", Name: "amber-lagoon-x9f2", HostID: "host-a",
+				State: "running", App: "shop", Slot: 1, ServiceID: "svc-web", ReleaseID: "rel-1"},
+			// Suspended, but a service replica: it kept its slot and address.
+			{ID: "m-db", Name: "quiet-harbor-4c1a", HostID: "host-a",
+				State: "suspended", App: "shop", Slot: 2, ServiceID: "svc-db", ReleaseID: "rel-1"},
+		},
+		services: []state.Service{{ID: "svc-db", Name: "db", App: "shop"}},
+	}
+	r := NewFleetResolver(fleet, mesh.NewLocator("host-a", selfKey, fleet))
+
+	if addrs := r.Resolve(Query{MachineID: "m-asker", Name: "db"}); len(addrs) != 1 {
+		t.Fatalf("a suspended replica did not resolve by service name: %v", addrs)
+	}
+}
+
+// An ungrouped machine has no app, so it reaches no service by name either.
+func TestAServiceNameIsInvisibleToAnUngroupedMachine(t *testing.T) {
+	selfKey := keyFor(1)
+	fleet := fakeFleet{
+		hosts: []state.Host{{ID: "host-a", WGPubKey: selfKey.String()}},
+		machines: []state.Machine{
+			{ID: "m-loose", Name: "loose", HostID: "host-a", State: "running", Slot: 9},
+			{ID: "m-db", Name: "quiet-harbor-4c1a", HostID: "host-a",
+				State: "running", App: "shop", Slot: 2, ServiceID: "svc-db", ReleaseID: "rel-1"},
+		},
+		services: []state.Service{{ID: "svc-db", Name: "db", App: "shop"}},
+	}
+	r := NewFleetResolver(fleet, mesh.NewLocator("host-a", selfKey, fleet))
+
+	if addrs := r.Resolve(Query{MachineID: "m-loose", Name: "db"}); len(addrs) != 0 {
+		t.Fatalf("a machine with no app resolved a service name: %v", addrs)
+	}
+}
+
+// A machine row whose App disagrees with its service's must not be answered.
+//
+// The two tables merge independently under LWW, and Manager.Create does not
+// cross-validate a request's app against its service's -- so the row is
+// creatable through the public API, not merely a corruption. Without the app
+// re-check on the MACHINE row, the fallback matches on service id alone and
+// hands the asker an address in another app: unreachable through the
+// app-keyed tenant filter at best, a cross-app disclosure at worst.
+func TestAServiceAnswerRechecksTheMachinesApp(t *testing.T) {
+	selfKey := keyFor(1)
+	fleet := fakeFleet{
+		hosts: []state.Host{{ID: "host-a", WGPubKey: selfKey.String()}},
+		machines: []state.Machine{
+			{ID: "m-asker", Name: "amber-lagoon-x9f2", HostID: "host-a",
+				State: "running", App: "shop", Slot: 1, ServiceID: "svc-web", ReleaseID: "rel-1"},
+			// Claims shop's svc-db, but sits in another app.
+			{ID: "m-stray", Name: "quiet-harbor-4c1a", HostID: "host-a",
+				State: "running", App: "other", Slot: 2, ServiceID: "svc-db", ReleaseID: "rel-1"},
+		},
+		services: []state.Service{
+			{ID: "svc-web", Name: "web", App: "shop"},
+			{ID: "svc-db", Name: "db", App: "shop"},
+		},
+	}
+	r := NewFleetResolver(fleet, mesh.NewLocator("host-a", selfKey, fleet))
+
+	if addrs := r.Resolve(Query{MachineID: "m-asker", Name: "db"}); len(addrs) != 0 {
+		t.Fatalf("db.internal answered a machine from another app: %v", addrs)
+	}
+}
+
+// A machine that claims a name but yields no address keeps the name.
+//
+// Its host row may simply not have gossiped in yet. If the fallback triggered
+// on "no addresses" rather than "no claim", the name would resolve to the
+// service now and flip back to the machine when the host row arrives -- the
+// meaning of a name changing with gossip timing, which is the exact thing the
+// precedence rule exists to prevent.
+func TestAClaimedNameWithNoAddressDoesNotFallThrough(t *testing.T) {
+	selfKey := keyFor(1)
+	fleet := fakeFleet{
+		hosts: []state.Host{{ID: "host-a", WGPubKey: selfKey.String()}},
+		machines: []state.Machine{
+			{ID: "m-asker", Name: "amber-lagoon-x9f2", HostID: "host-a",
+				State: "running", App: "shop", Slot: 1, ServiceID: "svc-web", ReleaseID: "rel-1"},
+			// Hand-named db, healthy, in-app -- on a host with NO host row,
+			// so it produces no address.
+			{ID: "m-hand", Name: "db", HostID: "host-ghost", State: "running", App: "shop", Slot: 2},
+			// A service also named db, whose replica WOULD resolve.
+			{ID: "m-db", Name: "quiet-harbor-4c1a", HostID: "host-a",
+				State: "running", App: "shop", Slot: 3, ServiceID: "svc-db", ReleaseID: "rel-1"},
+		},
+		services: []state.Service{{ID: "svc-db", Name: "db", App: "shop"}},
+	}
+	r := NewFleetResolver(fleet, mesh.NewLocator("host-a", selfKey, fleet))
+
+	if addrs := r.Resolve(Query{MachineID: "m-asker", Name: "db"}); len(addrs) != 0 {
+		t.Fatalf("a claimed name fell through to the service while its "+
+			"machine's host row was missing: %v", addrs)
 	}
 }
