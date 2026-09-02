@@ -320,8 +320,14 @@ else
 
     # A machine can only be rescued from a snapshot in object storage, so give
     # it one -- exactly as step 4 does for the ordinary machine.
-    api "$VHOST" POST "/v1/machines/${VMID}/suspend" >/dev/null && ok "suspended"
-    api "$VHOST" POST "/v1/machines/${VMID}/wake" >/dev/null && ok "woke"
+    # Asserted, not attempted. Both of these used to be `&& ok` with no
+    # failing branch, so a suspend that did not happen left the machine with
+    # no snapshot and the failure surfaced four assertions later as "the
+    # volume lost its data" -- which is not what went wrong.
+    api "$VHOST" POST "/v1/machines/${VMID}/suspend" >/dev/null \
+      && ok "suspended" || bad "suspend failed; the machine has no snapshot to be rescued from"
+    api "$VHOST" POST "/v1/machines/${VMID}/wake" >/dev/null \
+      && ok "woke" || bad "wake failed after the suspend"
 
     VDOM=$(sudo virsh list --name | while read -r d; do
       [ -n "$d" ] && sudo virsh domifaddr "$d" --source lease 2>/dev/null | grep -q "$VHOST" && echo "$d"
