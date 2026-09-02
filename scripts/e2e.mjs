@@ -1149,6 +1149,188 @@ async function replicasOf(serviceID) {
   return (json ?? []).filter((m) => m.service_id === serviceID);
 }
 
+// ---------------------------------------------------------------------------
+// Phase 5's own gate line: a multi-service app, end to end.
+//
+// Every ingredient is proven separately elsewhere -- .internal resolves
+// cross-host in the cluster gate, releases deploy and health-gate in the
+// service battery, env reaches a process in the env battery. This asserts them
+// TOGETHER, in the shape a real compose file has: two services in one app, one
+// depending on the other by name, both deployed from releases, both carrying
+// their environment. An integration that works only when each half is tested
+// alone is not an integration.
+// ---------------------------------------------------------------------------
+
+async function multiServiceAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const app = `e2e-app-${tag}`;
+  const created = [];
+
+  // Every early return below is a battery that could not set itself up, and it
+  // still owns whatever it already created. Cleanup therefore runs in a
+  // finally: a run that fails halfway must not leave replicas behind for the
+  // next one to trip over.
+  try {
+    await runMultiService();
+  } finally {
+    for (const id of created) await request(`/v1/machines/${id}`, { method: 'DELETE' });
+  }
+
+  async function runMultiService() {
+    // One build serves both services: this is about wiring them together, not
+    // about their contents differing.
+    let build;
+    await step('a build for the multi-service app', async () => {
+      const res = await postTar('/v1/builds', tarball({
+        'Dockerfile': [
+          'FROM alpine:3.20',
+          // curl, not busybox wget: the assertion below reads the resolved peer
+          // address out of curl's -w, which is how it tells "reached the right
+          // machine" from "reached something".
+          'RUN apk add --no-cache curl',
+          `RUN echo ${tag} > /etc/pilots-app-marker`,
+          'CMD ["/bin/sh", "-c", "while true; do sleep 3600; done"]',
+          '',
+        ].join('\n'),
+      }));
+      assert(res.status === 200, `build: HTTP ${res.status}`);
+      const text = await res.text();
+      for (const line of text.trim().split('\n')) {
+        try { const o = JSON.parse(line); if (o.result) build = o.result; } catch {}
+      }
+      assert(build, `no rootfs id:\n${text.slice(-300)}`);
+    });
+    if (!build) return;
+
+    // Both services carry an environment, and both are health-gated on a command
+    // check so neither needs an HTTP listener of its own.
+    const health = { type: 'cmd', test: ['CMD-SHELL', 'true'], grace: 90, interval: 2, healthy_threshold: 1 };
+    const services = {};
+
+    for (const [role, env] of [['db', { ROLE: 'db', TAG: tag }], ['web', { ROLE: 'web', TAG: tag }]]) {
+      await step(`the ${role} service deploys from a release, health-gated`, async () => {
+        const { status, json: svc } = await request('/v1/services', {
+          method: 'POST',
+          body: { name: `${role}-${tag}`, app, replicas: 1, health, env },
+        });
+        assert(status === 201, `create ${role}: ${status} ${JSON.stringify(svc)}`);
+
+        const { status: dstatus, json: rel } = await request(`/v1/services/${svc.id}/deploy`, {
+          method: 'POST', body: { build },
+        });
+        assert(dstatus === 200, `deploy ${role}: ${dstatus} ${JSON.stringify(rel)}`);
+        assert(rel.healthy,
+          `${role}'s release was flipped to healthy without passing its health gate`);
+        services[role] = { svc, rel };
+      });
+    }
+    if (!services.db || !services.web) return;
+
+    // The replicas the rollout produced, which is what .internal has to resolve.
+    const replicas = {};
+    await step('both services have a running replica', async () => {
+      const { json: machines } = await request('/v1/machines');
+      for (const role of ['db', 'web']) {
+        // Running, not merely present. A superseded or errored replica still
+        // carries the service id, and the resolver filters anything that is not
+        // running out of .internal -- so picking one here turns a green rollout
+        // into a two-minute DNS timeout three assertions later.
+        const mine = (machines ?? []).filter(
+          (m) => m.service_id === services[role].svc.id && m.state === 'running');
+        assert(mine.length >= 1, `${role} has no running replica`);
+        replicas[role] = mine[0];
+        created.push(mine[0].id);
+        assert(mine[0].release_id === services[role].rel.id,
+          `${role}'s replica names release ${mine[0].release_id}, want ${services[role].rel.id}`);
+      }
+    });
+    if (!replicas.web || !replicas.db) return;
+
+    await step('the deployed environment reached BOTH services', async () => {
+      // Found by scanning /proc rather than by asking systemd for the unit's
+      // MainPID. A built image is not the golden template: alpine carries no
+      // systemd, so its application is started by the guest agent's supervisor
+      // instead -- and 5b's whole point is that both mechanisms deliver the same
+      // environment. An assertion that only works on one of them would prove
+      // half of the thing it is named after.
+      const findEnv = `for p in /proc/[0-9]*/environ; do ` +
+        `if tr '\\0' '\\n' < $p 2>/dev/null | grep -q '^ROLE='; then ` +
+        `tr '\\0' '\\n' < $p | sort; break; fi; done`;
+      for (const role of ['db', 'web']) {
+        const { status, json } = await request(`/v1/machines/${replicas[role].id}/exec`, {
+          method: 'POST', body: { cmd: findEnv, user: 'root' },
+        });
+        assert(status === 200, `exec in ${role} returned HTTP ${status}, so nothing was checked`);
+        const out = json?.stdout ?? '';
+        assert(out.includes(`ROLE=${role}`),
+          `no process in ${role} carries ROLE=${role}; its application did not ` +
+          `receive the service's environment:\n${out || '(no process matched)'}`);
+        assert(out.includes(`TAG=${tag}`), `${role}'s application does not carry TAG`);
+      }
+    });
+
+    // The line Phase 5 exists to prove: one service reaching another by name.
+    await step('web reaches db by <name>.internal', async () => {
+      const url = `http://${replicas.db.name}.internal:${AGENT_PORT}/health`;
+      let last = '';
+      try {
+        await waitFor(async () => {
+          const { json } = await request(`/v1/machines/${replicas.web.id}/exec`, {
+            method: 'POST',
+            body: { cmd: `curl -s -o /dev/null -m 8 -w '%{http_code} %{remote_ip}' ${url} || true`, user: 'root' },
+          });
+          last = (json?.stdout ?? '').trim();
+          return last.startsWith('200');
+        }, { timeoutMs: 120_000, what: `web to reach ${replicas.db.name}.internal` });
+      } catch (err) {
+        // The last curl is the whole diagnostic, and it has to be read AFTER the
+        // wait: interpolating it into `what` captures the empty string the loop
+        // started with, so the message never carried anything.
+        throw new Error(`${err.message} (last curl: ${last || '(no output)'})`);
+      }
+
+      const addr = last.split(/\s+/)[1] ?? '';
+      assert(addr.startsWith('fdcd:'),
+        `web reached db at ${addr}, which is not a machine mesh address -- ` +
+        'the name resolved to something other than the peer');
+    });
+
+    // And the boundary still holds: a machine outside the app cannot use the
+    // same name. An integration that works by removing isolation is not one.
+    await step('a machine outside the app cannot resolve those names', async () => {
+      const { status, json: outsider } = await request('/v1/machines', {
+        method: 'POST',
+        body: { app: `e2e-other-${tag}`, vcpus: 1, mem_mib: 512, cmd: 'sleep 86400' },
+      });
+      assert(status === 201, `outsider create: ${status}`);
+      created.push(outsider.id);
+
+      async function probe(target) {
+        const { status: es, json } = await request(`/v1/machines/${outsider.id}/exec`, {
+          method: 'POST',
+          body: { cmd: `curl -s -o /dev/null -m 5 -w '%{http_code}' ${target} || true`, user: 'root' },
+        });
+        assert(es === 200, `exec in the outsider returned HTTP ${es}, so nothing was probed`);
+        return (json?.stdout ?? '').trim();
+      }
+
+      // The positive control first. An empty answer here means curl never ran --
+      // no curl in the image, an agent not serving yet, an exec that failed --
+      // and without this the refusal below would report a holding boundary
+      // having sent no packet at all.
+      const control = await probe(`http://127.0.0.1:${AGENT_PORT}/health`);
+      assert(control === '200',
+        `the outsider cannot even reach its own agent (curl said ${control || '(nothing)'}); ` +
+        'the refusal below would prove nothing');
+
+      const code = await probe(`http://${replicas.db.name}.internal:${AGENT_PORT}/health`);
+      assert(code === '000',
+        `a machine in another app reached ${replicas.db.name}.internal (got ${code}); ` +
+        'the app boundary is not holding');
+    });
+  }
+}
+
 async function envAssertions() {
   const tag = Math.random().toString(36).slice(2, 8);
   const name = `envy-${tag}`;
@@ -1248,6 +1430,7 @@ async function main() {
     await internalAssertions();
     await envAssertions();
     await serviceAssertions();
+    await multiServiceAssertions();
   } else {
     console.log('  - machine lifecycle skipped (set PILOTS_E2E_FULL=1 on a Firecracker host)');
   }
