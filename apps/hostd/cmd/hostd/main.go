@@ -336,6 +336,11 @@ func run() error {
 		HostID: cfg.HostID, Store: store, Machines: mgr,
 	})
 
+	// Only the arbiter for a service acts on it, so every host can run this
+	// loop: they all see every service in their local replica, and all but one
+	// will decline for any given service.
+	go rollout.RunAutoscaler(ctx, mgr)
+
 	controlAPI := api.Routes(api.Deps{
 		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink,
 		Builds: builder, Rollout: rollout, Domain: cfg.WorkloadDomain,

@@ -101,3 +101,10 @@ func (m *Manager) AppAddr(machineID string) (string, bool) {
 	}
 	return fmt.Sprintf("%s:%d", slot.HostIP, netns.GuestAppPort), true
 }
+
+// InFlight is how many requests are currently being served by a machine.
+//
+// Exported for the autoscaler, which is the only caller that needs a number
+// rather than a boolean: the idle monitor asks "is anything happening", and
+// scaling asks "how close to the limit is this replica".
+func (m *Manager) InFlight(machineID string) int { return m.flight.count(machineID) }

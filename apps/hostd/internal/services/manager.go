@@ -183,9 +183,11 @@ func (m *Manager) createReplica(ctx context.Context, svc *state.Service,
 	rel *state.Release, restore bool) (*state.Machine, error) {
 
 	req := api.CreateMachineRequest{
-		App:     svc.App,
-		Image:   rel.RootfsBuildID,
-		Knobs:   json.RawMessage(`{"auto_stop":"off"}`),
+		App:   svc.App,
+		Image: rel.RootfsBuildID,
+		// Replicas carry the service's lifecycle knobs, which is also where
+		// they persist: services has no knobs column and must not grow one.
+		Knobs:   m.replicaKnobs(ctx, svc),
 		Service: svc.ID,
 		Release: rel.ID,
 	}
@@ -333,4 +335,21 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// replicaKnobs is the lifecycle configuration a new replica gets.
+//
+// Inherited from an existing replica so every machine of a service agrees,
+// and defaulted for the first one. auto_stop stays OFF by default for a
+// service replica: the autoscaler owns that decision and the idle monitor
+// stopping a replica behind its back would fight it.
+func (m *Manager) replicaKnobs(ctx context.Context, svc *state.Service) json.RawMessage {
+	if machines, err := m.replicasOf(ctx, svc.ID, svc.ReleaseID); err == nil {
+		for _, mach := range machines {
+			if mach.KindKnobs != "" {
+				return json.RawMessage(mach.KindKnobs)
+			}
+		}
+	}
+	return json.RawMessage(`{"auto_stop":"off","min_machines_running":1}`)
 }
