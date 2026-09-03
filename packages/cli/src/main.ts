@@ -12,7 +12,13 @@
 
 import { Command } from 'commander'
 
+import { createDomainsCommand } from './commands/domains.ts'
 import { createLoginCommand, createLogoutCommand, createWhoamiCommand } from './commands/login.ts'
+import { createMachinesCommand } from './commands/machines.ts'
+import { createPromoteCommand } from './commands/promote.ts'
+import { createServicesCommand } from './commands/services.ts'
+import { createStatusCommand } from './commands/status.ts'
+import { createVolumesCommand } from './commands/volumes.ts'
 import { fail, setJSONMode } from './output.ts'
 import { VERSION } from './version.ts'
 
@@ -33,6 +39,12 @@ export function buildProgram(): Command {
   program.addCommand(createLoginCommand())
   program.addCommand(createLogoutCommand())
   program.addCommand(createWhoamiCommand())
+  program.addCommand(createMachinesCommand())
+  program.addCommand(createServicesCommand())
+  program.addCommand(createDomainsCommand())
+  program.addCommand(createVolumesCommand())
+  program.addCommand(createPromoteCommand())
+  program.addCommand(createStatusCommand())
 
   return program
 }

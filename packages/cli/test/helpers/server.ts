@@ -26,7 +26,7 @@ export interface FakeServer {
 export type Handler = (
   req: IncomingMessage & { path: string; body: string },
   res: ServerResponse,
-) => void | Promise<void>
+) => unknown
 
 export async function startServer(handler: Handler): Promise<FakeServer> {
   const requests: RecordedRequest[] = []
