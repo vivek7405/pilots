@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/vivek7405/pilots/hostd/internal/quota"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -24,9 +25,9 @@ type Rollout interface {
 // serviceToAPI never returns env or env_sealed. The sealed blob is not a
 // secret to the fleet but it is not the client's either, and the plaintext
 // half has no business on a list endpoint.
-func serviceToAPI(svc state.Service, domain string) Service {
+func serviceToAPI(svc state.Service, domain, orgID string) Service {
 	out := Service{
-		ID: svc.ID, Name: svc.Name, App: svc.App, ReleaseID: svc.ReleaseID,
+		ID: svc.ID, Name: svc.Name, OrgID: orgID, App: svc.App, ReleaseID: svc.ReleaseID,
 		Replicas: svc.Replicas, CustomDomain: svc.CustomDomain,
 		Repo: svc.Repo, Branch: svc.Branch, Autodeploy: svc.Autodeploy,
 		CreatedAt: svc.CreatedAt,
@@ -64,6 +65,16 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 			"no domain, no app and no running replicas can never be reached or " +
 			"woken: give it a domain to route to, an app so peers can resolve it " +
 			"by name, or at least one replica"})
+		return
+	}
+
+	// A service's replicas are machines, so a create is admitted against the
+	// same limits a create of that many machines would be. A replica boots
+	// with the manager's defaults, which is where these numbers come from.
+	req.OrgID = OrgID(r.Context())
+	if !d.checkQuota(w, r, quota.Delta{
+		Machines: req.Replicas, VCPUs: req.Replicas, MemMiB: req.Replicas * 512,
+	}) {
 		return
 	}
 
@@ -117,11 +128,19 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 		svc.EnvSealed = sealed
 	}
 
+	// Tenancy first, so a create that dies between the two writes leaves a
+	// row nothing points at rather than a service no org owns.
+	if err := d.Store.PutTenancy(r.Context(), &state.Tenancy{
+		ID: svc.ID, OrgID: req.OrgID, Kind: "service", CreatedAt: svc.CreatedAt,
+	}); err != nil {
+		writeStoreError(w, err)
+		return
+	}
 	if err := d.Store.PutService(r.Context(), svc); err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, serviceToAPI(*svc, d.Domain))
+	writeJSON(w, http.StatusCreated, serviceToAPI(*svc, d.Domain, req.OrgID))
 }
 
 func (d Deps) handleListServices(w http.ResponseWriter, r *http.Request) {
@@ -130,23 +149,33 @@ func (d Deps) handleListServices(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
 		return
 	}
+	org, narrow := listOrg(r)
 	out := make([]Service, 0, len(rows))
 	for _, svc := range rows {
-		out = append(out, serviceToAPI(svc, d.Domain))
+		owner, ok := d.visible(r, svc.ID, org, narrow)
+		if !ok {
+			continue
+		}
+		out = append(out, serviceToAPI(svc, d.Domain, owner))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (d Deps) handleGetService(w http.ResponseWriter, r *http.Request) {
-	svc, err := d.Store.GetService(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeStoreError(w, err)
+	svc, ok := d.ownedService(w, r, r.PathValue("id"))
+	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, serviceToAPI(*svc, d.Domain))
+	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
+	writeJSON(w, http.StatusOK, serviceToAPI(*svc, d.Domain, owner))
 }
 
 func (d Deps) handleDeploy(w http.ResponseWriter, r *http.Request) {
+	// Ownership before forwarding: a foreign service must not be told which
+	// host arbitrates it, and must not be acted on anywhere.
+	if _, ok := d.ownedService(w, r, r.PathValue("id")); !ok {
+		return
+	}
 	// Only the arbiter may write this service; forward rather than refuse.
 	if d.forwardToArbiter(w, r, r.PathValue("id")) {
 		return
@@ -165,6 +194,16 @@ func (d Deps) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "build is required"})
 		return
 	}
+	// The build becomes this service's root filesystem, so it is scoped like
+	// any other object the caller names by id.
+	if !d.ownedBuild(w, r, req.Build) {
+		return
+	}
+	// A rollout boots one extra machine before it retires the old one, so a
+	// deploy is admitted against one replica's worth of headroom.
+	if !d.checkQuota(w, r, quota.Delta{Machines: 1, VCPUs: 1, MemMiB: 512}) {
+		return
+	}
 	rel, err := d.Rollout.Deploy(r.Context(), r.PathValue("id"), req.Build)
 	if err != nil {
 		writeStoreError(w, err)
@@ -174,6 +213,9 @@ func (d Deps) handleDeploy(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d Deps) handleRollback(w http.ResponseWriter, r *http.Request) {
+	if _, ok := d.ownedService(w, r, r.PathValue("id")); !ok {
+		return
+	}
 	// Only the arbiter may write this service; forward rather than refuse.
 	if d.forwardToArbiter(w, r, r.PathValue("id")) {
 		return
@@ -197,6 +239,9 @@ func (d Deps) handlePromote(w http.ResponseWriter, r *http.Request) {
 			ErrorResponse{Error: "this host cannot promote: no object storage is configured"})
 		return
 	}
+	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
+		return
+	}
 	var req PromoteRequest
 	if r.ContentLength > 0 {
 		if err := decodeBody(r, &req); err != nil {
@@ -209,7 +254,8 @@ func (d Deps) handlePromote(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, serviceToAPI(*svc, d.Domain))
+	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
+	writeJSON(w, http.StatusOK, serviceToAPI(*svc, d.Domain, owner))
 }
 
 type Release struct {

@@ -16,8 +16,6 @@ source "$STATE_FILE"
 REPO="$(cd ../.. && pwd)"
 read -ra IPS <<< "$NODE_IPS"
 
-KEY="${PILOT_API_KEY:-pilot_gate_key}"
-AUTH="Authorization: Bearer ${KEY}"
 SSH="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=5 -i ${SSH_KEY}"
 
 PASS=0; FAIL=0
@@ -37,15 +35,21 @@ api() { # api <ip> <method> <path> [body]
 
 jf() { python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('$1',''))"; }
 
-# Every host authenticates locally against replicated key hashes, so seeding
-# the key on one host is enough -- which is itself worth asserting.
-say "Seeding an API key on one host"
-HASH=$(python3 -c "import hashlib;print(hashlib.sha256('${KEY}'.encode()).hexdigest())")
-$SSH "root@${IPS[0]}" "curl -sf -X POST http://127.0.0.1:51002/v1/transactions \
-  -H 'Content-Type: application/json' \
-  -H \"Authorization: Bearer \$(grep CORROSION_TOKEN /etc/pilots/config | cut -d= -f2)\" \
-  --http2-prior-knowledge \
-  -d '[{\"query\":\"INSERT INTO api_keys (hash,org_id,scopes,created_at) VALUES (?,?,?,?) ON CONFLICT(hash) DO NOTHING\",\"params\":[\"${HASH}\",\"org-gate\",\"machines\",0]}]'" >/dev/null 2>&1
+# Every host authenticates locally against replicated key hashes, so minting
+# the key on ONE host is enough -- which is itself worth asserting.
+#
+# `hostd bootstrap-key` rather than a hand-written corrosion transaction: the
+# key shape, the hash and the scopes then have exactly one implementation, and
+# a change to any of them cannot leave this script writing rows hostd no
+# longer recognises. It prints the plaintext and nothing else, and mints an
+# admin key, which the gate needs because it drives routes from every scope.
+say "Minting an API key on one host"
+KEY="${PILOT_API_KEY:-$($SSH "root@${IPS[0]}" /opt/pilots/bin/hostd bootstrap-key 2>/dev/null | tail -1)}"
+AUTH="Authorization: Bearer ${KEY}"
+case "$KEY" in
+  pilot_*) ok "minted a key on ${IPS[0]}" ;;
+  *) bad "could not mint a key on ${IPS[0]}"; exit 1 ;;
+esac
 sleep 3
 
 say "1. Every host sees the whole fleet"

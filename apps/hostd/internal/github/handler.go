@@ -161,10 +161,19 @@ func (d Deps) onPullRequest(ctx context.Context, ev Event) error {
 	// from the new commit is simpler than reasoning about what changed.
 	_ = d.destroyPreview(ctx, name, ev)
 
+	// The preview belongs to the org that owns the service it previews. There
+	// is no authenticated caller on a webhook delivery -- GitHub is the
+	// principal -- so the org is read from the service rather than a request.
+	previewOrg := ""
+	if t, err := d.Store.GetTenancy(ctx, svc.ID); err == nil {
+		previewOrg = t.OrgID
+	}
+
 	mach, err := d.Machines.Create(ctx, api.CreateMachineRequest{
 		Name:  name,
 		Image: build,
 		App:   svc.App,
+		OrgID: previewOrg,
 		// Suspends when idle and wakes on request, so an open pull request
 		// nobody is looking at costs nothing.
 		Knobs: []byte(`{"auto_stop":"suspend","auto_start":true,"min_machines_running":0}`),

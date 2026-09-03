@@ -8,6 +8,10 @@
 //
 //   PILOTS_E2E=1 PILOT_API=http://127.0.0.1:8080 PILOT_API_KEY=... node scripts/e2e.mjs
 //
+// The key comes from `hostd bootstrap-key` and must carry the `admin` scope:
+// this file drives routes from all three scopes, and a narrower key would turn
+// real assertions into 403s.
+//
 // Without PILOTS_E2E=1 it skips cleanly, so `npm test` stays green on a
 // machine with no KVM.
 
@@ -40,10 +44,13 @@ function assert(cond, msg) {
   if (!cond) throw new Error(msg);
 }
 
-async function request(path, { method = 'GET', body, auth = true, raw = false } = {}) {
+async function request(path, { method = 'GET', body, auth = true, raw = false, key } = {}) {
   const headers = {};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
-  if (auth && KEY) headers.Authorization = `Bearer ${KEY}`;
+  // `key` lets a tenancy assertion speak as a second org. Everything else
+  // uses the battery's own admin key.
+  const bearer = key ?? (auth ? KEY : '');
+  if (bearer) headers.Authorization = `Bearer ${bearer}`;
 
   const res = await fetch(`${API}${path}`, {
     method,
@@ -1453,10 +1460,140 @@ async function envAssertions() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 6a: the API can be handed to a second tenant.
+// ---------------------------------------------------------------------------
+
+async function tenancyAssertions() {
+  let secondKey = null;
+  let secondHash = null;
+  let secondOrg = `org_e2e_${Date.now()}`;
+
+  await step('POST /v1/api-keys mints a key for a second org', async () => {
+    const { status, json } = await request('/v1/api-keys', {
+      method: 'POST',
+      body: { org_id: secondOrg, scopes: ['machines'] },
+    });
+    assert(status === 201, `expected 201, got ${status}`);
+    assert(typeof json?.key === 'string' && json.key.startsWith('pilot_'),
+      `expected a pilot_ key, got ${JSON.stringify(json)}`);
+    assert(json.org_id === secondOrg, `key is for ${json.org_id}`);
+    secondKey = json.key;
+    secondHash = json.hash;
+  });
+
+  await step('the minted key authenticates on the API', async () => {
+    const { status } = await request('/v1/machines', { key: secondKey });
+    assert(status === 200, `expected 200, got ${status}`);
+  });
+
+  // Scopes are what stop an agent key from deploying. The refusal names the
+  // scope, because "forbidden" alone tells a client nothing it can act on.
+  await step('a machines-scoped key is refused on POST /v1/builds', async () => {
+    const { status, json } = await request('/v1/builds', { method: 'POST', key: secondKey });
+    assert(status === 403, `expected 403, got ${status}`);
+    assert(json?.error === 'scope deploy required',
+      `expected the refusal to name the scope, got ${JSON.stringify(json)}`);
+  });
+
+  await step('a machines-scoped key is refused on POST /v1/api-keys', async () => {
+    const { status, json } = await request('/v1/api-keys', {
+      method: 'POST', key: secondKey, body: { org_id: 'x', scopes: ['machines'] },
+    });
+    assert(status === 403, `expected 403, got ${status}`);
+    assert(json?.error === 'scope admin required', `got ${JSON.stringify(json)}`);
+  });
+
+  if (FULL) {
+    // A machine belonging to the battery's org, which the second org must not
+    // be able to see, read or destroy.
+    let id = null;
+    try {
+      await step('a machine created by one org is invisible to another', async () => {
+        const created = await request('/v1/machines', {
+          method: 'POST',
+          body: { vcpus: 1, mem_mib: 512, knobs: { auto_stop: 'off' } },
+        });
+        assert(created.status === 201, `create: expected 201, got ${created.status}`);
+        id = created.json.id;
+
+        const { status, json } = await request('/v1/machines', { key: secondKey });
+        assert(status === 200, `list: expected 200, got ${status}`);
+        assert(!json.some((m) => m.id === id),
+          'the second org can list another tenant\'s machine');
+      });
+
+      // 404 and never 403: a 403 confirms the id exists, which is a
+      // machine-name oracle across tenants.
+      await step('a foreign machine id is a 404 with a JSON body', async () => {
+        const { status, json } = await request(`/v1/machines/${id}`, { key: secondKey });
+        assert(status === 404, `expected 404, got ${status}`);
+        assert(json && typeof json.error === 'string', 'the 404 carries no JSON body');
+      });
+
+      await step('a foreign DELETE is a 404 and the machine survives', async () => {
+        const { status } = await request(`/v1/machines/${id}`, {
+          method: 'DELETE', key: secondKey,
+        });
+        assert(status === 404, `expected 404, got ${status}`);
+        const still = await request(`/v1/machines/${id}`);
+        assert(still.status === 200, `the machine was destroyed anyway: ${still.status}`);
+      });
+    } finally {
+      await step('destroy the tenancy assertion machine', async () => {
+        if (!id) return;
+        const { status } = await request(`/v1/machines/${id}`, { method: 'DELETE' });
+        assert(status === 204, `expected 204, got ${status}`);
+      });
+    }
+  }
+
+  // A quota of zero freezes the org. Checked before the revocation, because
+  // the key has to still work to be refused for the right reason.
+  await step('a quota of zero refuses a create with a structured 429', async () => {
+    const put = await request(`/v1/quotas/${secondOrg}`, {
+      method: 'PUT',
+      body: { max_machines: 0, max_vcpus: 1, max_mem_mib: 512, max_volume_gib: 1, max_builds: 1 },
+    });
+    assert(put.status === 200, `PUT quotas: expected 200, got ${put.status}`);
+
+    const { status, json } = await request('/v1/machines', {
+      method: 'POST', key: secondKey, body: { vcpus: 1, mem_mib: 512 },
+    });
+    assert(status === 429, `expected 429, got ${status}`);
+    assert(json?.error === 'quota exceeded' && json?.quota === 'machines' && json?.limit === 0,
+      `refusal body is not the structured shape: ${JSON.stringify(json)}`);
+  });
+
+  await step('GET /v1/quotas reads back what was written', async () => {
+    const { status, json } = await request(`/v1/quotas/${secondOrg}`);
+    assert(status === 200, `expected 200, got ${status}`);
+    assert(json?.max_machines === 0 && json?.max_vcpus === 1,
+      `read back ${JSON.stringify(json)}`);
+  });
+
+  // Revocation is a row that appears. The key row survives it, so the list
+  // can still report that the credential was killed.
+  await step('a revoked key is refused and no key row was deleted', async () => {
+    const rev = await request(`/v1/api-keys/${secondHash}/revoke`, { method: 'POST' });
+    assert(rev.status === 200, `revoke: expected 200, got ${rev.status}`);
+
+    const { status } = await request('/v1/machines', { key: secondKey });
+    assert(status === 401, `the revoked key still authenticates: ${status}`);
+
+    const list = await request(`/v1/api-keys?org=${secondOrg}`);
+    assert(list.status === 200, `list: expected 200, got ${list.status}`);
+    const row = list.json.find((k) => k.hash === secondHash);
+    assert(row, 'the revoked key vanished from the list; revocation must not delete');
+    assert(row.revoked_at > 0, `the list does not report the revocation: ${JSON.stringify(row)}`);
+  });
+}
+
 async function main() {
   console.log(`e2e: ${API}${FULL ? ' (full lifecycle)' : ' (process only)'}`);
 
   await processAssertions();
+  await tenancyAssertions();
   if (FULL) {
     await lifecycleAssertions();
     await timingAssertions();
