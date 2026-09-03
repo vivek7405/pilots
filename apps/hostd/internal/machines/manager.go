@@ -124,6 +124,10 @@ type Manager struct {
 
 	locks  sync.Map // machine id -> *sync.Mutex
 	flight *inFlight
+
+	// retired keeps the engine counters monotonic across a machine going
+	// away. See retiredUffd.
+	retired retiredUffd
 }
 
 func New(opts Options) *Manager {

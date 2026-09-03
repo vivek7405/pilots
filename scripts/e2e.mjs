@@ -389,8 +389,9 @@ async function scrapeMetric(name) {
   for (const line of body.split('\n')) {
     if (line.startsWith('#') || !line.startsWith(name)) continue;
     const rest = line.slice(name.length);
-    // Exact family match: the name is followed by a space or a label set,
-    // never by more name characters.
+    // Exact match: the name is followed by a space or a label set, never by
+    // more name characters. A caller may pass a fully labelled series
+    // (family{label="x"}), in which case rest starts at the space.
     if (rest && !rest.startsWith(' ') && !rest.startsWith('{')) continue;
     const value = Number(line.slice(line.lastIndexOf(' ') + 1));
     if (Number.isFinite(value)) total = (total ?? 0) + value;
@@ -555,18 +556,36 @@ async function timingAssertions() {
         }
         const first = gaps[0];
         const rest = median(gaps.slice(1));
-        console.log(`      checkpoint 1 (Full) ${first}ms, 2-4 (Diff) p50 `
+        console.log(`      resume gap: checkpoint 1 ${first}ms, 2-4 p50 `
           + `${rest.toFixed(0)}ms  [${gaps.join(', ')}]`);
 
-        // Without extent sharing both checkpoints pay a real copy of snap.bin
-        // and the cow inside the pause -- a fixed cost added to BOTH, which
-        // compresses the ratio. The switch is still visible; the bar moves.
-        const ratio = reflink ? 5 : 2;
-        assert(first >= rest * ratio,
-          `the first checkpoint was ${first}ms and the later ones ${rest.toFixed(0)}ms, `
-          + `a ratio of ${(first / Math.max(rest, 1)).toFixed(1)}x against the `
-          + `${ratio}x expected ${reflink ? 'with' : 'without'} reflink. Every `
-          + `checkpoint is still writing the whole memory image.`);
+        // Assert on the SNAPSHOT WRITE, not the resume gap.
+        //
+        // The resume gap is the whole pause, and on a host without extent
+        // sharing it is dominated by real copies of snap.bin and the cow --
+        // a fixed cost paid by Full and Diff alike, which compresses the
+        // ratio below anything worth asserting (measured 1.5x on ext4 while
+        // the writes themselves differed by far more). The snapshot write is
+        // the part lever 2 actually shortens, and the server reports it by
+        // type, so ask for that instead of inferring it.
+        const fullSum = await scrapeMetric('pilots_snapshot_write_seconds_sum{type="Full"}');
+        const fullCount = await scrapeMetric('pilots_snapshot_write_seconds_count{type="Full"}');
+        const diffSum = await scrapeMetric('pilots_snapshot_write_seconds_sum{type="Diff"}');
+        const diffCount = await scrapeMetric('pilots_snapshot_write_seconds_count{type="Diff"}');
+        assert(fullCount > 0 && diffCount > 0,
+          `the host recorded ${fullCount} Full and ${diffCount} Diff snapshot `
+          + 'writes; a machine that never switched to Diff is the failure this '
+          + 'assertion exists to catch.');
+
+        const fullMs = (fullSum / fullCount) * 1000;
+        const diffMs = (diffSum / diffCount) * 1000;
+        console.log(`      snapshot write: Full ${fullMs.toFixed(0)}ms, `
+          + `Diff ${diffMs.toFixed(0)}ms (${(fullMs / Math.max(diffMs, 0.001)).toFixed(1)}x)`);
+        assert(fullMs >= diffMs * 2,
+          `a Full snapshot write averaged ${fullMs.toFixed(0)}ms and a Diff `
+          + `${diffMs.toFixed(0)}ms, a ratio of `
+          + `${(fullMs / Math.max(diffMs, 0.001)).toFixed(1)}x. The pause is `
+          + 'still O(RAM), so the Full-to-Diff switch bought nothing.');
       });
 
     await step('a second wake faults less than the first', async () => {
@@ -616,9 +635,19 @@ async function timingAssertions() {
       const stored = [];
       for (const mid of pair) {
         const before = await scrapeMetric('pilots_snapshot_stored_bytes_sum');
-        const { status } = await request(`/v1/machines/${mid}/checkpoints`,
+        const { status, json } = await request(`/v1/machines/${mid}/checkpoints`,
           { method: 'POST', body: {} });
         assert(status === 201, `checkpoint of ${mid}: HTTP ${status}`);
+
+        // The response returns as soon as the guest is running again: the
+        // chunkify and upload that PRODUCE this number run afterwards, in the
+        // background. Scraping straight away races them and reads zero, which
+        // is what this assertion did on its first real run.
+        await waitFor(async () => {
+          const ck = await request(`/v1/checkpoints/${json.id}`);
+          return ck.json?.durable === true;
+        }, { what: `checkpoint ${json.id} to become durable` });
+
         const after = await scrapeMetric('pilots_snapshot_stored_bytes_sum');
         assert(before !== null && after !== null,
           'GET /metrics does not publish pilots_snapshot_stored_bytes');

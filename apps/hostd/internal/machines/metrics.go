@@ -1,6 +1,8 @@
 package machines
 
 import (
+	"sync"
+
 	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/uffd"
 )
@@ -22,17 +24,69 @@ type uffdStats = uffd.StatsReport
 // org count is bounded, machine count is not, and a label set per machine
 // melts the scrape exactly when a host is busiest. See #7's landmine on this,
 // and the metrics package doc.
+// retiredUffd accumulates the totals of handlers that have gone away.
+//
+// Without it these series DECREASE. A scrape sums the live handlers, so when a
+// machine suspends its handler dies and its faults leave the total -- and a
+// Prometheus counter that goes down is read as a process restart, which makes
+// every rate() over it wrong. It also made an e2e assertion measure a delta of
+// MINUS ten faults across a suspend/wake, which is how this was found.
+//
+// Keyed by machine so a handler counted once is not counted twice: a machine
+// that is still alive at the next scrape contributes through the live path,
+// and only a machine that has disappeared is folded in here.
+type retiredUffd struct {
+	mu     sync.Mutex
+	lastBy map[string]uffdStats
+	total  uffdStats
+}
+
+func (r *retiredUffd) observe(live map[string]uffdStats) uffdStats {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.lastBy == nil {
+		r.lastBy = map[string]uffdStats{}
+	}
+	// Anything seen before and absent now has retired: fold its last reading
+	// in permanently.
+	for id, last := range r.lastBy {
+		if _, ok := live[id]; !ok {
+			r.total.Faults += last.Faults
+			r.total.BytesCopied += last.BytesCopied
+			r.total.Replayed += last.Replayed
+			r.total.PrefetchHit += last.PrefetchHit
+			delete(r.lastBy, id)
+		}
+	}
+	for id, cur := range live {
+		r.lastBy[id] = cur
+	}
+	return r.total
+}
+
 func (m *Manager) CollectMetrics() {
 	m.mu.RLock()
-	handlers := make([]statter, 0, len(m.running))
-	for _, mach := range m.running {
+	handlers := make(map[string]statter, len(m.running))
+	for id, mach := range m.running {
 		if mach.Uffd != nil {
-			handlers = append(handlers, mach.Uffd)
+			handlers[id] = mach.Uffd
 		}
 	}
 	m.mu.RUnlock()
 
-	faults, bytes, replayed, hit, startupPages, startupBytes := foldHandlers(handlers)
+	live := make(map[string]uffdStats, len(handlers))
+	for id, h := range handlers {
+		if r, ok := h.Stats(); ok {
+			live[id] = r
+		}
+	}
+	retired := m.retired.observe(live)
+
+	faults, bytes, replayed, hit, startupPages, startupBytes := foldStats(live)
+	faults += retired.Faults
+	bytes += retired.BytesCopied
+	replayed += retired.Replayed
+	hit += retired.PrefetchHit
 
 	// Set rather than Add: each report is a whole total, so accumulating
 	// deltas here would double-count every scrape.
@@ -44,17 +98,13 @@ func (m *Manager) CollectMetrics() {
 	metrics.UffdStartupBytes.Set(startupBytes)
 }
 
-// foldHandlers sums one scrape's worth of handler reports.
+// foldStats sums one scrape's worth of handler reports.
 //
 // Split out from CollectMetrics so the summing is testable without a live
 // machine: the registry is package-level, so asserting through it would make
 // every test in this package share one set of counters.
-func foldHandlers(handlers []statter) (faults, bytes, replayed, hit, startupPages, startupBytes int64) {
-	for _, h := range handlers {
-		r, ok := h.Stats()
-		if !ok {
-			continue // machine gone, or adopted without a control socket
-		}
+func foldStats(live map[string]uffdStats) (faults, bytes, replayed, hit, startupPages, startupBytes int64) {
+	for _, r := range live {
 		faults += r.Faults
 		bytes += r.BytesCopied
 		replayed += r.Replayed
