@@ -12,6 +12,40 @@
 # allocator, and nothing to update anywhere else: the new host mints its own
 # mesh identity, derives its own address from it, and announces itself by
 # writing its own row.
+#
+# ENVIRONMENT
+#   PILOT_CORROSION_TOKEN      required -- the cluster's shared API secret
+#   PILOT_AGENT_TOKEN_SECRET   required -- guest credentials are derived from it
+#   PILOT_FLEET_KEY            required -- seals secret env values; keep it
+#                              somewhere that outlives the fleet
+#   PILOT_REQUIRE_REFLINK=1    THE FLEET SWITCH. Refuses to finish on a host
+#                              that cannot share extents, and is also where the
+#                              fleet-only requirements below are enforced.
+#   PILOT_CPU_TEMPLATE         T2 / T2CL (Intel) or T2A (AMD). Required under
+#                              PILOT_REQUIRE_REFLINK=1, and checked against the
+#                              host's actual vendor before this exits.
+#   PILOT_ACME_EMAIL           turns TLS on. Also turns on the port 80 and 443
+#                              reachability probes.
+#   PILOT_CLOUDFLARE_API_TOKEN DNS-01 credential for the wildcard certificate
+#   PILOT_WORKLOAD_DOMAIN      default pilotrun.app
+#   PILOT_S3_ENDPOINT / _REGION / _BUCKET / _ACCESS_KEY / _SECRET_KEY
+#   PILOT_ROOTFS_TAG           download golden-<tag>.ext4.zst from the release
+#                              when there is no local rootfs
+#
+# WHAT IT REFUSES TO FINISH ON, and why each is a refusal rather than a warning
+#   * a golden.ext4 that is not the committed pin -- hosts bootstrapped on
+#     different days would carry different base images
+#   * a CPU vendor that disagrees with PILOT_CPU_TEMPLATE -- snapshots taken
+#     here would be unrestorable everywhere else
+#   * a corrosion config key corrosion does not read -- it ignores unknown keys
+#     silently, so a typo runs on the default forever
+#   * a host this machine cannot reach on 8080, 80 or 443 -- the wildcard
+#     record lists every host, so a firewalled one eats 1/N of the traffic with
+#     nothing reporting it
+#   * no extent sharing, under PILOT_REQUIRE_REFLINK=1
+#
+# It also bounds every build to the pilot user's slice, so a build cannot
+# starve the machines it shares a host with.
 set -euo pipefail
 
 # Pinned versions. Everything the fleet runs is a fixed artifact -- a host that
@@ -839,6 +873,64 @@ else
   fi
 fi
 REMOTE
+
+# Reachability, checked FROM HERE and not from the host.
+#
+# This is the whole point of the check. Every probe above ran on the host and
+# every one of them talks to 127.0.0.1, where a firewall rule is invisible. The
+# wildcard A record lists every host IP, so a host whose port is closed to the
+# world does not fail -- it silently eats 1/N of the fleet's traffic, and the
+# only symptom is a fraction of requests timing out with no host reporting
+# anything wrong. Adding a host to DNS before this passes is how that starts.
+say "Checking ${IP} is reachable from here"
+REACHED=""
+if curl -sf -m 10 -o /dev/null "http://${IP}:8080/v1/health"; then
+  REACHED="8080"
+else
+  echo "  unreachable: tcp 8080 on ${IP} does not answer /v1/health." >&2
+  echo "    Check the Hetzner Robot firewall for ${IP}: 8080 must allow the" >&2
+  echo "    fleet's host IPs and this machine's address." >&2
+  exit 1
+fi
+
+# Port 80 and 443 only matter once ACME is configured. Without an ACME contact
+# hostd never binds them, so probing would fail a host that is correct.
+if [ -n "$ACME_EMAIL" ]; then
+  CODE=$(curl -s -m 10 -o /dev/null -w '%{http_code}' "http://${IP}/" || echo 000)
+  case "$CODE" in
+    301|308) REACHED="${REACHED} 80" ;;
+    *)
+      echo "  unreachable: tcp 80 on ${IP} returned ${CODE}, want a redirect." >&2
+      echo "    Port 80 is where the ACME HTTP-01 challenge lands. A host that" >&2
+      echo "    does not answer it cannot obtain or renew a custom-domain" >&2
+      echo "    certificate, and the failure shows up as an expiry months out." >&2
+      echo "    Check the Hetzner Robot firewall for ${IP}." >&2
+      exit 1
+      ;;
+  esac
+
+  # Resolved to THIS host on purpose: the wildcard record points at every host
+  # and this asks whether this one can serve the name.
+  CODE=$(curl -s -m 10 -o /dev/null -w '%{http_code}' \
+    --resolve "api.${DOMAIN}:443:${IP}" "https://api.${DOMAIN}/v1/health" || echo 000)
+  if [ "$CODE" = 200 ]; then
+    REACHED="${REACHED} 443"
+  elif curl -sk -m 10 -o /dev/null \
+       --resolve "api.${DOMAIN}:443:${IP}" "https://api.${DOMAIN}/v1/health"; then
+    # It serves, but the certificate is not trusted yet. The wildcard is
+    # ordered asynchronously, so this is expected for the first minutes of the
+    # first host and is never expected afterwards.
+    echo "  cert: pending -- ${IP} serves TLS but the wildcard has not been"
+    echo "    issued yet. Expected on the first host for a few minutes; on any"
+    echo "    later host it means PILOT_CLOUDFLARE_API_TOKEN is wrong or the"
+    echo "    certificate storage is not shared."
+  else
+    echo "  unreachable: tcp 443 on ${IP} returned ${CODE}." >&2
+    echo "    Check the Hetzner Robot firewall for ${IP}." >&2
+    exit 1
+  fi
+fi
+echo "  reachable: ${REACHED}"
 
 # The CPU template and the CPU must agree. A T2A on Intel or a T2 on AMD is
 # not a slow host, it is a host whose snapshots the rest of the fleet cannot
