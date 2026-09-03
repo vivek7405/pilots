@@ -14,6 +14,10 @@
     "test:hostd": "cd apps/hostd && go test ./...",
     "vet:hostd": "cd apps/hostd && go vet ./...",
     "test:e2e": "node scripts/e2e.mjs",
-    "test": "npm run vet:hostd && npm run test:hostd && npm run test:e2e"
+    "test:sdk-js": "npm test --workspace=sdks/js",
+    "build:sdk-js": "npm run build --workspace=sdks/js",
+    "vet:sdk-go": "cd sdks/go && go vet ./...",
+    "test:sdk-go": "cd sdks/go && go test ./...",
+    "test": "npm run vet:hostd && npm run test:hostd && npm run vet:sdk-go && npm run test:sdk-go && npm run test:sdk-js && npm run test:e2e"
   }
 }
