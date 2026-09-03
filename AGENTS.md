@@ -142,9 +142,22 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
   on machines with no KVM.
 - Its API key comes from `hostd bootstrap-key` and must carry `admin`: the
   battery drives routes from every scope, and a narrower key turns real
-  assertions into 403s. Assertions that need a host shell — a fleet-wide
-  gossip check, a corrosion restart — live in `scripts/cluster/gate.sh`
-  instead, which drives the same public API over SSH.
+  assertions into 403s.
+- `scripts/cluster/gate.sh` is the fleet battery, a numbered `say` section per
+  property, run against the local multi-node rig. It grows monotonically too.
+
+**Where a new test belongs** — the split is what can *observe* the assertion:
+
+| The assertion needs… | It goes in |
+|---|---|
+| only the public API (`/v1/...`, `/metrics`, an SDK, the CLI) | `scripts/e2e.mjs` |
+| a host shell — `/sys`, `/proc`, cgroup files, `journalctl`, `kill -9 hostd`, a reboot | `scripts/cluster/gate.sh`, as a new numbered section |
+
+A hostility test usually has both halves, and they are written as a pair: the
+e2e half asserts what a client would see, the gate half asserts that the host
+kept none of the wreckage. Neither half may retire an assertion, and neither
+may *skip* one — a block that cannot set itself up fails loudly, because a
+quiet early return retires every assertion below it at runtime.
 
 ---
 

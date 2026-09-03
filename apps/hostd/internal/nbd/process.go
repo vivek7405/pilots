@@ -188,8 +188,14 @@ func (p *Process) Dirty() (*roaring.Bitmap, error) {
 func (p *Process) Stop() error {
 	var errs []error
 
-	if err := DisconnectDevice(p.Index); err != nil {
-		errs = append(errs, err)
+	// The guard is the hostility battery's negative control and nothing else:
+	// it needs both PILOT_FAULTS=1 and PILOT_FAULT_NBD_SKIP_DISCONNECT=1, so
+	// on any host that has not deliberately armed both, the ioctl runs exactly
+	// as it always has. See faults.go.
+	if !skipDisconnect() {
+		if err := DisconnectDevice(p.Index); err != nil {
+			errs = append(errs, err)
+		}
 	}
 
 	if p.pid > 0 {
