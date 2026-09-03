@@ -32,7 +32,9 @@ this, in order. It is loaded into context automatically (`CLAUDE.md` is
    is our own buildless, web-components, full-stack framework: its deploy is
    `npm install` on the fleet-wide layer cache, then a restore from the
    release snapshot, then `/__webjs/ready`. Nothing may sit between those
-   steps. See `docs/prior-art/webjs-deploy-contract.md`.
+   steps. See `docs/prior-art/webjs-deploy-contract.md`. **Every web app in
+   this repo is a webjs app**: the dashboard, the marketing site, anything
+   that serves a page. No other web framework, bundler or UI library.
 5. **Spin-up, pause/resume and snapshot/restore are extremely fast.** Create
    is a restore, not a boot; wake is a held request, never a waiting page;
    a checkpoint's resume gap is independent of machine size. The numbers are
