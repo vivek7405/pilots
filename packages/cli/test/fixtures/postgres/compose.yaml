@@ -1,0 +1,5 @@
+# Two replicas because the health check is slow.
+services:
+  web:
+    build: .
+    replicas: 2
