@@ -20,6 +20,19 @@
  * rewritten to a typed RPC stub, `#`-alias imports resolved, `@webjsdev/core`
  * served, and the importmap injected. (#806)
  */
+// The browser runner boots the REAL app handler, so `env.ts` validation runs
+// before any test does. These are the same throwaway values `test/helpers/app.ts`
+// sets for the node layer; nothing in a browser test reaches a fleet or a
+// GitHub App, and an in-memory database keeps the run from touching db/dev.db.
+process.env.NODE_ENV ??= 'test';
+process.env.DATABASE_URL ??= 'file::memory:';
+process.env.AUTH_SECRET ??= 'test-secret-at-least-thirty-two-characters-long';
+process.env.AUTH_GITHUB_ID ??= 'Iv1.testclientid';
+process.env.AUTH_GITHUB_SECRET ??= 'test-client-secret';
+process.env.PILOT_ADMIN_KEY ??= 'pilot_testadminkey';
+process.env.PILOT_API_URL ??= 'https://api.pilots.test';
+process.env.PILOT_USAGE_POLL ??= '0';
+
 import { playwrightLauncher } from '@web/test-runner-playwright';
 import { createBrowserTestHandler } from '@webjsdev/server/testing';
 import { resolve } from 'node:path';

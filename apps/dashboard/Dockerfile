@@ -1,63 +1,59 @@
-# Production image for the dashboard webjs app.
+# Production image for the dashboard.
 #
-# Works with a plain `docker build` / `docker compose up`, and is the same
-# artifact the webdeploy hosting tool (ubicloud + uncloud) builds and ships.
+# The build context is the REPO ROOT, not this directory. The dashboard imports
+# `@pilots/sdk` from the `sdks/js` workspace, which is not published, so an
+# `npm install` run inside a context of `apps/dashboard` could never resolve
+# it. Installing from the root with npm workspaces is the only shape that does.
 #
-# webjs serves .ts directly by stripping types at the runtime layer, so there is
-# NO JavaScript build step (webjs is buildless end to end; there is no bundler or
-# esbuild fallback). This image runs the app on **Node 24+**, where the strip is
-# the built-in `module.stripTypeScriptTypes`. webjs ALSO runs on **Bun** (where
-# the strip comes from `amaro` automatically), so you can swap this base for an
-# `oven/bun` image and start the app with `bun --bun run start`. Do not lower the
-# Node base below 24 (the floor the CI workflow and the framework pin enforce),
-# since the built-in stripper and recursive fs.watch need it.
+# webjs serves `.ts` directly by stripping types at the runtime layer, so there
+# is NO JavaScript build step for the app itself (webjs is buildless end to
+# end). The SDK is the one thing compiled here, because its package `exports`
+# point at `dist/`.
 #
-# Security headers are set by the framework, not the proxy. webjs emits
-# X-Content-Type-Options, X-Frame-Options, Referrer-Policy, and
+# Do not lower the Node base below 24: the built-in TypeScript stripper and
+# recursive fs.watch both need it, and it is the floor the framework pins.
+#
+# Security headers come from the framework, not from a proxy config. webjs emits
+# X-Content-Type-Options, X-Frame-Options, Referrer-Policy and
 # Permissions-Policy on every response, plus Strict-Transport-Security in
-# production over HTTPS (detected from X-Forwarded-Proto on the trusted
-# edge). So the baseline needs no reverse-proxy config. Override or extend
-# per path with package.json "webjs": { "headers": [...] }. See the
-# framework AGENTS.md "Secure response headers" section.
+# production over HTTPS, detected from X-Forwarded-Proto on the trusted edge.
 FROM node:24-alpine
 
-# ca-certificates for outbound TLS (e.g. a managed Postgres). SQLite uses the
-# built-in node:sqlite (no native module, no build toolchain needed).
+# ca-certificates for outbound TLS: the fleet API, GitHub, and the per-host
+# usage reads. SQLite is the built-in node:sqlite, so there is no native module
+# and no build toolchain.
 RUN apk add --no-cache ca-certificates
 
 WORKDIR /app
 
-# Install deps first so this layer is cached unless the manifests change.
-# package-lock.json is optional (it's absent when the app was scaffolded with
-# --no-install); the glob keeps the COPY working with or without it.
-COPY package.json package-lock.json* ./
-RUN npm install --no-audit --no-fund
+# Manifests first, so this layer caches unless a dependency changes. Every
+# workspace the root lockfile names has to be present for `npm ci` to resolve.
+COPY package.json package-lock.json ./
+COPY apps/dashboard/package.json ./apps/dashboard/
+COPY apps/website/package.json ./apps/website/
+COPY sdks/js/package.json ./sdks/js/
+RUN npm install --no-audit --no-fund --workspace=apps/dashboard --workspace=sdks/js --include-workspace-root
 
-# App source. node_modules and local state are excluded via .dockerignore.
-COPY . .
+# The SDK's sources, then its build: `@pilots/sdk` resolves through `exports`
+# to `dist/`, which is gitignored and therefore never in the context.
+COPY sdks/js ./sdks/js
+RUN npm run build --workspace=sdks/js
 
-# Drizzle has no client-codegen step, so there is nothing to build here. The
-# database is migrated at boot via `webjs start` (the `webjs.start.before`
-# step runs `webjs db migrate`). See the CMD note below.
+# The app itself. node_modules and local state are excluded by .dockerignore.
+COPY apps/dashboard ./apps/dashboard
+
+WORKDIR /app/apps/dashboard
 
 ENV NODE_ENV=production
-# webjs start reads $PORT (default 8080). compose / uncloud / Railway set it.
 ENV PORT=8080
 EXPOSE 8080
 
-# Platform-neutral readiness gate. webjs answers /__webjs/ready with 503 until
-# the instance is fully warm (analysis + first vendor attempt), then 200. This
-# HEALTHCHECK is honoured by Docker, compose, and most Docker-based platforms,
-# so the gate works the same everywhere instead of needing a per-platform file.
-# The probe is dependency-free (Node 24's built-in fetch, no curl/wget). For
-# platforms that read their own config, point the equivalent knob at the same
-# path (Railway healthcheckPath, Render healthCheckPath, Fly [checks], k8s
-# readinessProbe); see AGENTS.md "Health and readiness probes".
+# `/__webjs/ready` answers a real 503 until the instance is fully warm, so this
+# is a readiness gate rather than a liveness ping. The rollout cuts over on a
+# 200 from the same path.
 HEALTHCHECK --interval=15s --timeout=3s --start-period=40s --retries=5 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/__webjs/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
 
-# `npm start` is a thin alias for `webjs start` (#550). `webjs start` runs the
-# `webjs.start.before` step (`webjs db migrate`, idempotent / a no-op with no
-# pending migrations) IN-PROCESS, then serves on $PORT. `CMD ["webjs", "start"]`
-# is now equivalent: the migrate no longer depends on an npm `prestart` hook.
+# `webjs start` runs its `webjs.start.before` steps in-process (`webjs db
+# migrate`, idempotent with no pending migrations) and then serves on $PORT.
 CMD ["npm", "start"]

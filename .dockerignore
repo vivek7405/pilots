@@ -1,0 +1,64 @@
+# The dashboard image builds from the REPO ROOT, because it needs the
+# `sdks/js` workspace. Everything a root-context build does not need is
+# excluded here; without this the context would carry kernels, rootfs images
+# and every node_modules tree in the monorepo.
+#
+# This file applies only to a build whose context is the repo root. An app that
+# builds from its own directory reads that directory's .dockerignore instead.
+
+.git
+.github
+node_modules
+**/node_modules
+
+# The Go data plane: not in any web app's image.
+apps/hostd
+sdks/go
+
+# Machine images and kernels, which are large and never in a container.
+*.ext4
+*.img
+vmlinux*
+
+# Operational scripts and local cluster state.
+scripts
+
+# Docs and research notes.
+docs
+*.md
+!apps/dashboard/README.md
+
+# The other web app.
+apps/website
+
+# webjs per-machine caches, EXCEPT the committed vendor manifest. Do not
+# collapse to `**/.webjs`: excluding the parent blocks the child negation and
+# the vendor files would silently never ship.
+**/.webjs/*
+!**/.webjs/vendor/
+!**/.webjs/vendor/**
+
+# Local env and databases. The container gets its env from the deploy.
+.env
+.env.*
+!.env.example
+**/db/dev.db
+**/db/dev.db-journal
+**/db/dev.db-*
+
+# Build output and caches.
+dist
+build
+out
+.cache
+coverage
+
+# Tests are not needed in the production image.
+**/test/
+
+# Editors and OS noise.
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+*.log
