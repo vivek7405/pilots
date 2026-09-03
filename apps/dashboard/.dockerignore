@@ -1,0 +1,46 @@
+.git
+.github
+node_modules
+**/node_modules
+
+# `.webjs/` is ignored EXCEPT for `.webjs/vendor/`, which holds the committed
+# importmap manifest (and optionally downloaded bundle bytes) the server needs
+# at boot without reaching api.jspm.io. DO NOT collapse to `**/.webjs`: parent
+# exclusion blocks child negations and the vendor files would never ship. The
+# `**/` prefix matches `.webjs/` at any depth so a nested build context does
+# not ship the per-machine cache, mirroring the `.gitignore` pattern.
+**/.webjs/*
+!**/.webjs/vendor/
+!**/.webjs/vendor/**
+
+dist
+build
+out
+.cache
+
+# Local env files. The container gets its env from compose / uncloud, not a
+# committed file. Keep the example for reference.
+.env
+!.env.example
+
+# Local SQLite database (Drizzle, sqlite dialect). Schema + migrations ship;
+# the runtime volume owns the db file. Matches the `db/dev.db*` rule the
+# scaffold appends to `.gitignore` for the sqlite dialect (no-op for postgres).
+db/dev.db
+db/dev.db-journal
+db/dev.db-*
+
+# logs
+*.log
+npm-debug.log*
+
+# editors / OS
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# tests aren't needed in the production image
+coverage/
+test/
+**/test/

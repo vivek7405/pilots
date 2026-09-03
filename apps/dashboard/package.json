@@ -1,0 +1,81 @@
+{
+  "name": "dashboard",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "engines": {
+    "node": ">=24"
+  },
+  "imports": {
+    "#*": "./*"
+  },
+  "scripts": {
+    "css:build": "tailwindcss -i ./public/input.css -o ./public/tailwind.css --minify",
+    "gallery:clear": "node scripts/clear-gallery.mjs",
+    "dev": "webjs dev",
+    "start": "webjs start",
+    "test": "webjs test",
+    "test:server": "webjs test --server",
+    "test:browser": "webjs test --browser",
+    "check": "webjs check",
+    "typecheck": "webjs typecheck",
+    "doctor": "webjs doctor",
+    "db:generate": "webjs db generate",
+    "db:migrate": "webjs db migrate",
+    "db:push": "webjs db push",
+    "db:studio": "webjs db studio",
+    "db:seed": "webjs db seed"
+  },
+  "dependencies": {
+    "drizzle-orm": "1.0.0-rc.3",
+    "@webjsdev/cli": "0.10.57",
+    "@webjsdev/core": "0.7.53",
+    "@webjsdev/server": "0.8.66"
+  },
+  "devDependencies": {
+    "drizzle-kit": "1.0.0-rc.3",
+    "typescript": "^6.0.3",
+    "@types/node": "^24.0.0",
+    "@web/test-runner": "^0.20.0",
+    "@web/test-runner-playwright": "^0.11.0",
+    "playwright": "^1.59.0",
+    "axe-core": "^4.10.0",
+    "@tailwindcss/cli": "^4.1.0",
+    "@webjsdev/intellisense": "0.5.5"
+  },
+  "overrides": {
+    "puppeteer-core": "^25.7.0"
+  },
+  "webjs": {
+    "dev": {
+      "before": [
+        "webjs db migrate",
+        "tailwindcss -i ./public/input.css -o ./public/tailwind.css --minify"
+      ],
+      "regenerate": [
+        {
+          "output": "public/tailwind.css",
+          "command": "tailwindcss -i ./public/input.css -o ./public/tailwind.css --minify",
+          "inputs": [
+            "app",
+            "components",
+            "modules",
+            "lib",
+            "public/input.css"
+          ]
+        }
+      ]
+    },
+    "start": {
+      "before": [
+        "webjs db migrate",
+        "tailwindcss -i ./public/input.css -o ./public/tailwind.css --minify"
+      ]
+    },
+    "doctor": {
+      "gate": {
+        "UNMARKED_ASSET_LINKS": "error"
+      }
+    }
+  }
+}

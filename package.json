@@ -24,6 +24,8 @@
     "vet:sdk-go": "cd sdks/go && go vet ./...",
     "test:sdk-go": "cd sdks/go && go test ./...",
     "test:cli": "npm run build:sdk-js && npm test --workspace=packages/cli",
-    "test": "npm run vet:hostd && npm run test:hostd && npm run vet:sdk-go && npm run test:sdk-go && npm run test:sdk-js && npm run test:cli && npm run test:website && npm run test:e2e"
+    "test:dashboard": "npm run build:sdk-js && npm run check --workspace=apps/dashboard && npm run typecheck --workspace=apps/dashboard && npm run test:server --workspace=apps/dashboard",
+    "test:dashboard:browser": "npm run test:browser --workspace=apps/dashboard",
+    "test": "npm run vet:hostd && npm run test:hostd && npm run vet:sdk-go && npm run test:sdk-go && npm run test:sdk-js && npm run test:cli && npm run test:website && npm run test:dashboard && npm run test:e2e"
   }
 }
