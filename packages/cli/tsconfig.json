@@ -14,5 +14,9 @@
     "forceConsistentCasingInFileNames": true,
     "resolveJsonModule": true
   },
-  "include": ["src", "test"]
+  "include": ["src", "test"],
+  // Fixture trees are inputs to the code under test, not code: a
+  // `vite.config.ts` there is a file the detector LOOKS at, and type-checking
+  // it against this package's settings fails on a config it does not own.
+  "exclude": ["test/fixtures"]
 }
