@@ -54,6 +54,14 @@ func diffEntries(src block.Slicer, pageSize uint64) ([]entry, int) {
 	}
 	self := hdr.Metadata.BuildId
 
+	// A build mapping is aligned to the BLOCK size (4KiB), and the guest
+	// faults at the PAGE size, which under hugepage backing is 2MiB. Emitting
+	// a mapping's own offset would hand UFFDIO_COPY a destination that is not
+	// page-aligned, and the kernel rejects every one of them -- 469 failed
+	// copies out of 481 on the first hugepage host this ran on, which is how
+	// this was found. Align down, cover the mapping's whole span, and
+	// deduplicate: at 2MiB many 4KiB mappings fall inside one guest page.
+	seen := make(map[uint64]struct{})
 	var out []entry
 	var span uint64
 	var dropped int
@@ -61,16 +69,18 @@ func diffEntries(src block.Slicer, pageSize uint64) ([]entry, int) {
 		if m == nil || m.BuildId != self {
 			continue // served by the parent: unchanged, and not worth fetching
 		}
-		if span+m.Length > prefetchDiffCap {
-			dropped++
-			continue
-		}
-		// Split into page-sized entries, because replay installs one page per
-		// entry and a mapping can span many.
-		for off := m.Offset; off < m.Offset+m.Length; off += pageSize {
+		for off := m.Offset &^ (pageSize - 1); off < m.Offset+m.Length; off += pageSize {
+			if _, ok := seen[off]; ok {
+				continue
+			}
+			if span+pageSize > prefetchDiffCap {
+				dropped++
+				continue
+			}
+			seen[off] = struct{}{}
 			out = append(out, entry{off: int64(off), length: int64(pageSize)})
+			span += pageSize
 		}
-		span += m.Length
 	}
 	return out, dropped
 }
@@ -193,10 +203,7 @@ func prefault(ctx context.Context, h *handshake, src block.Slicer,
 func replay(ctx context.Context, h *handshake, src block.Slicer,
 	entries []entry, stats *Stats) {
 
-	type fetched struct {
-		off  int64
-		data []byte
-	}
+	type fetched struct{ off int64 }
 
 	work := make(chan entry, len(entries))
 	for _, e := range entries {
@@ -217,13 +224,16 @@ func replay(ctx context.Context, h *handshake, src block.Slicer,
 				if ctx.Err() != nil {
 					return
 				}
-				data, err := src.Slice(ctx, e.off, e.length)
-				if err != nil {
+				// Warm the local cache for this range; the copy worker
+				// below does the authoritative read into its own page
+				// buffer, because filling a whole guest page can take
+				// several Slice calls (see fillPage).
+				if _, err := src.Slice(ctx, e.off, e.length); err != nil {
 					skipped.Add(1)
 					continue
 				}
 				select {
-				case pages <- fetched{off: e.off, data: data}:
+				case pages <- fetched{off: e.off}:
 				case <-ctx.Done():
 					return
 				}
@@ -246,8 +256,14 @@ func replay(ctx context.Context, h *handshake, src block.Slicer,
 					skipped.Add(1)
 					continue
 				}
-				for i := copy(buf, p.data); i < len(buf); i++ {
-					buf[i] = 0
+				// The SAME fill the demand path uses. This was a single
+				// Slice plus a zero-fill of the remainder, which is correct
+				// only while one block covers one page: at 2MiB it installed
+				// 4KiB of real data and ~2MB of zeros over the guest's
+				// memory, and the machine never came back from a restore.
+				if err := fillPage(ctx, src, p.off, buf); err != nil {
+					skipped.Add(1)
+					continue
 				}
 				// Best-effort by design: a page that fails here is simply
 				// served on demand later. It must NOT count toward the fault

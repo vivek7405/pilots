@@ -274,12 +274,29 @@ func handleFault(ctx context.Context, h *handshake, src block.Slicer,
 		return fmt.Errorf("address %#x is not in any region", faultAddr)
 	}
 
-	// Loop, because a Slicer is allowed to return less than asked for -- it
-	// stops at a mapping boundary, and a page spans more than one whenever the
-	// build's block size is smaller than the guest's. Treating the first short
-	// return as the end of the image would zero-fill the rest of a page whose
-	// bytes are sitting in the very next mapping, and the guest would resume on
-	// memory that is half correct and half holes.
+	if err := fillPage(ctx, src, off, buf); err != nil {
+		return err
+	}
+
+	_, err := installPage(h.uffd, pageAddr, buf, h.pageSize, stats)
+	return err
+}
+
+// fillPage reads one guest page of the image into buf.
+//
+// It LOOPS, because a Slicer is allowed to return less than asked for -- it
+// stops at a mapping boundary, and a page spans more than one whenever the
+// build's block size is smaller than the guest's, which is every page once
+// guest memory is backed by 2MiB pages and the block size is 4KiB. Treating
+// the first short return as the end of the image would zero-fill the rest of
+// a page whose bytes are sitting in the very next mapping, and the guest
+// would resume on memory that is half correct and half holes.
+//
+// Shared with the prefetch replay rather than written twice. The replay had
+// its own single-Slice-then-zero-fill version, which was invisible at 4KiB
+// (one block IS one page) and silently corrupted almost every replayed page
+// at 2MiB -- a restored guest that resumed onto zeros and never ran.
+func fillPage(ctx context.Context, src block.Slicer, off int64, buf []byte) error {
 	filled := 0
 	for filled < len(buf) {
 		chunk, err := src.Slice(ctx, off+int64(filled), int64(len(buf)-filled))
@@ -298,9 +315,7 @@ func handleFault(ctx context.Context, h *handshake, src block.Slicer,
 	for i := filled; i < len(buf); i++ {
 		buf[i] = 0
 	}
-
-	_, err := installPage(h.uffd, pageAddr, buf, h.pageSize, stats)
-	return err
+	return nil
 }
 
 // uffdioCopy issues one UFFDIO_COPY and reports the kernel's errno, writing

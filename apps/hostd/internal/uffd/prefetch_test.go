@@ -272,3 +272,152 @@ func TestPrefaultReplaysTheRecordedOrderBeforeTheDiff(t *testing.T) {
 		t.Errorf("second replayed entry is at %d, want the diff's 0", entries[1].off)
 	}
 }
+
+// A build mapping is block-aligned (4KiB); the guest faults at the page size.
+// Handing UFFDIO_COPY a destination that is not page-aligned makes the kernel
+// reject every copy, which is exactly what happened on the first hugepage
+// host this ran on: 469 of 481 replayed pages failed.
+func TestDiffEntriesAlignsToTheGuestPageSize(t *testing.T) {
+	self := uuid.New()
+	const huge = uint64(2) << 20
+	src := buildWithMapping(self, []*block.BuildMap{
+		// A 4KiB mapping sitting one block into a 2MiB page.
+		{Offset: 4096, Length: 4096, BuildId: self},
+	})
+
+	got, _ := diffEntries(src, huge)
+	if len(got) != 1 {
+		t.Fatalf("got %d entries, want 1: %+v", len(got), got)
+	}
+	if got[0].off != 0 {
+		t.Errorf("entry at offset %d, want it aligned down to 0", got[0].off)
+	}
+	if uint64(got[0].off)&(huge-1) != 0 {
+		t.Errorf("offset %d is not %d-aligned, so the copy would be refused",
+			got[0].off, huge)
+	}
+}
+
+// Many small mappings inside one guest page must produce ONE entry, not one
+// per mapping: replay installs a whole page at a time, so the rest would be
+// redundant copies of the same page.
+func TestDiffEntriesDeduplicatesWithinAPage(t *testing.T) {
+	self := uuid.New()
+	const huge = uint64(2) << 20
+	var maps []*block.BuildMap
+	for i := 0; i < 16; i++ {
+		maps = append(maps, &block.BuildMap{
+			Offset: uint64(i) * 4096, Length: 4096, BuildId: self,
+		})
+	}
+
+	got, _ := diffEntries(buildWithMapping(self, maps), huge)
+	if len(got) != 1 {
+		t.Errorf("got %d entries for 16 mappings inside one 2MiB page, want 1",
+			len(got))
+	}
+}
+
+// A mapping that straddles a page boundary covers both pages.
+func TestDiffEntriesCoversEveryPageAMappingTouches(t *testing.T) {
+	self := uuid.New()
+	const huge = uint64(2) << 20
+	src := buildWithMapping(self, []*block.BuildMap{
+		{Offset: huge - 4096, Length: 8192, BuildId: self},
+	})
+
+	got, _ := diffEntries(src, huge)
+	if len(got) != 2 {
+		t.Fatalf("got %d entries for a straddling mapping, want 2: %+v", len(got), got)
+	}
+	if got[0].off != 0 || uint64(got[1].off) != huge {
+		t.Errorf("entries at %d and %d, want 0 and %d",
+			got[0].off, got[1].off, huge)
+	}
+}
+
+// shortSlicer hands back at most maxChunk bytes per call, which is what a real
+// build does at a mapping boundary.
+type shortSlicer struct {
+	data     []byte
+	maxChunk int
+	calls    int
+}
+
+func (s *shortSlicer) Slice(_ context.Context, off, length int64) ([]byte, error) {
+	s.calls++
+	if off >= int64(len(s.data)) {
+		return nil, block.ErrOutOfRange
+	}
+	end := off + length
+	if end > int64(len(s.data)) {
+		end = int64(len(s.data))
+	}
+	if int(end-off) > s.maxChunk {
+		end = off + int64(s.maxChunk)
+	}
+	return s.data[off:end], nil
+}
+
+func (s *shortSlicer) BlockSize() int64               { return int64(s.maxChunk) }
+func (s *shortSlicer) Size() int64                    { return int64(len(s.data)) }
+func (s *shortSlicer) Prefault(context.Context) error { return nil }
+func (s *shortSlicer) Close() error                   { return nil }
+
+// THIS TEST STANDS BETWEEN THE CODEBASE AND A GUEST THAT NEVER COMES BACK.
+//
+// A Slicer stops at a mapping boundary, so filling one guest page can take
+// several calls whenever the block size is smaller than the page size -- which
+// is EVERY page once memory is backed by 2MiB pages and blocks are 4KiB. Taking
+// the first short return as the end of the image installs a page that is part
+// real data and part zeros. At 4KiB it cannot happen, because one block is one
+// page; at 2MiB it corrupted almost every replayed page, and the restored guest
+// resumed onto zeros and never ran. Found on a live host, not in a unit test.
+func TestFillPageAssemblesAPageFromSeveralSlices(t *testing.T) {
+	const pageSize = 64 * 1024
+	want := make([]byte, pageSize)
+	for i := range want {
+		want[i] = byte(i%251 + 1) // no zeros, so a zero-fill is visible
+	}
+	src := &shortSlicer{data: want, maxChunk: 4096}
+
+	buf := make([]byte, pageSize)
+	if err := fillPage(context.Background(), src, 0, buf); err != nil {
+		t.Fatalf("fillPage: %v", err)
+	}
+	if !bytes.Equal(buf, want) {
+		for i := range buf {
+			if buf[i] != want[i] {
+				t.Fatalf("page differs at byte %d (got %#x want %#x); a single "+
+					"Slice plus a zero-fill would produce exactly this",
+					i, buf[i], want[i])
+			}
+		}
+	}
+	if src.calls < 2 {
+		t.Errorf("filled the page in %d call(s); the fixture hands back at most "+
+			"%d bytes, so this test is not exercising the loop", src.calls, src.maxChunk)
+	}
+}
+
+// Past the end of the image the rest of the page is genuinely zeros, and that
+// must still be true -- the loop must not turn a short image into an error.
+func TestFillPageZeroFillsPastTheEndOfTheImage(t *testing.T) {
+	const pageSize = 8192
+	data := bytes.Repeat([]byte{0xAA}, 4096)
+	src := &shortSlicer{data: data, maxChunk: 4096}
+
+	buf := make([]byte, pageSize)
+	for i := range buf {
+		buf[i] = 0xFF // dirty, so a missing zero-fill is visible
+	}
+	if err := fillPage(context.Background(), src, 0, buf); err != nil {
+		t.Fatalf("fillPage: %v", err)
+	}
+	if !bytes.Equal(buf[:4096], data) {
+		t.Error("the part of the page inside the image was not filled")
+	}
+	if !bytes.Equal(buf[4096:], make([]byte, 4096)) {
+		t.Error("the part past the end of the image was not zeroed")
+	}
+}

@@ -480,6 +480,11 @@ PUBKEY=$(on_host "wg pubkey < /var/lib/pilots/mesh.key")
 # never arrives.
 MESH_ADDR=$(on_host "/opt/pilots/bin/hostd mesh-addr")
 HOST_ID="host-$(echo "$PUBKEY" | tr -d '=/+' | tr 'A-Z' 'a-z' | cut -c1-12)"
+# Asked of the host rather than assumed from the reservation above: the kernel
+# grants what it can, and a fragmented box can come back with none. The awk
+# program is single-quoted on the far side, so its $2 reaches awk instead of
+# being eaten by the remote shell as a positional parameter.
+HUGEPAGES=$(on_host "awk '/^HugePages_Total:/{print (\$2 > 0) ? 1 : 0}' /proc/meminfo")
 echo "  host id   ${HOST_ID}"
 echo "  mesh addr ${MESH_ADDR}"
 
@@ -500,6 +505,16 @@ PILOT_S3_BUCKET=${BUCKET}
 PILOT_S3_ACCESS_KEY=${S3_KEY}
 PILOT_S3_SECRET_KEY=${S3_SECRET}
 PILOT_TEMPLATE_ROOTFS=/var/lib/pilots/templates/golden.ext4
+# Guest memory comes out of the 2MiB pool reserved in step [2/10]. This line
+# is the difference between RESERVING the pool and USING it: without it the
+# pool sits idle, every machine runs at 4KiB, and /v1/health reports hugepages
+# false while [10/10] cheerfully prints "hugepages: yes".
+#
+# Read from HugePages_Total as it actually stands rather than from what was
+# asked for. A host whose reservation failed must run at 4KiB instead of
+# configuring Firecracker for a pool it does not have, which surfaces as
+# SIGBUS in a running guest rather than as a refused create.
+PILOT_HUGEPAGES=${HUGEPAGES}
 # buildkitd runs rootless as the pilot user, so its socket lives under THAT
 # user's runtime directory. hostd is root and would derive /run/user/0, where
 # there is no socket and the dial fails naming nothing about users.
