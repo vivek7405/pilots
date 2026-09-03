@@ -11,11 +11,26 @@ type fakeStatter struct {
 	report uffd.StatsReport
 	ok     bool
 	asked  int
+	pid    int
 }
 
 func (f *fakeStatter) Stats() (uffd.StatsReport, bool) {
 	f.asked++
 	return f.report, f.ok
+}
+
+func (f *fakeStatter) Pid() int { return f.pid }
+
+var _ statter = (*fakeStatter)(nil)
+
+// alive builds the "still has a handler" set for observe: every listed
+// machine on the same pid, which is a scrape with no handler turnover.
+func alive(pid int, ids ...string) map[string]int {
+	out := make(map[string]int, len(ids))
+	for _, id := range ids {
+		out[id] = pid
+	}
+	return out
 }
 
 // The whole point of the collector: N machines become ONE series each. A
@@ -72,7 +87,7 @@ func TestRetiredHandlersKeepTheCountersMonotonic(t *testing.T) {
 	var r retiredUffd
 
 	// Two machines busy.
-	total := r.observe(map[string]uffdStats{
+	total := r.observe(alive(1, "m-1", "m-2"), map[string]uffdStats{
 		"m-1": {Faults: 100, BytesCopied: 4096, Replayed: 5, PrefetchHit: 4},
 		"m-2": {Faults: 50, BytesCopied: 2048, Replayed: 3, PrefetchHit: 2},
 	})
@@ -82,7 +97,7 @@ func TestRetiredHandlersKeepTheCountersMonotonic(t *testing.T) {
 	}
 
 	// m-2 suspends. Its handler is gone; its faults must not vanish.
-	total = r.observe(map[string]uffdStats{
+	total = r.observe(alive(1, "m-1"), map[string]uffdStats{
 		"m-1": {Faults: 120, BytesCopied: 8192, Replayed: 6, PrefetchHit: 5},
 	})
 	if total.Faults != 50 {
@@ -94,7 +109,7 @@ func TestRetiredHandlersKeepTheCountersMonotonic(t *testing.T) {
 	}
 
 	// m-1 keeps running: it must NOT be double counted.
-	total = r.observe(map[string]uffdStats{
+	total = r.observe(alive(1, "m-1"), map[string]uffdStats{
 		"m-1": {Faults: 130, BytesCopied: 9000, Replayed: 7, PrefetchHit: 6},
 	})
 	if total.Faults != 50 {
@@ -137,10 +152,10 @@ func TestCollectMetricsIsIdempotentAcrossScrapes(t *testing.T) {
 func TestRetiredHandlersSurviveACounterResetOnTheSameMachine(t *testing.T) {
 	var r retiredUffd
 
-	r.observe(map[string]uffdStats{"m-1": {Faults: 100, BytesCopied: 4096}})
+	r.observe(alive(1, "m-1"), map[string]uffdStats{"m-1": {Faults: 100, BytesCopied: 4096}})
 
 	// Same machine, new handler after a wake: the counter restarts.
-	total := r.observe(map[string]uffdStats{"m-1": {Faults: 3, BytesCopied: 128}})
+	total := r.observe(alive(2, "m-1"), map[string]uffdStats{"m-1": {Faults: 3, BytesCopied: 128}})
 	if total.Faults != 100 {
 		t.Fatalf("retired faults = %d, want the dead handler's 100", total.Faults)
 	}
@@ -149,9 +164,52 @@ func TestRetiredHandlersSurviveACounterResetOnTheSameMachine(t *testing.T) {
 	}
 
 	// And it keeps climbing from there without re-retiring.
-	total = r.observe(map[string]uffdStats{"m-1": {Faults: 9, BytesCopied: 512}})
+	total = r.observe(alive(2, "m-1"), map[string]uffdStats{"m-1": {Faults: 9, BytesCopied: 512}})
 	if total.Faults != 100 {
 		t.Errorf("retired faults = %d after the new handler advanced, want 100",
+			total.Faults)
+	}
+}
+
+// The new handler is told apart by its pid, not by its count going down. A
+// woken machine that has already out-faulted its previous handler by the
+// first scrape looks, by count alone, like the same handler still climbing --
+// and the old handler's work silently leaves the total.
+func TestRetiredHandlersSurviveAResetThatOvershootsTheOldCount(t *testing.T) {
+	var r retiredUffd
+
+	r.observe(alive(1, "m-1"), map[string]uffdStats{"m-1": {Faults: 100}})
+
+	// New pid, and it has already served more than the old one ever did.
+	total := r.observe(alive(2, "m-1"), map[string]uffdStats{"m-1": {Faults: 150}})
+	if total.Faults != 100 {
+		t.Errorf("retired faults = %d, want the dead handler's 100; a reset "+
+			"that overshoots the old count was read as the old handler", total.Faults)
+	}
+}
+
+// A handler that is still there but did not answer this scrape -- the control
+// socket is served one request at a time and a prefault holds it for seconds
+// -- must not be retired. Retiring it folds its total in permanently, and its
+// next answer is then counted on top of that: the series jumps by everything
+// the machine has ever done.
+func TestRetiredHandlersIgnoreAScrapeTheHandlerMissed(t *testing.T) {
+	var r retiredUffd
+
+	r.observe(alive(1, "m-1"), map[string]uffdStats{"m-1": {Faults: 100}})
+
+	// Still alive, no answer.
+	total := r.observe(alive(1, "m-1"), map[string]uffdStats{})
+	if total.Faults != 0 {
+		t.Fatalf("retired faults = %d after a missed scrape of a live handler, want 0",
+			total.Faults)
+	}
+
+	// It answers again. 100 retired + 120 live would be 220 for a machine
+	// that has faulted 120 times.
+	total = r.observe(alive(1, "m-1"), map[string]uffdStats{"m-1": {Faults: 120}})
+	if total.Faults != 0 {
+		t.Errorf("retired faults = %d, want 0: the handler never went away",
 			total.Faults)
 	}
 }

@@ -32,42 +32,55 @@ type uffdStats = uffd.StatsReport
 // every rate() over it wrong. It also made an e2e assertion measure a delta of
 // MINUS ten faults across a suspend/wake, which is how this was found.
 //
-// Keyed by machine so a handler counted once is not counted twice: a machine
-// that is still alive at the next scrape contributes through the live path,
-// and only a machine that has disappeared is folded in here.
+// Keyed by machine, and the reading remembers which handler PROCESS it came
+// from. A machine keeps its id across a suspend and wake but its handler does
+// not: the woken machine gets a new process whose counters start at zero, and
+// keyed by machine alone that reads as one handler counting backwards. The
+// pid is what tells a new handler from the old one; a "counter went down"
+// heuristic misses the reset whenever the new handler has already served more
+// faults than the old one had when it was last scraped.
 type retiredUffd struct {
 	mu     sync.Mutex
-	lastBy map[string]uffdStats
+	lastBy map[string]handlerReading
 	total  uffdStats
 }
 
-func (r *retiredUffd) observe(live map[string]uffdStats) uffdStats {
+// handlerReading is one scrape's answer from one handler process.
+type handlerReading struct {
+	pid   int
+	stats uffdStats
+}
+
+// observe folds in every handler that has gone since the last scrape and
+// returns the running total of retired work.
+//
+// alive is every machine that still HAS a handler this scrape, keyed to its
+// pid, whether or not that handler answered; live is the readings from the
+// ones that did. The two are separate on purpose: a handler that merely
+// failed to answer -- the control socket is served one request at a time, and
+// a prefault holds it for seconds -- must not be retired, because its next
+// answer would then be counted on top of its retired total. Only a handler
+// that is gone, or replaced by a new pid, retires.
+func (r *retiredUffd) observe(alive map[string]int, live map[string]uffdStats) uffdStats {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.lastBy == nil {
-		r.lastBy = map[string]uffdStats{}
+		r.lastBy = map[string]handlerReading{}
 	}
-	// Anything seen before and absent now has retired: fold its last reading
-	// in permanently.
 	for id, last := range r.lastBy {
-		if _, ok := live[id]; !ok {
-			r.retire(last)
+		if pid, ok := alive[id]; !ok || pid != last.pid {
+			r.retire(last.stats)
 			delete(r.lastBy, id)
 		}
 	}
 	for id, cur := range live {
-		// A machine keeps its id across a suspend and wake, but its handler
-		// does not: the woken machine gets a NEW process whose counters start
-		// at zero. Keyed by machine alone that reads as the same handler
-		// counting backwards, and the fleet total drops by whatever the dead
-		// one had done -- which is exactly what a counter must never do.
-		//
-		// A reading lower than the last one for this id is that reset. Retire
-		// the previous handler's work before adopting the new reading.
-		if last, ok := r.lastBy[id]; ok && cur.Faults < last.Faults {
-			r.retire(last)
+		if last, ok := r.lastBy[id]; ok && cur.Faults < last.stats.Faults {
+			// Same pid, smaller count. A handler's counters never go down,
+			// so this is a pid reused between two scrapes; keep the series
+			// monotonic rather than trust the coincidence.
+			r.retire(last.stats)
 		}
-		r.lastBy[id] = cur
+		r.lastBy[id] = handlerReading{pid: alive[id], stats: cur}
 	}
 	return r.total
 }
@@ -89,13 +102,15 @@ func (m *Manager) CollectMetrics() {
 	}
 	m.mu.RUnlock()
 
+	alive := make(map[string]int, len(handlers))
 	live := make(map[string]uffdStats, len(handlers))
 	for id, h := range handlers {
+		alive[id] = h.Pid()
 		if r, ok := h.Stats(); ok {
 			live[id] = r
 		}
 	}
-	retired := m.retired.observe(live)
+	retired := m.retired.observe(alive, live)
 
 	faults, bytes, replayed, hit, startupPages, startupBytes := foldStats(live)
 	faults += retired.Faults
@@ -133,7 +148,9 @@ func foldStats(live map[string]uffdStats) (faults, bytes, replayed, hit, startup
 }
 
 // statter is the part of uffd.Process this file needs, named so the collector
-// can be tested without starting a handler process.
+// can be tested without starting a handler process. Pid is what tells one
+// handler process from its successor on the same machine.
 type statter interface {
 	Stats() (uffdStats, bool)
+	Pid() int
 }
