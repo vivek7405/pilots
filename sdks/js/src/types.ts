@@ -26,6 +26,13 @@ export interface Knobs {
 
 /** The platform's one primitive. Its id, name and URL never change. */
 export interface Machine {
+  /**
+   * The org that owns this object. Present when the caller is an admin key,
+   * which is the only caller that sees objects across orgs; a tenant-scoped
+   * key only ever sees its own, so the field carries nothing it did not
+   * already know.
+   */
+  org_id?: string
   id: string
   name: string
   host_id: string
@@ -115,6 +122,13 @@ export interface HealthCheck {
 }
 
 export interface Service {
+  /**
+   * The org that owns this object. Present when the caller is an admin key,
+   * which is the only caller that sees objects across orgs; a tenant-scoped
+   * key only ever sees its own, so the field carries nothing it did not
+   * already know.
+   */
+  org_id?: string
   id: string
   name: string
   app?: string
@@ -168,6 +182,13 @@ export interface Release {
 }
 
 export interface Volume {
+  /**
+   * The org that owns this object. Present when the caller is an admin key,
+   * which is the only caller that sees objects across orgs; a tenant-scoped
+   * key only ever sees its own, so the field carries nothing it did not
+   * already know.
+   */
+  org_id?: string
   id: string
   name: string
   size_gib: number

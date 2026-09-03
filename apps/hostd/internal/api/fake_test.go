@@ -16,6 +16,11 @@ type fakeManager struct {
 
 	created, destroyed, suspended, woken, restored int
 	volumesCreated                                 int
+	// lastCreate is the request as the handler passed it down, so a test can
+	// assert what the handler filled in -- the org above all, which must come
+	// from the key and never from the body.
+	lastCreate       CreateMachineRequest
+	lastCreateVolume CreateVolumeRequest
 }
 
 func newFakeManager() *fakeManager {
@@ -32,8 +37,9 @@ func newFakeManager() *fakeManager {
 	}
 }
 
-func (f *fakeManager) Create(context.Context, CreateMachineRequest) (*state.Machine, error) {
+func (f *fakeManager) Create(_ context.Context, req CreateMachineRequest) (*state.Machine, error) {
 	f.created++
+	f.lastCreate = req
 	return f.machine, f.err
 }
 func (f *fakeManager) Destroy(context.Context, string) error { f.destroyed++; return f.err }
@@ -59,8 +65,9 @@ func (f *fakeManager) Exec(context.Context, string, ExecRequest) (*ExecResponse,
 func (f *fakeManager) Logs(context.Context, string) ([]byte, error) {
 	return []byte("boot log"), f.err
 }
-func (f *fakeManager) CreateVolume(context.Context, CreateVolumeRequest) (*state.Volume, error) {
+func (f *fakeManager) CreateVolume(_ context.Context, req CreateVolumeRequest) (*state.Volume, error) {
 	f.volumesCreated++
+	f.lastCreateVolume = req
 	return f.volume, f.err
 }
 func (f *fakeManager) ListVolumes(context.Context) ([]state.Volume, error) {

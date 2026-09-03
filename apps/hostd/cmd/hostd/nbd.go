@@ -122,6 +122,9 @@ func dispatchSubcommand() bool {
 	if dispatchMeshUp() {
 		return true
 	}
+	if dispatchBootstrapKey() {
+		return true
+	}
 
 	var (
 		run  func([]string) error

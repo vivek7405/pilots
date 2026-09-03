@@ -21,6 +21,10 @@ type Knobs struct {
 // Machine is the one primitive. Its id, name and URL never change, across
 // suspend, wake, checkpoint, restore, promote and host migration.
 type Machine struct {
+	// OrgID is the org that owns this object. Set when the caller is an admin
+	// key, which is the only caller that sees objects across orgs; a
+	// tenant-scoped key only ever sees its own.
+	OrgID        string `json:"org_id,omitempty"`
 	ID           string `json:"id"`
 	Name         string `json:"name"`
 	HostID       string `json:"host_id"`
@@ -135,6 +139,10 @@ type HealthCheck struct {
 }
 
 type Service struct {
+	// OrgID is the org that owns this object. Set when the caller is an admin
+	// key, which is the only caller that sees objects across orgs; a
+	// tenant-scoped key only ever sees its own.
+	OrgID        string       `json:"org_id,omitempty"`
 	ID           string       `json:"id"`
 	Name         string       `json:"name"`
 	App          string       `json:"app,omitempty"`
@@ -194,6 +202,10 @@ type Release struct {
 // Volume is persistent, per-write-durable storage, attached to at most one
 // machine and mounted by at most one host.
 type Volume struct {
+	// OrgID is the org that owns this object. Set when the caller is an admin
+	// key, which is the only caller that sees objects across orgs; a
+	// tenant-scoped key only ever sees its own.
+	OrgID     string `json:"org_id,omitempty"`
 	ID        string `json:"id"`
 	Name      string `json:"name"`
 	SizeGiB   int    `json:"size_gib"`
