@@ -92,6 +92,18 @@ compose fragment on the ordinary primitives, not a product tier. See
    dispose"). Storage is content-addressed and host-agnostic (better than
    Fly's host-pinned volumes).
 
+8. **Guest page size is fleet-wide.** Guest memory is backed by 2MiB
+   hugepages when the host is configured for it (`PILOT_HUGEPAGES`, with the
+   pool reserved at boot by `host-bootstrap.sh`). The size is recorded IN
+   every snapshot and cannot be reinterpreted at restore, so a host that
+   disagrees with the fleet cannot restore the fleet's machines at all — not
+   slowly, not at all. The template manifest records what it was photographed
+   at, and a mismatch rebuilds rather than repairs. Capacity is then counted
+   from `HugePages_Free`, not `MemAvailable`, which excludes the reserved
+   pool: a host counting the wrong one advertises itself full and refuses
+   every rescue. Swap must be off, because a swapped-out page is not resident
+   and `mincore` would leave it out of the diff.
+
 ---
 
 ## Contracts (fixed before parallel work begins)
@@ -411,12 +423,29 @@ and every one of them was arrived at by measuring a resume gap:
    write, and that write is inside the pause — so the freeze a user feels
    belongs to the checkpoint before the one they asked for.
 2. *Before* pausing, ask the uffd handler to make the guest's memory
-   resident. Firecracker reads all of guest memory to write a snapshot, so
-   any page still lazily backed faults through the handler with the guest
-   frozen. On a first checkpoint that is the entire image: 5.8s versus 450ms.
-3. Flush the guest's page cache (`sync` over the agent) so the memory and
-   disk images agree about recent writes.
-4. PATCH `/vm Paused` → PUT `/snapshot/create {Full, snap.bin, mem.bin}`.
+   resident — **but only when the snapshot will be a Full**. Firecracker
+   reads all of guest memory to write a Full, so any page still lazily backed
+   faults through the handler with the guest frozen: on a first checkpoint
+   that is the entire image, 5.8s versus 450ms. Under a Diff the dirty set IS
+   the resident set, so prefaulting first turns the Diff back into a Full and
+   costs the whole lever.
+3. Reclaim inside the guest over the agent, in one exec: `fstrim`, `sync`,
+   `drop_caches`, `compact_memory`. The `sync` is what makes the memory and
+   disk images agree about recent writes; the rest shrink what the snapshot
+   has to carry at all. Only `sync` is required — the others are tolerated
+   individually, because a guest missing one knob still wants the rest.
+4. PATCH `/vm Paused` → PUT `/snapshot/create`, **`Diff` whenever the local
+   `mem.bin` is exactly `mem_size_mib`, else `Full`**. Firecracker merges a
+   diff into that file in place under exactly that condition and OVERWRITES
+   it with a partial image otherwise — which does not fail, it silently
+   produces an image whose untouched pages read back as zeros and loses the
+   machine's memory one restore later. So the first snapshot of every machine
+   lifetime is Full: a woken machine has no local image, because suspend
+   removes it. `track_dirty_pages` stays off; the diff comes from `mincore`,
+   which is the only flavour that composes with hugepage backing, since
+   dirty-page tracking forces KVM to 4KiB page tables. Measured on FC 1.16.1
+   over a uffd-backed 512MiB guest: 78-116ms against 2.8-3.5s for a Full of
+   the same paused instant, with the merged image byte-identical to it.
 5. Read the NBD handler's dirty bitmap over its control socket, while the
    guest is still paused — a bitmap read mid-write describes a disk state
    that never existed.
@@ -489,8 +518,15 @@ replay (read the replay file fully BEFORE creating the record file — commonly
 the same path, and os.Create truncates). A control socket exposes `prefault`,
 which installs every page; the snapshot path calls it before pausing.
 MINOR and WP faults are counted and still answered — leaving one unresolved
-wedges the guest thread that raised it. Mixed page sizes (hugepages+uffd) are
-refused at the handshake, not per fault.
+wedges the guest thread that raised it. Mixed page sizes are refused at the
+handshake, not per fault; a **uniform** page size is accepted at either 4KiB
+or 2MiB, which is what lets guest memory be hugepage-backed. A short
+`UFFDIO_COPY` is resumed from the bytes the kernel reports rather than treated
+as failure — a hugetlb copy can be preempted mid-page and is never
+redelivered, so failing it wedges the guest thread for ever. The replay set is
+the recorded fault order followed by the ranges the last cycle's diff stores
+itself (capped at 64MiB): a sequence that matches real access order, then a
+set with no ordering.
 
 **Lazy disk (NBD handler):** kernel NBD split-mode via socketpair fd handoff
 (28-byte BE requests / 16-byte BE replies); serves a block `Overlay` =

@@ -376,6 +376,28 @@ async function hostSharesExtents() {
   return health.json?.reflink === true;
 }
 
+// Read one number out of the Prometheus endpoint.
+//
+// The same precedent as hostSharesExtents: ask the server what it observed
+// rather than infer it from the outside. Sums every series of the family, so
+// a metric that later grows a label keeps working.
+async function scrapeMetric(name) {
+  const res = await fetch(`${API}/metrics`);
+  if (!res.ok) return null;
+  const body = await res.text();
+  let total = null;
+  for (const line of body.split('\n')) {
+    if (line.startsWith('#') || !line.startsWith(name)) continue;
+    const rest = line.slice(name.length);
+    // Exact family match: the name is followed by a space or a label set,
+    // never by more name characters.
+    if (rest && !rest.startsWith(' ') && !rest.startsWith('{')) continue;
+    const value = Number(line.slice(line.lastIndexOf(' ') + 1));
+    if (Number.isFinite(value)) total = (total ?? 0) + value;
+  }
+  return total;
+}
+
 async function timingAssertions() {
   const created = [];
   const reflink = await hostSharesExtents();
@@ -504,6 +526,82 @@ async function timingAssertions() {
       const out = await exec(id, 'tr "\n" "," < /var/tmp/rounds.txt');
       assert(out === 'one,2,3,4,',
         `writes were lost across suspend/wake: ${JSON.stringify(out)}`);
+    });
+
+    // ---- #22 gate: the engine-performance levers -----------------------
+    //
+    // These come AFTER the assertions above so a failure in the metrics path
+    // cannot mask a regression in the numbers that were already the gate.
+
+    await step('the host reports its guest page size', async () => {
+      const health = await request('/v1/health', { auth: false });
+      assert(typeof health.json?.hugepages === 'boolean',
+        'GET /v1/health does not report hugepages. A host that cannot restore '
+        + 'the fleet snapshots is invisible until a wake fails, because a page '
+        + 'size is baked into every snapshot and cannot be reinterpreted.');
+      console.log(`      hugepages: ${health.json.hugepages}`);
+    });
+
+    await step('a second checkpoint of an idle machine is much faster than its first',
+      async () => {
+        // Four back to back with no guest work between them. The first is the
+        // Full that seeds mem.bin; 2-4 are Diffs of an idle guest.
+        const gaps = [];
+        for (let i = 0; i < 4; i++) {
+          const { status, json } = await request(
+            `/v1/machines/${id}/checkpoints`, { method: 'POST', body: {} });
+          assert(status === 201, `checkpoint ${i + 1}: HTTP ${status}`);
+          gaps.push(json.resume_gap_ms ?? 0);
+        }
+        const first = gaps[0];
+        const rest = median(gaps.slice(1));
+        console.log(`      checkpoint 1 (Full) ${first}ms, 2-4 (Diff) p50 `
+          + `${rest.toFixed(0)}ms  [${gaps.join(', ')}]`);
+
+        // Without extent sharing both checkpoints pay a real copy of snap.bin
+        // and the cow inside the pause -- a fixed cost added to BOTH, which
+        // compresses the ratio. The switch is still visible; the bar moves.
+        const ratio = reflink ? 5 : 2;
+        assert(first >= rest * ratio,
+          `the first checkpoint was ${first}ms and the later ones ${rest.toFixed(0)}ms, `
+          + `a ratio of ${(first / Math.max(rest, 1)).toFixed(1)}x against the `
+          + `${ratio}x expected ${reflink ? 'with' : 'without'} reflink. Every `
+          + `checkpoint is still writing the whole memory image.`);
+      });
+
+    await step('a second wake faults less than the first', async () => {
+      // The second wake replays a fault order the first could not have had,
+      // plus the ranges the last cycle's diff stores itself.
+      const deltas = [];
+      for (let round = 0; round < 2; round++) {
+        const before = await scrapeMetric('pilots_uffd_faults_total');
+        const s = await request(`/v1/machines/${id}/suspend`, { method: 'POST' });
+        assert(s.status === 204 || s.status === 200, `suspend: ${s.status}`);
+        const w = await request(`/v1/machines/${id}/wake`, { method: 'POST' });
+        assert(w.status === 204 || w.status === 200, `wake: ${w.status}`);
+        await exec(id, 'true');
+        const after = await scrapeMetric('pilots_uffd_faults_total');
+        assert(before !== null && after !== null,
+          'GET /metrics does not publish pilots_uffd_faults_total');
+        deltas.push(after - before);
+      }
+      console.log(`      faults to first exec: wake 1 ${deltas[0]}, wake 2 ${deltas[1]}`);
+      assert(deltas[1] < deltas[0],
+        `the second wake faulted ${deltas[1]} pages against the first's `
+        + `${deltas[0]}: the replay is not predicting what the guest needs.`);
+    });
+
+    await step('a checkpoint stores far less than the machine holds', async () => {
+      const ratio = await scrapeMetric('pilots_snapshot_stored_ratio_sum');
+      const count = await scrapeMetric('pilots_snapshot_stored_ratio_count');
+      assert(ratio !== null && count !== null && count > 0,
+        'GET /metrics does not publish pilots_snapshot_stored_ratio');
+      const mean = ratio / count;
+      console.log(`      mean stored/memory ratio over ${count} checkpoints: `
+        + `${(mean * 100).toFixed(1)}%`);
+      assert(mean < 1,
+        `checkpoints stored ${(mean * 100).toFixed(1)}% of the machine's memory `
+        + 'on average, so nothing is being deduplicated or elided.');
     });
   } finally {
     for (const id of created) {
