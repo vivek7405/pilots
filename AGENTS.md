@@ -9,6 +9,39 @@ Canonical guide for any agent or human working in this repo. It owns the
 
 ---
 
+## The bar (read this first, before planning or implementing anything)
+
+Every plan written into an issue and every line of code is measured against
+this, in order. It is loaded into context automatically (`CLAUDE.md` is
+`@AGENTS.md`), so it applies while planning AND while implementing.
+
+1. **At par with e2b-infra, fly.io and sprites.dev, or better.** Never below
+   any of them on a capability they have. `docs/prior-art/README.md` carries
+   the scorecard; a design that lands a "~" or "✗" where a competitor has "✓"
+   must say why.
+2. **Resilient, robust, and simple to maintain.** Three processes per host,
+   no extra tiers, no second copy of a contract, no dependency added for
+   convenience. When two designs are equally fast, the one with fewer moving
+   parts wins.
+3. **No central control plane, on purpose.** The shape is borrowed from
+   uncloud (`docs/prior-art/uncloud.md`): every host runs the identical stack
+   and serves the full API from its local Corrosion replica. No request path
+   may depend on any specific host, including the dashboard's. A design that
+   needs a coordinator has already failed this bar.
+4. **Deploying is very fast, and a webjs app deploys fastest of all.** webjs
+   is our own buildless, web-components, full-stack framework: its deploy is
+   `npm install` on the fleet-wide layer cache, then a restore from the
+   release snapshot, then `/__webjs/ready`. Nothing may sit between those
+   steps. See `docs/prior-art/webjs-deploy-contract.md`.
+5. **Spin-up, pause/resume and snapshot/restore are extremely fast.** Create
+   is a restore, not a boot; wake is a held request, never a waiting page;
+   a checkpoint's resume gap is independent of machine size. The numbers are
+   the SLO table in #7 and the levers beyond it are #22; a change that makes
+   any of them slower is a regression even if every test stays green.
+
+When a phase plan, an issue body, or a review comment conflicts with one of
+these, this section wins and the conflict is stated in the issue.
+
 ## What pilots is
 
 A **2-in-1 sandbox + PaaS** on Firecracker microVMs — instant sandboxes for
