@@ -692,13 +692,28 @@ host_counts() {
     2>/dev/null | tr -d '\n'
 }
 
-# live_machines_on counts the machines a host says it owns.
+# live_machines_on counts the machines a host is RUNNING a Firecracker for.
+#
+# 'running', not 'not destroyed': a suspended machine is a perfectly healthy
+# row whose VMM is gone -- giving the slot back is the whole point of suspend
+# -- so counting it would report a divergence on a host that has none.
 live_machines_on() {
   local hid; hid=$(curl -sf -m 5 "http://$1:8080/v1/health" | jf host_id)
   api "$1" GET /v1/machines | python3 -c "
 import sys, json
 rows = json.load(sys.stdin)
-print(sum(1 for m in rows if m.get('host_id') == '$hid' and m.get('state') != 'destroyed'))" 2>/dev/null || echo -1
+print(sum(1 for m in rows if m.get('host_id') == '$hid' and m.get('state') == 'running'))" 2>/dev/null || echo -1
+}
+
+# machine_ids_on lists the ids a host still owns, sorted so two snapshots can
+# be diffed with comm.
+machine_ids_on() {
+  local hid; hid=$(curl -sf -m 5 "http://$1:8080/v1/health" | jf host_id)
+  api "$1" GET /v1/machines | python3 -c "
+import sys, json
+for m in json.load(sys.stdin):
+    if m.get('host_id') == '$hid' and m.get('state') != 'destroyed':
+        print(m['id'])" 2>/dev/null | sort
 }
 
 # wait_serving polls a host's health until it answers or the deadline passes.
@@ -805,7 +820,9 @@ say "15. A hundred create/destroy cycles return the host to its baseline"
 CHURN_N=${GATE_CHURN_N:-100}
 if [ -n "$H_IP" ]; then
   BASE_COUNTS=$(host_counts "$H_IP")
-  SINCE=$(date '+%Y-%m-%d %H:%M:%S')
+  # Read on the NODE, not here: journalctl --since is interpreted by the node's
+  # clock, and any skew between the two silently moves the window.
+  SINCE=$($SSH "root@$H_IP" "date '+%Y-%m-%d %H:%M:%S'" 2>/dev/null | tr -d '\n')
   ok "baseline on ${H_IP}: netns/veth/nbd = ${BASE_COUNTS}"
 
   CHURN_FAIL=0
@@ -878,23 +895,34 @@ if [ -n "$H_IP" ]; then
       # All three bombs, back to back, each bounded so the step ends. The
       # memory bomb is the one that reaches the host: a guest touching every
       # page it has drives the Firecracker process's RSS at memory.max.
-      api "$H_IP" POST "/v1/machines/${BOMB_ID}/exec" \
-        '{"cmd":"timeout 30 sh -c \u0027tail /dev/zero\u0027 >/dev/null 2>&1; exit 0","user":"root"}' >/dev/null 2>&1 &
-      MEMBOMB=$!
+      # sample_while polls the slice for as long as the background exec whose
+      # pid it is given is still running, so every peak below covers the bomb
+      # it is reported against. Sampling only the memory bomb and then quoting
+      # the pids peak against the FORK bomb -- which had not been launched yet
+      # -- reports a number from the wrong window.
       MEM_PEAK=0; PIDS_PEAK=0
-      while kill -0 $MEMBOMB 2>/dev/null; do
-        READING=$($SSH "root@$H_IP" "cat ${BOMB_SLICE}/memory.current ${BOMB_SLICE}/pids.current 2>/dev/null | tr '\n' ' '" 2>/dev/null)
-        CUR_MEM=$(echo "$READING" | awk '{print $1}'); CUR_PIDS=$(echo "$READING" | awk '{print $2}')
-        [ -n "$CUR_MEM" ] && [ "$CUR_MEM" -gt "$MEM_PEAK" ] 2>/dev/null && MEM_PEAK=$CUR_MEM
-        [ -n "$CUR_PIDS" ] && [ "$CUR_PIDS" -gt "$PIDS_PEAK" ] 2>/dev/null && PIDS_PEAK=$CUR_PIDS
-        sleep 1
-      done
-      wait $MEMBOMB 2>/dev/null
+      sample_while() {
+        while kill -0 "$1" 2>/dev/null; do
+          READING=$($SSH "root@$H_IP" "cat ${BOMB_SLICE}/memory.current ${BOMB_SLICE}/pids.current 2>/dev/null | tr '\n' ' '" 2>/dev/null)
+          CUR_MEM=$(echo "$READING" | awk '{print $1}'); CUR_PIDS=$(echo "$READING" | awk '{print $2}')
+          [ -n "$CUR_MEM" ] && [ "$CUR_MEM" -gt "$MEM_PEAK" ] 2>/dev/null && MEM_PEAK=$CUR_MEM
+          [ -n "$CUR_PIDS" ] && [ "$CUR_PIDS" -gt "$PIDS_PEAK" ] 2>/dev/null && PIDS_PEAK=$CUR_PIDS
+          sleep 1
+        done
+        wait "$1" 2>/dev/null
+      }
 
       api "$H_IP" POST "/v1/machines/${BOMB_ID}/exec" \
-        '{"cmd":"timeout 15 sh -c \u0027bomb(){ bomb|bomb & }; bomb\u0027 >/dev/null 2>&1; exit 0","user":"root"}' >/dev/null 2>&1
+        '{"cmd":"timeout 30 sh -c \u0027tail /dev/zero\u0027 >/dev/null 2>&1; exit 0","user":"root"}' >/dev/null 2>&1 &
+      sample_while $!
+
       api "$H_IP" POST "/v1/machines/${BOMB_ID}/exec" \
-        '{"cmd":"timeout 15 sh -c \u0027while :; do :; done\u0027 >/dev/null 2>&1; exit 0","user":"root"}' >/dev/null 2>&1
+        '{"cmd":"timeout 15 sh -c \u0027bomb(){ bomb|bomb & }; bomb\u0027 >/dev/null 2>&1; exit 0","user":"root"}' >/dev/null 2>&1 &
+      sample_while $!
+
+      api "$H_IP" POST "/v1/machines/${BOMB_ID}/exec" \
+        '{"cmd":"timeout 15 sh -c \u0027while :; do :; done\u0027 >/dev/null 2>&1; exit 0","user":"root"}' >/dev/null 2>&1 &
+      sample_while $!
 
       # Containment, asserted on the slice rather than on who did the killing.
       # A guest that OOMs its own processes and a slice that OOM-kills the VMM
@@ -951,7 +979,14 @@ if [ -n "$H_IP" ]; then
     api "$H_IP" POST "/v1/machines/${H5_ID}/wake" >/dev/null 2>&1 \
       && ok "and woke" || bad "the first wake failed"
 
-    FD_BEFORE=$($SSH "root@$H_IP" "ls /proc/$(fc_pid "$H_IP" "$H5_ID")/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
+    # The pid is read into a variable rather than interpolated inline: an empty
+    # one makes the remote command 'ls /proc//fd', which the kernel resolves to
+    # the non-existent /proc/fd, so wc -l prints 0 -- and 0 -> 0 passes the fd
+    # assertion below on a machine that has no Firecracker at all.
+    H5_FCPID=$(fc_pid "$H_IP" "$H5_ID")
+    [ -n "$H5_FCPID" ] && ok "its Firecracker is pid ${H5_FCPID}" \
+      || bad "could not find the Firecracker process for ${H5_ID}; the fd counts below mean nothing"
+    FD_BEFORE=$($SSH "root@$H_IP" "ls /proc/${H5_FCPID}/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
     HOSTD_FD_BEFORE=$($SSH "root@$H_IP" "ls /proc/\$(pgrep -x hostd | head -1)/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
     ok "Firecracker holds ${FD_BEFORE} fds and hostd holds ${HOSTD_FD_BEFORE} before the loop"
 
@@ -968,7 +1003,11 @@ if [ -n "$H_IP" ]; then
       && ok "${H5_OPS} sequential Firecracker API operations all succeeded" \
       || bad "operation ${FAILED_AT} of ${H5_OPS} failed; the API stopped answering"
 
-    FD_AFTER=$($SSH "root@$H_IP" "ls /proc/$(fc_pid "$H_IP" "$H5_ID")/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
+    # Re-read: every wake restores into a NEW Firecracker, so the pid the loop
+    # ended on is not the one it started with.
+    H5_FCPID_AFTER=$(fc_pid "$H_IP" "$H5_ID")
+    [ -n "$H5_FCPID_AFTER" ] || bad "no Firecracker is running for ${H5_ID} after the loop"
+    FD_AFTER=$($SSH "root@$H_IP" "ls /proc/${H5_FCPID_AFTER}/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
     HOSTD_FD_AFTER=$($SSH "root@$H_IP" "ls /proc/\$(pgrep -x hostd | head -1)/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
     # hostd is the side that would hold a leaked keepalive connection open, so
     # it is asserted as well as Firecracker's own count.
@@ -995,7 +1034,8 @@ say "18. hostd killed at ten random points converges to the running set"
 # window is between spawning a Firecracker and recording it.
 if [ -n "$H_IP" ]; then
   KILL_BASE=$(host_counts "$H_IP")
-  KILL_SINCE=$(date '+%Y-%m-%d %H:%M:%S')
+  KILL_IDS_BEFORE=$(machine_ids_on "$H_IP")
+  KILL_SINCE=$($SSH "root@$H_IP" "date '+%Y-%m-%d %H:%M:%S'" 2>/dev/null | tr -d '\n')
   for i in $(seq 10); do
     api "$H_IP" POST /v1/machines '{"vcpus":1,"mem_mib":512}' >/dev/null 2>&1 &
     sleep "0.$((RANDOM % 9))"
@@ -1008,6 +1048,18 @@ if [ -n "$H_IP" ]; then
       break
     fi
   done
+
+  # A kill that lands 0-0.8s in does not always beat the create: a create is a
+  # restore, so some of the ten finished and wrote their row first. Those are
+  # real machines -- the reaper only sweeps Firecrackers with NO row -- so they
+  # hold a namespace, a veth half and an NBD device forever, and the baseline
+  # below is unreachable until they are destroyed. This is cleanup, not an
+  # assertion: what the section is about is the creates that did NOT finish.
+  SURVIVORS=$(comm -13 <(echo "$KILL_IDS_BEFORE") <(machine_ids_on "$H_IP"))
+  for mid in $SURVIVORS; do
+    api "$H_IP" DELETE "/v1/machines/${mid}" >/dev/null 2>&1
+  done
+  echo "  destroyed $(echo "$SURVIVORS" | grep -c . ) machine(s) whose create outran its kill"
 
   $SSH "root@$H_IP" "journalctl -u hostd --since '${KILL_SINCE}' --no-pager 2>/dev/null | grep -q 're-adopted machines from a previous run'" >/dev/null 2>&1 \
     && ok "the journal shows machines re-adopted by comm across a restart" \
@@ -1059,13 +1111,17 @@ else
     bad "hostd did not come back after arming the fault on ${FAULT_IP}"
   fi
 
+  # Snapshotted BEFORE the create, so the device this machine takes can be
+  # named rather than inferred from an intersection with everything else the
+  # host has attached.
+  WEDGE_NBD_BEFORE=$(nbd_attached "$FAULT_IP")
   WEDGE=$(api "$FAULT_IP" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
   WEDGE_ID=$(echo "$WEDGE" | jf id)
   if [ -z "$WEDGE_ID" ]; then
     bad "could not create the machine to wedge: $WEDGE"
   else
     WEDGE_PID=$(fc_pid "$FAULT_IP" "$WEDGE_ID")
-    WEDGE_NBD=$(nbd_attached "$FAULT_IP")
+    WEDGE_OWN=$(comm -13 <(echo "$WEDGE_NBD_BEFORE") <(nbd_attached "$FAULT_IP"))
     api "$FAULT_IP" DELETE "/v1/machines/${WEDGE_ID}" >/dev/null 2>&1
 
     WEDGED=no
@@ -1078,10 +1134,19 @@ else
       && ok "without the disconnect the Firecracker wedges in D-state, so section 14 has teeth" \
       || bad "the fault did not reproduce the wedge; section 14's ordering assertion proves nothing"
 
-    STILL=$(nbd_attached "$FAULT_IP" | comm -12 - <(echo "$WEDGE_NBD"))
-    [ -n "$STILL" ] \
-      && ok "and $(echo "$STILL" | tr '\n' ' ')stayed attached to a server that is gone" \
-      || bad "the device detached anyway; the fault did not take effect"
+    # The device THIS machine held, not the intersection of every attached
+    # device with every previously attached one: other machines are running on
+    # this host, so an intersection is non-empty whether the fault took effect
+    # or not, and section 14's own check is the diff (comm -23), not the
+    # intersection. WEDGE_OWN is what appeared when the machine was created.
+    STILL=$(nbd_attached "$FAULT_IP" | comm -12 - <(echo "$WEDGE_OWN"))
+    if [ -z "$WEDGE_OWN" ]; then
+      bad "the wedge machine attached no NBD device, so nothing can be asserted about it"
+    elif [ -n "$STILL" ]; then
+      ok "and $(echo "$STILL" | tr '\n' ' ')stayed attached to a server that is gone"
+    else
+      bad "${WEDGE_OWN} detached anyway; the fault did not take effect"
+    fi
   fi
 
   # Disarm before the reboot, so a host that comes back is a normal host.

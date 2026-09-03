@@ -1743,7 +1743,6 @@ async function capacityAssertions() {
 
     if (SLOT_POOL > 0) {
       await step(`filling ${SLOT_POOL} slots makes the next create refuse, and it leaks nothing`, async () => {
-        const before = await freeSlots();
         for (let i = 0; i < SLOT_POOL; i++) {
           const { status, json } = await request('/v1/machines', {
             method: 'POST',
@@ -1753,6 +1752,12 @@ async function capacityAssertions() {
             `filling the pool failed at slot ${i} of ${SLOT_POOL}: HTTP ${status} ${JSON.stringify(json)}`);
           created.push(json.id);
         }
+
+        // Read AFTER the fill and before the refusal, not before the fill: the
+        // fallback source is the machine count, which legitimately grows by
+        // SLOT_POOL across the loop above. What must not move is the count
+        // across the REFUSED create.
+        const before = await freeSlots();
 
         const { status, json } = await request('/v1/machines', {
           method: 'POST',
@@ -1766,8 +1771,9 @@ async function capacityAssertions() {
           'a full pool surfaced as a 500; the host tried rather than refusing');
 
         const after = await freeSlots();
-        assert(after.value <= before.value,
-          `${after.source} grew across a refused create (${before.value} -> ${after.value})`);
+        assert(after.value === before.value,
+          `${after.source} moved from ${before.value} to ${after.value} across a refused create; ` +
+          'the refusal leaked');
       });
     } else {
       console.log('      - the pool ceiling was not filled: the default pool is 1024 slots and');
@@ -1781,14 +1787,32 @@ async function capacityAssertions() {
     // refuses gives the coordinator nothing to re-hash -- and the step above
     // has already failed loudly in that case.
     if (HOSTS.length >= 2 && refusal !== null && (refusal < 200 || refusal >= 300)) {
-      await step('a create refused by one host is served by another', async () => {
-        const { status, json } = await requestAt(HOSTS[0], '/v1/machines', {
+      await step('a create refused by one host is served by a DIFFERENT host', async () => {
+        // The entry host is whichever one answered the refusal above. Sending
+        // the retry to HOSTS[0] unconditionally can send it straight back to
+        // that same host, which asserts nothing at all -- so the host is
+        // chosen by host_id, and the landing host_id is asserted too.
+        const { json: entryHealth } = await requestAt(API, '/v1/health', { auth: false });
+        const entryID = entryHealth?.host_id;
+        assert(entryID, 'the entry host did not report a host_id');
+
+        let target = null;
+        for (const host of HOSTS) {
+          const { json: health } = await requestAt(host, '/v1/health', { auth: false });
+          if (health?.host_id && health.host_id !== entryID) { target = host; break; }
+        }
+        assert(target,
+          `every host in PILOTS_E2E_HOSTS reports ${entryID}; there is no second host to serve the create`);
+
+        const { status, json } = await requestAt(target, '/v1/machines', {
           method: 'POST',
           body: { name: `e2e-rehash-${tag}`, vcpus: 1, mem_mib: 512, knobs: { auto_stop: 'off' } },
         });
         assert(status === 201,
-          `${HOSTS[0]} could not serve a create: HTTP ${status} ${JSON.stringify(json)}`);
+          `${target} could not serve a create: HTTP ${status} ${JSON.stringify(json)}`);
         created.push(json.id);
+        assert(json.host_id !== entryID,
+          `the create landed back on the refusing host ${entryID}`);
 
         // Asserted on every host, not on the entry one: a fleet that agrees
         // only with the host you asked is not a fleet.
@@ -1835,6 +1859,15 @@ const CLI = process.env.PILOT_CLI ?? 'pilot';
 async function mcpCall(spawnFn, tool, args, env, timeoutMs = 30_000) {
   const child = spawnFn(CLI, ['mcp'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
 
+  // A ChildProcess with no 'error' listener THROWS the event, and it arrives on
+  // a later tick rather than as a rejection -- so an ENOENT here (the CLI is
+  // #32 and does not exist yet) would take the whole battery down with an
+  // uncaught exception, skipping the summary and the finally that destroys
+  // every machine this file created. Captured and reported instead.
+  let spawnErr = null;
+  child.on('error', (e) => { spawnErr = e; });
+  child.stdin.on('error', () => { /* the spawn error above is the real one */ });
+
   let out = '';
   let err = '';
   child.stdout.setEncoding('utf8');
@@ -1848,6 +1881,7 @@ async function mcpCall(spawnFn, tool, args, env, timeoutMs = 30_000) {
   const waitForID = async (id) => {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
+      if (spawnErr) throw new Error(`could not run ${CLI}: ${spawnErr.message}`);
       for (const line of frames()) {
         let msg = null;
         try { msg = JSON.parse(line); } catch { continue; }
@@ -2015,6 +2049,12 @@ async function quotaAssertions() {
     });
   } finally {
     for (const id of created) await destroy(id);
+    // The quota outlives the run otherwise, and the next run's "fill to the
+    // limit" loop then hits 429 partway through against a ceiling this run
+    // computed from a machine count that has since moved.
+    try {
+      await request(`/v1/quotas/${QUOTA_ORG}`, { method: 'DELETE' });
+    } catch { /* best effort, like every other teardown here */ }
   }
 }
 
