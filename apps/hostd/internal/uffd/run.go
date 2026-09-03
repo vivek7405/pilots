@@ -115,7 +115,7 @@ func Run(ctx context.Context, cfg Config, store block.ObjectStore) error {
 	fromDiff, droppedOverCap := diffEntries(src, h.pageSize)
 	if len(fromDiff) > 0 {
 		slog.Info("uffd replay set carries the last cycle's diff",
-			"pages_from_diff", len(fromDiff), "mappings_over_cap", droppedOverCap)
+			"pages_from_diff", len(fromDiff), "pages_over_cap", droppedOverCap)
 	}
 
 	prefaultCtx, stopPrefault := context.WithCancel(ctx)

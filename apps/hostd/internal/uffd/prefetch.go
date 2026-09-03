@@ -53,6 +53,15 @@ func diffEntries(src block.Slicer, pageSize uint64) ([]entry, int) {
 		return nil, 0
 	}
 	self := hdr.Metadata.BuildId
+	if hdr.Metadata.BaseBuildId == self {
+		// A build with no parent -- the template itself, or a Full chunked
+		// without one -- stores EVERY range, so "what it changed" is all of
+		// memory. Replaying that would prefault the first 64MiB of every
+		// machine created from the template: pages the guest may never ask
+		// for and, under 2MiB backing, thirty-two hugepages taken from the
+		// pool for nothing. The recorded fault order still covers a create.
+		return nil, 0
+	}
 
 	// A build mapping is aligned to the BLOCK size (4KiB), and the guest
 	// faults at the PAGE size, which under hugepage backing is 2MiB. Emitting
@@ -173,8 +182,8 @@ func parsePrefetch(contents []byte) []entry {
 // extra is appended AFTER the recorded order. The recorded order is a
 // SEQUENCE whose value is that it matches the guest's real access order; extra
 // is a SET with no ordering, so putting it first would delay the pages the
-// guest is about to ask for. Duplicates are free: replay is idempotent and an
-// already-installed page answers EEXIST, which counts as success.
+// guest is about to ask for. A page the recorded order already carries is
+// dropped from extra rather than replayed twice; see withoutRecorded.
 func prefault(ctx context.Context, h *handshake, src block.Slicer,
 	contents []byte, extra []entry, stats *Stats) {
 
@@ -192,11 +201,38 @@ func prefault(ctx context.Context, h *handshake, src block.Slicer,
 		slog.Info("uffd bulk fetch done", "ms", time.Since(start).Milliseconds())
 	}
 
-	entries := append(parsePrefetch(contents), extra...)
+	entries := parsePrefetch(contents)
+	entries = append(entries, withoutRecorded(extra, entries)...)
 	if len(entries) == 0 {
 		return
 	}
 	replay(ctx, h, src, entries, stats)
+}
+
+// withoutRecorded drops from extra the pages the recorded order already
+// carries.
+//
+// A page the guest faulted last cycle is very likely one it also dirtied, so
+// the two sets overlap heavily, and the overlap is not free: the second copy
+// of a page answers EEXIST, which replay counts as the guest having got there
+// first -- a MISS -- so the hit rate a wake is judged on drifts down with
+// every duplicate, while a fetch worker and a copy worker each spend a page
+// read finding out.
+func withoutRecorded(extra, recorded []entry) []entry {
+	if len(extra) == 0 || len(recorded) == 0 {
+		return extra
+	}
+	seen := make(map[int64]struct{}, len(recorded))
+	for _, e := range recorded {
+		seen[e.off] = struct{}{}
+	}
+	out := make([]entry, 0, len(extra))
+	for _, e := range extra {
+		if _, ok := seen[e.off]; !ok {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // replay installs every recorded page, fetching and copying in parallel.

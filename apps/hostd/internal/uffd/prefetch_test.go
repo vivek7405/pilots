@@ -421,3 +421,46 @@ func TestFillPageZeroFillsPastTheEndOfTheImage(t *testing.T) {
 		t.Error("the part past the end of the image was not zeroed")
 	}
 }
+
+// A build with no parent stores every range, so its "own" ranges are all of
+// memory. Replaying those would prefault the first 64MiB of every machine
+// created from the template, which is not a prediction of anything.
+func TestDiffEntriesIsEmptyForABuildWithNoParent(t *testing.T) {
+	self := uuid.New()
+	src := &fakeHeadered{hdr: &block.Header{
+		Metadata: &block.Metadata{BuildId: self, BaseBuildId: self},
+		Mapping: []*block.BuildMap{
+			{Offset: 0, Length: 4096, BuildId: self},
+			{Offset: 4096, Length: 4096, BuildId: self},
+		},
+	}}
+	if got, dropped := diffEntries(src, 4096); len(got) != 0 || dropped != 0 {
+		t.Errorf("a parentless build produced %d entries (%d dropped), want none",
+			len(got), dropped)
+	}
+}
+
+// A page in both sets is replayed once. The second copy would answer EEXIST,
+// which replay counts as the guest having got there first, so every
+// duplicate reads as a miss against a hit rate the wake is judged on.
+func TestPrefaultDoesNotReplayADiffPageTheRecordedOrderCarries(t *testing.T) {
+	recorded := parsePrefetch([]byte("4096 4096\n8192 4096\n"))
+	extra := []entry{
+		{off: 0, length: 4096},
+		{off: 4096, length: 4096}, // already recorded
+		{off: 12288, length: 4096},
+	}
+	got := withoutRecorded(extra, recorded)
+	want := []int64{0, 12288}
+	if len(got) != len(want) {
+		t.Fatalf("got %d entries, want %d: %+v", len(got), len(want), got)
+	}
+	for i, off := range want {
+		if got[i].off != off {
+			t.Errorf("entry %d at offset %d, want %d", i, got[i].off, off)
+		}
+	}
+	if kept := withoutRecorded(extra, nil); len(kept) != len(extra) {
+		t.Errorf("with nothing recorded, %d of %d extras survived", len(kept), len(extra))
+	}
+}
