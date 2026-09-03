@@ -6,8 +6,11 @@
  * machine: hostd forwards a write that arrived at the wrong host itself.
  */
 
-import { Http } from './http.ts'
+import { BuildStream } from './build.ts'
+import { Http, textLines } from './http.ts'
 import type { HttpOptions } from './http.ts'
+import { buildExecURL, ExecStream } from './stream.ts'
+import type { ExecStreamOptions, WebSocketCtor } from './stream.ts'
 import type {
   AddDomainRequest,
   APIKeyResponse,
@@ -37,11 +40,15 @@ import type {
   Volume,
 } from './types.ts'
 
-export interface ClientOptions extends HttpOptions {}
+export interface ClientOptions extends HttpOptions {
+  /** Overrides `globalThis.WebSocket` for every stream this client opens. */
+  WebSocket?: WebSocketCtor
+}
 
 export class PilotsClient {
   readonly http: Http
   readonly machines: Machines
+  readonly builds: Builds
   readonly checkpoints: Checkpoints
   readonly services: Services
   readonly domains: Domains
@@ -54,7 +61,8 @@ export class PilotsClient {
 
   constructor(apiKey: string, opts: ClientOptions = {}) {
     this.http = new Http(apiKey, opts)
-    this.machines = new Machines(this.http)
+    this.machines = new Machines(this.http, opts.WebSocket)
+    this.builds = new Builds(this.http)
     this.checkpoints = new Checkpoints(this.http)
     this.services = new Services(this.http)
     this.domains = new Domains(this.http)
@@ -82,9 +90,11 @@ export class PilotsClient {
 
 export class Machines {
   private readonly http: Http
+  private readonly WebSocket: WebSocketCtor | undefined
 
-  constructor(http: Http) {
+  constructor(http: Http, ws?: WebSocketCtor) {
     this.http = http
+    this.WebSocket = ws
   }
 
   create(req: CreateMachineRequest = {}): Promise<Machine> {
@@ -110,6 +120,32 @@ export class Machines {
 
   logs(id: string): Promise<string> {
     return this.http.text('GET', `/v1/machines/${encodeURIComponent(id)}/logs`)
+  }
+
+  /**
+   * Streams a command's output frame by frame. `stdin` is false by default;
+   * see ExecStream before turning it on.
+   */
+  execStream(id: string, argv: string[], opts: ExecStreamOptions = {}): ExecStream {
+    const url = buildExecURL(
+      this.http.baseURL,
+      `/v1/machines/${encodeURIComponent(id)}/exec/stream`,
+      argv,
+      opts,
+    )
+    return new ExecStream(url, this.http.apiKey, {
+      stdin: opts.stdin ?? false,
+      ...(opts.WebSocket ?? this.WebSocket ? { WebSocket: opts.WebSocket ?? this.WebSocket! } : {}),
+    })
+  }
+
+  /** Follows the console log line by line. Never given a client deadline. */
+  async *followLogs(id: string): AsyncGenerator<string, void, undefined> {
+    const res = await this.http.send('GET', `/v1/machines/${encodeURIComponent(id)}/logs`, {
+      query: { follow: '1' },
+      timeoutMs: null,
+    })
+    yield* textLines(res)
   }
 
   suspend(id: string): Promise<void> {
@@ -169,6 +205,38 @@ export class Checkpoints {
   /** `durable` flips to true once the upload to object storage lands. */
   get(id: string): Promise<Checkpoint> {
     return this.http.json<Checkpoint>('GET', `/v1/checkpoints/${encodeURIComponent(id)}`)
+  }
+}
+
+export class Builds {
+  private readonly http: Http
+
+  constructor(http: Http) {
+    this.http = http
+  }
+
+  /**
+   * Uploads a build context (a tar) and streams the build's NDJSON log.
+   *
+   * No client deadline: the whole point of the stream is that the build
+   * outlives the request that started it.
+   */
+  async create(tar: BodyInit): Promise<BuildStream> {
+    const res = await this.http.send('POST', '/v1/builds', {
+      raw: tar,
+      contentType: 'application/x-tar',
+      timeoutMs: null,
+    })
+    return new BuildStream(res)
+  }
+
+  /** Replays a build's log, following it live when asked. */
+  async logs(id: string, opts: { follow?: boolean } = {}): Promise<BuildStream> {
+    const res = await this.http.send('GET', `/v1/builds/${encodeURIComponent(id)}/logs`, {
+      ...(opts.follow ? { query: { follow: '1' } } : {}),
+      timeoutMs: null,
+    })
+    return new BuildStream(res, id)
   }
 }
 

@@ -165,6 +165,11 @@ async function toError(res: Response, method: string, path: string): Promise<Pil
  * streams it.
  */
 export async function* ndjson<T>(res: Response): AsyncGenerator<T, void, undefined> {
+  for await (const line of textLines(res)) yield JSON.parse(line) as T
+}
+
+/** Yields each non-empty line of a text body as it arrives. */
+export async function* textLines(res: Response): AsyncGenerator<string, void, undefined> {
   if (!res.body) return
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
@@ -178,12 +183,12 @@ export async function* ndjson<T>(res: Response): AsyncGenerator<T, void, undefin
       while ((nl = buffer.indexOf('\n')) >= 0) {
         const line = buffer.slice(0, nl).trim()
         buffer = buffer.slice(nl + 1)
-        if (line) yield JSON.parse(line) as T
+        if (line) yield line
       }
     }
     buffer += decoder.decode()
     const last = buffer.trim()
-    if (last) yield JSON.parse(last) as T
+    if (last) yield last
   } finally {
     reader.releaseLock()
   }

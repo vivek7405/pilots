@@ -17,6 +17,7 @@ export { PilotsClient } from './client.ts'
 export type { ClientOptions } from './client.ts'
 export {
   APIKeys,
+  Builds,
   Checkpoints,
   Compose,
   Domains,
@@ -28,8 +29,12 @@ export {
   Volumes,
 } from './client.ts'
 
-export { Http, ndjson, resolveBaseURL, DEFAULT_BASE_URL, DEFAULT_TIMEOUT_MS } from './http.ts'
+export { Http, ndjson, textLines, resolveBaseURL, DEFAULT_BASE_URL, DEFAULT_TIMEOUT_MS } from './http.ts'
 export type { FetchLike, HttpOptions } from './http.ts'
+
+export { BuildStream } from './build.ts'
+export { buildExecURL, ExecStream } from './stream.ts'
+export type { ExecStreamInit, ExecStreamOptions, WebSocketCtor } from './stream.ts'
 
 export {
   BuildFailedError,
