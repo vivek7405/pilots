@@ -91,6 +91,16 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 	// carry one at all, and this line is the only thing that ever sets it.
 	req.OrgID = OrgID(r.Context())
 
+	// A create may name a volume to attach, and a volume is another tenant's
+	// data. Without this, naming a foreign id in the body would mount someone
+	// else's filesystem into a machine the caller controls -- the one place
+	// tenancy could be crossed by a create rather than by a read.
+	if req.Volume != "" {
+		if _, ok := d.ownedVolume(w, r, req.Volume); !ok {
+			return
+		}
+	}
+
 	if !d.checkQuota(w, r, quota.Delta{
 		Machines: 1,
 		VCPUs:    orDefault(req.VCPUs, 1),

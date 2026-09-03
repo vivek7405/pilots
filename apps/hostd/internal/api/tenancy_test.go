@@ -173,3 +173,33 @@ func TestAMachineReportsItsOrg(t *testing.T) {
 		t.Errorf("org_id = %q, want org_1", m.OrgID)
 	}
 }
+
+// A create may name a volume to attach, and a volume is another tenant's
+// data. This is the one place tenancy could be crossed by a create rather
+// than by a read.
+func TestACreateCannotAttachAForeignVolume(t *testing.T) {
+	h, st, fake := twoTenants(t)
+	ctx := context.Background()
+
+	if err := st.PutVolume(ctx, &state.Volume{
+		ID: "vol_1", Name: "data", SizeMiB: 1024, HostID: "host-test", MountPath: "/data",
+	}); err != nil {
+		t.Fatalf("PutVolume: %v", err)
+	}
+	if err := st.PutTenancy(ctx, &state.Tenancy{ID: "vol_1", OrgID: "org_1", Kind: "volume"}); err != nil {
+		t.Fatalf("PutTenancy: %v", err)
+	}
+
+	rec := postJSON(t, h, "/v1/machines", "pilot_org2", `{"vcpus":1,"mem_mib":512,"volume":"vol_1"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("attaching a foreign volume: got %d, want 404 (%s)", rec.Code, rec.Body.String())
+	}
+	if fake.created != 0 {
+		t.Errorf("the create reached the manager anyway (%d creates)", fake.created)
+	}
+
+	// Its own tenant may attach it.
+	if ok := postJSON(t, h, "/v1/machines", "pilot_org1", `{"vcpus":1,"mem_mib":512,"volume":"vol_1"}`); ok.Code != http.StatusCreated {
+		t.Errorf("the owning tenant was refused its own volume: %d (%s)", ok.Code, ok.Body.String())
+	}
+}
