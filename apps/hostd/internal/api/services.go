@@ -194,6 +194,11 @@ func (d Deps) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "build is required"})
 		return
 	}
+	// The build becomes this service's root filesystem, so it is scoped like
+	// any other object the caller names by id.
+	if !d.ownedBuild(w, r, req.Build) {
+		return
+	}
 	// A rollout boots one extra machine before it retires the old one, so a
 	// deploy is admitted against one replica's worth of headroom.
 	if !d.checkQuota(w, r, quota.Delta{Machines: 1, VCPUs: 1, MemMiB: 512}) {

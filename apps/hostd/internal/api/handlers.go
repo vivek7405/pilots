@@ -101,6 +101,14 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// And a create may name a built image, which is the same crossing by a
+	// different door: the build id becomes this machine's root filesystem.
+	if req.Image != "" {
+		if !d.ownedBuild(w, r, req.Image) {
+			return
+		}
+	}
+
 	if !d.checkQuota(w, r, quota.Delta{
 		Machines: 1,
 		VCPUs:    orDefault(req.VCPUs, 1),

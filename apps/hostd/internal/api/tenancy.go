@@ -149,3 +149,22 @@ func (d Deps) visible(r *http.Request, id, org string, narrow bool) (owner strin
 	}
 	return owner, found && org != "" && owner == org
 }
+
+// ownedBuild resolves a build the caller is allowed to name.
+//
+// A build id is as sensitive as the image it produces: startNewMachine hands
+// it straight to the boot path, which fetches that build from object storage
+// and mounts it as the root filesystem. Without this, naming another org's
+// build id in a create body boots a shell inside their private image, and
+// build ids are handed out in the NDJSON stream and in X-Pilot-Build-Id, so
+// one has only to be told a single id.
+//
+// A build that carries no tenancy row at all is admin-only, exactly as an
+// unowned machine is: builds predating this check have no owner to compare.
+func (d Deps) ownedBuild(w http.ResponseWriter, r *http.Request, id string) bool {
+	if d.mayAccess(r, id) {
+		return true
+	}
+	notFound(w, "build")
+	return false
+}

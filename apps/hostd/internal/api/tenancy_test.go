@@ -203,3 +203,75 @@ func TestACreateCannotAttachAForeignVolume(t *testing.T) {
 		t.Errorf("the owning tenant was refused its own volume: %d (%s)", ok.Code, ok.Body.String())
 	}
 }
+
+// A build id becomes a machine's root filesystem, so naming a foreign one in
+// a create body is the same crossing as a foreign volume, by a different
+// door: it boots a shell inside another tenant's private image. Build ids are
+// handed out in the NDJSON stream and in X-Pilot-Build-Id, so one has only to
+// be told a single id.
+func TestACreateCannotBootAForeignImage(t *testing.T) {
+	h, st, fake := twoTenants(t)
+	ctx := context.Background()
+
+	if err := st.PutTenancy(ctx, &state.Tenancy{
+		ID: "bld_1", OrgID: "org_1", Kind: "build",
+	}); err != nil {
+		t.Fatalf("PutTenancy: %v", err)
+	}
+
+	rec := postJSON(t, h, "/v1/machines", "pilot_org2", `{"vcpus":1,"mem_mib":512,"image":"bld_1"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("booting a foreign image: got %d, want 404 (%s)", rec.Code, rec.Body.String())
+	}
+	if fake.created != 0 {
+		t.Errorf("the create reached the manager anyway (%d creates)", fake.created)
+	}
+
+	// Its own tenant may boot it.
+	if ok := postJSON(t, h, "/v1/machines", "pilot_org1", `{"vcpus":1,"mem_mib":512,"image":"bld_1"}`); ok.Code != http.StatusCreated {
+		t.Errorf("the owning tenant was refused its own image: %d (%s)", ok.Code, ok.Body.String())
+	}
+
+	// A build nobody owns is admin-only, exactly as an unowned machine is.
+	if anon := postJSON(t, h, "/v1/machines", "pilot_org2", `{"vcpus":1,"mem_mib":512,"image":"bld_unowned"}`); anon.Code != http.StatusNotFound {
+		t.Errorf("an unowned build was bootable by a tenant: %d", anon.Code)
+	}
+}
+
+// The build log is the build's own output -- Dockerfile lines, registry URLs,
+// whatever the build echoed -- so it is scoped like the build it belongs to.
+// The key here carries `deploy`, so the scope gate lets it through and the
+// tenancy check is what refuses it.
+func TestAForeignBuildLogIsNotReadable(t *testing.T) {
+	_, st, fake := newTestServerWithManager(t)
+	h := Routes(Deps{HostID: "host-test", Store: st, Machines: fake,
+		Builds: &fakeBuilder{hasLog: true, log: []BuildLogLine{{Line: "secret registry url"}}}})
+	seedKey(t, st, "pilot_org2_deploy", "org_2", "deploy")
+	seedKey(t, st, "pilot_org1_deploy", "org_1", "deploy")
+
+	if err := st.PutTenancy(context.Background(), &state.Tenancy{
+		ID: "bld_1", OrgID: "org_1", Kind: "build",
+	}); err != nil {
+		t.Fatalf("PutTenancy: %v", err)
+	}
+
+	req := httptest.NewRequest("GET", "/v1/builds/bld_1/logs", nil)
+	req.Header.Set("Authorization", "Bearer pilot_org2_deploy")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("reading a foreign build log: got %d, want 404 (%s)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "secret registry url") {
+		t.Error("the refusal carried the build's own output")
+	}
+
+	// Its owner reads it.
+	own := httptest.NewRequest("GET", "/v1/builds/bld_1/logs", nil)
+	own.Header.Set("Authorization", "Bearer pilot_org1_deploy")
+	ownRec := httptest.NewRecorder()
+	h.ServeHTTP(ownRec, own)
+	if ownRec.Code != http.StatusOK {
+		t.Errorf("the owning tenant was refused its own build log: %d (%s)", ownRec.Code, ownRec.Body.String())
+	}
+}

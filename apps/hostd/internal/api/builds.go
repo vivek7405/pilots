@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/quota"
+	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
 // BuildRunner is the build surface the handlers drive.
@@ -118,6 +119,18 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Recorded BEFORE the id leaves this handler, in the header below and in
+	// the stream. A build id names an image the create path will mount as a
+	// root filesystem, so an id that escapes before its owner is written is an
+	// id anyone may boot.
+	if err := d.Store.PutTenancy(r.Context(), &state.Tenancy{
+		ID: id, OrgID: org, Kind: "build", CreatedAt: time.Now().Unix(),
+	}); err != nil {
+		writeJSON(w, http.StatusInternalServerError,
+			ErrorResponse{Error: "cannot record the build's owner: " + err.Error()})
+		return
+	}
+
 	w.Header().Set("Content-Type", ndjson)
 	// The id in a header as well as the stream: a client that wants to reattach
 	// should not have to parse the body to learn what to reattach to.
@@ -163,6 +176,12 @@ func (d Deps) handleBuildLogs(w http.ResponseWriter, r *http.Request) {
 	if d.Builds == nil {
 		writeJSON(w, http.StatusNotImplemented,
 			ErrorResponse{Error: "builds are not configured on this host"})
+		return
+	}
+
+	// A build log is the build's own output: Dockerfile lines, registry URLs,
+	// whatever the build echoed. It is scoped like the build it belongs to.
+	if !d.ownedBuild(w, r, r.PathValue("id")) {
 		return
 	}
 
