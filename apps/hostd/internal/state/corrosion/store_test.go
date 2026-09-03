@@ -459,3 +459,107 @@ func TestReleaseRoundTrip(t *testing.T) {
 		t.Fatalf("ReleasesFor: %v (%d rows)", err, len(list))
 	}
 }
+
+// Tenancy, revocations and quotas must round-trip through the agent, and the
+// first two must be write-once there as well: they are the rows any host may
+// write, and that is only safe while nothing can change a written value.
+func TestTenancyRoundTripsAndIsWriteOnce(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newTestStore(t, "host-a")
+
+	if err := store.PutTenancy(ctx, &state.Tenancy{
+		ID: "m-1", OrgID: "org-1", Kind: "machine", CreatedAt: 10,
+	}); err != nil {
+		t.Fatalf("PutTenancy: %v", err)
+	}
+	if err := store.PutTenancy(ctx, &state.Tenancy{
+		ID: "m-1", OrgID: "org-2", Kind: "machine", CreatedAt: 20,
+	}); err != nil {
+		t.Fatalf("PutTenancy again: %v", err)
+	}
+	if got := agent.scalar(t, `SELECT org_id FROM tenancy WHERE id='m-1'`); got != "org-1" {
+		t.Errorf("a second write moved the object to %q; the SQL must be ON CONFLICT DO NOTHING", got)
+	}
+
+	got, err := store.GetTenancy(ctx, "m-1")
+	if err != nil {
+		t.Fatalf("GetTenancy: %v", err)
+	}
+	if got.OrgID != "org-1" || got.Kind != "machine" {
+		t.Errorf("read back %+v", got)
+	}
+	if _, err := store.GetTenancy(ctx, "m-absent"); !errors.Is(err, state.ErrNotFound) {
+		t.Errorf("an untenanted id returned %v, want ErrNotFound", err)
+	}
+
+	all, err := store.ListTenancy(ctx)
+	if err != nil || len(all) != 1 {
+		t.Errorf("ListTenancy = %+v, %v", all, err)
+	}
+}
+
+func TestRevocationRoundTripsAndKeepsTheKeyRow(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newTestStore(t, "host-a")
+
+	if err := store.PutAPIKey(ctx, &state.APIKey{
+		Hash: "cafe", OrgID: "org-1", Scopes: "admin", CreatedAt: 1,
+	}); err != nil {
+		t.Fatalf("PutAPIKey: %v", err)
+	}
+	if revoked, err := store.IsRevoked(ctx, "cafe"); err != nil || revoked {
+		t.Fatalf("IsRevoked before revoking = %v, %v", revoked, err)
+	}
+	if err := store.PutRevocation(ctx, &state.Revocation{Hash: "cafe", RevokedAt: 100}); err != nil {
+		t.Fatalf("PutRevocation: %v", err)
+	}
+	if err := store.PutRevocation(ctx, &state.Revocation{Hash: "cafe", RevokedAt: 200}); err != nil {
+		t.Fatalf("PutRevocation again: %v", err)
+	}
+	if got := agent.scalar(t, `SELECT revoked_at FROM api_key_revocations WHERE hash='cafe'`); got != "100" {
+		t.Errorf("revoked_at moved to %q; the earliest revocation is the true one", got)
+	}
+
+	revoked, err := store.IsRevoked(ctx, "cafe")
+	if err != nil || !revoked {
+		t.Errorf("IsRevoked after revoking = %v, %v", revoked, err)
+	}
+	// The credential is killed by a row that APPEARS, never by deleting the
+	// key's: a delete loses to a replica still carrying the insert.
+	if got := agent.scalar(t, `SELECT count(*) FROM api_keys WHERE hash='cafe'`); got != "1" {
+		t.Errorf("revoking removed the api_keys row (count=%q)", got)
+	}
+
+	keys, err := store.ListAPIKeys(ctx, "org-1")
+	if err != nil || len(keys) != 1 || keys[0].Hash != "cafe" {
+		t.Errorf("ListAPIKeys = %+v, %v", keys, err)
+	}
+	if other, _ := store.ListAPIKeys(ctx, "org-2"); len(other) != 0 {
+		t.Errorf("ListAPIKeys leaked another org's keys: %+v", other)
+	}
+}
+
+func TestQuotaRoundTripsThroughCorrosion(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTestStore(t, "host-a")
+
+	if _, err := store.GetQuota(ctx, "org-1"); !errors.Is(err, state.ErrNotFound) {
+		t.Fatalf("an org with no row returned %v, want ErrNotFound", err)
+	}
+	want := &state.Quota{OrgID: "org-1", MaxMachines: 5, MaxVCPUs: 10,
+		MaxMemMiB: 2048, MaxVolumeGiB: 50, MaxBuilds: 1, UpdatedAt: 7}
+	if err := store.PutQuota(ctx, want); err != nil {
+		t.Fatalf("PutQuota: %v", err)
+	}
+	want.MaxMachines, want.UpdatedAt = 9, 8
+	if err := store.PutQuota(ctx, want); err != nil {
+		t.Fatalf("PutQuota again: %v", err)
+	}
+	got, err := store.GetQuota(ctx, "org-1")
+	if err != nil {
+		t.Fatalf("GetQuota: %v", err)
+	}
+	if *got != *want {
+		t.Errorf("read back %+v, want %+v", got, want)
+	}
+}
