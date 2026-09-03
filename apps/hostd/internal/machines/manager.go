@@ -250,7 +250,26 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 	// built, so that a create which dies partway leaves a row naming a service
 	// row that exists -- rather than a machine whose environment was never
 	// written anywhere and cannot be recovered from the request that is gone.
-	env := createEnv{App: req.App, Cmd: req.Cmd, Env: req.Env, SecretEnv: req.SecretEnv}
+	// The org comes from the authenticated request, or -- for a replica the
+	// rollout is booting -- from the service it joins. A replica must land in
+	// its service's tenant, not in whichever one happened to trigger the
+	// rollout.
+	org := req.OrgID
+	if org == "" && req.Service != "" {
+		t, err := m.opts.Store.GetTenancy(ctx, req.Service)
+		switch {
+		case err == nil:
+			org = t.OrgID
+		case !errors.Is(err, state.ErrNotFound):
+			// Refused rather than swallowed. The tenancy row below is
+			// write-once, so a replica that lands with an empty org because
+			// this read blipped is unowned FOREVER -- invisible to its own
+			// tenant and unrepairable without the UPDATE the design forbids.
+			return nil, fmt.Errorf("machines: resolve the org of service %s: %w", req.Service, err)
+		}
+	}
+
+	env := createEnv{App: req.App, Cmd: req.Cmd, OrgID: org, Env: req.Env, SecretEnv: req.SecretEnv}
 	// A replica joins its service's existing row rather than minting one.
 	// provisionService mints per create, which is right for a standalone
 	// machine and wrong for the second replica of a rollout -- that would give
@@ -275,6 +294,22 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 		AgentTokenHash: hex.EncodeToString(sum[:]),
 		LastActivity:   time.Now().Unix(),
 		UpdatedAt:      time.Now().Unix(),
+	}
+	// Tenancy BEFORE the machine row. A create that dies partway then leaves
+	// a tenancy row naming a machine that never appeared -- invisible and
+	// harmless -- rather than a machine no org owns, which its own tenant
+	// could not see and could not destroy.
+	//
+	// Skipped when there is no org, and that is not the same as writing an
+	// empty one: the row is write-once, so an empty org_id would fix this id
+	// as unowned for good. Writing nothing leaves it in the state a row
+	// created before tenancy existed is in -- admin-only, and still claimable.
+	if org != "" {
+		if err := m.opts.Store.PutTenancy(ctx, &state.Tenancy{
+			ID: id, OrgID: org, Kind: "machine", CreatedAt: time.Now().Unix(),
+		}); err != nil {
+			return nil, err
+		}
 	}
 	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
 		return nil, err

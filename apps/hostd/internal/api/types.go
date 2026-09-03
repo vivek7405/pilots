@@ -78,9 +78,12 @@ func MarshalKnobs(k Knobs) (string, error) {
 // identity -- id, name, URL, agent token -- never changes for its whole life,
 // across suspend, wake, checkpoint, restore, promote, and host migration.
 type Machine struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	HostID       string `json:"host_id"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	HostID string `json:"host_id"`
+	// OrgID is the tenant that owns it. Absent on a row created before
+	// tenancy existed, which only an admin key can see at all.
+	OrgID        string `json:"org_id,omitempty"`
 	State        string `json:"state"` // creating|running|suspended|stopped|error
 	Knobs        Knobs  `json:"knobs"`
 	ImageRef     string `json:"image_ref,omitempty"`
@@ -148,6 +151,11 @@ type CreateMachineRequest struct {
 	// HERE rather than in the client: a client that sealed would need the
 	// fleet key, and a key on every laptop is not fleet infrastructure.
 	SecretEnv map[string]string `json:"secret_env,omitempty"`
+
+	// OrgID is the tenant this machine belongs to, filled from the
+	// authenticated key. `json:"-"` is load-bearing: a client that could set
+	// it in the body could create machines inside another tenant.
+	OrgID string `json:"-"`
 }
 
 // ExecRequest runs a command inside a machine. Cwd and Env are required on
@@ -232,8 +240,9 @@ type HealthCheck struct {
 }
 
 type Service struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	OrgID string `json:"org_id,omitempty"`
 	// App groups services that may find each other by <name>.internal.
 	App          string       `json:"app,omitempty"`
 	Replicas     int          `json:"replicas"`
@@ -271,6 +280,10 @@ type CreateServiceRequest struct {
 	Repo       string `json:"repo,omitempty"`
 	Branch     string `json:"branch,omitempty"`
 	Autodeploy bool   `json:"autodeploy,omitempty"`
+
+	// OrgID comes from the authenticated key, never from the body. See
+	// CreateMachineRequest.OrgID.
+	OrgID string `json:"-"`
 }
 
 // DeployRequest cuts a new release over, health-gated, keeping the previous
@@ -298,6 +311,7 @@ type PromoteRequest struct {
 type Volume struct {
 	ID        string `json:"id"`
 	Name      string `json:"name"`
+	OrgID     string `json:"org_id,omitempty"`
 	SizeGiB   int    `json:"size_gib"`
 	MachineID string `json:"machine_id,omitempty"`
 	HostID    string `json:"host_id,omitempty"`
@@ -325,6 +339,10 @@ type CreateVolumeRequest struct {
 	SizeGiB int    `json:"size_gib"`
 	// MountPath is where the guest mounts it. Defaults to /data.
 	MountPath string `json:"mount_path,omitempty"`
+
+	// OrgID comes from the authenticated key, never from the body. See
+	// CreateMachineRequest.OrgID.
+	OrgID string `json:"-"`
 }
 
 // Host is one member of the fleet, as seen by any host reading its local
@@ -337,6 +355,54 @@ type Host struct {
 	MemFreeMiB int    `json:"mem_free_mib"`
 	LastSeen   int64  `json:"last_seen"`
 	Alive      bool   `json:"alive"`
+}
+
+// CreateAPIKeyRequest mints a key for an org. Admin-scoped: the org is named
+// in the body because an admin acts across orgs, unlike every other create on
+// this API, where the org comes from the key and never from the body.
+type CreateAPIKeyRequest struct {
+	OrgID  string   `json:"org_id"`
+	Scopes []string `json:"scopes"`
+}
+
+// APIKeyResponse carries the plaintext key exactly once, on the mint. Every
+// later read of the same row -- the list -- leaves Key empty, because the
+// plaintext was never stored to read back.
+type APIKeyResponse struct {
+	Key       string   `json:"key,omitempty"`
+	Hash      string   `json:"hash"`
+	OrgID     string   `json:"org_id"`
+	Scopes    []string `json:"scopes"`
+	CreatedAt int64    `json:"created_at"`
+	RevokedAt int64    `json:"revoked_at,omitempty"`
+}
+
+type RevokeResponse struct {
+	Hash      string `json:"hash"`
+	RevokedAt int64  `json:"revoked_at"`
+}
+
+// QuotaResponse is one org's limits, and also the PUT body minus updated_at.
+type QuotaResponse struct {
+	OrgID        string `json:"org_id"`
+	MaxMachines  int    `json:"max_machines"`
+	MaxVCPUs     int    `json:"max_vcpus"`
+	MaxMemMiB    int    `json:"max_mem_mib"`
+	MaxVolumeGiB int    `json:"max_volume_gib"`
+	MaxBuilds    int    `json:"max_builds"`
+	UpdatedAt    int64  `json:"updated_at,omitempty"`
+}
+
+// QuotaExceededResponse names the limit that refused a request, so a client is
+// told what to raise rather than only that something was too big.
+type QuotaExceededResponse struct {
+	Error string `json:"error"`
+	Quota string `json:"quota"`
+	Limit int    `json:"limit"`
+	Used  int    `json:"used"`
+	// Scope is "host" when the limit is per host rather than fleet-wide,
+	// which is true of builds alone: a build is not a replicated object.
+	Scope string `json:"scope,omitempty"`
 }
 
 type HealthResponse struct {

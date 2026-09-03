@@ -10,8 +10,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/vivek7405/pilots/hostd/internal/quota"
+	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
 // fakeBuilder stands in for BuildKit so the streaming contract can be tested
@@ -336,4 +340,82 @@ func (b *readingBuilder) StartBuild(_ context.Context, _ string, r io.Reader,
 func (b *readingBuilder) BuildLog(context.Context, string, bool) (
 	[]BuildLogLine, <-chan BuildLogLine, bool) {
 	return nil, nil, false
+}
+
+// Concurrent builds are bounded per org on this host, and the refusal says
+// "scope":"host" -- a build is not a replicated object, so there is nothing
+// fleet-wide to count and the limit must not claim to be fleet-wide.
+func TestConcurrentBuildsAreBoundedPerOrg(t *testing.T) {
+	_, st, fake := newTestServerWithManager(t)
+	if err := st.PutQuota(context.Background(), &state.Quota{
+		OrgID: "org_1", MaxMachines: 20, MaxVCPUs: 40, MaxMemMiB: 65536,
+		MaxVolumeGiB: 100, MaxBuilds: 1,
+	}); err != nil {
+		t.Fatalf("PutQuota: %v", err)
+	}
+
+	// A builder that blocks until released, so a second request really is
+	// concurrent with the first rather than following it.
+	release := make(chan struct{})
+	inFlight := make(chan struct{})
+	blocking := &blockingBuilder{release: release, inFlight: inFlight}
+	h := Routes(Deps{HostID: "host-test", Store: st, Machines: fake,
+		Builds: blocking, BuildGate: &quota.HostGate{}})
+
+	go func() {
+		req := httptest.NewRequest("POST", "/v1/builds", bytes.NewReader(nil))
+		req.Header.Set("Authorization", "Bearer "+testKey)
+		h.ServeHTTP(httptest.NewRecorder(), req)
+	}()
+	<-inFlight
+
+	rec := postTar(t, h, "/v1/builds", nil)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("the second concurrent build got %d, want 429 (%s)", rec.Code, rec.Body.String())
+	}
+	var body QuotaExceededResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Quota != "builds" || body.Scope != "host" || body.Limit != 1 {
+		t.Errorf("refusal body = %+v, want builds/host/limit 1", body)
+	}
+
+	// The slot comes back when the first build finishes.
+	close(release)
+	waitUntil(t, func() bool {
+		return postTar(t, h, "/v1/builds", nil).Code != http.StatusTooManyRequests
+	}, "the build slot to be released")
+}
+
+type blockingBuilder struct {
+	release  chan struct{}
+	inFlight chan struct{}
+	once     sync.Once
+}
+
+func (b *blockingBuilder) NewBuildID() string { return "bld-block" }
+
+func (b *blockingBuilder) StartBuild(_ context.Context, _ string, r io.Reader,
+	_ func(BuildLogLine)) (string, error) {
+	_, _ = io.Copy(io.Discard, r)
+	b.once.Do(func() { close(b.inFlight) })
+	<-b.release
+	return "rootfs-1", nil
+}
+
+func (b *blockingBuilder) BuildLog(context.Context, string, bool) ([]BuildLogLine, <-chan BuildLogLine, bool) {
+	return nil, nil, false
+}
+
+func waitUntil(t *testing.T, cond func() bool, what string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", what)
 }

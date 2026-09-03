@@ -54,6 +54,12 @@ func (d Deps) handleAddDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Ownership first: pointing a hostname at another tenant's service would
+	// hand them traffic, and a 403 here would confirm the service exists.
+	if _, ok := d.ownedService(w, r, req.ServiceID); !ok {
+		return
+	}
+
 	// Only the service's arbiter may write its domain row, so forward rather
 	// than refuse -- PutDomain enforces the same rule and would otherwise 409
 	// on two hosts in three.
@@ -100,8 +106,14 @@ func (d Deps) handleListDomains(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
 		return
 	}
+	// A domain carries no tenancy of its own: it belongs to the org that owns
+	// the service it points at.
+	org, narrow := listOrg(r)
 	out := make([]DomainResponse, 0, len(rows))
 	for _, row := range rows {
+		if _, ok := d.visible(r, row.ServiceID, org, narrow); !ok {
+			continue
+		}
 		svc, err := d.Store.GetService(r.Context(), row.ServiceID)
 		target := ""
 		if err == nil {
@@ -123,6 +135,9 @@ func (d Deps) handleDeleteDomain(w http.ResponseWriter, r *http.Request) {
 	row, err := d.Store.GetDomain(r.Context(), r.PathValue("hostname"))
 	if err != nil {
 		writeStoreError(w, err)
+		return
+	}
+	if _, ok := d.ownedService(w, r, row.ServiceID); !ok {
 		return
 	}
 	if d.forwardToArbiter(w, r, row.ServiceID) {

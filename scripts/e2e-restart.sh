@@ -13,11 +13,9 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 API="${PILOT_API:-http://127.0.0.1:8080}"
-KEY="${PILOT_API_KEY:-pilot_e2e_testkey}"
 HOSTD="${HOSTD_BIN:-$REPO/apps/hostd/hostd}"
 ROOTFS="${PILOT_TEMPLATE_ROOTFS:-/var/lib/pilots/templates/golden.ext4}"
 STATE_DSN="${PILOT_STATE_DSN:-/var/lib/pilots/e2e-state.db}"
-auth="Authorization: Bearer $KEY"
 
 [ "$(id -u)" = 0 ] || { echo "must run as root" >&2; exit 1; }
 for f in "$HOSTD" "$ROOTFS"; do
@@ -47,10 +45,14 @@ mkdir -p "$(dirname "$STATE_DSN")"
 
 start_hostd /tmp/pilots-restart-1.log
 
-# Seed an API key: hostd authenticates against hashes in its local state.
-HASH=$(python3 -c "import hashlib;print(hashlib.sha256('$KEY'.encode()).hexdigest())")
-sqlite3 "$STATE_DSN" \
-  "INSERT INTO api_keys (hash,org_id,scopes,created_at) VALUES ('$HASH','org_e2e','machines',$(date +%s));"
+# Mint an API key: hostd authenticates against hashes in its local state.
+#
+# `hostd bootstrap-key` rather than a sqlite3 insert, so the key shape, the
+# hash and the scopes have one implementation. It mints an admin key, which
+# this script needs because tenancy scopes the routes it drives.
+KEY="${PILOT_API_KEY:-$(PILOT_STATE_DSN="$STATE_DSN" "$HOSTD" bootstrap-key | tail -1)}"
+auth="Authorization: Bearer $KEY"
+case "$KEY" in pilot_*) ;; *) echo "bootstrap-key did not mint a key" >&2; exit 1 ;; esac
 
 echo "== create =="
 M=$(curl -sf -X POST "$API/v1/machines" -H "$auth" -H 'Content-Type: application/json' \

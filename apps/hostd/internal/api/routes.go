@@ -2,9 +2,11 @@ package api
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 
 	"github.com/vivek7405/pilots/hostd/internal/metrics"
+	"github.com/vivek7405/pilots/hostd/internal/quota"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -41,6 +43,19 @@ type Deps struct {
 	// which case the route answers 503 rather than accepting deliveries it
 	// cannot verify.
 	GitHub http.HandlerFunc
+	// Tenancy answers which org owns an object and whether a key has been
+	// revoked, from local state. Nil falls back to the store, which is what a
+	// single box wants; a fleet passes the subscription cache so neither
+	// question costs a query on the request path.
+	Tenancy TenancyView
+	// BuildGate bounds concurrent builds per org on THIS host. Nil means
+	// unlimited, which is what a test wants and what a host with no builder
+	// configured never reaches.
+	BuildGate *quota.HostGate
+	// KeySource is where a minted key's randomness comes from. Nil is
+	// crypto/rand, which is what production uses; a test supplies a fixed
+	// reader so it can know the hash a mint will produce.
+	KeySource io.Reader
 }
 
 // Routes registers the full public API. Phase 1 lands the shapes; the handlers
@@ -131,6 +146,15 @@ func Routes(d Deps) http.Handler {
 	// guarantee that fails silently.
 	mux.HandleFunc("GET /v1/machines/{id}/volume", d.handleMachineVolume)
 	mux.HandleFunc("GET /v1/hosts", d.handleListHosts)
+
+	// Tenancy administration. Admin-scoped, and served by every host from its
+	// own replica: the dashboard is a guest on the platform and cannot reach
+	// its host directly, so minting a key is an ordinary public API call.
+	mux.HandleFunc("POST /v1/api-keys", d.handleCreateAPIKey)
+	mux.HandleFunc("GET /v1/api-keys", d.handleListAPIKeys)
+	mux.HandleFunc("POST /v1/api-keys/{hash}/revoke", d.handleRevokeAPIKey)
+	mux.HandleFunc("GET /v1/quotas/{org}", d.handleGetQuota)
+	mux.HandleFunc("PUT /v1/quotas/{org}", d.handlePutQuota)
 
 	return WithAuth(d, mux)
 }

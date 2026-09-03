@@ -36,6 +36,14 @@ type Cache struct {
 	// service holds the sealed environment, and a second in-memory copy of
 	// every app's secrets on every host is a cost with no reader.
 	services map[string]state.Service
+	// tenancy answers "which org owns this id" on every authenticated read.
+	// A subscription rather than a query: org scoping runs on the API's hot
+	// path, and a request path that queries the agent is a request path that
+	// can block on it.
+	tenancy map[string]state.Tenancy
+	// revoked is the set of killed key hashes, checked on every request. Held
+	// as a set because nothing reads the revocation time on this path.
+	revoked map[string]struct{}
 	// heardAt is when THIS host last saw a peer's heartbeat change, by the
 	// local clock. Liveness is judged from it rather than from the last_seen
 	// the peer wrote, because that value is stamped by the peer's clock and
@@ -92,6 +100,8 @@ func NewCache(ctx context.Context, client *Client) (*Cache, error) {
 		machines:     map[string]state.Machine{},
 		hosts:        map[string]state.Host{},
 		services:     map[string]state.Service{},
+		tenancy:      map[string]state.Tenancy{},
+		revoked:      map[string]struct{}{},
 		heardAt:      map[string]time.Time{},
 		hostsChanged: make(chan struct{}, 1),
 	}
@@ -111,6 +121,21 @@ func NewCache(ctx context.Context, client *Client) (*Cache, error) {
 		hosts.Close()
 		return nil, err
 	}
+	tenancy, err := c.subscribeTenancy(ctx)
+	if err != nil {
+		machines.Close()
+		hosts.Close()
+		services.Close()
+		return nil, err
+	}
+	revocations, err := c.subscribeRevocations(ctx)
+	if err != nil {
+		machines.Close()
+		hosts.Close()
+		services.Close()
+		tenancy.Close()
+		return nil, err
+	}
 
 	c.mu.Lock()
 	c.ready = true
@@ -119,7 +144,71 @@ func NewCache(ctx context.Context, client *Client) (*Cache, error) {
 	go c.follow(ctx, machines, "machines", c.subscribeMachines)
 	go c.follow(ctx, hosts, "hosts", c.subscribeHosts)
 	go c.follow(ctx, services, "services", c.subscribeServices)
+	go c.follow(ctx, tenancy, "tenancy", c.subscribeTenancy)
+	go c.follow(ctx, revocations, "api_key_revocations", c.subscribeRevocations)
 	return c, nil
+}
+
+// subscribeTenancy materializes the owner of every machine, service and volume.
+//
+// Three columns, not four: created_at has no reader on the request path.
+func (c *Cache) subscribeTenancy(ctx context.Context) (*Subscription, error) {
+	sub, err := c.client.Subscribe(ctx, `SELECT id, org_id, kind FROM tenancy`)
+	if err != nil {
+		return nil, err
+	}
+
+	fresh := map[string]state.Tenancy{}
+	rows := sub.Rows()
+	for rows.Next() {
+		var t state.Tenancy
+		if err := rows.Scan(&t.ID, &t.OrgID, &t.Kind); err != nil {
+			sub.Close()
+			return nil, err
+		}
+		fresh[t.ID] = t
+	}
+	if err := rows.Err(); err != nil {
+		sub.Close()
+		return nil, err
+	}
+
+	c.mu.Lock()
+	c.tenancy = fresh
+	c.mu.Unlock()
+	return sub, nil
+}
+
+// subscribeRevocations materializes the killed keys.
+//
+// A rebuild after a lost subscription re-reads the whole table, so a
+// revocation cannot be missed by the gap: the tombstone is a row that only
+// ever appears, and a full re-read always finds it.
+func (c *Cache) subscribeRevocations(ctx context.Context) (*Subscription, error) {
+	sub, err := c.client.Subscribe(ctx, `SELECT hash FROM api_key_revocations`)
+	if err != nil {
+		return nil, err
+	}
+
+	fresh := map[string]struct{}{}
+	rows := sub.Rows()
+	for rows.Next() {
+		var hash string
+		if err := rows.Scan(&hash); err != nil {
+			sub.Close()
+			return nil, err
+		}
+		fresh[hash] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		sub.Close()
+		return nil, err
+	}
+
+	c.mu.Lock()
+	c.revoked = fresh
+	c.mu.Unlock()
+	return sub, nil
 }
 
 // subscribeMachines opens a subscription and replaces the machine map with its
@@ -334,7 +423,54 @@ func (c *Cache) apply(table string, change Change) {
 			return
 		}
 		c.services[svc.ID] = svc
+
+	case "tenancy":
+		var t state.Tenancy
+		if err := change.Scan(&t.ID, &t.OrgID, &t.Kind); err != nil {
+			slog.Error("cluster cache could not read a tenancy change", "err", err)
+			return
+		}
+		if change.Kind == ChangeDelete {
+			delete(c.tenancy, t.ID)
+			return
+		}
+		c.tenancy[t.ID] = t
+
+	case "api_key_revocations":
+		var hash string
+		if err := change.Scan(&hash); err != nil {
+			slog.Error("cluster cache could not read a revocation change", "err", err)
+			return
+		}
+		// No delete case on purpose. A revocation is a tombstone: it only
+		// ever appears, and un-revoking is minting a new key.
+		c.revoked[hash] = struct{}{}
 	}
+}
+
+// OrgOf returns the org that owns an id, and whether any row says so.
+//
+// false means the object predates tenancy, not that it is public: callers
+// treat it as visible to admin alone.
+func (c *Cache) OrgOf(id string) (string, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	t, ok := c.tenancy[id]
+	if !ok {
+		return "", false
+	}
+	return t.OrgID, true
+}
+
+// Revoked reports whether a key hash has been killed. Read on every
+// authenticated request, from memory, with no query.
+func (c *Cache) Revoked(hash string) bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	_, ok := c.revoked[hash]
+	return ok
 }
 
 // Services returns the id, name and app of every service in the fleet.

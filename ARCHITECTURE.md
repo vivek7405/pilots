@@ -74,6 +74,15 @@ compose fragment on the ordinary primitives, not a product tier. See
    free tier). One wildcard cert via ACME DNS-01 (certmagic + Cloudflare API
    token), shared to hosts via S3. Custom domains: per-domain on-demand
    certs via HTTP-01 (any host can answer the challenge).
+   In code: every host calls `certmagic.ManageAsync` for `*.<workload
+   domain>`, the workload apex and the dashboard apex; the shared `certs`
+   Storage lock is what makes N hosts running the identical call produce ONE
+   order, with the rest loading the result. Without a Cloudflare token the
+   router stays HTTP-01-only and the wildcard is simply absent — the
+   on-demand path still serves custom domains, so this degrades rather than
+   fails. The API hostname `api.<workload domain>` needs no record and no
+   certificate of its own: the wildcard A record and the wildcard
+   certificate already cover it.
 6. **Fleet is CPU-vendor-homogeneous — vendor is a cost decision, not a
    technical one.** FC memory snapshots carry raw CPUID; a snapshot never
    restores across the Intel/AMD boundary (cpu_templates normalize within a
@@ -85,6 +94,16 @@ compose fragment on the ordinary primitives, not a product tier. See
    laptop is AMD, so laptop-built snapshots/templates never ship to an Intel
    fleet — golden templates are always built ON the fleet by CI; and auction
    i7 desktop boards have non-ECC RAM (acceptable at this stage; note it).
+   The two halves of a template are built in different places and that split
+   is the enforcement: the **rootfs** is an ext4 disk image with no CPUID in
+   it, so CI builds it at a tag and `scripts/rootfs/golden.ext4.sha256` pins
+   it — CI asserts the build matches the pin, and `host-bootstrap.sh`
+   refuses to ship a local `golden.ext4` that does not. The **memory
+   template** is never a file and is never shipped: it exists only as builds
+   a fleet host chunkified from its own boot and published through its own
+   replica, so no laptop can mint one. `PILOT_CPU_TEMPLATE` is pinned in
+   `/etc/pilots/config` and the bootstrap refuses a host whose CPU vendor
+   disagrees with it.
 7. **Fly-shaped orchestration, sprites-shaped storage.** Per-host autonomy
    (each host acts on its own machines: wake, restart, suspend, health) +
    any-host coordination (any host serves any API request, proposing
@@ -131,7 +150,9 @@ CREATE TABLE checkpoints (id TEXT PRIMARY KEY, machine_id TEXT, seq INTEGER,
                        mem_build_id TEXT, rootfs_build_id TEXT,
                        durable INTEGER, created_at INTEGER);
 CREATE TABLE api_keys (hash TEXT PRIMARY KEY, org_id TEXT, scopes TEXT,
-                       created_at INTEGER);          -- writer: dashboard's host
+                       created_at INTEGER);
+                       -- writer: any host, on an admin-scoped request
+                       -- (write-once rows)
 CREATE TABLE releases (id TEXT PRIMARY KEY, service_id TEXT,
                        rootfs_build_id TEXT, healthy INTEGER,
                        created_at INTEGER);
@@ -143,6 +164,41 @@ CREATE TABLE services  (id TEXT PRIMARY KEY, name TEXT, app TEXT,
                        domain TEXT, custom_domain TEXT,
                        repo TEXT, branch TEXT, autodeploy INTEGER,
                        created_at INTEGER);           -- writer: host_id only
+
+-- Which org owns an object. A NEW table rather than an org_id column on
+-- machines, services and volumes: those tables carry rows, and cr-sqlite
+-- backfills every row of a table whose columns change -- the fleet-wide
+-- gossip storm that took fly's fleet down twice for ~11.5h
+-- (fly.io/infra-log/2024-11-30). A new table backfills nothing.
+--
+-- The row is written BEFORE the object row it names and is never changed, so
+-- ANY host may write it: two writers cannot disagree about a value written
+-- once, which is what makes "any host" legal under last-write-wins.
+CREATE TABLE tenancy (id TEXT PRIMARY KEY, org_id TEXT,
+                       kind TEXT,        -- machine|service|volume
+                       created_at INTEGER);
+                       -- writer: the host writing the object row (write-once)
+
+-- A revoked key. A tombstone that only ever APPEARS: deleting the api_keys row
+-- would be undone by a replica still carrying the older insert, and the key
+-- would come back alive. Revocation therefore adds a row instead.
+CREATE TABLE api_key_revocations (hash TEXT PRIMARY KEY, revoked_at INTEGER);
+                       -- writer: any host, on an admin-scoped request
+                       -- (write-once)
+
+-- Per-org limits. One logical writer -- an admin request -- so last-write-wins
+-- between two admins editing the same org is the intended semantics.
+CREATE TABLE org_quotas (org_id TEXT PRIMARY KEY, max_machines INTEGER,
+                       max_vcpus INTEGER, max_mem_mib INTEGER,
+                       max_volume_gib INTEGER, max_builds INTEGER,
+                       updated_at INTEGER);
+                       -- writer: any host, on an admin-scoped request
+
+-- Operator note for a fleet that is already bootstrapped: corrosion reads
+-- schema_paths at agent start, so a host that has run before needs the new
+-- schema.sql copied and its corrosion unit restarted before it can serve the
+-- three tables above. They backfill nothing -- they have no rows -- so the
+-- restart is the whole of the rollout.
 
 -- Grouping is a property of the client's compose file, not a fleet object, so
 -- there is deliberately no apps table. App names take their uniqueness from
@@ -169,6 +225,8 @@ GET    /v1/machines/:id              info
 DELETE /v1/machines/:id              destroy
 POST   /v1/machines/:id/exec         {cmd, cwd?, env?, user?, timeout?} → {stdout, stderr, exitCode}
 GET    /v1/machines/:id/exec/stream  WS: query argv/dir/env/stdin → frames (below)
+                                     auth: Authorization: Bearer, or the
+                                     subprotocol authorization.bearer.<key> (browsers)
 GET    /v1/machines/:id/logs?follow  stream
 POST   /v1/machines/:id/suspend|wake|stop|start
 POST   /v1/machines/:id/checkpoints  {comment?} → {id, seq}
@@ -184,9 +242,21 @@ POST   /v1/machines/:id/promote      {domain?} → service
 POST   /v1/volumes                   create JuiceFS volume
 GET    /v1/volumes                   list
 GET    /v1/hosts                     fleet view
+POST   /v1/api-keys                  admin: mint {org_id, scopes[]} → the plaintext key, ONCE
+POST   /v1/api-keys/:hash/revoke     admin: tombstone a key; no row is deleted
+GET    /v1/api-keys?org=             admin: list an org's keys, revoked ones included
+GET    /v1/quotas/:org               admin: the org's limits, or the defaults
+PUT    /v1/quotas/:org               admin: set them
 GET    /v1/health                    liveness (unauthenticated)
 GET    /metrics                      Prometheus (unauthenticated)
 ```
+
+Every read is scoped to the caller's org. An id another org owns answers
+**404**, never 403: existence must not leak across tenants. An `admin` key
+sees every row and may narrow a list with `?org=`; a non-admin's `?org=` is
+ignored rather than refused. Creates take the org from the authenticated key
+and never from the request body. A create refused by a quota answers **429**
+with `{"error":"quota exceeded","quota","limit","used"}`.
 
 ### `.internal` service discovery and guest-to-guest traffic
 
@@ -410,6 +480,16 @@ gap a *degraded ceiling* where extents cannot be shared rather than dropping
 the assertion — an assertion that stops asserting is how a real slowdown
 hides.
 
+Above those two tiers sits a third. `PILOTS_E2E_METAL=1` holds the host to the
+**metal SLOs** — create < 500ms, wake < 200ms, checkpoint resume gap < 500ms,
+release restore < 1s, promote < 1.5s — which is the latency the product is
+sold on and is only achievable on dedicated hardware. The switch is explicit
+rather than inferred, because extent sharing is necessary for those numbers
+and nowhere near sufficient: a nested-virtualisation laptop node on btrfs
+reports `reflink: true` and cannot create a machine in 500ms. Setting the
+flag on a host whose `/v1/health` does not report `reflink: true` is a FAILED
+step, never a quiet downgrade to the laptop ceilings.
+
 (An earlier note here put the ext4 penalty at 2.2s per create. That measured
 `cp --reflink=auto` without `--sparse=always`, which is not what the engine
 runs; the same copy without sparse detection takes 19s on these hosts.)
@@ -599,8 +679,11 @@ process the guest just restored. Changing an env var therefore takes effect
 only through an explicit restart or roll of the machine — never through a
 suspend/wake cycle, which must leave the running process and its env untouched.
 
-**Router (in hostd):** TLS termination (wildcard + on-demand custom-domain
-certs) → hostname parse (`name` | `port-name` | custom domain) → local
+**Router (in hostd):** TLS termination — the wildcard arrives by ACME DNS-01
+through the Cloudflare API and is managed eagerly on every host, custom
+domains arrive by on-demand HTTP-01 gated by `certs.Decider`, and TLS-ALPN is
+off because the challenge would have to be answered by whichever host DNS
+picked → hostname parse (`name` | `port-name` | custom domain) → local
 Corrosion lookup → if running-local: proxy into the netns (in-process Go
 proxy — no socat, no per-VM forwarder processes); if running-remote: proxy
 over WireGuard to the owning hostd; if suspended and `autoStart`: **hold the
@@ -620,6 +703,23 @@ latest builds in S3, write the new `host_id`, URL unchanged. No leader, no
 election. Placement double-booking is prevented by hosts being final
 authority on their own capacity (a create/rescue targeting a full host is
 refused and re-hashed).
+
+**Operations:** a host whose local replica is corrupt or hopelessly behind is
+re-seeded with `scripts/corrosion-reseed.sh <ip> --from <survivor>`, which
+stops hostd FIRST (the reaper kills any Firecracker with no row for 60s, so
+running it against an empty replica would destroy the machines the re-seed is
+trying to save), moves the store aside rather than deleting it, and waits for
+every table's count to agree with a survivor. Every hostd re-publishes its own
+`machines` and `volumes` rows on start, read from the replica and never from
+local disk — a write that never gossiped self-corrects on the next restart,
+and a row the replica no longer shows may belong to a rescuer, so disk is the
+wrong source. `corrosion.service` runs `Type=notify` with a watchdog and hard
+memory bounds: a hung state daemon is worse than a dead one, because a dead
+one restarts. **No data-plane unit orders on another.** hostd already waits
+for corrosion's schema in code, so `After=corrosion.service` buys nothing and
+costs the failure shape where one blocked unit wedges the whole data plane.
+Anything a customer saw, every self-heal and every re-seed is written up in
+`docs/incidents/`.
 
 **Build path:** `POST /v1/builds` accepts a Dockerfile context → BuildKit
 (rootless buildkitd on each host) → **BuildKit's `tar` exporter**, which
@@ -750,13 +850,32 @@ snapshot; a database restores and then replays WAL.
   pilots **API key** → stored at `~/.config/pilots/credentials`. Headless
   fallback: `pilot login --token` / `PILOT_API_KEY` env.
 - **Machine auth:** every hostd request carries `Authorization: Bearer
-  <api-key>`. Key **hashes** live in the Corrosion `api_keys` table
-  (writer: the dashboard's host), so **every host authenticates locally**
-  with no auth-service round-trip — auth survives any host loss, including
-  the dashboard's.
+  <api-key>`. Key **hashes** live in the Corrosion `api_keys` table, written
+  by whichever host serves the `POST /v1/api-keys` that minted them, so
+  **every host authenticates locally** with no auth-service round-trip —
+  auth survives any host loss, including the dashboard's. The dashboard is a
+  guest on the platform and guests reach only `fdcd::/16`, so it mints keys
+  through the public API like any other client, not through its own host.
+  The first key on a fleet comes from `hostd bootstrap-key`, run on the box.
+  Revoking a key writes an `api_key_revocations` row and deletes nothing: a
+  delete racing a replica that still carries the insert loses, and the key
+  comes back alive.
 - **Agents are first-class principals:** an API key is all an agent needs;
-  scopes on the key (`machines`, `deploy`, `admin`) bound what it can do.
-  The MCP server reads the same credentials file/env.
+  scopes on the key bound what it can do, stored comma-separated and sent as
+  a JSON array. They nest — `machines` ⊂ `deploy` ⊂ `admin`:
+  `machines` covers `/v1/machines`, `/v1/checkpoints`, `/v1/volumes`,
+  `/v1/sprites` and `/v1/hosts`; `deploy` adds `/v1/builds`, `/v1/services`
+  and `/v1/domains`; `admin` adds `/v1/api-keys`, `/v1/quotas` and
+  `/v1/usage`. An unknown path or an unknown scope name fails closed, and a
+  refusal is `403 {"error":"scope <s> required"}`. The MCP server reads the
+  same credentials file/env.
+- **WebSocket clients** may carry the key as the subprotocol
+  `authorization.bearer.<key>` instead of the header, which a browser cannot
+  set on an upgrade. hostd echoes the offered subprotocol on the `101` —
+  the WHATWG algorithm fails a connection whose client offered subprotocols
+  and whose server picked none — and strips it before the request reaches
+  the guest. `?token=` is deliberately not accepted: it lands in logs and in
+  shell history.
 - Per-machine **agent tokens** (guest exec auth) are minted at create,
   hashed into the machine row, never reused across machines.
 
@@ -770,6 +889,10 @@ restore (same row/URL/token — never respawn-from-template) · WS streaming
 exec with `stdin=false` for `claude -p … --output-format stream-json` ·
 `cwd` + `env` on every exec (buffered and streaming). The sprites byte frame
 protocol (1/2/3) is kept exactly so crisp's client code drops in.
+`@pilots/sdk/sprites-compat` is the drop-in adapter: a sprite's `id` is the
+machine's NAME, because a sprites consumer persists that id and hands it back
+as a path segment to a name-keyed route, and `machineId` carries the `m-…` id
+for anything going through the typed client.
 
 ---
 
@@ -786,7 +909,10 @@ pilots/
       systemd/            # hostd.service, corrosion.service
     dashboard/            # webjs full-stack app (scaffolded `npm create webjs`)
   packages/cli/           # `pilot` CLI (TS)
-  sdks/js/  sdks/go/      # thin typed clients over hostd's API
+  sdks/js/                # @pilots/sdk — typed client + sprites-compat adapter
+  sdks/go/                # github.com/vivek7405/pilots/sdks/go
+                          #   both hand-written; both carry a drift test that
+                          #   parses internal/api and fails on a wire change
   scripts/                # bash one-shots ONLY: host-bootstrap.sh <ip>,
                           #   build-golden-rootfs.sh, dev-vm.sh, e2e.mjs
 ```
@@ -801,18 +927,36 @@ Drizzle (pinned 1.0.0-rc.3) is in the box; API routes =
 `.server.ts` + `'use server'`; auth via `createAuth({providers})` +
 `session()`; readiness at `/__webjs/ready` (the deploy health gate);
 scaffold Dockerfile is buildless (`node:24-alpine`, `npm start`).
-Dashboard owns orgs/users/API keys in its own Drizzle DB and pushes API-key
-hashes into Corrosion (via its local hostd) so every host authenticates
-locally; it is deployed ON the platform via promote and is never in the
-request path.
+Dashboard owns orgs/users in its own Drizzle DB and mints platform API keys
+through `POST /v1/api-keys` on any host, so every host authenticates locally
+from its replica; it is deployed ON the platform via promote and is never in
+the request path. It cannot reach its own host directly — a guest reaches
+only `fdcd::/16` — which is why the mint is a public API call rather than a
+loopback write.
 
 ---
 
 ## Verification (continuous)
 
 `scripts/e2e.mjs` is the single growing battery: correctness from Phase 2,
-timing from Phase 3, chaos from Phase 4, PaaS from Phase 5, hostility from
-Phase 6 — later phases never retire earlier assertions. `go test ./...` for
+timing from Phase 3, chaos from Phase 4, PaaS from Phase 5, tenancy and
+hostility from Phase 6 — later phases never retire earlier assertions. Its
+key comes from `hostd bootstrap-key` and must carry the `admin` scope, since
+the battery exercises every scope's routes; `scripts/cluster/gate.sh` seeds
+the fleet the same way rather than writing `api_keys` by hand. Hostility is
+the one phase split across two batteries, because the public API cannot see a
+process in D-state, a cgroup's `memory.events`, a file-descriptor count, or a
+hostd that was SIGKILLed: the API-visible half (netns churn, egress
+containment, capacity refusal, quota parity) is in `e2e.mjs`, and the
+host-shell half (the NBD wedge and its deliberate negative control, the
+per-host resource counts, cgroup containment, Firecracker API exhaustion,
+orphan pile-up) is in `scripts/cluster/gate.sh` as numbered sections.
+`go test ./...` for
 netns/block/header/state/s3 (block-layer round-trip + diff-chain tests are
-mandatory). Dashboard: `webjs check` / `doctor --json` / `typecheck` /
-`test`. CI runs unit tests + the single-VM e2e on every push.
+mandatory). Drift tests in both SDKs parse `internal/api` on every
+`npm test`. Dashboard: `webjs check` / `doctor --json` / `typecheck` /
+`test`. CI runs unit tests + the single-VM e2e on every push, and at a tag
+builds the golden rootfs and asserts it matches the committed pin. Phase 6f
+adds the metal SLO tier (`PILOTS_E2E_METAL=1`) and the fleet gate; the
+production sign-off run is the first `docs/incidents/` entry, and a section
+of it marked "skipped" or "laptop only" makes the run red.

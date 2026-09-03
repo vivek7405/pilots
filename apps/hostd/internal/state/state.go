@@ -9,8 +9,11 @@
 //
 //   - Single-writer: a host writes ONLY rows describing its own machines. The
 //     sanctioned exceptions are deterministic-owner operations -- name
-//     allocation, self-heal claims of a provably dead host's machines, and the
-//     dashboard host's api_keys writes.
+//     allocation and self-heal claims of a provably dead host's machines --
+//     and the tables whose rows describe no machine: tenancy and
+//     api_key_revocations, which are write-once, and api_keys and org_quotas,
+//     written by any host serving an admin-scoped request. A row is safe for
+//     "any host" only when it is written once or has one logical writer.
 //   - Reads are local and must never block on another host. Routing and wake
 //     depend on this.
 package state
@@ -124,8 +127,10 @@ type WriteAuth struct {
 	// that host's last_seen immediately before writing, because the claim is
 	// only legitimate while the owner is still gone.
 	DeadOwnerClaim string
-	// APIKeyWrite: the dashboard's host writing api_keys, the one table whose
-	// rows describe no machine.
+	// APIKeyWrite: an admin-scoped request on any host writing api_keys, one
+	// of the tables whose rows describe no machine. The dashboard used to be
+	// the only writer; it is a guest on the platform now and reaches the API
+	// like any other client.
 	APIKeyWrite bool
 }
 
@@ -141,7 +146,7 @@ func WithDeadOwnerClaim(ownerID string) WriteOption {
 	return func(a *WriteAuth) { a.DeadOwnerClaim = ownerID }
 }
 
-// WithAPIKeyWrite authorises the dashboard host's api_keys writes.
+// WithAPIKeyWrite authorises an admin-scoped request's api_keys write.
 func WithAPIKeyWrite() WriteOption {
 	return func(a *WriteAuth) { a.APIKeyWrite = true }
 }
@@ -261,6 +266,41 @@ type APIKey struct {
 	CreatedAt int64
 }
 
+// Tenancy names the org that owns one machine, service or volume.
+//
+// A row of its own rather than a column on the object, because adding a
+// column to a replicated table that carries rows backfills every one of them
+// fleet-wide. Written before the object it names and never changed, which is
+// why any host may write it: a value written once cannot be merged into
+// something nobody wrote.
+type Tenancy struct {
+	ID        string
+	OrgID     string
+	Kind      string // machine|service|volume
+	CreatedAt int64
+}
+
+// Revocation is a killed API key. Adding a row rather than deleting the key's,
+// because a delete loses to a replica still carrying the insert and the
+// credential comes back alive.
+type Revocation struct {
+	Hash      string
+	RevokedAt int64
+}
+
+// Quota is one org's limits. Zero means "no row was ever written", and the
+// caller applies its defaults; a limit of zero is expressed by writing the row
+// with an explicit 0, which is how an org is frozen.
+type Quota struct {
+	OrgID        string
+	MaxMachines  int
+	MaxVCPUs     int
+	MaxMemMiB    int
+	MaxVolumeGiB int
+	MaxBuilds    int
+	UpdatedAt    int64
+}
+
 // Store is the swappable state backend.
 type Store interface {
 	GetMachine(ctx context.Context, id string) (*Machine, error)
@@ -293,6 +333,37 @@ type Store interface {
 
 	GetAPIKeyByHash(ctx context.Context, hash string) (*APIKey, error)
 	PutAPIKey(ctx context.Context, k *APIKey) error
+	// ListAPIKeys returns one org's keys. Hashes only -- the plaintext exists
+	// for the length of the mint response and is never stored anywhere.
+	ListAPIKeys(ctx context.Context, orgID string) ([]APIKey, error)
+
+	// PutTenancy records which org owns an object. Write-once in both
+	// drivers: a second call with a different org leaves the first in place,
+	// so a replayed create cannot move an object between tenants.
+	PutTenancy(ctx context.Context, t *Tenancy) error
+	// GetTenancy returns ErrNotFound for an object created before tenancy
+	// existed. Callers treat that as admin-only rather than as public.
+	GetTenancy(ctx context.Context, id string) (*Tenancy, error)
+	// ListTenancy returns every row. The quota counter reads it once per
+	// create, joined against the object tables in memory.
+	ListTenancy(ctx context.Context) ([]Tenancy, error)
+
+	// PutRevocation tombstones a key. Write-once, and never paired with a
+	// delete: see the Revocation type.
+	PutRevocation(ctx context.Context, rv *Revocation) error
+	// IsRevoked answers from the local replica, on every authenticated
+	// request. It must never make a network call.
+	IsRevoked(ctx context.Context, hash string) (bool, error)
+	// GetRevocation returns WHEN a key was killed, for the key list. Separate
+	// from IsRevoked because the request path asks only whether, and paying
+	// for a row scan on every authenticated call to answer a question no
+	// caller there asks would be a cost with no reader.
+	GetRevocation(ctx context.Context, hash string) (*Revocation, error)
+
+	// GetQuota returns ErrNotFound when the org has no row, which means the
+	// defaults apply.
+	GetQuota(ctx context.Context, orgID string) (*Quota, error)
+	PutQuota(ctx context.Context, q *Quota) error
 
 	GetVolume(ctx context.Context, id string) (*Volume, error)
 	ListVolumes(ctx context.Context) ([]Volume, error)
@@ -708,6 +779,146 @@ func (s *sqliteStore) PutAPIKey(ctx context.Context, k *APIKey) error {
 		k.Hash, k.OrgID, k.Scopes, k.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("state: put api key: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) ListAPIKeys(ctx context.Context, orgID string) ([]APIKey, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT hash, org_id, scopes, created_at FROM api_keys
+		 WHERE org_id = ? ORDER BY created_at DESC, hash`, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("state: list api keys: %w", err)
+	}
+	defer rows.Close()
+
+	var out []APIKey
+	for rows.Next() {
+		var k APIKey
+		if err := rows.Scan(&k.Hash, &k.OrgID, &k.Scopes, &k.CreatedAt); err != nil {
+			return nil, fmt.Errorf("state: scan api key: %w", err)
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// PutTenancy is DO NOTHING rather than DO UPDATE, and that is the whole
+// invariant: the row is what makes "any host may write this" safe, and it is
+// only safe while nothing can change a value that was already written.
+func (s *sqliteStore) PutTenancy(ctx context.Context, t *Tenancy) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO tenancy (id, org_id, kind, created_at) VALUES (?,?,?,?)
+		ON CONFLICT(id) DO NOTHING`,
+		t.ID, t.OrgID, t.Kind, t.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put tenancy %q: %w", t.ID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) GetTenancy(ctx context.Context, id string) (*Tenancy, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id, org_id, kind, created_at FROM tenancy WHERE id = ?`, id)
+	var t Tenancy
+	err := row.Scan(&t.ID, &t.OrgID, &t.Kind, &t.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get tenancy %q: %w", id, err)
+	}
+	return &t, nil
+}
+
+func (s *sqliteStore) ListTenancy(ctx context.Context) ([]Tenancy, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, org_id, kind, created_at FROM tenancy ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("state: list tenancy: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Tenancy
+	for rows.Next() {
+		var t Tenancy
+		if err := rows.Scan(&t.ID, &t.OrgID, &t.Kind, &t.CreatedAt); err != nil {
+			return nil, fmt.Errorf("state: scan tenancy: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// PutRevocation is DO NOTHING for the same reason PutTenancy is, plus one of
+// its own: the earliest revocation time is the true one, and a re-revocation
+// must not move it forward.
+func (s *sqliteStore) PutRevocation(ctx context.Context, rv *Revocation) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO api_key_revocations (hash, revoked_at) VALUES (?,?)
+		ON CONFLICT(hash) DO NOTHING`, rv.Hash, rv.RevokedAt)
+	if err != nil {
+		return fmt.Errorf("state: put revocation: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) GetRevocation(ctx context.Context, hash string) (*Revocation, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT hash, revoked_at FROM api_key_revocations WHERE hash = ?`, hash)
+	var rv Revocation
+	err := row.Scan(&rv.Hash, &rv.RevokedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get revocation: %w", err)
+	}
+	return &rv, nil
+}
+
+func (s *sqliteStore) IsRevoked(ctx context.Context, hash string) (bool, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT 1 FROM api_key_revocations WHERE hash = ?`, hash)
+	var one int
+	err := row.Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("state: check revocation: %w", err)
+	}
+	return true, nil
+}
+
+const quotaCols = `org_id, max_machines, max_vcpus, max_mem_mib, max_volume_gib, max_builds, updated_at`
+
+func (s *sqliteStore) GetQuota(ctx context.Context, orgID string) (*Quota, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+quotaCols+` FROM org_quotas WHERE org_id = ?`, orgID)
+	var q Quota
+	err := row.Scan(&q.OrgID, &q.MaxMachines, &q.MaxVCPUs, &q.MaxMemMiB,
+		&q.MaxVolumeGiB, &q.MaxBuilds, &q.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get quota %q: %w", orgID, err)
+	}
+	return &q, nil
+}
+
+func (s *sqliteStore) PutQuota(ctx context.Context, q *Quota) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO org_quotas (`+quotaCols+`) VALUES (?,?,?,?,?,?,?)
+		ON CONFLICT(org_id) DO UPDATE SET
+			max_machines=excluded.max_machines, max_vcpus=excluded.max_vcpus,
+			max_mem_mib=excluded.max_mem_mib, max_volume_gib=excluded.max_volume_gib,
+			max_builds=excluded.max_builds, updated_at=excluded.updated_at`,
+		q.OrgID, q.MaxMachines, q.MaxVCPUs, q.MaxMemMiB, q.MaxVolumeGiB,
+		q.MaxBuilds, q.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put quota %q: %w", q.OrgID, err)
 	}
 	return nil
 }

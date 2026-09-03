@@ -31,6 +31,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/machines"
 	"github.com/vivek7405/pilots/hostd/internal/mesh"
 	"github.com/vivek7405/pilots/hostd/internal/nbd"
+	"github.com/vivek7405/pilots/hostd/internal/quota"
 	"github.com/vivek7405/pilots/hostd/internal/router"
 	"github.com/vivek7405/pilots/hostd/internal/s3"
 	"github.com/vivek7405/pilots/hostd/internal/seal"
@@ -271,6 +272,21 @@ func run() error {
 		slog.Info("re-adopted machines from a previous run", "count", adopted)
 	}
 
+	// Re-gossip this host's own rows. A write that reached the local replica
+	// and never left the host -- a partition, a wedge, a kill between the two
+	// -- leaves every peer stale, and nothing else corrects it. See
+	// republishOwnRows for why the replica is the source and why this is on
+	// start rather than on a timer.
+	if cfg.Fleet() {
+		if n, err := republishOwnRows(ctx, cfg.HostID, store); err != nil {
+			slog.Warn("could not republish this host's own rows; peers may hold "+
+				"a stale view of machines this host owns until the next restart",
+				"err", err)
+		} else if n > 0 {
+			slog.Info("republished own rows", "count", n)
+		}
+	}
+
 	// After adoption, anything still lying around belongs to nothing.
 	if err := mgr.GCOrphanInterfaces(); err != nil {
 		slog.Warn("could not clean up orphaned interfaces", "err", err)
@@ -359,10 +375,18 @@ func run() error {
 		return err
 	}
 
+	// Org scoping and the revocation check run on every authenticated request,
+	// so in a fleet they read the subscription cache -- a map lookup -- rather
+	// than querying the corrosion agent per call.
+	var tenancy api.TenancyView = api.StoreTenancy(store)
+	if f != nil {
+		tenancy = cachedTenancy{cache: f.cache, store: store}
+	}
+
 	controlAPI := api.Routes(api.Deps{
 		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink, HugePages: cfg.HugePages,
 		Builds: builder, Rollout: rollout, Domain: cfg.WorkloadDomain,
-		Peers: peerLookup(f),
+		Peers: peerLookup(f), Tenancy: tenancy, BuildGate: &quota.HostGate{},
 		GitHub: github.Handler(github.Deps{
 			HostID: cfg.HostID, App: ghApp, Store: store, Builds: builder,
 			Rollout: rollout, Machines: mgr, Domain: cfg.WorkloadDomain,

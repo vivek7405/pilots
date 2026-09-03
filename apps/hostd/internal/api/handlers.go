@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/vivek7405/pilots/hostd/internal/quota"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -38,9 +39,14 @@ type Manager interface {
 //
 // The URL is derived from the machine's domain rather than stored twice, so
 // there is exactly one place a machine's address is decided.
-func toAPI(row state.Machine) Machine {
+//
+// orgID is passed in rather than looked up here: a list endpoint already knows
+// every row's owner from the pass it made to filter them, and re-asking per
+// row would turn one lookup into N.
+func toAPI(row state.Machine, orgID string) Machine {
 	return Machine{
 		ID: row.ID, Name: row.Name, HostID: row.HostID, State: row.State,
+		OrgID:        orgID,
 		Knobs:        ParseKnobs(row.KindKnobs),
 		ImageRef:     row.ImageRef,
 		VCPUs:        row.VCPUs,
@@ -85,12 +91,53 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad request body"})
 		return
 	}
+	// The org comes from the authenticated key and overwrites whatever the
+	// body said. CreateMachineRequest.OrgID is `json:"-"` so a body cannot
+	// carry one at all, and this line is the only thing that ever sets it.
+	req.OrgID = OrgID(r.Context())
+
+	// A create may name a volume to attach, and a volume is another tenant's
+	// data. Without this, naming a foreign id in the body would mount someone
+	// else's filesystem into a machine the caller controls -- the one place
+	// tenancy could be crossed by a create rather than by a read.
+	if req.Volume != "" {
+		if _, ok := d.ownedVolume(w, r, req.Volume); !ok {
+			return
+		}
+	}
+
+	// And a create may name a built image, which is the same crossing by a
+	// different door: the build id becomes this machine's root filesystem.
+	if req.Image != "" {
+		if !d.ownedBuild(w, r, req.Image) {
+			return
+		}
+	}
+
+	if !d.checkQuota(w, r, quota.Delta{
+		Machines: 1,
+		VCPUs:    orDefault(req.VCPUs, 1),
+		MemMiB:   orDefault(req.MemMiB, 512),
+	}) {
+		return
+	}
+
 	row, err := d.Machines.Create(r.Context(), req)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, toAPI(*row))
+	writeJSON(w, http.StatusCreated, toAPI(*row, req.OrgID))
+}
+
+// orDefault mirrors the machine manager's own defaulting, so the quota check
+// counts the size the create will really ask for rather than the zero a client
+// left out.
+func orDefault(v, fallback int) int {
+	if v == 0 {
+		return fallback
+	}
+	return v
 }
 
 func (d Deps) handleListMachines(w http.ResponseWriter, r *http.Request) {
@@ -99,23 +146,34 @@ func (d Deps) handleListMachines(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	org, narrow := listOrg(r)
 	out := make([]Machine, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, toAPI(row))
+		owner, ok := d.visible(r, row.ID, org, narrow)
+		if !ok {
+			continue
+		}
+		out = append(out, toAPI(row, owner))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (d Deps) handleGetMachine(w http.ResponseWriter, r *http.Request) {
-	row, err := d.Store.GetMachine(r.Context(), r.PathValue("id"))
-	if err != nil {
-		writeErr(w, err)
+	row, ok := d.ownedMachine(w, r, r.PathValue("id"))
+	if !ok {
 		return
 	}
-	writeJSON(w, http.StatusOK, toAPI(*row))
+	owner, _ := d.tenancy().OrgOf(r.Context(), row.ID)
+	writeJSON(w, http.StatusOK, toAPI(*row, owner))
 }
 
 func (d Deps) handleDestroyMachine(w http.ResponseWriter, r *http.Request) {
+	// Resolved before the destroy, not after: a foreign id must never reach
+	// the manager, or a tenant could delete another tenant's machine and be
+	// told 404 about a machine that is already gone.
+	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
+		return
+	}
 	if err := d.Machines.Destroy(r.Context(), r.PathValue("id")); err != nil {
 		writeErr(w, err)
 		return
@@ -133,6 +191,9 @@ func (d Deps) handleExec(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "cmd is required"})
 		return
 	}
+	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
+		return
+	}
 	resp, err := d.Machines.Exec(r.Context(), r.PathValue("id"), req)
 	if err != nil {
 		writeErr(w, err)
@@ -142,6 +203,9 @@ func (d Deps) handleExec(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d Deps) handleSuspend(w http.ResponseWriter, r *http.Request) {
+	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
+		return
+	}
 	if err := d.Machines.Suspend(r.Context(), r.PathValue("id")); err != nil {
 		writeErr(w, err)
 		return
@@ -150,6 +214,9 @@ func (d Deps) handleSuspend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d Deps) handleWake(w http.ResponseWriter, r *http.Request) {
+	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
+		return
+	}
 	if err := d.Machines.Wake(r.Context(), r.PathValue("id")); err != nil {
 		writeErr(w, err)
 		return
@@ -163,6 +230,9 @@ func (d Deps) handleCreateCheckpoint(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad request body"})
 		return
 	}
+	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
+		return
+	}
 	ckpt, err := d.Machines.Checkpoint(r.Context(), r.PathValue("id"), req.Comment)
 	if err != nil {
 		writeErr(w, err)
@@ -172,6 +242,9 @@ func (d Deps) handleCreateCheckpoint(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d Deps) handleListCheckpoints(w http.ResponseWriter, r *http.Request) {
+	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
+		return
+	}
 	cks, err := d.Machines.ListCheckpoints(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeErr(w, err)
@@ -184,13 +257,28 @@ func (d Deps) handleListCheckpoints(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// handleRestoreCheckpoint restores in place: same machine, same URL, same
+// token.
+//
+// A checkpoint id is resolved to its machine BEFORE anything acts on it, and
+// the machine is what tenancy is checked against: checkpoints carry no org of
+// their own, so a foreign checkpoint id is a foreign machine.
 func (d Deps) handleRestoreCheckpoint(w http.ResponseWriter, r *http.Request) {
+	ck, err := d.Machines.GetCheckpoint(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if _, ok := d.ownedMachine(w, r, ck.MachineID); !ok {
+		return
+	}
 	row, err := d.Machines.RestoreCheckpoint(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toAPI(*row))
+	owner, _ := d.tenancy().OrgOf(r.Context(), row.ID)
+	writeJSON(w, http.StatusOK, toAPI(*row, owner))
 }
 
 // handleCheckpointStatus lets a caller learn when a checkpoint became durable.
@@ -204,10 +292,16 @@ func (d Deps) handleCheckpointStatus(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	if _, ok := d.ownedMachine(w, r, ck.MachineID); !ok {
+		return
+	}
 	writeJSON(w, http.StatusOK, toAPICheckpoint(*ck))
 }
 
 func (d Deps) handleLogs(w http.ResponseWriter, r *http.Request) {
+	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
+		return
+	}
 	logs, err := d.Machines.Logs(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeErr(w, err)
@@ -223,9 +317,9 @@ func (d Deps) handleLogs(w http.ResponseWriter, r *http.Request) {
 // Sizes are stored in mebibytes and reported in gibibytes, because a volume is
 // created in gibibytes and the two must round-trip: a 10 GiB volume that comes
 // back as 10240 of something is a client bug waiting to happen.
-func toAPIVolume(v state.Volume) Volume {
+func toAPIVolume(v state.Volume, orgID string) Volume {
 	return Volume{
-		ID: v.ID, Name: v.Name, SizeGiB: v.SizeMiB / 1024,
+		ID: v.ID, Name: v.Name, OrgID: orgID, SizeGiB: v.SizeMiB / 1024,
 		MachineID: v.MachineID, HostID: v.HostID, MountPath: v.MountPath,
 		CreatedAt: v.CreatedAt,
 	}
@@ -241,12 +335,16 @@ func (d Deps) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "size_gib is required"})
 		return
 	}
+	req.OrgID = OrgID(r.Context())
+	if !d.checkQuota(w, r, quota.Delta{VolumeGiB: req.SizeGiB}) {
+		return
+	}
 	v, err := d.Machines.CreateVolume(r.Context(), req)
 	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, toAPIVolume(*v))
+	writeJSON(w, http.StatusCreated, toAPIVolume(*v, req.OrgID))
 }
 
 func (d Deps) handleListVolumes(w http.ResponseWriter, r *http.Request) {
@@ -255,15 +353,23 @@ func (d Deps) handleListVolumes(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	org, narrow := listOrg(r)
 	out := make([]Volume, 0, len(rows))
 	for _, v := range rows {
-		out = append(out, toAPIVolume(v))
+		owner, ok := d.visible(r, v.ID, org, narrow)
+		if !ok {
+			continue
+		}
+		out = append(out, toAPIVolume(v, owner))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 // handleMachineVolume reports the volume drive Firecracker is really running.
 func (d Deps) handleMachineVolume(w http.ResponseWriter, r *http.Request) {
+	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
+		return
+	}
 	v, err := d.Machines.MachineVolume(r.Context(), r.PathValue("id"))
 	if err != nil {
 		writeErr(w, err)

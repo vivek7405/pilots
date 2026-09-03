@@ -98,13 +98,13 @@ here; do not fix blind.
 | Gap | Where it bites | Note |
 |---|---|---|
 | Rootfs user is `user` (`scripts/rootfs/Dockerfile:43`); no `/home/sprite`, no nvm shim | crisp drop-in (#7 gate) hardcodes `/home/sprite/app` | `sprites-dev.md` §6 |
-| Exec frame protocol has ids 1/2/3 only; missing 0 (stdin), 4 (stdin_eof), JSON `resize`/`exit`/`port_opened`, `/control` multiplex | `@fly/sprites` SDK parity; crisp compat adapter (#7 §4) | `sprites-dev.md` §5, COPY 5 |
+| Exec frame protocol has ids 1/2/3 only; missing 0 (stdin), 4 (stdin_eof), JSON `resize`/`exit`/`port_opened`, `/control` multiplex | the frame half only — SDK parity and the crisp adapter are closed by `@pilots/sdk/sprites-compat` | `sprites-dev.md` §5, COPY 5 |
 | No join gate: self-heal/DNS/mesh can run on a half-replicated replica | rescue of live machines after a host reboot | `uncloud.md` COPY 1; open Q1 |
 | Placement is ownership-hash only; no best-fit ranking, no template-cache affinity | create latency + "Katamari" imbalance on a multi-host fleet | `fly-io.md` COPY 2–4 |
 | No lifecycle journal / re-adoption on hostd restart | in-flight checkpoint lost on daemon upgrade | `fly-io.md` COPY 1 |
 | Router/DNS must join on `hosts.last_seen` (membership-aware), and prefer the local replica | dead host keeps 1/N of traffic; cross-mesh hops when a local replica exists | `uncloud.md` COPY 7, REJECT 3 |
-| Host-bootstrap lacks e2b's sysctls, hugepage math, NBD `nowatch` udev rule, public-reachability self-check | #22 gate 5; a firewalled host silently eats traffic | `e2b-infra.md` COPY 13, 19–20; `uncloud.md` COPY 13 |
-| No `docs/incidents/` log, no `/v1/hosts` replication-lag field | first self-heal misfire will be undebuggable | `fly-io.md` COPY 20; `uncloud.md` COPY 11 |
+| Host-bootstrap lacks e2b's sysctls, hugepage math, NBD `nowatch` udev rule (#22), ~~public-reachability self-check~~ (landed) | #22 gate 5; a firewalled host silently eats traffic | `e2b-infra.md` COPY 13, 19–20; `uncloud.md` COPY 13 |
+| ~~No `docs/incidents/` log~~ (landed: `docs/incidents/`), no `/v1/hosts` replication-lag field (#30) | first self-heal misfire will be undebuggable | `fly-io.md` COPY 20; `uncloud.md` COPY 11 |
 | Rollout probe default should be `/__webjs/ready` (200 only) for webjs apps; router must set `X-Forwarded-Proto` and speak h2 to browsers | webjs HSTS never turns on; cold instance cut over; slow page loads | `webjs-deploy-contract.md` |
 | Auto-checkpoints with tiered retention; last-N checkpoints mounted read-only in the guest; port-open notifications | agent DX parity with sprites | `sprites-dev.md` COPY 3–4, 6 |
 | #22 levers (hugepage uffd, `Diff` snapshots, last-cycle prefetch, pre-pause reclaim, fs-only snapshots) | beyond-SLO speed | `e2b-infra.md` COPY 1–12, 23 |

@@ -14,3 +14,6 @@ vmlinux*
 # Local cluster state, written by scripts/cluster/cluster-up.sh
 scripts/cluster/cluster.env
 apps/hostd/hostd
+
+# Build output of the JS SDK (sdks/js).
+sdks/js/dist/
