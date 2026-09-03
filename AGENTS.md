@@ -165,3 +165,23 @@ Their warm tier exists for two reasons, and the second is the one that is easy
 to miss: writing a 2GiB snapshot to a remote object store over 1Gbit/s takes
 ~16s against ~2s to local NVMe, so the local tier is the fast WRITE target as
 much as the fast read one.
+
+### Prior art: `docs/prior-art/` — read the relevant note before designing
+
+The bar is "at par with fly.io, sprites.dev and e2b-infra, or better", so every
+design decision starts from what they did and why. `docs/prior-art/` holds
+deep, sourced notes (URL or `path:line` on every claim; inference marked) on
+each system, plus a synthesis. Start at `docs/prior-art/README.md` — it has the
+capability scorecard and the "which note answers which question" index. Then
+read only the note you need:
+
+| Working on… | Read first |
+|---|---|
+| placement, self-heal, Corrosion schema/ops, router LB, rollout, incidents | `fly-io.md` (flyd/flaps split, the three 2024 Corrosion outages) |
+| checkpoints, sleep/wake tiers, exec frames, sandbox env, agent DX | `sprites-dev.md` (crisp runs there today; the surface to match) |
+| uffd, memfile/diff chain, block/chunk store, templates, envd, netns | `e2b-infra.md` (mechanics; the AGENTS.md table above is its short index) |
+| Corrosion join/sync gates, own-rows discipline, WG mesh, `.internal` DNS | `uncloud.md` (where the no-control-plane shape was borrowed from) |
+| deploy path, readiness gate, rollout defaults for the primary workload | `webjs-deploy-contract.md` |
+
+The COPY / REJECT / parity sections at the end of each note are the actionable
+part; an issue that contradicts a REJECT entry must say why.
