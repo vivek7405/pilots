@@ -78,3 +78,49 @@ jobs:
           name: firecracker-serial-log
           path: /tmp/pilots-dev-vm-*.log
           if-no-files-found: ignore
+
+  # The golden rootfs, built at a tag and pinned.
+  #
+  # It is built HERE and not on a fleet host because the route is
+  # docker export -> fakeroot -> mke2fs, and a pilots host installs rootless
+  # BuildKit rather than docker. The other half of a template -- the memory
+  # image -- is deliberately NOT built here and never can be: it carries raw
+  # CPUID, so it exists only as builds a fleet host chunkified from its own
+  # boot. That split is the enforcement, not a convention.
+  template:
+    name: golden rootfs (tags only)
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    needs: go
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: apps/hostd/go.sum
+
+      # The pin is read BEFORE the build, because build-golden-rootfs.sh
+      # rewrites scripts/rootfs/golden.ext4.sha256 as its last step -- checking
+      # that file afterwards would compare the image with itself and pass on
+      # every input. The authority is the hash committed at the tag.
+      - run: git show "${GITHUB_SHA}:scripts/rootfs/golden.ext4.sha256" > /tmp/pinned.sha256
+      - run: scripts/build-golden-rootfs.sh
+      - name: the rootfs CI built is the one pinned at this tag
+        run: |
+          sha256sum -c /tmp/pinned.sha256 || {
+            echo "::error::The rootfs built at this tag does not match"
+            echo "::error::scripts/rootfs/golden.ext4.sha256. The pin was not"
+            echo "::error::refreshed with the change that altered the image, so"
+            echo "::error::the tag is wrong -- not the build."
+            exit 1
+          }
+
+      - run: zstd -T0 -19 scripts/rootfs/golden.ext4 -o "golden-${GITHUB_REF_NAME}.ext4.zst"
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" \
+            "golden-${GITHUB_REF_NAME}.ext4.zst" \
+            scripts/rootfs/golden.ext4.sha256 --clobber

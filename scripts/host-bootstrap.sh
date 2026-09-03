@@ -48,6 +48,15 @@ CORROSION_TOKEN="${PILOT_CORROSION_TOKEN:-}"
 AGENT_SECRET="${PILOT_AGENT_TOKEN_SECRET:-}"
 FLEET_KEY="${PILOT_FLEET_KEY:-}"
 DOMAIN="${PILOT_WORKLOAD_DOMAIN:-pilotrun.app}"
+S3_REGION="${PILOT_S3_REGION:-}"
+# The Firecracker CPU template this fleet is pinned to: T2 or T2CL on Intel,
+# T2A on AMD. It normalises CPUID WITHIN a vendor, which is what lets a later
+# host generation restore a snapshot an older one took. Unpinned, a fleet
+# works until the day a new box has a different stepping, and then it fails at
+# restore reporting a bad snapshot.
+CPU_TEMPLATE="${PILOT_CPU_TEMPLATE:-}"
+ACME_EMAIL="${PILOT_ACME_EMAIL:-}"
+CF_TOKEN="${PILOT_CLOUDFLARE_API_TOKEN:-}"
 SSH_OPTS="${SSH_OPTS:--o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null}"
 
 shift || true
@@ -83,6 +92,21 @@ done
   echo "  export PILOT_FLEET_KEY=\$(openssl rand -base64 32)   # once, for the fleet" >&2
   exit 2
 }
+# PILOT_REQUIRE_REFLINK=1 is the "this is the fleet, not a laptop" switch, so
+# it is where the fleet-only requirements are enforced. A production host
+# without a pinned CPU template restores nothing a later host generation took,
+# and the failure appears months later as an unrestorable snapshot rather than
+# here as a missing variable.
+if [ "${PILOT_REQUIRE_REFLINK:-0}" = 1 ] && [ -z "$CPU_TEMPLATE" ]; then
+  echo "PILOT_CPU_TEMPLATE must be set on a fleet host: Firecracker memory" >&2
+  echo "snapshots carry raw CPUID, and a template normalises it WITHIN a" >&2
+  echo "vendor so a later host generation can restore what this one took." >&2
+  echo "Unpinned, the fleet works until the next box has a different" >&2
+  echo "stepping, and then it fails at restore reporting a bad snapshot." >&2
+  echo >&2
+  echo "  T2 or T2CL on Intel, T2A on AMD -- the SAME value on every host." >&2
+  exit 2
+fi
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 on_host() { ssh $SSH_OPTS "root@${IP}" "$@"; }
@@ -240,6 +264,37 @@ REMOTE
 
 # ---------------------------------------------------------------------------
 say "[5/10] Guest kernel and golden rootfs"
+# The rootfs is the one artifact the fleet takes from outside itself, so it is
+# pinned. CI builds it at a tag and asserts it matches
+# scripts/rootfs/golden.ext4.sha256; this refuses to ship anything else. An
+# unpinned rootfs is not a cosmetic difference: hosts bootstrapped on different
+# days would carry different base images, and the guest agent the image
+# contains is version-tied to hostd.
+#
+# Note that scripts/build-golden-rootfs.sh REWRITES the .sha256 file as its
+# last step, so a locally rebuilt image always matches its own hash. The pin
+# that matters is the COMMITTED one -- `git status` on that file after a local
+# build is the tell, and CI compares against the tagged tree, not the runner's.
+if [ -z "${PILOT_ROOTFS_TAG:-}" ] || [ -f "${REPO}/scripts/rootfs/golden.ext4" ]; then
+  :
+else
+  echo "  fetching golden-${PILOT_ROOTFS_TAG}.ext4.zst from the release"
+  command -v zstd >/dev/null || { echo "  zstd is needed to unpack it" >&2; exit 1; }
+  curl -fsSL -o "${REPO}/scripts/rootfs/golden.ext4.zst" \
+    "https://github.com/vivek7405/pilots/releases/download/${PILOT_ROOTFS_TAG}/golden-${PILOT_ROOTFS_TAG}.ext4.zst"
+  zstd -d -f "${REPO}/scripts/rootfs/golden.ext4.zst" -o "${REPO}/scripts/rootfs/golden.ext4"
+  rm -f "${REPO}/scripts/rootfs/golden.ext4.zst"
+fi
+if [ -f "${REPO}/scripts/rootfs/golden.ext4" ]; then
+  ( cd "$REPO" && sha256sum -c scripts/rootfs/golden.ext4.sha256 >/dev/null ) || {
+    echo "  this golden.ext4 is not the pinned one." >&2
+    echo "    Build it with scripts/build-golden-rootfs.sh at the tagged commit," >&2
+    echo "    or set PILOT_ROOTFS_TAG=<tag> to download golden-<tag>.ext4.zst" >&2
+    echo "    from the release. Refusing to ship an unpinned image." >&2
+    exit 1
+  }
+  echo "  golden rootfs matches the pin"
+fi
 # Two gigabytes, so it is compared before it is copied. Without this every
 # re-run ships it again -- which makes "re-running upgrades a host" cost
 # minutes per host instead of seconds.
@@ -440,6 +495,14 @@ PILOT_S3_ENDPOINT=${S3_ENDPOINT}
 PILOT_S3_BUCKET=${BUCKET}
 PILOT_S3_ACCESS_KEY=${S3_KEY}
 PILOT_S3_SECRET_KEY=${S3_SECRET}
+PILOT_S3_REGION=${S3_REGION}
+PILOT_CPU_TEMPLATE=${CPU_TEMPLATE}
+PILOT_ACME_EMAIL=${ACME_EMAIL}
+# The DNS-01 credential for the wildcard certificate. Every host holds it and
+# every host manages the same names; the shared certificate storage lock is
+# what turns N identical orders into one. Empty leaves the router HTTP-01-only
+# with no wildcard, which serves custom domains and nothing else.
+PILOT_CLOUDFLARE_API_TOKEN=${CF_TOKEN}
 PILOT_TEMPLATE_ROOTFS=/var/lib/pilots/templates/golden.ext4
 # buildkitd runs rootless as the pilot user, so its socket lives under THAT
 # user's runtime directory. hostd is root and would derive /run/user/0, where
@@ -647,6 +710,30 @@ else
   fi
 fi
 REMOTE
+
+# The CPU template and the CPU must agree. A T2A on Intel or a T2 on AMD is
+# not a slow host, it is a host whose snapshots the rest of the fleet cannot
+# restore -- and Firecracker reports that as a corrupt snapshot at restore
+# time, on a machine belonging to a customer, months after the mistake.
+if [ -n "$CPU_TEMPLATE" ]; then
+  VENDOR=$(on_host "grep -m1 '^vendor_id' /proc/cpuinfo | awk '{print \$3}'")
+  case "$CPU_TEMPLATE" in
+    T2|T2CL) WANT_VENDOR=GenuineIntel ;;
+    T2A)     WANT_VENDOR=AuthenticAMD ;;
+    *)
+      echo "  PILOT_CPU_TEMPLATE=${CPU_TEMPLATE} is not one of T2, T2CL, T2A." >&2
+      exit 1
+      ;;
+  esac
+  if [ "$VENDOR" != "$WANT_VENDOR" ]; then
+    echo "  cpu template: NO -- ${CPU_TEMPLATE} needs ${WANT_VENDOR}, this host is ${VENDOR}." >&2
+    echo "    A memory snapshot never restores across the Intel/AMD boundary." >&2
+    echo "    Either this host does not belong in the fleet, or the fleet's" >&2
+    echo "    PILOT_CPU_TEMPLATE is wrong. Refusing to finish." >&2
+    exit 1
+  fi
+  echo "  cpu template: ${CPU_TEMPLATE} on ${VENDOR}"
+fi
 
 echo
 echo "Host ${IP} is up."
