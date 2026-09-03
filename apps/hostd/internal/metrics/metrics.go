@@ -19,6 +19,7 @@ package metrics
 import (
 	"fmt"
 	"io"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -138,7 +139,7 @@ func (g *Gauge) writeTo(w io.Writer) {
 type Histogram struct {
 	bounds  []float64
 	buckets []atomic.Int64 // cumulative counts are computed at render time
-	sum     atomic.Int64   // scaled by sumScale to stay integral
+	sum     atomic.Uint64  // float64 bits; see addSum
 	count   atomic.Int64
 	labels  []label
 	desc    string
@@ -147,11 +148,6 @@ type Histogram struct {
 
 // label is one dimension of a series.
 type label struct{ name, value string }
-
-// sumScale keeps _sum integral without a float atomic. Observations are
-// scaled by it going in and divided going out, so a microsecond-resolution
-// duration survives the round trip.
-const sumScale = 1e6
 
 // NewHistogram registers a histogram. bounds must be ascending; the implicit
 // +Inf bucket is added by the renderer.
@@ -177,8 +173,27 @@ func (h *Histogram) Observe(v float64) {
 	// bucket v belongs in under Prometheus's le semantics. Past the last bound
 	// that is len(bounds), the +Inf bucket, which is why buckets is one longer.
 	h.buckets[i].Add(1)
-	h.sum.Add(int64(v * sumScale))
+	h.addSum(v)
 	h.count.Add(1)
+}
+
+// addSum folds one observation into _sum as a float64 held in its bit
+// pattern, with a compare-and-swap loop standing in for the float atomic Go
+// does not have.
+//
+// It was an int64 scaled by 1e6, which is fine for seconds and wrong for
+// bytes: SnapshotStoredBytes observes whole checkpoints, and at 512MiB a
+// scaled int64 wraps negative after ~17,000 of them -- a few weeks on a busy
+// host -- after which every rate() over _sum is garbage. A float64 keeps
+// microsecond resolution for the duration histograms and never wraps.
+func (h *Histogram) addSum(v float64) {
+	for {
+		old := h.sum.Load()
+		next := math.Float64bits(math.Float64frombits(old) + v)
+		if h.sum.CompareAndSwap(old, next) {
+			return
+		}
+	}
 }
 
 func (h *Histogram) Count() int64 { return h.count.Load() }
@@ -202,7 +217,7 @@ func (h *Histogram) writeSamples(w io.Writer) {
 	fmt.Fprintf(w, "%s_bucket{%s} %d\n", h.id,
 		h.labelsWith(label{"le", "+Inf"}), cumulative)
 	fmt.Fprintf(w, "%s_sum%s %g\n", h.id, h.labelSuffix(),
-		float64(h.sum.Load())/sumScale)
+		math.Float64frombits(h.sum.Load()))
 	fmt.Fprintf(w, "%s_count%s %d\n", h.id, h.labelSuffix(), cumulative)
 }
 
