@@ -360,7 +360,7 @@ func run() error {
 	}
 
 	controlAPI := api.Routes(api.Deps{
-		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink,
+		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink, HugePages: cfg.HugePages,
 		Builds: builder, Rollout: rollout, Domain: cfg.WorkloadDomain,
 		Peers: peerLookup(f),
 		GitHub: github.Handler(github.Deps{
