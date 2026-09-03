@@ -235,6 +235,7 @@ func run() error {
 			JailerBin:      cfg.JailerBin,
 			ChrootBase:     cfg.ChrootBase,
 			CPUTemplate:    cfg.CPUTemplate,
+			HugePages:      cfg.HugePages,
 			JailUID:        cfg.JailUID,
 			JailGID:        cfg.JailGID,
 			Limits:         fc.Limits{PidsMax: 2048},

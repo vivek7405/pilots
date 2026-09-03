@@ -75,6 +75,11 @@ type Config struct {
 
 	VCPUs  int
 	MemMiB int
+	// HugePages backs guest memory with 2MiB pages. It comes from the host's
+	// own configuration, never from a machine's request: the page size is
+	// baked into every snapshot this host takes, so it has to be uniform
+	// across the fleet. See HugePages2M.
+	HugePages bool
 
 	KernelPath     string
 	TemplateRootfs string
@@ -305,10 +310,14 @@ func Boot(ctx context.Context, cfg Config) (*Machine, error) {
 }
 
 func (m *Machine) configure(ctx context.Context, cfg Config) error {
-	if err := m.Client.SetMachineConfig(ctx, MachineConfig{
+	mc := MachineConfig{
 		VCPUCount: cfg.VCPUs, MemSizeMiB: cfg.MemMiB, SMT: false,
 		CPUTemplate: cfg.CPUTemplate,
-	}); err != nil {
+	}
+	if cfg.HugePages {
+		mc.HugePages = HugePages2M
+	}
+	if err := m.Client.SetMachineConfig(ctx, mc); err != nil {
 		return err
 	}
 	if err := m.Client.SetBootSource(ctx, BootSource{

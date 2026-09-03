@@ -216,6 +216,9 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 	if err := m.ensureNameFree(ctx, name); err != nil {
 		return nil, err
 	}
+	if err := m.validateMemMiB(orDefault(req.MemMiB, 512)); err != nil {
+		return nil, err
+	}
 
 	// The agent token is generated once and only its hash is stored. hostd
 	// keeps the plaintext in memory for as long as it drives this machine; a

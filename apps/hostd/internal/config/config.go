@@ -46,6 +46,14 @@ type Config struct {
 	JailUID     int    // PILOT_JAIL_UID
 	JailGID     int    // PILOT_JAIL_GID
 
+	// HugePages backs guest memory with 2MiB pages instead of 4KiB. It must
+	// be the SAME on every host in the fleet and it needs a hugepage pool
+	// reserved at boot (host-bootstrap.sh): the page size is recorded in
+	// every snapshot and cannot be reinterpreted at restore, so a host that
+	// disagrees with the fleet cannot restore the fleet's machines at all.
+	// See fc.HugePages2M.
+	HugePages bool // PILOT_HUGEPAGES
+
 	// WorkloadDomain is the apex every machine's URL sits under. Workloads
 	// never share the dashboard's apex: a guest on the same apex could set
 	// cookies scoped to it.
@@ -189,6 +197,7 @@ func Load() (*Config, error) {
 		StateBackend:   env("PILOT_STATE_BACKEND", "sqlite"),
 		CorrosionAddr:  env("PILOT_CORROSION_ADDR", "127.0.0.1:51002"),
 		CorrosionToken: os.Getenv("PILOT_CORROSION_TOKEN"),
+		HugePages:      os.Getenv("PILOT_HUGEPAGES") == "1",
 		MeshEnabled:    os.Getenv("PILOT_MESH_ENABLED") == "1",
 		MeshBootstrap:  os.Getenv("PILOT_MESH_BOOTSTRAP"),
 

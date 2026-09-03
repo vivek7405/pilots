@@ -75,6 +75,28 @@ func (c *Client) do(ctx context.Context, method, path string, body any) ([]byte,
 	return out, nil
 }
 
+// HugePages2M backs guest memory with 2MiB hugetlbfs pages. Firecracker's
+// enum is "None" (its default) or "2M"; pilots sends the field only when it
+// wants the latter, so the wire stays byte-identical for a 4KiB machine.
+//
+// Three constraints come with it, all of them fleet-wide rather than
+// per-machine:
+//
+//   - The page size is recorded IN the snapshot and cannot be changed at
+//     restore. Firecracker reads it back out of the saved vm_info, and its own
+//     docs say there is no option to flip between 4KiB and huge pages at
+//     restore time. So a 2MiB snapshot cannot run on a host without a
+//     hugepage pool, and a 4KiB template cannot be restored by a host
+//     configured for 2MiB. A half-migrated fleet cannot restore its own
+//     machines.
+//   - A hugepage snapshot restores ONLY through the Uffd memory backend.
+//     Firecracker refuses the File backend outright for one. pilots always
+//     restores through Uffd, so this costs nothing -- but it makes that a
+//     requirement rather than a choice.
+//   - mem_size_mib must be even. Firecracker rejects an odd MiB count under
+//     2MiB backing, and its error names neither the field nor the reason.
+const HugePages2M = "2M"
+
 // MachineConfig is the VM's shape. SMT stays off: hyperthread siblings shared
 // between tenants are a side-channel, and the density gain is not worth it.
 type MachineConfig struct {
@@ -82,6 +104,9 @@ type MachineConfig struct {
 	MemSizeMiB  int    `json:"mem_size_mib"`
 	SMT         bool   `json:"smt"`
 	CPUTemplate string `json:"cpu_template,omitempty"`
+	// HugePages is HugePages2M or empty. See HugePages2M for why this is a
+	// property of the whole fleet.
+	HugePages string `json:"huge_pages,omitempty"`
 }
 
 func (c *Client) SetMachineConfig(ctx context.Context, cfg MachineConfig) error {
