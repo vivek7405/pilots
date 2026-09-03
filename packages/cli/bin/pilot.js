@@ -21,4 +21,18 @@ if (!Number.isFinite(major) || major < MIN_MAJOR) {
   process.exit(1)
 }
 
+// Node announces its own type stripper with an ExperimentalWarning on some
+// releases in the 22 and 24 lines. It fires on the import below, so it can be
+// filtered here -- and it has to be, because this CLI makes promises about
+// stderr: `--json` says stderr carries the server's error body and nothing
+// else, and `pilot mcp` routes every diagnostic there. A note about the
+// mechanism by which the CLI runs is not the caller's business. Every OTHER
+// warning is re-emitted to the listeners Node installed.
+const defaultWarningListeners = process.listeners('warning')
+process.removeAllListeners('warning')
+process.on('warning', (warning) => {
+  if (warning.name === 'ExperimentalWarning' && /type strip/i.test(warning.message)) return
+  for (const listener of defaultWarningListeners) listener.call(process, warning)
+})
+
 await import('../src/main.ts')

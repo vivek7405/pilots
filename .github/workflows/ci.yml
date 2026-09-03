@@ -57,6 +57,11 @@ jobs:
       - run: npm run test:sdk-js
       # Proves dist/ still builds; the published package is what dist/ holds.
       - run: npm run build:sdk-js
+      # The CLI's own gate: `tsc --noEmit` (which is the only static check a
+      # package with no emit and no linter has) plus its unit tests. It runs
+      # AFTER build:sdk-js because @pilots/sdk publishes out of dist/, and a
+      # fresh checkout has nothing for the type check to resolve until then.
+      - run: npm test --workspace=packages/cli
       # Skips cleanly without PILOTS_E2E=1; this asserts the skip path works.
       - run: npm run test:e2e
 

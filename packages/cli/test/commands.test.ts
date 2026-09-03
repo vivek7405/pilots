@@ -267,3 +267,35 @@ test('no command validates the cached key: every one works with the dashboard do
     await api.close()
   }
 })
+
+test('the type-stripping warning is filtered off stderr, and nothing else is', async () => {
+  // stderr is a documented channel: `--json` promises it carries the server's
+  // error body and nothing else. A note about the mechanism by which the CLI
+  // runs would break that promise on any Node release that still prints one.
+  const api = await startFakeAPI()
+  // Answered slowly on purpose, so the warnings below fire while the process is
+  // still up rather than after it has exited.
+  api.routes.set('GET /v1/machines', (_req, res) => {
+    setTimeout(() => {
+      res.writeHead(200, { 'content-type': 'application/json' })
+      res.end('[]')
+    }, 400)
+  })
+  const env = loggedIn(api.url)
+  const warner = join(import.meta.dirname, 'helpers', 'warn-import.mjs')
+  try {
+    const res = await pilot({ ...env, NODE_OPTIONS: `--import ${warner}` }, ['--json', 'machines', 'ls'])
+    assert.equal(res.code, 0, res.stderr)
+    assert.equal(res.stdout.trim(), '[]')
+    assert.equal(
+      res.stderr.includes('Type Stripping'),
+      false,
+      'the type-stripping warning reached stderr and would corrupt a --json error body',
+    )
+    // The filter is narrow: every other warning is re-emitted to the listeners
+    // Node installed, so a real deprecation is not silently swallowed.
+    assert.match(res.stderr, /something a user should actually see/)
+  } finally {
+    await api.close()
+  }
+})
