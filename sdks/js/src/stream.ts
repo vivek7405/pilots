@@ -187,10 +187,15 @@ export class ExecStream extends EventEmitter {
     const payload = bytes.subarray(1)
     switch (bytes[0]) {
       case FrameStdout:
-        this.stdout.push(payload)
+        // Dropped rather than pushed once the exit frame has ended the
+        // streams: push() after EOF throws inside the socket's message
+        // listener, which is an uncaught exception that takes the process
+        // down. A frame that arrives after the verdict is a server that
+        // reordered, not a reason to kill the caller.
+        if (!this.exited) this.stdout.push(payload)
         return
       case FrameStderr:
-        this.stderr.push(payload)
+        if (!this.exited) this.stderr.push(payload)
         return
       case FrameExit:
         this.finish(payload.length > 0 ? payload[0]! : 0)

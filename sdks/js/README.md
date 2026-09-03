@@ -3,7 +3,9 @@
 The typed JavaScript client for the pilots API: instant sandboxes and durable
 production services on one primitive, Firecracker microVMs.
 
-Zero runtime dependencies. ESM only. Node 22 or newer, Bun, Deno, or a browser.
+Zero runtime dependencies. ESM only. Node 22 or newer, Bun, or Deno: the
+streaming exec is built on `node:stream`, so a browser needs a bundler that
+shims it.
 
 ```
 npm i @pilots/sdk

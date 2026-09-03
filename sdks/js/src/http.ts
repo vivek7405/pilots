@@ -168,7 +168,13 @@ export async function* ndjson<T>(res: Response): AsyncGenerator<T, void, undefin
   for await (const line of textLines(res)) yield JSON.parse(line) as T
 }
 
-/** Yields each non-empty line of a text body as it arrives. */
+/**
+ * Yields each non-blank line of a text body as it arrives.
+ *
+ * Only the line terminator is stripped, never the line's own whitespace: this
+ * is what `followLogs` reads, and a trim would flatten the indentation of
+ * every stack trace a guest prints.
+ */
 export async function* textLines(res: Response): AsyncGenerator<string, void, undefined> {
   if (!res.body) return
   const reader = res.body.getReader()
@@ -181,15 +187,23 @@ export async function* textLines(res: Response): AsyncGenerator<string, void, un
       buffer += decoder.decode(value, { stream: true })
       let nl: number
       while ((nl = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, nl).trim()
+        const line = stripCR(buffer.slice(0, nl))
         buffer = buffer.slice(nl + 1)
-        if (line) yield line
+        if (line.trim()) yield line
       }
     }
     buffer += decoder.decode()
-    const last = buffer.trim()
-    if (last) yield last
+    const last = stripCR(buffer)
+    if (last.trim()) yield last
   } finally {
+    // Cancel, not just release: a consumer that breaks out of the loop early
+    // -- one `for await ... break` over a build log -- would otherwise leave
+    // the response body unread and its socket held open until GC.
+    await reader.cancel().catch(() => {})
     reader.releaseLock()
   }
+}
+
+function stripCR(line: string): string {
+  return line.endsWith('\r') ? line.slice(0, -1) : line
 }

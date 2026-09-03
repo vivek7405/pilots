@@ -219,3 +219,33 @@ func TestExecStreamNeedsArgv(t *testing.T) {
 		t.Fatal("an empty argv was accepted")
 	}
 }
+
+func TestCloseReturnsWithUnreadOutput(t *testing.T) {
+	// The frame loop parks inside a pipe write until someone reads it. Close
+	// has to end the stream anyway: a caller that only wanted the exit, or that
+	// is abandoning the command, never reads Stdout, and Close blocking on that
+	// goroutine forever is a deadlock in the caller's process.
+	c := wsServer(t, func(t *testing.T, conn *websocket.Conn, _ *http.Request) {
+		ctx := context.Background()
+		_ = conn.Write(ctx, websocket.MessageBinary, frame(FrameStdout, "output nobody reads"))
+		// Parked in a read, so the client's close handshake is answered.
+		_, _, _ = conn.Read(ctx)
+	})
+
+	s, err := c.Machines.ExecStream(context.Background(), "m-1", []string{"sh"}, ExecStreamOptions{})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	time.Sleep(50 * time.Millisecond) // let the frame arrive and block the pipe
+
+	closed := make(chan struct{})
+	go func() {
+		_ = s.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close blocked on a frame loop parked writing unread output")
+	}
+}

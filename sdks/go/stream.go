@@ -37,6 +37,11 @@ type ExecStream struct {
 	// send the stdin EOF frame.
 	Stdin io.WriteCloser
 
+	// The read ends of the pipes above, kept so Close can unblock a frame
+	// loop parked writing output nobody is reading.
+	stdoutR *io.PipeReader
+	stderrR *io.PipeReader
+
 	conn   *websocket.Conn
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -74,6 +79,7 @@ func (m *Machines) ExecStream(ctx context.Context, id string, argv []string, opt
 	stderrR, stderrW := io.Pipe()
 	s := &ExecStream{
 		Stdout: stdoutR, Stderr: stderrR,
+		stdoutR: stdoutR, stderrR: stderrR,
 		conn: conn, cancel: cancel, done: make(chan struct{}), code: -1,
 	}
 	if opts.Stdin {
@@ -245,12 +251,26 @@ func (s *ExecStream) Output() (stdout, stderr []byte, code int, err error) {
 }
 
 // Close ends the stream. The agent's context cancel kills the process.
+//
+// It closes the read ends of both pipes before waiting on the frame loop.
+// Without that, a caller who never read Stdout would deadlock here: the loop
+// would still be parked inside a pipe write that no reader will ever take, so
+// closing the socket alone does not return it, and Close would block forever.
 func (s *ExecStream) Close() error {
+	// Before the socket, not after: the close handshake waits on the peer, and
+	// a frame loop parked in a pipe write can neither read the peer's reply nor
+	// drain, so closing the socket first would block here for the handshake's
+	// full timeout and then wait on a goroutine that never returns.
+	_ = s.stdoutR.CloseWithError(errStreamClosed)
+	_ = s.stderrR.CloseWithError(errStreamClosed)
 	err := s.conn.Close(websocket.StatusNormalClosure, "")
 	s.cancel()
 	<-s.done
 	return err
 }
+
+// errStreamClosed is what an unread pipe reports once Close has abandoned it.
+var errStreamClosed = errors.New("pilots: stream closed")
 
 // stdinWriter frames what a caller writes as stdin chunks, and its Close as
 // the stdin EOF frame.

@@ -100,6 +100,22 @@ test('a text exit frame after the binary one changes nothing', async () => {
   assert.deepEqual(exits, [7])
 })
 
+test('an output frame after the exit frame is dropped, not thrown', async () => {
+  // The exit frame has already ended both streams, so pushing into them again
+  // throws ERR_STREAM_PUSH_AFTER_EOF -- inside the socket's message listener,
+  // where it is an uncaught exception that takes the consumer's process down.
+  // A server that reordered its frames must not be able to do that.
+  const { stream, ws } = open(['bash', '-c', 'true'])
+  ws.frame(3, new Uint8Array([0]))
+  assert.equal(await stream.wait(), 0)
+
+  ws.frame(1, 'late output')
+  ws.frame(2, 'late error')
+
+  assert.equal(await collect(stream.stdout), '')
+  assert.equal(await collect(stream.stderr), '')
+})
+
 test('a text exit frame alone is enough', async () => {
   const { stream, ws } = open(['bash', '-c', 'true'])
   ws.text(JSON.stringify({ type: 'exit', exit_code: 7 }))
