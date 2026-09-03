@@ -129,6 +129,10 @@ type Machine struct {
 	NBD  *nbd.Process
 	Uffd *uffd.Process
 
+	// lastSnapshotType is what the most recent snapshot actually was, for the
+	// metrics and for a test to assert the Full-to-Diff switch happened.
+	lastSnapshotType string
+
 	// captureDone is closed when the background half of the previous snapshot
 	// finishes. See awaitCapture.
 	captureMu   sync.Mutex
