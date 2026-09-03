@@ -57,6 +57,19 @@ func (m *Manager) Promote(ctx context.Context, machineID string, req api.Promote
 		hosts, _ := m.opts.Store.ListHosts(ctx)
 		svc.ID = state.NewOwnedID("svc_", m.opts.HostID, state.LiveHosts(hosts))
 		svc.CreatedAt = time.Now().Unix()
+		// A fresh service row inherits the machine's tenant. Promote never
+		// changes who owns the workload -- it changes what the workload is --
+		// so a service minted here must land in the same org, or its own
+		// tenant would stop being able to see it.
+		org := ""
+		if t, err := m.opts.Store.GetTenancy(ctx, machineID); err == nil {
+			org = t.OrgID
+		}
+		if err := m.opts.Store.PutTenancy(ctx, &state.Tenancy{
+			ID: svc.ID, OrgID: org, Kind: "service", CreatedAt: svc.CreatedAt,
+		}); err != nil {
+			return nil, err
+		}
 	}
 	svc.Name = row.Name
 	svc.App = row.App

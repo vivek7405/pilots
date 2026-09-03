@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/vivek7405/pilots/hostd/internal/quota"
 )
 
 // BuildRunner is the build surface the handlers drive.
@@ -64,6 +66,24 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := d.Builds.NewBuildID()
+
+	// Concurrent builds are bounded per org ON THIS HOST. A build is not a
+	// replicated object -- no row describes one -- so there is nothing
+	// fleet-wide to count, and the refusal says "scope":"host" rather than
+	// implying a limit this host cannot see.
+	//
+	// Taken before the context is spooled: refusing after accepting a 2 GiB
+	// upload would make the limit cost more than the build it refused.
+	org := OrgID(r.Context())
+	limits := quota.For(r.Context(), d.Store, org)
+	if used, ok := d.BuildGate.Acquire(org, limits.MaxBuilds); !ok {
+		writeJSON(w, http.StatusTooManyRequests, QuotaExceededResponse{
+			Error: "quota exceeded", Quota: "builds",
+			Limit: limits.MaxBuilds, Used: used, Scope: "host",
+		})
+		return
+	}
+	defer d.BuildGate.Release(org)
 
 	// Spool the context to disk BEFORE writing a single byte of response.
 	//

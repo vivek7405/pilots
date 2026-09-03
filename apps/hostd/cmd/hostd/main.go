@@ -31,6 +31,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/machines"
 	"github.com/vivek7405/pilots/hostd/internal/mesh"
 	"github.com/vivek7405/pilots/hostd/internal/nbd"
+	"github.com/vivek7405/pilots/hostd/internal/quota"
 	"github.com/vivek7405/pilots/hostd/internal/router"
 	"github.com/vivek7405/pilots/hostd/internal/s3"
 	"github.com/vivek7405/pilots/hostd/internal/seal"
@@ -358,10 +359,18 @@ func run() error {
 		return err
 	}
 
+	// Org scoping and the revocation check run on every authenticated request,
+	// so in a fleet they read the subscription cache -- a map lookup -- rather
+	// than querying the corrosion agent per call.
+	var tenancy api.TenancyView = api.StoreTenancy(store)
+	if f != nil {
+		tenancy = cachedTenancy{f.cache}
+	}
+
 	controlAPI := api.Routes(api.Deps{
 		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink,
 		Builds: builder, Rollout: rollout, Domain: cfg.WorkloadDomain,
-		Peers: peerLookup(f),
+		Peers: peerLookup(f), Tenancy: tenancy, BuildGate: &quota.HostGate{},
 		GitHub: github.Handler(github.Deps{
 			HostID: cfg.HostID, App: ghApp, Store: store, Builds: builder,
 			Rollout: rollout, Machines: mgr, Domain: cfg.WorkloadDomain,

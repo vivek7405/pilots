@@ -269,3 +269,21 @@ func (p peerAPI) Post(ctx context.Context, hostID, path string) error {
 	}
 	return nil
 }
+
+// cachedTenancy answers org ownership and revocation from the subscription
+// cache, in the shape of cachedOwner: a mutex and a map lookup instead of a
+// query to the corrosion agent per authenticated request.
+//
+// No store fallback, unlike cachedOwner. A miss here is not "not yet
+// delivered, ask the store": it is "no row says who owns this", which is a
+// legitimate answer that the callers read as admin-only. Falling back would
+// put a query on the request path to learn the same thing.
+type cachedTenancy struct{ cache *corrosion.Cache }
+
+func (t cachedTenancy) OrgOf(_ context.Context, id string) (string, bool) {
+	return t.cache.OrgOf(id)
+}
+
+func (t cachedTenancy) Revoked(_ context.Context, hash string) (bool, error) {
+	return t.cache.Revoked(hash), nil
+}
