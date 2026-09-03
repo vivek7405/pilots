@@ -68,6 +68,7 @@ func (m *Machine) Persist() error {
 		SerialLog:   m.SerialLog,
 		SocketPath:  filepath.Join(m.ChrootDir, "run", "fc.sock"),
 		StartedAtNs: m.StartedAt.UnixNano(),
+		MemMiB:      m.MemMiB,
 	}
 	// An adopted machine carries no slot: its namespace already exists and was
 	// recorded by whichever process created it.

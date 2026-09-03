@@ -299,3 +299,25 @@ func TestAdoptWithoutHandlersReservesNothing(t *testing.T) {
 		t.Errorf("the pool reserved %d devices for a machine with no handler", pool.InUse())
 	}
 }
+
+// MemMiB is what the snapshot-type decision compares mem.bin against, so a
+// breadcrumb without it makes every snapshot after a hostd restart a Full:
+// the Diff lever switches off silently, on every machine, until the next
+// wake. Persist -- not just WriteState -- has to carry it.
+func TestPersistCarriesMemMiB(t *testing.T) {
+	m := &Machine{ID: "m-1", MemMiB: 512, StateDir: t.TempDir(),
+		ChrootDir: "/var/lib/pilots/jailer/firecracker/m-1/root"}
+	if err := m.Persist(); err != nil {
+		t.Fatalf("Persist: %v", err)
+	}
+	got, err := ReadState(m.StateDir)
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	if got.MemMiB != 512 {
+		t.Errorf("MemMiB = %d after a round trip, want 512", got.MemMiB)
+	}
+	if Adopted(got, t.TempDir(), nil).MemMiB != 512 {
+		t.Errorf("an adopted machine lost its MemMiB")
+	}
+}
