@@ -1090,7 +1090,22 @@ async function internalAssertions() {
     await step('two machines in one app find each other by name and exchange traffic', async () => {
       // Both directions. One-way would pass with a filter that allows egress
       // from web and happens to allow nothing back.
-      const forward = await reach(web.id, `http://${db.name}.internal:${AGENT_PORT}/health`);
+      // Wait for the name, do not assume it resolves the instant create
+      // returns. .internal answers from the local Corrosion cache FILTERED TO
+      // HEALTHY, so a machine becomes resolvable a beat after it is running,
+      // once its first health check lands. That is deliberate: resolving a
+      // machine that cannot serve yet is worse than making the caller wait.
+      //
+      // The gap was invisible while a create took ~460ms and appeared at
+      // 135ms. What is asserted is unchanged -- the name resolves, to a
+      // machine address, and traffic flows both ways.
+      let forward = await reach(web.id, `http://${db.name}.internal:${AGENT_PORT}/health`);
+      if (forward.code !== '200') {
+        await waitFor(async () => {
+          forward = await reach(web.id, `http://${db.name}.internal:${AGENT_PORT}/health`);
+          return forward.code === '200';
+        }, { timeoutMs: 30_000, what: `${db.name}.internal to become resolvable` });
+      }
       assert(forward.code === '200',
         `web could not reach ${db.name}.internal (curl said ${forward.code})`);
       assert(forward.ip.startsWith('fdcd:'),
@@ -1113,7 +1128,16 @@ async function internalAssertions() {
       // The address comes from a machine that IS allowed to know it, because
       // nothing outside the app can discover it -- which is the point. What is
       // being tested is that knowing it is not enough.
-      const probe = await reach(secret.id, `http://${secret.name}.internal:${AGENT_PORT}/health`);
+      // Same health-gated wait as above: this asks a machine to resolve its
+      // OWN name, which is allowed, but is subject to the same delay before
+      // the first health check lands.
+      let probe = await reach(secret.id, `http://${secret.name}.internal:${AGENT_PORT}/health`);
+      if (!probe.ip.startsWith('fdcd:')) {
+        await waitFor(async () => {
+          probe = await reach(secret.id, `http://${secret.name}.internal:${AGENT_PORT}/health`);
+          return probe.ip.startsWith('fdcd:');
+        }, { timeoutMs: 30_000, what: `${secret.name} to resolve its own name` });
+      }
       assert(probe.ip.startsWith('fdcd:'),
         `could not learn ${secret.name}'s address from inside its own app (got ${probe.ip})`);
 
