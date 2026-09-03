@@ -6,6 +6,11 @@
     "lib": ["es2023", "dom"],
     "types": ["node"],
     "strict": true,
+    // The type check is this package's only static gate: there is no emit and
+    // no linter, so an import left behind by a refactor would otherwise sit
+    // there until someone read the file.
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "noEmit": true,
     "allowImportingTsExtensions": true,
     "erasableSyntaxOnly": true,

@@ -16,7 +16,7 @@ import { after, test } from 'node:test'
 import { promisify } from 'node:util'
 
 import { saveCredentials } from '../src/config.ts'
-import { fakeMachine, startFakeAPI, type FakeAPI } from './helpers/fake-api.ts'
+import { fakeMachine, startFakeAPI } from './helpers/fake-api.ts'
 import { json, startServer } from './helpers/server.ts'
 
 const exec = promisify(execFile)

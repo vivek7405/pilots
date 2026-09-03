@@ -18,7 +18,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 
 import { saveCredentials } from '../src/config.ts'
-import { fakeMachine, startFakeAPI, type FakeAPI } from './helpers/fake-api.ts'
+import { fakeMachine, startFakeAPI } from './helpers/fake-api.ts'
 import { json } from './helpers/server.ts'
 import { startWSServer } from './helpers/ws-server.ts'
 
