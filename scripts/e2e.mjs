@@ -1670,6 +1670,142 @@ async function egressAssertions() {
   }
 }
 
+// H7 -- capacity refusal.
+//
+// The host is the final authority on its own capacity: internal/selfheal
+// consults Capacity before it rescues anything, the slot pool returns
+// ErrPoolFull from Take, and cmd/hostd/fleet.go derives free memory from the
+// kernel. What does NOT exist yet is the create path honouring any of it:
+// handleCreateMachine maps every non-ErrNotFound error to a 500, so a host at
+// its ceiling has no way to say so.
+//
+// So this asserts the property, not the current behaviour, and it is written
+// to fail loudly until the create-time refusal lands (a 6a follow-up). The
+// property is the one ARCHITECTURE.md commits to: a host refuses work rather
+// than accepting it and failing, and a refusal leaks nothing.
+//
+// Two ways to reach the ceiling. The slot pool holds 1024 slots by default and
+// filling it through the public API would mean 1024 live machines, which is
+// not a test anyone will run, so the pool form runs only against a host
+// started with a small pool (PILOTS_E2E_SLOT_POOL says how small). The memory
+// form needs no special host: a machine larger than the host's RAM is refused
+// by the same admission the pool refusal belongs to, and it runs everywhere.
+const SLOT_POOL = Number(process.env.PILOTS_E2E_SLOT_POOL ?? '') || 0;
+
+// A machine larger than any host this will ever run on. Not "large": the
+// assertion has to be about admission and never about a host that happened to
+// have the memory free.
+const IMPOSSIBLE_MEM_MIB = 1024 * 1024 * 4; // 4 TiB
+
+async function capacityAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const created = [];
+  let refusal = null;
+
+  // freeSlots prefers the metric and falls back to the machine count. The
+  // fallback asserts the same thing the metric would: a refused create must
+  // leave the host with exactly the machines it already had.
+  async function freeSlots(base = API) {
+    const metric = await metricValue('pilots_slots_free', base);
+    if (metric !== null) return { source: 'pilots_slots_free', value: metric };
+    return { source: 'the machine count', value: await machineCount(base) };
+  }
+
+  try {
+    await step('a host at its ceiling refuses the next create cleanly and leaks no slot or namespace', async () => {
+      const before = await freeSlots();
+      console.log(`      capacity read from ${before.source} (${before.value})`);
+
+      const { status, json, text } = await request('/v1/machines', {
+        method: 'POST',
+        body: { name: `e2e-ceiling-${tag}`, vcpus: 1, mem_mib: IMPOSSIBLE_MEM_MIB },
+      });
+      refusal = status;
+      if (status >= 200 && status < 300) {
+        if (json?.id) created.push(json.id);
+        throw new Error(
+          `the host accepted a ${IMPOSSIBLE_MEM_MIB} MiB machine with HTTP ${status}. ` +
+          'A host that cannot run the work has to refuse it, not take it and fail later');
+      }
+
+      // A 500 is an accepted-then-broke, not a refusal: it says the host tried.
+      assert(status === 503 || status === 507 || status === 400,
+        `the refusal came back as HTTP ${status} (${text.slice(0, 200)}); ` +
+        'a capacity refusal must name capacity, not surface as a generic error');
+      assert(/capacit|memor|resource|full/i.test(text),
+        `the refusal body does not name capacity: ${text.slice(0, 200)}`);
+
+      const after = await freeSlots();
+      assert(after.value === before.value,
+        `${after.source} moved from ${before.value} to ${after.value} across a refused create; ` +
+        'the refusal leaked');
+    });
+
+    if (SLOT_POOL > 0) {
+      await step(`filling ${SLOT_POOL} slots makes the next create refuse, and it leaks nothing`, async () => {
+        const before = await freeSlots();
+        for (let i = 0; i < SLOT_POOL; i++) {
+          const { status, json } = await request('/v1/machines', {
+            method: 'POST',
+            body: { name: `e2e-fill-${tag}-${i}`, vcpus: 1, mem_mib: 256, knobs: { auto_stop: 'off' } },
+          });
+          assert(status === 201,
+            `filling the pool failed at slot ${i} of ${SLOT_POOL}: HTTP ${status} ${JSON.stringify(json)}`);
+          created.push(json.id);
+        }
+
+        const { status, json } = await request('/v1/machines', {
+          method: 'POST',
+          body: { name: `e2e-fill-${tag}-over`, vcpus: 1, mem_mib: 256 },
+        });
+        if (status >= 200 && status < 300) {
+          if (json?.id) created.push(json.id);
+          throw new Error(`the create past a full ${SLOT_POOL}-slot pool succeeded with HTTP ${status}`);
+        }
+        assert(status !== 500,
+          'a full pool surfaced as a 500; the host tried rather than refusing');
+
+        const after = await freeSlots();
+        assert(after.value <= before.value,
+          `${after.source} grew across a refused create (${before.value} -> ${after.value})`);
+      });
+    } else {
+      console.log('      - the pool ceiling was not filled: the default pool is 1024 slots and');
+      console.log('        filling it through the API means 1024 live machines. Set');
+      console.log('        PILOTS_E2E_SLOT_POOL=<n> against a host started with a small pool.');
+      console.log('        The memory ceiling above exercises the same admission path.');
+    }
+
+    // The other half of a refusal: somebody else has to serve the work. This
+    // asserts only once the refusal itself exists, because a host that never
+    // refuses gives the coordinator nothing to re-hash -- and the step above
+    // has already failed loudly in that case.
+    if (HOSTS.length >= 2 && refusal !== null && (refusal < 200 || refusal >= 300)) {
+      await step('a create refused by one host is served by another', async () => {
+        const { status, json } = await requestAt(HOSTS[0], '/v1/machines', {
+          method: 'POST',
+          body: { name: `e2e-rehash-${tag}`, vcpus: 1, mem_mib: 512, knobs: { auto_stop: 'off' } },
+        });
+        assert(status === 201,
+          `${HOSTS[0]} could not serve a create: HTTP ${status} ${JSON.stringify(json)}`);
+        created.push(json.id);
+
+        // Asserted on every host, not on the entry one: a fleet that agrees
+        // only with the host you asked is not a fleet.
+        for (const host of HOSTS) {
+          await waitFor(async () => (await requestAt(host, `/v1/machines/${json.id}`)).status === 200,
+            { timeoutMs: 60_000, what: `${host} to see the re-hashed machine` });
+        }
+      });
+    } else if (HOSTS.length < 2) {
+      console.log('      - the cross-host re-hash is not asserted: PILOTS_E2E_HOSTS names');
+      console.log(`        ${HOSTS.length} host(s) and the assertion needs two. Set it to the fleet's base URLs.`);
+    }
+  } finally {
+    for (const id of created) await destroy(id);
+  }
+}
+
 // hostilityAssertions runs the API-visible half of H1-H8 in the order that
 // leaves the host least disturbed for whatever runs after it: the churn loop
 // first, egress next, capacity last, because capacity deliberately pushes the
@@ -1678,6 +1814,7 @@ async function hostilityAssertions() {
   console.log('\n-- hostility (Phase 6e)');
   await churnAssertions();
   await egressAssertions();
+  await capacityAssertions();
 }
 
 async function main() {
