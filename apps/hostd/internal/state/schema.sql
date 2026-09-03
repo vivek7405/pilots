@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS checkpoints (
   created_at      INTEGER
 );
 
-CREATE TABLE IF NOT EXISTS api_keys (   -- writer: the dashboard's host
+CREATE TABLE IF NOT EXISTS api_keys (   -- writer: any host, on an admin-scoped request
   hash       TEXT NOT NULL PRIMARY KEY,
   org_id     TEXT,
   scopes     TEXT,
@@ -237,3 +237,57 @@ CREATE TABLE IF NOT EXISTS services (  -- writer: host_id of the owning machines
   branch        TEXT,
   autodeploy    INTEGER,
   created_at    INTEGER);
+
+
+-- Which org owns an object.
+--
+-- A NEW table, not an org_id column on machines, services and volumes: those
+-- tables carry rows, and cr-sqlite backfills every row of a table whose
+-- columns change. That is the fleet-wide gossip storm that took fly's fleet
+-- down twice for ~11.5h (fly.io/infra-log/2024-11-30). A new table backfills
+-- nothing because it has no rows.
+--
+-- The row is written BEFORE the object row it names, and never changed after.
+-- That is what makes "any host" a legal writer here, where everything else in
+-- this schema names one: two writers cannot disagree about a value written
+-- once, so there is nothing for a last-write-wins merge to corrupt. Both
+-- drivers write it ON CONFLICT DO NOTHING, so a second writer cannot change a
+-- value even by accident.
+--
+-- Written first, and not after, so a create that dies partway leaves a tenancy
+-- row naming an object that never appeared -- harmless, invisible, collected
+-- with nothing -- rather than an object no org owns, which would be visible to
+-- admin alone and to the tenant who created it not at all.
+CREATE TABLE IF NOT EXISTS tenancy (   -- writer: the host writing the object row (write-once)
+  id         TEXT NOT NULL PRIMARY KEY, -- machine, service or volume id
+  org_id     TEXT,
+  kind       TEXT,                      -- machine|service|volume
+  created_at INTEGER
+);
+
+-- A revoked key.
+--
+-- A tombstone that only ever APPEARS, for the same reason a destroyed machine
+-- is a state rather than a DELETE (see the top of this file): a delete racing
+-- a replica that still carries the older insert loses the race through the
+-- merge, and the row comes back. For a machine that is a resurrected sandbox;
+-- for a key it is a revoked credential that authenticates again.
+CREATE TABLE IF NOT EXISTS api_key_revocations (  -- writer: any host, on an admin-scoped request (write-once)
+  hash       TEXT NOT NULL PRIMARY KEY,
+  revoked_at INTEGER
+);
+
+-- Per-org limits.
+--
+-- One logical writer -- an admin request -- so unlike the two tables above
+-- this one is updated in place, and last-write-wins between two admins
+-- editing the same org is the intended semantics rather than a hazard.
+CREATE TABLE IF NOT EXISTS org_quotas (          -- writer: any host, on an admin-scoped request
+  org_id         TEXT NOT NULL PRIMARY KEY,
+  max_machines   INTEGER,
+  max_vcpus      INTEGER,
+  max_mem_mib    INTEGER,
+  max_volume_gib INTEGER,
+  max_builds     INTEGER,
+  updated_at     INTEGER
+);

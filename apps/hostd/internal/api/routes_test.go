@@ -28,9 +28,13 @@ func newTestServerWithManager(t *testing.T) (http.Handler, state.Store, *fakeMan
 	}
 	t.Cleanup(func() { st.Close() })
 
+	// admin, because this helper's server is used by every test in the
+	// package and the battery of routes spans all three scopes. Narrower
+	// scopes get their own tests in auth_test.go, where the refusal is the
+	// assertion rather than an accident.
 	sum := sha256.Sum256([]byte(testKey))
 	if err := st.PutAPIKey(context.Background(), &state.APIKey{
-		Hash: hex.EncodeToString(sum[:]), OrgID: "org_1", Scopes: "machines",
+		Hash: hex.EncodeToString(sum[:]), OrgID: "org_1", Scopes: "admin",
 	}); err != nil {
 		t.Fatalf("PutAPIKey: %v", err)
 	}
@@ -133,6 +137,11 @@ func TestEveryRouteIsRegistered(t *testing.T) {
 		{"POST", "/v1/volumes"},
 		{"GET", "/v1/volumes"},
 		{"GET", "/v1/hosts"},
+		{"POST", "/v1/api-keys"},
+		{"GET", "/v1/api-keys"},
+		{"POST", "/v1/api-keys/abc/revoke"},
+		{"GET", "/v1/quotas/org_1"},
+		{"PUT", "/v1/quotas/org_1"},
 	}
 
 	for _, r := range routes {

@@ -32,16 +32,20 @@ func hostRow(id, addr string, lastSeen int64) string {
 	return fmt.Sprintf(`["%s","%s","pk-%s","203.0.113.1",8,4096,%d]`, id, addr, id, lastSeen)
 }
 
-// cacheServer serves the three subscriptions a Cache opens.
+// cacheServer serves the five subscriptions a Cache opens.
 type cacheServer struct {
-	machineRows []string
-	hostRows    []string
-	serviceRows []string
+	machineRows    []string
+	hostRows       []string
+	serviceRows    []string
+	tenancyRows    []string
+	revocationRows []string
 
-	machineChanges chan string
-	hostChanges    chan string
-	serviceChanges chan string
-	subscribes     atomic.Int32
+	machineChanges    chan string
+	hostChanges       chan string
+	serviceChanges    chan string
+	tenancyChanges    chan string
+	revocationChanges chan string
+	subscribes        atomic.Int32
 }
 
 func startCache(t *testing.T, s *cacheServer) *Cache {
@@ -56,16 +60,34 @@ func startCache(t *testing.T, s *cacheServer) *Cache {
 	if s.serviceChanges == nil {
 		s.serviceChanges = make(chan string)
 	}
+	if s.tenancyChanges == nil {
+		s.tenancyChanges = make(chan string)
+	}
+	if s.revocationChanges == nil {
+		s.revocationChanges = make(chan string)
+	}
 
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		body := make([]byte, r.ContentLength)
 		_, _ = r.Body.Read(body)
 		isHosts := strings.Contains(string(body), "FROM hosts")
 		isServices := strings.Contains(string(body), "FROM services")
+		isTenancy := strings.Contains(string(body), "FROM tenancy")
+		isRevocations := strings.Contains(string(body), "FROM api_key_revocations")
 
 		s.subscribes.Add(1)
 		w.Header().Set("corro-query-id", "sub")
-		if isServices {
+		if isTenancy {
+			flushLine(w, `{"columns":["id","org_id","kind"]}`)
+			for _, row := range s.tenancyRows {
+				flushLine(w, `{"row":[1,`+row+`]}`)
+			}
+		} else if isRevocations {
+			flushLine(w, `{"columns":["hash"]}`)
+			for _, row := range s.revocationRows {
+				flushLine(w, `{"row":[1,`+row+`]}`)
+			}
+		} else if isServices {
 			flushLine(w, `{"columns":["id","name","app"]}`)
 			for _, row := range s.serviceRows {
 				flushLine(w, `{"row":[1,`+row+`]}`)
@@ -85,6 +107,10 @@ func startCache(t *testing.T, s *cacheServer) *Cache {
 
 		ch := s.machineChanges
 		switch {
+		case isTenancy:
+			ch = s.tenancyChanges
+		case isRevocations:
+			ch = s.revocationChanges
 		case isServices:
 			ch = s.serviceChanges
 		case isHosts:
@@ -292,6 +318,18 @@ func TestCacheRebuildsWhenItsSubscriptionIsGone(t *testing.T) {
 			<-r.Context().Done()
 			return
 		}
+		if strings.Contains(string(body), "FROM tenancy") {
+			flushLine(w, `{"columns":["id","org_id","kind"]}`)
+			flushLine(w, `{"eoq":{"time":0,"change_id":1}}`)
+			<-r.Context().Done()
+			return
+		}
+		if strings.Contains(string(body), "FROM api_key_revocations") {
+			flushLine(w, `{"columns":["hash"]}`)
+			flushLine(w, `{"eoq":{"time":0,"change_id":1}}`)
+			<-r.Context().Done()
+			return
+		}
 
 		n := subscribes.Add(1)
 		flushLine(w, `{"columns":["id","name","host_id","state","kind_knobs","image_ref","vcpus","mem_mib","domain","custom_domain","app_port","agent_port","agent_token_hash","mem_build_id","rootfs_build_id","template_mem_build_id","template_rootfs_build_id","volume_id","service_id","release_id","app","slot","last_activity","updated_at"]}`)
@@ -390,4 +428,45 @@ func TestAHostChangeIsAnnounced(t *testing.T) {
 		}
 		return false
 	}, "the second host to reach the cache")
+}
+
+// Org scoping and revocation run on the API's hot path, so both answer from
+// the cache. A request path that queries the agent is a request path that can
+// block on it.
+func TestCacheServesTenancyAndRevocations(t *testing.T) {
+	tenancy := make(chan string)
+	revocations := make(chan string)
+	cache := startCache(t, &cacheServer{
+		machineRows:       []string{machineRow("m-1", "alpha", "host-a", "running")},
+		hostRows:          []string{hostRow("host-a", "fdcc::1", time.Now().Unix())},
+		tenancyRows:       []string{`["m-1","org-1","machine"]`},
+		revocationRows:    []string{`["dead"]`},
+		tenancyChanges:    tenancy,
+		revocationChanges: revocations,
+	})
+
+	if org, ok := cache.OrgOf("m-1"); !ok || org != "org-1" {
+		t.Errorf("OrgOf(m-1) = %q, %v; want org-1, true", org, ok)
+	}
+	// An id with no row is not public: it predates tenancy, and the caller
+	// treats "no row" as admin-only.
+	if _, ok := cache.OrgOf("m-legacy"); ok {
+		t.Error("an id with no tenancy row reported an owner")
+	}
+	if !cache.Revoked("dead") {
+		t.Error("a revoked hash from the initial rows is not revoked")
+	}
+	if cache.Revoked("alive") {
+		t.Error("an unrevoked hash reported as revoked")
+	}
+
+	tenancy <- `{"change":["insert",1,["m-2","org-2","machine"],2]}`
+	waitFor(t, func() bool {
+		org, ok := cache.OrgOf("m-2")
+		return ok && org == "org-2"
+	}, "a tenancy insert to reach the cache")
+
+	revocations <- `{"change":["insert",1,["beef"],2]}`
+	waitFor(t, func() bool { return cache.Revoked("beef") },
+		"a revocation to reach the cache")
 }

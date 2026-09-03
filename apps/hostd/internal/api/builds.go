@@ -7,6 +7,9 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"github.com/vivek7405/pilots/hostd/internal/quota"
+	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
 // BuildRunner is the build surface the handlers drive.
@@ -65,6 +68,24 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 
 	id := d.Builds.NewBuildID()
 
+	// Concurrent builds are bounded per org ON THIS HOST. A build is not a
+	// replicated object -- no row describes one -- so there is nothing
+	// fleet-wide to count, and the refusal says "scope":"host" rather than
+	// implying a limit this host cannot see.
+	//
+	// Taken before the context is spooled: refusing after accepting a 2 GiB
+	// upload would make the limit cost more than the build it refused.
+	org := OrgID(r.Context())
+	limits := quota.For(r.Context(), d.Store, org)
+	if used, ok := d.BuildGate.Acquire(org, limits.MaxBuilds); !ok {
+		writeJSON(w, http.StatusTooManyRequests, QuotaExceededResponse{
+			Error: "quota exceeded", Quota: "builds",
+			Limit: limits.MaxBuilds, Used: used, Scope: "host",
+		})
+		return
+	}
+	defer d.BuildGate.Release(org)
+
 	// Spool the context to disk BEFORE writing a single byte of response.
 	//
 	// Not an optimisation -- a correctness fix. Go's server treats the request
@@ -95,6 +116,18 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	if _, err := spool.Seek(0, io.SeekStart); err != nil {
 		writeJSON(w, http.StatusInternalServerError,
 			ErrorResponse{Error: "cannot rewind the build context: " + err.Error()})
+		return
+	}
+
+	// Recorded BEFORE the id leaves this handler, in the header below and in
+	// the stream. A build id names an image the create path will mount as a
+	// root filesystem, so an id that escapes before its owner is written is an
+	// id anyone may boot.
+	if err := d.Store.PutTenancy(r.Context(), &state.Tenancy{
+		ID: id, OrgID: org, Kind: "build", CreatedAt: time.Now().Unix(),
+	}); err != nil {
+		writeJSON(w, http.StatusInternalServerError,
+			ErrorResponse{Error: "cannot record the build's owner: " + err.Error()})
 		return
 	}
 
@@ -143,6 +176,12 @@ func (d Deps) handleBuildLogs(w http.ResponseWriter, r *http.Request) {
 	if d.Builds == nil {
 		writeJSON(w, http.StatusNotImplemented,
 			ErrorResponse{Error: "builds are not configured on this host"})
+		return
+	}
+
+	// A build log is the build's own output: Dockerfile lines, registry URLs,
+	// whatever the build echoed. It is scoped like the build it belongs to.
+	if !d.ownedBuild(w, r, r.PathValue("id")) {
 		return
 	}
 
