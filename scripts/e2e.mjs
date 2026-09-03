@@ -25,6 +25,10 @@ const KEY = process.env.PILOT_API_KEY ?? '';
 // Machine lifecycle assertions need a real Firecracker host; the process-level
 // ones do not.
 const FULL = process.env.PILOTS_E2E_FULL === '1';
+// The metal tier: hold this host to the SLOs the product is sold on rather
+// than to the laptop ceilings. See enforce() for why it is a flag and not a
+// property the battery infers.
+const METAL = process.env.PILOTS_E2E_METAL === '1';
 
 let passed = 0;
 const failures = [];
@@ -376,6 +380,36 @@ async function timed(fn) {
   return { ms: Number(process.hrtime.bigint() - started) / 1e6, result };
 }
 
+// Every assertion still asserts, on every host. Create and wake meet the
+// engine targets even without extent sharing -- the copy the engine really
+// runs skips zero blocks and costs ~134ms warm on ext4, so they are held to
+// the real budget everywhere. Only the checkpoint pause genuinely breaks: it
+// reflinks the snapshot and the cow while the guest is frozen, and without
+// extent sharing it stops being independent of machine size. That one gets a
+// ceiling measured on ext4 rather than no assertion at all.
+//
+// On top of those two tiers sits the metal one. A dedicated host is held to
+// the SLO table -- create 500ms, wake 200ms, resume gap 500ms, release restore
+// 1s, promote 1.5s -- because that is the claim being sold, and a claim no
+// battery checks is a claim nobody owns. The switch is explicit rather than
+// inferred from the host, because extent sharing is necessary for those
+// numbers and nowhere near sufficient: a laptop cluster node on btrfs reports
+// reflink true and cannot create a machine in 500ms, so an auto-selected tier
+// would fail the laptop for a reason that has nothing to do with its storage.
+// PILOTS_E2E_METAL=1 says "hold me to metal"; /v1/health.reflink says "extents
+// are shared"; the run needs both, and the flag without the fact is a failed
+// step rather than a quiet downgrade.
+//
+// This lives at module scope so there is ONE tier rule. A second copy inside
+// the service battery would be a second copy of a contract, and the two would
+// disagree the first time either moved.
+function enforce(reflink, p50, budget, degraded, metal, what) {
+  const limit = METAL ? metal : reflink ? budget : degraded;
+  const tier = METAL ? 'metal SLO' : reflink ? 'engine target' : 'degraded ceiling';
+  assert(p50 < limit,
+    `${what} p50 was ${p50.toFixed(0)}ms, over the ${tier} of ${limit}ms`);
+}
+
 // Whether this host can share extents, which the engine's image copies depend
 // on. hostd probes it at startup and reports it; see fc.SupportsReflink.
 async function hostSharesExtents() {
@@ -406,20 +440,22 @@ async function timingAssertions() {
     console.log('        Put the machine store on btrfs, or on XFS made with -m reflink=1.');
   }
 
-  // Every assertion still asserts, on every host. Create and wake meet the
-  // engine targets even without extent sharing -- the copy the engine really
-  // runs skips zero blocks and costs ~134ms warm on ext4, so they are held to
-  // the real budget everywhere. Only the checkpoint pause genuinely breaks:
-  // it reflinks the snapshot and the cow while the guest is frozen, and
-  // without extent sharing it stops being independent of machine size. That
-  // one gets a ceiling measured on ext4 rather than no assertion at all.
-  const enforce = (p50, budget, degraded, what) => {
-    const limit = reflink ? budget : degraded;
-    assert(p50 < limit, `${what} p50 was ${p50.toFixed(0)}ms, over the `
-      + `${reflink ? 'engine target' : 'degraded ceiling'} of ${limit}ms`);
-  };
+  // The tier rule itself is enforce(), at module scope.
 
   try {
+    // Before any timing runs, because the whole point of the metal tier is
+    // that it cannot be claimed by a host that has not earned it. A run that
+    // asked for metal budgets on a host without extent sharing is measuring
+    // the wrong machine, and downgrading it silently would produce a green
+    // run that proves nothing.
+    await step('PILOTS_E2E_METAL=1 is only valid on a host that shares extents', async () => {
+      assert(!METAL || reflink,
+        'PILOTS_E2E_METAL=1 but /v1/health reports reflink false: this host cannot '
+        + 'share extents, so the metal SLOs are unreachable for reasons the engine '
+        + 'cannot fix. Run without the flag, or put the machine store on btrfs or '
+        + 'on XFS made with -m reflink=1.');
+    });
+
     await step('a host that cannot share extents says so on /v1/health', async () => {
       // Only meaningful where it is false; where it is true this asserts the
       // field exists and is honest, which is what the branch above trusts.
@@ -428,7 +464,7 @@ async function timingAssertions() {
         '/v1/health does not report reflink support, so a degraded host is invisible');
     });
 
-    await step(`create is under 1.5s (p50 of ${TIMING_SAMPLES})`, async () => {
+    await step(`create is under ${METAL ? '500ms' : '1.5s'} (p50 of ${TIMING_SAMPLES})`, async () => {
       const samples = [];
       for (let i = 0; i < TIMING_SAMPLES; i++) {
         const { ms, result } = await timed(() =>
@@ -439,12 +475,12 @@ async function timingAssertions() {
       }
       const p50 = median(samples);
       console.log(`      create p50 ${p50.toFixed(0)}ms  [${samples.map((s) => s.toFixed(0)).join(', ')}]`);
-      enforce(p50, 1500, 1500, 'create');
+      enforce(reflink, p50, 1500, 1500, 500, 'create');
     });
 
     const id = created[0];
 
-    await step(`wake is under 1s with a warm cache (p50 of ${TIMING_SAMPLES})`, async () => {
+    await step(`wake is under ${METAL ? '200ms' : '1s'} with a warm cache (p50 of ${TIMING_SAMPLES})`, async () => {
       const samples = [];
       for (let i = 0; i < TIMING_SAMPLES; i++) {
         const suspended = await request(`/v1/machines/${id}/suspend`, { method: 'POST' });
@@ -459,7 +495,7 @@ async function timingAssertions() {
       }
       const p50 = median(samples);
       console.log(`      wake p50 ${p50.toFixed(0)}ms  [${samples.map((s) => s.toFixed(0)).join(', ')}]`);
-      enforce(p50, 1000, 1000, 'wake');
+      enforce(reflink, p50, 1000, 1000, 200, 'wake');
     });
 
     await step('a machine still serves after being woken', async () => {
@@ -489,7 +525,7 @@ async function timingAssertions() {
       const p50 = median(gaps);
       console.log(`      checkpoint resume gap p50 ${p50.toFixed(0)}ms  [${gaps.join(', ')}]`);
       console.log(`      checkpoint round trip p50 ${median(trips).toFixed(0)}ms  [${trips.map((t) => t.toFixed(0)).join(', ')}]`);
-      enforce(p50, 500, 3000, 'checkpoint resume gap');
+      enforce(reflink, p50, 500, 3000, 500, 'checkpoint resume gap');
     });
 
     await step('the guest keeps serving through a checkpoint', async () => {
@@ -993,6 +1029,9 @@ async function internalAssertions() {
 async function serviceAssertions() {
   const tag = Math.random().toString(36).slice(2, 8);
   const created = [];
+  // Taken once: the tier rule is shared with the timing battery, and asking
+  // the host twice in one run could only ever produce a disagreement.
+  const reflink = await hostSharesExtents();
 
   // A service nothing could ever wake is refused, and the message says why.
   // Silently redefining it as "stopped" is how it becomes a support ticket six
@@ -1071,6 +1110,38 @@ async function serviceAssertions() {
       `service names ${json.release_id}, deploy returned ${release.id}`);
   });
 
+  // How long a replica of a release takes to come up. This is the number a
+  // scale-out, a rollback and a self-heal all pay, and until now the battery
+  // asserted that a replica RESTORED without ever putting a clock on it.
+  //
+  // The path timed is exactly the one replicas 2..N take: a create carrying
+  // the release's build pair and no image. It is issued as a plain machine
+  // create rather than by scaling the service, so these samples are not bound
+  // to it -- an extra bound replica is something the autoscaler would
+  // resurrect after the cleanup below destroys it.
+  await step(`a replica restored from the release is under ${METAL ? '1s' : '1.5s'} (p50 of ${TIMING_SAMPLES})`, async () => {
+    const samples = [];
+    for (let i = 0; i < TIMING_SAMPLES; i++) {
+      const { ms, result } = await timed(() =>
+        request('/v1/machines', {
+          method: 'POST',
+          body: {
+            app: svc.app,
+            mem_build_id: release.mem_build_id,
+            rootfs_build_id: release.rootfs_build_id,
+            vcpus: 1, mem_mib: 512,
+          },
+        }));
+      assert(result.status === 201,
+        `restore from the release failed: ${result.status} ${JSON.stringify(result.json)}`);
+      created.push(result.json.id);
+      samples.push(ms);
+    }
+    const p50 = median(samples);
+    console.log(`      release restore p50 ${p50.toFixed(0)}ms  [${samples.map((s) => s.toFixed(0)).join(', ')}]`);
+    enforce(reflink, p50, 1500, 1500, 1000, 'release restore');
+  });
+
   // Scale up and assert the new replica RESTORED. A machine created from a
   // release's build pair reports the release it came from; one that cold
   // booted would have taken the image path instead.
@@ -1140,6 +1211,34 @@ async function serviceAssertions() {
     });
     assert((ran?.stdout ?? '').includes('promoted'),
       'exec stopped working after promote: the agent token was rotated');
+  });
+
+  // Promote's own clock. The step above proves it keeps the URL and the token;
+  // this one holds it to a latency, because promote is what an agent runs when
+  // its sandbox turns out to be worth keeping and it waits on the round trip.
+  // What it pays for is a token reset, a checkpoint and three row writes.
+  await step(`promote is under ${METAL ? '1.5s' : '5s'} (p50 of ${TIMING_SAMPLES})`, async () => {
+    const samples = [];
+    for (let i = 0; i < TIMING_SAMPLES; i++) {
+      const { status, json: sandbox } = await request('/v1/machines', {
+        method: 'POST',
+        body: { app: `e2e-svc-${tag}-p${i}`, vcpus: 1, mem_mib: 512, cmd: 'sleep 86400' },
+      });
+      assert(status === 201, `create: ${status} ${JSON.stringify(sandbox)}`);
+      created.push(sandbox.id);
+
+      const before = sandbox.url;
+      const { ms, result } = await timed(() =>
+        request(`/v1/machines/${sandbox.id}/promote`, { method: 'POST', body: {} }));
+      assert(result.status === 200,
+        `promote: ${result.status} ${JSON.stringify(result.json)}`);
+      const { json: after } = await request(`/v1/machines/${sandbox.id}`);
+      assert(after.url === before, `the URL changed: ${before} -> ${after.url}`);
+      samples.push(ms);
+    }
+    const p50 = median(samples);
+    console.log(`      promote p50 ${p50.toFixed(0)}ms  [${samples.map((s) => s.toFixed(0)).join(', ')}]`);
+    enforce(reflink, p50, 5000, 5000, 1500, 'promote');
   });
 
   // Cleanup: destroy this battery's machines so later runs start clean.

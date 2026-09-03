@@ -104,12 +104,14 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
 5. **Snapshots are host-agnostic.** Nothing host-specific may enter a
    snapshot — that is why guest networking uses constant addresses and the
    rootfs is bind-mounted to a constant path. See ARCHITECTURE.md.
-6. **Never `ALTER TABLE` a live Corrosion table.** cr-sqlite backfills every
-   existing row when a table's columns change, and that gossip storm took
-   fly's fleet down twice for ~11.5 h (fly.io/infra-log/2024-11-30). A shape
-   change is a NEW table plus a dual read. The only column adds in this repo
-   are in `state.go`'s `addMissingColumns`, for SQLite hosts, against tables
-   that carried no rows.
+6. **Never `ALTER TABLE` a live Corrosion table, and never add a column to
+   one that has rows.** cr-sqlite backfills every existing row on a column
+   add and gossips the backfill; that took fly's fleet down twice for
+   ~11.5 h (`docs/prior-art/fly-io.md` §10, 2024-11-25). A shape change is a
+   new table plus a dual read, and a table that has ever held a row is
+   closed to column adds (see `internal/state/schema.sql:144-150`). The only
+   column adds in this repo are in `state.go`'s `addMissingColumns`, for
+   SQLite hosts, against tables that carried no rows.
 
 ### Workflow
 
@@ -128,7 +130,9 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
   list while CI enforced it, so a branch could be green locally and red on
   main. Note gofmt reformats DOC comments as well as code: it turns `''` and
   ``` `` ``` into curly quotes, which quietly mangles a comment that meant an
-  empty SQL string.
+  empty SQL string. Also run `bash -n` on every shell script you edited and
+  `node --check scripts/e2e.mjs` — a syntax error in either is only found at
+  the moment it is needed, on a host, mid-bootstrap.
 - Every phase issue (#2–#7) carries a **gate checklist**. An issue closes
   when its gate is green, not when the code is written.
 
@@ -158,6 +162,10 @@ e2e half asserts what a client would see, the gate half asserts that the host
 kept none of the wreckage. Neither half may retire an assertion, and neither
 may *skip* one — a block that cannot set itself up fails loudly, because a
 quiet early return retires every assertion below it at runtime.
+- The **metal tier** runs only under `PILOTS_E2E_METAL=1` on a host whose
+  `/v1/health` reports `reflink: true`. It replaces the laptop budgets with
+  the SLOs the product is sold on; the flag on a host that cannot share
+  extents fails the run rather than downgrading it.
 
 ---
 
