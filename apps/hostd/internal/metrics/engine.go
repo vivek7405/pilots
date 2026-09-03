@@ -49,22 +49,38 @@ var (
 		"Replayed pages the guest went on to need. Over the replayed total, "+
 			"this is how good the prediction was.")
 
-	// SnapshotDiffBytes is what Firecracker actually wrote, measured as
-	// ALLOCATED blocks rather than apparent size: a diff snapshot leaves the
-	// file at the full memory size and only the block count moves.
-	SnapshotDiffBytes = NewHistogram(Default, "pilots_snapshot_diff_bytes",
-		"Bytes allocated for a memory image by one checkpoint.",
+	// SnapshotStoredBytes is what a checkpoint actually added to storage: the
+	// bytes chunkify packed after eliding zeros and everything the parent
+	// already holds.
+	//
+	// NOT the size of mem.bin, apparent or allocated. Firecracker merges a
+	// diff INTO that file in place, so it stays dense at the machine's full
+	// memory size and its block count stays pinned at ~100% however little
+	// the checkpoint wrote. Measuring it reports every checkpoint as a full
+	// one; this was measured and confirmed on real Firecracker 1.16.1 before
+	// the metric was written this way.
+	SnapshotStoredBytes = NewHistogram(Default, "pilots_snapshot_stored_bytes",
+		"Bytes a checkpoint added to storage, after zero-elision and dedup "+
+			"against the parent.",
 		[]float64{
 			1 << 20, 4 << 20, 16 << 20, 64 << 20, 128 << 20,
 			256 << 20, 512 << 20, 1 << 30, 2 << 30,
 		})
 
-	// SnapshotDiffRatio is that over the machine's memory size. This is the
+	// SnapshotStoredRatio is that over the machine's memory size. This is the
 	// series that says whether O(dirty) checkpoints are working: an idle
 	// machine's second checkpoint should sit in the smallest buckets.
-	SnapshotDiffRatio = NewHistogram(Default, "pilots_snapshot_diff_ratio",
-		"Allocated memory image size over the machine's configured memory.",
+	SnapshotStoredRatio = NewHistogram(Default, "pilots_snapshot_stored_ratio",
+		"Stored checkpoint bytes over the machine's configured memory.",
 		[]float64{0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1})
+
+	// SnapshotWriteSeconds is how long Firecracker's own snapshot write took,
+	// labelled by type. It sits INSIDE the pause, so it is the part of the
+	// freeze this issue's lever 2 shortens: measured at 116ms for a Diff
+	// against 3.5s for a Full of the same paused 512MiB guest.
+	SnapshotWriteSeconds = NewHistogramVec(Default, "pilots_snapshot_write_seconds",
+		"Time Firecracker spent writing a snapshot, by snapshot type.",
+		"type", []float64{0.05, 0.1, 0.25, 0.5, 1, 2, 4, 8})
 
 	// SnapshotResumeGapSeconds is the guest-visible freeze: the window
 	// between pause and resume around a checkpoint. Already returned per call

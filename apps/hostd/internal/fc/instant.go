@@ -748,17 +748,23 @@ func (m *Machine) finishCheckpoint(up Uploader, chunks Uploader, opts SnapshotOp
 		_ = os.WriteFile(filepath.Join(localDir, failedMarker), []byte(err.Error()), 0o644)
 	}
 
-	if _, _, err := block.Chunkify(ctx, block.ChunkifyOpts{
+	_, memStats, err := block.Chunkify(ctx, block.ChunkifyOpts{
 		In:      memPath,
 		OutDir:  filepath.Join(opts.BuildDir, ids.MemBuildID.String()),
 		BuildID: ids.MemBuildID, ParentDir: opts.MemParentDir,
-	}); err != nil {
+	})
+	if err != nil {
 		fail(err)
 		return
 	}
-
-	// What this checkpoint actually wrote, before the file is touched again.
-	recordSnapshotSize(memPath, m.MemMiB)
+	// What this checkpoint actually added to storage, which is the O(dirty)
+	// number. See metrics.SnapshotStoredBytes for why mem.bin's own size --
+	// apparent or allocated -- is not it.
+	metrics.SnapshotStoredBytes.Observe(float64(memStats.PackedBytes))
+	if m.MemMiB > 0 {
+		metrics.SnapshotStoredRatio.Observe(
+			float64(memStats.PackedBytes) / float64(int64(m.MemMiB)<<20))
+	}
 
 	// Deliberately NOT posix_fadvise(DONTNEED) on the image here. Dropping it
 	// looks obviously right -- half a gigabyte, read once, never read again --

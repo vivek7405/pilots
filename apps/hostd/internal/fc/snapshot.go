@@ -7,6 +7,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
+
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 )
 
 // Snapshot artifact names, both on disk and as object-storage keys.
@@ -79,11 +82,15 @@ func (m *Machine) pauseAndSnapshot(ctx context.Context) (snapshotPaths, error) {
 	if err := m.Client.Pause(ctx); err != nil {
 		return p, fmt.Errorf("fc: pause %s: %w", m.ID, err)
 	}
+	started := time.Now()
 	if err := m.Client.CreateSnapshot(ctx, SnapshotCreate{
 		SnapshotType: kind, SnapshotPath: p.jailSnap, MemFilePath: p.jailMem,
 	}); err != nil {
 		return p, fmt.Errorf("fc: snapshot %s (%s): %w", m.ID, kind, err)
 	}
+	// Inside the pause, so this is guest-visible freeze time and the number
+	// the Full-to-Diff switch moves.
+	metrics.SnapshotWriteSeconds.With(kind).Observe(time.Since(started).Seconds())
 	m.lastSnapshotType = kind
 	return p, nil
 }
