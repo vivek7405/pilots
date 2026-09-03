@@ -461,3 +461,152 @@ func TestAcceptTimesOutRatherThanWaitingForever(t *testing.T) {
 		t.Errorf("accept waited %s past its 200ms deadline", elapsed)
 	}
 }
+
+// A hugetlb UFFDIO_COPY can install part of a page and stop. The kernel
+// reports what it managed and does NOT redeliver the fault, so a handler that
+// treats a short copy as failure leaves the guest thread blocked for ever --
+// the VM hangs with nothing but a log line to say why. Only reachable through
+// a stubbed ioctl: a real kernel takes this path under memory pressure at
+// 2MiB, which a test cannot provoke on demand.
+func TestInstallPageResumesAShortCopy(t *testing.T) {
+	const pageSize = 2 << 20
+
+	restore := uffdioCopy
+	defer func() { uffdioCopy = restore }()
+
+	var calls []copyRequest
+	uffdioCopy = func(_ int, req *copyRequest) syscall.Errno {
+		calls = append(calls, *req)
+		if len(calls) == 1 {
+			req.Copy = int64(req.Len) / 2 // preempted mid-page
+			return 0
+		}
+		req.Copy = int64(req.Len)
+		return 0
+	}
+
+	buf := make([]byte, pageSize)
+	var stats Stats
+	if err := installPage(0, 0x7f0000000000, buf, pageSize, &stats); err != nil {
+		t.Fatalf("installPage: %v", err)
+	}
+
+	if len(calls) != 2 {
+		t.Fatalf("issued %d copies, want 2", len(calls))
+	}
+	if got := stats.CopyShort.Load(); got != 1 {
+		t.Errorf("CopyShort = %d, want 1", got)
+	}
+	half := uint64(pageSize / 2)
+	if got := calls[1].Dst - calls[0].Dst; got != half {
+		t.Errorf("resumed at +%d, want +%d", got, half)
+	}
+	if got := calls[1].Src - calls[0].Src; got != half {
+		t.Errorf("resumed reading at +%d, want +%d", got, half)
+	}
+	if calls[1].Len != half {
+		t.Errorf("resumed asking for %d bytes, want %d", calls[1].Len, half)
+	}
+	if calls[1].Copy != 0 {
+		t.Errorf("Copy carried %d into the resume, want 0", calls[1].Copy)
+	}
+}
+
+// A kernel that reports installing nothing, with no error, cannot be resumed
+// from -- advancing by zero would reissue the same request for ever. That one
+// stays a hard failure.
+func TestInstallPageFailsWhenNothingWasInstalled(t *testing.T) {
+	restore := uffdioCopy
+	defer func() { uffdioCopy = restore }()
+
+	calls := 0
+	uffdioCopy = func(_ int, req *copyRequest) syscall.Errno {
+		calls++
+		req.Copy = 0
+		return 0
+	}
+
+	buf := make([]byte, testPageSize)
+	var stats Stats
+	err := installPage(0, 0x7f0000000000, buf, testPageSize, &stats)
+	if err == nil {
+		t.Fatal("a copy that installed nothing was reported as success")
+	}
+	if calls != 1 {
+		t.Errorf("issued %d copies, want 1 -- a zero copy must not be retried", calls)
+	}
+}
+
+// EAGAIN can arrive after part of the page has already landed. Clearing Copy
+// without consuming it would reinstall those bytes and overrun the page.
+func TestInstallPageKeepsProgressAcrossEAGAIN(t *testing.T) {
+	const pageSize = 2 << 20
+
+	restore := uffdioCopy
+	defer func() { uffdioCopy = restore }()
+
+	var calls []copyRequest
+	uffdioCopy = func(_ int, req *copyRequest) syscall.Errno {
+		calls = append(calls, *req)
+		if len(calls) == 1 {
+			req.Copy = int64(req.Len) / 4
+			return syscall.EAGAIN
+		}
+		req.Copy = int64(req.Len)
+		return 0
+	}
+
+	buf := make([]byte, pageSize)
+	var stats Stats
+	if err := installPage(0, 0x7f0000000000, buf, pageSize, &stats); err != nil {
+		t.Fatalf("installPage: %v", err)
+	}
+	if got := stats.CopyEAGAIN.Load(); got != 1 {
+		t.Errorf("CopyEAGAIN = %d, want 1", got)
+	}
+	quarter := uint64(pageSize / 4)
+	if got := calls[1].Dst - calls[0].Dst; got != quarter {
+		t.Errorf("resumed at +%d, want +%d", got, quarter)
+	}
+	if calls[1].Len != uint64(pageSize)-quarter {
+		t.Errorf("resumed asking for %d bytes, want %d",
+			calls[1].Len, uint64(pageSize)-quarter)
+	}
+}
+
+// The sibling of TestAcceptTakesTheRegionsAndTheDescriptor at the size lever 1
+// runs at. Mixed sizes are refused (see TestAcceptRejectsMixedPageSizes); a
+// uniform 2MiB guest must be accepted, and its page size carried through.
+func TestAcceptTakesUniformHugePages(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "uffd.sock")
+	ln, err := listen(sock)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	spare, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer spare.Close()
+
+	const huge = uint64(2 << 20)
+	sent := sendHandshake(sock, []Region{
+		{BaseHostVirtAddr: 0x7f0000000000, Size: 4 << 20, Offset: 0, PageSize: huge},
+		{BaseHostVirtAddr: 0x7f0000400000, Size: 4 << 20, Offset: 4 << 20, PageSize: huge},
+	}, int(spare.Fd()))
+
+	h, err := accept(ln, 5*time.Second)
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if err := <-sent; err != nil {
+		t.Fatalf("send handshake: %v", err)
+	}
+	defer syscall.Close(h.uffd)
+
+	if h.pageSize != huge {
+		t.Errorf("page size = %d, want %d", h.pageSize, huge)
+	}
+}
