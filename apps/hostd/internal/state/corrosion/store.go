@@ -460,6 +460,27 @@ func (s *Store) PutRevocation(ctx context.Context, rv *state.Revocation) error {
 	return nil
 }
 
+func (s *Store) GetRevocation(ctx context.Context, hash string) (*state.Revocation, error) {
+	rows, err := s.client.Query(ctx,
+		`SELECT hash, revoked_at FROM api_key_revocations WHERE hash = ?`, hash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("state: revocation: %w", state.ErrNotFound)
+	}
+	var rv state.Revocation
+	if err := rows.Scan(&rv.Hash, &rv.RevokedAt); err != nil {
+		return nil, err
+	}
+	return &rv, rows.Err()
+}
+
 func (s *Store) IsRevoked(ctx context.Context, hash string) (bool, error) {
 	rows, err := s.client.Query(ctx,
 		`SELECT 1 FROM api_key_revocations WHERE hash = ?`, hash)

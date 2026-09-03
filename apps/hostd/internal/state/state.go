@@ -354,6 +354,11 @@ type Store interface {
 	// IsRevoked answers from the local replica, on every authenticated
 	// request. It must never make a network call.
 	IsRevoked(ctx context.Context, hash string) (bool, error)
+	// GetRevocation returns WHEN a key was killed, for the key list. Separate
+	// from IsRevoked because the request path asks only whether, and paying
+	// for a row scan on every authenticated call to answer a question no
+	// caller there asks would be a cost with no reader.
+	GetRevocation(ctx context.Context, hash string) (*Revocation, error)
 
 	// GetQuota returns ErrNotFound when the org has no row, which means the
 	// defaults apply.
@@ -856,6 +861,20 @@ func (s *sqliteStore) PutRevocation(ctx context.Context, rv *Revocation) error {
 		return fmt.Errorf("state: put revocation: %w", err)
 	}
 	return nil
+}
+
+func (s *sqliteStore) GetRevocation(ctx context.Context, hash string) (*Revocation, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT hash, revoked_at FROM api_key_revocations WHERE hash = ?`, hash)
+	var rv Revocation
+	err := row.Scan(&rv.Hash, &rv.RevokedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get revocation: %w", err)
+	}
+	return &rv, nil
 }
 
 func (s *sqliteStore) IsRevoked(ctx context.Context, hash string) (bool, error) {
