@@ -2546,6 +2546,185 @@ async function tenancyAssertions() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Phase 6c's gate line: an agent takes a bare Django app to a live URL.
+//
+// The fixture at `packages/cli/test/fixtures/django-app` has no Dockerfile,
+// which is the whole point: `generate_dockerfile` writes one, `build` turns it
+// into a rootfs, and `deploy` puts it behind a URL. Every call goes through
+// `pilot mcp` over stdio, so what is exercised is the surface an agent
+// actually drives, not a shortcut around it.
+//
+// The agent's ROLE is scripted rather than played by a model. A gate must fail
+// for one reason, and "the model chose differently today" is not one; the
+// demo with a live agent is manual. What the script keeps is the part that
+// matters -- an injected build failure the loop has to read out of the NDJSON
+// stream and correct -- because that loop is the reason the build log is
+// structured at all.
+// ---------------------------------------------------------------------------
+
+const CLI_BIN = new URL('../packages/cli/bin/pilot.js', import.meta.url).pathname;
+const DJANGO_FIXTURE = new URL('../packages/cli/test/fixtures/django-app', import.meta.url).pathname;
+
+const MCP_TOOLS = [
+  'build', 'checkpoint', 'create_machine', 'deploy', 'destroy_machine', 'exec',
+  'exec_stream', 'generate_dockerfile', 'list_machines', 'logs', 'promote',
+  'restore', 'status',
+];
+
+// The text of a tool result, which is JSON in every case here.
+function toolText(result) {
+  return (result.content ?? []).map((c) => c.text ?? '').join('');
+}
+
+async function agentDeployAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const app = `gate-django-${tag}`;
+  const created = [];
+  const serviceIDs = [];
+  let client;
+
+  try {
+    // Imported here rather than at the top of the file: the module is a
+    // workspace dependency of the CLI, and a process-only run must not need it
+    // installed to skip cleanly.
+    const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+    const { StdioClientTransport } = await import('@modelcontextprotocol/sdk/client/stdio.js');
+
+    let dockerfile;
+    let build;
+    let service;
+
+    await step('`pilot mcp` starts and offers exactly the thirteen tools', async () => {
+      const transport = new StdioClientTransport({
+        command: process.execPath,
+        args: [CLI_BIN, 'mcp'],
+        env: { PATH: process.env.PATH, PILOT_API_URL: API, PILOT_API_KEY: KEY },
+        stderr: 'pipe',
+      });
+      client = new Client({ name: 'e2e-agent', version: '0' });
+      await client.connect(transport);
+      const { tools } = await client.listTools();
+      const names = tools.map((t) => t.name).sort();
+      assert(names.length === 13, `expected 13 tools, got ${names.length}: ${names.join(', ')}`);
+      assert(JSON.stringify(names) === JSON.stringify(MCP_TOOLS),
+        `the tool set drifted: ${names.join(', ')}`);
+    });
+    if (!client) return;
+
+    await step('generate_dockerfile turns a bare Django app into a recipe', async () => {
+      const result = await client.callTool({ name: 'generate_dockerfile', arguments: { dir: DJANGO_FIXTURE } });
+      assert(!result.isError, `generate_dockerfile failed: ${toolText(result)}`);
+      const recipe = JSON.parse(toolText(result));
+      assert(recipe.framework === 'django', `detected ${recipe.framework}`);
+      // The two rules. Either one broken produces a build that SUCCEEDS and a
+      // URL that answers 502, with nothing in the log to read.
+      assert(recipe.dockerfile.includes('--bind 0.0.0.0:'),
+        'the recipe does not bind every interface');
+      assert(recipe.dockerfile.includes('${PORT'),
+        'the recipe does not read the port from $PORT');
+      dockerfile = recipe.dockerfile;
+    });
+    if (!dockerfile) return;
+
+    await step('an injected build failure comes back as readable NDJSON', async () => {
+      // The failure an agent has to recover from, injected rather than waited
+      // for: a base image that does not exist.
+      const broken = dockerfile.replace('FROM python:3.12-slim', 'FROM python:3.12-slim-does-not-exist');
+      assert(broken !== dockerfile, 'the injection did not change the Dockerfile');
+
+      const result = await client.callTool({
+        name: 'build',
+        arguments: { dir: DJANGO_FIXTURE, dockerfile: broken },
+      });
+      assert(result.isError, `the broken build did not fail: ${toolText(result).slice(0, 400)}`);
+
+      const lines = toolText(result).split('\n').filter((l) => l.trim());
+      assert(lines.length > 0, 'the failure carried no log lines to act on');
+      let parsed;
+      try {
+        parsed = lines.map((l) => JSON.parse(l));
+      } catch (err) {
+        throw new Error(`a failure line is not NDJSON (${err.message}): ${lines.join(' | ').slice(0, 300)}`);
+      }
+      const last = parsed[parsed.length - 1];
+      assert(last.error, `the last line carries no verdict: ${JSON.stringify(last)}`);
+      // Actionable: the text has to name what could not be resolved, or the
+      // agent has nothing to correct.
+      assert(/does-not-exist|not found|failed to solve/i.test(JSON.stringify(parsed)),
+        `nothing in the failure names the bad base image: ${JSON.stringify(parsed).slice(0, 400)}`);
+    });
+
+    await step('the corrected Dockerfile builds a rootfs', async () => {
+      const result = await client.callTool({
+        name: 'build',
+        arguments: { dir: DJANGO_FIXTURE, dockerfile },
+      });
+      assert(!result.isError, `the corrected build failed: ${toolText(result).slice(-600)}`);
+      const parsed = JSON.parse(toolText(result));
+      assert(parsed.rootfs_build_id, `no rootfs build id: ${toolText(result)}`);
+      build = parsed.rootfs_build_id;
+    });
+    if (!build) return;
+
+    await step('deploy puts the app behind a URL', async () => {
+      const result = await client.callTool({
+        name: 'deploy',
+        arguments: {
+          name: `web-${tag}`,
+          build,
+          app,
+          port: 8000,
+          health: { type: 'http', path: '/', grace: 60 },
+        },
+      });
+      assert(!result.isError, `deploy failed: ${toolText(result)}`);
+      service = JSON.parse(toolText(result));
+      assert(service.service_id, `no service id: ${toolText(result)}`);
+      serviceIDs.push(service.service_id);
+      assert(service.url?.startsWith('https://'), `unexpected url ${service.url}`);
+      assert(service.release_id, 'the deploy returned no release');
+    });
+    if (!service) return;
+
+    await step('a Django replica answers 200 on / from inside the fleet', async () => {
+      // Reached by `<service>.internal` from a peer, the way every other
+      // service assertion here reaches one: public DNS for the wildcard is not
+      // resolvable from a battery running against one box.
+      const { status, json: probe } = await request('/v1/machines', {
+        method: 'POST',
+        body: { app, vcpus: 1, mem_mib: 512, cmd: 'sleep 86400' },
+      });
+      assert(status === 201, `probe create: ${status} ${JSON.stringify(probe)}`);
+      created.push(probe.id);
+
+      // The positive control. Without it, a refusal below could be curl never
+      // having run at all.
+      const control = await reach(probe.id, `http://127.0.0.1:${AGENT_PORT}/health`);
+      assert(control.code === '200',
+        `the probe cannot reach its own agent (curl said ${control.code || '(nothing)'})`);
+
+      const target = `http://web-${tag}.internal:8000/`;
+      let last = { code: '000' };
+      await waitFor(async () => {
+        last = await reach(probe.id, target, 8);
+        return last.code === '200';
+      }, { timeoutMs: 90_000, what: `${target} to answer 200 (last: ${last.code})` });
+    });
+  } finally {
+    if (client) {
+      try { await client.close(); } catch { /* best effort */ }
+    }
+    const doomed = new Set(created);
+    for (const id of serviceIDs) {
+      try { for (const m of await replicasOf(id)) doomed.add(m.id); } catch { /* best effort */ }
+    }
+    for (const id of doomed) {
+      try { await request(`/v1/machines/${id}`, { method: 'DELETE' }); } catch { /* best effort */ }
+    }
+  }
+}
+
 async function main() {
   console.log(`e2e: ${API}${FULL ? ' (full lifecycle)' : ' (process only)'}`);
 
@@ -2560,6 +2739,7 @@ async function main() {
     await envAssertions();
     await serviceAssertions();
     await multiServiceAssertions();
+    await agentDeployAssertions();
     await hostilityAssertions();
   } else {
     console.log('  - machine lifecycle skipped (set PILOTS_E2E_FULL=1 on a Firecracker host)');
