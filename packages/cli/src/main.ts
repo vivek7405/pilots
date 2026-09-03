@@ -17,6 +17,7 @@ import { createDeployCommand } from './commands/deploy.ts'
 import { createDomainsCommand } from './commands/domains.ts'
 import { createLoginCommand, createLogoutCommand, createWhoamiCommand } from './commands/login.ts'
 import { createMachinesCommand } from './commands/machines.ts'
+import { createMcpCommand } from './commands/mcp.ts'
 import { createPromoteCommand } from './commands/promote.ts'
 import { createServicesCommand } from './commands/services.ts'
 import { createStatusCommand } from './commands/status.ts'
@@ -49,6 +50,7 @@ export function buildProgram(): Command {
   program.addCommand(createStatusCommand())
   program.addCommand(createDeployCommand())
   program.addCommand(createAddCommand())
+  program.addCommand(createMcpCommand())
 
   return program
 }
