@@ -96,12 +96,24 @@ export async function startFakeAPI(): Promise<FakeAPI> {
     volumes: [],
   }
   const routes = new Map<string, (req: { path: string; body: string }, res: ServerResponse) => void>()
+  let buildCount = 0
 
   const server = await startServer((req, res) => {
     const method = req.method ?? 'GET'
     const path = req.path
     const scripted = routes.get(`${method} ${path}`)
     if (scripted) return scripted(req, res)
+
+    // Builds. The status is 200 before the outcome is known, so the verdict
+    // is the LAST NDJSON line rather than the code.
+    if (method === 'POST' && path === '/v1/builds') {
+      buildCount++
+      const id = `bld_${buildCount}`
+      res.writeHead(200, { 'content-type': 'application/x-ndjson', 'x-pilot-build-id': id })
+      res.write(JSON.stringify({ step: 'FROM', line: 'pulling base', ts: 1 }) + '\n')
+      res.write(JSON.stringify({ result: `rootfs_${buildCount}`, ts: 2 }) + '\n')
+      return res.end()
+    }
 
     // Machines.
     if (method === 'POST' && path === '/v1/machines') {

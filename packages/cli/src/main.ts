@@ -12,6 +12,7 @@
 
 import { Command } from 'commander'
 
+import { createDeployCommand } from './commands/deploy.ts'
 import { createDomainsCommand } from './commands/domains.ts'
 import { createLoginCommand, createLogoutCommand, createWhoamiCommand } from './commands/login.ts'
 import { createMachinesCommand } from './commands/machines.ts'
@@ -45,6 +46,7 @@ export function buildProgram(): Command {
   program.addCommand(createVolumesCommand())
   program.addCommand(createPromoteCommand())
   program.addCommand(createStatusCommand())
+  program.addCommand(createDeployCommand())
 
   return program
 }

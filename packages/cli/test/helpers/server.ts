@@ -15,6 +15,8 @@ export interface RecordedRequest {
   path: string
   headers: Record<string, string | string[] | undefined>
   body: string
+  /** The bytes, for a body that is not text: a tar upload, say. */
+  raw: Buffer
 }
 
 export interface FakeServer {
@@ -36,7 +38,13 @@ export async function startServer(handler: Handler): Promise<FakeServer> {
     req.on('end', () => {
       const body = Buffer.concat(chunks).toString('utf8')
       const path = (req.url ?? '/').split('?')[0]!
-      requests.push({ method: req.method ?? 'GET', path: req.url ?? '/', headers: req.headers, body })
+      requests.push({
+        method: req.method ?? 'GET',
+        path: req.url ?? '/',
+        headers: req.headers,
+        body,
+        raw: Buffer.concat(chunks),
+      })
       void Promise.resolve(
         handler(Object.assign(req, { path, body }), res),
       ).catch((err: Error) => {

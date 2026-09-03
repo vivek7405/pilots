@@ -80,6 +80,18 @@ export interface TarOptions {
   rules?: IgnoreRule[]
 }
 
+/** Tars a set of in-memory files, with no directory on disk involved. */
+export function tarFiles(files: Record<string, string>): Buffer {
+  return writeTar(
+    Object.entries(files).map(([name, content]) => ({
+      name,
+      mode: 0o644,
+      type: '0' as const,
+      body: Buffer.from(content, 'utf8'),
+    })),
+  )
+}
+
 /** Tars a directory into a build context. */
 export function tarDirectory(dir: string, opts: TarOptions = {}): Buffer {
   const rules = opts.rules ?? readIgnoreRules(dir)
