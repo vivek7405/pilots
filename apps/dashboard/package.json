@@ -27,6 +27,7 @@
     "db:seed": "webjs db seed"
   },
   "dependencies": {
+    "@pilots/sdk": "0.1.0",
     "drizzle-orm": "1.0.0-rc.3",
     "@webjsdev/cli": "0.10.57",
     "@webjsdev/core": "0.7.53",
