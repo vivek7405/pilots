@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -62,13 +63,23 @@ func (m *Manager) Promote(ctx context.Context, machineID string, req api.Promote
 		// so a service minted here must land in the same org, or its own
 		// tenant would stop being able to see it.
 		org := ""
-		if t, err := m.opts.Store.GetTenancy(ctx, machineID); err == nil {
+		switch t, err := m.opts.Store.GetTenancy(ctx, machineID); {
+		case err == nil:
 			org = t.OrgID
+		case !errors.Is(err, state.ErrNotFound):
+			// Refused rather than swallowed: the row written below is
+			// write-once, so a blip here would mint a service its own tenant
+			// can never see and nothing can ever repair.
+			return nil, fmt.Errorf("services: resolve the org of machine %s: %w", machineID, err)
 		}
-		if err := m.opts.Store.PutTenancy(ctx, &state.Tenancy{
-			ID: svc.ID, OrgID: org, Kind: "service", CreatedAt: svc.CreatedAt,
-		}); err != nil {
-			return nil, err
+		// A machine with no tenancy row of its own leaves the service without
+		// one too, rather than fixing it as unowned with an empty org_id.
+		if org != "" {
+			if err := m.opts.Store.PutTenancy(ctx, &state.Tenancy{
+				ID: svc.ID, OrgID: org, Kind: "service", CreatedAt: svc.CreatedAt,
+			}); err != nil {
+				return nil, err
+			}
 		}
 	}
 	svc.Name = row.Name

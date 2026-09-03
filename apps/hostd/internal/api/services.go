@@ -152,10 +152,10 @@ func (d Deps) handleListServices(w http.ResponseWriter, r *http.Request) {
 	org, narrow := listOrg(r)
 	out := make([]Service, 0, len(rows))
 	for _, svc := range rows {
-		if !d.visible(r, svc.ID, org, narrow) {
+		owner, ok := d.visible(r, svc.ID, org, narrow)
+		if !ok {
 			continue
 		}
-		owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
 		out = append(out, serviceToAPI(svc, d.Domain, owner))
 	}
 	writeJSON(w, http.StatusOK, out)

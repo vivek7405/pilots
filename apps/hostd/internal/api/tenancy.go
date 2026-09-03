@@ -132,11 +132,20 @@ func listOrg(r *http.Request) (org string, narrow bool) {
 	return OrgID(r.Context()), true
 }
 
-// visible reports whether a listed row belongs in the answer.
-func (d Deps) visible(r *http.Request, id, org string, narrow bool) bool {
+// visible reports whether a listed row belongs in the answer, and returns the
+// org that owns it.
+//
+// The owner is returned rather than looked up a second time by the caller
+// rendering the row: a list would otherwise ask the same question twice per
+// row, which is what toAPI's own comment says it exists to avoid.
+//
+// An empty org never matches, for the same reason mayAccess refuses one: a
+// row with no owner is admin-only, and a key whose row carries no org must
+// not be handed every unowned object on the fleet.
+func (d Deps) visible(r *http.Request, id, org string, narrow bool) (owner string, ok bool) {
+	owner, found := d.tenancy().OrgOf(r.Context(), id)
 	if !narrow {
-		return true
+		return owner, true
 	}
-	owner, ok := d.tenancy().OrgOf(r.Context(), id)
-	return ok && owner == org
+	return owner, found && org != "" && owner == org
 }

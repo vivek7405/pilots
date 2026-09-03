@@ -274,14 +274,27 @@ func (p peerAPI) Post(ctx context.Context, hostID, path string) error {
 // cache, in the shape of cachedOwner: a mutex and a map lookup instead of a
 // query to the corrosion agent per authenticated request.
 //
-// No store fallback, unlike cachedOwner. A miss here is not "not yet
-// delivered, ask the store": it is "no row says who owns this", which is a
-// legitimate answer that the callers read as admin-only. Falling back would
-// put a query on the request path to learn the same thing.
-type cachedTenancy struct{ cache *corrosion.Cache }
+// A miss falls back to the store, exactly as cachedOwner does, because a miss
+// is ambiguous: it is either "no row says who owns this" or "the subscription
+// has not yet delivered the row this host wrote a moment ago". Reading the
+// second as the first 404s a machine to the tenant that just created it --
+// create, then exec, is the first thing an agent does, and the tenancy row is
+// written milliseconds before that call arrives. The fallback costs a query
+// only on the miss, so the steady state is still a map lookup.
+type cachedTenancy struct {
+	cache *corrosion.Cache
+	store state.Store
+}
 
-func (t cachedTenancy) OrgOf(_ context.Context, id string) (string, bool) {
-	return t.cache.OrgOf(id)
+func (t cachedTenancy) OrgOf(ctx context.Context, id string) (string, bool) {
+	if org, ok := t.cache.OrgOf(id); ok {
+		return org, true
+	}
+	row, err := t.store.GetTenancy(ctx, id)
+	if err != nil {
+		return "", false
+	}
+	return row.OrgID, true
 }
 
 func (t cachedTenancy) Revoked(_ context.Context, hash string) (bool, error) {

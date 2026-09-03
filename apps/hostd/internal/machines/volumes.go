@@ -49,10 +49,14 @@ func (m *Manager) CreateVolume(ctx context.Context, req api.CreateVolumeRequest)
 	// Between the two writes on purpose. The volume exists by now, so its row
 	// is safe to publish; the tenancy goes first of the two so a failure
 	// cannot leave a volume no org owns.
-	if err := m.opts.Store.PutTenancy(ctx, &state.Tenancy{
-		ID: v.ID, OrgID: req.OrgID, Kind: "volume", CreatedAt: v.CreatedAt,
-	}); err != nil {
-		return nil, err
+	// Skipped when there is no org, for the reason the machine path gives:
+	// the row is write-once, so an empty org_id is permanent.
+	if req.OrgID != "" {
+		if err := m.opts.Store.PutTenancy(ctx, &state.Tenancy{
+			ID: v.ID, OrgID: req.OrgID, Kind: "volume", CreatedAt: v.CreatedAt,
+		}); err != nil {
+			return nil, err
+		}
 	}
 	if err := m.opts.Store.PutVolume(ctx, v); err != nil {
 		return nil, err

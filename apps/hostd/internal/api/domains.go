@@ -111,7 +111,7 @@ func (d Deps) handleListDomains(w http.ResponseWriter, r *http.Request) {
 	org, narrow := listOrg(r)
 	out := make([]DomainResponse, 0, len(rows))
 	for _, row := range rows {
-		if !d.visible(r, row.ServiceID, org, narrow) {
+		if _, ok := d.visible(r, row.ServiceID, org, narrow); !ok {
 			continue
 		}
 		svc, err := d.Store.GetService(r.Context(), row.ServiceID)

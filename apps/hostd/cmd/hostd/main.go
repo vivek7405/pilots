@@ -364,7 +364,7 @@ func run() error {
 	// than querying the corrosion agent per call.
 	var tenancy api.TenancyView = api.StoreTenancy(store)
 	if f != nil {
-		tenancy = cachedTenancy{f.cache}
+		tenancy = cachedTenancy{cache: f.cache, store: store}
 	}
 
 	controlAPI := api.Routes(api.Deps{

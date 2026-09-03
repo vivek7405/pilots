@@ -249,8 +249,16 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 	// rollout.
 	org := req.OrgID
 	if org == "" && req.Service != "" {
-		if t, err := m.opts.Store.GetTenancy(ctx, req.Service); err == nil {
+		t, err := m.opts.Store.GetTenancy(ctx, req.Service)
+		switch {
+		case err == nil:
 			org = t.OrgID
+		case !errors.Is(err, state.ErrNotFound):
+			// Refused rather than swallowed. The tenancy row below is
+			// write-once, so a replica that lands with an empty org because
+			// this read blipped is unowned FOREVER -- invisible to its own
+			// tenant and unrepairable without the UPDATE the design forbids.
+			return nil, fmt.Errorf("machines: resolve the org of service %s: %w", req.Service, err)
 		}
 	}
 
@@ -284,10 +292,17 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 	// a tenancy row naming a machine that never appeared -- invisible and
 	// harmless -- rather than a machine no org owns, which its own tenant
 	// could not see and could not destroy.
-	if err := m.opts.Store.PutTenancy(ctx, &state.Tenancy{
-		ID: id, OrgID: org, Kind: "machine", CreatedAt: time.Now().Unix(),
-	}); err != nil {
-		return nil, err
+	//
+	// Skipped when there is no org, and that is not the same as writing an
+	// empty one: the row is write-once, so an empty org_id would fix this id
+	// as unowned for good. Writing nothing leaves it in the state a row
+	// created before tenancy existed is in -- admin-only, and still claimable.
+	if org != "" {
+		if err := m.opts.Store.PutTenancy(ctx, &state.Tenancy{
+			ID: id, OrgID: org, Kind: "machine", CreatedAt: time.Now().Unix(),
+		}); err != nil {
+			return nil, err
+		}
 	}
 	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
 		return nil, err

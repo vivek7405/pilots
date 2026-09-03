@@ -15,6 +15,7 @@ package quota
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 
@@ -61,13 +62,32 @@ func (e *Exceeded) Error() string {
 // A missing row is not zero: zero would freeze every new org the moment it
 // appeared. Freezing an org is done by WRITING a row of zeroes.
 func For(ctx context.Context, st state.Store, orgID string) state.Quota {
-	q, err := st.GetQuota(ctx, orgID)
-	if err != nil || q == nil {
+	q, err := limitsFor(ctx, st, orgID)
+	if err != nil {
 		out := Defaults
 		out.OrgID = orgID
 		return out
 	}
-	return *q
+	return q
+}
+
+// limitsFor is For with the error kept.
+//
+// The distinction matters on the create path: a store that is briefly
+// unreachable must not read as "this org has no row", because the defaults
+// are generous and an org deliberately frozen with a row of zeroes would be
+// admitted by the blip. A caller that has nowhere to put an error uses For.
+func limitsFor(ctx context.Context, st state.Store, orgID string) (state.Quota, error) {
+	q, err := st.GetQuota(ctx, orgID)
+	if errors.Is(err, state.ErrNotFound) || (err == nil && q == nil) {
+		out := Defaults
+		out.OrgID = orgID
+		return out, nil
+	}
+	if err != nil {
+		return state.Quota{}, fmt.Errorf("quota: get quota %q: %w", orgID, err)
+	}
+	return *q, nil
 }
 
 // Check counts what an org already holds and refuses a delta that would take
@@ -83,7 +103,10 @@ func Check(ctx context.Context, st state.Store, orgID string, d Delta) error {
 		// path. There is nothing to count against and nothing to protect.
 		return nil
 	}
-	limits := For(ctx, st, orgID)
+	limits, err := limitsFor(ctx, st, orgID)
+	if err != nil {
+		return err
+	}
 
 	owned, err := ownedIDs(ctx, st, orgID)
 	if err != nil {

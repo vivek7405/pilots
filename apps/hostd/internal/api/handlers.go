@@ -136,10 +136,10 @@ func (d Deps) handleListMachines(w http.ResponseWriter, r *http.Request) {
 	org, narrow := listOrg(r)
 	out := make([]Machine, 0, len(rows))
 	for _, row := range rows {
-		if !d.visible(r, row.ID, org, narrow) {
+		owner, ok := d.visible(r, row.ID, org, narrow)
+		if !ok {
 			continue
 		}
-		owner, _ := d.tenancy().OrgOf(r.Context(), row.ID)
 		out = append(out, toAPI(row, owner))
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -343,10 +343,10 @@ func (d Deps) handleListVolumes(w http.ResponseWriter, r *http.Request) {
 	org, narrow := listOrg(r)
 	out := make([]Volume, 0, len(rows))
 	for _, v := range rows {
-		if !d.visible(r, v.ID, org, narrow) {
+		owner, ok := d.visible(r, v.ID, org, narrow)
+		if !ok {
 			continue
 		}
-		owner, _ := d.tenancy().OrgOf(r.Context(), v.ID)
 		out = append(out, toAPIVolume(v, owner))
 	}
 	writeJSON(w, http.StatusOK, out)
