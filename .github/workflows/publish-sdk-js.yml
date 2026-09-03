@@ -1,0 +1,35 @@
+name: publish @pilots/sdk
+
+# Tag-driven, so a release is a deliberate act rather than a side effect of a
+# merge. The FIRST publish is manual (`npm publish --access public` from
+# sdks/js) because the package name has to be claimed with the owner's
+# credentials; every later version comes from here.
+on:
+  push:
+    tags:
+      - 'sdk-js-v*'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # Provenance: npm records which workflow, commit and tag built the
+      # tarball, so a consumer can check that a version came from this repo.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+      - run: npm install
+      # The tests run before the publish, not after: an unpublish is a far
+      # worse thing to need than a red build.
+      - run: npm run test:sdk-js
+      - run: npm run build:sdk-js
+      - run: npm publish --provenance --access public
+        working-directory: sdks/js
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

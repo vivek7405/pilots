@@ -25,6 +25,25 @@ jobs:
       # control -- it must link statically.
       - run: CGO_ENABLED=0 go build -o /dev/null ./cmd/guest-agent
 
+  go-sdk:
+    name: go (sdk)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: sdks/go
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: sdks/go/go.sum
+      - run: go build ./...
+      - run: go vet ./...
+      - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      # The drift test parses apps/hostd/internal/api, so it is this job that
+      # catches a wire change landing without the mirror.
+      - run: go test ./...
+
   ts:
     name: node
     runs-on: ubuntu-24.04
@@ -35,6 +54,9 @@ jobs:
           node-version: '24'
       - run: npm install
       - run: node --check scripts/e2e.mjs
+      - run: npm run test:sdk-js
+      # Proves dist/ still builds; the published package is what dist/ holds.
+      - run: npm run build:sdk-js
       # Skips cleanly without PILOTS_E2E=1; this asserts the skip path works.
       - run: npm run test:e2e
 
