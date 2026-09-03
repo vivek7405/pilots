@@ -32,13 +32,14 @@ func (m *Manager) CollectMetrics() {
 	}
 	m.mu.RUnlock()
 
-	faults, bytes, replayed, startupPages, startupBytes := foldHandlers(handlers)
+	faults, bytes, replayed, hit, startupPages, startupBytes := foldHandlers(handlers)
 
 	// Set rather than Add: each report is a whole total, so accumulating
 	// deltas here would double-count every scrape.
 	metrics.UffdFaults.Set(faults)
 	metrics.UffdFaultBytes.Set(bytes)
 	metrics.UffdPrefetchReplayed.Set(replayed)
+	metrics.UffdPrefetchHit.Set(hit)
 	metrics.UffdStartupPages.Set(startupPages)
 	metrics.UffdStartupBytes.Set(startupBytes)
 }
@@ -48,7 +49,7 @@ func (m *Manager) CollectMetrics() {
 // Split out from CollectMetrics so the summing is testable without a live
 // machine: the registry is package-level, so asserting through it would make
 // every test in this package share one set of counters.
-func foldHandlers(handlers []statter) (faults, bytes, replayed, startupPages, startupBytes int64) {
+func foldHandlers(handlers []statter) (faults, bytes, replayed, hit, startupPages, startupBytes int64) {
 	for _, h := range handlers {
 		r, ok := h.Stats()
 		if !ok {
@@ -57,12 +58,13 @@ func foldHandlers(handlers []statter) (faults, bytes, replayed, startupPages, st
 		faults += r.Faults
 		bytes += r.BytesCopied
 		replayed += r.Replayed
+		hit += r.PrefetchHit
 		startupPages += r.StartupPages
 		// Each handler's own page size, so a 2MiB machine and a 4KiB machine
 		// on the same host are both counted correctly.
 		startupBytes += r.StartupPages * int64(r.PageSize)
 	}
-	return faults, bytes, replayed, startupPages, startupBytes
+	return faults, bytes, replayed, hit, startupPages, startupBytes
 }
 
 // statter is the part of uffd.Process this file needs, named so the collector

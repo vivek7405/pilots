@@ -52,6 +52,10 @@ type Stats struct {
 	// was bandwidth spent for nothing, so this is the denominator for how
 	// good the prediction is.
 	Replayed atomic.Int64
+	// PrefetchHit counts replayed pages the guest had NOT already faulted --
+	// the ones the prediction was early enough to matter for. Over Replayed,
+	// this is how good the prediction is.
+	PrefetchHit atomic.Int64
 	// StartupPages is Faults sampled at the moment the machine first answered
 	// a health check, which is where "how much of the image did this wake
 	// actually need" is answered. Zero until that sample is taken.
@@ -295,7 +299,8 @@ func handleFault(ctx context.Context, h *handshake, src block.Slicer,
 		buf[i] = 0
 	}
 
-	return installPage(h.uffd, pageAddr, buf, h.pageSize, stats)
+	_, err := installPage(h.uffd, pageAddr, buf, h.pageSize, stats)
+	return err
 }
 
 // uffdioCopy issues one UFFDIO_COPY and reports the kernel's errno, writing
@@ -320,7 +325,12 @@ var uffdioCopy = func(uffd int, req *copyRequest) syscall.Errno {
 // landed. The kernel reports what it managed in Copy and does NOT redeliver
 // the fault, so resuming from there is the only thing that ever unblocks the
 // guest thread. At 4KiB a page is one physical page and this never happens.
-func installPage(uffd int, dst uint64, buf []byte, pageSize uint64, stats *Stats) error {
+// The bool reports that the page was ALREADY installed (EEXIST). On the
+// replay path that means the guest faulted it first and the replay arrived
+// too late to have saved anything, which is the only honest way to tell a
+// prediction that paid off from one that did not: a page installed ahead of
+// demand never faults again, so its usefulness cannot be observed directly.
+func installPage(uffd int, dst uint64, buf []byte, pageSize uint64, stats *Stats) (bool, error) {
 	req := copyRequest{
 		Dst: dst,
 		Src: uint64(uintptr(unsafe.Pointer(&buf[0]))),
@@ -345,17 +355,17 @@ func installPage(uffd int, dst uint64, buf []byte, pageSize uint64, stats *Stats
 		switch errno := uffdioCopy(uffd, &req); errno {
 		case 0:
 			if req.Copy == int64(req.Len) {
-				return nil
+				return false, nil
 			}
 			// Short copy. Nothing installed at all means no progress is
 			// possible, so that stays an error rather than a spin.
 			stats.CopyShort.Add(1)
 			if req.Copy <= 0 {
-				return fmt.Errorf("UFFDIO_COPY at %#x installed %d of %d bytes",
+				return false, fmt.Errorf("UFFDIO_COPY at %#x installed %d of %d bytes",
 					req.Dst, req.Copy, req.Len)
 			}
 			if attempt >= copyRetries {
-				return fmt.Errorf("UFFDIO_COPY at %#x was still short after "+
+				return false, fmt.Errorf("UFFDIO_COPY at %#x was still short after "+
 					"%d resumes", dst, attempt)
 			}
 			advance()
@@ -363,19 +373,19 @@ func installPage(uffd int, dst uint64, buf []byte, pageSize uint64, stats *Stats
 		case syscall.EEXIST:
 			// Another worker, or the prefetch replay, already installed it.
 			stats.CopyEEXIST.Add(1)
-			return nil
+			return true, nil
 
 		case syscall.EAGAIN:
 			stats.CopyEAGAIN.Add(1)
 			if attempt >= copyRetries {
-				return fmt.Errorf("UFFDIO_COPY at %#x returned EAGAIN %d times",
+				return false, fmt.Errorf("UFFDIO_COPY at %#x returned EAGAIN %d times",
 					dst, attempt)
 			}
 			advance()
 
 		default:
 			stats.CopyFailed.Add(1)
-			return fmt.Errorf("UFFDIO_COPY at %#x: %w", dst, errno)
+			return false, fmt.Errorf("UFFDIO_COPY at %#x: %w", dst, errno)
 		}
 	}
 }

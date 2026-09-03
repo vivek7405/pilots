@@ -24,16 +24,16 @@ func (f *fakeStatter) Stats() (uffd.StatsReport, bool) {
 func TestCollectSumsHandlersIntoOneSeries(t *testing.T) {
 	handlers := []statter{
 		&fakeStatter{ok: true, report: uffd.StatsReport{
-			Faults: 100, BytesCopied: 409600, Replayed: 10,
+			Faults: 100, BytesCopied: 409600, Replayed: 10, PrefetchHit: 8,
 			StartupPages: 40, PageSize: 4096,
 		}},
 		&fakeStatter{ok: true, report: uffd.StatsReport{
-			Faults: 250, BytesCopied: 1024000, Replayed: 25,
+			Faults: 250, BytesCopied: 1024000, Replayed: 25, PrefetchHit: 20,
 			StartupPages: 60, PageSize: 4096,
 		}},
 	}
 
-	faults, bytes, replayed, pages, startBytes := foldHandlers(handlers)
+	faults, bytes, replayed, hit, pages, startBytes := foldHandlers(handlers)
 
 	if faults != 350 {
 		t.Errorf("faults = %d, want 350", faults)
@@ -43,6 +43,9 @@ func TestCollectSumsHandlersIntoOneSeries(t *testing.T) {
 	}
 	if replayed != 35 {
 		t.Errorf("replayed = %d, want 35", replayed)
+	}
+	if hit != 28 {
+		t.Errorf("prefetch hits = %d, want 28", hit)
 	}
 	if pages != 100 {
 		t.Errorf("startup pages = %d, want 100", pages)
@@ -58,7 +61,7 @@ func TestCollectSkipsAHandlerThatCannotAnswer(t *testing.T) {
 	gone := &fakeStatter{ok: false, report: uffd.StatsReport{Faults: 999}}
 	live := &fakeStatter{ok: true, report: uffd.StatsReport{Faults: 7, PageSize: 4096}}
 
-	faults, _, _, _, _ := foldHandlers([]statter{gone, live})
+	faults, _, _, _, _, _ := foldHandlers([]statter{gone, live})
 	if faults != 7 {
 		t.Errorf("faults = %d, want 7 -- a dead handler must contribute nothing", faults)
 	}
@@ -70,7 +73,7 @@ func TestCollectSkipsAHandlerThatCannotAnswer(t *testing.T) {
 // Startup bytes are derived from the handler's own page size, so a 2MiB
 // machine and a 4KiB machine on the same host are both counted correctly.
 func TestCollectDerivesStartupBytesFromEachPageSize(t *testing.T) {
-	_, _, _, _, startBytes := foldHandlers([]statter{
+	_, _, _, _, _, startBytes := foldHandlers([]statter{
 		&fakeStatter{ok: true, report: uffd.StatsReport{StartupPages: 10, PageSize: 4096}},
 		&fakeStatter{ok: true, report: uffd.StatsReport{StartupPages: 10, PageSize: 2 << 20}},
 	})

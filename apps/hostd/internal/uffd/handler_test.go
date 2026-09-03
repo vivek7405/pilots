@@ -487,7 +487,7 @@ func TestInstallPageResumesAShortCopy(t *testing.T) {
 
 	buf := make([]byte, pageSize)
 	var stats Stats
-	if err := installPage(0, 0x7f0000000000, buf, pageSize, &stats); err != nil {
+	if _, err := installPage(0, 0x7f0000000000, buf, pageSize, &stats); err != nil {
 		t.Fatalf("installPage: %v", err)
 	}
 
@@ -528,7 +528,7 @@ func TestInstallPageFailsWhenNothingWasInstalled(t *testing.T) {
 
 	buf := make([]byte, testPageSize)
 	var stats Stats
-	err := installPage(0, 0x7f0000000000, buf, testPageSize, &stats)
+	_, err := installPage(0, 0x7f0000000000, buf, testPageSize, &stats)
 	if err == nil {
 		t.Fatal("a copy that installed nothing was reported as success")
 	}
@@ -558,7 +558,7 @@ func TestInstallPageKeepsProgressAcrossEAGAIN(t *testing.T) {
 
 	buf := make([]byte, pageSize)
 	var stats Stats
-	if err := installPage(0, 0x7f0000000000, buf, pageSize, &stats); err != nil {
+	if _, err := installPage(0, 0x7f0000000000, buf, pageSize, &stats); err != nil {
 		t.Fatalf("installPage: %v", err)
 	}
 	if got := stats.CopyEAGAIN.Load(); got != 1 {
@@ -608,5 +608,52 @@ func TestAcceptTakesUniformHugePages(t *testing.T) {
 
 	if h.pageSize != huge {
 		t.Errorf("page size = %d, want %d", h.pageSize, huge)
+	}
+}
+
+// A page installed ahead of demand never faults again, so whether the
+// prediction was USEFUL cannot be observed directly. What can be observed is
+// the opposite: a replayed page the guest had already faulted was served on
+// demand anyway, and the replay arrived too late to save anything. installPage
+// reports that as EEXIST, which is what separates a hit from a miss.
+func TestInstallPageReportsAnAlreadyPresentPage(t *testing.T) {
+	restore := uffdioCopy
+	defer func() { uffdioCopy = restore }()
+
+	uffdioCopy = func(_ int, _ *copyRequest) syscall.Errno { return syscall.EEXIST }
+
+	buf := make([]byte, testPageSize)
+	var stats Stats
+	existed, err := installPage(0, 0x7f0000000000, buf, testPageSize, &stats)
+	if err != nil {
+		t.Fatalf("installPage: %v", err)
+	}
+	if !existed {
+		t.Error("an EEXIST copy was not reported as already present, so a late " +
+			"replay would be counted as a page the prediction won")
+	}
+	if got := stats.CopyEEXIST.Load(); got != 1 {
+		t.Errorf("CopyEEXIST = %d, want 1", got)
+	}
+}
+
+// The ordinary case: a page the replay got to first.
+func TestInstallPageReportsAFreshInstall(t *testing.T) {
+	restore := uffdioCopy
+	defer func() { uffdioCopy = restore }()
+
+	uffdioCopy = func(_ int, req *copyRequest) syscall.Errno {
+		req.Copy = int64(req.Len)
+		return 0
+	}
+
+	buf := make([]byte, testPageSize)
+	var stats Stats
+	existed, err := installPage(0, 0x7f0000000000, buf, testPageSize, &stats)
+	if err != nil {
+		t.Fatalf("installPage: %v", err)
+	}
+	if existed {
+		t.Error("a fresh install was reported as already present")
 	}
 }

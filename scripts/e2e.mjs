@@ -591,17 +591,55 @@ async function timingAssertions() {
         + `${deltas[0]}: the replay is not predicting what the guest needs.`);
     });
 
-    await step('a checkpoint stores far less than the machine holds', async () => {
-      const ratio = await scrapeMetric('pilots_snapshot_stored_ratio_sum');
-      const count = await scrapeMetric('pilots_snapshot_stored_ratio_count');
-      assert(ratio !== null && count !== null && count > 0,
-        'GET /metrics does not publish pilots_snapshot_stored_ratio');
-      const mean = ratio / count;
-      console.log(`      mean stored/memory ratio over ${count} checkpoints: `
-        + `${(mean * 100).toFixed(1)}%`);
-      assert(mean < 1,
-        `checkpoints stored ${(mean * 100).toFixed(1)}% of the machine's memory `
-        + 'on average, so nothing is being deduplicated or elided.');
+    await step('pre-pause hygiene shrinks what a checkpoint stores', async () => {
+      // Two identical machines, each with a warm guest page cache, checkpointed
+      // one after the other. The control is the OTHER MACHINE rather than a
+      // code path, so the assertion survives a refactor of the reclaim chain
+      // and measures the thing itself: how much a checkpoint had to store.
+      const pair = [];
+      for (let i = 0; i < 2; i++) {
+        const { status, json } = await request('/v1/machines', {
+          method: 'POST', body: { mem_mib: 512 },
+        });
+        assert(status === 201, `create ${i}: HTTP ${status}`);
+        created.push(json.id);
+        pair.push(json.id);
+      }
+
+      // Warm each guest's page cache with the same work, so the pages the
+      // reclaim chain can release actually exist.
+      for (const mid of pair) {
+        await exec(mid, 'dd if=/dev/zero of=/var/tmp/warm bs=1M count=192 2>/dev/null; '
+          + 'cat /var/tmp/warm > /dev/null');
+      }
+
+      const stored = [];
+      for (const mid of pair) {
+        const before = await scrapeMetric('pilots_snapshot_stored_bytes_sum');
+        const { status } = await request(`/v1/machines/${mid}/checkpoints`,
+          { method: 'POST', body: {} });
+        assert(status === 201, `checkpoint of ${mid}: HTTP ${status}`);
+        const after = await scrapeMetric('pilots_snapshot_stored_bytes_sum');
+        assert(before !== null && after !== null,
+          'GET /metrics does not publish pilots_snapshot_stored_bytes');
+        stored.push(after - before);
+      }
+
+      // Both ran the chain, so this asserts the floor rather than a
+      // difference: hygiene plus dedup must keep a checkpoint well under the
+      // machine's memory. Without the chain a warm 512MiB guest stores most
+      // of it, because page-cache pages are dirty from the host's side.
+      const memBytes = 512 * 1024 * 1024;
+      for (const [i, n] of stored.entries()) {
+        console.log(`      machine ${i + 1} stored ${(n / 1048576).toFixed(0)}MiB `
+          + `of ${memBytes / 1048576}MiB (${(100 * n / memBytes).toFixed(1)}%)`);
+      }
+      for (const [i, n] of stored.entries()) {
+        assert(n > 0 && n < memBytes / 2,
+          `machine ${i + 1} stored ${(n / 1048576).toFixed(0)}MiB of a 512MiB `
+          + 'machine after warming its page cache: the pre-pause reclaim is not '
+          + 'releasing what the guest stopped using.');
+      }
     });
   } finally {
     for (const id of created) {

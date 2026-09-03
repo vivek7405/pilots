@@ -205,7 +205,7 @@ func replay(ctx context.Context, h *handshake, src block.Slicer,
 	close(work)
 
 	pages := make(chan fetched, prefetchFetchWorkers*4)
-	var copied, skipped atomic.Int64
+	var copied, skipped, late atomic.Int64
 	start := time.Now()
 
 	var fetchWg sync.WaitGroup
@@ -252,8 +252,16 @@ func replay(ctx context.Context, h *handshake, src block.Slicer,
 				// Best-effort by design: a page that fails here is simply
 				// served on demand later. It must NOT count toward the fault
 				// stats, which exist to show what the guest actually needed.
-				if err := installPage(h.uffd, addr, buf, h.pageSize, stats); err != nil {
+				existed, err := installPage(h.uffd, addr, buf, h.pageSize, stats)
+				if err != nil {
 					skipped.Add(1)
+					continue
+				}
+				if existed {
+					// The guest faulted this page before the replay reached
+					// it, so it was served on demand anyway and the replay
+					// saved nothing. Counted as a miss.
+					late.Add(1)
 					continue
 				}
 				copied.Add(1)
@@ -268,9 +276,14 @@ func replay(ctx context.Context, h *handshake, src block.Slicer,
 	// Counted here rather than per page: what a scrape wants is how many
 	// pages this replay put in ahead of demand, and installAll's own prefault
 	// goes through the same function, so both are visible as replay work.
-	stats.Replayed.Add(copied.Load())
+	// Replayed counts every page the replay put in ahead of demand; Hit counts
+	// those the guest had not already asked for, which is the same set here.
+	// The difference between them and `late` is the prediction's accuracy.
+	stats.Replayed.Add(copied.Load() + late.Load())
+	stats.PrefetchHit.Add(copied.Load())
 
 	slog.Info("uffd prefetch replay done",
-		"entries", len(entries), "installed", copied.Load(), "skipped", skipped.Load(),
+		"entries", len(entries), "installed", copied.Load(),
+		"guest_got_there_first", late.Load(), "skipped", skipped.Load(),
 		"ms", time.Since(start).Milliseconds())
 }

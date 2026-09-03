@@ -48,6 +48,7 @@ type StatsReport struct {
 	MinorFaults  int64  `json:"minor_faults"`
 	WPFaults     int64  `json:"wp_faults"`
 	Replayed     int64  `json:"replayed"`
+	PrefetchHit  int64  `json:"prefetch_hit"`
 	PageSize     uint64 `json:"page_size"`
 	StartupPages int64  `json:"startup_pages"`
 }
@@ -91,6 +92,7 @@ func (p *prefaulter) report(stats *Stats) StatsReport {
 		MinorFaults:  stats.MinorFaults.Load(),
 		WPFaults:     stats.WPFaults.Load(),
 		Replayed:     stats.Replayed.Load(),
+		PrefetchHit:  stats.PrefetchHit.Load(),
 		StartupPages: stats.StartupPages.Load(),
 	}
 	p.mu.Lock()
