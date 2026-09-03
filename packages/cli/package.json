@@ -1,0 +1,31 @@
+{
+  "name": "@pilots/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "description": "The pilot CLI and its MCP server: sandboxes and services on one primitive",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vivek7405/pilots.git",
+    "directory": "packages/cli"
+  },
+  "bin": { "pilot": "bin/pilot.js" },
+  "files": ["bin", "src", "README.md"],
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "tsc --noEmit && node --test 'test/**/*.test.ts'"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@pilots/sdk": "*",
+    "commander": "15.0.0",
+    "yaml": "2.9.0",
+    "zod": "4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "typescript": "~5.9.3"
+  },
+  "publishConfig": { "access": "public" }
+}

@@ -23,6 +23,7 @@
     "build:sdk-js": "npm run build --workspace=sdks/js",
     "vet:sdk-go": "cd sdks/go && go vet ./...",
     "test:sdk-go": "cd sdks/go && go test ./...",
-    "test": "npm run vet:hostd && npm run test:hostd && npm run vet:sdk-go && npm run test:sdk-go && npm run test:sdk-js && npm run test:website && npm run test:e2e"
+    "test:cli": "npm run build:sdk-js && npm test --workspace=packages/cli",
+    "test": "npm run vet:hostd && npm run test:hostd && npm run vet:sdk-go && npm run test:sdk-go && npm run test:sdk-js && npm run test:cli && npm run test:website && npm run test:e2e"
   }
 }
