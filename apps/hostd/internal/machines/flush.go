@@ -24,7 +24,10 @@ import (
 // Every step but sync is tolerated individually. A guest whose filesystem has
 // no discard support, or a kernel without one of the procfs knobs, still
 // wants the sync -- and slightly less hygiene beats no snapshot.
-const reclaimChain = "fstrim -a 2>/dev/null || true; sync; " +
+// The chain's exit status is sync's. Every other step ends in `|| true`, so
+// without the `|| exit 1` a failed sync would be papered over by the last
+// tolerated step's zero and the warning below could never fire for it.
+const reclaimChain = "fstrim -a 2>/dev/null || true; sync || exit 1; " +
 	"echo 3 > /proc/sys/vm/drop_caches 2>/dev/null || true; " +
 	"echo 1 > /proc/sys/vm/compact_memory 2>/dev/null || true"
 
@@ -57,11 +60,18 @@ func (m *Manager) reclaimGuestMemory(ctx context.Context, machineID string) {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	if _, err := m.execOnSlot(ctx, machineID, slot, api.ExecRequest{
+	out, err := m.execOnSlot(ctx, machineID, slot, api.ExecRequest{
 		Cmd: reclaimChain, User: "root", TimeoutMS: 10_000,
-	}); err != nil {
+	})
+	if err != nil {
 		slog.Warn("could not flush the guest's disk before snapshotting; "+
 			"the snapshot may miss its most recent writes",
 			"machine", machineID, "err", err)
+		return
+	}
+	if out.ExitCode != 0 {
+		slog.Warn("the guest's sync failed before snapshotting; "+
+			"the snapshot may miss its most recent writes",
+			"machine", machineID, "exit", out.ExitCode, "stderr", out.Stderr)
 	}
 }
