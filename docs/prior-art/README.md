@@ -104,7 +104,7 @@ here; do not fix blind.
 | No lifecycle journal / re-adoption on hostd restart | in-flight checkpoint lost on daemon upgrade | `fly-io.md` COPY 1 |
 | Router/DNS must join on `hosts.last_seen` (membership-aware), and prefer the local replica | dead host keeps 1/N of traffic; cross-mesh hops when a local replica exists | `uncloud.md` COPY 7, REJECT 3 |
 | Host-bootstrap lacks e2b's sysctls, hugepage math, NBD `nowatch` udev rule, public-reachability self-check | #22 gate 5; a firewalled host silently eats traffic | `e2b-infra.md` COPY 13, 19–20; `uncloud.md` COPY 13 |
-| No `docs/incidents/` log, no `/v1/hosts` replication-lag field | first self-heal misfire will be undebuggable | `fly-io.md` COPY 20; `uncloud.md` COPY 11 |
+| ~~No `docs/incidents/` log~~ (landed: `docs/incidents/`), no `/v1/hosts` replication-lag field (#30) | first self-heal misfire will be undebuggable | `fly-io.md` COPY 20; `uncloud.md` COPY 11 |
 | Rollout probe default should be `/__webjs/ready` (200 only) for webjs apps; router must set `X-Forwarded-Proto` and speak h2 to browsers | webjs HSTS never turns on; cold instance cut over; slow page loads | `webjs-deploy-contract.md` |
 | Auto-checkpoints with tiered retention; last-N checkpoints mounted read-only in the guest; port-open notifications | agent DX parity with sprites | `sprites-dev.md` COPY 3–4, 6 |
 | #22 levers (hugepage uffd, `Diff` snapshots, last-cycle prefetch, pre-pause reclaim, fs-only snapshots) | beyond-SLO speed | `e2b-infra.md` COPY 1–12, 23 |

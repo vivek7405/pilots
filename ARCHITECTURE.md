@@ -74,6 +74,15 @@ compose fragment on the ordinary primitives, not a product tier. See
    free tier). One wildcard cert via ACME DNS-01 (certmagic + Cloudflare API
    token), shared to hosts via S3. Custom domains: per-domain on-demand
    certs via HTTP-01 (any host can answer the challenge).
+   In code: every host calls `certmagic.ManageAsync` for `*.<workload
+   domain>`, the workload apex and the dashboard apex; the shared `certs`
+   Storage lock is what makes N hosts running the identical call produce ONE
+   order, with the rest loading the result. Without a Cloudflare token the
+   router stays HTTP-01-only and the wildcard is simply absent — the
+   on-demand path still serves custom domains, so this degrades rather than
+   fails. The API hostname `api.<workload domain>` needs no record and no
+   certificate of its own: the wildcard A record and the wildcard
+   certificate already cover it.
 6. **Fleet is CPU-vendor-homogeneous — vendor is a cost decision, not a
    technical one.** FC memory snapshots carry raw CPUID; a snapshot never
    restores across the Intel/AMD boundary (cpu_templates normalize within a
@@ -85,6 +94,16 @@ compose fragment on the ordinary primitives, not a product tier. See
    laptop is AMD, so laptop-built snapshots/templates never ship to an Intel
    fleet — golden templates are always built ON the fleet by CI; and auction
    i7 desktop boards have non-ECC RAM (acceptable at this stage; note it).
+   The two halves of a template are built in different places and that split
+   is the enforcement: the **rootfs** is an ext4 disk image with no CPUID in
+   it, so CI builds it at a tag and `scripts/rootfs/golden.ext4.sha256` pins
+   it — CI asserts the build matches the pin, and `host-bootstrap.sh`
+   refuses to ship a local `golden.ext4` that does not. The **memory
+   template** is never a file and is never shipped: it exists only as builds
+   a fleet host chunkified from its own boot and published through its own
+   replica, so no laptop can mint one. `PILOT_CPU_TEMPLATE` is pinned in
+   `/etc/pilots/config` and the bootstrap refuses a host whose CPU vendor
+   disagrees with it.
 7. **Fly-shaped orchestration, sprites-shaped storage.** Per-host autonomy
    (each host acts on its own machines: wake, restart, suspend, health) +
    any-host coordination (any host serves any API request, proposing
@@ -398,6 +417,16 @@ gap a *degraded ceiling* where extents cannot be shared rather than dropping
 the assertion — an assertion that stops asserting is how a real slowdown
 hides.
 
+Above those two tiers sits a third. `PILOTS_E2E_METAL=1` holds the host to the
+**metal SLOs** — create < 500ms, wake < 200ms, checkpoint resume gap < 500ms,
+release restore < 1s, promote < 1.5s — which is the latency the product is
+sold on and is only achievable on dedicated hardware. The switch is explicit
+rather than inferred, because extent sharing is necessary for those numbers
+and nowhere near sufficient: a nested-virtualisation laptop node on btrfs
+reports `reflink: true` and cannot create a machine in 500ms. Setting the
+flag on a host whose `/v1/health` does not report `reflink: true` is a FAILED
+step, never a quiet downgrade to the laptop ceilings.
+
 (An earlier note here put the ext4 penalty at 2.2s per create. That measured
 `cp --reflink=auto` without `--sparse=always`, which is not what the engine
 runs; the same copy without sparse detection takes 19s on these hosts.)
@@ -550,8 +579,11 @@ process the guest just restored. Changing an env var therefore takes effect
 only through an explicit restart or roll of the machine — never through a
 suspend/wake cycle, which must leave the running process and its env untouched.
 
-**Router (in hostd):** TLS termination (wildcard + on-demand custom-domain
-certs) → hostname parse (`name` | `port-name` | custom domain) → local
+**Router (in hostd):** TLS termination — the wildcard arrives by ACME DNS-01
+through the Cloudflare API and is managed eagerly on every host, custom
+domains arrive by on-demand HTTP-01 gated by `certs.Decider`, and TLS-ALPN is
+off because the challenge would have to be answered by whichever host DNS
+picked → hostname parse (`name` | `port-name` | custom domain) → local
 Corrosion lookup → if running-local: proxy into the netns (in-process Go
 proxy — no socat, no per-VM forwarder processes); if running-remote: proxy
 over WireGuard to the owning hostd; if suspended and `autoStart`: **hold the
@@ -571,6 +603,23 @@ latest builds in S3, write the new `host_id`, URL unchanged. No leader, no
 election. Placement double-booking is prevented by hosts being final
 authority on their own capacity (a create/rescue targeting a full host is
 refused and re-hashed).
+
+**Operations:** a host whose local replica is corrupt or hopelessly behind is
+re-seeded with `scripts/corrosion-reseed.sh <ip> --from <survivor>`, which
+stops hostd FIRST (the reaper kills any Firecracker with no row for 60s, so
+running it against an empty replica would destroy the machines the re-seed is
+trying to save), moves the store aside rather than deleting it, and waits for
+every table's count to agree with a survivor. Every hostd re-publishes its own
+`machines` and `volumes` rows on start, read from the replica and never from
+local disk — a write that never gossiped self-corrects on the next restart,
+and a row the replica no longer shows may belong to a rescuer, so disk is the
+wrong source. `corrosion.service` runs `Type=notify` with a watchdog and hard
+memory bounds: a hung state daemon is worse than a dead one, because a dead
+one restarts. **No data-plane unit orders on another.** hostd already waits
+for corrosion's schema in code, so `After=corrosion.service` buys nothing and
+costs the failure shape where one blocked unit wedges the whole data plane.
+Anything a customer saw, every self-heal and every re-seed is written up in
+`docs/incidents/`.
 
 **Build path:** `POST /v1/builds` accepts a Dockerfile context → BuildKit
 (rootless buildkitd on each host) → **BuildKit's `tar` exporter**, which
@@ -766,4 +815,8 @@ timing from Phase 3, chaos from Phase 4, PaaS from Phase 5, hostility from
 Phase 6 — later phases never retire earlier assertions. `go test ./...` for
 netns/block/header/state/s3 (block-layer round-trip + diff-chain tests are
 mandatory). Dashboard: `webjs check` / `doctor --json` / `typecheck` /
-`test`. CI runs unit tests + the single-VM e2e on every push.
+`test`. CI runs unit tests + the single-VM e2e on every push, and at a tag
+builds the golden rootfs and asserts it matches the committed pin. Phase 6f
+adds the metal SLO tier (`PILOTS_E2E_METAL=1`) and the fleet gate; the
+production sign-off run is the first `docs/incidents/` entry, and a section
+of it marked "skipped" or "laptop only" makes the run red.
