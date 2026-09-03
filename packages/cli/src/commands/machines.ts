@@ -216,9 +216,12 @@ async function execStream(
   })
   stream.stdout.pipe(process.stdout)
   stream.stderr.pipe(process.stderr)
+
+  const onStdin = (chunk: Buffer) => stream.writeStdin(chunk)
+  const onStdinEnd = () => stream.endStdin()
   if (opts.stdin) {
-    process.stdin.on('data', (chunk: Buffer) => stream.writeStdin(chunk))
-    process.stdin.on('end', () => stream.endStdin())
+    process.stdin.on('data', onStdin)
+    process.stdin.on('end', onStdinEnd)
   }
   // SIGINT closes the socket, which cancels the guest's context and kills the
   // command; 130 is what a shell reports for the same interruption.
@@ -231,6 +234,15 @@ async function execStream(
     return await stream.wait()
   } finally {
     process.off('SIGINT', onSigint)
+    if (opts.stdin) {
+      // Reading stdin keeps the handle referenced, so without this the CLI
+      // outlives the command it ran: `pilot machines exec --stdin` would sit
+      // there after the guest had already exited, waiting on a terminal
+      // nobody is typing into.
+      process.stdin.off('data', onStdin)
+      process.stdin.off('end', onStdinEnd)
+      process.stdin.pause()
+    }
   }
 }
 

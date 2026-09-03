@@ -76,6 +76,7 @@ export async function startWSServer(
     socket.write(headers)
 
     const url = new URL(req.url ?? '/', 'http://localhost')
+    let closed = false
     const conn: WSConnection = {
       url: req.url ?? '/',
       query: url.searchParams,
@@ -88,16 +89,35 @@ export async function startWSServer(
       close: () => {
         // 0x88 is a close frame; ending the socket without one makes the
         // client's decoder report a failure rather than a clean end.
-        socket.write(Buffer.from([0x88, 0x00]))
-        socket.end()
+        closed = true
+        if (socket.writable) {
+          socket.write(Buffer.from([0x88, 0x00]))
+          socket.end()
+        }
       },
     }
     upgraded.add(socket)
     socket.on('close', () => upgraded.delete(socket))
     connections.push(conn)
-    // The client's frames are ignored: nothing here asserts on what it sends,
-    // and draining keeps the socket from stalling.
-    req.socket.on('data', () => {})
+
+    // The close handshake has to be completed, not merely tolerated. A client
+    // that sent a close frame waits for one back before releasing the socket,
+    // so a server that only drains leaves the client's event loop alive and
+    // its process never exits. Nothing else the client sends is asserted on
+    // here, so the rest is drained.
+    socket.on('data', (chunk: Buffer) => {
+      if (closed || chunk.length === 0) return
+      const opcode = chunk[0]! & 0x0f
+      if (opcode === 0x8) {
+        closed = true
+        // The server may already have closed first, in which case there is
+        // nothing left to answer on.
+        if (socket.writable) {
+          socket.write(Buffer.from([0x88, 0x00]))
+          socket.end()
+        }
+      }
+    })
     onConnect(conn)
   })
 

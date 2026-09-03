@@ -13,8 +13,25 @@
 
 import { CliError } from './output.ts'
 
-export const DEVICE_CODE_URL = 'https://github.com/login/device/code'
-export const ACCESS_TOKEN_URL = 'https://github.com/login/oauth/access_token'
+export const GITHUB_URL = 'https://github.com'
+
+/**
+ * Where the device flow runs.
+ *
+ * `PILOT_GITHUB_URL` points both endpoints at a GitHub Enterprise Server,
+ * which serves the same two paths under its own hostname. It is one variable
+ * rather than two because the two paths never move independently.
+ */
+export function githubEndpoints(env: NodeJS.ProcessEnv = process.env): {
+  deviceCodeURL: string
+  accessTokenURL: string
+} {
+  const base = (env.PILOT_GITHUB_URL || GITHUB_URL).replace(/\/+$/, '')
+  return {
+    deviceCodeURL: `${base}/login/device/code`,
+    accessTokenURL: `${base}/login/oauth/access_token`,
+  }
+}
 
 /**
  * The scopes the exchange needs to identify a person: who they are and which
@@ -75,8 +92,9 @@ export async function deviceFlow(opts: DeviceFlowOptions): Promise<string> {
   const doFetch = opts.fetch ?? globalThis.fetch
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)))
   const prompt = opts.prompt ?? ((m: string) => process.stderr.write(m + '\n'))
-  const deviceCodeURL = opts.deviceCodeURL ?? DEVICE_CODE_URL
-  const accessTokenURL = opts.accessTokenURL ?? ACCESS_TOKEN_URL
+  const endpoints = githubEndpoints()
+  const deviceCodeURL = opts.deviceCodeURL ?? endpoints.deviceCodeURL
+  const accessTokenURL = opts.accessTokenURL ?? endpoints.accessTokenURL
   const maxPolls = opts.maxPolls ?? 200
 
   if (!opts.clientId) {

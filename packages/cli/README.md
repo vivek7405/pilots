@@ -49,6 +49,7 @@ Other variables the CLI reads:
 
 - `PILOT_GITHUB_CLIENT_ID` — the GitHub App's public client id for `pilot login`.
 - `PILOT_DASHBOARD_URL` — where the token exchange happens; defaults to `https://pilots.run`.
+- `PILOT_GITHUB_URL` — the GitHub the device flow runs against; defaults to `https://github.com`. Point it at a GitHub Enterprise Server to use one.
 - `PILOT_SECRET_<NAME>` — the value for a `secret://<name>` reference in a compose file.
 
 ### The credentials file

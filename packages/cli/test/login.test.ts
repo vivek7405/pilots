@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
 
-import { loadCredentials, saveCredentials } from '../src/config.ts'
+import { credentialsPath, loadCredentials, saveCredentials } from '../src/config.ts'
 import { deviceFlow, exchangeToken } from '../src/github.ts'
 import { CliError } from '../src/output.ts'
 import { json, startServer, type FakeServer } from './helpers/server.ts'
@@ -333,4 +333,67 @@ test('`pilot whoami` prints the key prefix and never the key', async () => {
   assert.equal(parsed.api_url, 'https://f')
   assert.equal(parsed.key_prefix, 'pilot_secret')
   assert.equal(stdout.includes('abcdefghijklmnop'), false, 'the key itself never reaches stdout')
+})
+
+test('`pilot login` drives the whole flow and writes a 0600 file', async () => {
+  // The command end to end, spawned: the device flow, the poll loop, the
+  // exchange and the file, with a GitHub and a dashboard that are both real
+  // servers. The unit tests above cover the branches; this covers the wiring.
+  let polls = 0
+  const github = await startServer((req, res) => {
+    if (req.path === '/login/device/code') {
+      return json(res, 200, {
+        device_code: 'dc-1',
+        user_code: 'WXYZ-9999',
+        verification_uri: 'https://github.test/login/device',
+        expires_in: 900,
+        // One second, so the real sleep this test does not inject stays short.
+        interval: 1,
+      })
+    }
+    polls++
+    return json(res, 200, polls === 1 ? { error: 'authorization_pending' } : { access_token: 'gho_end_to_end' })
+  })
+  const dashboard = await startServer((req, res) => {
+    assert.equal(req.path, '/api/cli/exchange')
+    assert.deepEqual(JSON.parse(req.body), { github_access_token: 'gho_end_to_end' })
+    return json(res, 200, { api_key: 'pilot_from_exchange', org_id: 'org_42', scopes: ['deploy'] })
+  })
+  const env = scratch()
+  const { execFile } = await import('node:child_process')
+  const { promisify } = await import('node:util')
+  const { statSync } = await import('node:fs')
+  const run = promisify(execFile)
+  const BIN = join(import.meta.dirname, '..', 'bin', 'pilot.js')
+  try {
+    const { stdout, stderr } = await run(process.execPath, [BIN, '--json', 'login'], {
+      env: {
+        ...env,
+        PATH: process.env.PATH,
+        PILOT_GITHUB_CLIENT_ID: 'Iv1.public',
+        PILOT_GITHUB_URL: github.url,
+        PILOT_DASHBOARD_URL: dashboard.url,
+        PILOT_API_URL: 'https://fleet.example',
+      },
+    })
+    // The prompt is on stderr, never stdout: `--json` promises stdout carries
+    // one object and nothing else.
+    assert.match(stderr, /enter code WXYZ-9999/)
+    assert.deepEqual(JSON.parse(stdout), {
+      org_id: 'org_42',
+      scopes: ['deploy'],
+      api_url: 'https://fleet.example',
+    })
+    assert.equal(polls, 2, 'the poll loop waited out authorization_pending')
+
+    assert.deepEqual(loadCredentials(env), {
+      api_key: 'pilot_from_exchange',
+      api_url: 'https://fleet.example',
+      org_id: 'org_42',
+    })
+    assert.equal(statSync(credentialsPath(env)).mode & 0o777, 0o600)
+  } finally {
+    await github.close()
+    await dashboard.close()
+  }
 })
