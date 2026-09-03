@@ -26,17 +26,29 @@ export interface FakeExecFrame {
   data: string;
 }
 
-export interface FakeFleet {
-  calls: FleetCall[];
+/**
+ * The fleet's contents, kept under `data` rather than beside the API groups.
+ *
+ * `fleet.machines` is the API group, exactly as it is on the real client, so
+ * the rows it serves need their own home or the two collide and a test setting
+ * up rows would silently overwrite the method it is about to call.
+ */
+export interface FleetData {
   machines: Machine[];
   services: Service[];
   volumes: Volume[];
   hosts: Host[];
   releases: Record<string, Release[]>;
+  apiKeyRows: { hash: string; org_id: string; scopes: string[]; revoked_at?: string }[];
   execFrames: FakeExecFrame[];
   logLines: string[];
   /** Records what `execStream` was asked for, so a test can assert stdin=false. */
   lastExec: { id: string; argv: string[]; opts: Record<string, unknown> } | null;
+}
+
+export interface FakeFleet {
+  calls: FleetCall[];
+  data: FleetData;
   reset(): void;
   [group: string]: unknown;
 }
@@ -49,29 +61,29 @@ export function makeFakeFleet(): FakeFleet {
     calls.push({ method, args });
   };
 
-  const state = {
-    calls,
-    machines: [] as Machine[],
-    services: [] as Service[],
-    volumes: [] as Volume[],
-    hosts: [] as Host[],
-    releases: {} as Record<string, Release[]>,
-    execFrames: [] as FakeExecFrame[],
-    logLines: [] as string[],
-    lastExec: null as FakeFleet['lastExec'],
-    apiKeyRows: [] as { hash: string; org_id: string; scopes: string[]; revoked_at?: string }[],
-    reset() {
-      calls.length = 0;
-      state.machines.length = 0;
-      state.services.length = 0;
-      state.volumes.length = 0;
-      state.hosts.length = 0;
-      state.releases = {};
-      state.execFrames.length = 0;
-      state.logLines.length = 0;
-      state.lastExec = null;
-      state.apiKeyRows.length = 0;
-    },
+  const state: FleetData = {
+    machines: [],
+    services: [],
+    volumes: [],
+    hosts: [],
+    releases: {},
+    apiKeyRows: [],
+    execFrames: [],
+    logLines: [],
+    lastExec: null,
+  };
+
+  const reset = () => {
+    calls.length = 0;
+    state.machines.length = 0;
+    state.services.length = 0;
+    state.volumes.length = 0;
+    state.hosts.length = 0;
+    state.releases = {};
+    state.apiKeyRows.length = 0;
+    state.execFrames.length = 0;
+    state.logLines.length = 0;
+    state.lastExec = null;
   };
 
   const notFound = (what: string) => {
@@ -82,7 +94,9 @@ export function makeFakeFleet(): FakeFleet {
   };
 
   const fleet = {
-    ...state,
+    calls,
+    data: state,
+    reset,
 
     // `Http` is reached directly for the two list calls that need `?org=`; see
     // modules/fleet/client.server.ts for why.

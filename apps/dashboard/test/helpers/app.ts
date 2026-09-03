@@ -13,6 +13,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createRequestHandler } from '@webjsdev/server';
 import { getSetCookies } from '@webjsdev/server/testing';
+import type { RouteHandlerContext } from '@webjsdev/core';
 import { makeFakeFleet } from './fake-fleet.ts';
 import type { FakeFleet } from './fake-fleet.ts';
 
@@ -129,4 +130,28 @@ export function asUser(cookie: string, init: RequestInit = {}, ip = '203.0.113.9
     ...init,
     headers: { ...(init.headers as Record<string, string>), cookie, 'x-forwarded-for': ip },
   };
+}
+
+/**
+ * A `RouteHandlerContext` for calling a `WS` export directly.
+ *
+ * `params` is `Awaitable<T>` -- readable synchronously AND awaitable -- so a
+ * plain object is not one. Building the real shape here keeps the test calling
+ * the handler with exactly what the framework passes it.
+ */
+export function routeCtx(params: Record<string, string>): RouteHandlerContext {
+  const awaitable = Object.assign({ ...params }, {
+    then: <R>(onfulfilled?: ((value: Record<string, string>) => R | PromiseLike<R>) | null) =>
+      Promise.resolve(params).then(onfulfilled),
+  }) as RouteHandlerContext['params'];
+  return { params: awaitable };
+}
+
+/** `Promise.withResolvers`, which the app's `lib` target predates. */
+export function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
 }
