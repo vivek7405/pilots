@@ -2,9 +2,18 @@
 // durable production services on one primitive, Firecracker microVMs.
 //
 //	c := pilots.New(os.Getenv("PILOT_API_KEY"))
+//
 //	m, err := c.Machines.Create(ctx, pilots.CreateMachineRequest{Name: "demo"})
-//	out, _, code, err := mustStream(c.Machines.ExecStream(ctx, m.ID,
-//		[]string{"bash", "-c", "echo hi"}, pilots.ExecStreamOptions{}))
+//	if err != nil {
+//		return err
+//	}
+//
+//	s, err := c.Machines.ExecStream(ctx, m.ID,
+//		[]string{"bash", "-c", "echo hi"}, pilots.ExecStreamOptions{})
+//	if err != nil {
+//		return err
+//	}
+//	stdout, stderr, code, err := s.Output()
 //
 // Every host serves this identical API, so the base URL is any host in the
 // fleet: there is no control-plane tier to be down, and a write that arrives
@@ -25,7 +34,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // DefaultBaseURL is used when neither WithBaseURL nor PILOT_API_URL says
@@ -75,9 +83,12 @@ func New(apiKey string, opts ...Option) *Client {
 	c := &Client{
 		apiKey:  apiKey,
 		baseURL: strings.TrimRight(base, "/"),
-		// Generous rather than absent: a create restores a snapshot and a
-		// checkpoint pauses a guest, neither of which is a millisecond call.
-		httpClient: &http.Client{Timeout: 60 * time.Second},
+		// No client-level deadline on purpose. A build streams for minutes, an
+		// exec carries its own timeout_ms, and a checkpoint pauses a guest --
+		// any fixed ceiling here would truncate one of them into a network
+		// error rather than a result. Deadlines belong on the caller's
+		// context, which is where a Go caller looks for them.
+		httpClient: &http.Client{},
 	}
 	for _, opt := range opts {
 		opt(c)

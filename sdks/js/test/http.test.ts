@@ -214,3 +214,27 @@ test('PILOT_API_URL is honoured, and the default when it is unset', () => {
     else process.env.PILOT_API_URL = saved
   }
 })
+
+test('a long exec timeout extends the client deadline instead of aborting', async () => {
+  const fake = new FakeHostd()
+  fake.on('POST /v1/machines/{id}/exec', async (_req, res) => {
+    // Longer than the client's 50 ms deadline, shorter than the exec's own.
+    await new Promise((r) => setTimeout(r, 120))
+    json(res, 200, { stdout: 'done', stderr: '', exit_code: 0 })
+  })
+  await fake.start()
+  try {
+    const client = new PilotsClient('pilot_k', { baseURL: fake.baseURL, timeoutMs: 50 })
+    const out = await client.machines.exec('m-1', { cmd: 'sleep 0.1', timeout_ms: 300_000 })
+    assert.equal(out.stdout, 'done')
+
+    // Without the timeout_ms, the same call is cut off by the client.
+    const err = await client.machines.exec('m-1', { cmd: 'sleep 0.1' }).then(
+      () => null,
+      (e: unknown) => e,
+    )
+    assert.ok(err instanceof PilotsError, `got ${String(err)}`)
+  } finally {
+    await fake.stop()
+  }
+})

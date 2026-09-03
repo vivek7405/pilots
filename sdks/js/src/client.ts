@@ -113,9 +113,20 @@ export class Machines {
     return this.http.none('DELETE', `/v1/machines/${encodeURIComponent(id)}`)
   }
 
-  /** Buffered exec. For output nobody wants to hold in memory, use execStream. */
+  /**
+   * Buffered exec. For output nobody wants to hold in memory, use execStream.
+   *
+   * A `timeout_ms` longer than the client's own deadline extends it, with a
+   * margin: otherwise the client would abort a command the server was still
+   * willing to run, and the caller would get a network error instead of the
+   * server's own timeout result.
+   */
   exec(id: string, req: ExecRequest): Promise<ExecResponse> {
-    return this.http.json<ExecResponse>('POST', `/v1/machines/${encodeURIComponent(id)}/exec`, { body: req })
+    const timeoutMs = req.timeout_ms ? req.timeout_ms + 5_000 : undefined
+    return this.http.json<ExecResponse>('POST', `/v1/machines/${encodeURIComponent(id)}/exec`, {
+      body: req,
+      ...(timeoutMs !== undefined && timeoutMs > this.http.timeoutMs ? { timeoutMs } : {}),
+    })
   }
 
   logs(id: string): Promise<string> {
