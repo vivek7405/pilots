@@ -253,7 +253,7 @@ func (m *Manager) restoreFromCheckpoint(ctx context.Context, row *state.Machine,
 	}
 
 	localDir := m.checkpointDir(row.ID, ckpt.ID)
-	if err := m.awaitChunked(ctx, localDir); err != nil {
+	if err := m.awaitRestorable(ctx, localDir); err != nil {
 		return nil, err
 	}
 
@@ -286,18 +286,31 @@ func (m *Manager) restoreFromCheckpoint(ctx context.Context, row *state.Machine,
 	return fcm, err
 }
 
-// awaitChunked blocks until a checkpoint's builds exist on this host.
+// awaitRestorable blocks until a checkpoint can actually be restored from.
 //
-// A checkpoint taken moments ago may still be chunkifying. Failing instead
-// would make "checkpoint then immediately roll back" -- the exact loop an
-// agent runs -- fail intermittently on nothing but timing.
-func (m *Manager) awaitChunked(ctx context.Context, localDir string) error {
+// That means DURABLE -- uploaded -- and the reason is not obvious. An earlier
+// version waited only for the builds to exist on local disk, on the stated
+// reasoning that a rollback on this host reads them locally and should not
+// pay for an upload it never touches. That reasoning is wrong: the memory
+// build reaches the fault handler as a remote build by id, so a local
+// rollback fetches it from object storage like any other host would.
+//
+// Measured when this bit: the builds and their headers were on local disk at
+// T+0ms, the chunked marker at T+0ms, the handlers failed at T+92ms with
+// "artifact missing", and the upload completed at T+202ms. A 110ms window in
+// which the checkpoint looked ready and was not. It stayed hidden while a
+// checkpoint took seconds, and appeared the moment they got fast.
+//
+// The cost is that a rollback now waits for the upload. Making it genuinely
+// local would mean teaching the restore path to prefer an on-disk build over
+// a remote one, which is a real improvement and a larger change than this.
+func (m *Manager) awaitRestorable(ctx context.Context, localDir string) error {
 	deadline := time.Now().Add(chunkWaitTimeout)
 
 	for time.Now().Before(deadline) {
 		st := fc.StatusOf(localDir)
 		switch {
-		case st.Chunked:
+		case st.Durable:
 			return nil
 		case st.Failed:
 			return fmt.Errorf("machines: checkpoint could not be prepared: %s", st.Error)
@@ -308,7 +321,7 @@ func (m *Manager) awaitChunked(ctx context.Context, localDir string) error {
 		case <-time.After(durabilityPollInterval):
 		}
 	}
-	return fmt.Errorf("machines: checkpoint was not ready within %s", chunkWaitTimeout)
+	return fmt.Errorf("machines: checkpoint was not restorable within %s; its data had not finished uploading", chunkWaitTimeout)
 }
 
 // chunkWaitTimeout bounds the wait for a just-taken checkpoint to be usable.

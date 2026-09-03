@@ -446,6 +446,19 @@ and every one of them was arrived at by measuring a resume gap:
    dirty-page tracking forces KVM to 4KiB page tables. Measured on FC 1.16.1
    over a uffd-backed 512MiB guest: 78-116ms against 2.8-3.5s for a Full of
    the same paused instant, with the merged image byte-identical to it.
+
+   **But that 36x does not survive the sequence in front of it, and the
+   reason is worth knowing before anyone quotes the number.** mincore reports
+   RESIDENCY. Step 2 above prefaults every page before a Full, and nothing
+   evicts a page installed through userfaultfd -- so from a machine's first
+   checkpoint onward mincore reports all of memory as resident, and every
+   later Diff writes nearly all of it. End to end that is 412ms against
+   295ms, a ratio of 1.4x. The Diff is never worse than a Full and it is what
+   makes an O(dirty) pause POSSIBLE, but the pause is O(dirty) only for a
+   machine whose memory is not already fully resident. Closing that gap needs
+   a dirty set that is not residency -- which upstream Firecracker offers
+   only through track_dirty_pages, and that cancels the hugepage lever. It is
+   the one place this design is knowingly leaving a win on the table.
 5. Read the NBD handler's dirty bitmap over its control socket, while the
    guest is still paused — a bitmap read mid-write describes a disk state
    that never existed.

@@ -128,3 +128,30 @@ func TestCollectMetricsIsIdempotentAcrossScrapes(t *testing.T) {
 			first, second)
 	}
 }
+
+// A machine keeps its id across a suspend and wake; its HANDLER does not. The
+// woken machine gets a new process whose counters start at zero, and keyed by
+// machine alone that reads as one handler counting backwards -- the fleet
+// total drops by whatever the dead handler had done. This is what made the
+// e2e assertion measure minus seventeen faults across a wake.
+func TestRetiredHandlersSurviveACounterResetOnTheSameMachine(t *testing.T) {
+	var r retiredUffd
+
+	r.observe(map[string]uffdStats{"m-1": {Faults: 100, BytesCopied: 4096}})
+
+	// Same machine, new handler after a wake: the counter restarts.
+	total := r.observe(map[string]uffdStats{"m-1": {Faults: 3, BytesCopied: 128}})
+	if total.Faults != 100 {
+		t.Fatalf("retired faults = %d, want the dead handler's 100", total.Faults)
+	}
+	if fleet := total.Faults + 3; fleet < 100 {
+		t.Errorf("fleet total went backwards to %d after a wake", fleet)
+	}
+
+	// And it keeps climbing from there without re-retiring.
+	total = r.observe(map[string]uffdStats{"m-1": {Faults: 9, BytesCopied: 512}})
+	if total.Faults != 100 {
+		t.Errorf("retired faults = %d after the new handler advanced, want 100",
+			total.Faults)
+	}
+}

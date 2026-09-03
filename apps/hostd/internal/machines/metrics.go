@@ -51,17 +51,32 @@ func (r *retiredUffd) observe(live map[string]uffdStats) uffdStats {
 	// in permanently.
 	for id, last := range r.lastBy {
 		if _, ok := live[id]; !ok {
-			r.total.Faults += last.Faults
-			r.total.BytesCopied += last.BytesCopied
-			r.total.Replayed += last.Replayed
-			r.total.PrefetchHit += last.PrefetchHit
+			r.retire(last)
 			delete(r.lastBy, id)
 		}
 	}
 	for id, cur := range live {
+		// A machine keeps its id across a suspend and wake, but its handler
+		// does not: the woken machine gets a NEW process whose counters start
+		// at zero. Keyed by machine alone that reads as the same handler
+		// counting backwards, and the fleet total drops by whatever the dead
+		// one had done -- which is exactly what a counter must never do.
+		//
+		// A reading lower than the last one for this id is that reset. Retire
+		// the previous handler's work before adopting the new reading.
+		if last, ok := r.lastBy[id]; ok && cur.Faults < last.Faults {
+			r.retire(last)
+		}
 		r.lastBy[id] = cur
 	}
 	return r.total
+}
+
+func (r *retiredUffd) retire(s uffdStats) {
+	r.total.Faults += s.Faults
+	r.total.BytesCopied += s.BytesCopied
+	r.total.Replayed += s.Replayed
+	r.total.PrefetchHit += s.PrefetchHit
 }
 
 func (m *Manager) CollectMetrics() {
