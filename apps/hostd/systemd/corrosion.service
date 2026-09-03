@@ -1,15 +1,47 @@
 [Unit]
-Description=Corrosion (gossip-replicated cluster state)
+Description=corrosion (pilots cluster state)
 Documentation=https://github.com/superfly/corrosion
-After=network-online.target
+After=network-online.target pilots-mesh.service
 Wants=network-online.target
 
+# Wants=, not Requires=. Gossip rides the mesh, so corrosion does need the
+# interface to bind its address -- but a Requires= turns a mesh that came up
+# late into a corrosion that systemd refuses to start, where Restart=always
+# would simply have retried the bind and succeeded. After= keeps the ordering
+# when both are starting together; the retry covers the rest.
+Wants=pilots-mesh.service
+
 [Service]
-Type=simple
-ExecStart=/usr/local/bin/corrosion agent -c /etc/corrosion/config.toml
+# corrosion v1.0.0 sends READY=1, WATCHDOG=1 and STOPPING=1 through libsystemd
+# (crates/corrosion/src/command/agent.rs). Before moving CORROSION_VERSION,
+# confirm the new binary still does:
+#
+#   strings /opt/pilots/bin/corrosion | grep -c WATCHDOG
+#
+# A Type=notify unit whose binary does not notify never reaches active, and
+# the failure reads as a hung start rather than a wrong unit type.
+Type=notify
+ExecStart=/opt/pilots/bin/corrosion agent --config /var/lib/pilots/corrosion/config.toml
 Restart=always
-RestartSec=1
+RestartSec=2
+TimeoutStartSec=120
+
+# A HUNG state daemon is worse than a dead one, because a dead one restarts.
+# fly's 2024-09-01 outage was a proxy that hung instead of crashing, and their
+# 2026-06-23 one was corrosion OOMing into stuck units. The watchdog turns the
+# first into a restart; the bounds and OOMPolicy turn the second into one.
+WatchdogSec=30
+MemoryHigh=1536M
+MemoryMax=2G
+CPUWeight=50
+OOMPolicy=kill
 LimitNOFILE=65536
+
+# Gossip bytes, visible. fly drove 150 GB/s of gossip in 2024-10-22 and the
+# cause was invisible until they measured it. Read it with:
+#
+#   systemctl show corrosion -p IPEgressBytes -p IPIngressBytes
+IPAccounting=yes
 
 [Install]
 WantedBy=multi-user.target

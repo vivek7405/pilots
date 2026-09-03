@@ -12,6 +12,40 @@
 # allocator, and nothing to update anywhere else: the new host mints its own
 # mesh identity, derives its own address from it, and announces itself by
 # writing its own row.
+#
+# ENVIRONMENT
+#   PILOT_CORROSION_TOKEN      required -- the cluster's shared API secret
+#   PILOT_AGENT_TOKEN_SECRET   required -- guest credentials are derived from it
+#   PILOT_FLEET_KEY            required -- seals secret env values; keep it
+#                              somewhere that outlives the fleet
+#   PILOT_REQUIRE_REFLINK=1    THE FLEET SWITCH. Refuses to finish on a host
+#                              that cannot share extents, and is also where the
+#                              fleet-only requirements below are enforced.
+#   PILOT_CPU_TEMPLATE         T2 / T2CL (Intel) or T2A (AMD). Required under
+#                              PILOT_REQUIRE_REFLINK=1, and checked against the
+#                              host's actual vendor before this exits.
+#   PILOT_ACME_EMAIL           turns TLS on. Also turns on the port 80 and 443
+#                              reachability probes.
+#   PILOT_CLOUDFLARE_API_TOKEN DNS-01 credential for the wildcard certificate
+#   PILOT_WORKLOAD_DOMAIN      default pilotrun.app
+#   PILOT_S3_ENDPOINT / _REGION / _BUCKET / _ACCESS_KEY / _SECRET_KEY
+#   PILOT_ROOTFS_TAG           download golden-<tag>.ext4.zst from the release
+#                              when there is no local rootfs
+#
+# WHAT IT REFUSES TO FINISH ON, and why each is a refusal rather than a warning
+#   * a golden.ext4 that is not the committed pin -- hosts bootstrapped on
+#     different days would carry different base images
+#   * a CPU vendor that disagrees with PILOT_CPU_TEMPLATE -- snapshots taken
+#     here would be unrestorable everywhere else
+#   * a corrosion config key corrosion does not read -- it ignores unknown keys
+#     silently, so a typo runs on the default forever
+#   * a host this machine cannot reach on 8080, 80 or 443 -- the wildcard
+#     record lists every host, so a firewalled one eats 1/N of the traffic with
+#     nothing reporting it
+#   * no extent sharing, under PILOT_REQUIRE_REFLINK=1
+#
+# It also bounds every build to the pilot user's slice, so a build cannot
+# starve the machines it shares a host with.
 set -euo pipefail
 
 # Pinned versions. Everything the fleet runs is a fixed artifact -- a host that
@@ -48,6 +82,15 @@ CORROSION_TOKEN="${PILOT_CORROSION_TOKEN:-}"
 AGENT_SECRET="${PILOT_AGENT_TOKEN_SECRET:-}"
 FLEET_KEY="${PILOT_FLEET_KEY:-}"
 DOMAIN="${PILOT_WORKLOAD_DOMAIN:-pilotrun.app}"
+S3_REGION="${PILOT_S3_REGION:-}"
+# The Firecracker CPU template this fleet is pinned to: T2 or T2CL on Intel,
+# T2A on AMD. It normalises CPUID WITHIN a vendor, which is what lets a later
+# host generation restore a snapshot an older one took. Unpinned, a fleet
+# works until the day a new box has a different stepping, and then it fails at
+# restore reporting a bad snapshot.
+CPU_TEMPLATE="${PILOT_CPU_TEMPLATE:-}"
+ACME_EMAIL="${PILOT_ACME_EMAIL:-}"
+CF_TOKEN="${PILOT_CLOUDFLARE_API_TOKEN:-}"
 SSH_OPTS="${SSH_OPTS:--o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null}"
 
 shift || true
@@ -83,6 +126,21 @@ done
   echo "  export PILOT_FLEET_KEY=\$(openssl rand -base64 32)   # once, for the fleet" >&2
   exit 2
 }
+# PILOT_REQUIRE_REFLINK=1 is the "this is the fleet, not a laptop" switch, so
+# it is where the fleet-only requirements are enforced. A production host
+# without a pinned CPU template restores nothing a later host generation took,
+# and the failure appears months later as an unrestorable snapshot rather than
+# here as a missing variable.
+if [ "${PILOT_REQUIRE_REFLINK:-0}" = 1 ] && [ -z "$CPU_TEMPLATE" ]; then
+  echo "PILOT_CPU_TEMPLATE must be set on a fleet host: Firecracker memory" >&2
+  echo "snapshots carry raw CPUID, and a template normalises it WITHIN a" >&2
+  echo "vendor so a later host generation can restore what this one took." >&2
+  echo "Unpinned, the fleet works until the next box has a different" >&2
+  echo "stepping, and then it fails at restore reporting a bad snapshot." >&2
+  echo >&2
+  echo "  T2 or T2CL on Intel, T2A on AMD -- the SAME value on every host." >&2
+  exit 2
+fi
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 on_host() { ssh $SSH_OPTS "root@${IP}" "$@"; }
@@ -108,13 +166,21 @@ on_host bash -euo pipefail -s <<'REMOTE'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq curl ca-certificates iproute2 iptables nftables \
-  e2fsprogs wireguard-tools sqlite3 \
+  e2fsprogs wireguard-tools sqlite3 python3 \
   fuse3 uidmap slirp4netns fakeroot >/dev/null
 # fuse3 is what a JuiceFS mount is; uidmap and slirp4netns are what rootless
 # BuildKit needs to have a user namespace and a network without root; fakeroot
 # is the fallback when this box's mke2fs cannot read a tarball, and it is the
 # only way an unprivileged build can produce a rootfs whose files are
 # root-owned.
+
+# The nft BINARY is needed; the nftables SERVICE must not run. Its unit runs
+# `nft -f /etc/nftables.conf`, and Ubuntu's stock file begins with
+# `flush ruleset` -- so a reload, a package upgrade or a reboot silently
+# deletes the tables hostd owns in the root namespace (internal/netns/wake.go,
+# tenant.go) alongside the per-netns pilots-nat. Every machine on the host
+# stops being reachable and nothing reports a cause.
+systemctl disable --now nftables >/dev/null 2>&1 || true
 
 # Clock sync is load-bearing, not hygiene: liveness compares a heartbeat
 # stamped by one host's clock against another host's clock with a 30s
@@ -240,6 +306,37 @@ REMOTE
 
 # ---------------------------------------------------------------------------
 say "[5/10] Guest kernel and golden rootfs"
+# The rootfs is the one artifact the fleet takes from outside itself, so it is
+# pinned. CI builds it at a tag and asserts it matches
+# scripts/rootfs/golden.ext4.sha256; this refuses to ship anything else. An
+# unpinned rootfs is not a cosmetic difference: hosts bootstrapped on different
+# days would carry different base images, and the guest agent the image
+# contains is version-tied to hostd.
+#
+# Note that scripts/build-golden-rootfs.sh REWRITES the .sha256 file as its
+# last step, so a locally rebuilt image always matches its own hash. The pin
+# that matters is the COMMITTED one -- `git status` on that file after a local
+# build is the tell, and CI compares against the tagged tree, not the runner's.
+if [ -z "${PILOT_ROOTFS_TAG:-}" ] || [ -f "${REPO}/scripts/rootfs/golden.ext4" ]; then
+  :
+else
+  echo "  fetching golden-${PILOT_ROOTFS_TAG}.ext4.zst from the release"
+  command -v zstd >/dev/null || { echo "  zstd is needed to unpack it" >&2; exit 1; }
+  curl -fsSL -o "${REPO}/scripts/rootfs/golden.ext4.zst" \
+    "https://github.com/vivek7405/pilots/releases/download/${PILOT_ROOTFS_TAG}/golden-${PILOT_ROOTFS_TAG}.ext4.zst"
+  zstd -d -f "${REPO}/scripts/rootfs/golden.ext4.zst" -o "${REPO}/scripts/rootfs/golden.ext4"
+  rm -f "${REPO}/scripts/rootfs/golden.ext4.zst"
+fi
+if [ -f "${REPO}/scripts/rootfs/golden.ext4" ]; then
+  ( cd "$REPO" && sha256sum -c scripts/rootfs/golden.ext4.sha256 >/dev/null ) || {
+    echo "  this golden.ext4 is not the pinned one." >&2
+    echo "    Build it with scripts/build-golden-rootfs.sh at the tagged commit," >&2
+    echo "    or set PILOT_ROOTFS_TAG=<tag> to download golden-<tag>.ext4.zst" >&2
+    echo "    from the release. Refusing to ship an unpinned image." >&2
+    exit 1
+  }
+  echo "  golden rootfs matches the pin"
+fi
 # Two gigabytes, so it is compared before it is copied. Without this every
 # re-run ships it again -- which makes "re-running upgrades a host" cost
 # minutes per host instead of seconds.
@@ -363,6 +460,29 @@ WantedBy=default.target
 UNIT
 chown -R pilot:pilot /home/pilot/.config
 
+# Build containment.
+#
+# It has to be user-<uid>.slice and cannot be a slice of our own naming:
+# buildkitd is a USER unit, a unit inside the user manager cannot name a
+# system slice as its parent, and everything that manager runs already lives
+# under user.slice/user-<uid>.slice. Bounding that slice bounds buildkitd,
+# rootlesskit, slirp4netns and every process a build spawns, in one place.
+#
+# Weights rather than caps, deliberately: a build should be able to use an
+# idle host and should lose to a machine that is serving when the host is not
+# idle. The per-unit MemoryMax, CPUQuota and TasksMax on buildkitd stay --
+# a weight shares, a max stops, and an unbounded build still OOMs a host.
+#
+PILOT_UID=$(id -u pilot)
+mkdir -p "/etc/systemd/system/user-${PILOT_UID}.slice.d"
+cat >"/etc/systemd/system/user-${PILOT_UID}.slice.d/50-pilots-build.conf" <<'CONF'
+[Slice]
+# A build is arbitrary tenant code running beside other tenants' machines.
+CPUWeight=20
+MemoryHigh=8G
+IOWeight=20
+CONF
+
 # cgroup v2 delegation, so the rootless daemon can put each build in its own
 # slice. Without it buildkitd starts happily and every build fails on a cgroup
 # write, which reads as a permission problem and is not one.
@@ -373,7 +493,6 @@ Delegate=cpu cpuset io memory pids
 CONF
 
 systemctl daemon-reload
-PILOT_UID=$(id -u pilot)
 runuser -u pilot -- env XDG_RUNTIME_DIR="/run/user/$PILOT_UID" \
   systemctl --user daemon-reload >/dev/null 2>&1 || true
 if runuser -u pilot -- env XDG_RUNTIME_DIR="/run/user/$PILOT_UID" \
@@ -440,6 +559,14 @@ PILOT_S3_ENDPOINT=${S3_ENDPOINT}
 PILOT_S3_BUCKET=${BUCKET}
 PILOT_S3_ACCESS_KEY=${S3_KEY}
 PILOT_S3_SECRET_KEY=${S3_SECRET}
+PILOT_S3_REGION=${S3_REGION}
+PILOT_CPU_TEMPLATE=${CPU_TEMPLATE}
+PILOT_ACME_EMAIL=${ACME_EMAIL}
+# The DNS-01 credential for the wildcard certificate. Every host holds it and
+# every host manages the same names; the shared certificate storage lock is
+# what turns N identical orders into one. Empty leaves the router HTTP-01-only
+# with no wildcard, which serves custom domains and nothing else.
+PILOT_CLOUDFLARE_API_TOKEN=${CF_TOKEN}
 PILOT_TEMPLATE_ROOTFS=/var/lib/pilots/templates/golden.ext4
 # buildkitd runs rootless as the pilot user, so its socket lives under THAT
 # user's runtime directory. hostd is root and would derive /run/user/0, where
@@ -464,6 +591,16 @@ say "[8/10] Corrosion schema, config and units"
 scp $SSH_OPTS -q "${REPO}/apps/hostd/internal/state/schema.sql" \
   "root@${IP}:/var/lib/pilots/corrosion/schema.sql"
 
+# The units are files in the repo, not heredocs here. They were both for a
+# while, and the two copies had already drifted: the repo's hostd unit carried
+# Type=notify, Delegate=yes and LimitNOFILE while the one hosts actually ran
+# carried none of them, and nothing installed the repo copy. Which unit a host
+# is running is now answerable by reading one file.
+scp $SSH_OPTS -q "${REPO}/apps/hostd/systemd/corrosion.service" \
+  "root@${IP}:/etc/systemd/system/corrosion.service"
+scp $SSH_OPTS -q "${REPO}/apps/hostd/systemd/hostd.service" \
+  "root@${IP}:/etc/systemd/system/hostd.service"
+
 # The schema file must be BYTE-IDENTICAL on every host: corrosion does not
 # replicate DDL, so a host with a different one silently diverges.
 BOOTSTRAP_LINE=""
@@ -474,16 +611,49 @@ cat >/var/lib/pilots/corrosion/config.toml <<CONF
 [db]
 path = "/var/lib/pilots/corrosion/store.db"
 schema_paths = ["/var/lib/pilots/corrosion/schema.sql"]
+# The default is -1048576: a 1 GiB SQLite page cache, sized for fly's fleet.
+# This store holds thousands of rows, and that cache is the single largest
+# term under the MemoryMax on the unit below. corrosion warns below 100 MiB,
+# so 256 MiB is 2.5x the floor and still a quarter of the default.
+cache_size_kib = -262144
 
 [gossip]
 addr = "[${MESH_ADDR}]:51001"
 bootstrap = [${BOOTSTRAP_LINE}]
+# The default, written down so the operator reading this file can see it: a
+# mesh peer that vanished is dropped after 30s, the same window liveness uses
+# to judge a host dead. The two agreeing is not a coincidence to be discovered
+# later from a divergence.
+idle_timeout_secs = 30
 # Pinned from the smallest MTU any host could have. Left to discover it,
 # QUIC overestimates across a heterogeneous underlay and gossip black-holes
 # in a way that presents as the cluster flapping at random.
 max_mtu = 1232
 # The mesh already authenticates and encrypts every byte.
 plaintext = true
+
+[perf]
+# How many unapplied changesets are buffered before corrosion starts DROPPING
+# them. Left at the default on purpose: a re-seed replays this fleet's whole
+# state at once, and a lower number would make the re-seed drop changes and
+# then wait out anti-entropy to get them back -- turning a 60s convergence
+# into an unbounded one.
+processing_queue_len = 20000
+# A bounded transaction keeps the local SQLite write lock short while a
+# re-seed applies. An unbounded batch is how a busy apply loop starves every
+# reader on the same database.
+apply_queue_max_batch_size = 4000
+# Checkpoint the WAL far more often than fly's 5 GiB default. This store is
+# small; a WAL allowed to reach gigabytes is NVMe and page cache spent on
+# nothing, and it is the term that grows when apply falls behind.
+wal_threshold_mb = 512
+sql_tx_timeout = 30
+
+[telemetry.prometheus]
+# corrosion's own counters for gossip and sync, on loopback only. This is the
+# view of the state layer that a host has of ITSELF; cross-host replication
+# lag is a separate signal and is not duplicated here.
+bind_addr = "127.0.0.1:51003"
 
 [api]
 addr = "127.0.0.1:51002"
@@ -494,6 +664,77 @@ bearer-token = "${CORROSION_TOKEN}"
 [admin]
 path = "/run/pilots/corrosion/admin.sock"
 CONF
+
+# Corrosion 1.0.0 SILENTLY IGNORES a key it does not recognise: Config::load
+# deserialises through the `config` crate's try_deserialize and no struct
+# carries deny_unknown_fields. So a typo -- processing_queue_length for
+# processing_queue_len -- starts an agent that reports healthy and runs on the
+# default forever. Nothing else in the system would ever say so, which is why
+# the check lives here rather than in a comment asking for care.
+#
+# The allowlist is copied from crates/corro-types/src/config.rs at v1.0.0,
+# serde aliases included. Re-check it when CORROSION_VERSION moves.
+python3 - /var/lib/pilots/corrosion/config.toml <<'PY'
+import sys, tomllib
+
+ALLOWED = {
+    "db": {"path", "schema_paths", "subscriptions_path", "cache_size_kib"},
+    "api": {"bind_addr", "addr", "endpoint_name", "authorization", "authz", "pg"},
+    "api.authz": {"bearer-token", "bearer"},
+    "api.pg": {"bind_addr", "addr", "tls", "readonly"},
+    "gossip": {"bind_addr", "addr", "external_addr", "client_addr", "bootstrap",
+               "tls", "plaintext", "max_mtu", "idle_timeout_secs", "disable_gso",
+               "member_id"},
+    "gossip.tls": {"cert_file", "key_file", "ca_file", "insecure", "client"},
+    "gossip.tls.client": {"cert_file", "key_file"},
+    "perf": {"apply_channel_len", "changes_channel_len", "empties_channel_len",
+             "to_send_channel_len", "notifications_channel_len",
+             "schedule_channel_len", "clearbuf_channel_len", "bcast_channel_len",
+             "foca_channel_len", "wal_threshold_mb", "sql_tx_timeout",
+             "min_sync_backoff", "max_sync_backoff", "processing_queue_len",
+             "apply_queue_timeout", "apply_queue_min_batch_size",
+             "apply_queue_step_base", "apply_queue_max_batch_size",
+             "apply_queue_batch_threshold_ratio"},
+    "admin": {"uds_path", "path"},
+    "telemetry": {"prometheus", "open_telemetry"},
+    "telemetry.prometheus": {"bind_addr", "addr"},
+    "log": {"format", "colors"},
+}
+
+path = sys.argv[1]
+with open(path, "rb") as fh:
+    doc = tomllib.load(fh)
+
+bad = []
+
+
+def walk(table, prefix):
+    known = ALLOWED.get(prefix)
+    if known is None:
+        bad.append(f"[{prefix}] is not a corrosion config section")
+        return
+    for key, value in table.items():
+        if isinstance(value, dict):
+            walk(value, f"{prefix}.{key}" if prefix else key)
+        elif key not in known:
+            bad.append(f"{prefix}.{key} is not a corrosion config key")
+
+
+for section, value in doc.items():
+    if isinstance(value, dict):
+        walk(value, section)
+    else:
+        bad.append(f"{section} is a top-level value; corrosion has none")
+
+if bad:
+    print("  corrosion config: NO -- corrosion would ignore these silently:",
+          file=sys.stderr)
+    for line in bad:
+        print(f"    {line}", file=sys.stderr)
+    print(f"    in {path}", file=sys.stderr)
+    sys.exit(1)
+print("  corrosion config: every key is one corrosion reads")
+PY
 
 # hostd brings the mesh up, and gossip rides the mesh -- so corrosion cannot
 # reach its bootstrap peer until hostd has run. Ordering them the other way
@@ -507,41 +748,6 @@ Type=oneshot
 RemainAfterExit=yes
 EnvironmentFile=/etc/pilots/config
 ExecStart=/opt/pilots/bin/hostd mesh-up
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-cat >/etc/systemd/system/corrosion.service <<'UNIT'
-[Unit]
-Description=corrosion (pilots cluster state)
-After=network-online.target pilots-mesh.service
-Requires=pilots-mesh.service
-[Service]
-ExecStart=/opt/pilots/bin/corrosion agent --config /var/lib/pilots/corrosion/config.toml
-Restart=always
-RestartSec=2
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-cat >/etc/systemd/system/hostd.service <<'UNIT'
-[Unit]
-Description=pilots hostd
-After=network-online.target corrosion.service
-Wants=corrosion.service
-[Service]
-EnvironmentFile=/etc/pilots/config
-# Optional, and the '-' is what makes it optional: gate.sh's negative control
-# writes the fault flags here and removes them again. Without this line the
-# flags are written to a file nothing reads, and the section that reproduces
-# the NBD wedge on purpose silently reproduces nothing.
-EnvironmentFile=-/etc/pilots/hostd.env
-ExecStart=/opt/pilots/bin/hostd
-Restart=always
-RestartSec=2
-# The machines outlive the daemon: a restart re-adopts them rather than
-# taking every workload on the host down with it.
-KillMode=process
 [Install]
 WantedBy=multi-user.target
 UNIT
@@ -634,6 +840,26 @@ else
   echo "  buildkitd: NOT listening -- builds will fail on this host" >&2
 fi
 
+# The containment a build actually runs under. Asked of systemd rather than
+# read back from the drop-in file, because a drop-in that systemd never
+# reloaded is a file that says the right thing and does nothing.
+# One property per call: `systemctl show -p A -p B -p C` prints them in
+# systemd's own internal order, not the requested one, so matching a joined
+# string would report a correctly configured slice as unset whenever that
+# order is not the one guessed here.
+SLICE_CPU=$(systemctl show "user-${PILOT_UID}.slice" -p CPUWeight --value 2>/dev/null)
+SLICE_MEM=$(systemctl show "user-${PILOT_UID}.slice" -p MemoryHigh --value 2>/dev/null)
+SLICE_IO=$(systemctl show "user-${PILOT_UID}.slice" -p IOWeight --value 2>/dev/null)
+if [ "$SLICE_CPU" = 20 ] && [ "$SLICE_MEM" = 8589934592 ] && [ "$SLICE_IO" = 20 ]; then
+  echo "  build slice: CPUWeight=20 MemoryHigh=8G IOWeight=20"
+else
+  echo "  build slice: NO -- user-${PILOT_UID}.slice is CPUWeight=${SLICE_CPU:-unset}" >&2
+  echo "    MemoryHigh=${SLICE_MEM:-unset} IOWeight=${SLICE_IO:-unset}." >&2
+  echo "    A build here is arbitrary tenant code with no weight against the" >&2
+  echo "    machines it shares the host with: one cargo build starves a" >&2
+  echo "    serving neighbour and nothing reports why." >&2
+fi
+
 REFLINK=$(curl -sf http://127.0.0.1:8080/v1/health |
   python3 -c 'import sys,json;print(json.load(sys.stdin).get("reflink"))' 2>/dev/null || echo None)
 if [ "$REFLINK" = True ]; then
@@ -652,6 +878,103 @@ else
   fi
 fi
 REMOTE
+
+# Reachability, checked FROM HERE and not from the host.
+#
+# This is the whole point of the check. Every probe above ran on the host and
+# every one of them talks to 127.0.0.1, where a firewall rule is invisible. The
+# wildcard A record lists every host IP, so a host whose port is closed to the
+# world does not fail -- it silently eats 1/N of the fleet's traffic, and the
+# only symptom is a fraction of requests timing out with no host reporting
+# anything wrong. Adding a host to DNS before this passes is how that starts.
+say "Checking ${IP} is reachable from here"
+REACHED=""
+if curl -sf -m 10 -o /dev/null "http://${IP}:8080/v1/health"; then
+  REACHED="8080"
+else
+  echo "  unreachable: tcp 8080 on ${IP} does not answer /v1/health." >&2
+  echo "    Check the Hetzner Robot firewall for ${IP}: 8080 must allow the" >&2
+  echo "    fleet's host IPs and this machine's address." >&2
+  exit 1
+fi
+
+# Port 80 and 443 only matter once ACME is configured. Without an ACME contact
+# hostd never binds them, so probing would fail a host that is correct.
+if [ -n "$ACME_EMAIL" ]; then
+  CODE=$(curl -s -m 10 -o /dev/null -w '%{http_code}' "http://${IP}/" || echo 000)
+  case "$CODE" in
+    301|308) REACHED="${REACHED} 80" ;;
+    *)
+      echo "  unreachable: tcp 80 on ${IP} returned ${CODE}, want a redirect." >&2
+      echo "    Port 80 is where the ACME HTTP-01 challenge lands. A host that" >&2
+      echo "    does not answer it cannot obtain or renew a custom-domain" >&2
+      echo "    certificate, and the failure shows up as an expiry months out." >&2
+      echo "    Check the Hetzner Robot firewall for ${IP}." >&2
+      exit 1
+      ;;
+  esac
+
+  # Resolved to THIS host on purpose: the wildcard record points at every host
+  # and this asks whether this one can serve the name.
+  #
+  # What is asserted is the HANDSHAKE, not the status code. api.<domain> has no
+  # dispatch of its own yet (that is #30), so the router resolves it as a
+  # machine name, finds no row, and answers 404 -- a 200 is not reachable from
+  # here and never was. Curl's exit code is the honest signal: 0 means TLS
+  # completed against a trusted wildcard, an SSL-class code means the port is
+  # open but the certificate is not there yet, and anything else means nothing
+  # answered at all.
+  set +e
+  curl -s -m 10 -o /dev/null \
+    --resolve "api.${DOMAIN}:443:${IP}" "https://api.${DOMAIN}/v1/health"
+  RC=$?
+  set -e
+  case "$RC" in
+    0) REACHED="${REACHED} 443" ;;
+    35|51|58|59|60|66|77|83|91)
+      # The port is open and TLS was attempted, but the wildcard is not
+      # serving yet. It is ordered asynchronously, so this is expected for the
+      # first minutes of the first host and is never expected afterwards --
+      # a warning rather than a refusal, because a bootstrap that fails here
+      # would fail on a host that is entirely correct.
+      echo "  cert: pending -- ${IP} accepts tcp 443 but the wildcard is not"
+      echo "    serving yet (curl exit ${RC}). Expected on the first host for a"
+      echo "    few minutes; on any later host it means"
+      echo "    PILOT_CLOUDFLARE_API_TOKEN is wrong or the certificate storage"
+      echo "    is not shared."
+      ;;
+    *)
+      echo "  unreachable: tcp 443 on ${IP} did not answer (curl exit ${RC})." >&2
+      echo "    Check the Hetzner Robot firewall for ${IP}." >&2
+      exit 1
+      ;;
+  esac
+fi
+echo "  reachable: ${REACHED}"
+
+# The CPU template and the CPU must agree. A T2A on Intel or a T2 on AMD is
+# not a slow host, it is a host whose snapshots the rest of the fleet cannot
+# restore -- and Firecracker reports that as a corrupt snapshot at restore
+# time, on a machine belonging to a customer, months after the mistake.
+if [ -n "$CPU_TEMPLATE" ]; then
+  VENDOR=$(on_host "grep -m1 '^vendor_id' /proc/cpuinfo | awk '{print \$3}'")
+  case "$CPU_TEMPLATE" in
+    T2|T2CL) WANT_VENDOR=GenuineIntel ;;
+    T2A)     WANT_VENDOR=AuthenticAMD ;;
+    *)
+      echo "  PILOT_CPU_TEMPLATE=${CPU_TEMPLATE} is not one of T2, T2CL, T2A." >&2
+      exit 1
+      ;;
+  esac
+  if [ "$VENDOR" != "$WANT_VENDOR" ]; then
+    echo "  cpu template: NO -- ${CPU_TEMPLATE} needs ${WANT_VENDOR}, this host is ${VENDOR}." >&2
+    echo "    A memory snapshot never restores across the Intel/AMD boundary." >&2
+    echo "    Either this host does not belong in the fleet, or the fleet's" >&2
+    echo "    PILOT_CPU_TEMPLATE is wrong. Refusing to finish." >&2
+    exit 1
+  fi
+  echo "  cpu template: ${CPU_TEMPLATE} on ${VENDOR}"
+fi
 
 echo
 echo "Host ${IP} is up."

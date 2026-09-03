@@ -51,10 +51,22 @@ type Config struct {
 	// cookies scoped to it.
 	WorkloadDomain string // PILOT_WORKLOAD_DOMAIN
 
+	// DashboardDomain is the apex the dashboard is served on, and NOTHING
+	// else. Kept apart from WorkloadDomain on purpose (see above); named here
+	// only because the router has to manage a certificate for it.
+	DashboardDomain string // PILOT_DASHBOARD_DOMAIN
+
 	// ACMEEmail is the contact Let's Encrypt requires. Empty turns TLS off
 	// entirely rather than issuing without one: a fleet that cannot be
 	// notified about expiring certificates should not be holding any.
 	ACMEEmail string // PILOT_ACME_EMAIL
+
+	// CloudflareAPIToken authorises the ACME DNS-01 challenge, which is the
+	// only way to obtain the *.<workload domain> wildcard: HTTP-01 cannot
+	// issue a wildcard at all. Empty leaves the router HTTP-01-only, which
+	// still serves custom domains on demand and simply has no wildcard --
+	// a degradation rather than a failure, logged once at startup.
+	CloudflareAPIToken string // PILOT_CLOUDFLARE_API_TOKEN
 
 	// The GitHub App, for push-to-deploy and pull-request previews. All three
 	// empty turns the webhook route off rather than half-configuring it: a
@@ -163,19 +175,23 @@ func Load() (*Config, error) {
 
 		StateDSN: env("PILOT_STATE_DSN", "/var/lib/pilots/state.db"),
 
-		KernelPath:       env("PILOT_KERNEL", "/opt/pilots/kernels/vmlinux-6.1.158/vmlinux.bin"),
-		FirecrackerBin:   env("PILOT_FIRECRACKER", "/opt/pilots/bin/firecracker"),
-		JailerBin:        env("PILOT_JAILER", "/opt/pilots/bin/jailer"),
-		TemplateRootfs:   env("PILOT_TEMPLATE_ROOTFS", "/var/lib/pilots/templates/golden.ext4"),
-		GuestAgentBin:    env("PILOT_GUEST_AGENT", "/opt/pilots/bin/guest-agent"),
-		BuildCacheDir:    env("PILOT_BUILD_CACHE", "/var/cache/pilot-build"),
-		BuildkitSock:     os.Getenv("PILOT_BUILDKIT_SOCK"),
-		ChrootBase:       env("PILOT_CHROOT_BASE", "/var/lib/pilots/jailer"),
-		CPUTemplate:      os.Getenv("PILOT_CPU_TEMPLATE"),
-		JailUID:          envInt("PILOT_JAIL_UID", 0),
-		JailGID:          envInt("PILOT_JAIL_GID", 0),
-		WorkloadDomain:   env("PILOT_WORKLOAD_DOMAIN", "pilotrun.app"),
-		ACMEEmail:        env("PILOT_ACME_EMAIL", ""),
+		KernelPath:      env("PILOT_KERNEL", "/opt/pilots/kernels/vmlinux-6.1.158/vmlinux.bin"),
+		FirecrackerBin:  env("PILOT_FIRECRACKER", "/opt/pilots/bin/firecracker"),
+		JailerBin:       env("PILOT_JAILER", "/opt/pilots/bin/jailer"),
+		TemplateRootfs:  env("PILOT_TEMPLATE_ROOTFS", "/var/lib/pilots/templates/golden.ext4"),
+		GuestAgentBin:   env("PILOT_GUEST_AGENT", "/opt/pilots/bin/guest-agent"),
+		BuildCacheDir:   env("PILOT_BUILD_CACHE", "/var/cache/pilot-build"),
+		BuildkitSock:    os.Getenv("PILOT_BUILDKIT_SOCK"),
+		ChrootBase:      env("PILOT_CHROOT_BASE", "/var/lib/pilots/jailer"),
+		CPUTemplate:     os.Getenv("PILOT_CPU_TEMPLATE"),
+		JailUID:         envInt("PILOT_JAIL_UID", 0),
+		JailGID:         envInt("PILOT_JAIL_GID", 0),
+		WorkloadDomain:  env("PILOT_WORKLOAD_DOMAIN", "pilotrun.app"),
+		DashboardDomain: env("PILOT_DASHBOARD_DOMAIN", "pilots.run"),
+		ACMEEmail:       env("PILOT_ACME_EMAIL", ""),
+
+		CloudflareAPIToken: os.Getenv("PILOT_CLOUDFLARE_API_TOKEN"),
+
 		GitHubAppID:      int64(envInt("PILOT_GITHUB_APP_ID", 0)),
 		GitHubKeyPath:    env("PILOT_GITHUB_APP_KEY", ""),
 		GitHubWebhookKey: env("PILOT_GITHUB_WEBHOOK_SECRET", ""),
