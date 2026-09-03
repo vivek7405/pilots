@@ -14,12 +14,115 @@ import (
 
 type ctxKey int
 
-const orgIDKey ctxKey = iota
+const principalKey ctxKey = iota
+
+// principal is the authenticated caller. Both halves travel together because
+// every authorisation question needs both: which org's rows may be seen, and
+// which routes may be called.
+type principal struct {
+	OrgID  string
+	Scopes []string
+}
 
 // OrgID returns the authenticated caller's org, if any.
 func OrgID(ctx context.Context) string {
-	org, _ := ctx.Value(orgIDKey).(string)
-	return org
+	p, _ := ctx.Value(principalKey).(principal)
+	return p.OrgID
+}
+
+// HasScope reports whether the caller's key carries a scope, honouring the
+// hierarchy: an admin key has every scope.
+func HasScope(ctx context.Context, want string) bool {
+	p, _ := ctx.Value(principalKey).(principal)
+	return rankOf(p.Scopes) >= scopeRank[want] && scopeRank[want] != 0
+}
+
+// IsAdmin reports whether the caller may act across orgs. Admin is the ops
+// org's key: it sees every row, including rows created before tenancy
+// existed, and it is the only scope that may mint or revoke a key.
+func IsAdmin(ctx context.Context) bool { return HasScope(ctx, ScopeAdmin) }
+
+// The three scopes, nested. Stored comma-separated on the key row and sent as
+// a JSON array, so a client never has to know the storage form.
+const (
+	ScopeMachines = "machines"
+	ScopeDeploy   = "deploy"
+	ScopeAdmin    = "admin"
+)
+
+// scopeRank turns the nesting into a comparison. An unknown name is rank 0,
+// which is what makes an unrecognised scope string fail closed rather than be
+// treated as harmless.
+var scopeRank = map[string]int{
+	ScopeMachines: 1,
+	ScopeDeploy:   2,
+	ScopeAdmin:    3,
+}
+
+// ValidScope reports whether a name is one of the three. Used by the mint
+// route, so a typo becomes a 400 rather than a key that can do nothing.
+func ValidScope(s string) bool { return scopeRank[s] != 0 }
+
+// scopePrefixes maps a route prefix to the scope it needs. Longest match wins,
+// so a prefix under an already-mapped one can require more.
+var scopePrefixes = []struct {
+	prefix string
+	need   string
+}{
+	{"/v1/machines", ScopeMachines},
+	{"/v1/checkpoints", ScopeMachines},
+	{"/v1/volumes", ScopeMachines},
+	{"/v1/sprites", ScopeMachines},
+	{"/v1/compose/plan", ScopeMachines},
+	{"/v1/hosts", ScopeMachines},
+	{"/v1/builds", ScopeDeploy},
+	{"/v1/services", ScopeDeploy},
+	{"/v1/domains", ScopeDeploy},
+	{"/v1/api-keys", ScopeAdmin},
+	{"/v1/quotas", ScopeAdmin},
+	{"/v1/usage", ScopeAdmin},
+}
+
+// scopeAllows reports whether a key's scopes cover a path, and which scope the
+// path needs.
+//
+// A path nothing claims needs admin. That is the fail-closed half and it is
+// deliberate: a route added without a line in the table above is reachable by
+// the ops org alone until someone notices, rather than by every key on the
+// fleet.
+func scopeAllows(scopes, path string) (need string, ok bool) {
+	need = ScopeAdmin
+	best := 0
+	for _, p := range scopePrefixes {
+		if path == p.prefix || strings.HasPrefix(path, p.prefix+"/") {
+			if len(p.prefix) > best {
+				best, need = len(p.prefix), p.need
+			}
+		}
+	}
+	return need, rankOf(splitScopes(scopes)) >= scopeRank[need]
+}
+
+func splitScopes(scopes string) []string {
+	var out []string
+	for _, s := range strings.Split(scopes, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// rankOf is the highest rank the key carries. An unknown name contributes
+// nothing, so a key whose scopes are all unrecognised can reach no route.
+func rankOf(scopes []string) int {
+	best := 0
+	for _, s := range scopes {
+		if r := scopeRank[s]; r > best {
+			best = r
+		}
+	}
+	return best
 }
 
 // exemptPaths bypass auth: liveness and metrics must answer even to a caller
@@ -75,20 +178,57 @@ func WithAuth(d Deps, next http.Handler) http.Handler {
 			return
 		}
 
-		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), orgIDKey, rec.OrgID)))
+		// Revocation is checked AFTER the key resolves and before anything
+		// acts on it. The tombstone replicates like every other row, so a key
+		// killed on one host stops working on all of them within gossip
+		// latency, with no host having to be reachable for the check.
+		revoked, err := d.tenancy().Revoked(r.Context(), hash)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "auth lookup failed"})
+			return
+		}
+		if revoked {
+			unauthorized(w)
+			return
+		}
+
+		if need, ok := scopeAllows(rec.Scopes, r.URL.Path); !ok {
+			writeJSON(w, http.StatusForbidden,
+				ErrorResponse{Error: "scope " + need + " required"})
+			return
+		}
+
+		ctx := context.WithValue(r.Context(), principalKey,
+			principal{OrgID: rec.OrgID, Scopes: splitScopes(rec.Scopes)})
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
+// subprotocolBearer is how a WebSocket client carries the key.
+//
+// A browser cannot set an Authorization header on an upgrade, so the key rides
+// the subprotocol instead. hostd echoes the offered value on the 101 -- the
+// WHATWG algorithm fails a connection whose client offered subprotocols and
+// whose server chose none -- and strips it before the request reaches a guest.
+const subprotocolBearer = "authorization.bearer."
+
 func bearerToken(r *http.Request) (string, bool) {
-	h := r.Header.Get("Authorization")
-	if h == "" {
-		return "", false
+	if h := r.Header.Get("Authorization"); h != "" {
+		scheme, token, found := strings.Cut(h, " ")
+		if !found || !strings.EqualFold(scheme, "bearer") || token == "" {
+			return "", false
+		}
+		return token, true
 	}
-	scheme, token, found := strings.Cut(h, " ")
-	if !found || !strings.EqualFold(scheme, "bearer") || token == "" {
-		return "", false
+
+	// No ?token= form on purpose: a credential in a query string lands in
+	// access logs, in proxy logs and in shell history.
+	for _, p := range strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",") {
+		if key, ok := strings.CutPrefix(strings.TrimSpace(p), subprotocolBearer); ok && key != "" {
+			return key, true
+		}
 	}
-	return token, true
+	return "", false
 }
 
 func unauthorized(w http.ResponseWriter) {

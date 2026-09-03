@@ -8,6 +8,10 @@
 //
 //   PILOTS_E2E=1 PILOT_API=http://127.0.0.1:8080 PILOT_API_KEY=... node scripts/e2e.mjs
 //
+// The key comes from `hostd bootstrap-key` and must carry the `admin` scope:
+// this file drives routes from all three scopes, and a narrower key would turn
+// real assertions into 403s.
+//
 // Without PILOTS_E2E=1 it skips cleanly, so `npm test` stays green on a
 // machine with no KVM.
 
@@ -44,10 +48,13 @@ function assert(cond, msg) {
   if (!cond) throw new Error(msg);
 }
 
-async function request(path, { method = 'GET', body, auth = true, raw = false } = {}) {
+async function request(path, { method = 'GET', body, auth = true, raw = false, key } = {}) {
   const headers = {};
   if (body !== undefined) headers['Content-Type'] = 'application/json';
-  if (auth && KEY) headers.Authorization = `Bearer ${KEY}`;
+  // `key` lets a tenancy assertion speak as a second org. Everything else
+  // uses the battery's own admin key.
+  const bearer = key ?? (auth ? KEY : '');
+  if (bearer) headers.Authorization = `Bearer ${bearer}`;
 
   const res = await fetch(`${API}${path}`, {
     method,
@@ -1552,10 +1559,758 @@ async function envAssertions() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 6e: hostility.
+//
+// Every class asserted here is one the predecessor paid for in production and
+// that ARCHITECTURE.md records as a comment and nothing else: an NBD device
+// that wedges a host in D-state until it is rebooted, netns deletes that
+// return EBUSY while a just-killed Firecracker still holds the namespace, a
+// Firecracker API that accepts about ten connections in its whole life, a
+// hostd SIGKILLed mid-create leaving orphans, and a host that must refuse work
+// rather than accept it and fail.
+//
+// This is the half the PUBLIC API can observe. The other half needs a host
+// shell -- /sys/block/nbdN/pid, a process's D-state, cgroup memory.events,
+// /proc/<fcpid>/fd, kill -9 hostd -- and lives in scripts/cluster/gate.sh as
+// numbered sections. A new hostility test belongs here if the API can see it
+// and there if it cannot. Neither half ever retires an assertion.
+//
+// Multi-host assertions read PILOTS_E2E_HOSTS (space- or comma-separated base
+// URLs). When it is unset the single-host assertions still run and the
+// multi-host ones print WHY they did not, the way the mesh probe above does --
+// a battery that quietly stops asserting is the failure this file already has
+// a scar from.
+// ---------------------------------------------------------------------------
+
+const HOSTS = (process.env.PILOTS_E2E_HOSTS ?? '')
+  .split(/[\s,]+/)
+  .filter(Boolean);
+
+// requestAt is `request` aimed at a named host rather than at PILOT_API,
+// because H7 has to ask a SECOND host what it thinks of a create the first one
+// refused. Every other assertion in this file deliberately goes through one
+// entry point, since the fleet is supposed to make that indistinguishable.
+async function requestAt(base, path, { method = 'GET', body, auth = true, raw = false } = {}) {
+  const headers = {};
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (auth && KEY) headers.Authorization = `Bearer ${KEY}`;
+
+  const res = await fetch(`${base}${path}`, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await res.text();
+  if (raw) return { status: res.status, text };
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch { /* not json */ }
+  return { status: res.status, json, text };
+}
+
+// machineCount is the leak detector every hostility test shares: an operation
+// that was refused must leave the host with exactly the machines it had.
+async function machineCount(base = API) {
+  const { status, json } = await requestAt(base, '/v1/machines');
+  assert(status === 200, `GET /v1/machines: HTTP ${status}`);
+  return (json ?? []).length;
+}
+
+// metricValue reads one Prometheus sample from /metrics, or null when the
+// family is absent. Absent is not a failure here: the families H2 and H7 would
+// rather read are owned by another change, and every caller carries a fallback
+// that asserts the same property through a surface that exists today.
+async function metricValue(name, base = API) {
+  const { status, text } = await requestAt(base, '/metrics', { auth: false, raw: true });
+  if (status !== 200 || !text) return null;
+  for (const line of text.split('\n')) {
+    if (line.startsWith('#')) continue;
+    const match = line.match(new RegExp(`^${name}(?:\\{[^}]*\\})?\\s+([0-9.eE+-]+)\\s*$`));
+    if (match) return Number(match[1]);
+  }
+  return null;
+}
+
+// destroy is best effort by design: teardown runs in a finally, and one
+// unreachable host during cleanup must not replace the run's real result.
+async function destroy(id, base = API) {
+  try { await requestAt(base, `/v1/machines/${id}`, { method: 'DELETE' }); } catch { /* best effort */ }
+}
+
+// H2 -- netns churn, the half the API can see.
+//
+// The engine under test is the EBUSY retry loop in internal/netns/teardown.go
+// and the slot pool in internal/netns/slot.go. A destroy races the death of
+// the Firecracker that held the namespace open, so the delete returns EBUSY
+// and has to be retried rather than reported; a destroy that gives up leaves a
+// stale namespace, and the NEXT create on that slot fails with "file exists".
+// The Go unit proves the in-process path. This proves it through the public
+// API, which is the only place a client ever meets it.
+//
+// A hundred cycles, not five: the race needs to be lost at least once, and it
+// is lost rarely. The gate's section 15 reads the host-side counts for the
+// same run.
+const CHURN_CYCLES = 100;
+
+async function churnAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const created = [];
+
+  try {
+    await step(`${CHURN_CYCLES} create/destroy cycles all complete`, async () => {
+      for (let i = 0; i < CHURN_CYCLES; i++) {
+        const { status, json } = await request('/v1/machines', {
+          method: 'POST',
+          body: { name: `e2e-churn-${tag}-${i}`, vcpus: 1, mem_mib: 512 },
+        });
+        assert(status === 201,
+          `cycle ${i}: create returned HTTP ${status} ${JSON.stringify(json)}`);
+
+        const { status: gone } = await request(`/v1/machines/${json.id}`, { method: 'DELETE' });
+        assert(gone === 204, `cycle ${i}: destroy of ${json.id} returned HTTP ${gone}`);
+      }
+    });
+
+    await step(`${CHURN_CYCLES} create/destroy cycles leave the host able to create and serve a ${CHURN_CYCLES + 1}st`, async () => {
+      // The cycles above can all pass while the host is quietly poisoned: a
+      // leaked namespace only bites the create that lands on its slot. So the
+      // assertion is not that the loop finished, it is that the host still
+      // works afterwards -- created, booted, and answering.
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST',
+        body: { name: `e2e-churn-${tag}-last`, vcpus: 1, mem_mib: 512, knobs: { auto_stop: 'off' } },
+      });
+      assert(status === 201,
+        `the create after ${CHURN_CYCLES} cycles returned HTTP ${status} ${JSON.stringify(json)}`);
+      created.push(json.id);
+
+      const out = await exec(json.id, 'echo churn-survivor');
+      assert(out === 'churn-survivor', `the survivor could not run a command (got ${JSON.stringify(out)})`);
+    });
+  } finally {
+    for (const id of created) await destroy(id);
+  }
+}
+
+// H3 -- egress containment.
+//
+// The drop list is internal/netns/firewall.go: the RFC1918 ranges, loopback,
+// link-local (which is where every cloud keeps its metadata service), and the
+// IPv6 ULA boundary that separates the host mesh (fdcc) from machines (fdcd).
+// Two machines in DIFFERENT apps prove the last one, because knowing a
+// sibling's address must not be enough to reach it -- name scoping is not a
+// boundary, the filter is.
+//
+// Public egress is asserted in the same block on purpose. A firewall that
+// drops everything passes every line above it and ships a product where
+// nothing can install a package.
+async function egressAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const appA = `e2e-hostile-${tag}`;
+  const appB = `e2e-neighbour-${tag}`;
+  const created = [];
+
+  async function make(name, app) {
+    const { status, json } = await request('/v1/machines', {
+      method: 'POST',
+      body: { name, app, vcpus: 1, mem_mib: 512, knobs: { auto_stop: 'off' } },
+    });
+    assert(status === 201, `create ${name}: HTTP ${status} ${JSON.stringify(json)}`);
+    created.push(json.id);
+    return json;
+  }
+
+  let guest, sibling;
+  try {
+    guest = await make(`hostile-${tag}`, appA);
+    sibling = await make(`neighbour-${tag}`, appB);
+  } catch (err) {
+    // FAIL, never skip. Returning here quietly retires every assertion below.
+    await step('the egress battery can create its machines', async () => {
+      throw new Error(`setup failed, so nothing below ran: ${err.message}`);
+    });
+    for (const id of created) await destroy(id);
+    return;
+  }
+
+  try {
+    // Each address gets its own step, so a run reports WHICH range opened up
+    // rather than "egress broke". The name is the assertion.
+    const blocked = [
+      ['a guest cannot reach the host\'s private 10/8 network', 'http://10.0.0.1:22'],
+      ['a guest cannot reach the 172.16/12 private range', 'http://172.16.0.1:80'],
+      ['a guest cannot reach the 192.168/16 private range', 'http://192.168.1.1:80'],
+      ['a guest cannot reach the host\'s loopback', 'http://127.0.0.1:22'],
+      ['a guest cannot reach cloud metadata at 169.254.169.254', 'http://169.254.169.254:80'],
+      ['a guest cannot reach an IPv6 unique-local address', 'http://[fd00::1]:80'],
+    ];
+
+    for (const [name, url] of blocked) {
+      await step(name, async () => {
+        const got = await reach(guest.id, url);
+        assert(got.code === '000',
+          `the guest got HTTP ${got.code} from ${url}; it must get no reply at all`);
+      });
+    }
+
+    await step('a guest cannot reach a machine in another app by its raw address', async () => {
+      // The address is learned from inside the sibling's OWN app, because
+      // nothing outside it can discover the address -- which is the point.
+      // What is under test is that knowing it is not enough.
+      const probe = await reach(sibling.id, `http://${sibling.name}.internal:${AGENT_PORT}/health`);
+      assert(probe.ip.startsWith('fdcd:'),
+        `could not learn ${sibling.name}'s address from inside its own app (got '${probe.ip}')`);
+
+      const raw = await reach(guest.id, `http://[${probe.ip}]:${AGENT_PORT}/health`);
+      assert(raw.code === '000',
+        `a machine in ${appA} got HTTP ${raw.code} from ${probe.ip} in ${appB}`);
+    });
+
+    await step('a guest can still reach the public internet', async () => {
+      const got = await reach(guest.id, 'https://1.1.1.1:443');
+      assert(got.code !== '000',
+        'the guest could not reach a public address; the drop list is catching everything');
+    });
+  } finally {
+    for (const id of created) await destroy(id);
+  }
+}
+
+// H7 -- capacity refusal.
+//
+// The host is the final authority on its own capacity: internal/selfheal
+// consults Capacity before it rescues anything, the slot pool returns
+// ErrPoolFull from Take, and cmd/hostd/fleet.go derives free memory from the
+// kernel. What does NOT exist yet is the create path honouring any of it:
+// handleCreateMachine maps every non-ErrNotFound error to a 500, so a host at
+// its ceiling has no way to say so.
+//
+// So this asserts the property, not the current behaviour, and it is written
+// to fail loudly until the create-time refusal lands (a 6a follow-up). The
+// property is the one ARCHITECTURE.md commits to: a host refuses work rather
+// than accepting it and failing, and a refusal leaks nothing.
+//
+// Two ways to reach the ceiling. The slot pool holds 1024 slots by default and
+// filling it through the public API would mean 1024 live machines, which is
+// not a test anyone will run, so the pool form runs only against a host
+// started with a small pool (PILOTS_E2E_SLOT_POOL says how small). The memory
+// form needs no special host: a machine larger than the host's RAM is refused
+// by the same admission the pool refusal belongs to, and it runs everywhere.
+const SLOT_POOL = Number(process.env.PILOTS_E2E_SLOT_POOL ?? '') || 0;
+
+// A machine larger than any host this will ever run on. Not "large": the
+// assertion has to be about admission and never about a host that happened to
+// have the memory free.
+const IMPOSSIBLE_MEM_MIB = 1024 * 1024 * 4; // 4 TiB
+
+async function capacityAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const created = [];
+  let refusal = null;
+
+  // freeSlots prefers the metric and falls back to the machine count. The
+  // fallback asserts the same thing the metric would: a refused create must
+  // leave the host with exactly the machines it already had.
+  async function freeSlots(base = API) {
+    const metric = await metricValue('pilots_slots_free', base);
+    if (metric !== null) return { source: 'pilots_slots_free', value: metric };
+    return { source: 'the machine count', value: await machineCount(base) };
+  }
+
+  try {
+    await step('a host at its ceiling refuses the next create cleanly and leaks no slot or namespace', async () => {
+      const before = await freeSlots();
+      console.log(`      capacity read from ${before.source} (${before.value})`);
+
+      const { status, json, text } = await request('/v1/machines', {
+        method: 'POST',
+        body: { name: `e2e-ceiling-${tag}`, vcpus: 1, mem_mib: IMPOSSIBLE_MEM_MIB },
+      });
+      refusal = status;
+      if (status >= 200 && status < 300) {
+        if (json?.id) created.push(json.id);
+        throw new Error(
+          `the host accepted a ${IMPOSSIBLE_MEM_MIB} MiB machine with HTTP ${status}. ` +
+          'A host that cannot run the work has to refuse it, not take it and fail later');
+      }
+
+      // A 500 is an accepted-then-broke, not a refusal: it says the host tried.
+      assert(status === 503 || status === 507 || status === 400,
+        `the refusal came back as HTTP ${status} (${text.slice(0, 200)}); ` +
+        'a capacity refusal must name capacity, not surface as a generic error');
+      assert(/capacit|memor|resource|full/i.test(text),
+        `the refusal body does not name capacity: ${text.slice(0, 200)}`);
+
+      const after = await freeSlots();
+      assert(after.value === before.value,
+        `${after.source} moved from ${before.value} to ${after.value} across a refused create; ` +
+        'the refusal leaked');
+    });
+
+    if (SLOT_POOL > 0) {
+      await step(`filling ${SLOT_POOL} slots makes the next create refuse, and it leaks nothing`, async () => {
+        for (let i = 0; i < SLOT_POOL; i++) {
+          const { status, json } = await request('/v1/machines', {
+            method: 'POST',
+            body: { name: `e2e-fill-${tag}-${i}`, vcpus: 1, mem_mib: 256, knobs: { auto_stop: 'off' } },
+          });
+          assert(status === 201,
+            `filling the pool failed at slot ${i} of ${SLOT_POOL}: HTTP ${status} ${JSON.stringify(json)}`);
+          created.push(json.id);
+        }
+
+        // Read AFTER the fill and before the refusal, not before the fill: the
+        // fallback source is the machine count, which legitimately grows by
+        // SLOT_POOL across the loop above. What must not move is the count
+        // across the REFUSED create.
+        const before = await freeSlots();
+
+        const { status, json } = await request('/v1/machines', {
+          method: 'POST',
+          body: { name: `e2e-fill-${tag}-over`, vcpus: 1, mem_mib: 256 },
+        });
+        if (status >= 200 && status < 300) {
+          if (json?.id) created.push(json.id);
+          throw new Error(`the create past a full ${SLOT_POOL}-slot pool succeeded with HTTP ${status}`);
+        }
+        assert(status !== 500,
+          'a full pool surfaced as a 500; the host tried rather than refusing');
+
+        const after = await freeSlots();
+        assert(after.value === before.value,
+          `${after.source} moved from ${before.value} to ${after.value} across a refused create; ` +
+          'the refusal leaked');
+      });
+    } else {
+      console.log('      - the pool ceiling was not filled: the default pool is 1024 slots and');
+      console.log('        filling it through the API means 1024 live machines. Set');
+      console.log('        PILOTS_E2E_SLOT_POOL=<n> against a host started with a small pool.');
+      console.log('        The memory ceiling above exercises the same admission path.');
+    }
+
+    // The other half of a refusal: somebody else has to serve the work. This
+    // asserts only once the refusal itself exists, because a host that never
+    // refuses gives the coordinator nothing to re-hash -- and the step above
+    // has already failed loudly in that case.
+    if (HOSTS.length >= 2 && refusal !== null && (refusal < 200 || refusal >= 300)) {
+      await step('a create refused by one host is served by a DIFFERENT host', async () => {
+        // The entry host is whichever one answered the refusal above. Sending
+        // the retry to HOSTS[0] unconditionally can send it straight back to
+        // that same host, which asserts nothing at all -- so the host is
+        // chosen by host_id, and the landing host_id is asserted too.
+        const { json: entryHealth } = await requestAt(API, '/v1/health', { auth: false });
+        const entryID = entryHealth?.host_id;
+        assert(entryID, 'the entry host did not report a host_id');
+
+        let target = null;
+        for (const host of HOSTS) {
+          const { json: health } = await requestAt(host, '/v1/health', { auth: false });
+          if (health?.host_id && health.host_id !== entryID) { target = host; break; }
+        }
+        assert(target,
+          `every host in PILOTS_E2E_HOSTS reports ${entryID}; there is no second host to serve the create`);
+
+        const { status, json } = await requestAt(target, '/v1/machines', {
+          method: 'POST',
+          body: { name: `e2e-rehash-${tag}`, vcpus: 1, mem_mib: 512, knobs: { auto_stop: 'off' } },
+        });
+        assert(status === 201,
+          `${target} could not serve a create: HTTP ${status} ${JSON.stringify(json)}`);
+        created.push(json.id);
+        assert(json.host_id !== entryID,
+          `the create landed back on the refusing host ${entryID}`);
+
+        // Asserted on every host, not on the entry one: a fleet that agrees
+        // only with the host you asked is not a fleet.
+        for (const host of HOSTS) {
+          await waitFor(async () => (await requestAt(host, `/v1/machines/${json.id}`)).status === 200,
+            { timeoutMs: 60_000, what: `${host} to see the re-hashed machine` });
+        }
+      });
+    } else if (HOSTS.length < 2) {
+      console.log('      - the cross-host re-hash is not asserted: PILOTS_E2E_HOSTS names');
+      console.log(`        ${HOSTS.length} host(s) and the assertion needs two. Set it to the fleet's base URLs.`);
+    }
+  } finally {
+    for (const id of created) await destroy(id);
+  }
+}
+
+// H8 -- one quota, three client paths.
+//
+// A quota that is enforced in the HTTP handler is enforced everywhere by
+// construction, and that is exactly the assumption worth distrusting: the CLI
+// and the MCP server are separate processes with their own request building,
+// their own error mapping, and their own idea of what an error looks like on
+// the wire. A CLI that prints "request failed" and exits 0, or an MCP server
+// that turns a 429 into a tool result saying the machine was created, are both
+// shipped products that pass an HTTP-only test.
+//
+// So all three paths are driven for real: the SDK shape over HTTP, the CLI
+// spawned as a child process, and the MCP server spoken to over stdio with one
+// JSON-RPC tools/call. Anything less does not prove "enforced identically".
+//
+// This depends on work that has not landed: quota enforcement (#30) and the
+// CLI and MCP server (#32). Where a dependency is missing the step FAILS and
+// names it. It does not skip -- a battery that quietly stops asserting when a
+// dependency is late is how a whole section goes green while testing nothing.
+const QUOTA_ORG = process.env.PILOTS_E2E_ORG ?? 'org-e2e';
+const QUOTA_HEADROOM = 2;
+const CLI = process.env.PILOT_CLI ?? 'pilot';
+
+// mcpCall speaks one tools/call to a freshly spawned MCP server and returns
+// both the parsed result and every line the server put on stdout, because
+// stdout IS the wire: one stray log line there corrupts the session for any
+// client, and that is asserted rather than assumed.
+async function mcpCall(spawnFn, tool, args, env, timeoutMs = 30_000) {
+  const child = spawnFn(CLI, ['mcp'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+
+  // A ChildProcess with no 'error' listener THROWS the event, and it arrives on
+  // a later tick rather than as a rejection -- so an ENOENT here (the CLI is
+  // #32 and does not exist yet) would take the whole battery down with an
+  // uncaught exception, skipping the summary and the finally that destroys
+  // every machine this file created. Captured and reported instead.
+  let spawnErr = null;
+  child.on('error', (e) => { spawnErr = e; });
+  child.stdin.on('error', () => { /* the spawn error above is the real one */ });
+
+  let out = '';
+  let err = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => { out += chunk; });
+  child.stderr.on('data', (chunk) => { err += chunk; });
+
+  const send = (msg) => child.stdin.write(`${JSON.stringify(msg)}\n`);
+
+  const frames = () => out.split('\n').filter((l) => l.trim() !== '');
+  const waitForID = async (id) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (spawnErr) throw new Error(`could not run ${CLI}: ${spawnErr.message}`);
+      for (const line of frames()) {
+        let msg = null;
+        try { msg = JSON.parse(line); } catch { continue; }
+        if (msg?.id === id) return msg;
+      }
+      await sleep(100);
+    }
+    throw new Error(`the MCP server never answered id ${id} (stdout: ${out.slice(0, 400)} stderr: ${err.slice(0, 400)})`);
+  };
+
+  try {
+    send({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        clientInfo: { name: 'pilots-e2e', version: '0' },
+      },
+    });
+    await waitForID(1);
+    send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+
+    send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: tool, arguments: args } });
+    const response = await waitForID(2);
+    return { response, lines: frames(), stderr: err };
+  } finally {
+    child.stdin.end();
+    child.kill('SIGKILL');
+  }
+}
+
+// quotaFields normalises what each path hands back to the same three values,
+// so "identical" is asserted on the values a client acts on rather than on
+// byte-for-byte framing that legitimately differs between a header-bearing
+// HTTP body and a tool result.
+function quotaFields(body) {
+  if (!body || typeof body !== 'object') return null;
+  const { error, quota, limit, used } = body;
+  return { error, quota, limit, used };
+}
+
+async function quotaAssertions() {
+  const { execFile, spawn } = await import('node:child_process');
+  const created = [];
+  const tag = Math.random().toString(36).slice(2, 8);
+  let limit = 0;
+
+  const run = (args, env) => new Promise((resolve) => {
+    execFile(CLI, args, { env, timeout: 60_000 }, (error, stdout, stderr) => {
+      resolve({ code: error?.code ?? (error ? 1 : 0), stdout, stderr, spawnError: error?.code === 'ENOENT' ? error : null });
+    });
+  });
+
+  const childEnv = { ...process.env, PILOT_API: API, PILOT_API_KEY: KEY };
+
+  try {
+    await step('a machine quota can be set and filled to its limit', async () => {
+      const baseline = await machineCount();
+      limit = baseline + QUOTA_HEADROOM;
+
+      const { status, text } = await request(`/v1/quotas/${QUOTA_ORG}`, {
+        method: 'PUT', body: { max_machines: limit }, raw: true,
+      });
+      assert(status >= 200 && status < 300,
+        `PUT /v1/quotas/${QUOTA_ORG} returned HTTP ${status} (${text.slice(0, 200)}). ` +
+        'Quota enforcement is issue #30 (Phase 6a); this asserts nothing until it lands');
+
+      for (let i = 0; i < QUOTA_HEADROOM; i++) {
+        const { status: cs, json } = await request('/v1/machines', {
+          method: 'POST',
+          body: { name: `e2e-quota-${tag}-${i}`, vcpus: 1, mem_mib: 512, knobs: { auto_stop: 'off' } },
+        });
+        assert(cs === 201, `create ${i} inside the quota returned HTTP ${cs} ${JSON.stringify(json)}`);
+        created.push(json.id);
+      }
+    });
+
+    let viaSDK = null;
+
+    await step('the machine quota is refused with a 429 over HTTP', async () => {
+      const { status, json, text } = await request('/v1/machines', {
+        method: 'POST',
+        body: { name: `e2e-quota-${tag}-over`, vcpus: 1, mem_mib: 512 },
+      });
+      if (status === 201) {
+        created.push(json.id);
+        throw new Error(`the create past the quota succeeded with HTTP ${status}`);
+      }
+      assert(status === 429, `expected 429, got ${status} (${text.slice(0, 200)})`);
+
+      viaSDK = quotaFields(json);
+      assert(viaSDK?.error === 'quota exceeded', `error = ${JSON.stringify(viaSDK?.error)}`);
+      assert(viaSDK?.quota === 'machines', `quota = ${JSON.stringify(viaSDK?.quota)}`);
+      assert(viaSDK?.limit === limit, `limit = ${JSON.stringify(viaSDK?.limit)}, want ${limit}`);
+      assert(viaSDK?.used === limit, `used = ${JSON.stringify(viaSDK?.used)}, want ${limit}`);
+    });
+
+    await step('the CLI reports the same 429 body and exits non-zero', async () => {
+      assert(viaSDK, 'the HTTP path did not produce a body to compare against');
+
+      const { code, stdout, stderr, spawnError } = await run(
+        ['machines', 'create', '--json'], childEnv);
+      assert(!spawnError,
+        `${CLI} is not on PATH. The CLI is issue #32 (Phase 6c); set PILOT_CLI to its path`);
+      assert(code !== 0, `the CLI exited 0 after a refused create (stdout: ${stdout.slice(0, 200)})`);
+
+      let body = null;
+      for (const stream of [stderr, stdout]) {
+        for (const line of stream.split('\n').reverse()) {
+          if (!line.trim()) continue;
+          try { body = JSON.parse(line); break; } catch { /* keep looking */ }
+        }
+        if (body) break;
+      }
+      assert(body, `the CLI printed no JSON with --json (stderr: ${stderr.slice(0, 300)})`);
+      assert(JSON.stringify(quotaFields(body)) === JSON.stringify(viaSDK),
+        `the CLI reported ${JSON.stringify(quotaFields(body))}, HTTP reported ${JSON.stringify(viaSDK)}`);
+    });
+
+    await step('the MCP server reports the same 429 body, and puts nothing but JSON-RPC on stdout', async () => {
+      assert(viaSDK, 'the HTTP path did not produce a body to compare against');
+
+      let call;
+      try {
+        call = await mcpCall(spawn, 'create_machine',
+          { vcpus: 1, mem_mib: 512, name: `e2e-quota-${tag}-mcp` }, childEnv);
+      } catch (err) {
+        throw new Error(
+          `${err.message}. The MCP server is issue #32 (Phase 6c); set PILOT_CLI to the CLI that serves it`);
+      }
+
+      // stdout is the wire. A log line here breaks every MCP client, and it is
+      // the kind of regression nothing else would catch.
+      for (const line of call.lines) {
+        let msg = null;
+        try { msg = JSON.parse(line); } catch {
+          throw new Error(`the MCP server wrote non-JSON to stdout: ${line.slice(0, 200)}`);
+        }
+        assert(msg.jsonrpc === '2.0', `a stdout frame is not JSON-RPC 2.0: ${line.slice(0, 200)}`);
+      }
+
+      const result = call.response?.result;
+      const payload = (result?.structuredContent
+        ?? (() => {
+          const text = (result?.content ?? []).map((c) => c.text ?? '').join('');
+          try { return JSON.parse(text); } catch { return null; }
+        })());
+      assert(payload, `the tool result carried no JSON body: ${JSON.stringify(call.response).slice(0, 300)}`);
+      assert(JSON.stringify(quotaFields(payload)) === JSON.stringify(viaSDK),
+        `MCP reported ${JSON.stringify(quotaFields(payload))}, HTTP reported ${JSON.stringify(viaSDK)}`);
+    });
+
+    await step('the machines already inside the quota are untouched by the refusals', async () => {
+      // The failure this catches is a refusal implemented as a rollback: three
+      // refused creates that each destroy a machine to make room leave the org
+      // under its quota and every assertion above green.
+      for (const id of created) {
+        const { status, json } = await request(`/v1/machines/${id}`);
+        assert(status === 200, `machine ${id} is gone after the refusals (HTTP ${status})`);
+        assert(json.state === 'running' || json.state === 'suspended',
+          `machine ${id} is in state '${json.state}' after the refusals`);
+      }
+    });
+  } finally {
+    for (const id of created) await destroy(id);
+    // The quota outlives the run otherwise, and the next run's "fill to the
+    // limit" loop then hits 429 partway through against a ceiling this run
+    // computed from a machine count that has since moved.
+    try {
+      await request(`/v1/quotas/${QUOTA_ORG}`, { method: 'DELETE' });
+    } catch { /* best effort, like every other teardown here */ }
+  }
+}
+
+// hostilityAssertions runs the API-visible half of H1-H8 in the order that
+// leaves the host least disturbed for whatever runs after it: the churn loop
+// first, egress next, then the two that deliberately push the host to a
+// ceiling. Each sub-battery owns its own cleanup in a finally, so one that
+// fails halfway leaves nothing for the next to trip over.
+async function hostilityAssertions() {
+  console.log('\n-- hostility (Phase 6e)');
+  await churnAssertions();
+  await egressAssertions();
+  await capacityAssertions();
+  await quotaAssertions();
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6a: the API can be handed to a second tenant.
+// ---------------------------------------------------------------------------
+
+async function tenancyAssertions() {
+  let secondKey = null;
+  let secondHash = null;
+  let secondOrg = `org_e2e_${Date.now()}`;
+
+  await step('POST /v1/api-keys mints a key for a second org', async () => {
+    const { status, json } = await request('/v1/api-keys', {
+      method: 'POST',
+      body: { org_id: secondOrg, scopes: ['machines'] },
+    });
+    assert(status === 201, `expected 201, got ${status}`);
+    assert(typeof json?.key === 'string' && json.key.startsWith('pilot_'),
+      `expected a pilot_ key, got ${JSON.stringify(json)}`);
+    assert(json.org_id === secondOrg, `key is for ${json.org_id}`);
+    secondKey = json.key;
+    secondHash = json.hash;
+  });
+
+  await step('the minted key authenticates on the API', async () => {
+    const { status } = await request('/v1/machines', { key: secondKey });
+    assert(status === 200, `expected 200, got ${status}`);
+  });
+
+  // Scopes are what stop an agent key from deploying. The refusal names the
+  // scope, because "forbidden" alone tells a client nothing it can act on.
+  await step('a machines-scoped key is refused on POST /v1/builds', async () => {
+    const { status, json } = await request('/v1/builds', { method: 'POST', key: secondKey });
+    assert(status === 403, `expected 403, got ${status}`);
+    assert(json?.error === 'scope deploy required',
+      `expected the refusal to name the scope, got ${JSON.stringify(json)}`);
+  });
+
+  await step('a machines-scoped key is refused on POST /v1/api-keys', async () => {
+    const { status, json } = await request('/v1/api-keys', {
+      method: 'POST', key: secondKey, body: { org_id: 'x', scopes: ['machines'] },
+    });
+    assert(status === 403, `expected 403, got ${status}`);
+    assert(json?.error === 'scope admin required', `got ${JSON.stringify(json)}`);
+  });
+
+  if (FULL) {
+    // A machine belonging to the battery's org, which the second org must not
+    // be able to see, read or destroy.
+    let id = null;
+    try {
+      await step('a machine created by one org is invisible to another', async () => {
+        const created = await request('/v1/machines', {
+          method: 'POST',
+          body: { vcpus: 1, mem_mib: 512, knobs: { auto_stop: 'off' } },
+        });
+        assert(created.status === 201, `create: expected 201, got ${created.status}`);
+        id = created.json.id;
+
+        const { status, json } = await request('/v1/machines', { key: secondKey });
+        assert(status === 200, `list: expected 200, got ${status}`);
+        assert(!json.some((m) => m.id === id),
+          'the second org can list another tenant\'s machine');
+      });
+
+      // 404 and never 403: a 403 confirms the id exists, which is a
+      // machine-name oracle across tenants.
+      await step('a foreign machine id is a 404 with a JSON body', async () => {
+        const { status, json } = await request(`/v1/machines/${id}`, { key: secondKey });
+        assert(status === 404, `expected 404, got ${status}`);
+        assert(json && typeof json.error === 'string', 'the 404 carries no JSON body');
+      });
+
+      await step('a foreign DELETE is a 404 and the machine survives', async () => {
+        const { status } = await request(`/v1/machines/${id}`, {
+          method: 'DELETE', key: secondKey,
+        });
+        assert(status === 404, `expected 404, got ${status}`);
+        const still = await request(`/v1/machines/${id}`);
+        assert(still.status === 200, `the machine was destroyed anyway: ${still.status}`);
+      });
+    } finally {
+      await step('destroy the tenancy assertion machine', async () => {
+        if (!id) return;
+        const { status } = await request(`/v1/machines/${id}`, { method: 'DELETE' });
+        assert(status === 204, `expected 204, got ${status}`);
+      });
+    }
+  }
+
+  // A quota of zero freezes the org. Checked before the revocation, because
+  // the key has to still work to be refused for the right reason.
+  await step('a quota of zero refuses a create with a structured 429', async () => {
+    const put = await request(`/v1/quotas/${secondOrg}`, {
+      method: 'PUT',
+      body: { max_machines: 0, max_vcpus: 1, max_mem_mib: 512, max_volume_gib: 1, max_builds: 1 },
+    });
+    assert(put.status === 200, `PUT quotas: expected 200, got ${put.status}`);
+
+    const { status, json } = await request('/v1/machines', {
+      method: 'POST', key: secondKey, body: { vcpus: 1, mem_mib: 512 },
+    });
+    assert(status === 429, `expected 429, got ${status}`);
+    assert(json?.error === 'quota exceeded' && json?.quota === 'machines' && json?.limit === 0,
+      `refusal body is not the structured shape: ${JSON.stringify(json)}`);
+  });
+
+  await step('GET /v1/quotas reads back what was written', async () => {
+    const { status, json } = await request(`/v1/quotas/${secondOrg}`);
+    assert(status === 200, `expected 200, got ${status}`);
+    assert(json?.max_machines === 0 && json?.max_vcpus === 1,
+      `read back ${JSON.stringify(json)}`);
+  });
+
+  // Revocation is a row that appears. The key row survives it, so the list
+  // can still report that the credential was killed.
+  await step('a revoked key is refused and no key row was deleted', async () => {
+    const rev = await request(`/v1/api-keys/${secondHash}/revoke`, { method: 'POST' });
+    assert(rev.status === 200, `revoke: expected 200, got ${rev.status}`);
+
+    const { status } = await request('/v1/machines', { key: secondKey });
+    assert(status === 401, `the revoked key still authenticates: ${status}`);
+
+    const list = await request(`/v1/api-keys?org=${secondOrg}`);
+    assert(list.status === 200, `list: expected 200, got ${list.status}`);
+    const row = list.json.find((k) => k.hash === secondHash);
+    assert(row, 'the revoked key vanished from the list; revocation must not delete');
+    assert(row.revoked_at > 0, `the list does not report the revocation: ${JSON.stringify(row)}`);
+  });
+}
+
 async function main() {
   console.log(`e2e: ${API}${FULL ? ' (full lifecycle)' : ' (process only)'}`);
 
   await processAssertions();
+  await tenancyAssertions();
   if (FULL) {
     await lifecycleAssertions();
     await timingAssertions();
@@ -1565,6 +2320,7 @@ async function main() {
     await envAssertions();
     await serviceAssertions();
     await multiServiceAssertions();
+    await hostilityAssertions();
   } else {
     console.log('  - machine lifecycle skipped (set PILOTS_E2E_FULL=1 on a Firecracker host)');
   }

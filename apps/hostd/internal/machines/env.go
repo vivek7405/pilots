@@ -89,6 +89,20 @@ func (m *Manager) provisionService(ctx context.Context, name string,
 		svc.EnvSealed = sealed
 	}
 
+	// Tenancy before the service row, for the same reason the environment is
+	// recorded before the machine is built: a create that dies between the
+	// two leaves a row nothing points at, rather than a service no org owns
+	// and therefore no tenant can ever see.
+	// Skipped when there is no org: the row is write-once, so an empty org_id
+	// would fix this service as unowned for good rather than leaving it in
+	// the admin-only, still-claimable state a pre-tenancy row is in.
+	if req.OrgID != "" {
+		if err := m.opts.Store.PutTenancy(ctx, &state.Tenancy{
+			ID: svc.ID, OrgID: req.OrgID, Kind: "service", CreatedAt: svc.CreatedAt,
+		}); err != nil {
+			return "", err
+		}
+	}
 	if err := m.opts.Store.PutService(ctx, svc); err != nil {
 		return "", err
 	}
@@ -99,6 +113,7 @@ func (m *Manager) provisionService(ctx context.Context, name string,
 type createEnv struct {
 	App       string
 	Cmd       string
+	OrgID     string
 	Env       map[string]string
 	SecretEnv map[string]string
 }

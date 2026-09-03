@@ -32,7 +32,9 @@ this, in order. It is loaded into context automatically (`CLAUDE.md` is
    is our own buildless, web-components, full-stack framework: its deploy is
    `npm install` on the fleet-wide layer cache, then a restore from the
    release snapshot, then `/__webjs/ready`. Nothing may sit between those
-   steps. See `docs/prior-art/webjs-deploy-contract.md`.
+   steps. See `docs/prior-art/webjs-deploy-contract.md`. **Every web app in
+   this repo is a webjs app**: the dashboard, the marketing site, anything
+   that serves a page. No other web framework, bundler or UI library.
 5. **Spin-up, pause/resume and snapshot/restore are extremely fast.** Create
    is a restore, not a boot; wake is a held request, never a waiting page;
    a checkpoint's resume gap is independent of machine size. The numbers are
@@ -85,9 +87,12 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
 
 1. **Single-writer.** A host writes ONLY rows describing its own machines.
    The sanctioned exceptions are deterministic-owner operations (name
-   allocation, self-heal claims of a *provably dead* host's machines, and
-   the dashboard host's `api_keys` writes). Violating this does not error —
-   it corrupts state silently through CRDT merges.
+   allocation and self-heal claims of a *provably dead* host's machines) and
+   the write-once rows in `tenancy` and `api_key_revocations`, plus
+   `api_keys` and `org_quotas` on an admin-scoped request. Violating this
+   does not error — it corrupts state silently through CRDT merges. A row is
+   only safe for "any host" to write when it is written once, or has one
+   logical writer: then the merge has nothing to corrupt.
 2. **The data plane never depends on the control plane.** Routing and wake
    read local state only. If that is not true of a change, the change is
    wrong.
@@ -104,7 +109,9 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
    add and gossips the backfill; that took fly's fleet down twice for
    ~11.5 h (`docs/prior-art/fly-io.md` §10, 2024-11-25). A shape change is a
    new table plus a dual read, and a table that has ever held a row is
-   closed to column adds (see `internal/state/schema.sql:144-150`).
+   closed to column adds (see `internal/state/schema.sql:144-150`). The only
+   column adds in this repo are in `state.go`'s `addMissingColumns`, for
+   SQLite hosts, against tables that carried no rows.
 
 ### Workflow
 
@@ -137,6 +144,24 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
   A green run therefore exercises routing + hostd + Firecracker together.
 - It skips cleanly (exit 0) unless `PILOTS_E2E=1`, so `npm test` stays green
   on machines with no KVM.
+- Its API key comes from `hostd bootstrap-key` and must carry `admin`: the
+  battery drives routes from every scope, and a narrower key turns real
+  assertions into 403s.
+- `scripts/cluster/gate.sh` is the fleet battery, a numbered `say` section per
+  property, run against the local multi-node rig. It grows monotonically too.
+
+**Where a new test belongs** — the split is what can *observe* the assertion:
+
+| The assertion needs… | It goes in |
+|---|---|
+| only the public API (`/v1/...`, `/metrics`, an SDK, the CLI) | `scripts/e2e.mjs` |
+| a host shell — `/sys`, `/proc`, cgroup files, `journalctl`, `kill -9 hostd`, a reboot | `scripts/cluster/gate.sh`, as a new numbered section |
+
+A hostility test usually has both halves, and they are written as a pair: the
+e2e half asserts what a client would see, the gate half asserts that the host
+kept none of the wreckage. Neither half may retire an assertion, and neither
+may *skip* one — a block that cannot set itself up fails loudly, because a
+quiet early return retires every assertion below it at runtime.
 - The **metal tier** runs only under `PILOTS_E2E_METAL=1` on a host whose
   `/v1/health` reports `reflink: true`. It replaces the laptop budgets with
   the SLOs the product is sold on; the flag on a host that cannot share

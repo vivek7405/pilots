@@ -19,6 +19,11 @@ Wants=corrosion.service pilots-mesh.service
 Type=notify
 ExecStart=/opt/pilots/bin/hostd
 EnvironmentFile=/etc/pilots/config
+# Optional, and the '-' is what makes it optional: the cluster gate's negative
+# control writes the NBD fault flags here and removes them again. Without this
+# line those flags land in a file nothing reads, and the section that
+# reproduces the wedge on purpose silently reproduces nothing.
+EnvironmentFile=-/etc/pilots/hostd.env
 Restart=always
 RestartSec=1
 
