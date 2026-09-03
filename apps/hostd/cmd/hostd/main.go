@@ -270,6 +270,21 @@ func run() error {
 		slog.Info("re-adopted machines from a previous run", "count", adopted)
 	}
 
+	// Re-gossip this host's own rows. A write that reached the local replica
+	// and never left the host -- a partition, a wedge, a kill between the two
+	// -- leaves every peer stale, and nothing else corrects it. See
+	// republishOwnRows for why the replica is the source and why this is on
+	// start rather than on a timer.
+	if cfg.Fleet() {
+		if n, err := republishOwnRows(ctx, cfg.HostID, store); err != nil {
+			slog.Warn("could not republish this host's own rows; peers may hold "+
+				"a stale view of machines this host owns until the next restart",
+				"err", err)
+		} else if n > 0 {
+			slog.Info("republished own rows", "count", n)
+		}
+	}
+
 	// After adoption, anything still lying around belongs to nothing.
 	if err := mgr.GCOrphanInterfaces(); err != nil {
 		slog.Warn("could not clean up orphaned interfaces", "err", err)
