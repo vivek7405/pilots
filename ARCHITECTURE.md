@@ -836,7 +836,15 @@ timing from Phase 3, chaos from Phase 4, PaaS from Phase 5, tenancy and
 hostility from Phase 6 — later phases never retire earlier assertions. Its
 key comes from `hostd bootstrap-key` and must carry the `admin` scope, since
 the battery exercises every scope's routes; `scripts/cluster/gate.sh` seeds
-the fleet the same way rather than writing `api_keys` by hand. `go test ./...` for
+the fleet the same way rather than writing `api_keys` by hand. Hostility is
+the one phase split across two batteries, because the public API cannot see a
+process in D-state, a cgroup's `memory.events`, a file-descriptor count, or a
+hostd that was SIGKILLed: the API-visible half (netns churn, egress
+containment, capacity refusal, quota parity) is in `e2e.mjs`, and the
+host-shell half (the NBD wedge and its deliberate negative control, the
+per-host resource counts, cgroup containment, Firecracker API exhaustion,
+orphan pile-up) is in `scripts/cluster/gate.sh` as numbered sections.
+`go test ./...` for
 netns/block/header/state/s3 (block-layer round-trip + diff-chain tests are
 mandatory). Dashboard: `webjs check` / `doctor --json` / `typecheck` /
 `test`. CI runs unit tests + the single-VM e2e on every push.

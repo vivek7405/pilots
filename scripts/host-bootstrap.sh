@@ -531,6 +531,11 @@ After=network-online.target corrosion.service
 Wants=corrosion.service
 [Service]
 EnvironmentFile=/etc/pilots/config
+# Optional, and the '-' is what makes it optional: gate.sh's negative control
+# writes the fault flags here and removes them again. Without this line the
+# flags are written to a file nothing reads, and the section that reproduces
+# the NBD wedge on purpose silently reproduces nothing.
+EnvironmentFile=-/etc/pilots/hostd.env
 ExecStart=/opt/pilots/bin/hostd
 Restart=always
 RestartSec=2
