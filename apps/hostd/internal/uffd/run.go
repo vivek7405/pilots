@@ -106,12 +106,24 @@ func Run(ctx context.Context, cfg Config, store block.ObjectStore) error {
 	// goroutine still running past that point reads a closed file and issues
 	// UFFDIO_COPY on a descriptor the process may already have handed to
 	// something else.
+	// The recorded order FIRST, then the ranges the last cycle actually
+	// changed. The recorded order is a SEQUENCE whose value is that it
+	// matches the guest's real access order; the diff ranges are a SET with
+	// no ordering, so putting them first would delay the pages the guest is
+	// about to ask for. Duplicates are free: replay is idempotent, and an
+	// already-installed page answers EEXIST, which counts as success.
+	fromDiff, droppedOverCap := diffEntries(src, h.pageSize)
+	if len(fromDiff) > 0 {
+		slog.Info("uffd replay set carries the last cycle's diff",
+			"pages_from_diff", len(fromDiff), "mappings_over_cap", droppedOverCap)
+	}
+
 	prefaultCtx, stopPrefault := context.WithCancel(ctx)
 	var prefaultDone sync.WaitGroup
 	prefaultDone.Add(1)
 	go func() {
 		defer prefaultDone.Done()
-		prefault(prefaultCtx, h, src, prefetch, &stats)
+		prefault(prefaultCtx, h, src, prefetch, fromDiff, &stats)
 	}()
 
 	start := time.Now()

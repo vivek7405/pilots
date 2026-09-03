@@ -25,7 +25,55 @@ const (
 	// prefetchCopyWorkers keeps the kernel's queue draining while pages
 	// are still arriving.
 	prefetchCopyWorkers = 4
+	// prefetchDiffCap bounds the ranges taken from the last cycle's diff.
+	//
+	// Uncapped, a machine that rewrote most of its memory turns its wake into
+	// a full image read -- the fault storm the bulk fetch exists to avoid,
+	// moved one layer up. 64MiB is an eighth of the default 512MiB machine.
+	prefetchDiffCap = 64 << 20
 )
+
+// diffEntries are the ranges a build stores ITSELF, which is exactly what the
+// machine changed since the template it was diffed against.
+//
+// The set costs nothing to obtain: it is the self-pointing half of the
+// mapping the build already carries, so this needs no new persisted state.
+// The pages a machine dirtied last cycle are the best available predictor of
+// what it will touch next cycle, and the recorded fault order cannot cover a
+// page the previous run never faulted in order.
+//
+// Returned ascending by offset, capped, with the tail dropped and counted.
+func diffEntries(src block.Slicer, pageSize uint64) ([]entry, int) {
+	hs, ok := src.(block.HeaderedSlicer)
+	if !ok {
+		return nil, 0
+	}
+	hdr := hs.Header()
+	if hdr == nil || hdr.Metadata == nil {
+		return nil, 0
+	}
+	self := hdr.Metadata.BuildId
+
+	var out []entry
+	var span uint64
+	var dropped int
+	for _, m := range hdr.Mapping {
+		if m == nil || m.BuildId != self {
+			continue // served by the parent: unchanged, and not worth fetching
+		}
+		if span+m.Length > prefetchDiffCap {
+			dropped++
+			continue
+		}
+		// Split into page-sized entries, because replay installs one page per
+		// entry and a mapping can span many.
+		for off := m.Offset; off < m.Offset+m.Length; off += pageSize {
+			out = append(out, entry{off: int64(off), length: int64(pageSize)})
+		}
+		span += m.Length
+	}
+	return out, dropped
+}
 
 // recorder appends the fault order to a file, for the next wake to replay.
 type recorder struct {
@@ -112,8 +160,13 @@ func parsePrefetch(contents []byte) []entry {
 // idempotent -- a page another worker already installed comes back EEXIST --
 // so racing is safe, and doing it first would block Firecracker's resume for
 // as long as the replay takes.
+// extra is appended AFTER the recorded order. The recorded order is a
+// SEQUENCE whose value is that it matches the guest's real access order; extra
+// is a SET with no ordering, so putting it first would delay the pages the
+// guest is about to ask for. Duplicates are free: replay is idempotent and an
+// already-installed page answers EEXIST, which counts as success.
 func prefault(ctx context.Context, h *handshake, src block.Slicer,
-	contents []byte, stats *Stats) {
+	contents []byte, extra []entry, stats *Stats) {
 
 	// One bulk fetch first, always, list or no list.
 	//
@@ -129,7 +182,7 @@ func prefault(ctx context.Context, h *handshake, src block.Slicer,
 		slog.Info("uffd bulk fetch done", "ms", time.Since(start).Milliseconds())
 	}
 
-	entries := parsePrefetch(contents)
+	entries := append(parsePrefetch(contents), extra...)
 	if len(entries) == 0 {
 		return
 	}
