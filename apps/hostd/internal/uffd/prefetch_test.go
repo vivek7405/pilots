@@ -16,8 +16,8 @@ import (
 // Replaying a recorded fault order is what makes a warm wake fast: the pages
 // are already installed when the guest resumes, so it never traps at all.
 func TestReplayInstallsPagesBeforeTheGuestFaults(t *testing.T) {
-	fd, base, mem := newUserfaultfd(t, testPages)
-	path, want := memImage(t, testPages)
+	fd, base, mem := newUserfaultfd(t, testPages, testPageSize)
+	path, want := memImage(t, testPages, testPageSize)
 
 	src, err := block.OpenFileSlicer(path, int64(testPageSize))
 	if err != nil {
@@ -64,8 +64,8 @@ func TestReplayInstallsPagesBeforeTheGuestFaults(t *testing.T) {
 // because the prefetch raced the serve loop, which is exactly what they are
 // designed to do.
 func TestReplayIsIdempotent(t *testing.T) {
-	fd, base, mem := newUserfaultfd(t, testPages)
-	path, want := memImage(t, testPages)
+	fd, base, mem := newUserfaultfd(t, testPages, testPageSize)
+	path, want := memImage(t, testPages, testPageSize)
 
 	src, err := block.OpenFileSlicer(path, int64(testPageSize))
 	if err != nil {
