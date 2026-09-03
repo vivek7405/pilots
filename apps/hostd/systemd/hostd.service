@@ -4,12 +4,28 @@ Documentation=https://github.com/vivek7405/pilots
 After=network-online.target
 Wants=network-online.target
 
+# Wants=, never After=, on either of these.
+#
+# hostd already waits up to two minutes for corrosion's schema in code
+# (corrosion.WaitReady, cmd/hostd/fleet.go), so ordering on the unit buys
+# nothing it does not already have. What it costs is the failure shape fly hit
+# on 2026-08-13: two data-plane daemons blocked behind one another through a
+# systemd dependency, so a single unit that would not settle wedged the whole
+# data plane. A daemon that starts, finds its dependency absent and retries is
+# strictly better than one systemd refuses to start at all.
+Wants=corrosion.service pilots-mesh.service
+
 [Service]
 Type=notify
-ExecStart=/usr/local/bin/hostd
-EnvironmentFile=-/etc/pilots/hostd.env
+ExecStart=/opt/pilots/bin/hostd
+EnvironmentFile=/etc/pilots/config
 Restart=always
 RestartSec=1
+
+# Type=notify plus that 120s schema wait needs a start timeout above it, or
+# systemd SIGKILLs a perfectly healthy hostd at the 90s default -- during
+# exactly the fleet-wide restart where the wait is longest.
+TimeoutStartSec=180
 
 # hostd spawns firecracker and the uffd/NBD handlers, and creates cgroup v2
 # sub-slices per guest -- Delegate=yes is what makes that legal.

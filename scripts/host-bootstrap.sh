@@ -132,13 +132,21 @@ on_host bash -euo pipefail -s <<'REMOTE'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq curl ca-certificates iproute2 iptables nftables \
-  e2fsprogs wireguard-tools sqlite3 \
+  e2fsprogs wireguard-tools sqlite3 python3 \
   fuse3 uidmap slirp4netns fakeroot >/dev/null
 # fuse3 is what a JuiceFS mount is; uidmap and slirp4netns are what rootless
 # BuildKit needs to have a user namespace and a network without root; fakeroot
 # is the fallback when this box's mke2fs cannot read a tarball, and it is the
 # only way an unprivileged build can produce a rootfs whose files are
 # root-owned.
+
+# The nft BINARY is needed; the nftables SERVICE must not run. Its unit runs
+# `nft -f /etc/nftables.conf`, and Ubuntu's stock file begins with
+# `flush ruleset` -- so a reload, a package upgrade or a reboot silently
+# deletes the tables hostd owns in the root namespace (internal/netns/wake.go,
+# tenant.go) alongside the per-netns pilots-nat. Every machine on the host
+# stops being reachable and nothing reports a cause.
+systemctl disable --now nftables >/dev/null 2>&1 || true
 
 # Clock sync is load-bearing, not hygiene: liveness compares a heartbeat
 # stamped by one host's clock against another host's clock with a 30s
@@ -549,6 +557,16 @@ say "[8/10] Corrosion schema, config and units"
 scp $SSH_OPTS -q "${REPO}/apps/hostd/internal/state/schema.sql" \
   "root@${IP}:/var/lib/pilots/corrosion/schema.sql"
 
+# The units are files in the repo, not heredocs here. They were both for a
+# while, and the two copies had already drifted: the repo's hostd unit carried
+# Type=notify, Delegate=yes and LimitNOFILE while the one hosts actually ran
+# carried none of them, and nothing installed the repo copy. Which unit a host
+# is running is now answerable by reading one file.
+scp $SSH_OPTS -q "${REPO}/apps/hostd/systemd/corrosion.service" \
+  "root@${IP}:/etc/systemd/system/corrosion.service"
+scp $SSH_OPTS -q "${REPO}/apps/hostd/systemd/hostd.service" \
+  "root@${IP}:/etc/systemd/system/hostd.service"
+
 # The schema file must be BYTE-IDENTICAL on every host: corrosion does not
 # replicate DDL, so a host with a different one silently diverges.
 BOOTSTRAP_LINE=""
@@ -559,16 +577,49 @@ cat >/var/lib/pilots/corrosion/config.toml <<CONF
 [db]
 path = "/var/lib/pilots/corrosion/store.db"
 schema_paths = ["/var/lib/pilots/corrosion/schema.sql"]
+# The default is -1048576: a 1 GiB SQLite page cache, sized for fly's fleet.
+# This store holds thousands of rows, and that cache is the single largest
+# term under the MemoryMax on the unit below. corrosion warns below 100 MiB,
+# so 256 MiB is 2.5x the floor and still a quarter of the default.
+cache_size_kib = -262144
 
 [gossip]
 addr = "[${MESH_ADDR}]:51001"
 bootstrap = [${BOOTSTRAP_LINE}]
+# The default, written down so the operator reading this file can see it: a
+# mesh peer that vanished is dropped after 30s, the same window liveness uses
+# to judge a host dead. The two agreeing is not a coincidence to be discovered
+# later from a divergence.
+idle_timeout_secs = 30
 # Pinned from the smallest MTU any host could have. Left to discover it,
 # QUIC overestimates across a heterogeneous underlay and gossip black-holes
 # in a way that presents as the cluster flapping at random.
 max_mtu = 1232
 # The mesh already authenticates and encrypts every byte.
 plaintext = true
+
+[perf]
+# How many unapplied changesets are buffered before corrosion starts DROPPING
+# them. Left at the default on purpose: a re-seed replays this fleet's whole
+# state at once, and a lower number would make the re-seed drop changes and
+# then wait out anti-entropy to get them back -- turning a 60s convergence
+# into an unbounded one.
+processing_queue_len = 20000
+# A bounded transaction keeps the local SQLite write lock short while a
+# re-seed applies. An unbounded batch is how a busy apply loop starves every
+# reader on the same database.
+apply_queue_max_batch_size = 4000
+# Checkpoint the WAL far more often than fly's 5 GiB default. This store is
+# small; a WAL allowed to reach gigabytes is NVMe and page cache spent on
+# nothing, and it is the term that grows when apply falls behind.
+wal_threshold_mb = 512
+sql_tx_timeout = 30
+
+[telemetry.prometheus]
+# corrosion's own counters for gossip and sync, on loopback only. This is the
+# view of the state layer that a host has of ITSELF; cross-host replication
+# lag is a separate signal and is not duplicated here.
+bind_addr = "127.0.0.1:51003"
 
 [api]
 addr = "127.0.0.1:51002"
@@ -579,6 +630,77 @@ bearer-token = "${CORROSION_TOKEN}"
 [admin]
 path = "/run/pilots/corrosion/admin.sock"
 CONF
+
+# Corrosion 1.0.0 SILENTLY IGNORES a key it does not recognise: Config::load
+# deserialises through the `config` crate's try_deserialize and no struct
+# carries deny_unknown_fields. So a typo -- processing_queue_length for
+# processing_queue_len -- starts an agent that reports healthy and runs on the
+# default forever. Nothing else in the system would ever say so, which is why
+# the check lives here rather than in a comment asking for care.
+#
+# The allowlist is copied from crates/corro-types/src/config.rs at v1.0.0,
+# serde aliases included. Re-check it when CORROSION_VERSION moves.
+python3 - /var/lib/pilots/corrosion/config.toml <<'PY'
+import sys, tomllib
+
+ALLOWED = {
+    "db": {"path", "schema_paths", "subscriptions_path", "cache_size_kib"},
+    "api": {"bind_addr", "addr", "endpoint_name", "authorization", "authz", "pg"},
+    "api.authz": {"bearer-token", "bearer"},
+    "api.pg": {"bind_addr", "addr", "tls", "readonly"},
+    "gossip": {"bind_addr", "addr", "external_addr", "client_addr", "bootstrap",
+               "tls", "plaintext", "max_mtu", "idle_timeout_secs", "disable_gso",
+               "member_id"},
+    "gossip.tls": {"cert_file", "key_file", "ca_file", "insecure", "client"},
+    "gossip.tls.client": {"cert_file", "key_file"},
+    "perf": {"apply_channel_len", "changes_channel_len", "empties_channel_len",
+             "to_send_channel_len", "notifications_channel_len",
+             "schedule_channel_len", "clearbuf_channel_len", "bcast_channel_len",
+             "foca_channel_len", "wal_threshold_mb", "sql_tx_timeout",
+             "min_sync_backoff", "max_sync_backoff", "processing_queue_len",
+             "apply_queue_timeout", "apply_queue_min_batch_size",
+             "apply_queue_step_base", "apply_queue_max_batch_size",
+             "apply_queue_batch_threshold_ratio"},
+    "admin": {"uds_path", "path"},
+    "telemetry": {"prometheus", "open_telemetry"},
+    "telemetry.prometheus": {"bind_addr", "addr"},
+    "log": {"format", "colors"},
+}
+
+path = sys.argv[1]
+with open(path, "rb") as fh:
+    doc = tomllib.load(fh)
+
+bad = []
+
+
+def walk(table, prefix):
+    known = ALLOWED.get(prefix)
+    if known is None:
+        bad.append(f"[{prefix}] is not a corrosion config section")
+        return
+    for key, value in table.items():
+        if isinstance(value, dict):
+            walk(value, f"{prefix}.{key}" if prefix else key)
+        elif key not in known:
+            bad.append(f"{prefix}.{key} is not a corrosion config key")
+
+
+for section, value in doc.items():
+    if isinstance(value, dict):
+        walk(value, section)
+    else:
+        bad.append(f"{section} is a top-level value; corrosion has none")
+
+if bad:
+    print("  corrosion config: NO -- corrosion would ignore these silently:",
+          file=sys.stderr)
+    for line in bad:
+        print(f"    {line}", file=sys.stderr)
+    print(f"    in {path}", file=sys.stderr)
+    sys.exit(1)
+print("  corrosion config: every key is one corrosion reads")
+PY
 
 # hostd brings the mesh up, and gossip rides the mesh -- so corrosion cannot
 # reach its bootstrap peer until hostd has run. Ordering them the other way
@@ -592,36 +714,6 @@ Type=oneshot
 RemainAfterExit=yes
 EnvironmentFile=/etc/pilots/config
 ExecStart=/opt/pilots/bin/hostd mesh-up
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-cat >/etc/systemd/system/corrosion.service <<'UNIT'
-[Unit]
-Description=corrosion (pilots cluster state)
-After=network-online.target pilots-mesh.service
-Requires=pilots-mesh.service
-[Service]
-ExecStart=/opt/pilots/bin/corrosion agent --config /var/lib/pilots/corrosion/config.toml
-Restart=always
-RestartSec=2
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-cat >/etc/systemd/system/hostd.service <<'UNIT'
-[Unit]
-Description=pilots hostd
-After=network-online.target corrosion.service
-Wants=corrosion.service
-[Service]
-EnvironmentFile=/etc/pilots/config
-ExecStart=/opt/pilots/bin/hostd
-Restart=always
-RestartSec=2
-# The machines outlive the daemon: a restart re-adopts them rather than
-# taking every workload on the host down with it.
-KillMode=process
 [Install]
 WantedBy=multi-user.target
 UNIT
