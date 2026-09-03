@@ -129,6 +129,21 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
   A green run therefore exercises routing + hostd + Firecracker together.
 - It skips cleanly (exit 0) unless `PILOTS_E2E=1`, so `npm test` stays green
   on machines with no KVM.
+- `scripts/cluster/gate.sh` is the fleet battery, a numbered `say` section per
+  property, run against the local multi-node rig. It grows monotonically too.
+
+**Where a new test belongs** — the split is what can *observe* the assertion:
+
+| The assertion needs… | It goes in |
+|---|---|
+| only the public API (`/v1/...`, `/metrics`, an SDK, the CLI) | `scripts/e2e.mjs` |
+| a host shell — `/sys`, `/proc`, cgroup files, `journalctl`, `kill -9 hostd`, a reboot | `scripts/cluster/gate.sh`, as a new numbered section |
+
+A hostility test usually has both halves, and they are written as a pair: the
+e2e half asserts what a client would see, the gate half asserts that the host
+kept none of the wreckage. Neither half may retire an assertion, and neither
+may *skip* one — a block that cannot set itself up fails loudly, because a
+quiet early return retires every assertion below it at runtime.
 
 ---
 

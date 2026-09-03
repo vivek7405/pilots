@@ -1116,4 +1116,6 @@ echo "This run left the rig changed on purpose:"
 echo "  - three hosts are powered off (steps 8, 12 and 13); sudo virsh start <domain>"
 echo "  - the fleet is one host bigger (step 11), and cluster.env records it,"
 echo "    so the next run adds another. cluster-down.sh resets it."
+echo "  - one host was hard reset (step 19) after the NBD wedge was reproduced"
+echo "    on it on purpose; the fault flags were removed from its hostd.env first."
 [ "$FAIL" = 0 ] || exit 1
