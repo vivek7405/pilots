@@ -116,9 +116,9 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
   print nothing), `go vet ./...` and `go test ./...`; the same three from
   `sdks/go/`; from the root, `npm test`. These are exactly what CI runs --
   gofmt was missing from this list while CI enforced it, so a branch could be
-  green locally and red on main. Note gofmt reformats DOC comments as well as code: it turns `''` and
-  ``` `` ``` into curly quotes, which quietly mangles a comment that meant an
-  empty SQL string.
+  green locally and red on main. Note gofmt reformats DOC comments as well as
+  code: it turns `''` and ``` `` ``` into curly quotes, which quietly mangles a
+  comment that meant an empty SQL string.
 - Every phase issue (#2–#7) carries a **gate checklist**. An issue closes
   when its gate is green, not when the code is written.
 
