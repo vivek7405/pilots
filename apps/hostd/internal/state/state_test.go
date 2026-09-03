@@ -376,3 +376,118 @@ func TestServiceRoundTrip(t *testing.T) {
 		t.Errorf("a missing service returned %v, want ErrNotFound", err)
 	}
 }
+
+// A shape change to a replicated table is a new table, never an ALTER.
+//
+// cr-sqlite backfills every existing row when a table's columns change, and
+// corrosion loads this file at agent start -- so an ALTER here is a fleet-wide
+// gossip storm rather than a migration. It took fly's fleet down twice for
+// ~11.5h (fly.io/infra-log/2024-11-30). The column adds this repo does make
+// live in addMissingColumns, which corrosion never reads.
+func TestNoAlterTableInTheSchema(t *testing.T) {
+	for i, line := range strings.Split(Schema, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), "--") {
+			continue
+		}
+		if strings.Contains(strings.ToUpper(line), "ALTER TABLE") {
+			t.Errorf("schema.sql:%d contains ALTER TABLE: %s", i+1, strings.TrimSpace(line))
+		}
+	}
+}
+
+// Tenancy rows are write-once, and that is what makes "any host may write
+// this" safe. If a second write could change the org, two hosts racing could
+// leave an object owned by a tenant neither of them named.
+func TestTenancyIsWriteOnce(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+
+	if err := s.PutTenancy(ctx, &Tenancy{ID: "m_1", OrgID: "org_1", Kind: "machine", CreatedAt: 10}); err != nil {
+		t.Fatalf("PutTenancy: %v", err)
+	}
+	if err := s.PutTenancy(ctx, &Tenancy{ID: "m_1", OrgID: "org_2", Kind: "machine", CreatedAt: 20}); err != nil {
+		t.Fatalf("PutTenancy again: %v", err)
+	}
+
+	got, err := s.GetTenancy(ctx, "m_1")
+	if err != nil {
+		t.Fatalf("GetTenancy: %v", err)
+	}
+	if got.OrgID != "org_1" {
+		t.Errorf("a second write moved the object to %q; tenancy must be write-once", got.OrgID)
+	}
+	if _, err := s.GetTenancy(ctx, "m_absent"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("an object with no tenancy row returned %v, want ErrNotFound", err)
+	}
+
+	all, err := s.ListTenancy(ctx)
+	if err != nil {
+		t.Fatalf("ListTenancy: %v", err)
+	}
+	if len(all) != 1 || all[0].Kind != "machine" {
+		t.Errorf("ListTenancy returned %+v", all)
+	}
+}
+
+// Revoking never deletes the key row: a delete racing a replica that still
+// carries the insert loses through the merge, and the credential comes back.
+func TestRevocationIsATombstone(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+
+	if err := s.PutAPIKey(ctx, &APIKey{Hash: "abc", OrgID: "org_1", Scopes: "admin"}); err != nil {
+		t.Fatalf("PutAPIKey: %v", err)
+	}
+	if revoked, err := s.IsRevoked(ctx, "abc"); err != nil || revoked {
+		t.Fatalf("IsRevoked before revoking = %v, %v", revoked, err)
+	}
+	if err := s.PutRevocation(ctx, &Revocation{Hash: "abc", RevokedAt: 100}); err != nil {
+		t.Fatalf("PutRevocation: %v", err)
+	}
+	// Re-revoking must not move the time forward: the earliest is the true one.
+	if err := s.PutRevocation(ctx, &Revocation{Hash: "abc", RevokedAt: 200}); err != nil {
+		t.Fatalf("PutRevocation again: %v", err)
+	}
+
+	revoked, err := s.IsRevoked(ctx, "abc")
+	if err != nil || !revoked {
+		t.Errorf("IsRevoked after revoking = %v, %v", revoked, err)
+	}
+	// The key row itself survives, so the list can still report it.
+	if _, err := s.GetAPIKeyByHash(ctx, "abc"); err != nil {
+		t.Errorf("revoking deleted the key row: %v", err)
+	}
+	keys, err := s.ListAPIKeys(ctx, "org_1")
+	if err != nil || len(keys) != 1 {
+		t.Errorf("ListAPIKeys = %+v, %v", keys, err)
+	}
+	if keys, _ := s.ListAPIKeys(ctx, "org_other"); len(keys) != 0 {
+		t.Errorf("ListAPIKeys leaked another org's keys: %+v", keys)
+	}
+}
+
+func TestQuotaRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+
+	if _, err := s.GetQuota(ctx, "org_1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("an org with no row returned %v, want ErrNotFound", err)
+	}
+	want := &Quota{OrgID: "org_1", MaxMachines: 5, MaxVCPUs: 10, MaxMemMiB: 2048,
+		MaxVolumeGiB: 50, MaxBuilds: 1, UpdatedAt: 7}
+	if err := s.PutQuota(ctx, want); err != nil {
+		t.Fatalf("PutQuota: %v", err)
+	}
+	// Unlike tenancy, a quota HAS one logical writer, so a second write wins.
+	want.MaxMachines, want.UpdatedAt = 9, 8
+	if err := s.PutQuota(ctx, want); err != nil {
+		t.Fatalf("PutQuota again: %v", err)
+	}
+	got, err := s.GetQuota(ctx, "org_1")
+	if err != nil {
+		t.Fatalf("GetQuota: %v", err)
+	}
+	if *got != *want {
+		t.Errorf("read back %+v, want %+v", got, want)
+	}
+}

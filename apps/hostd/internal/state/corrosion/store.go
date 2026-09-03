@@ -369,6 +369,153 @@ func (s *Store) PutAPIKey(ctx context.Context, k *state.APIKey) error {
 	return nil
 }
 
+func (s *Store) ListAPIKeys(ctx context.Context, orgID string) ([]state.APIKey, error) {
+	rows, err := s.client.Query(ctx,
+		`SELECT hash, org_id, scopes, created_at FROM api_keys
+		 WHERE org_id = ? ORDER BY created_at DESC, hash`, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("state: list api keys: %w", err)
+	}
+	defer rows.Close()
+
+	var out []state.APIKey
+	for rows.Next() {
+		var k state.APIKey
+		if err := rows.Scan(&k.Hash, &k.OrgID, &k.Scopes, &k.CreatedAt); err != nil {
+			return nil, fmt.Errorf("state: scan api key: %w", err)
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// PutTenancy records which org owns an object.
+//
+// Unguarded by single-writer, and DO NOTHING rather than DO UPDATE. Those two
+// go together: any host may write this row precisely because nothing can ever
+// change a value it already holds, so two hosts racing cannot produce a merge
+// neither of them wrote. Turn this into DO UPDATE and "any host may write it"
+// stops being true.
+func (s *Store) PutTenancy(ctx context.Context, t *state.Tenancy) error {
+	_, err := s.client.Exec(ctx, `
+		INSERT INTO tenancy (id, org_id, kind, created_at) VALUES (?,?,?,?)
+		ON CONFLICT(id) DO NOTHING`,
+		t.ID, t.OrgID, t.Kind, t.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put tenancy %q: %w", t.ID, err)
+	}
+	return nil
+}
+
+func (s *Store) GetTenancy(ctx context.Context, id string) (*state.Tenancy, error) {
+	rows, err := s.client.Query(ctx,
+		`SELECT id, org_id, kind, created_at FROM tenancy WHERE id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("state: tenancy %q: %w", id, state.ErrNotFound)
+	}
+	var t state.Tenancy
+	if err := rows.Scan(&t.ID, &t.OrgID, &t.Kind, &t.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &t, rows.Err()
+}
+
+func (s *Store) ListTenancy(ctx context.Context) ([]state.Tenancy, error) {
+	rows, err := s.client.Query(ctx,
+		`SELECT id, org_id, kind, created_at FROM tenancy ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("state: list tenancy: %w", err)
+	}
+	defer rows.Close()
+
+	var out []state.Tenancy
+	for rows.Next() {
+		var t state.Tenancy
+		if err := rows.Scan(&t.ID, &t.OrgID, &t.Kind, &t.CreatedAt); err != nil {
+			return nil, fmt.Errorf("state: scan tenancy: %w", err)
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+// PutRevocation kills a key by ADDING a row. Never by deleting the api_keys
+// one: a delete racing a replica that still carries the insert loses the race
+// through the merge, and the revoked credential authenticates again.
+func (s *Store) PutRevocation(ctx context.Context, rv *state.Revocation) error {
+	_, err := s.client.Exec(ctx, `
+		INSERT INTO api_key_revocations (hash, revoked_at) VALUES (?,?)
+		ON CONFLICT(hash) DO NOTHING`, rv.Hash, rv.RevokedAt)
+	if err != nil {
+		return fmt.Errorf("state: put revocation: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) IsRevoked(ctx context.Context, hash string) (bool, error) {
+	rows, err := s.client.Query(ctx,
+		`SELECT 1 FROM api_key_revocations WHERE hash = ?`, hash)
+	if err != nil {
+		return false, fmt.Errorf("state: check revocation: %w", err)
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		return false, rows.Err()
+	}
+	return true, rows.Err()
+}
+
+const quotaCols = `org_id, max_machines, max_vcpus, max_mem_mib, max_volume_gib, max_builds, updated_at`
+
+func (s *Store) GetQuota(ctx context.Context, orgID string) (*state.Quota, error) {
+	rows, err := s.client.Query(ctx,
+		`SELECT `+quotaCols+` FROM org_quotas WHERE org_id = ?`, orgID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("state: quota %q: %w", orgID, state.ErrNotFound)
+	}
+	var q state.Quota
+	if err := rows.Scan(&q.OrgID, &q.MaxMachines, &q.MaxVCPUs, &q.MaxMemMiB,
+		&q.MaxVolumeGiB, &q.MaxBuilds, &q.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &q, rows.Err()
+}
+
+// PutQuota updates in place, unlike the two tables above. One logical writer
+// -- an admin request -- so last-write-wins between two admins editing the
+// same org is the semantics rather than a hazard.
+func (s *Store) PutQuota(ctx context.Context, q *state.Quota) error {
+	_, err := s.client.Exec(ctx, `
+		INSERT INTO org_quotas (`+quotaCols+`) VALUES (?,?,?,?,?,?,?)
+		ON CONFLICT(org_id) DO UPDATE SET
+			max_machines=excluded.max_machines, max_vcpus=excluded.max_vcpus,
+			max_mem_mib=excluded.max_mem_mib, max_volume_gib=excluded.max_volume_gib,
+			max_builds=excluded.max_builds, updated_at=excluded.updated_at`,
+		q.OrgID, q.MaxMachines, q.MaxVCPUs, q.MaxMemMiB, q.MaxVolumeGiB,
+		q.MaxBuilds, q.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put quota %q: %w", q.OrgID, err)
+	}
+	return nil
+}
+
 func (s *Store) GetTemplate(ctx context.Context, id string) (*state.Template, error) {
 	rows, err := s.client.Query(ctx,
 		`SELECT id, descriptor, created_at FROM templates WHERE id = ?`, id)
