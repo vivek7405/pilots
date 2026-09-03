@@ -856,12 +856,16 @@ snapshot; a database restores and then replays WAL.
   with `{github_access_token}` returns `{api_key, org_id, scopes}` → stored at
   `${XDG_CONFIG_HOME:-~/.config}/pilots/credentials` as
   `{api_key, api_url, org_id, secrets}`, directory `0700` and file `0600`
-  (a file readable by another user is refused, naming the path). The CLI
-  ships the App's public `client_id` and NO client secret, which is what the
-  device flow exists for. Headless fallback: `pilot login --token` /
-  `PILOT_API_KEY` env. **No command validates a cached key**: once the file
-  exists every command talks only to the fleet, so a dashboard outage cannot
-  take the CLI down with it (fly's tkdb outage is the precedent).
+  (a file readable by another user is refused, naming the path). That route
+  verifies the token with GitHub's check-a-token endpoint
+  (`POST /applications/{client_id}/token`, HTTP basic with the App's own
+  credentials), never `GET /user`: `GET /user` accepts a token issued to ANY
+  OAuth app, so a token leaked from an unrelated application could mint
+  pilots keys for its owner. The CLI ships the App's public `client_id` and
+  NO client secret, which is what the device flow exists for. Headless
+  fallback: `pilot login --token` / `PILOT_API_KEY` env. **No command
+  validates a cached key**: once the file exists every command talks only to
+  the fleet, so a dashboard outage cannot take the CLI down with it.
 - **Machine auth:** every hostd request carries `Authorization: Bearer
   <api-key>`. Key **hashes** live in the Corrosion `api_keys` table, written
   by whichever host serves the `POST /v1/api-keys` that minted them, so
@@ -920,7 +924,10 @@ pilots/
       cmd/hostd/  cmd/guest-agent/  cmd/chunkify/
       internal/{fc,block,uffd,nbd,ctlsock,netns,router,state,s3,build,volumes,selfheal}/
       systemd/            # hostd.service, corrosion.service
-    dashboard/            # webjs full-stack app (scaffolded `npm create webjs`)
+    dashboard/            # webjs full-stack app (scaffolded `npm create webjs`);
+                          #   deployed by `pilot deploy` from apps/dashboard/,
+                          #   SQLite on a volume at /data, pilots.run as a
+                          #   custom domain, one replica
   packages/cli/           # `pilot` CLI + its MCP server (TS, no build step:
     bin/  src/{commands,compose,mcp}/   #   Node strips the types at run time)
   sdks/js/                # @pilots/sdk — typed client + sprites-compat adapter

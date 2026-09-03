@@ -92,6 +92,29 @@ jobs:
       # where the browser half belongs.
       - run: npm test
 
+  dashboard:
+    name: dashboard
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      # From the REPO ROOT: apps/dashboard is a workspace member and imports
+      # @pilots/sdk from another one, so both resolve through the root lockfile.
+      - run: npm install
+      # @pilots/sdk resolves through its package `exports` to dist/, which is
+      # gitignored. Without this the dashboard's typecheck has no types to read.
+      - run: npm run build:sdk-js
+      - run: npm run test:dashboard
+      # The browser half needs a real Chromium, which is exactly the setup the
+      # repo root's `npm test` keeps out of itself. CI is where it belongs. The
+      # one browser test is required rather than optional: applying a live delta
+      # to the machine list is post-hydration behaviour, so the served bytes are
+      # identical whether it works or not.
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:dashboard:browser
+
   boot:
     name: firecracker boot gate
     runs-on: ubuntu-24.04
