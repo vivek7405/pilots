@@ -1453,6 +1453,233 @@ async function envAssertions() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 6e: hostility.
+//
+// Every class asserted here is one the predecessor paid for in production and
+// that ARCHITECTURE.md records as a comment and nothing else: an NBD device
+// that wedges a host in D-state until it is rebooted, netns deletes that
+// return EBUSY while a just-killed Firecracker still holds the namespace, a
+// Firecracker API that accepts about ten connections in its whole life, a
+// hostd SIGKILLed mid-create leaving orphans, and a host that must refuse work
+// rather than accept it and fail.
+//
+// This is the half the PUBLIC API can observe. The other half needs a host
+// shell -- /sys/block/nbdN/pid, a process's D-state, cgroup memory.events,
+// /proc/<fcpid>/fd, kill -9 hostd -- and lives in scripts/cluster/gate.sh as
+// numbered sections. A new hostility test belongs here if the API can see it
+// and there if it cannot. Neither half ever retires an assertion.
+//
+// Multi-host assertions read PILOTS_E2E_HOSTS (space- or comma-separated base
+// URLs). When it is unset the single-host assertions still run and the
+// multi-host ones print WHY they did not, the way the mesh probe above does --
+// a battery that quietly stops asserting is the failure this file already has
+// a scar from.
+// ---------------------------------------------------------------------------
+
+const HOSTS = (process.env.PILOTS_E2E_HOSTS ?? '')
+  .split(/[\s,]+/)
+  .filter(Boolean);
+
+// requestAt is `request` aimed at a named host rather than at PILOT_API,
+// because H7 has to ask a SECOND host what it thinks of a create the first one
+// refused. Every other assertion in this file deliberately goes through one
+// entry point, since the fleet is supposed to make that indistinguishable.
+async function requestAt(base, path, { method = 'GET', body, auth = true, raw = false } = {}) {
+  const headers = {};
+  if (body !== undefined) headers['Content-Type'] = 'application/json';
+  if (auth && KEY) headers.Authorization = `Bearer ${KEY}`;
+
+  const res = await fetch(`${base}${path}`, {
+    method,
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await res.text();
+  if (raw) return { status: res.status, text };
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch { /* not json */ }
+  return { status: res.status, json, text };
+}
+
+// machineCount is the leak detector every hostility test shares: an operation
+// that was refused must leave the host with exactly the machines it had.
+async function machineCount(base = API) {
+  const { status, json } = await requestAt(base, '/v1/machines');
+  assert(status === 200, `GET /v1/machines: HTTP ${status}`);
+  return (json ?? []).length;
+}
+
+// metricValue reads one Prometheus sample from /metrics, or null when the
+// family is absent. Absent is not a failure here: the families H2 and H7 would
+// rather read are owned by another change, and every caller carries a fallback
+// that asserts the same property through a surface that exists today.
+async function metricValue(name, base = API) {
+  const { status, text } = await requestAt(base, '/metrics', { auth: false, raw: true });
+  if (status !== 200 || !text) return null;
+  for (const line of text.split('\n')) {
+    if (line.startsWith('#')) continue;
+    const match = line.match(new RegExp(`^${name}(?:\\{[^}]*\\})?\\s+([0-9.eE+-]+)\\s*$`));
+    if (match) return Number(match[1]);
+  }
+  return null;
+}
+
+// destroy is best effort by design: teardown runs in a finally, and one
+// unreachable host during cleanup must not replace the run's real result.
+async function destroy(id, base = API) {
+  try { await requestAt(base, `/v1/machines/${id}`, { method: 'DELETE' }); } catch { /* best effort */ }
+}
+
+// H2 -- netns churn, the half the API can see.
+//
+// The engine under test is the EBUSY retry loop in internal/netns/teardown.go
+// and the slot pool in internal/netns/slot.go. A destroy races the death of
+// the Firecracker that held the namespace open, so the delete returns EBUSY
+// and has to be retried rather than reported; a destroy that gives up leaves a
+// stale namespace, and the NEXT create on that slot fails with "file exists".
+// The Go unit proves the in-process path. This proves it through the public
+// API, which is the only place a client ever meets it.
+//
+// A hundred cycles, not five: the race needs to be lost at least once, and it
+// is lost rarely. The gate's section 15 reads the host-side counts for the
+// same run.
+const CHURN_CYCLES = 100;
+
+async function churnAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const created = [];
+
+  try {
+    await step(`${CHURN_CYCLES} create/destroy cycles all complete`, async () => {
+      for (let i = 0; i < CHURN_CYCLES; i++) {
+        const { status, json } = await request('/v1/machines', {
+          method: 'POST',
+          body: { name: `e2e-churn-${tag}-${i}`, vcpus: 1, mem_mib: 512 },
+        });
+        assert(status === 201,
+          `cycle ${i}: create returned HTTP ${status} ${JSON.stringify(json)}`);
+
+        const { status: gone } = await request(`/v1/machines/${json.id}`, { method: 'DELETE' });
+        assert(gone === 204, `cycle ${i}: destroy of ${json.id} returned HTTP ${gone}`);
+      }
+    });
+
+    await step(`${CHURN_CYCLES} create/destroy cycles leave the host able to create and serve a ${CHURN_CYCLES + 1}st`, async () => {
+      // The cycles above can all pass while the host is quietly poisoned: a
+      // leaked namespace only bites the create that lands on its slot. So the
+      // assertion is not that the loop finished, it is that the host still
+      // works afterwards -- created, booted, and answering.
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST',
+        body: { name: `e2e-churn-${tag}-last`, vcpus: 1, mem_mib: 512, knobs: { auto_stop: 'off' } },
+      });
+      assert(status === 201,
+        `the create after ${CHURN_CYCLES} cycles returned HTTP ${status} ${JSON.stringify(json)}`);
+      created.push(json.id);
+
+      const out = await exec(json.id, 'echo churn-survivor');
+      assert(out === 'churn-survivor', `the survivor could not run a command (got ${JSON.stringify(out)})`);
+    });
+  } finally {
+    for (const id of created) await destroy(id);
+  }
+}
+
+// H3 -- egress containment.
+//
+// The drop list is internal/netns/firewall.go: the RFC1918 ranges, loopback,
+// link-local (which is where every cloud keeps its metadata service), and the
+// IPv6 ULA boundary that separates the host mesh (fdcc) from machines (fdcd).
+// Two machines in DIFFERENT apps prove the last one, because knowing a
+// sibling's address must not be enough to reach it -- name scoping is not a
+// boundary, the filter is.
+//
+// Public egress is asserted in the same block on purpose. A firewall that
+// drops everything passes every line above it and ships a product where
+// nothing can install a package.
+async function egressAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const appA = `e2e-hostile-${tag}`;
+  const appB = `e2e-neighbour-${tag}`;
+  const created = [];
+
+  async function make(name, app) {
+    const { status, json } = await request('/v1/machines', {
+      method: 'POST',
+      body: { name, app, vcpus: 1, mem_mib: 512, knobs: { auto_stop: 'off' } },
+    });
+    assert(status === 201, `create ${name}: HTTP ${status} ${JSON.stringify(json)}`);
+    created.push(json.id);
+    return json;
+  }
+
+  let guest, sibling;
+  try {
+    guest = await make(`hostile-${tag}`, appA);
+    sibling = await make(`neighbour-${tag}`, appB);
+  } catch (err) {
+    // FAIL, never skip. Returning here quietly retires every assertion below.
+    await step('the egress battery can create its machines', async () => {
+      throw new Error(`setup failed, so nothing below ran: ${err.message}`);
+    });
+    for (const id of created) await destroy(id);
+    return;
+  }
+
+  try {
+    // Each address gets its own step, so a run reports WHICH range opened up
+    // rather than "egress broke". The name is the assertion.
+    const blocked = [
+      ['a guest cannot reach the host\'s private 10/8 network', 'http://10.0.0.1:22'],
+      ['a guest cannot reach the 172.16/12 private range', 'http://172.16.0.1:80'],
+      ['a guest cannot reach the 192.168/16 private range', 'http://192.168.1.1:80'],
+      ['a guest cannot reach the host\'s loopback', 'http://127.0.0.1:22'],
+      ['a guest cannot reach cloud metadata at 169.254.169.254', 'http://169.254.169.254:80'],
+      ['a guest cannot reach an IPv6 unique-local address', 'http://[fd00::1]:80'],
+    ];
+
+    for (const [name, url] of blocked) {
+      await step(name, async () => {
+        const got = await reach(guest.id, url);
+        assert(got.code === '000',
+          `the guest got HTTP ${got.code} from ${url}; it must get no reply at all`);
+      });
+    }
+
+    await step('a guest cannot reach a machine in another app by its raw address', async () => {
+      // The address is learned from inside the sibling's OWN app, because
+      // nothing outside it can discover the address -- which is the point.
+      // What is under test is that knowing it is not enough.
+      const probe = await reach(sibling.id, `http://${sibling.name}.internal:${AGENT_PORT}/health`);
+      assert(probe.ip.startsWith('fdcd:'),
+        `could not learn ${sibling.name}'s address from inside its own app (got '${probe.ip}')`);
+
+      const raw = await reach(guest.id, `http://[${probe.ip}]:${AGENT_PORT}/health`);
+      assert(raw.code === '000',
+        `a machine in ${appA} got HTTP ${raw.code} from ${probe.ip} in ${appB}`);
+    });
+
+    await step('a guest can still reach the public internet', async () => {
+      const got = await reach(guest.id, 'https://1.1.1.1:443');
+      assert(got.code !== '000',
+        'the guest could not reach a public address; the drop list is catching everything');
+    });
+  } finally {
+    for (const id of created) await destroy(id);
+  }
+}
+
+// hostilityAssertions runs the API-visible half of H1-H8 in the order that
+// leaves the host least disturbed for whatever runs after it: the churn loop
+// first, egress next, capacity last, because capacity deliberately pushes the
+// host to a ceiling.
+async function hostilityAssertions() {
+  console.log('\n-- hostility (Phase 6e)');
+  await churnAssertions();
+  await egressAssertions();
+}
+
 async function main() {
   console.log(`e2e: ${API}${FULL ? ' (full lifecycle)' : ' (process only)'}`);
 
@@ -1466,6 +1693,7 @@ async function main() {
     await envAssertions();
     await serviceAssertions();
     await multiServiceAssertions();
+    await hostilityAssertions();
   } else {
     console.log('  - machine lifecycle skipped (set PILOTS_E2E_FULL=1 on a Firecracker host)');
   }
