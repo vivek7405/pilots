@@ -418,6 +418,29 @@ WantedBy=default.target
 UNIT
 chown -R pilot:pilot /home/pilot/.config
 
+# Build containment.
+#
+# It has to be user-<uid>.slice and cannot be a slice of our own naming:
+# buildkitd is a USER unit, a unit inside the user manager cannot name a
+# system slice as its parent, and everything that manager runs already lives
+# under user.slice/user-<uid>.slice. Bounding that slice bounds buildkitd,
+# rootlesskit, slirp4netns and every process a build spawns, in one place.
+#
+# Weights rather than caps, deliberately: a build should be able to use an
+# idle host and should lose to a machine that is serving when the host is not
+# idle. The per-unit MemoryMax, CPUQuota and TasksMax on buildkitd stay --
+# a weight shares, a max stops, and an unbounded build still OOMs a host.
+#
+PILOT_UID=$(id -u pilot)
+mkdir -p "/etc/systemd/system/user-${PILOT_UID}.slice.d"
+cat >"/etc/systemd/system/user-${PILOT_UID}.slice.d/50-pilots-build.conf" <<'CONF'
+[Slice]
+# A build is arbitrary tenant code running beside other tenants' machines.
+CPUWeight=20
+MemoryHigh=8G
+IOWeight=20
+CONF
+
 # cgroup v2 delegation, so the rootless daemon can put each build in its own
 # slice. Without it buildkitd starts happily and every build fails on a cgroup
 # write, which reads as a permission problem and is not one.
@@ -428,7 +451,6 @@ Delegate=cpu cpuset io memory pids
 CONF
 
 systemctl daemon-reload
-PILOT_UID=$(id -u pilot)
 runuser -u pilot -- env XDG_RUNTIME_DIR="/run/user/$PILOT_UID" \
   systemctl --user daemon-reload >/dev/null 2>&1 || true
 if runuser -u pilot -- env XDG_RUNTIME_DIR="/run/user/$PILOT_UID" \
@@ -691,6 +713,21 @@ if [ -S "/run/user/${PILOT_UID}/buildkit/buildkitd.sock" ]; then
 else
   echo "  buildkitd: NOT listening -- builds will fail on this host" >&2
 fi
+
+# The containment a build actually runs under. Asked of systemd rather than
+# read back from the drop-in file, because a drop-in that systemd never
+# reloaded is a file that says the right thing and does nothing.
+SLICE=$(systemctl show "user-${PILOT_UID}.slice" -p CPUWeight -p MemoryHigh -p IOWeight 2>/dev/null |
+  tr '\n' ' ' | sed 's/ *$//')
+case "$SLICE" in
+  *CPUWeight=20*MemoryHigh=8589934592*IOWeight=20*|*CPUWeight=20*IOWeight=20*MemoryHigh=8589934592*)
+    echo "  build slice: CPUWeight=20 MemoryHigh=8G IOWeight=20" ;;
+  *)
+    echo "  build slice: NO -- user-${PILOT_UID}.slice is ${SLICE:-unset}." >&2
+    echo "    A build here is arbitrary tenant code with no weight against the" >&2
+    echo "    machines it shares the host with: one cargo build starves a" >&2
+    echo "    serving neighbour and nothing reports why." >&2 ;;
+esac
 
 REFLINK=$(curl -sf http://127.0.0.1:8080/v1/health |
   python3 -c 'import sys,json;print(json.load(sys.stdin).get("reflink"))' 2>/dev/null || echo None)
