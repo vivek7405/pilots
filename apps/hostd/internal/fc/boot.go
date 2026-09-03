@@ -37,7 +37,12 @@ const BakedRootfsPath = "/srv/pilots/rootfs.ext4"
 // The ip= addresses match the golden rootfs's static network config exactly
 // and are identical for every machine on every host, which is what keeps a
 // snapshot host-agnostic.
+// rootflags=discard is what gives fstrim something to release: without it the
+// guest never issues discards and the pre-snapshot reclaim chain trims
+// nothing. It is host-agnostic -- no address, no path, no host identity -- so
+// invariant 5 is untouched.
 const BootArgs = "console=ttyS0 reboot=k panic=1 pci=off ro root=/dev/vda " +
+	"rootflags=discard " +
 	"clocksource=kvm-clock random.trust_cpu=on i8042.nokbd i8042.noaux " +
 	"ipv6.disable=0 ipv6.autoconf=1 " +
 	"ip=" + netns.TapGuestIP + "::" + netns.TapHostIP + ":255.255.255.252:instance:eth0:off:"

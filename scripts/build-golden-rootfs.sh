@@ -29,9 +29,15 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# -trimpath is load-bearing, not tidiness. Without it the binary embeds the
+# absolute module-cache and source paths of whoever built it, so the same
+# source produces different bytes for a user and for root -- and the pin test
+# that checks the image carries the agent this tree builds fails for a reason
+# that has nothing to do with the agent. With it the build is reproducible and
+# the pin means what it says.
 echo "==> building guest-agent (static)"
 ( cd apps/hostd && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -ldflags="-s -w" -o "../../$STAGED_BIN" ./cmd/guest-agent )
+    go build -trimpath -ldflags="-s -w" -o "../../$STAGED_BIN" ./cmd/guest-agent )
 
 echo "==> docker build $IMAGE"
 docker build -q -t "$IMAGE" scripts/rootfs

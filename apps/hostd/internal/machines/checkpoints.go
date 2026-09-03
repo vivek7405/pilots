@@ -65,7 +65,7 @@ func (m *Manager) Checkpoint(ctx context.Context, machineID, comment string) (*s
 
 	// Same reason as suspend: the disk image must agree with the memory image
 	// about what was written.
-	m.flushGuestDisk(ctx, machineID)
+	m.reclaimGuestMemory(ctx, machineID)
 
 	// Returns as soon as the guest is running again; chunkify and upload
 	// continue in the background and durability is reported separately.

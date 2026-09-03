@@ -492,7 +492,7 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 
 	// The guest must write out its page cache before we capture the disk, or
 	// the memory and disk images disagree about recent writes.
-	m.flushGuestDisk(ctx, id)
+	m.reclaimGuestMemory(ctx, id)
 
 	// The template this machine was built from, not this host's current one.
 	// A suspend writes a DIFF, and its base is recorded in the header, so
