@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
+	"github.com/libdns/cloudflare"
+	"github.com/mholt/acmez/v3"
 
 	"github.com/vivek7405/pilots/hostd/internal/certs"
 	"github.com/vivek7405/pilots/hostd/internal/config"
@@ -54,16 +56,50 @@ func startTLS(ctx context.Context, cfg *config.Config, store state.Store,
 		CA:     certmagic.LetsEncryptProductionCA,
 		Email:  cfg.ACMEEmail,
 		Agreed: true,
-		// HTTP-01 only. TLS-ALPN cannot work here: the challenge would have to
-		// be answered by whichever host the client resolved, and that host may
-		// not be the one that started the order.
+		// TLS-ALPN cannot work here: the challenge would have to be answered
+		// by whichever host the client resolved, and that host may not be the
+		// one that started the order.
 		DisableTLSALPNChallenge: true,
+		// HTTP-01 stays on for custom domains, which cannot use DNS-01 -- the
+		// zone belongs to the customer and we have no token for it.
+		//
 		// Distributed solvers stay ON. certmagic persists the challenge token
 		// to Storage so any host can answer it -- without that, HTTP-01 fails
 		// (N-1)/N of the time on an N-host fleet, and it looks like flaky
 		// Let's Encrypt rather than a configuration mistake.
+		//
+		// DNS-01 is what obtains the wildcard, and it is the ONLY thing that
+		// can: HTTP-01 cannot issue a wildcard certificate at all. nil when
+		// no Cloudflare token is set, which certmagic reads as "this issuer
+		// does not do DNS-01".
+		DNS01Solver: dnsSolver(cfg),
 	})
 	magic.Issuers = []certmagic.Issuer{issuer}
+
+	// The wildcard, both apexes, managed eagerly rather than on demand: an
+	// on-demand certificate is obtained during a handshake, and the first
+	// client to arrive would wait out a DNS-01 propagation check.
+	//
+	// Every host runs this identical call. That is not a race to be avoided,
+	// it is the design: certs.Storage is shared and its lock serialises the
+	// order, so ONE host obtains the certificate and the rest find it already
+	// in storage. A fleet where only one host managed the wildcard would have
+	// a host whose loss stops renewal.
+	if names := wildcardNames(cfg); len(names) > 0 && cfg.CloudflareAPIToken != "" {
+		go func() {
+			if err := magic.ManageAsync(ctx, names); err != nil {
+				slog.Error("could not manage the wildcard certificate; the router "+
+					"will serve custom domains on demand and nothing else",
+					"names", names, "err", err)
+			}
+		}()
+		slog.Info("managing the wildcard certificate by ACME DNS-01", "names", names)
+	} else {
+		slog.Info("no Cloudflare API token; the router is HTTP-01-only and has no "+
+			"wildcard certificate. Workload subdomains will fail the handshake "+
+			"unless they are named in the fleet's state as custom domains",
+			"env", "PILOT_CLOUDFLARE_API_TOKEN")
+	}
 
 	// Port 80 answers ACME challenges and redirects everything else. Every
 	// host runs it because the challenge lands wherever DNS sent the client.
@@ -99,6 +135,40 @@ func startTLS(ctx context.Context, cfg *config.Config, store state.Store,
 	}()
 	slog.Info("serving TLS on :443 with on-demand certificates")
 	return nil
+}
+
+// dnsSolver builds the ACME DNS-01 solver, or returns nil when the fleet has
+// no Cloudflare token.
+//
+// Typed as acmez.Solver rather than *certmagic.DNS01Solver deliberately: a
+// typed nil pointer in an interface field is not nil, and certmagic tests that
+// field against nil to decide whether the issuer can do DNS-01 at all. Return
+// the concrete type here and a token-less fleet would advertise a solver that
+// panics on the first challenge.
+func dnsSolver(cfg *config.Config) acmez.Solver {
+	if cfg.CloudflareAPIToken == "" {
+		return nil
+	}
+	return &certmagic.DNS01Solver{
+		DNSManager: certmagic.DNSManager{
+			DNSProvider: &cloudflare.Provider{APIToken: cfg.CloudflareAPIToken},
+		},
+	}
+}
+
+// wildcardNames is the set of names every host manages eagerly.
+//
+// The wildcard covers every workload subdomain, which includes the API
+// hostname -- api.<workload domain> needs neither a record nor a certificate
+// of its own. The workload apex is listed because a wildcard does not cover
+// the apex it wildcards, and the dashboard apex because it is a separate zone
+// (a guest sharing the dashboard's apex could set cookies scoped to it).
+func wildcardNames(cfg *config.Config) []string {
+	names := []string{"*." + cfg.WorkloadDomain, cfg.WorkloadDomain}
+	if cfg.DashboardDomain != "" && cfg.DashboardDomain != cfg.WorkloadDomain {
+		names = append(names, cfg.DashboardDomain)
+	}
+	return names
 }
 
 func redirectToHTTPS(w http.ResponseWriter, r *http.Request) {
