@@ -37,6 +37,10 @@ type State struct {
 	SocketPath  string `json:"socket_path"`
 	NetnsName   string `json:"netns_name"`
 	StartedAtNs int64  `json:"started_at_unix_ns"`
+	// MemMiB, so a re-adopted machine can still decide its snapshot type and
+	// report its diff ratio. Zero from a state file written before this
+	// field, which makes the next snapshot a Full -- the safe direction.
+	MemMiB int `json:"mem_mib,omitempty"`
 
 	// The block and fault servers, so a restarted hostd can pick them back up.
 	//
@@ -227,6 +231,7 @@ func Adopted(st State, stateRoot string, pool *nbd.DevicePool) *Machine {
 	}
 	m := &Machine{
 		ID:        st.MachineID,
+		MemMiB:    st.MemMiB,
 		Cmd:       &exec.Cmd{Process: proc},
 		Client:    NewClient(st.SocketPath),
 		ChrootDir: st.ChrootDir,

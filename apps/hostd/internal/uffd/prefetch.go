@@ -212,6 +212,11 @@ func replay(ctx context.Context, h *handshake, src block.Slicer,
 	close(pages)
 	copyWg.Wait()
 
+	// Counted here rather than per page: what a scrape wants is how many
+	// pages this replay put in ahead of demand, and installAll's own prefault
+	// goes through the same function, so both are visible as replay work.
+	stats.Replayed.Add(copied.Load())
+
 	slog.Info("uffd prefetch replay done",
 		"entries", len(entries), "installed", copied.Load(), "skipped", skipped.Load(),
 		"ms", time.Since(start).Milliseconds())

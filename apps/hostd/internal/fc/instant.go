@@ -18,6 +18,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/vivek7405/pilots/hostd/internal/block"
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/nbd"
 	"github.com/vivek7405/pilots/hostd/internal/netns"
 	"github.com/vivek7405/pilots/hostd/internal/uffd"
@@ -220,6 +221,7 @@ func RestoreInstant(ctx context.Context, cfg InstantConfig, dl Uploader,
 
 	m = &Machine{
 		ID:        cfg.MachineID,
+		MemMiB:    cfg.MemMiB,
 		Slot:      cfg.Slot,
 		Cmd:       cmd,
 		Client:    NewClient(filepath.Join(chrootDir, "run", "fc.sock")),
@@ -653,6 +655,7 @@ func (m *Machine) CheckpointInstant(ctx context.Context, up Uploader, chunks Upl
 	// machine already serving.
 	defer func() {
 		res.ResumeGap = time.Since(pausedAt)
+		metrics.SnapshotResumeGapSeconds.Observe(res.ResumeGap.Seconds())
 		slog.Info("checkpoint resume gap", "machine", m.ID,
 			"ms", res.ResumeGap.Milliseconds())
 		if rerr := m.Client.Resume(context.WithoutCancel(ctx)); rerr != nil {
@@ -735,6 +738,9 @@ func (m *Machine) finishCheckpoint(up Uploader, chunks Uploader, opts SnapshotOp
 		fail(err)
 		return
 	}
+
+	// What this checkpoint actually wrote, before the file is touched again.
+	recordSnapshotSize(memPath, m.MemMiB)
 
 	// Deliberately NOT posix_fadvise(DONTNEED) on the image here. Dropping it
 	// looks obviously right -- half a gigabyte, read once, never read again --

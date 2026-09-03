@@ -15,6 +15,7 @@ type fakeManager struct {
 	err        error
 
 	created, destroyed, suspended, woken, restored int
+	collected                                      int
 	volumesCreated                                 int
 }
 
@@ -72,3 +73,5 @@ func (f *fakeManager) MachineVolume(context.Context, string) (*MachineVolume, er
 		Device: "/dev/vdb", CacheType: "Writeback",
 	}, f.err
 }
+
+func (f *fakeManager) CollectMetrics() { f.collected++ }

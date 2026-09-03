@@ -109,9 +109,14 @@ type Config struct {
 // Machine is a running Firecracker process and everything needed to reach,
 // snapshot, or kill it.
 type Machine struct {
-	ID        string
-	Slot      *netns.Slot
-	Cmd       *exec.Cmd
+	ID   string
+	Slot *netns.Slot
+	Cmd  *exec.Cmd
+	// MemMiB is the guest's configured memory. Kept on the machine because
+	// two things need it after boot: the snapshot-type decision compares the
+	// on-disk memory image's size against it, and the diff-ratio metric
+	// divides by it.
+	MemMiB    int
 	Client    *Client
 	ChrootDir string
 	StateDir  string
@@ -288,6 +293,7 @@ func Boot(ctx context.Context, cfg Config) (*Machine, error) {
 
 	m := &Machine{
 		ID:        cfg.MachineID,
+		MemMiB:    cfg.MemMiB,
 		Slot:      cfg.Slot,
 		Cmd:       cmd,
 		Client:    NewClient(filepath.Join(chrootDir, "run", "fc.sock")),

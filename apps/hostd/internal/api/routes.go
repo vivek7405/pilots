@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -57,8 +58,15 @@ func Routes(d Deps) http.Handler {
 		})
 	})
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
+		// Collected on the scrape rather than on a timer: the memory handlers
+		// are separate processes that have to be asked, and asking them on a
+		// schedule nobody is reading is work for nothing.
+		if d.Machines != nil {
+			d.Machines.CollectMetrics()
+		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		w.WriteHeader(http.StatusOK)
+		metrics.Default.Render(w)
 	})
 
 	// Machines: the one primitive.

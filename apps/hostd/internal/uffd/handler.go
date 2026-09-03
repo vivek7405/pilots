@@ -47,6 +47,15 @@ type Stats struct {
 	EventsIgnore atomic.Int64
 	MinorFaults  atomic.Int64
 	WPFaults     atomic.Int64
+	// Replayed counts pages installed ahead of demand, from a recorded fault
+	// order or a diff's own ranges. A replayed page the guest never asks for
+	// was bandwidth spent for nothing, so this is the denominator for how
+	// good the prediction is.
+	Replayed atomic.Int64
+	// StartupPages is Faults sampled at the moment the machine first answered
+	// a health check, which is where "how much of the image did this wake
+	// actually need" is answered. Zero until that sample is taken.
+	StartupPages atomic.Int64
 }
 
 // handshake is what Firecracker sends when it loads a snapshot: the region map
