@@ -121,6 +121,11 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # Nothing in this repo creates the release, and a plain `git push
+          # --tags` is what triggers this job -- so upload alone fails with
+          # "release not found" on every tag that has no release yet.
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 ||
+            gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
           gh release upload "$GITHUB_REF_NAME" \
             "golden-${GITHUB_REF_NAME}.ext4.zst" \
             scripts/rootfs/golden.ext4.sha256 --clobber

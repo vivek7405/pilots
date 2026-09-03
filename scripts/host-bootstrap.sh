@@ -843,17 +843,22 @@ fi
 # The containment a build actually runs under. Asked of systemd rather than
 # read back from the drop-in file, because a drop-in that systemd never
 # reloaded is a file that says the right thing and does nothing.
-SLICE=$(systemctl show "user-${PILOT_UID}.slice" -p CPUWeight -p MemoryHigh -p IOWeight 2>/dev/null |
-  tr '\n' ' ' | sed 's/ *$//')
-case "$SLICE" in
-  *CPUWeight=20*MemoryHigh=8589934592*IOWeight=20*|*CPUWeight=20*IOWeight=20*MemoryHigh=8589934592*)
-    echo "  build slice: CPUWeight=20 MemoryHigh=8G IOWeight=20" ;;
-  *)
-    echo "  build slice: NO -- user-${PILOT_UID}.slice is ${SLICE:-unset}." >&2
-    echo "    A build here is arbitrary tenant code with no weight against the" >&2
-    echo "    machines it shares the host with: one cargo build starves a" >&2
-    echo "    serving neighbour and nothing reports why." >&2 ;;
-esac
+# One property per call: `systemctl show -p A -p B -p C` prints them in
+# systemd's own internal order, not the requested one, so matching a joined
+# string would report a correctly configured slice as unset whenever that
+# order is not the one guessed here.
+SLICE_CPU=$(systemctl show "user-${PILOT_UID}.slice" -p CPUWeight --value 2>/dev/null)
+SLICE_MEM=$(systemctl show "user-${PILOT_UID}.slice" -p MemoryHigh --value 2>/dev/null)
+SLICE_IO=$(systemctl show "user-${PILOT_UID}.slice" -p IOWeight --value 2>/dev/null)
+if [ "$SLICE_CPU" = 20 ] && [ "$SLICE_MEM" = 8589934592 ] && [ "$SLICE_IO" = 20 ]; then
+  echo "  build slice: CPUWeight=20 MemoryHigh=8G IOWeight=20"
+else
+  echo "  build slice: NO -- user-${PILOT_UID}.slice is CPUWeight=${SLICE_CPU:-unset}" >&2
+  echo "    MemoryHigh=${SLICE_MEM:-unset} IOWeight=${SLICE_IO:-unset}." >&2
+  echo "    A build here is arbitrary tenant code with no weight against the" >&2
+  echo "    machines it shares the host with: one cargo build starves a" >&2
+  echo "    serving neighbour and nothing reports why." >&2
+fi
 
 REFLINK=$(curl -sf http://127.0.0.1:8080/v1/health |
   python3 -c 'import sys,json;print(json.load(sys.stdin).get("reflink"))' 2>/dev/null || echo None)
@@ -911,24 +916,39 @@ if [ -n "$ACME_EMAIL" ]; then
 
   # Resolved to THIS host on purpose: the wildcard record points at every host
   # and this asks whether this one can serve the name.
-  CODE=$(curl -s -m 10 -o /dev/null -w '%{http_code}' \
-    --resolve "api.${DOMAIN}:443:${IP}" "https://api.${DOMAIN}/v1/health" || echo 000)
-  if [ "$CODE" = 200 ]; then
-    REACHED="${REACHED} 443"
-  elif curl -sk -m 10 -o /dev/null \
-       --resolve "api.${DOMAIN}:443:${IP}" "https://api.${DOMAIN}/v1/health"; then
-    # It serves, but the certificate is not trusted yet. The wildcard is
-    # ordered asynchronously, so this is expected for the first minutes of the
-    # first host and is never expected afterwards.
-    echo "  cert: pending -- ${IP} serves TLS but the wildcard has not been"
-    echo "    issued yet. Expected on the first host for a few minutes; on any"
-    echo "    later host it means PILOT_CLOUDFLARE_API_TOKEN is wrong or the"
-    echo "    certificate storage is not shared."
-  else
-    echo "  unreachable: tcp 443 on ${IP} returned ${CODE}." >&2
-    echo "    Check the Hetzner Robot firewall for ${IP}." >&2
-    exit 1
-  fi
+  #
+  # What is asserted is the HANDSHAKE, not the status code. api.<domain> has no
+  # dispatch of its own yet (that is #30), so the router resolves it as a
+  # machine name, finds no row, and answers 404 -- a 200 is not reachable from
+  # here and never was. Curl's exit code is the honest signal: 0 means TLS
+  # completed against a trusted wildcard, an SSL-class code means the port is
+  # open but the certificate is not there yet, and anything else means nothing
+  # answered at all.
+  set +e
+  curl -s -m 10 -o /dev/null \
+    --resolve "api.${DOMAIN}:443:${IP}" "https://api.${DOMAIN}/v1/health"
+  RC=$?
+  set -e
+  case "$RC" in
+    0) REACHED="${REACHED} 443" ;;
+    35|51|58|59|60|66|77|83|91)
+      # The port is open and TLS was attempted, but the wildcard is not
+      # serving yet. It is ordered asynchronously, so this is expected for the
+      # first minutes of the first host and is never expected afterwards --
+      # a warning rather than a refusal, because a bootstrap that fails here
+      # would fail on a host that is entirely correct.
+      echo "  cert: pending -- ${IP} accepts tcp 443 but the wildcard is not"
+      echo "    serving yet (curl exit ${RC}). Expected on the first host for a"
+      echo "    few minutes; on any later host it means"
+      echo "    PILOT_CLOUDFLARE_API_TOKEN is wrong or the certificate storage"
+      echo "    is not shared."
+      ;;
+    *)
+      echo "  unreachable: tcp 443 on ${IP} did not answer (curl exit ${RC})." >&2
+      echo "    Check the Hetzner Robot firewall for ${IP}." >&2
+      exit 1
+      ;;
+  esac
 fi
 echo "  reachable: ${REACHED}"
 

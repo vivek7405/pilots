@@ -87,6 +87,18 @@ counts_of() {
   printf '%s' "${out% }"
 }
 
+# Whether every table in a counts_of line reported an actual number. A query
+# that failed leaves "machines=" behind, which is still a non-empty line.
+all_counted() {
+  local pair
+  for pair in $1; do
+    case "${pair#*=}" in
+      ''|*[!0-9]*) return 1 ;;
+    esac
+  done
+  [ -n "$1" ]
+}
+
 live_hosts() {
   curl -sf -m 10 "http://${1}:8080/v1/hosts" 2>/dev/null |
     python3 -c 'import sys,json;print(len(json.load(sys.stdin) or []))' 2>/dev/null || echo 0
@@ -186,7 +198,14 @@ else
   while [ "$(date +%s)" -lt "$DEADLINE" ]; do
     TARGET_COUNTS=$(counts_of "$IP")
     SURVIVOR_COUNTS=$(counts_of "$FROM")
-    if [ -n "$TARGET_COUNTS" ] && [ "$TARGET_COUNTS" = "$SURVIVOR_COUNTS" ]; then
+    # Every table must have reported a NUMBER. counts_of always returns a
+    # non-empty string -- a failed query leaves "hosts= machines= ..." -- so a
+    # plain -n test passes when every count failed the same way on both hosts,
+    # and two identically broken measurements would read as convergence. That
+    # hands an unverified replica back to hostd, whose reaper then destroys
+    # the machines this run exists to save.
+    if all_counted "$TARGET_COUNTS" && all_counted "$SURVIVOR_COUNTS" &&
+       [ "$TARGET_COUNTS" = "$SURVIVOR_COUNTS" ]; then
       AGREED=$((AGREED + 1))
       if [ "$AGREED" -ge 3 ]; then CONVERGED=1; break; fi
     else
