@@ -157,6 +157,8 @@ GET    /v1/machines/:id              info
 DELETE /v1/machines/:id              destroy
 POST   /v1/machines/:id/exec         {cmd, cwd?, env?, user?, timeout?} → {stdout, stderr, exitCode}
 GET    /v1/machines/:id/exec/stream  WS: query argv/dir/env/stdin → frames (below)
+                                     auth: Authorization: Bearer, or the
+                                     subprotocol authorization.bearer.<key> (browsers)
 GET    /v1/machines/:id/logs?follow  stream
 POST   /v1/machines/:id/suspend|wake|stop|start
 POST   /v1/machines/:id/checkpoints  {comment?} → {id, seq}
@@ -721,6 +723,10 @@ restore (same row/URL/token — never respawn-from-template) · WS streaming
 exec with `stdin=false` for `claude -p … --output-format stream-json` ·
 `cwd` + `env` on every exec (buffered and streaming). The sprites byte frame
 protocol (1/2/3) is kept exactly so crisp's client code drops in.
+`@pilots/sdk/sprites-compat` is the drop-in adapter: a sprite's `id` is the
+machine's NAME, because a sprites consumer persists that id and hands it back
+as a path segment to a name-keyed route, and `machineId` carries the `m-…` id
+for anything going through the typed client.
 
 ---
 
@@ -737,7 +743,10 @@ pilots/
       systemd/            # hostd.service, corrosion.service
     dashboard/            # webjs full-stack app (scaffolded `npm create webjs`)
   packages/cli/           # `pilot` CLI (TS)
-  sdks/js/  sdks/go/      # thin typed clients over hostd's API
+  sdks/js/                # @pilots/sdk — typed client + sprites-compat adapter
+  sdks/go/                # github.com/vivek7405/pilots/sdks/go
+                          #   both hand-written; both carry a drift test that
+                          #   parses internal/api and fails on a wire change
   scripts/                # bash one-shots ONLY: host-bootstrap.sh <ip>,
                           #   build-golden-rootfs.sh, dev-vm.sh, e2e.mjs
 ```
@@ -765,5 +774,6 @@ request path.
 timing from Phase 3, chaos from Phase 4, PaaS from Phase 5, hostility from
 Phase 6 — later phases never retire earlier assertions. `go test ./...` for
 netns/block/header/state/s3 (block-layer round-trip + diff-chain tests are
-mandatory). Dashboard: `webjs check` / `doctor --json` / `typecheck` /
+mandatory). Drift tests in both SDKs parse `internal/api` on every
+`npm test`. Dashboard: `webjs check` / `doctor --json` / `typecheck` /
 `test`. CI runs unit tests + the single-VM e2e on every push.

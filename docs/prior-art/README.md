@@ -98,7 +98,7 @@ here; do not fix blind.
 | Gap | Where it bites | Note |
 |---|---|---|
 | Rootfs user is `user` (`scripts/rootfs/Dockerfile:43`); no `/home/sprite`, no nvm shim | crisp drop-in (#7 gate) hardcodes `/home/sprite/app` | `sprites-dev.md` §6 |
-| Exec frame protocol has ids 1/2/3 only; missing 0 (stdin), 4 (stdin_eof), JSON `resize`/`exit`/`port_opened`, `/control` multiplex | `@fly/sprites` SDK parity; crisp compat adapter (#7 §4) | `sprites-dev.md` §5, COPY 5 |
+| Exec frame protocol has ids 1/2/3 only; missing 0 (stdin), 4 (stdin_eof), JSON `resize`/`exit`/`port_opened`, `/control` multiplex | the frame half only — SDK parity and the crisp adapter are closed by `@pilots/sdk/sprites-compat` | `sprites-dev.md` §5, COPY 5 |
 | No join gate: self-heal/DNS/mesh can run on a half-replicated replica | rescue of live machines after a host reboot | `uncloud.md` COPY 1; open Q1 |
 | Placement is ownership-hash only; no best-fit ranking, no template-cache affinity | create latency + "Katamari" imbalance on a multi-host fleet | `fly-io.md` COPY 2–4 |
 | No lifecycle journal / re-adoption on hostd restart | in-flight checkpoint lost on daemon upgrade | `fly-io.md` COPY 1 |
