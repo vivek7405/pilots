@@ -177,10 +177,69 @@ vm.unprivileged_userfaultfd = 1
 kernel.apparmor_restrict_unprivileged_userns = 0
 net.ipv6.conf.all.accept_ra = 2
 net.ipv6.conf.default.accept_ra = 2
+# The fault handler maps one range per region and many more while replaying a
+# prefetch set, so the default 65530 is reachable on a busy host. Exceeding it
+# fails an mmap, which arrives as a restore that could not map guest memory.
+vm.max_map_count = 1048576
+# A snapshot write is one large burst. At the defaults (10/20) the kernel
+# starts blocking the writer partway through, and that stall lands INSIDE the
+# pause window, where it is guest-visible freeze time.
+vm.dirty_background_ratio = 20
+vm.dirty_ratio = 40
 SYSCTL
 # --system stops at the first unknown key on some releases; -e ignores keys
 # this kernel does not have, which is the whole point of the line above.
 sysctl -qe --system
+
+# Swap off, permanently.
+#
+# A checkpoint's dirty set comes from mincore, which reports page RESIDENCY.
+# A page that was swapped out is not resident, so it is absent from the diff
+# -- and the machine restores with that page as zeros. This is not a slow
+# host, it is a memory image missing the pages the host chose to swap.
+#
+# Firecracker's own documentation carries the same constraint for the
+# mincore-flavoured diff snapshot: it works only with swap disabled.
+swapoff -a
+# And keep it off across a reboot. Commented rather than deleted so an
+# operator can see what was there and why it is gone.
+if grep -qE '^[^#].*\sswap\s' /etc/fstab; then
+  sed -i -E 's|^([^#].*\sswap\s.*)$|# disabled by pilots (mincore diff snapshots): \1|' /etc/fstab
+fi
+
+# Hugepage pool for guest memory, reserved at boot before memory fragments.
+#
+# Guest memory is backed by 2MiB pages, claimed from this pool on demand:
+# Firecracker maps it MAP_NORESERVE, so a pool that is too small does not
+# refuse a machine, it delivers SIGBUS to a running one.
+#
+# The split keeps the larger of 4GiB or 16% of RAM, capped at 42GiB, as
+# normal pages for the host itself, hostd, buildkitd, and the per-machine
+# firecracker/uffd/nbd processes. Everything else goes to the pool, plus an
+# overcommit allowance so a burst borrows from the kernel instead of taking
+# SIGBUS at the boundary.
+TOTAL_KB=$(awk '/^MemTotal:/{print $2}' /proc/meminfo)
+HP_KB=$(awk -v t="$TOTAL_KB" 'BEGIN{
+  reserve = t * 16 / 100
+  if (reserve < 4*1024*1024) reserve = 4*1024*1024
+  if (reserve > 42*1024*1024) reserve = 42*1024*1024
+  pool = t - reserve
+  if (pool < 0) pool = 0
+  print int(pool)
+}')
+NR_HUGEPAGES=$((HP_KB / 2048))
+# A tenth again, so a transient overshoot borrows rather than dies.
+NR_OVERCOMMIT=$((NR_HUGEPAGES / 10))
+cat >/etc/sysctl.d/61-pilots-hugepages.conf <<SYSCTL
+# Written by host-bootstrap.sh from MemTotal=${TOTAL_KB} kB. See the script
+# for the split; re-run it after adding RAM.
+vm.nr_hugepages = ${NR_HUGEPAGES}
+vm.nr_overcommit_hugepages = ${NR_OVERCOMMIT}
+SYSCTL
+sysctl -qe --system
+# Reserving at runtime on an already-fragmented host gets fewer pages than
+# asked for. That is reported in [10/10] rather than failed here, because the
+# reboot that fixes it is the operator's call.
 
 # The block server needs network block devices. nbds_max is fixed at load
 # time, so it goes in a modprobe conf rather than being set later.
@@ -627,6 +686,37 @@ if [ -S "/run/user/${PILOT_UID}/buildkit/buildkitd.sock" ]; then
   echo "  buildkitd: listening"
 else
   echo "  buildkitd: NOT listening -- builds will fail on this host" >&2
+fi
+
+# The hugepage pool guest memory comes out of. Unlike reflink this is not
+# only a speed signal: the page size is recorded in every snapshot and cannot
+# be reinterpreted at restore, so a host without a pool cannot run the
+# fleet's machines at all once the fleet's template is a 2MiB one.
+HP_TOTAL=$(awk '/^HugePages_Total:/{print $2}' /proc/meminfo)
+HP_SIZE=$(awk '/^Hugepagesize:/{print $2}' /proc/meminfo)
+HP_WANT=$(awk '/^vm.nr_hugepages/{print $3}' /etc/sysctl.d/61-pilots-hugepages.conf 2>/dev/null || echo 0)
+if [ "${HP_TOTAL:-0}" -gt 0 ] && [ "${HP_SIZE:-0}" = 2048 ]; then
+  echo "  hugepages: yes -- ${HP_TOTAL} x 2MiB reserved ($((HP_TOTAL * 2 / 1024)) GiB)"
+  if [ "${HP_WANT:-0}" -gt 0 ] && [ "$HP_TOTAL" -lt "$HP_WANT" ]; then
+    echo "    NOTE: asked for ${HP_WANT}, got ${HP_TOTAL}. Memory was already" >&2
+    echo "    fragmented; reboot to reserve the full pool at boot." >&2
+  fi
+else
+  echo "  hugepages: NO -- this host reserved ${HP_TOTAL:-0} 2MiB pages." >&2
+  echo "    Machines here restore at 4KiB, and a 2MiB snapshot taken elsewhere" >&2
+  echo "    CANNOT be restored on this host at all -- not slowly, not at all." >&2
+  echo "    Set vm.nr_hugepages in /etc/sysctl.d/61-pilots-hugepages.conf and reboot." >&2
+fi
+
+# Swap must be off for the same reason: a swapped-out page is not resident,
+# so mincore leaves it out of the diff and the machine restores it as zeros.
+if [ -z "$(swapon --show --noheadings 2>/dev/null)" ]; then
+  echo "  swap: off"
+else
+  echo "  swap: ON -- $(swapon --show=NAME --noheadings | tr '\n' ' ')" >&2
+  echo "    A checkpoint's dirty set is page residency, so a page the host" >&2
+  echo "    swapped out is MISSING from the image and restores as zeros." >&2
+  echo "    Run swapoff -a and remove the swap entry from /etc/fstab." >&2
 fi
 
 REFLINK=$(curl -sf http://127.0.0.1:8080/v1/health |
