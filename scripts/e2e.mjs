@@ -598,6 +598,14 @@ async function timingAssertions() {
           return { sum, count };
         };
         for (let i = 0; i < 4; i++) {
+          // Touch the machine first. A checkpoint does NOT refresh
+          // last_activity, so a machine being checkpointed back to back and
+          // nothing else is idle as far as the idle monitor is concerned --
+          // and on a slow host it gets suspended mid-sequence, which then
+          // fails the next checkpoint with a 404 that looks like a snapshot
+          // bug and is not one. Seen on this rig when one checkpoint took
+          // 15.7s and the machine was suspended 17s later.
+          await exec(id, 'true');
           const before = await writeTotals();
           const { status, json } = await request(
             `/v1/machines/${id}/checkpoints`, { method: 'POST', body: {} });
