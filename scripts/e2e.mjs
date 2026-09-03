@@ -1806,15 +1806,229 @@ async function capacityAssertions() {
   }
 }
 
+// H8 -- one quota, three client paths.
+//
+// A quota that is enforced in the HTTP handler is enforced everywhere by
+// construction, and that is exactly the assumption worth distrusting: the CLI
+// and the MCP server are separate processes with their own request building,
+// their own error mapping, and their own idea of what an error looks like on
+// the wire. A CLI that prints "request failed" and exits 0, or an MCP server
+// that turns a 429 into a tool result saying the machine was created, are both
+// shipped products that pass an HTTP-only test.
+//
+// So all three paths are driven for real: the SDK shape over HTTP, the CLI
+// spawned as a child process, and the MCP server spoken to over stdio with one
+// JSON-RPC tools/call. Anything less does not prove "enforced identically".
+//
+// This depends on work that has not landed: quota enforcement (#30) and the
+// CLI and MCP server (#32). Where a dependency is missing the step FAILS and
+// names it. It does not skip -- a battery that quietly stops asserting when a
+// dependency is late is how a whole section goes green while testing nothing.
+const QUOTA_ORG = process.env.PILOTS_E2E_ORG ?? 'org-e2e';
+const QUOTA_HEADROOM = 2;
+const CLI = process.env.PILOT_CLI ?? 'pilot';
+
+// mcpCall speaks one tools/call to a freshly spawned MCP server and returns
+// both the parsed result and every line the server put on stdout, because
+// stdout IS the wire: one stray log line there corrupts the session for any
+// client, and that is asserted rather than assumed.
+async function mcpCall(spawnFn, tool, args, env, timeoutMs = 30_000) {
+  const child = spawnFn(CLI, ['mcp'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+
+  let out = '';
+  let err = '';
+  child.stdout.setEncoding('utf8');
+  child.stderr.setEncoding('utf8');
+  child.stdout.on('data', (chunk) => { out += chunk; });
+  child.stderr.on('data', (chunk) => { err += chunk; });
+
+  const send = (msg) => child.stdin.write(`${JSON.stringify(msg)}\n`);
+
+  const frames = () => out.split('\n').filter((l) => l.trim() !== '');
+  const waitForID = async (id) => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      for (const line of frames()) {
+        let msg = null;
+        try { msg = JSON.parse(line); } catch { continue; }
+        if (msg?.id === id) return msg;
+      }
+      await sleep(100);
+    }
+    throw new Error(`the MCP server never answered id ${id} (stdout: ${out.slice(0, 400)} stderr: ${err.slice(0, 400)})`);
+  };
+
+  try {
+    send({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2024-11-05',
+        capabilities: {},
+        clientInfo: { name: 'pilots-e2e', version: '0' },
+      },
+    });
+    await waitForID(1);
+    send({ jsonrpc: '2.0', method: 'notifications/initialized' });
+
+    send({ jsonrpc: '2.0', id: 2, method: 'tools/call', params: { name: tool, arguments: args } });
+    const response = await waitForID(2);
+    return { response, lines: frames(), stderr: err };
+  } finally {
+    child.stdin.end();
+    child.kill('SIGKILL');
+  }
+}
+
+// quotaFields normalises what each path hands back to the same three values,
+// so "identical" is asserted on the values a client acts on rather than on
+// byte-for-byte framing that legitimately differs between a header-bearing
+// HTTP body and a tool result.
+function quotaFields(body) {
+  if (!body || typeof body !== 'object') return null;
+  const { error, quota, limit, used } = body;
+  return { error, quota, limit, used };
+}
+
+async function quotaAssertions() {
+  const { execFile, spawn } = await import('node:child_process');
+  const created = [];
+  const tag = Math.random().toString(36).slice(2, 8);
+  let limit = 0;
+
+  const run = (args, env) => new Promise((resolve) => {
+    execFile(CLI, args, { env, timeout: 60_000 }, (error, stdout, stderr) => {
+      resolve({ code: error?.code ?? (error ? 1 : 0), stdout, stderr, spawnError: error?.code === 'ENOENT' ? error : null });
+    });
+  });
+
+  const childEnv = { ...process.env, PILOT_API: API, PILOT_API_KEY: KEY };
+
+  try {
+    await step('a machine quota can be set and filled to its limit', async () => {
+      const baseline = await machineCount();
+      limit = baseline + QUOTA_HEADROOM;
+
+      const { status, text } = await request(`/v1/quotas/${QUOTA_ORG}`, {
+        method: 'PUT', body: { max_machines: limit }, raw: true,
+      });
+      assert(status >= 200 && status < 300,
+        `PUT /v1/quotas/${QUOTA_ORG} returned HTTP ${status} (${text.slice(0, 200)}). ` +
+        'Quota enforcement is issue #30 (Phase 6a); this asserts nothing until it lands');
+
+      for (let i = 0; i < QUOTA_HEADROOM; i++) {
+        const { status: cs, json } = await request('/v1/machines', {
+          method: 'POST',
+          body: { name: `e2e-quota-${tag}-${i}`, vcpus: 1, mem_mib: 512, knobs: { auto_stop: 'off' } },
+        });
+        assert(cs === 201, `create ${i} inside the quota returned HTTP ${cs} ${JSON.stringify(json)}`);
+        created.push(json.id);
+      }
+    });
+
+    let viaSDK = null;
+
+    await step('the machine quota is refused with a 429 over HTTP', async () => {
+      const { status, json, text } = await request('/v1/machines', {
+        method: 'POST',
+        body: { name: `e2e-quota-${tag}-over`, vcpus: 1, mem_mib: 512 },
+      });
+      if (status === 201) {
+        created.push(json.id);
+        throw new Error(`the create past the quota succeeded with HTTP ${status}`);
+      }
+      assert(status === 429, `expected 429, got ${status} (${text.slice(0, 200)})`);
+
+      viaSDK = quotaFields(json);
+      assert(viaSDK?.error === 'quota exceeded', `error = ${JSON.stringify(viaSDK?.error)}`);
+      assert(viaSDK?.quota === 'machines', `quota = ${JSON.stringify(viaSDK?.quota)}`);
+      assert(viaSDK?.limit === limit, `limit = ${JSON.stringify(viaSDK?.limit)}, want ${limit}`);
+      assert(viaSDK?.used === limit, `used = ${JSON.stringify(viaSDK?.used)}, want ${limit}`);
+    });
+
+    await step('the CLI reports the same 429 body and exits non-zero', async () => {
+      assert(viaSDK, 'the HTTP path did not produce a body to compare against');
+
+      const { code, stdout, stderr, spawnError } = await run(
+        ['machines', 'create', '--json'], childEnv);
+      assert(!spawnError,
+        `${CLI} is not on PATH. The CLI is issue #32 (Phase 6c); set PILOT_CLI to its path`);
+      assert(code !== 0, `the CLI exited 0 after a refused create (stdout: ${stdout.slice(0, 200)})`);
+
+      let body = null;
+      for (const stream of [stderr, stdout]) {
+        for (const line of stream.split('\n').reverse()) {
+          if (!line.trim()) continue;
+          try { body = JSON.parse(line); break; } catch { /* keep looking */ }
+        }
+        if (body) break;
+      }
+      assert(body, `the CLI printed no JSON with --json (stderr: ${stderr.slice(0, 300)})`);
+      assert(JSON.stringify(quotaFields(body)) === JSON.stringify(viaSDK),
+        `the CLI reported ${JSON.stringify(quotaFields(body))}, HTTP reported ${JSON.stringify(viaSDK)}`);
+    });
+
+    await step('the MCP server reports the same 429 body, and puts nothing but JSON-RPC on stdout', async () => {
+      assert(viaSDK, 'the HTTP path did not produce a body to compare against');
+
+      let call;
+      try {
+        call = await mcpCall(spawn, 'create_machine',
+          { vcpus: 1, mem_mib: 512, name: `e2e-quota-${tag}-mcp` }, childEnv);
+      } catch (err) {
+        throw new Error(
+          `${err.message}. The MCP server is issue #32 (Phase 6c); set PILOT_CLI to the CLI that serves it`);
+      }
+
+      // stdout is the wire. A log line here breaks every MCP client, and it is
+      // the kind of regression nothing else would catch.
+      for (const line of call.lines) {
+        let msg = null;
+        try { msg = JSON.parse(line); } catch {
+          throw new Error(`the MCP server wrote non-JSON to stdout: ${line.slice(0, 200)}`);
+        }
+        assert(msg.jsonrpc === '2.0', `a stdout frame is not JSON-RPC 2.0: ${line.slice(0, 200)}`);
+      }
+
+      const result = call.response?.result;
+      const payload = (result?.structuredContent
+        ?? (() => {
+          const text = (result?.content ?? []).map((c) => c.text ?? '').join('');
+          try { return JSON.parse(text); } catch { return null; }
+        })());
+      assert(payload, `the tool result carried no JSON body: ${JSON.stringify(call.response).slice(0, 300)}`);
+      assert(JSON.stringify(quotaFields(payload)) === JSON.stringify(viaSDK),
+        `MCP reported ${JSON.stringify(quotaFields(payload))}, HTTP reported ${JSON.stringify(viaSDK)}`);
+    });
+
+    await step('the machines already inside the quota are untouched by the refusals', async () => {
+      // The failure this catches is a refusal implemented as a rollback: three
+      // refused creates that each destroy a machine to make room leave the org
+      // under its quota and every assertion above green.
+      for (const id of created) {
+        const { status, json } = await request(`/v1/machines/${id}`);
+        assert(status === 200, `machine ${id} is gone after the refusals (HTTP ${status})`);
+        assert(json.state === 'running' || json.state === 'suspended',
+          `machine ${id} is in state '${json.state}' after the refusals`);
+      }
+    });
+  } finally {
+    for (const id of created) await destroy(id);
+  }
+}
+
 // hostilityAssertions runs the API-visible half of H1-H8 in the order that
 // leaves the host least disturbed for whatever runs after it: the churn loop
-// first, egress next, capacity last, because capacity deliberately pushes the
-// host to a ceiling.
+// first, egress next, then the two that deliberately push the host to a
+// ceiling. Each sub-battery owns its own cleanup in a finally, so one that
+// fails halfway leaves nothing for the next to trip over.
 async function hostilityAssertions() {
   console.log('\n-- hostility (Phase 6e)');
   await churnAssertions();
   await egressAssertions();
   await capacityAssertions();
+  await quotaAssertions();
 }
 
 async function main() {
