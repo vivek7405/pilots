@@ -27,7 +27,7 @@ import { pageHero } from '#lib/ui/page-hero.ts';
 export const metadata = {
   title: 'Roadmap: what is finished and what is not',
   description:
-    'The six phases of building pilots, which gate each one had to pass to close, and exactly which are done. Phases 1 to 4 are closed. Phase 5 is in progress.',
+    'The six phases of building pilots, which gate each one had to pass to close, and exactly which are done. Phases 1 to 5 are closed. Phase 6 is in progress.',
 };
 
 type Status = 'done' | 'active' | 'next';
@@ -89,19 +89,19 @@ const PHASES: Phase[] = [
   {
     n: '5',
     title: 'Volumes and the PaaS face',
-    status: 'active',
+    status: 'done',
     issue: 15,
     summary:
-      'Durable volumes, the build path from Dockerfile to microVM image, services with health-gated deploys and rollback, custom domains with automatic certificates, promotion, and replicas that follow load. Split into three tracks being built in parallel.',
+      'Durable volumes, the build path from Dockerfile to microVM image, guest-to-guest naming, sealed environment values, services with health-gated deploys and rollback, custom domains with automatic certificates, promotion, and replicas that follow load.',
     gate: 'A real application deploys to a custom domain with valid TLS, its readiness endpoint gates the cutover, killing it restarts it, rollback works, it scales from zero and back, and volume data survives a host dying and being rescheduled.',
   },
   {
     n: '6',
     title: 'Product surface and sign-off',
-    status: 'next',
+    status: 'active',
     issue: 7,
     summary:
-      'The dashboard, accounts and API keys, the command line tool, typed SDKs, the agent-facing tool server, metering, quotas, and a hostility suite that replays every known incident class as a test.',
+      'The product surface on a finished engine. Merged: tenancy, scoped keys, revocation and quotas on the API, typed JavaScript and Go clients, the hostility suite that replays every known incident class as a test, the fleet hardening the incident research asked for, hugepage-backed guest memory, the command line tool with the agent-facing tool server inside it, and the dashboard. Still open: streaming exec and three other routes the clients are already written against, metering, and the sign-off run on the production fleet.',
     gate: 'A real product builds, iterates, checkpoints, and promotes an application end to end. The dashboard runs as a service on the platform it describes. The entire battery is green on the production fleet.',
   },
 ];
@@ -115,7 +115,7 @@ const STATUS_LABEL: Record<Status, string> = {
 export default function Roadmap() {
   return html`
     ${pageHero({
-      heading: 'Four phases closed, one being built',
+      heading: 'Five phases closed, the last being built',
       lede: html`A phase closes when its gate passes, not when its code is written. That is the rule the
         repository holds itself to, so it is the rule this page reports against. The gates are below
         in full, including the ones that have not been met.`,
@@ -181,9 +181,9 @@ export default function Roadmap() {
       body: html`
         <div class="grid gap-px bg-rule border border-rule rounded overflow-hidden mid:grid-cols-2">
           ${[
-            ['Do not put production traffic on it', 'Phase 6 exists precisely to earn that, and it has not started. There is no accounts system, no metering, and no quota enforcement yet.'],
-            ['There is nothing to sign up for', 'Accounts and API keys are Phase 6 work. No waiting list is collecting addresses in the meantime.'],
-            ['The timings are laptop timings', 'The Phase 3 gate was measured on a development machine rather than on the hardware this eventually runs on. Real fleet numbers replace them when there is a fleet.'],
+            ['Do not put production traffic on it', 'Phase 6 exists precisely to earn that, and it is in progress. Every request now carries an org, a scoped key, and a quota. What has not happened is the sign-off battery on the fleet it is written for, and there is no metering yet.'],
+            ['There is nothing to sign up for', 'The dashboard that issues accounts is in review rather than deployed, so an API key today comes from an operator on a host. No waiting list is collecting addresses in the meantime.'],
+            ['The timings are development-rig timings', 'The Phase 3 gate and every battery readout were measured on nested virtualisation without extent sharing, not on the hardware this eventually runs on. Real fleet numbers replace them when there is a fleet.'],
             ['One region, one CPU vendor', 'Both are structural rather than temporary. Snapshots cannot cross a CPU vendor boundary, so the fleet commits to one.'],
           ].map(
             ([t, b]) => html`

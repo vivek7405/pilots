@@ -3,7 +3,7 @@ import '#components/lifecycle-demo.ts';
 import { terminal } from '#lib/ui/terminal.ts';
 import { section } from '#lib/ui/section.ts';
 import { readout, inlineFact } from '#lib/ui/stat.ts';
-import { PANEL, PROSE, BTN_PRIMARY, BTN_GHOST, HAIRLINE } from '#lib/design/recipes.ts';
+import { PANEL, PROSE, LINK, BTN_PRIMARY, BTN_GHOST, HAIRLINE } from '#lib/design/recipes.ts';
 import { WORKLOAD_APEX, GH_URL, NEW_TAB } from '#lib/links.ts';
 import { pageHero } from '#lib/ui/page-hero.ts';
 
@@ -107,8 +107,10 @@ export default function Sandboxes() {
       id: 'exec',
       heading: 'Streaming exec, because agents produce output for minutes',
       lede: html`Running a command and collecting its output at the end is fine for a script and
-        useless for a model that emits tokens for several minutes. Both shapes exist: buffered when
-        you want a result, streamed over a socket when you want to watch.`,
+        useless for a model that emits tokens for several minutes. Both shapes exist in the guest
+        agent and in the typed clients: buffered when you want a result, streamed over a socket when
+        you want to watch. The streamed form does not answer on the public API yet, so the clients and
+        the command line are written against a route the engine still refuses.`,
       body: html`
         <div class="grid gap-6 mid:grid-cols-2">
           <div class="${PANEL} p-5">
@@ -130,6 +132,14 @@ export default function Sandboxes() {
         </div>
 
         <p class="${PROSE} mt-8">
+          Typed JavaScript and Go clients cover every route, and each carries a test that parses the
+          server's own source and fails when the wire types drift.
+          <a class=${LINK} href="${GH_URL}/tree/main/sdks" target="_blank" rel="noopener"
+            >The clients${NEW_TAB}</a
+          >.
+        </p>
+
+        <p class="${PROSE} mt-6">
           Exec counts as activity. A machine running a build with no HTTP traffic at all is not idle,
           and the idle monitor knows that, which is the difference between a
           ${inlineFact('idle')} timer that is useful and one that suspends an agent mid-task.
@@ -151,6 +161,8 @@ export default function Sandboxes() {
             ['Egress firewalled', 'Traffic to private ranges, loopback, and link-local is dropped inside the guest’s own namespace, so a sandbox cannot reach the host or its neighbours.'],
             ['Per-machine credentials', 'The token the guest agent accepts is minted per machine and never reused, so a leaked token is scoped to the machine that leaked it.'],
             ['Disposable by design', 'The expected end state of a sandbox is destruction. Nothing about the platform assumes a machine is precious.'],
+            ['Owned by an org', 'Every machine, service, and volume carries the org that created it, and a key sees only what its org owns. A foreign id answers as not found rather than as forbidden, so existence does not leak across tenants.'],
+            ['Capped per org', 'Quotas bound what one org can hold: machines, cores, memory, volume space, and concurrent builds. A refusal names the ceiling it hit.'],
           ].map(
             ([t, b]) => html`
               <div class="bg-paper-elev p-5">

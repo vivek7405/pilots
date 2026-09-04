@@ -236,7 +236,7 @@ export default function Home() {
             ],
             [
               'No production traffic yet',
-              'Phases 1 through 4 are closed and Phase 5 is being built. The gate for calling it production is the full battery green on real hardware, and that has not happened.',
+              'Phases 1 through 5 are closed and Phase 6, the product surface, is being built. The gate for calling it production is the full battery green on real hardware, and that has not happened.',
             ],
           ].map(
             ([title, body]) => html`

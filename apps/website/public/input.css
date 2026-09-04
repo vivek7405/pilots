@@ -112,6 +112,13 @@
   --breakpoint-wide: 960px;
 }
 
+/* The paper a logo sits on. The marks in lib/design cut their negative space
+   with `--logo-bg`, so a lockup on the page surface declares that surface
+   here rather than in an inline style, which the CSP does not have to allow. */
+@utility on-paper {
+  --logo-bg: var(--paper);
+}
+
 @layer base {
   html { -webkit-text-size-adjust: 100%; }
   body {
