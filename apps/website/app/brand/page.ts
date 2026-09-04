@@ -49,6 +49,20 @@ const SMALL_SIZES = [32, 24, 20, 16];
  * wordmark is a strong instrument-panel signal and a weak brand signal: it
  * looks like a filename, which is fine in a header and thin on a title slide.
  */
+/**
+ * The two casings under test.
+ *
+ * The site writes the name lowercase everywhere, including at the start of a
+ * sentence, which is a deliberate choice rather than an oversight. The capital
+ * is here because a lockup is where that choice is most visible and least
+ * committed: the header can carry one form while the prose carries another, and
+ * this is the surface for deciding whether it should.
+ */
+const WORD_CASES = [
+  { id: 'lower', label: 'lowercase', word: 'pilots' },
+  { id: 'upper', label: 'capital P', word: 'Pilots' },
+];
+
 const WORD_FACES = [
   { id: 'mono', label: 'mono, semibold', cls: 'font-mono font-semibold tracking-tight' },
   { id: 'sans', label: 'sans, extrabold', cls: 'font-sans font-extrabold tracking-[-0.035em]' },
@@ -108,15 +122,15 @@ function card(c: Candidate) {
  * mark looking a size too big, because a lowercase word's visual mass sits
  * well inside its em.
  */
-function lockupRow(c: Candidate) {
+function lockupRow(c: Candidate, word: string, label: string) {
   return html`
     <div class="grid gap-5 items-center py-6 border-b border-rule mid:grid-cols-[9rem_1fr_1fr]">
-      <code class="font-mono text-xs text-ink-subtle">${c.id}</code>
+      <span class=${FIELD_LABEL}>${label}</span>
       ${WORD_FACES.map(
         (w) => html`
           <div class="lab-paper flex items-center gap-2.5">
             ${markSvg(c, 30)}
-            <span class="${w.cls} text-[26px] leading-none text-ink">pilots</span>
+            <span class="${w.cls} text-[26px] leading-none text-ink">${word}</span>
           </div>
         `,
       )}
@@ -131,13 +145,15 @@ function lockupRow(c: Candidate) {
  * four nav links has not passed anything, and the header is the placement
  * this mark will actually live in on nearly every page view.
  */
-function headerMock(c: Candidate) {
+function headerMock(c: Candidate, word: string, label: string) {
   return html`
-    <div class="border border-rule bg-paper overflow-hidden">
+    <div>
+      <p class="${FIELD_LABEL} mb-2">${label}</p>
+      <div class="border border-rule bg-paper overflow-hidden">
       <div class="flex items-center gap-3 px-4 h-14">
         <span class="lab-paper flex items-center gap-2 mr-2">
           ${markSvg(c, 22)}
-          <span class="font-mono text-[15px] font-semibold tracking-tight text-ink">pilots</span>
+          <span class="font-mono text-[15px] font-semibold tracking-tight text-ink">${word}</span>
         </span>
         <span class="hidden mid:flex items-center gap-4 text-sm text-ink-muted">
           <span>Sandboxes</span><span>Deploy</span><span>Architecture</span>
@@ -146,6 +162,7 @@ function headerMock(c: Candidate) {
           class="ml-auto h-8 px-4 grid place-items-center rounded-full bg-signal text-signal-ink text-[13px] font-semibold"
           >GitHub</span
         >
+        </div>
       </div>
     </div>
   `;
@@ -227,17 +244,19 @@ export default function LogoLabPage() {
       heading: 'Against the word',
       body: html`
         <p class="${PROSE} mb-6">
-          The header sets the name in mono, which reads as an instrument label
-          and also, at a glance, as a filename. The second column asks whether a
-          heavier sans carries the name better once the mark is doing the
-          technical talking. That one is not settled.
+          Two questions at once, neither settled. Across the columns, whether a
+          heavier sans carries the name better than the mono the header uses
+          today, which reads as an instrument label and also, at a glance, as a
+          filename. Down the rows, whether the name takes a capital. The site
+          writes it lowercase everywhere, including at the start of a sentence,
+          so a capital here would be a decision rather than a tidy-up.
         </p>
         <div class="border-t border-rule">
           <div class="hidden mid:grid grid-cols-[9rem_1fr_1fr] gap-5 pt-4">
             <span></span>
             ${WORD_FACES.map((w) => html`<span class=${FIELD_LABEL}>${w.label}</span>`)}
           </div>
-          ${lockupRow(DELTA)}
+          ${WORD_CASES.map((k) => lockupRow(DELTA, k.word, k.label))}
         </div>
       `,
     })}
@@ -249,11 +268,11 @@ export default function LogoLabPage() {
       lede: html`
         The placement that matters most, since it is on every page view. A mark
         that resolves on a card and then vanishes beside six nav links has not
-        passed.
+        passed. Both casings are shown at the size they actually render.
       `,
       body: html`
-        <div class="grid gap-4">
-          ${headerMock(DELTA)}
+        <div class="grid gap-6 wide:grid-cols-2">
+          ${WORD_CASES.map((k) => headerMock(DELTA, k.word, k.label))}
         </div>
       `,
     })}
