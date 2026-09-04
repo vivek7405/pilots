@@ -2,6 +2,7 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -151,7 +152,7 @@ func fixture(t *testing.T, replicas int) (*Manager, *fakeMachines, state.Store, 
 func TestOnlyTheFirstReplicaBoots(t *testing.T) {
 	m, fm, _, _ := fixture(t, 3)
 
-	if _, err := m.Deploy(context.Background(), "svc-1", "rootfs-build"); err != nil {
+	if _, err := m.Deploy(context.Background(), "svc-1", "rootfs-build", nil); err != nil {
 		t.Fatalf("Deploy: %v", err)
 	}
 
@@ -174,7 +175,7 @@ func TestOnlyTheFirstReplicaBoots(t *testing.T) {
 // deploy has reported the snapshot succeeded.
 func TestTheTokenIsResetBeforeTheSnapshot(t *testing.T) {
 	m, fm, _, _ := fixture(t, 2)
-	if _, err := m.Deploy(context.Background(), "svc-1", "rootfs-build"); err != nil {
+	if _, err := m.Deploy(context.Background(), "svc-1", "rootfs-build", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -206,7 +207,7 @@ func TestAReleaseWithNoSnapshotStillDeploys(t *testing.T) {
 	m, fm, _, _ := fixture(t, 2)
 	fm.noSnap = true
 
-	if _, err := m.Deploy(context.Background(), "svc-1", "rootfs-build"); err != nil {
+	if _, err := m.Deploy(context.Background(), "svc-1", "rootfs-build", nil); err != nil {
 		t.Fatalf("a snapshotless release failed to deploy: %v", err)
 	}
 	for _, e := range fm.events {
@@ -223,7 +224,7 @@ func TestAFailedDeployDoesNotFlipTheRoute(t *testing.T) {
 	m, fm, store, _ := fixture(t, 2)
 
 	// Land an initial release so there is something to protect.
-	first, err := m.Deploy(ctx, "svc-1", "rootfs-1")
+	first, err := m.Deploy(ctx, "svc-1", "rootfs-1", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +235,7 @@ func TestAFailedDeployDoesNotFlipTheRoute(t *testing.T) {
 
 	// Now fail the second replica of the next deploy.
 	fm.creates, fm.failNth = 0, 2
-	if _, err := m.Deploy(ctx, "svc-1", "rootfs-2"); err == nil {
+	if _, err := m.Deploy(ctx, "svc-1", "rootfs-2", nil); err == nil {
 		t.Fatal("a deploy whose replica could not be created reported success")
 	}
 
@@ -260,11 +261,11 @@ func TestTheOldReleaseIsSuspendedNotDestroyed(t *testing.T) {
 	ctx := context.Background()
 	m, fm, _, _ := fixture(t, 1)
 
-	if _, err := m.Deploy(ctx, "svc-1", "rootfs-1"); err != nil {
+	if _, err := m.Deploy(ctx, "svc-1", "rootfs-1", nil); err != nil {
 		t.Fatal(err)
 	}
 	fm.events = nil
-	if _, err := m.Deploy(ctx, "svc-1", "rootfs-2"); err != nil {
+	if _, err := m.Deploy(ctx, "svc-1", "rootfs-2", nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -284,11 +285,11 @@ func TestRollbackWakesThepreviousRelease(t *testing.T) {
 	ctx := context.Background()
 	m, fm, store, _ := fixture(t, 1)
 
-	first, err := m.Deploy(ctx, "svc-1", "rootfs-1")
+	first, err := m.Deploy(ctx, "svc-1", "rootfs-1", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.Deploy(ctx, "svc-1", "rootfs-2"); err != nil {
+	if _, err := m.Deploy(ctx, "svc-1", "rootfs-2", nil); err != nil {
 		t.Fatal(err)
 	}
 	fm.events = nil
@@ -386,5 +387,164 @@ func TestPromoteResetsTheTokenBeforeSnapshotting(t *testing.T) {
 	}
 	if reset < 0 || ckpt < 0 || reset > ckpt {
 		t.Errorf("token reset (%d) must precede the snapshot (%d): %v", reset, ckpt, fm.events)
+	}
+}
+
+// replicasOfRelease returns a service's machine rows for one release.
+func replicasOfRelease(t *testing.T, store state.Store, serviceID, releaseID string) []state.Machine {
+	t.Helper()
+	all, err := store.ListMachines(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []state.Machine
+	for _, mach := range all {
+		if mach.ServiceID == serviceID && mach.ReleaseID == releaseID {
+			out = append(out, mach)
+		}
+	}
+	return out
+}
+
+// A deployed replica is an ordinary machine with a release attached, so it
+// gets the ordinary machine defaults: suspend when idle, wake on demand, a
+// floor of zero. The release is what hands its idle decision to the
+// autoscaler, so nothing about the knobs has to differ between the two faces.
+func TestAReplicaDefaultsToTheMachineDefaults(t *testing.T) {
+	ctx := context.Background()
+	m, _, store, _ := fixture(t, 1)
+
+	rel, err := m.Deploy(ctx, "svc-1", "rootfs-1", nil)
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	reps := replicasOfRelease(t, store, "svc-1", rel.ID)
+	if len(reps) != 1 {
+		t.Fatalf("deploy made %d replicas, want 1", len(reps))
+	}
+	if got := api.ParseKnobs(reps[0].KindKnobs); got != api.DefaultKnobs() {
+		t.Errorf("replica knobs = %+v, want the machine defaults %+v", got, api.DefaultKnobs())
+	}
+}
+
+// Nothing is migrated. A service whose replicas already carry a floor of one
+// keeps it across the next deploy, because the rollout inherits from the
+// previous release's replicas -- which are suspended and kept, never
+// destroyed.
+func TestAnExistingFloorSurvivesTheNextDeploy(t *testing.T) {
+	ctx := context.Background()
+	m, _, store, _ := fixture(t, 1)
+
+	first, err := m.Deploy(ctx, "svc-1", "rootfs-1", nil)
+	if err != nil {
+		t.Fatalf("first Deploy: %v", err)
+	}
+	// The shape a service deployed before this change carries.
+	old := replicasOfRelease(t, store, "svc-1", first.ID)[0]
+	old.KindKnobs = `{"auto_stop":"off","min_machines_running":1}`
+	if err := store.PutMachine(ctx, &old); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := m.Deploy(ctx, "svc-1", "rootfs-2", nil)
+	if err != nil {
+		t.Fatalf("second Deploy: %v", err)
+	}
+	fresh := replicasOfRelease(t, store, "svc-1", second.ID)
+	if len(fresh) != 1 {
+		t.Fatalf("second deploy made %d replicas, want 1", len(fresh))
+	}
+	if got := api.ParseKnobs(fresh[0].KindKnobs); got.MinMachinesRunning != 1 || got.AutoStop != "off" {
+		t.Errorf("a redeploy migrated an existing service's policy to the new "+
+			"default: %+v", got)
+	}
+}
+
+// Knobs travel on the deploy, which is the operator's opt-in for a warm
+// replica, and every replica of one rollout gets the same value: resolving per
+// replica would inherit from the PREVIOUS release for replica two, because the
+// service still names that release while the rollout is running.
+func TestKnobsOnTheDeployWinAndAreSharedByEveryReplica(t *testing.T) {
+	ctx := context.Background()
+	m, _, store, _ := fixture(t, 3)
+
+	rel, err := m.Deploy(ctx, "svc-1", "rootfs-1", json.RawMessage(`{"min_machines_running":1}`))
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	reps := replicasOfRelease(t, store, "svc-1", rel.ID)
+	if len(reps) != 3 {
+		t.Fatalf("deploy made %d replicas, want 3", len(reps))
+	}
+	for _, r := range reps {
+		got := api.ParseKnobs(r.KindKnobs)
+		if got.MinMachinesRunning != 1 {
+			t.Errorf("%s has floor %d, want 1", r.ID, got.MinMachinesRunning)
+		}
+		// Partial merge: the fields the deploy did not mention are the
+		// defaults, not the zero value. auto_stop off here would mean a
+		// replica that can never be given back.
+		if got.AutoStop != "suspend" || !got.AutoStart {
+			t.Errorf("%s: the merge replaced instead of merging: %+v", r.ID, got)
+		}
+	}
+}
+
+// Promote writes nothing to the machine's knobs, and every extra replica
+// inherits from the promoted machine rather than from the defaults. That is
+// only true because the knobs are resolved AFTER the machine is bound to its
+// release; resolving earlier would make the promoted machine invisible to the
+// lookup that finds its siblings.
+func TestPromoteLeavesTheKnobsAlone(t *testing.T) {
+	ctx := context.Background()
+	m, _, store, _ := fixture(t, 1)
+
+	const marker = `{"auto_stop":"suspend","auto_start":true,"min_machines_running":0,"soft_limit":7}`
+	if err := store.PutMachine(ctx, &state.Machine{
+		ID: "m-sandbox", Name: "sandbox", HostID: "host-a", State: "running",
+		App: "shop", KindKnobs: marker,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	svc, err := m.Promote(ctx, "m-sandbox", api.PromoteRequest{Replicas: 2})
+	if err != nil {
+		t.Fatalf("Promote: %v", err)
+	}
+
+	after, err := store.GetMachine(ctx, "m-sandbox")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.KindKnobs != marker {
+		t.Errorf("promote rewrote the machine's knobs: %q", after.KindKnobs)
+	}
+
+	for _, r := range replicasOfRelease(t, store, svc.ID, after.ReleaseID) {
+		if r.ID == "m-sandbox" {
+			continue
+		}
+		if got := api.ParseKnobs(r.KindKnobs); got.SoftLimit != 7 {
+			t.Errorf("%s inherited %+v rather than the promoted machine's policy", r.ID, got)
+		}
+	}
+}
+
+// A health probe must never keep a machine awake.
+//
+// It is exempt by construction rather than by a rule: the HTTP probe dials the
+// veth's host-side IPv4 address straight from an http.Client, so it passes
+// neither the router nor the IPv6 forward hook where activity is counted, and
+// the command probe runs only while a rollout is gating. This pins the half
+// that is testable here -- a deploy never touches a replica's row itself.
+func TestTheHealthProbeDoesNotTouchTheReplica(t *testing.T) {
+	ctx := context.Background()
+	m, fm, _, _ := fixture(t, 2)
+
+	if _, err := m.Deploy(ctx, "svc-1", "rootfs-1", nil); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if len(fm.touches) != 0 {
+		t.Errorf("a health-gated deploy recorded activity on %v", fm.touches)
 	}
 }

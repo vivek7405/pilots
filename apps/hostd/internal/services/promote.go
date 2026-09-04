@@ -131,9 +131,16 @@ func (m *Manager) Promote(ctx context.Context, machineID string, req api.Promote
 
 	// Any additional replicas restore from the release, exactly as a deploy's
 	// do. The promoted machine itself is already replica one and is not
-	// touched.
+	// touched -- promote writes nothing to its knobs, so it keeps the policy
+	// it was created with.
+	//
+	// Resolved AFTER the row bind above, so the promoted machine is the
+	// sibling every extra replica inherits from. Moving this above PutMachine
+	// would hand replicas two and up the defaults instead of the sandbox's
+	// knobs.
+	knobs := m.replicaKnobs(ctx, svc, nil)
 	for i := 1; i < replicas; i++ {
-		if _, err := m.createReplica(ctx, svc, rel, rel.MemBuildID != ""); err != nil {
+		if _, err := m.createReplica(ctx, svc, rel, rel.MemBuildID != "", knobs); err != nil {
 			return nil, fmt.Errorf("services: replica %d of promoted %s: %w", i+1, machineID, err)
 		}
 	}

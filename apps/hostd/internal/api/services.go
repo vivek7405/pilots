@@ -17,7 +17,7 @@ import (
 // without a machine layer, and nil on a host that has no object storage --
 // where a release has nowhere to come from.
 type Rollout interface {
-	Deploy(ctx context.Context, serviceID, rootfsBuildID string) (*state.Release, error)
+	Deploy(ctx context.Context, serviceID, rootfsBuildID string, knobs json.RawMessage) (*state.Release, error)
 	Rollback(ctx context.Context, serviceID string) (*state.Release, error)
 	Promote(ctx context.Context, machineID string, req PromoteRequest) (*state.Service, error)
 }
@@ -204,7 +204,7 @@ func (d Deps) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	if !d.checkQuota(w, r, quota.Delta{Machines: 1, VCPUs: 1, MemMiB: 512}) {
 		return
 	}
-	rel, err := d.Rollout.Deploy(r.Context(), r.PathValue("id"), req.Build)
+	rel, err := d.Rollout.Deploy(r.Context(), r.PathValue("id"), req.Build, req.Knobs)
 	if err != nil {
 		writeStoreError(w, err)
 		return

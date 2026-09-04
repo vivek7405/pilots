@@ -180,6 +180,10 @@ type CreateServiceRequest struct {
 type DeployRequest struct {
 	Release string `json:"release,omitempty"`
 	Build   string `json:"build,omitempty"`
+	// Knobs is the lifecycle policy for the replicas this deploy creates,
+	// merged onto what the previous release's replicas carry. A service row
+	// keeps no knobs, so the deploy is where they travel.
+	Knobs *Knobs `json:"knobs,omitempty"`
 }
 
 // PromoteRequest turns a sandbox into a durable service. The machine's URL is

@@ -271,7 +271,7 @@ func (m *Manager) scaleUp(ctx context.Context, svc *state.Service, machines []st
 	if err != nil {
 		return err
 	}
-	_, err = m.createReplica(ctx, svc, rel, rel.MemBuildID != "")
+	_, err = m.createReplica(ctx, svc, rel, rel.MemBuildID != "", m.replicaKnobs(ctx, svc, nil))
 	return err
 }
 

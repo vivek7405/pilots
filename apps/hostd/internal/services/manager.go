@@ -75,7 +75,8 @@ func New(opts Options) *Manager { return &Manager{opts: opts} }
 // gate it, snapshot it, restore the rest from that snapshot, gate those,
 // THEN flip. The previous release's machines are stopped but kept, so a
 // rollback is a start-and-flip rather than a rebuild.
-func (m *Manager) Deploy(ctx context.Context, serviceID, rootfsBuildID string) (*state.Release, error) {
+func (m *Manager) Deploy(ctx context.Context, serviceID, rootfsBuildID string,
+	knobs json.RawMessage) (*state.Release, error) {
 	svc, err := m.opts.Store.GetService(ctx, serviceID)
 	if err != nil {
 		return nil, err
@@ -106,7 +107,7 @@ func (m *Manager) Deploy(ctx context.Context, serviceID, rootfsBuildID string) (
 		return nil, err
 	}
 
-	fresh, err := m.rollOut(ctx, svc, rel, health, replicas)
+	fresh, err := m.rollOut(ctx, svc, rel, health, replicas, knobs)
 	if err != nil {
 		// Nothing has been flipped, so the old release is still serving.
 		// Clear up what was half-built rather than leaving it to bill.
@@ -146,13 +147,19 @@ func (m *Manager) Deploy(ctx context.Context, serviceID, rootfsBuildID string) (
 // rest from that snapshot. It returns every machine it created so a failed
 // deploy can clean up after itself.
 func (m *Manager) rollOut(ctx context.Context, svc *state.Service, rel *state.Release,
-	health HealthSpec, replicas int) ([]string, error) {
+	health HealthSpec, replicas int, knobs json.RawMessage) ([]string, error) {
 
 	var created []string
 
+	// Resolved ONCE, for the whole rollout. Per replica it would drift: during
+	// a rollout the service still names the previous release, so replica two
+	// would inherit from that one while replica one carried what the deploy
+	// asked for.
+	knobs = m.replicaKnobs(ctx, svc, knobs)
+
 	// Replica 1 BOOTS: a release has no memory image until something has
 	// proved this rootfs serves.
-	first, err := m.createReplica(ctx, svc, rel, false)
+	first, err := m.createReplica(ctx, svc, rel, false, knobs)
 	if err != nil {
 		return created, fmt.Errorf("services: first replica of %s: %w", rel.ID, err)
 	}
@@ -177,7 +184,7 @@ func (m *Manager) rollOut(ctx context.Context, svc *state.Service, rel *state.Re
 	}
 
 	for i := 1; i < replicas; i++ {
-		r, err := m.createReplica(ctx, svc, rel, rel.MemBuildID != "")
+		r, err := m.createReplica(ctx, svc, rel, rel.MemBuildID != "", knobs)
 		if err != nil {
 			return created, fmt.Errorf("services: replica %d of %s: %w", i+1, rel.ID, err)
 		}
@@ -198,14 +205,16 @@ func (m *Manager) rollOut(ctx context.Context, svc *state.Service, rel *state.Re
 // deploy because a snapshot was gone would be worse than one that took the
 // slow path.
 func (m *Manager) createReplica(ctx context.Context, svc *state.Service,
-	rel *state.Release, restore bool) (*state.Machine, error) {
+	rel *state.Release, restore bool, knobs json.RawMessage) (*state.Machine, error) {
 
 	req := api.CreateMachineRequest{
 		App:   svc.App,
 		Image: rel.RootfsBuildID,
 		// Replicas carry the service's lifecycle knobs, which is also where
 		// they persist: services has no knobs column and must not grow one.
-		Knobs:   m.replicaKnobs(ctx, svc),
+		// Resolved once per rollout by the caller, so replicas of one release
+		// cannot disagree.
+		Knobs:   knobs,
 		Service: svc.ID,
 		Release: rel.ID,
 	}
@@ -281,7 +290,9 @@ func (m *Manager) Rollback(ctx context.Context, serviceID string) (*state.Releas
 	if len(machines) == 0 {
 		// Its machines were pruned. Still recoverable: the release's build
 		// pair is the whole machine, so roll forward onto it instead.
-		fresh, err := m.rollOut(ctx, svc, target, health, max(svc.Replicas, 1))
+		// A rollback re-runs what was there; it asks for no knobs of its own
+		// and inherits whatever the release's surviving siblings carry.
+		fresh, err := m.rollOut(ctx, svc, target, health, max(svc.Replicas, 1), nil)
 		if err != nil {
 			// Same cleanup Deploy does in the same situation. rollOut returns
 			// what it created precisely so a failure does not leave half a
@@ -377,19 +388,34 @@ func max(a, b int) int {
 
 // replicaKnobs is the lifecycle configuration a new replica gets.
 //
-// Inherited from an existing replica so every machine of a service agrees,
-// and defaulted for the first one. auto_stop stays OFF by default for a
-// service replica: the autoscaler owns that decision and the idle monitor
-// stopping a replica behind its back would fight it.
-func (m *Manager) replicaKnobs(ctx context.Context, svc *state.Service) json.RawMessage {
+// Precedence: what the deploy asked for is merged over what an existing
+// replica carries, and that over the machine defaults. Inheriting from a
+// sibling is what keeps every machine of a service agreeing when nothing was
+// asked; the defaults are the sandbox's own (suspend when idle, wake on
+// demand, a floor of zero), because a replica IS a sandbox with a release
+// attached. The release, not a knob, is what hands its idle decision to the
+// autoscaler (machines.shouldSuspend), so nothing here needs to differ. A
+// warm replica is a deploy with min_machines_running set.
+func (m *Manager) replicaKnobs(ctx context.Context, svc *state.Service,
+	requested json.RawMessage) json.RawMessage {
+
+	base := api.DefaultKnobs()
 	if machines, err := m.replicasOf(ctx, svc.ID, svc.ReleaseID); err == nil {
 		for _, mach := range machines {
 			if mach.KindKnobs != "" {
-				return json.RawMessage(mach.KindKnobs)
+				base = api.ParseKnobs(mach.KindKnobs)
+				break
 			}
 		}
 	}
-	return json.RawMessage(`{"auto_stop":"off","min_machines_running":1}`)
+	if len(requested) > 0 {
+		// Partial, onto the inherited value: {"min_machines_running":1}
+		// changes the floor and nothing else. A decode error here is not
+		// the rollout's to swallow; the API validated the body already.
+		_ = json.Unmarshal(requested, &base)
+	}
+	raw, _ := api.MarshalKnobs(base)
+	return json.RawMessage(raw)
 }
 
 // remote asks another host to suspend or wake one of its machines.

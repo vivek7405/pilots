@@ -164,6 +164,12 @@ export interface CreateServiceRequest {
 export interface DeployRequest {
   release?: string
   build?: string
+  /**
+   * Lifecycle policy for the replicas this deploy creates, merged onto what
+   * the previous release's replicas carry. A service row keeps no knobs, so
+   * the deploy is where they travel.
+   */
+  knobs?: Knobs
 }
 
 export interface PromoteRequest {
