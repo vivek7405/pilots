@@ -270,7 +270,6 @@ async function upsertService(
   return await client.services.patch(existing.id, req)
 }
 
-
 /** Polls until the service reports the release just created, or gives up. */
 async function waitForRelease(
   client: PilotsClient,

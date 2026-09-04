@@ -194,6 +194,15 @@ func (d Deps) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "build is required"})
 		return
 	}
+	// Validated HERE, because the rollout merges these partially onto what the
+	// previous release's replicas carry and has no way to report a bad field
+	// without discarding the good ones. Unvalidated, {"min_machines_running":
+	// "one"} is a 200 whose replicas silently keep the old floor -- an
+	// operator asking for a warm replica and being told it worked.
+	if _, err := DecodeKnobs(req.Knobs); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
+		return
+	}
 	// The build becomes this service's root filesystem, so it is scoped like
 	// any other object the caller names by id.
 	if !d.ownedBuild(w, r, req.Build) {
