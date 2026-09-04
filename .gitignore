@@ -8,6 +8,10 @@ vmlinux*
 .env
 .env.*
 !.env.example
+# A test fixture, two placeholder values, read by the compose-plan tests.
+# Without this line the rule above hides it from git, the checkout on CI
+# has no such file, and the plan's env reads back empty there only.
+!packages/cli/test/fixtures/compose-app/.env
 /tmp/
 .DS_Store
 
