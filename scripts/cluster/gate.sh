@@ -531,6 +531,17 @@ else
   VHOST="${LIVE_IPS[0]}"
   VSURVIVOR="${LIVE_IPS[1]}"
 
+  # Minted on the host step 13 is about to power off, so 13b can prove the key
+  # outlives it. Minting it here rather than after the kill is the whole point:
+  # a key created on a host that is still alive proves nothing about
+  # replication.
+  MINTED=$(api "$VHOST" POST /v1/api-keys '{"org_id":"gate-org","scopes":["machines"]}' 2>/dev/null)
+  MINTED_KEY=$(echo "$MINTED" | jf key)
+  case "$MINTED_KEY" in
+    pilot_*) ok "minted a key on ${VHOST}, the host about to be killed" ;;
+    *) bad "could not mint a key on ${VHOST}: ${MINTED}" ;;
+  esac
+
   VOL=$(api "$VHOST" POST /v1/volumes '{"name":"gate-volume","size_gib":1,"mount_path":"/data"}')
   VOLID=$(echo "$VOL" | jf id)
   [ -n "$VOLID" ] && ok "created volume ${VOLID} on ${VHOST}" || bad "volume create failed: $VOL"
@@ -615,6 +626,46 @@ else
       && ok "/data is the volume drive on the rescuing host" \
       || bad "/data is backed by '${VDEV}', not the volume"
   fi
+fi
+
+say "13b. A key minted on a dead host still authenticates on every survivor"
+# The architecture's central claim, asserted where it can actually fail.
+#
+# The dashboard mints keys through POST /v1/api-keys and NEVER verifies one:
+# each host answers from its own replica of the hash. So a key is only as
+# available as replication makes it, and the way to prove that is to mint one
+# on a host and then use it after that host is gone.
+#
+# Step 13 has just hard powered off ${VHOST}. A key minted THERE, before the
+# power cut, is the interesting case: if minting wrote only to the minting
+# host, every call below is a 401 and the dashboard becomes a thing the fleet
+# depends on, which is exactly what the design forbids.
+if [ -n "${VHOST:-}" ] && [ -n "${MINTED_KEY:-}" ]; then
+  MINTED_AUTH="Authorization: Bearer ${MINTED_KEY}"
+  SURVIVORS=()
+  for ip in "${IPS[@]}" ${NEW_IP:-}; do
+    [ "$ip" = "$VHOST" ] && continue
+    curl -sf -m 5 "http://${ip}:8080/v1/health" >/dev/null 2>&1 && SURVIVORS+=("$ip")
+  done
+
+  if [ "${#SURVIVORS[@]}" -eq 0 ]; then
+    bad "no survivor left to check the minted key against"
+  else
+    for ip in "${SURVIVORS[@]}"; do
+      curl -sf -m 15 "http://${ip}:8080/v1/machines" -H "$MINTED_AUTH" >/dev/null 2>&1 \
+        && ok "${ip} authenticates the key minted on the now-dead ${VHOST}" \
+        || bad "${ip} rejected a key minted on ${VHOST}; auth depends on the minting host"
+    done
+
+    # And a garbage key is still refused, so the assertion above is not just
+    # "this host authenticates everything".
+    curl -sf -m 15 "http://${SURVIVORS[0]}:8080/v1/machines" \
+      -H "Authorization: Bearer pilot_definitely_not_a_real_key" >/dev/null 2>&1 \
+      && bad "${SURVIVORS[0]} accepted a key that was never minted" \
+      || ok "${SURVIVORS[0]} still refuses a key that was never minted"
+  fi
+else
+  bad "step 13 left no powered-off host or no minted key to check"
 fi
 
 # ---------------------------------------------------------------------------

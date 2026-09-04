@@ -1,0 +1,67 @@
+# The dashboard, deployed by the platform it administers.
+#
+#   docker compose up --build      →  http://localhost:8080
+#   pilot deploy                   →  https://pilots.run
+#
+# The BUILD CONTEXT is the repo root, not this directory, because the dashboard
+# imports `@pilots/sdk` from the `sdks/js` workspace. A context of `.` would
+# reach an `npm install` inside the image that cannot resolve a workspace
+# package that is not published. See ../../Dockerfile.dashboard.
+#
+# `pilots.run` is an ordinary custom domain on this service and is deliberately
+# a SEPARATE apex from `pilotrun.app`. A workload sharing the dashboard's apex
+# could set cookies scoped to it.
+x-pilots:
+  app: dashboard
+  custom_domain: pilots.run
+  # Keep one instance warm. This is the sign-in page and the key-minting path;
+  # a cold start on the way to `pilot login` is the wrong first impression.
+  min_machines_running: 1
+
+services:
+  app:
+    build:
+      context: ../..
+      dockerfile: apps/dashboard/Dockerfile
+    ports:
+      - "8080:8080"
+    # ONE replica, and this is a requirement rather than a default. Two would
+    # share one volume, which SQLite does not support across instances, and
+    # both would run the usage poller, double-counting every window.
+    deploy:
+      replicas: 1
+    environment:
+      PORT: 8080
+      # The database lives on the volume below, so it survives every redeploy
+      # and every restore from a release snapshot.
+      DATABASE_URL: file:/data/dev.db
+      # `secret://` values are resolved by `pilot deploy` on the client and sent
+      # as `secret_env`, which hostd seals with the fleet key before any row is
+      # written. None of them is in this file, the image, or a row in the clear.
+      AUTH_SECRET: secret://AUTH_SECRET
+      AUTH_GITHUB_ID: secret://AUTH_GITHUB_ID
+      AUTH_GITHUB_SECRET: secret://AUTH_GITHUB_SECRET
+      PILOT_ADMIN_KEY: secret://PILOT_ADMIN_KEY
+      # Required, with no default: a hostname off the workload apex that every
+      # host serves TLS for. The dashboard is a guest and reaches hostd over
+      # this public address, never over loopback.
+      PILOT_API_URL: ${PILOT_API_URL:-https://api.pilotrun.app}
+      # Optional. Absent, installation state renders as "App not configured on
+      # this fleet" and connecting a repo still works, because the ENGINE acts
+      # on a push.
+      PILOT_GITHUB_APP_ID: ${PILOT_GITHUB_APP_ID:-}
+      PILOT_GITHUB_APP_KEY: secret://PILOT_GITHUB_APP_KEY
+    volumes:
+      - app-data:/data
+    # The rollout cuts over only on a 200 here. `/__webjs/ready` answers a real
+    # 503 until the instance is warm, so this gates on readiness rather than on
+    # "the port accepted a connection".
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:'+(process.env.PORT||8080)+'/__webjs/ready').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 15s
+      timeout: 3s
+      start_period: 40s
+      retries: 5
+
+volumes:
+  app-data:
