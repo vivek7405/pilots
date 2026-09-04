@@ -1,17 +1,21 @@
 /**
  * The root layout: the only file in this app that may write the document
- * shell.
+ * shell. It owns the design tokens, the theme, and the app chrome.
  *
- * It renders the nav, the org switcher and the sign-out form. All three are
- * plain markup and plain forms: a page never hydrates, so this costs the
- * browser no JavaScript at all, and the switcher works with scripting off.
+ * The nav, the org switcher and the sign-out form are plain markup and plain
+ * forms, so they work with scripting off. The theme toggle is the one element
+ * here that needs a browser, and it is the only JavaScript any page ships.
  */
 
-import { html, asset } from '@webjsdev/core';
+import { html, asset, cspNonce } from '@webjsdev/core';
 import type { LayoutProps } from '@webjsdev/core';
 import { currentUser } from '#modules/auth/queries/current-user.server.ts';
 import { listOrgs } from '#modules/orgs/queries/list-orgs.server.ts';
 import { switchOrg } from '#modules/orgs/actions/switch-org.server.ts';
+import { buttonClass } from '#components/ui/button.ts';
+import { nativeSelectClass, nativeSelectIconClass, nativeSelectWrapperClass } from '#components/ui/native-select.ts';
+import { cn } from '#lib/utils/cn.ts';
+import '#components/theme-toggle.ts';
 
 export const metadata = {
   title: { default: 'pilots', template: '%s · pilots' },
@@ -32,17 +36,95 @@ export default async function RootLayout({ children, url }: LayoutProps) {
   const me = await currentUser();
   const orgs = me ? await listOrgs(me.id) : [];
   const path = new URL(url ?? 'http://localhost/').pathname;
+  const nonce = cspNonce();
 
   return html`
+    <script nonce="${nonce}">
+      // Apply the saved theme before the first paint, so a reload of a page
+      // chosen as dark does not flash light. The tokens below follow
+      // color-scheme, which [data-theme] forces and otherwise inherits from the
+      // OS, so an unset choice needs no work here beyond the .dark class the
+      // kit's dark: variants key on. (No backticks in here: this comment is
+      // inside a template literal, so one would end it.)
+      (function () {
+        try {
+          var mq = window.matchMedia('(prefers-color-scheme: dark)');
+          function apply() {
+            var t = null;
+            try { t = localStorage.getItem('pilots_theme'); } catch (_) {}
+            var el = document.documentElement;
+            if (t === 'light' || t === 'dark') el.dataset.theme = t;
+            else delete el.dataset.theme;
+            el.classList.toggle('dark', t === 'dark' || (t !== 'light' && mq.matches));
+          }
+          apply();
+          mq.addEventListener('change', apply);
+        } catch (_) {}
+      })();
+    </script>
     <meta name="color-scheme" content="light dark">
     <link rel="stylesheet" href=${asset('/public/tailwind.css')}>
     <style>
+      /* Design tokens. The NAMES are infrastructure: public/input.css maps them
+         into Tailwind utilities via @theme, which is where bg-card,
+         text-muted-foreground and border-border come from. The VALUES are here,
+         as plain custom properties, so they resolve with JavaScript disabled.
+
+         One definition per colour via light-dark(LIGHT, DARK), so a palette
+         change lands in one place. color-scheme decides which half applies:
+         the default 'light dark' follows the OS and the [data-theme] rules
+         below force one. That is why this block also overrides the flat :root
+         and .dark palettes public/input.css ships: those are the kit's
+         placeholder neutrals, and the toggle would otherwise have to keep two
+         palettes agreeing with each other.
+
+         light-dark() is COLOUR-only. A non-colour token that must differ per
+         theme needs a :root[data-theme='dark'] rule plus a
+         prefers-color-scheme media query; nothing here does. */
+      :root {
+        --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
+        --font-serif: ui-serif, Georgia, 'Times New Roman', serif;
+        --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+        color-scheme: light dark;
+
+        --background:           light-dark(#ffffff, #16181d);
+        --foreground:           light-dark(#15181d, #e3e6ea);
+        --card:                 light-dark(#f8f9fb, #1d2026);
+        --card-foreground:      light-dark(#15181d, #e3e6ea);
+        --popover:              light-dark(#ffffff, #1d2026);
+        --popover-foreground:   light-dark(#15181d, #e3e6ea);
+        --primary:              light-dark(#1f4fd8, #8ab0ff);
+        --primary-foreground:   light-dark(#ffffff, #12141a);
+        --secondary:            light-dark(#eef0f4, #262a31);
+        --secondary-foreground: light-dark(#15181d, #e3e6ea);
+        --muted:                light-dark(#f1f3f6, #22262d);
+        --muted-foreground:     light-dark(#5a6270, #949cab);
+        --accent:               light-dark(#e8ebf0, #2a2f37);
+        --accent-foreground:    light-dark(#15181d, #e3e6ea);
+        --destructive:          light-dark(#c0332b, #e5484d);
+        --border:               light-dark(#e1e4ea, #30353d);
+        --border-strong:        light-dark(#c8cdd6, #3f454f);
+        --input:                light-dark(#e1e4ea, #30353d);
+        --ring:                 light-dark(#1f4fd8, #8ab0ff);
+        /* A translucent primary, tracked across both themes for free because it
+           derives from a token that already is. */
+        --primary-tint: color-mix(in srgb, var(--primary) 22%, transparent);
+      }
+      /* The toggle writes data-theme to FORCE a scheme; with neither attribute
+         the 'light dark' above follows the OS. */
+      :root[data-theme='light'] { color-scheme: light; }
+      :root[data-theme='dark'] { color-scheme: dark; }
+    </style>
+    <style>
+      /* Base styles no utility class can reach. */
       html, body { margin: 0; }
       body {
-        background: var(--background, Canvas);
-        color: var(--foreground, CanvasText);
-        font: 15px/1.6 ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+        background: var(--background);
+        color: var(--foreground);
+        font: 15px/1.6 var(--font-sans);
         -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
       }
     </style>
 
@@ -52,14 +134,15 @@ export default async function RootLayout({ children, url }: LayoutProps) {
             <div class="max-w-6xl mx-auto px-6 py-3 flex flex-wrap items-center gap-x-6 gap-y-3">
               <a href="/machines" class="font-semibold tracking-tight no-underline text-foreground">pilots</a>
 
-              <nav class="flex items-center gap-4 text-sm">
+              <nav class="flex items-center gap-4 text-sm" aria-label="Primary">
                 ${NAV.map(
                   ([href, label]) => html`
                     <a
                       href=${href}
-                      class=${path.startsWith(href)
-                        ? 'no-underline text-foreground font-medium'
-                        : 'no-underline text-muted-foreground hover:text-foreground'}
+                      class=${cn(
+                        'no-underline transition-colors',
+                        path.startsWith(href) ? 'text-foreground font-medium' : 'text-muted-foreground hover:text-foreground',
+                      )}
                       aria-current=${path.startsWith(href) ? 'page' : 'false'}
                       >${label}</a
                     >
@@ -70,36 +153,39 @@ export default async function RootLayout({ children, url }: LayoutProps) {
               <div class="ml-auto flex items-center gap-3 text-sm">
                 ${orgs.length > 1
                   ? html`
-                      <form action=${switchOrg} class="flex items-center gap-2">
+                      <form action=${switchOrg} class="flex items-end gap-2">
                         <input type="hidden" name="back" value=${path}>
-                        <label class="sr-only" for="org-switch">Org</label>
-                        <select
-                          id="org-switch"
-                          name="org"
-                          class="rounded-md border border-border bg-background px-2 py-1 text-sm"
-                        >
-                          ${orgs.map(
-                            (o) => html`<option value=${o.id} ?selected=${o.id === me.org.id}>${o.slug}</option>`,
-                          )}
-                        </select>
-                        <button type="submit" class="rounded-md border border-border px-2 py-1 hover:bg-muted">
-                          Switch
-                        </button>
+                        <label class="sr-only" for="org-switch">Organisation</label>
+                        <div class=${nativeSelectWrapperClass()}>
+                          <select id="org-switch" name="org" data-size="sm" class=${nativeSelectClass()}>
+                            ${orgs.map(
+                              (o) => html`<option value=${o.id} ?selected=${o.id === me.org.id}>${o.slug}</option>`,
+                            )}
+                          </select>
+                          <svg class=${nativeSelectIconClass()} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+                        </div>
+                        <button type="submit" class=${buttonClass({ variant: 'outline', size: 'sm' })}>Switch</button>
                       </form>
                     `
                   : html`<span class="text-muted-foreground">${me.org.slug}</span>`}
 
                 <span class="text-muted-foreground">${me.login}</span>
                 <form method="POST" action="/api/auth/signout">
-                  <button type="submit" class="rounded-md border border-border px-2 py-1 hover:bg-muted">
-                    Sign out
-                  </button>
+                  <button type="submit" class=${buttonClass({ variant: 'ghost', size: 'sm' })}>Sign out</button>
                 </form>
+                <theme-toggle></theme-toggle>
               </div>
             </div>
           </header>
         `
-      : ''}
+      : html`
+          <header class="border-b border-border">
+            <div class="max-w-6xl mx-auto px-6 py-3 flex items-center gap-4">
+              <a href="/" class="font-semibold tracking-tight no-underline text-foreground">pilots</a>
+              <div class="ml-auto"><theme-toggle></theme-toggle></div>
+            </div>
+          </header>
+        `}
 
     <main class="max-w-6xl mx-auto px-6 py-8">${children}</main>
   `;
