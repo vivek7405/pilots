@@ -146,6 +146,25 @@ if [ -n "$A_IP" ]; then
   fi
 fi
 
+# slice_of finds a machine's cgroup v2 slice without hard-coding the layout.
+# The jailer builds the path from --parent-cgroup, the exec file's name and
+# --id, so it is pilots/firecracker/<id> on a current Firecracker and pilots/<id>
+# on older ones. A `find` is right either way, and a wrong hard-coded path
+# would read as "the limit is missing" rather than "the path moved".
+slice_of() {
+  $SSH "root@$1" "find /sys/fs/cgroup/pilots -maxdepth 3 -type d -name '$2' 2>/dev/null | head -1" \
+    2>/dev/null | tr -d '[:space:]'
+}
+
+# fc_pid reads the Firecracker pid out of the machine's own slice. pgrep will
+# not do it: the jailer execve()s Firecracker over itself, so the --id that
+# named the machine is gone from the command line by the time it matters.
+fc_pid() {
+  local slice; slice=$(slice_of "$1" "$2")
+  [ -z "$slice" ] && return
+  $SSH "root@$1" "head -1 ${slice}/cgroup.procs" 2>/dev/null | tr -d '[:space:]'
+}
+
 # curl_from <ip> <machine> <url> -> "<http_code> <resolved ip>"
 curl_from() {
   api "$1" POST "/v1/machines/$2/exec" \
@@ -289,6 +308,96 @@ if [ -n "${DOM:-}" ]; then
   curl -sf -m 3 "http://${B_IP}:8080/v1/health" >/dev/null 2>&1 \
     && ok "brought ${DOM} back for the fleet steps" \
     || bad "${DOM} did not come back; the steps below have no fleet to work with"
+fi
+
+say "7b. A promoted service at floor zero frees its Firecracker when idle, and not while a peer holds a session"
+# The claim this whole change exists to make is that an idle replica GIVES ITS
+# HOST BACK. A row saying "suspended" is not that claim; an absent Firecracker
+# process is. And the counterweight: a replica must not be given back while a
+# peer is mid-transaction over .internal, where no request the router can see
+# ever appears.
+if [ "${#LIVE_IPS[@]}" -ge 2 ]; then
+  SZ_APP="gate-sleep-$$"
+  SZ=$(api "$A_IP" POST /v1/machines \
+    "{\"app\":\"${SZ_APP}\",\"vcpus\":1,\"mem_mib\":512,\"cmd\":\"sleep 86400\"}")
+  SZ_ID=$(echo "$SZ" | jf id); SZ_NAME=$(echo "$SZ" | jf name)
+  CLIENT=$(api "$B_IP" POST /v1/machines \
+    "{\"app\":\"${SZ_APP}\",\"vcpus\":1,\"mem_mib\":512,\"cmd\":\"sleep 86400\",\"knobs\":{\"auto_stop\":\"off\"}}")
+  CLIENT_ID=$(echo "$CLIENT" | jf id)
+
+  if [ -z "$SZ_ID" ] || [ -z "$CLIENT_ID" ]; then
+    bad "could not create the pair for the scale-to-zero step"
+  else
+    api "$A_IP" POST "/v1/machines/${SZ_ID}/promote" '{}' >/dev/null 2>&1
+    SZ_HOST_IP=""
+    for ip in "${LIVE_IPS[@]}"; do
+      [ -n "$(fc_pid "$ip" "$SZ_ID")" ] && SZ_HOST_IP="$ip" && break
+    done
+    [ -z "$SZ_HOST_IP" ] && SZ_HOST_IP="$A_IP"
+
+    # 1. Idle: the row says suspended AND the process is gone.
+    START=$SECONDS; STATE=""
+    while [ $((SECONDS - START)) -lt 120 ]; do
+      STATE=$(api "$A_IP" GET "/v1/machines/${SZ_ID}" | jf state)
+      [ "$STATE" = "suspended" ] && break
+      sleep 5
+    done
+    if [ "$STATE" = "suspended" ]; then
+      ok "the promoted service suspended itself after $((SECONDS - START))s at a floor of zero"
+      if [ -z "$(fc_pid "$SZ_HOST_IP" "$SZ_ID")" ]; then
+        ok "its firecracker is gone, so the host actually got its memory back"
+      else
+        bad "the row says suspended but a firecracker is still running for ${SZ_ID}"
+      fi
+    else
+      bad "the promoted service never suspended (state '${STATE}'); a deployed service cannot sleep"
+    fi
+
+    # 2. A peer over .internal wakes it, and the process comes back.
+    OUT=$(curl_until "$B_IP" "$CLIENT_ID" "http://${SZ_NAME}.internal:3001/health")
+    if [ "${OUT%% *}" = "200" ]; then
+      ok "a peer woke it over .internal and got 200"
+      [ -n "$(fc_pid "$SZ_HOST_IP" "$SZ_ID")" ] \
+        && ok "its firecracker is back" \
+        || bad "it answered 200 with no firecracker running, which cannot be right"
+    else
+      bad "a peer could not wake the service at zero (curl said '${OUT}')"
+    fi
+
+    # 3. A silent, open session holds it up. This is the half that keeps a
+    # database alive mid-transaction, and no packet counter can see it.
+    api "$B_IP" POST "/v1/machines/${CLIENT_ID}/exec" \
+      "{\"cmd\":\"nohup bash -c 'exec 3<>/dev/tcp/${SZ_NAME}.internal/3001; sleep 300' >/dev/null 2>&1 & echo held\",\"user\":\"root\"}" \
+      >/dev/null 2>&1
+    sleep 75
+    STATE=$(api "$A_IP" GET "/v1/machines/${SZ_ID}" | jf state)
+    if [ "$STATE" = "running" ] && [ -n "$(fc_pid "$SZ_HOST_IP" "$SZ_ID")" ]; then
+      ok "a held session kept it running past the scale-down window"
+    else
+      bad "it was given back with a session open on it (state '${STATE}'): a transaction died mid-flight"
+    fi
+
+    # 4. And it sleeps again once the client lets go.
+    api "$B_IP" POST "/v1/machines/${CLIENT_ID}/exec" \
+      "{\"cmd\":\"pkill -f 'sleep 300' || true\",\"user\":\"root\"}" >/dev/null 2>&1
+    START=$SECONDS; STATE=""
+    while [ $((SECONDS - START)) -lt 120 ]; do
+      STATE=$(api "$A_IP" GET "/v1/machines/${SZ_ID}" | jf state)
+      [ "$STATE" = "suspended" ] && [ -z "$(fc_pid "$SZ_HOST_IP" "$SZ_ID")" ] && break
+      sleep 5
+    done
+    if [ "$STATE" = "suspended" ]; then
+      ok "it went back to sleep $((SECONDS - START))s after the session closed"
+    else
+      bad "it never slept again after the session closed (state '${STATE}'); a stale flow holds it forever"
+    fi
+  fi
+
+  for id in ${SZ_ID:-} ${CLIENT_ID:-}; do
+    for ip in "${LIVE_IPS[@]}"; do
+      api "$ip" DELETE "/v1/machines/${id}" >/dev/null 2>&1 && break
+    done
+  done
 fi
 
 say "8. Hard-kill the host that owns it"
@@ -713,25 +822,6 @@ H_IP="${HOSTILE_IPS[0]:-}"
 nbd_attached() {
   $SSH "root@$1" 'for f in /sys/block/nbd*/pid; do [ -s "$f" ] && basename "$(dirname "$f")"; done' \
     2>/dev/null | sort
-}
-
-# slice_of finds a machine's cgroup v2 slice without hard-coding the layout.
-# The jailer builds the path from --parent-cgroup, the exec file's name and
-# --id, so it is pilots/firecracker/<id> on a current Firecracker and pilots/<id>
-# on older ones. A `find` is right either way, and a wrong hard-coded path
-# would read as "the limit is missing" rather than "the path moved".
-slice_of() {
-  $SSH "root@$1" "find /sys/fs/cgroup/pilots -maxdepth 3 -type d -name '$2' 2>/dev/null | head -1" \
-    2>/dev/null | tr -d '[:space:]'
-}
-
-# fc_pid reads the Firecracker pid out of the machine's own slice. pgrep will
-# not do it: the jailer execve()s Firecracker over itself, so the --id that
-# named the machine is gone from the command line by the time it matters.
-fc_pid() {
-  local slice; slice=$(slice_of "$1" "$2")
-  [ -z "$slice" ] && return
-  $SSH "root@$1" "head -1 ${slice}/cgroup.procs" 2>/dev/null | tr -d '[:space:]'
 }
 
 # host_counts prints the three host-side resources a machine owns, so a leak is
