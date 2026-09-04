@@ -87,15 +87,23 @@ for ip in "${IPS[@]}"; do
 done
 
 if [ "${#VERSIONS[@]}" = "${#IPS[@]}" ]; then
-  # Each host may be one heartbeat behind every other host at the instant of
-  # the read, so the fleet size is the allowance. A wider spread than that is
-  # replication falling behind, not sampling.
+  # What this rules out is replication STALLED, not replication in flight.
+  # Gossip is asynchronous and every host writes a heartbeat every 5 s, so at
+  # the instant of a read a replica can be missing several recent writes from
+  # each peer -- and the reads themselves are sequential, one curl per host,
+  # so more land between the first and the last. An allowance of one write per
+  # host would fail on a perfectly healthy fleet.
+  #
+  # A few heartbeats per host is the sampling noise; a host that has actually
+  # stopped applying drifts by hundreds within a minute, which this still
+  # catches.
+  ALLOWED=$(( ${#IPS[@]} * 8 ))
   MAXV=$(printf '%s\n' "${VERSIONS[@]}" | sort -n | tail -1)
   MINV=$(printf '%s\n' "${VERSIONS[@]}" | sort -n | head -1)
   SPREAD=$((MAXV - MINV))
-  [ "$SPREAD" -le "${#IPS[@]}" ] \
+  [ "$SPREAD" -le "$ALLOWED" ] \
     && ok "replica versions are within ${SPREAD} of each other (${VERSIONS[*]})" \
-    || bad "replica versions span ${SPREAD}, want at most ${#IPS[@]} (${VERSIONS[*]})"
+    || bad "replica versions span ${SPREAD}, want at most ${ALLOWED} (${VERSIONS[*]})"
 fi
 
 say "2. A machine created on one host is visible and routable from every host"

@@ -152,11 +152,14 @@ func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
 // the chunk store relies on distinguishing "this object is empty because the
 // diff was all zeros" from "this fetch failed".
 func (c *Client) GetRange(ctx context.Context, key string, offset, length int64) ([]byte, error) {
-	defer observe("getrange", time.Now())
-
+	// Below the guard, not above it: a zero-length range makes no call at
+	// all, and counting one would add a call that never happened plus a
+	// near-zero latency sample that drags every getrange quantile down.
 	if length <= 0 {
 		return nil, nil
 	}
+	defer observe("getrange", time.Now())
+
 	rng := fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)
 
 	out, err := c.api.GetObject(ctx, &s3.GetObjectInput{
