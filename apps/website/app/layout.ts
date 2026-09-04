@@ -144,7 +144,7 @@ export default function RootLayout({ children }: LayoutProps) {
         </div>
       </div>
       <!-- The mobile nav is a plain scrolling row, not a hamburger opening a
-           full-screen overlay. Four links do not earn a disclosure widget, and
+           full-screen overlay. Six links do not earn a disclosure widget, and
            the overlay pattern costs a script, a focus trap, and a scroll lock
            to show what fits on one line. -->
       <nav class="mid:hidden border-t border-rule overflow-x-auto scroll-thin" aria-label="Main, condensed">

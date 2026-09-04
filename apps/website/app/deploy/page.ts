@@ -185,8 +185,9 @@ export default function Deploy() {
           failure and disk state that merely survives a restart.
         </p>
         <p class="${PROSE} mt-4">
-          Volumes are Phase 5 work and are being built now.
-          <a class=${LINK} href="/roadmap">The roadmap</a> tracks it honestly.
+          Volumes shipped with Phase 5, and its gate asserts that volume data survives the host
+          dying and the machine being rescued elsewhere.
+          <a class=${LINK} href="/roadmap">The roadmap</a> says what is still open.
         </p>
       `,
     })}

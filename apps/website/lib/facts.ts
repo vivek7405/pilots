@@ -145,6 +145,12 @@ export const FACTS = {
     source: 'Phase 4 issue #5 (closed): minimum WireGuard MTU less the IPv6 and UDP headers',
     kind: 'design',
   },
+  pageSize: {
+    value: '2MiB',
+    label: 'guest page size, fleet-wide',
+    source: 'ARCHITECTURE.md rule 8: PILOT_HUGEPAGES, recorded in every snapshot and never reinterpreted at restore',
+    kind: 'design',
+  },
   settle: {
     value: '20s',
     label: 'guest settle before a template is captured',
@@ -155,27 +161,33 @@ export const FACTS = {
   /* Measured. The rig is named in every source string because it is the whole
      caveat: no reflink support, so every copy is a real copy. */
   createMeasured: {
-    value: '462ms',
+    value: '142ms',
     label: 'create, median',
-    source: 'Phase 6 issue #7, state verified 2026-09-02: scripts/e2e.mjs on the laptop rig, no reflink support',
+    source: 'Phase 6 perf PR #28, merged 2026-09-04: scripts/e2e.mjs on a nested-KVM host with 2MiB hugepages, no reflink support',
     kind: 'measured',
   },
   wakeMeasured: {
-    value: '94ms',
+    value: '255ms',
     label: 'wake, median',
-    source: 'Phase 6 issue #7, state verified 2026-09-02: scripts/e2e.mjs on the laptop rig, no reflink support',
+    source: 'Phase 6 perf PR #28, merged 2026-09-04: scripts/e2e.mjs on a nested-KVM host with 2MiB hugepages, no reflink support',
     kind: 'measured',
   },
   resumeGapMeasured: {
-    value: '341ms',
+    value: '300ms',
     label: 'checkpoint resume gap, median',
-    source: 'Phase 6 issue #7, state verified 2026-09-02: scripts/e2e.mjs on the laptop rig, no reflink support',
+    source: 'Phase 6 perf PR #28, merged 2026-09-04: scripts/e2e.mjs on a nested-KVM host with 2MiB hugepages, no reflink support',
+    kind: 'measured',
+  },
+  resumeGapSmallPages: {
+    value: '3726ms',
+    label: 'the same resume gap without hugepages',
+    source: 'Phase 6 perf PR #28, merged 2026-09-04: the same battery on the same host at 4KiB pages',
     kind: 'measured',
   },
   assertions: {
-    value: '47',
-    label: 'assertions in the battery',
-    source: 'Phase 6 issue #7, state verified 2026-09-02: scripts/e2e.mjs, of which the cluster gate runs 45',
+    value: '98',
+    label: 'steps in the battery',
+    source: 'scripts/e2e.mjs on main, counted 2026-09-04: await step calls, beside 21 numbered sections in scripts/cluster/gate.sh',
     kind: 'measured',
   },
   rescue: {

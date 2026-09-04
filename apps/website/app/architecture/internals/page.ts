@@ -120,7 +120,10 @@ const TABLES: [string, string, string][] = [
   ['services', 'the host running it', 'The production face: replicas, the current release, a health specification, plain environment values, and sealed ones.'],
   ['releases', 'the host running the service', 'One rootfs build plus whether it was ever observed healthy, which is what a rollback selects against.'],
   ['volumes', 'the host it is mounted on', 'Where a volume lives in object storage, and which machine currently has it.'],
-  ['api_keys', 'the dashboard’s host', 'Key hashes only, replicated everywhere so that every host authenticates against its own disk. One of exactly three sanctioned exceptions to the single-writer rule.'],
+  ['api_keys', 'any host, on an admin-scoped request', 'Key hashes only, replicated everywhere so that every host authenticates against its own disk. Each row is written once, which is what makes any host a safe writer.'],
+  ['api_key_revocations', 'any host, on an admin-scoped request', 'A tombstone per revoked key. It only ever appears and never changes, so no two writers can disagree about it.'],
+  ['tenancy', 'the host writing the object row', 'Which org owns each machine, service, and volume. Written once, before the object row it names, so a create that dies partway leaves an owner and never an orphan.'],
+  ['org_quotas', 'any host, on an admin-scoped request', 'Ceilings per org on machines, cores, memory, volume space, and concurrent builds. One logical writer per row, so the merge has nothing to corrupt.'],
 ];
 
 export default function Internals() {
@@ -340,7 +343,7 @@ export default function Internals() {
         <p class="${PROSE} mt-10">
           Nothing enforces that column. Two hosts writing one row does not conflict and does not error,
           it merges, and the loser disappears with no trace anywhere. That is why the writer is a
-          property of the design rather than a constraint in a schema, and why the three exceptions are
+          property of the design rather than a constraint in a schema, and why the exceptions are
           enumerated rather than left to judgement.
         </p>
 
@@ -591,18 +594,19 @@ export default function Internals() {
     ${section({
       id: 'surface',
       heading: 'What drives all of this',
-      lede: html`The engine is finished ahead of the surface over it, so this section is mostly the last
-        phase. The parts that already exist are the API above and the guest protocol inside every
-        machine.`,
+      lede: html`The engine finished ahead of the surface over it. What exists on the API today is
+        tenancy, scoped keys, revocation, and quotas. The dashboard and the command line are in review,
+        and the tool server for agents ships inside the command line.`,
       body: html`
         <div class="grid gap-10 wide:grid-cols-[0.9fr_1.1fr]">
           <div class="min-w-0">
             <h3 class="text-h3 font-semibold m-0">Authentication survives losing any host</h3>
             <p class="${PROSE} mt-3">
-              The dashboard mints keys and never verifies one. It writes the hash into the replicated
-              table through its own local host, and from then on every host authenticates against its own
-              disk. Kill the dashboard's host and the API keeps accepting the keys it issued. Revocation
-              sets a field rather than deleting a row, for the resurrection reason above.
+              A key is minted through the API on any host, under the admin scope, and the first one
+              comes from an operator on a host. The dashboard calls that route and never verifies a key.
+              From then on every host authenticates against its own disk, so killing the dashboard's
+              host changes nothing about which keys the API accepts. Revocation writes a tombstone
+              rather than deleting a row, for the resurrection reason above.
             </p>
             <p class="${PROSE} mt-4">
               An agent is a first-class principal here. An API key is all one needs, scopes on the key
@@ -643,8 +647,8 @@ export default function Internals() {
             ['2', 3, 'closed', 'Engine core', 'One box end to end: boot, exec, pause and resume, snapshot and restore, the router with wake-on-request, the idle monitor, and the isolation layer. Allowed to be slow, and it was.'],
             ['3', 4, 'closed', 'The instant engine', 'Everything under the storage and lazy-paging figures: content-addressed blocks, the header format, the two handlers, fault-order replay, and checkpoints that resume before they finish uploading.'],
             ['4', 5, 'closed', 'Cross-host and resilience', 'The gossiped replica replacing a local database, the encrypted mesh, any host serving any machine, and the self-heal loop with the standing-down rule.'],
-            ['5', 15, 'in progress', 'Volumes and the production face', 'Durable volumes on object storage, the build pipeline, guest-to-guest naming, sealed environment values, and services with health-gated deploys. The first two parts have merged.'],
-            ['6', 7, 'not started', 'Product surface and sign-off', 'The dashboard, accounts and keys, the command line, typed clients, the agent tool server, quotas and metering, and a hostility suite that replays every known incident class as a test.'],
+            ['5', 15, 'closed', 'Volumes and the PaaS face', 'Durable volumes on object storage, the build pipeline, guest-to-guest naming, sealed environment values, and services with health-gated deploys. All three parts merged and the gate passed.'],
+            ['6', 7, 'in progress', 'Product surface and sign-off', 'Tenancy, scoped keys and quotas on the API, typed clients, the hostility suite, and hugepage-backed guest memory have merged. The command line with the agent tool server, and the dashboard, are in review. Metering and the fleet sign-off remain.'],
           ].map(
             ([n, issue, status, title, body], i) => html`
               <li class="py-7 ${i > 0 ? 'border-t border-rule' : ''}">
@@ -730,6 +734,14 @@ export default function Internals() {
         </div>
 
         <p class="${PROSE} mt-10">
+          The largest single change since the engine closed is guest memory backed by
+          ${inlineFact('pageSize')} hugepages. On the same host, the same battery's checkpoint resume gap
+          fell from ${inlineFact('resumeGapSmallPages')} to ${inlineFact('resumeGapMeasured')}, because
+          the page size is recorded in every snapshot and a host that disagrees with the fleet refuses to
+          restore rather than restoring slowly.
+        </p>
+
+        <p class="${PROSE} mt-6">
           The fleet numbers that matter are not in either group, because the fleet does not exist yet.
           The chaos gate is the closest thing there is: on a three-node rig, hard-killing the host that
           owned a machine returned it on a survivor in ${inlineFact('rescue')} with the same address and
