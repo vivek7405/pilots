@@ -2,6 +2,7 @@ package metrics
 
 import (
 	"bytes"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -162,5 +163,135 @@ func TestCounterSetMirrorsAnExternalTotal(t *testing.T) {
 	c.Set(42) // a later scrape of the same handler
 	if got := c.Load(); got != 42 {
 		t.Errorf("counter = %d, want 42 -- Set must not accumulate", got)
+	}
+}
+
+// A CounterVec renders one family header and one sample per label value,
+// sorted, so two scrapes of the same state are byte-identical.
+func TestCounterVecRendersOneHeaderAndSortedSeries(t *testing.T) {
+	r := NewRegistry()
+	v := NewCounterVec(r, "pilots_test_ops_total", "A counter vec.", "op")
+	v.With("put").Inc()
+	v.With("get").Add(3)
+
+	var buf bytes.Buffer
+	r.Render(&buf)
+
+	want := strings.Join([]string{
+		"# HELP pilots_test_ops_total A counter vec.",
+		"# TYPE pilots_test_ops_total counter",
+		`pilots_test_ops_total{op="get"} 3`,
+		`pilots_test_ops_total{op="put"} 1`,
+		"",
+	}, "\n")
+	if got := buf.String(); got != want {
+		t.Errorf("rendered\n%s\nwant\n%s", got, want)
+	}
+}
+
+// A GaugeVec is what publishes pilots_machines{state}, so every value it has
+// ever been given has to keep rendering: a state that empties must read 0
+// rather than vanish.
+func TestGaugeVecRendersEveryValueItHasBeenGiven(t *testing.T) {
+	r := NewRegistry()
+	v := NewGaugeVec(r, "pilots_test_machines", "A gauge vec.", "state")
+	v.With("running").Set(2)
+	v.With("suspended").Set(1)
+	v.With("running").Set(0)
+
+	var buf bytes.Buffer
+	r.Render(&buf)
+
+	want := strings.Join([]string{
+		"# HELP pilots_test_machines A gauge vec.",
+		"# TYPE pilots_test_machines gauge",
+		`pilots_test_machines{state="running"} 0`,
+		`pilots_test_machines{state="suspended"} 1`,
+		"",
+	}, "\n")
+	if got := buf.String(); got != want {
+		t.Errorf("rendered\n%s\nwant\n%s", got, want)
+	}
+}
+
+// With is the only way to reach a series, so it has to return the same one
+// every time. A second series for the same label value would split the count.
+func TestVecWithReturnsTheSameSeriesTwice(t *testing.T) {
+	r := NewRegistry()
+	c := NewCounterVec(r, "pilots_test_ops_total", "A counter vec.", "op")
+	g := NewGaugeVec(r, "pilots_test_machines", "A gauge vec.", "state")
+
+	if c.With("get") != c.With("get") {
+		t.Error("CounterVec.With returned two different series for one label value")
+	}
+	if g.With("running") != g.With("running") {
+		t.Error("GaugeVec.With returned two different series for one label value")
+	}
+	c.With("get").Inc()
+	c.With("get").Inc()
+	if n := c.With("get").Load(); n != 2 {
+		t.Errorf("counter = %d after two increments through With, want 2", n)
+	}
+}
+
+// Empty vecs publish nothing rather than a header with no samples, which some
+// scrapers treat as a malformed family. Four of this host's ten families are
+// vecs, so on a quiet host this is the normal case.
+func TestEmptyCounterAndGaugeVecsRenderNothing(t *testing.T) {
+	r := NewRegistry()
+	NewCounterVec(r, "pilots_test_ops_total", "A counter vec.", "op")
+	NewGaugeVec(r, "pilots_test_machines", "A gauge vec.", "state")
+
+	var buf bytes.Buffer
+	r.Render(&buf)
+	if buf.Len() != 0 {
+		t.Errorf("empty vecs rendered %q", buf.String())
+	}
+}
+
+// Adding labels to Counter and Gauge must not put an empty brace pair on an
+// unlabelled sample. TestRenderProducesPrometheusText covers the counter byte
+// for byte; this covers the gauge, which that test does not use.
+func TestAnUnlabelledGaugeRendersWithoutBraces(t *testing.T) {
+	r := NewRegistry()
+	NewGauge(r, "pilots_test_free", "A gauge.").Set(7)
+
+	var buf bytes.Buffer
+	r.Render(&buf)
+
+	want := strings.Join([]string{
+		"# HELP pilots_test_free A gauge.",
+		"# TYPE pilots_test_free gauge",
+		"pilots_test_free 7",
+		"",
+	}, "\n")
+	if got := buf.String(); got != want {
+		t.Errorf("rendered\n%s\nwant\n%s", got, want)
+	}
+}
+
+// The vecs are written from request handlers and from the idle tick at the
+// same time. Run under -race.
+func TestVecsAreSafeUnderConcurrentUse(t *testing.T) {
+	r := NewRegistry()
+	c := NewCounterVec(r, "pilots_test_ops_total", "A counter vec.", "op")
+	g := NewGaugeVec(r, "pilots_test_machines", "A gauge vec.", "state")
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				c.With([]string{"get", "put"}[j%2]).Inc()
+				g.With([]string{"running", "stopped"}[j%2]).Set(int64(j))
+				r.Render(io.Discard)
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	if n := c.With("get").Load() + c.With("put").Load(); n != 8*200 {
+		t.Errorf("counted %d increments, want %d", n, 8*200)
 	}
 }

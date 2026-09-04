@@ -50,6 +50,19 @@ func (f *inFlight) count(id string) int {
 	return f.n[id]
 }
 
+// total is every machine's in-flight count summed, for pilots_router_inflight.
+// Summed here rather than published per machine: a series per machine is
+// exactly the cardinality the metrics package doc refuses.
+func (f *inFlight) total() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, c := range f.n {
+		n += c
+	}
+	return n
+}
+
 // Begin and End bracket a request against a machine, and Touch records
 // activity that is not a request -- an exec, a websocket frame.
 func (m *Manager) Begin(id string) { m.flight.begin(id) }
@@ -97,6 +110,9 @@ func (m *Manager) suspendIdleMachines(ctx context.Context) {
 		slog.Error("idle monitor could not list machines", "err", err)
 		return
 	}
+	// Published from the tick, not from the scrape: this is the one loop that
+	// already lists the host's rows, and a scrape must never query the store.
+	m.countByState(rows)
 
 	for _, row := range rows {
 		if row.HostID != m.opts.HostID || row.State != StateRunning {

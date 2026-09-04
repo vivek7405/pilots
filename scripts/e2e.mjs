@@ -15,6 +15,10 @@
 // Without PILOTS_E2E=1 it skips cleanly, so `npm test` stays green on a
 // machine with no KVM.
 
+// node:http, not fetch, for the handful of assertions that address a machine
+// by its hostname without DNS: fetch refuses to let a caller set Host.
+import http from 'node:http';
+
 if (process.env.PILOTS_E2E !== '1') {
   console.log('e2e: skipped (set PILOTS_E2E=1 to run)');
   process.exit(0);
@@ -124,6 +128,31 @@ async function processAssertions() {
     assert(json?.ok === true, 'expected {ok:true}');
     assert(typeof json?.host_id === 'string' && json.host_id.length > 0,
       'expected a non-empty host_id');
+    // 0 on a single-box SQLite host, a real number on a replica. Either way
+    // it must be present, because the gate compares it across hosts.
+    assert(typeof json?.store_version === 'number',
+      `expected a numeric store_version, got ${JSON.stringify(json?.store_version)}`);
+  });
+
+  await step('GET /metrics renders the host families and no per-machine label', async () => {
+    const { status, text } = await request('/metrics', { auth: false, raw: true });
+    assert(status === 200, `expected 200, got ${status}`);
+    // The six that render on a host that has done nothing. The four vecs
+    // (machines, s3 ops, s3 latency, quota refusals) render only once they
+    // have a series, which is why they are not asserted here.
+    for (const family of [
+      'pilots_wake_seconds',
+      'pilots_checkpoint_durable_seconds',
+      'pilots_nbd_cache_hits_total',
+      'pilots_nbd_cache_misses_total',
+      'pilots_router_inflight',
+      'pilots_slots_free',
+    ]) {
+      assert(text.includes(`# TYPE ${family} `), `${family} is missing from the scrape`);
+    }
+    // Cardinality is the one thing that cannot be fixed after the fact: a
+    // series per machine melts the scrape exactly when a host is busiest.
+    assert(!/machine_id=/.test(text), 'the scrape carries a machine_id label');
   });
 
   // Auth is enforced locally from replicated key hashes, so it must hold even
@@ -1252,6 +1281,167 @@ async function internalAssertions() {
 }
 
 // ---------------------------------------------------------------------------
+// The edge: the three headers the router owns, the API hostname, and the
+// per-state gauge.
+//
+// All three are things only a real request through the router can show. A unit
+// test can prove setEdgeHeaders sets a header; only this can prove the header
+// the GUEST reads is the one the edge wrote, after two ReverseProxies have had
+// their turn at it.
+// ---------------------------------------------------------------------------
+
+// requestWithHost sends a raw request to the API origin with a Host header of
+// our choosing. node:http rather than fetch, because fetch refuses to let a
+// caller set Host and the whole point here is to address a machine by its
+// hostname without DNS.
+function requestWithHost(host, path, extraHeaders = {}) {
+  const target = new URL(API);
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      host: target.hostname,
+      port: target.port || 80,
+      path,
+      method: 'GET',
+      headers: { Host: host, ...extraHeaders },
+    }, (res) => {
+      let body = '';
+      res.setEncoding('utf8');
+      res.on('data', (chunk) => { body += chunk; });
+      res.on('end', () => resolve({ status: res.statusCode, text: body }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+}
+
+async function edgeAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const created = [];
+  let build;
+
+  try {
+    await step('an image that echoes the forwarded headers builds', async () => {
+      // busybox httpd with CGI, because the guest has to REPORT what it saw
+      // and the golden image ships no listener of its own. httpd is not in
+      // alpine's base busybox -- its config has CONFIG_HTTPD unset and the
+      // applet lives in busybox-extras, a 63 KiB package whose own config has
+      // CONFIG_FEATURE_HTTPD_CGI=y. There is no /usr/bin/httpd symlink, so it
+      // is invoked through the busybox-extras binary.
+      const res = await postTar('/v1/builds', tarball({
+        'Dockerfile': [
+          'FROM alpine:3.20',
+          'RUN apk add --no-cache busybox-extras',
+          'RUN mkdir -p /www/cgi-bin',
+          'COPY fwd /www/cgi-bin/fwd',
+          'RUN chmod +x /www/cgi-bin/fwd',
+          'EXPOSE 8080',
+          'CMD ["busybox-extras", "httpd", "-f", "-p", "8080", "-h", "/www"]',
+          '',
+        ].join('\n'),
+        // One line, pipe-separated, so a missing header is an empty field
+        // rather than a shifted one. busybox httpd converts every header it
+        // does not recognise into HTTP_<NAME> with non-alphanumerics as
+        // underscores, which is how the three below reach the script.
+        'fwd': [
+          '#!/bin/sh',
+          'echo "Content-Type: text/plain"',
+          'echo',
+          'echo "$HTTP_X_FORWARDED_FOR|$HTTP_X_FORWARDED_PROTO|$HTTP_X_FORWARDED_HOST"',
+          '',
+        ].join('\n'),
+      }));
+      assert(res.status === 200, `expected 200, got ${res.status}`);
+      const lines = await readNDJSON(res);
+      const last = lines[lines.length - 1];
+      assert(!last.error, `the build failed: ${last.error}`);
+      build = last.result;
+      assert(build, `the stream does not end with a rootfs build id: ${JSON.stringify(last)}`);
+    });
+
+    let machine;
+    await step('a machine from it serves through the router', async () => {
+      assert(build, 'no build id to create from');
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST',
+        body: { name: `e2e-edge-${tag}`, image: build, vcpus: 1, mem_mib: 512 },
+      });
+      assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
+      machine = json;
+      created.push(json.id);
+    });
+
+    if (machine) {
+      const hostname = new URL(machine.url).hostname;
+
+      await step('a forged X-Forwarded-For never reaches the guest', async () => {
+        // Every rate limiter behind the router reads the LEFTMOST entry. If a
+        // caller can put a value there, it picks its own bucket, and the
+        // dashboard's per-IP limits become one shared bucket per attacker.
+        let seen;
+        await waitFor(async () => {
+          const res = await requestWithHost(hostname, '/cgi-bin/fwd', {
+            'X-Forwarded-For': '203.0.113.9',
+          });
+          if (res.status !== 200) return false;
+          seen = res.text.trim();
+          return seen.length > 0;
+        }, { timeoutMs: 120_000, what: 'the guest to answer through the router' });
+
+        const [xff, proto, xfh] = seen.split('|');
+        // Two hops reach the application: the router's proxy to the guest
+        // agent, and the agent's proxy to the port inside the guest. Each
+        // appends its own peer, so a chain is expected -- what must not be
+        // in it is anything the caller supplied.
+        assert(!xff.includes('203.0.113.9'),
+          `the guest saw the forged address in ${JSON.stringify(xff)}: the ` +
+          'inbound header was appended to rather than deleted');
+        const client = xff.split(',')[0].trim();
+        assert(client.length > 0, 'the guest saw no X-Forwarded-For at all');
+        assert(client !== '203.0.113.9',
+          'the leftmost entry is the address the client chose, so a caller picks its own rate-limit bucket');
+
+        // The battery's listener is plain HTTP. The https case is the same
+        // code path with req.TLS set, and the router unit tests cover it.
+        assert(proto === 'http', `X-Forwarded-Proto is ${JSON.stringify(proto)}, want http`);
+        assert(xfh === hostname,
+          `X-Forwarded-Host is ${JSON.stringify(xfh)}, want the hostname the user typed`);
+      });
+
+      const domain = hostname.slice(hostname.indexOf('.') + 1);
+
+      await step('the control API answers on api.<domain>', async () => {
+        // Both SDKs default to this URL and the dashboard verifies TLS
+        // against it, so a host that does not claim it answers "unknown host"
+        // to every merged client.
+        const res = await requestWithHost(`api.${domain}`, '/v1/health');
+        assert(res.status === 200, `expected 200, got ${res.status}: ${res.text}`);
+        const json = JSON.parse(res.text);
+        assert(json?.ok === true, `expected {ok:true}, got ${res.text}`);
+      });
+
+      await step('a machine may not be named api', async () => {
+        const { status } = await request('/v1/machines', {
+          method: 'POST', body: { name: 'api', vcpus: 1, mem_mib: 512 },
+        });
+        assert(status === 400,
+          `expected 400, got ${status}: the API hostname is claimable by a tenant`);
+      });
+
+      await step('pilots_machines reports this host by state', async () => {
+        // Set on the idle tick, which runs every 10 s, so this is the one
+        // metric the battery has to wait for.
+        await waitFor(async () => {
+          const running = await metricValue('pilots_machines{state="running"}');
+          return running !== null && running >= 1;
+        }, { timeoutMs: 15_000, everyMs: 1_000, what: 'the per-state machine gauge' });
+      });
+    }
+  } finally {
+    for (const id of created) await destroy(id);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Environment delivery, and the asymmetry that is easy to get backwards.
 // ---------------------------------------------------------------------------
 
@@ -1857,15 +2047,20 @@ async function machineCount(base = API) {
 }
 
 // metricValue reads one Prometheus sample from /metrics, or null when the
-// family is absent. Absent is not a failure here: the families H2 and H7 would
-// rather read are owned by another change, and every caller carries a fallback
-// that asserts the same property through a surface that exists today.
+// family is absent. Absent is still not a failure: a vec family renders
+// nothing until it has a series, so a caller that reads one carries a fallback
+// asserting the same property through a surface that always exists.
 async function metricValue(name, base = API) {
   const { status, text } = await requestAt(base, '/metrics', { auth: false, raw: true });
   if (status !== 200 || !text) return null;
+  // The name is escaped because a labelled one -- pilots_machines{state="running"}
+  // -- carries braces and quotes that are regex syntax, and an unescaped brace
+  // makes the family silently unmatchable rather than failing loudly.
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pattern = new RegExp(`^${escaped}(?:\\{[^}]*\\})?\\s+([0-9.eE+-]+)\\s*$`);
   for (const line of text.split('\n')) {
     if (line.startsWith('#')) continue;
-    const match = line.match(new RegExp(`^${name}(?:\\{[^}]*\\})?\\s+([0-9.eE+-]+)\\s*$`));
+    const match = line.match(pattern);
     if (match) return Number(match[1]);
   }
   return null;
@@ -2736,6 +2931,7 @@ async function main() {
     await volumeAssertions();
     await buildAssertions();
     await internalAssertions();
+    await edgeAssertions();
     await envAssertions();
     await serviceAssertions();
     await multiServiceAssertions();

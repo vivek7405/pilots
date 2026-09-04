@@ -563,3 +563,75 @@ func TestQuotaRoundTripsThroughCorrosion(t *testing.T) {
 		t.Errorf("read back %+v, want %+v", got, want)
 	}
 }
+
+// crsqlDBVersionsDDL is cr-sqlite's own, byte for byte.
+//
+// The fake agent is plain SQLite with no cr-sqlite extension, so a test that
+// invents this table asserts the SQL and not the table -- a column renamed
+// upstream would keep passing here while Version failed on every real host.
+// So it is not invented: it was read off a corrosion v1.0.0 agent running this
+// repo's schema.sql, with
+//
+//	SELECT sql FROM sqlite_master WHERE name = 'crsql_db_versions'
+//
+// and the production query was run against that same agent, returning 0 on a
+// fresh replica and 3 after three writes. One row per actor, which is what
+// makes the sum a version vector. Re-take it when CORROSION_VERSION moves in
+// scripts/host-bootstrap.sh.
+const crsqlDBVersionsDDL = `CREATE TABLE crsql_db_versions ` +
+	`("site_id" BLOB NOT NULL PRIMARY KEY, "db_version" INTEGER NOT NULL) STRICT`
+
+// The comparable number is the version VECTOR summed, not the scalar
+// crsql_db_version(). That scalar is the local write clock: two replicas
+// holding identical data but having written a different share of it carry
+// different values, so comparing it across hosts says nothing.
+func TestStoreVersionSumsTheVersionVector(t *testing.T) {
+	store, agent := newTestStore(t, "host-a")
+	agent.exec(t, crsqlDBVersionsDDL)
+	agent.exec(t, `INSERT INTO crsql_db_versions VALUES (x'01', 3), (x'02', 4)`)
+
+	v, err := store.Version(context.Background())
+	if err != nil {
+		t.Fatalf("Version: %v", err)
+	}
+	if v != 7 {
+		t.Errorf("Version = %d, want 7: the sum across every actor, not one of them", v)
+	}
+
+	if !agent.asked(t, "crsql_db_versions") {
+		t.Error("the version was not read from crsql_db_versions")
+	}
+}
+
+// A replica that has applied nothing reads 0, not an error and not a NULL
+// scan. gate.sh treats 0 as a host whose agent is not answering, so the empty
+// case has to be a real zero.
+func TestStoreVersionIsZeroWithNoActors(t *testing.T) {
+	store, agent := newTestStore(t, "host-a")
+	agent.exec(t, crsqlDBVersionsDDL)
+
+	v, err := store.Version(context.Background())
+	if err != nil {
+		t.Fatalf("Version: %v", err)
+	}
+	if v != 0 {
+		t.Errorf("Version = %d on an empty version vector, want 0", v)
+	}
+}
+
+// The counterfactual for the DDL above: if a future cr-sqlite renames the
+// table or the column, Version must fail loudly rather than invent a number.
+// /v1/health then logs the error and reports store_version 0, which reads as
+// "this replica cannot be compared" -- a wrong non-zero here would instead
+// tell gate.sh the fleet is converged when nobody knows whether it is.
+func TestStoreVersionErrorsRatherThanGuessingWhenTheTableIsGone(t *testing.T) {
+	store, _ := newTestStore(t, "host-a")
+
+	v, err := store.Version(context.Background())
+	if err == nil {
+		t.Fatalf("Version returned %d with no crsql_db_versions table, want an error", v)
+	}
+	if v != 0 {
+		t.Errorf("Version = %d alongside an error, want 0", v)
+	}
+}

@@ -727,14 +727,19 @@ func (m *Machine) CheckpointInstant(ctx context.Context, up Uploader, chunks Upl
 	m.beginCapture()
 	go func() {
 		defer m.endCapture()
-		m.finishCheckpoint(up, chunks, opts, localDir, p.hostMem, snapKey, dirty, res)
+		m.finishCheckpoint(up, chunks, opts, localDir, p.hostMem, snapKey, dirty, res, pausedAt)
 	}()
 	return res, nil
 }
 
 // finishCheckpoint chunkifies and uploads a checkpoint's staged copies.
+//
+// pausedAt is when the guest was paused, so the observation below spans the
+// whole pause-to-durable window rather than just the upload: what a caller
+// asking "is my checkpoint safe yet" waits for is that window.
 func (m *Machine) finishCheckpoint(up Uploader, chunks Uploader, opts SnapshotOpts,
-	localDir, memPath, snapKey string, dirty *roaring.Bitmap, ids InstantSnapshot) {
+	localDir, memPath, snapKey string, dirty *roaring.Bitmap, ids InstantSnapshot,
+	pausedAt time.Time) {
 
 	uploadSlots <- struct{}{}
 	defer func() { <-uploadSlots }()
@@ -835,6 +840,11 @@ func (m *Machine) finishCheckpoint(up Uploader, chunks Uploader, opts SnapshotOp
 	if err := os.WriteFile(filepath.Join(localDir, durableMarker), nil, 0o644); err != nil {
 		slog.Error("could not mark checkpoint durable", "machine", m.ID, "err", err)
 	}
+
+	// Only a checkpoint that made it here is observed. Every failure path
+	// above went through fail and returned, so the histogram measures durable
+	// checkpoints rather than abandoned ones.
+	metrics.CheckpointDurableSeconds.Observe(time.Since(pausedAt).Seconds())
 }
 
 // buildIDsFile records which builds a checkpoint produced.

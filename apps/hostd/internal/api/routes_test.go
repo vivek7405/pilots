@@ -5,10 +5,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
@@ -70,12 +72,132 @@ func TestHealthIsPublic(t *testing.T) {
 	if !got.OK || got.HostID != "host-test" {
 		t.Errorf("health payload = %+v", got)
 	}
+	// SQLite: no replica, so the field is a real 0 rather than absent. The
+	// gate reads it as a number on every host, single-box ones included.
+	if got.StoreVersion != 0 {
+		t.Errorf("store_version = %d with no replica, want 0", got.StoreVersion)
+	}
+}
+
+// A host that has fallen behind on replication answers 200 and looks healthy
+// from every other angle. store_version is the only thing on this response
+// that says otherwise, which is why it is on the unauthenticated health route
+// rather than behind an admin key.
+func TestHealthReportsTheStoreVersion(t *testing.T) {
+	h := Routes(Deps{
+		HostID:       "host-test",
+		StoreVersion: func(context.Context) (int64, error) { return 42, nil },
+	})
+	rec := do(t, h, "GET", "/v1/health", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+	var got HealthResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.StoreVersion != 42 {
+		t.Errorf("store_version = %d, want 42", got.StoreVersion)
+	}
+}
+
+// A store that cannot be read is not a dead host. Failing liveness on a
+// replica hiccup takes the host out of rotation for a problem that is not
+// the host's, and every machine it owns with it.
+func TestHealthStaysOKWhenTheStoreVersionCannotBeRead(t *testing.T) {
+	h := Routes(Deps{
+		HostID: "host-test",
+		StoreVersion: func(context.Context) (int64, error) {
+			return 0, errors.New("corrosion: connection refused")
+		},
+	})
+	rec := do(t, h, "GET", "/v1/health", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200 even with the store unreadable", rec.Code)
+	}
+	var got HealthResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.OK || got.StoreVersion != 0 {
+		t.Errorf("health payload = %+v, want ok with store_version 0", got)
+	}
+}
+
+// A wedged replica is the case the error case above does not cover: the
+// corrosion client sets no response timeout, so an agent that accepts the
+// connection and then never answers would hold this handler open for as long
+// as the caller waits. On the one unauthenticated route every load balancer
+// polls, that is how a replica hiccup becomes the host being taken out of
+// rotation -- and it is cheap to trigger, since the route needs no key.
+//
+// The handler must give up on its own and answer 200 with 0.
+func TestHealthDoesNotWaitOnAWedgedStore(t *testing.T) {
+	released := make(chan struct{})
+	defer close(released)
+
+	h := Routes(Deps{
+		HostID: "host-test",
+		StoreVersion: func(ctx context.Context) (int64, error) {
+			select {
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			case <-released:
+				return 99, nil
+			}
+		},
+	})
+
+	start := time.Now()
+	rec := do(t, h, "GET", "/v1/health", "")
+	took := time.Since(start)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200 with the store wedged", rec.Code)
+	}
+	var got HealthResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.OK || got.StoreVersion != 0 {
+		t.Errorf("health payload = %+v, want ok with store_version 0", got)
+	}
+	// Generous, so the test is not a stopwatch: what it rules out is the
+	// handler waiting on the store indefinitely.
+	if took > 5*storeVersionTimeout {
+		t.Errorf("health took %s, want it bounded by %s", took, storeVersionTimeout)
+	}
 }
 
 func TestMetricsIsPublic(t *testing.T) {
 	h, _ := newTestServer(t)
-	if rec := do(t, h, "GET", "/metrics", ""); rec.Code != http.StatusOK {
-		t.Errorf("GET /metrics: got %d, want 200", rec.Code)
+	rec := do(t, h, "GET", "/metrics", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /metrics: got %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	// The host families render even on a host that has done nothing, which is
+	// what makes a scrape of a fresh host readable rather than empty.
+	for _, name := range []string{
+		"pilots_wake_seconds",
+		"pilots_checkpoint_durable_seconds",
+		"pilots_nbd_cache_hits_total",
+		"pilots_nbd_cache_misses_total",
+		"pilots_router_inflight",
+		"pilots_slots_free",
+	} {
+		if !strings.Contains(body, "# TYPE "+name+" ") {
+			t.Errorf("%s is missing from the scrape", name)
+		}
+	}
+
+	// Cardinality is the one thing that cannot be fixed after the fact: a
+	// series per machine melts the scrape exactly when a host is busiest.
+	for _, label := range []string{"machine_id=", "org_id=", "host_id="} {
+		if strings.Contains(body, label) {
+			t.Errorf("the scrape carries a %s label", label)
+		}
 	}
 }
 

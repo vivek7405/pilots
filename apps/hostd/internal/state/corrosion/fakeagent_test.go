@@ -201,3 +201,16 @@ func mustJSON(v any) []byte {
 }
 
 func strPtr(s string) *string { return &s }
+
+// asked reports whether any query the store sent mentions substr.
+func (a *fakeAgent) asked(t *testing.T, substr string) bool {
+	t.Helper()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, q := range a.queries {
+		if strings.Contains(q, substr) {
+			return true
+		}
+	}
+	return false
+}

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"sync/atomic"
+
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 )
 
 // Overlay is a copy-on-write view: a writable cache in front of a read-only
@@ -48,6 +50,7 @@ func (o *Overlay) ReadAt(p []byte, off int64) (int, error) {
 
 		dst := p[filled : filled+want]
 		if _, err := o.cache.ReadAt(dst, off+int64(filled)); err == nil {
+			metrics.NBDCacheHits.Inc()
 			filled += want
 			continue
 		} else if !errors.Is(err, ErrBytesNotAvailable) && !errors.Is(err, ErrOutOfRange) {
@@ -56,6 +59,7 @@ func (o *Overlay) ReadAt(p []byte, off int64) (int, error) {
 
 		// Not written here: read through to the template, looping because a
 		// Slice may return less than asked and zero-filling past its end.
+		metrics.NBDCacheMisses.Inc()
 		got := 0
 		for got < want {
 			chunk, err := o.template.Slice(context.Background(), off+int64(filled)+int64(got), int64(want-got))

@@ -11,9 +11,12 @@
 // A series is fleet-level or it does not exist. Per-machine values are summed
 // into one series before they reach here, and nothing carries a machine_id
 // label: org count is bounded, machine count is not, and a per-machine label
-// set melts the scrape at exactly the moment a host is busiest. The one label
-// in use is chain_depth, which is a snapshot chain's generation -- small,
-// bounded, and the whole point of the histogram it sits on.
+// set melts the scrape at exactly the moment a host is busiest. The labels in
+// use are a bounded set, fixed here and checked in review: chain_depth (a
+// snapshot chain's generation), type (a snapshot kind), state (a machine
+// lifecycle state), op (an object storage verb) and quota (an org limit's
+// name). Each has a handful of possible values that this repo enumerates; a
+// label whose values come from user input does not belong on this surface.
 package metrics
 
 import (
@@ -76,17 +79,22 @@ func (r *Registry) add(f family) {
 
 // Counter is a value that only ever goes up.
 type Counter struct {
-	n    atomic.Int64
-	desc string
-	id   string
+	n      atomic.Int64
+	labels []label
+	desc   string
+	id     string
 }
 
 // NewCounter registers a counter. help is the # HELP line, so it is written
 // for whoever reads the scrape at three in the morning.
 func NewCounter(r *Registry, name, help string) *Counter {
-	c := &Counter{desc: help, id: name}
+	c := newCounter(name, help, nil)
 	r.add(c)
 	return c
+}
+
+func newCounter(name, help string, labels []label) *Counter {
+	return &Counter{labels: labels, desc: help, id: name}
 }
 
 func (c *Counter) Add(n int64) { c.n.Add(n) }
@@ -105,20 +113,31 @@ func (c *Counter) name() string { return c.id }
 
 func (c *Counter) writeTo(w io.Writer) {
 	writeHeader(w, c.id, c.desc, "counter")
-	fmt.Fprintf(w, "%s %d\n", c.id, c.n.Load())
+	c.writeSample(w)
+}
+
+// writeSample renders this counter's one sample without the family header, so
+// a vector can share one header across its series.
+func (c *Counter) writeSample(w io.Writer) {
+	fmt.Fprintf(w, "%s%s %d\n", c.id, labelSuffix(c.labels), c.n.Load())
 }
 
 // Gauge is a value that goes up and down.
 type Gauge struct {
-	n    atomic.Int64
-	desc string
-	id   string
+	n      atomic.Int64
+	labels []label
+	desc   string
+	id     string
 }
 
 func NewGauge(r *Registry, name, help string) *Gauge {
-	g := &Gauge{desc: help, id: name}
+	g := newGauge(name, help, nil)
 	r.add(g)
 	return g
+}
+
+func newGauge(name, help string, labels []label) *Gauge {
+	return &Gauge{labels: labels, desc: help, id: name}
 }
 
 func (g *Gauge) Set(n int64)  { g.n.Store(n) }
@@ -127,7 +146,12 @@ func (g *Gauge) name() string { return g.id }
 
 func (g *Gauge) writeTo(w io.Writer) {
 	writeHeader(w, g.id, g.desc, "gauge")
-	fmt.Fprintf(w, "%s %d\n", g.id, g.n.Load())
+	g.writeSample(w)
+}
+
+// writeSample renders this gauge's one sample without the family header.
+func (g *Gauge) writeSample(w io.Writer) {
+	fmt.Fprintf(w, "%s%s %d\n", g.id, labelSuffix(g.labels), g.n.Load())
 }
 
 // Histogram is a fixed-bucket distribution.
@@ -231,13 +255,18 @@ func (h *Histogram) labelsWith(extra label) string {
 	return b.String()
 }
 
-func (h *Histogram) labelSuffix() string {
-	if len(h.labels) == 0 {
+func (h *Histogram) labelSuffix() string { return labelSuffix(h.labels) }
+
+// labelSuffix renders a series' labels as Prometheus writes them, or nothing
+// at all when the series has none -- an unlabelled sample must not carry an
+// empty brace pair.
+func labelSuffix(labels []label) string {
+	if len(labels) == 0 {
 		return ""
 	}
 	var b strings.Builder
 	b.WriteByte('{')
-	for i, l := range h.labels {
+	for i, l := range labels {
 		if i > 0 {
 			b.WriteByte(',')
 		}
@@ -245,6 +274,133 @@ func (h *Histogram) labelSuffix() string {
 	}
 	b.WriteByte('}')
 	return b.String()
+}
+
+// CounterVec is a counter partitioned by one label.
+//
+// One label only, in HistogramVec's shape and for the same reason: the caller
+// keeps the values bounded, and a vec that grew a series per machine is the
+// failure this package's doc comment is about.
+type CounterVec struct {
+	mu       sync.RWMutex
+	series   map[string]*Counter
+	labelKey string
+	desc     string
+	id       string
+}
+
+func NewCounterVec(r *Registry, name, help, labelKey string) *CounterVec {
+	v := &CounterVec{
+		series:   map[string]*Counter{},
+		labelKey: labelKey,
+		desc:     help,
+		id:       name,
+	}
+	r.add(v)
+	return v
+}
+
+// With returns the series for one label value, creating it on first use.
+func (v *CounterVec) With(value string) *Counter {
+	v.mu.RLock()
+	c, ok := v.series[value]
+	v.mu.RUnlock()
+	if ok {
+		return c
+	}
+
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if c, ok := v.series[value]; ok {
+		return c // another goroutine won the race
+	}
+	c = newCounter(v.id, v.desc, []label{{v.labelKey, value}})
+	v.series[value] = c
+	return c
+}
+
+func (v *CounterVec) name() string { return v.id }
+
+func (v *CounterVec) writeTo(w io.Writer) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+
+	if len(v.series) == 0 {
+		return // a family with no series at all is better left out
+	}
+	writeHeader(w, v.id, v.desc, "counter")
+	for _, k := range sortedKeys(v.series) {
+		v.series[k].writeSample(w)
+	}
+}
+
+// GaugeVec is a gauge partitioned by one label.
+//
+// The reason it exists rather than N gauges: pilots_machines{state} has to
+// publish every state on every set, including the ones that just emptied, and
+// a caller holding N separate gauges forgets one.
+type GaugeVec struct {
+	mu       sync.RWMutex
+	series   map[string]*Gauge
+	labelKey string
+	desc     string
+	id       string
+}
+
+func NewGaugeVec(r *Registry, name, help, labelKey string) *GaugeVec {
+	v := &GaugeVec{
+		series:   map[string]*Gauge{},
+		labelKey: labelKey,
+		desc:     help,
+		id:       name,
+	}
+	r.add(v)
+	return v
+}
+
+// With returns the series for one label value, creating it on first use.
+func (v *GaugeVec) With(value string) *Gauge {
+	v.mu.RLock()
+	g, ok := v.series[value]
+	v.mu.RUnlock()
+	if ok {
+		return g
+	}
+
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if g, ok := v.series[value]; ok {
+		return g // another goroutine won the race
+	}
+	g = newGauge(v.id, v.desc, []label{{v.labelKey, value}})
+	v.series[value] = g
+	return g
+}
+
+func (v *GaugeVec) name() string { return v.id }
+
+func (v *GaugeVec) writeTo(w io.Writer) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+
+	if len(v.series) == 0 {
+		return
+	}
+	writeHeader(w, v.id, v.desc, "gauge")
+	for _, k := range sortedKeys(v.series) {
+		v.series[k].writeSample(w)
+	}
+}
+
+// sortedKeys orders a vec's series by label value, so a scrape is byte-stable
+// across runs. Map order is not.
+func sortedKeys[T any](m map[string]T) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 // HistogramVec is a histogram partitioned by one label.
@@ -302,14 +458,7 @@ func (v *HistogramVec) writeTo(w io.Writer) {
 		return // a family with no series at all is better left out
 	}
 	writeHeader(w, v.id, v.desc, "histogram")
-
-	// Sorted, so a scrape is byte-stable across runs. Map order is not.
-	keys := make([]string, 0, len(v.series))
-	for k := range v.series {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
+	for _, k := range sortedKeys(v.series) {
 		v.series[k].writeSamples(w)
 	}
 }

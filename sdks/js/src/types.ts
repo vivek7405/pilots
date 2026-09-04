@@ -245,6 +245,13 @@ export interface HealthResponse {
    * disagrees with the fleet cannot restore the fleet's machines at all.
    */
   hugepages: boolean
+  /**
+   * The sum of the local replica's version vector: how many changes, from
+   * every host, this replica has applied. 0 on a single-box SQLite host.
+   * Comparable across hosts, so two hosts far apart on this number are a
+   * replication problem before they are anything else.
+   */
+  store_version: number
 }
 
 export interface ErrorResponse {

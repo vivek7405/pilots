@@ -1,10 +1,13 @@
 package machines
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestValidateNameAcceptsUsableLabels(t *testing.T) {
 	for _, name := range []string{
-		"webapp", "amber-harbor-k3x9", "a", "a1", "2fast", "api-v2",
+		"webapp", "amber-harbor-k3x9", "a", "a1", "2fast", "api-v2", "api-2", "apiary",
 	} {
 		if err := validateName(name); err != nil {
 			t.Errorf("validateName(%q) rejected a usable name: %v", name, err)
@@ -96,5 +99,47 @@ func TestTheTemplateMachineKeepsThePlaceholderToken(t *testing.T) {
 	if got := m.token("m-abc123"); got == templateToken {
 		t.Error("a real machine got the placeholder; it would be reachable by " +
 			"anything holding the golden rootfs")
+	}
+}
+
+// "api" is the one name a tenant may not take: dispatch claims
+// api.<workload domain> for the control API before the workload suffix, so a
+// machine of that name would own a hostname it can never be reached at.
+//
+// The reservation is DERIVED from the configured hostname rather than
+// hardcoded to "api". An operator who moves the control API with
+// PILOT_API_HOSTNAME moves what dispatch swallows, and a reservation left on
+// "api" would then leave the new name takeable -- which is the whole bug this
+// rule exists to prevent -- while refusing a name that now routes fine.
+func TestTheReservedNameFollowsTheConfiguredAPIHostname(t *testing.T) {
+	for _, tc := range []struct {
+		why         string
+		apiHostname string
+		machine     string
+		wantErr     bool
+	}{
+		{"the default reserves api", "", "api", true},
+		{"and nothing that merely starts with it", "", "apiary", false},
+		{"an override reserves its own label", "control.pilotrun.app", "control", true},
+		{"and frees the one it left behind", "control.pilotrun.app", "api", false},
+		{"a hostname off the workload domain reserves nothing, because " +
+			"dispatch does not claim it", "api.pilots.run", "api", false},
+	} {
+		t.Run(tc.why, func(t *testing.T) {
+			m := New(Options{Domain: "pilotrun.app", APIHostname: tc.apiHostname})
+			err := m.ensureNotReserved(tc.machine)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("%q was accepted, but the control API answers there", tc.machine)
+				}
+				if !strings.Contains(err.Error(), "reserved") {
+					t.Errorf("error %q does not say the name is reserved", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("%q was refused: %v", tc.machine, err)
+			}
+		})
 	}
 }
