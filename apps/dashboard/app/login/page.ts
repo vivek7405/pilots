@@ -4,6 +4,9 @@
  * `createAuth` is configured with `pages.error: '/login'`, so a refusal
  * arrives here as `?error=<code>` rather than at the home page, where it would
  * have looked like a successful sign-out.
+ *
+ * `?next=` is set by the signed-in segment's gate and handed to the sign-in
+ * link, so a deep link survives the round trip through GitHub.
  */
 import { html } from '@webjsdev/core';
 import type { PageProps } from '@webjsdev/core';
@@ -20,6 +23,7 @@ const MESSAGES: Record<string, string> = {
 
 export default function Login({ searchParams }: PageProps) {
   const error = String(searchParams.error ?? '');
+  const next = typeof searchParams.next === 'string' ? searchParams.next : undefined;
   return html`
     <div class="max-w-md mx-auto py-24 grid gap-6">
       ${error ? errorAlert(MESSAGES[error] ?? 'That sign-in did not complete.') : ''}
@@ -29,7 +33,7 @@ export default function Login({ searchParams }: PageProps) {
           <h1 class=${cardTitleClass()}>Sign in</h1>
           <p class="text-sm text-muted-foreground m-0">A pilots account is a GitHub account.</p>
         </div>
-        <div class=${cardContentClass()}>${signInLink()}</div>
+        <div class=${cardContentClass()}>${signInLink(next)}</div>
       </div>
     </div>
   `;

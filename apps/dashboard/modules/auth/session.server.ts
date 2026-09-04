@@ -188,11 +188,16 @@ function readOrgCookie(req?: Request): string | null {
   // the request in its own scope; without this fallback the cookie is invisible
   // to every one of them and `currentOrg` silently drops back to the personal
   // org, so the org switcher appeared to work and then acted as the wrong org.
-  const header = (req ?? getRequest())?.headers.get('cookie');
+  return readCookie(req ?? getRequest(), ORG_COOKIE);
+}
+
+/** One cookie's decoded value off a request, or null. */
+export function readCookie(req: Request | null | undefined, name: string): string | null {
+  const header = req?.headers.get('cookie');
   if (!header) return null;
   for (const part of header.split(';')) {
-    const [name, ...rest] = part.trim().split('=');
-    if (name === ORG_COOKIE) return decodeURIComponent(rest.join('='));
+    const [key, ...rest] = part.trim().split('=');
+    if (key === name) return decodeURIComponent(rest.join('='));
   }
   return null;
 }

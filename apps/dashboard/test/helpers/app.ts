@@ -88,13 +88,40 @@ export async function bootApp(overrides: Record<string, string> = {}): Promise<T
  */
 export async function signInAs(
   handle: TestApp['handle'],
-  profile: { id: number | string; login: string; name?: string | null; email?: string | null; avatar_url?: string | null },
+  profile: GithubProfile,
 ): Promise<string> {
-  const start = await handle(new Request('http://localhost/api/auth/signin/github'));
+  const { callback } = await driveOAuth(handle, profile);
+  const session = getSetCookies(callback).find((c) => c.startsWith('webjs.auth='));
+  if (!session) throw new Error(`callback set no session cookie (status ${callback.status})`);
+  return session.split(';')[0];
+}
+
+export interface GithubProfile {
+  id: number | string;
+  login: string;
+  name?: string | null;
+  email?: string | null;
+  avatar_url?: string | null;
+}
+
+/**
+ * The whole OAuth round trip, returning both responses so a test can assert on
+ * where the callback sends the visitor and which cookies it sets or clears.
+ *
+ * `signin` is the sign-in URL to start from (it may carry `?next=`), and the
+ * callback request carries every cookie the start set, exactly as a browser
+ * would send them back.
+ */
+export async function driveOAuth(
+  handle: TestApp['handle'],
+  profile: GithubProfile,
+  opts: { signin?: string; extraCookies?: string } = {},
+): Promise<{ start: Response; callback: Response }> {
+  const start = await handle(new Request(`http://localhost${opts.signin ?? '/api/auth/signin/github'}`));
   const location = start.headers.get('location');
   if (!location) throw new Error(`signin did not redirect: ${start.status}`);
   const state = new URL(location).searchParams.get('state');
-  const stateCookie = getSetCookies(start).join('; ');
+  const stateCookie = [...getSetCookies(start).map((c) => c.split(';')[0]), ...(opts.extraCookies ? [opts.extraCookies] : [])].join('; ');
 
   const realFetch = globalThis.fetch;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
@@ -111,14 +138,12 @@ export async function signInAs(
   }) as typeof globalThis.fetch;
 
   try {
-    const cb = await handle(
+    const callback = await handle(
       new Request(`http://localhost/api/auth/callback/github?code=abc&state=${state}`, {
         headers: { cookie: stateCookie },
       }),
     );
-    const session = getSetCookies(cb).find((c) => c.startsWith('webjs.auth='));
-    if (!session) throw new Error(`callback set no session cookie (status ${cb.status})`);
-    return session.split(';')[0];
+    return { start, callback };
   } finally {
     globalThis.fetch = realFetch;
   }
