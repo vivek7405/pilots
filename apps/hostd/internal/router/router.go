@@ -3,6 +3,10 @@
 // Every host runs an identical copy and can serve any request. Routing reads
 // only local state, so a request is served without consulting any other host
 // -- that is what keeps the data plane independent of anything central.
+//
+// The router also owns the X-Forwarded-* headers: it sets them once, at the
+// public entry, so what reaches a guest describes this edge and not what a
+// client claimed.
 package router
 
 import (
@@ -203,6 +207,8 @@ func (r *Router) ensureAwake(ctx context.Context, m state.Machine) error {
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	ctx := req.Context()
 
+	setEdgeHeaders(req)
+
 	target, err := r.resolve(ctx, req.Host)
 	if err != nil {
 		http.Error(w, "unknown host", http.StatusNotFound)
@@ -211,13 +217,52 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	r.serveOrForward(w, req, target)
 }
 
+// setEdgeHeaders makes the forwarded headers say what THIS edge knows.
+//
+// The inbound X-Forwarded-For is deleted, not appended to: ReverseProxy adds
+// the peer to whatever arrived, so a client that sent the header would sit
+// leftmost, which is the entry a rate limiter behind us reads. Proto and Host
+// are set here because TLS terminates here. Only the public entry runs this;
+// a request forwarded over the mesh keeps the values the first hop set, and
+// its own ReverseProxy appends the mesh peer after the client.
+//
+// The sibling client-IP headers go with it. Deleting X-Forwarded-For alone
+// only moves the forgery: an application that reads X-Real-IP (the nginx
+// convention, and what several frameworks fall back to), CF-Connecting-IP or
+// RFC 7239 Forwarded would still be reading a value the caller chose. Nothing
+// in front of this edge sets any of them, so any that arrives is a client's.
+var clientIPHeaders = []string{
+	"X-Forwarded-For",
+	"X-Real-IP",
+	"CF-Connecting-IP",
+	"True-Client-IP",
+	"Forwarded",
+}
+
+func setEdgeHeaders(req *http.Request) {
+	for _, h := range clientIPHeaders {
+		req.Header.Del(h)
+	}
+	proto := "http"
+	if req.TLS != nil {
+		proto = "https"
+	}
+	req.Header.Set("X-Forwarded-Proto", proto)
+	req.Header.Set("X-Forwarded-Host", req.Host)
+}
+
+// agentAddr is the guest dial address, a variable so a test can point the
+// proxy at a fake guest; GuestAgentPort is a constant and binding it in a test
+// collides with a running host.
+var agentAddr = (*netns.Slot).AgentAddr
+
 // proxyTo forwards to the guest.
 //
 // Requests go to the guest agent, which forwards to the requested port inside
 // the machine. That keeps one ingress path into the guest instead of exposing
 // every application port on the host.
 func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, slot *netns.Slot, port int) {
-	target := &url.URL{Scheme: "http", Host: slot.AgentAddr()}
+	target := &url.URL{Scheme: "http", Host: agentAddr(slot)}
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Director = func(out *http.Request) {

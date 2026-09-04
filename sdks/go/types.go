@@ -299,6 +299,11 @@ type HealthResponse struct {
 	// host that disagrees with the fleet cannot restore the fleet's machines
 	// at all.
 	HugePages bool `json:"hugepages"`
+	// StoreVersion is the sum of the local replica's version vector: how many
+	// changes, from every host, this replica has applied. 0 on a single-box
+	// SQLite host. Comparable across hosts, so two hosts far apart on this
+	// number are a replication problem before they are anything else.
+	StoreVersion int64 `json:"store_version"`
 }
 
 type ErrorResponse struct {

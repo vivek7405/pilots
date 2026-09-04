@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/vivek7405/pilots/hostd/internal/metrics"
+	"github.com/vivek7405/pilots/hostd/internal/state"
 	"github.com/vivek7405/pilots/hostd/internal/uffd"
 )
 
@@ -134,7 +135,9 @@ func TestCollectDerivesStartupBytesFromEachPageSize(t *testing.T) {
 // Set, not Add: each report is a whole total, so a second scrape of unchanged
 // handlers must not double the series.
 func TestCollectMetricsIsIdempotentAcrossScrapes(t *testing.T) {
-	m := &Manager{opts: Options{}}
+	// Built through New: CollectMetrics now also reads the slot pool and the
+	// in-flight map, neither of which a bare struct literal has.
+	m := New(Options{})
 	m.CollectMetrics()
 	first := metrics.UffdFaults.Load()
 	m.CollectMetrics()
@@ -211,5 +214,79 @@ func TestRetiredHandlersIgnoreAScrapeTheHandlerMissed(t *testing.T) {
 	if total.Faults != 0 {
 		t.Errorf("retired faults = %d, want 0: the handler never went away",
 			total.Faults)
+	}
+}
+
+// pilots_machines{state} is set from the idle tick, over rows the tick already
+// holds. Three things have to be true at once: only this host's rows count
+// (single-writer -- a host publishes its own machines and nothing else),
+// tombstones do not, and every state is written on every pass.
+func TestCountByStatePublishesThisHostsRowsOnly(t *testing.T) {
+	m := New(Options{HostID: "host-a"})
+	m.countByState([]state.Machine{
+		{ID: "m-1", HostID: "host-a", State: StateRunning},
+		{ID: "m-2", HostID: "host-a", State: StateRunning},
+		{ID: "m-3", HostID: "host-a", State: StateSuspended},
+		{ID: "m-4", HostID: "host-a", State: state.StateDestroyed},
+		{ID: "m-5", HostID: "host-b", State: StateRunning},
+	})
+
+	for _, tc := range []struct {
+		state string
+		want  int64
+	}{
+		{StateRunning, 2},
+		{StateSuspended, 1},
+		{StateCreating, 0},
+		{StateStopped, 0},
+		{StateError, 0},
+	} {
+		if got := metrics.Machines.With(tc.state).Load(); got != tc.want {
+			t.Errorf("%s = %d, want %d", tc.state, got, tc.want)
+		}
+	}
+}
+
+// A gauge that is simply not set keeps its last value. Without seeding every
+// state at zero, the last machine leaving "running" leaves the series reading
+// 1 forever -- which is worse than no metric, because it looks alive.
+func TestCountByStateZeroesAStateThatHasEmptied(t *testing.T) {
+	m := New(Options{HostID: "host-a"})
+	m.countByState([]state.Machine{{ID: "m-1", HostID: "host-a", State: StateRunning}})
+	if got := metrics.Machines.With(StateRunning).Load(); got != 1 {
+		t.Fatalf("running = %d, want 1", got)
+	}
+
+	m.countByState(nil)
+	if got := metrics.Machines.With(StateRunning).Load(); got != 0 {
+		t.Errorf("running = %d after every machine went away, want 0", got)
+	}
+}
+
+// Both gauges are pure in-memory reads, which is why the scrape may ask for
+// them directly rather than waiting for a tick.
+func TestCollectMetricsPublishesInflightAndFreeSlots(t *testing.T) {
+	m := New(Options{HostID: "host-a", PoolSize: 8})
+
+	m.CollectMetrics()
+	if got := metrics.SlotsFree.Load(); got != 7 {
+		t.Errorf("slots free = %d on a fresh pool of 8, want 7", got)
+	}
+	if got := metrics.RouterInflight.Load(); got != 0 {
+		t.Errorf("in flight = %d with no requests, want 0", got)
+	}
+
+	m.Begin("m-1")
+	m.Begin("m-2")
+	m.CollectMetrics()
+	if got := metrics.RouterInflight.Load(); got != 2 {
+		t.Errorf("in flight = %d with two requests across two machines, want 2", got)
+	}
+
+	m.End("m-1")
+	m.End("m-2")
+	m.CollectMetrics()
+	if got := metrics.RouterInflight.Load(); got != 0 {
+		t.Errorf("in flight = %d after both finished, want 0", got)
 	}
 }

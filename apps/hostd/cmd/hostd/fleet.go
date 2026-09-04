@@ -318,3 +318,17 @@ func (t cachedTenancy) OrgOf(ctx context.Context, id string) (string, bool) {
 func (t cachedTenancy) Revoked(_ context.Context, hash string) (bool, error) {
 	return t.cache.Revoked(hash), nil
 }
+
+// storeVersion exposes the replica's version vector sum on /v1/health, or nil
+// on SQLite where there is no replica and the field is 0.
+//
+// A type assertion rather than a method on state.Store: replication is a
+// property of one backend, and putting it on the interface would make every
+// implementation answer a question only one of them has.
+func storeVersion(store state.Store) func(context.Context) (int64, error) {
+	cs, ok := store.(*corrosion.Store)
+	if !ok {
+		return nil
+	}
+	return cs.Version
+}
