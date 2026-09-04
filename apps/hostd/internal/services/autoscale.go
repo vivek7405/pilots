@@ -130,20 +130,24 @@ func Decide(knobs api.Knobs, replicas []Replica, now time.Time,
 			delete(idleSince, r.ID)
 			continue
 		}
-		// How long this replica has been quiet, by the signals available
-		// here. The row's last_activity is what every host sees; the local
-		// observation clock is layered on top for replicas held here.
-		since := r.LastActivity
+		// The RANKING key is last_activity alone, because it is the only
+		// clock every host reads the same way. Layering the local
+		// observation clock on top of it here made the ranking disagree
+		// between hosts: idleSince is never earlier than last_activity, so a
+		// host ranked its OWN replica less idle than an equally idle remote
+		// one. Two hosts holding one replica each therefore both saw the
+		// other's as idlest, both declined on !idlestRemote, and the service
+		// never scaled down at all.
+		//
+		// The local clock is still read -- as a dwell guard below, on the
+		// replica this host would act on -- so one quiet observation is
+		// still not idleness.
 		if !r.Remote {
-			seen, ok := idleSince[r.ID]
-			if !ok {
+			if _, ok := idleSince[r.ID]; !ok {
 				idleSince[r.ID] = now
-				seen = now
-			}
-			if seen.After(since) {
-				since = seen
 			}
 		}
+		since := r.LastActivity
 		if idlest == "" || since.Before(idlestSince) ||
 			(since.Equal(idlestSince) && r.ID < idlest) {
 			idlest, idlestSince, idlestRemote = r.ID, since, r.Remote
@@ -160,12 +164,14 @@ func Decide(knobs api.Knobs, replicas []Replica, now time.Time,
 	if running > 0 && overLimit == running && knobs.SoftLimit > 0 {
 		return Decision{Up: true}
 	}
-	// Give one back only when it has been idle for a while, doing so stays at
-	// or above the floor, the policy allows stopping at all, and the idlest
+	// Give one back only when it has been idle for a while by the replicated
+	// clock AND by this host's own observation of it, doing so stays at or
+	// above the floor, the policy allows stopping at all, and the idlest
 	// replica fleet-wide is one THIS host holds.
 	if idlest != "" && !idlestRemote && knobs.AutoStop != "off" &&
 		running > knobs.MinMachinesRunning &&
-		now.Sub(idlestSince) >= idleBeforeScaleDown {
+		now.Sub(idlestSince) >= idleBeforeScaleDown &&
+		now.Sub(idleSince[idlest]) >= idleBeforeScaleDown {
 		return Decision{Down: idlest}
 	}
 	return Decision{}

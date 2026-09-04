@@ -219,6 +219,43 @@ func TestOnlyTheOwnerGivesBackTheIdlestReplica(t *testing.T) {
 	}
 }
 
+// Two hosts, one replica each, both quiet since the same moment: exactly one
+// of them must conclude it is the one to act.
+//
+// The ranking key has to be the REPLICATED clock for every replica, local and
+// remote alike. Ranking a local replica by the local observation clock instead
+// -- which is never earlier than last_activity, because it is set on the first
+// tick that observes the replica quiet -- makes each host rank its own replica
+// as the busier one. Both then see a remote replica as idlest, both decline,
+// and a service spread over two hosts never scales down at all.
+func TestTwoHostsAgreeOnWhichReplicaIsIdlest(t *testing.T) {
+	now := time.Now()
+	quiet := now.Add(-time.Hour)
+
+	decideAs := func(self string) Decision {
+		reps := []Replica{
+			{ID: "m-1", Running: true, LastActivity: quiet, Remote: self != "host-a"},
+			{ID: "m-2", Running: true, LastActivity: quiet, Remote: self != "host-b"},
+		}
+		// The host observes the pair go quiet, then keeps observing past the
+		// window. The first pass is what seeds the local clock, and it seeds
+		// it LATER than last_activity -- which is the whole asymmetry.
+		idle := map[string]time.Time{}
+		Decide(knobs(1, 20), reps, now, idle)
+		return Decide(knobs(1, 20), reps, now.Add(idleBeforeScaleDown+time.Second), idle)
+	}
+
+	a, b := decideAs("host-a"), decideAs("host-b")
+	if a.Down == "" && b.Down == "" {
+		t.Error("both hosts declined to give a replica back; each ranked its " +
+			"own replica less idle than the other's and the service can never sleep")
+	}
+	if a.Down != "" && b.Down != "" {
+		t.Errorf("both hosts gave a replica back (%s and %s); the floor of 1 breaks",
+			a.Down, b.Down)
+	}
+}
+
 // autoscaleFixture is a two-host fleet with one service on one release, and it
 // reports which host the arbiter is so a test can be the OTHER one.
 func autoscaleFixture(t *testing.T) (store state.Store, arbiter, other string) {
