@@ -10,6 +10,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       sudo bash coreutils curl \
     && rm -rf /var/lib/apt/lists/*
 
+# Node 24 system-wide: webjs needs >= 24 and the sandbox contract ships a
+# runtime. From NodeSource rather than Ubuntu's package (24.04 ships Node 18)
+# and rather than nvm, whose per-user shell shim is not on PATH for the
+# non-login `bash -c` every exec runs. The grep pins the major, so a NodeSource
+# change that ships another one fails this build rather than the first deploy.
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/* \
+    && node -v | grep -q '^v24\.'
+
 # The in-VM agent. Staged next to this Dockerfile by the build script.
 COPY guest-agent /usr/local/bin/guest-agent
 RUN install -D -m0755 /usr/local/bin/guest-agent /opt/pilot-agent/guest-agent
@@ -37,12 +47,17 @@ RUN install -d -m0700 /etc/pilot
 COPY eth0.network /etc/systemd/network/10-eth0.network
 RUN systemctl enable systemd-networkd
 
-# Ubuntu 24.04's base image already occupies uid 1000 with an `ubuntu` user.
-# Every exec defaults to uid 1000, so free it first.
+# The sandbox contract: user `sprite` at uid 1000, home /home/sprite,
+# passwordless sudo. Every client is written against it -- the dashboard's
+# console sends user: 'sprite' on every command, and both SDK READMEs document
+# /home/sprite/app as the working directory.
+#
+# Ubuntu 24.04's base image already occupies uid 1000 with an `ubuntu` user,
+# and every exec defaults to uid 1000, so free it first.
 RUN userdel -r ubuntu 2>/dev/null || true; \
-    useradd -m -u 1000 -s /bin/bash user \
-    && echo 'user ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-user \
-    && chmod 0440 /etc/sudoers.d/90-user
+    useradd -m -u 1000 -s /bin/bash sprite \
+    && echo 'sprite ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-sprite \
+    && chmod 0440 /etc/sudoers.d/90-sprite
 
 # Trim the boot: wait-online stalls ~2 minutes on a link that is already
 # statically configured; multi-user is the target; a passwordless root makes

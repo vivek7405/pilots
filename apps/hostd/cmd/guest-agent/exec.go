@@ -21,8 +21,9 @@ import (
 )
 
 // defaultGuestUser is the unprivileged account baked into the golden rootfs at
-// uid 1000. Commands run as this user unless one is explicitly requested.
-const defaultGuestUser = "user"
+// uid 1000: the sandbox contract's `sprite`, home /home/sprite, with Node on
+// PATH. Commands run as this user unless one is explicitly requested.
+const defaultGuestUser = "sprite"
 
 const defaultExecTimeout = 30 * time.Second
 
@@ -105,12 +106,12 @@ func prepareCommand(cmd *exec.Cmd, username, cwd string, env map[string]string) 
 	// applyUserCredential. The DEFAULT is different, and the difference is not
 	// a loophole in that rule.
 	//
-	// `user` is an account the golden rootfs happens to bake in. An image
-	// built from someone's Dockerfile has no reason to have it -- alpine,
-	// distroless and slim images do not -- and Docker's own default there is
-	// root. Failing closed on an account the caller never asked for makes
-	// every exec on every built image fail with "user \"user\" does not
-	// exist", which is the machine refusing to run its owner's commands.
+	// `sprite` is an account the golden rootfs bakes in. An image built from
+	// someone's Dockerfile has no reason to have it -- alpine, distroless and
+	// slim images do not -- and Docker's own default there is root. Failing
+	// closed on an account the caller never asked for makes every exec on
+	// every built image fail with "user \"sprite\" does not exist", which is
+	// the machine refusing to run its owner's commands.
 	//
 	// So: no user requested and no default account present means run as the
 	// image's own default. Nothing unprivileged was asked for, so nothing was
