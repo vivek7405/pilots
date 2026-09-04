@@ -102,6 +102,15 @@ hangs, and an agent run under `claude -p` is exactly such a process. Pass
 `{stdin: true}` to opt in, then use `writeStdin(chunk)` and `endStdin()`; both
 throw otherwise.
 
+**A text verdict follows the binary exit frame.** hostd sends
+`{"type":"exit","exit_code":n}` after frame `3`, because the binary frame
+carries the code in one byte and truncates anything above 255. Whichever
+arrives first decides; the other is ignored.
+
+**An exec that names no user runs as `sprite`.** The guest image bakes that
+account at uid 1000 with home `/home/sprite` and Node 24 on `PATH`, so a
+command needs neither a `user` nor a `cwd` to land where these examples assume.
+
 **A close with no exit frame is an error.** `wait()` rejects rather than
 resolving 0. The guest agent drains both output pumps before writing the exit
 frame and websocket frames are ordered, so an exit frame means every byte that

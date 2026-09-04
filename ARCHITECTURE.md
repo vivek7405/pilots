@@ -227,7 +227,11 @@ POST   /v1/machines/:id/exec         {cmd, cwd?, env?, user?, timeout?} → {std
 GET    /v1/machines/:id/exec/stream  WS: query argv/dir/env/stdin → frames (below)
                                      auth: Authorization: Bearer, or the
                                      subprotocol authorization.bearer.<key> (browsers)
-GET    /v1/machines/:id/logs?follow  stream
+GET    /v1/sprites/:name/exec       WS alias of exec/stream, keyed by machine NAME
+                                     (an id-shaped value is tried as an id first);
+                                     sprites-compatible
+GET    /v1/machines/:id/logs?follow  stream; a follow ends on disconnect or destroy,
+                                     never on suspend
 POST   /v1/machines/:id/suspend|wake|stop|start
 POST   /v1/machines/:id/checkpoints  {comment?} → {id, seq}
 GET    /v1/machines/:id/checkpoints  list
@@ -381,9 +385,13 @@ runs the bootstrap. Rotation requires a re-seal sweep over the affected rows.
 `GET /health` · `POST /init {timestamp_nanos}` (sets CLOCK_REALTIME — kvm-clock
 covers MONOTONIC; without this poke a restored guest's TLS/cron/JS clocks are
 frozen at snapshot time) · `POST /exec` (buffered; `bash -c`; default user
-uid-1000, root opt-in) · `GET /exec/stream` WS — binary frames, **byte 0:
-1=stdout 2=stderr 3=exit (payload[0]=code)**, single write-mutex; `stdin=false`
-supported (the agent-runner path) · `GET /terminal` WS (pty, JSON frames) ·
+uid-1000 = `sprite`, home `/home/sprite`, Node 24 on PATH; root opt-in) ·
+`GET /exec/stream` WS — binary frames, **byte 0: 1=stdout 2=stderr 3=exit
+(payload[0]=code)**, then a text `{"type":"exit","exit_code":n}` carrying the
+untruncated code; client to server **0=stdin 4=stdin_eof**, read only when the
+stream was opened with `stdin=true` (the default is `stdin=false`, the
+agent-runner path, where nothing is read from the socket and a `0` frame sent
+anyway is ignored); single write-mutex · `GET /terminal` WS (pty, JSON frames) ·
 reverse proxy: any request bearing `X-Pilot-Proxy-Port: <n>` is proxied to
 `127.0.0.1:<n>` (WS included; not auth-gated — the edge enforces). Token at
 `/etc/pilot-agent/token`, constant-time compare, header or `?token=`.
@@ -905,11 +913,20 @@ across every lifecycle event · multiple named checkpoints with **in-place**
 restore (same row/URL/token — never respawn-from-template) · WS streaming
 exec with `stdin=false` for `claude -p … --output-format stream-json` ·
 `cwd` + `env` on every exec (buffered and streaming). The sprites byte frame
-protocol (1/2/3) is kept exactly so crisp's client code drops in.
-`@pilots/sdk/sprites-compat` is the drop-in adapter: a sprite's `id` is the
-machine's NAME, because a sprites consumer persists that id and hands it back
-as a path segment to a name-keyed route, and `machineId` carries the `m-…` id
-for anything going through the typed client.
+protocol (1/2/3, plus 0/4 client to server) is kept exactly so crisp's client
+code drops in, and `stdin=false` stays the default so a client that never
+writes cannot hang on a process holding an open stdin.
+
+Three things together are what make a hand-built sprites client work
+unchanged. `GET /v1/sprites/:name/exec` is the name-keyed route such a client
+constructs itself, with the key in an `Authorization` header. The guest is the
+sprites environment: user `sprite`, home `/home/sprite`, Node 24 on `PATH`, so
+an exec that names no user lands where the client expects. And
+`@pilots/sdk/sprites-compat` is the drop-in adapter for anyone who would rather
+change one import line: a sprite's `id` is the machine's NAME, because a
+sprites consumer persists that id and hands it back as a path segment to a
+name-keyed route, and `machineId` carries the `m-…` id for anything going
+through the typed client.
 
 ---
 
@@ -972,9 +989,13 @@ containment, capacity refusal, quota parity) is in `e2e.mjs`, and the
 host-shell half (the NBD wedge and its deliberate negative control, the
 per-host resource counts, cgroup containment, Firecracker API exhaustion,
 orphan pile-up) is in `scripts/cluster/gate.sh` as numbered sections.
-`go test ./...` for
-netns/block/header/state/s3 (block-layer round-trip + diff-chain tests are
-mandatory). Drift tests in both SDKs parse `internal/api` on every
+The battery's exec-stream section drives the
+frames, both key carriers, the sprites alias, the `logs?follow` tail across a
+suspend, and the guest contract (`sprite`, `/home/sprite`, Node 24) through
+Node's global `WebSocket`; the gate streams the same command through every
+host that does not own the machine, by id and through the alias. `go test
+./...` for netns/block/header/state/s3 (block-layer round-trip + diff-chain
+tests are mandatory). Drift tests in both SDKs parse `internal/api` on every
 `npm test`. Dashboard: `webjs check` / `doctor --json` / `typecheck` /
 `test`. CI runs unit tests + the single-VM e2e on every push, and at a tag
 builds the golden rootfs and asserts it matches the committed pin. Phase 6f

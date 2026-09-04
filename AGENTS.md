@@ -145,6 +145,10 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
   A green run therefore exercises routing + hostd + Firecracker together.
 - It skips cleanly (exit 0) unless `PILOTS_E2E=1`, so `npm test` stays green
   on machines with no KVM.
+- It drives the exec stream with Node's **global `WebSocket`**, so it needs
+  Node 22 or newer. The root `package.json` already requires 24, so this costs
+  nothing; it is written down because the failure otherwise reads as a broken
+  route rather than a runtime that has no `WebSocket`.
 - Its API key comes from `hostd bootstrap-key` and must carry `admin`: the
   battery drives routes from every scope, and a narrower key turns real
   assertions into 403s.
