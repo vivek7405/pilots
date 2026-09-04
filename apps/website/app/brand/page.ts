@@ -2,31 +2,28 @@ import { html } from '@webjsdev/core';
 import { section } from '#lib/ui/section.ts';
 import { pageHero } from '#lib/ui/page-hero.ts';
 import { PROSE, FIELD_LABEL, PANEL } from '#lib/design/recipes.ts';
-import { CANDIDATES, markSvg, type Candidate } from '#lib/design/logo-candidates.ts';
-import { DELTA_PS, deltaPMark, deltaPLockup, type DeltaP } from '#lib/design/delta-p.ts';
-import { WORDMARKS, wordmarkLockup, type Wordmark } from '#lib/design/wordmark.ts';
+import { DELTA, markSvg, type Candidate } from '#lib/design/logo-candidates.ts';
 
 /**
  * /brand
  *
- * The working surface for choosing a mark. Not a brand page: a brand page
- * publishes a decision, and there is no decision yet.
+ * The mark, and the three places it has to keep working.
  *
- * It sits in the nav, so anyone working on this can reach it, but it is
- * `noindex` and out of the sitemap. A route showing several competing logos
- * for one product is not what a stranger's first search result should be, and
- * the two audiences want different things: the nav serves people who already
- * know what this is, the index serves people who do not.
+ * This was a bake-off between six drawings. Delta won, so the page is now the
+ * shorter thing a settled mark needs: the drawing on both grounds and at
+ * favicon sizes, the word beside it, and the header it lives in on nearly every
+ * page view. The losing drawings came out of the repo rather than staying
+ * behind a flag, because a rejected mark left in the tree gets rendered by
+ * accident eventually.
  *
- * The layout answers the three questions a mark actually has to survive, in
- * the order they kill candidates:
+ * It sits in the nav and stays `noindex`. The two audiences want different
+ * things: the nav serves people already working on this, the index serves
+ * people arriving cold, and a page of design tiles is not a stranger's first
+ * search result for a product.
  *
- *   1. Does it hold together at favicon size? Most marks die here.
- *   2. Does it survive the inversion? A drawing tuned on black often goes
- *      muddy on warm paper, which is why both tiles are shown side by side
- *      rather than one at a time behind a toggle.
- *   3. Does it sit beside the word without fighting it? A mark reviewed
- *      alone is reviewed in a context it will never appear in.
+ * The order below is the order a mark actually fails in. Favicon size kills
+ * most of them, the inversion kills the next few, and the rest die standing
+ * next to the word they have to share a header with.
  */
 export const metadata = {
   title: 'Brand',
@@ -154,101 +151,6 @@ function headerMock(c: Candidate) {
   `;
 }
 
-/**
- * One construction, shown as the mark alone and as the whole name.
- *
- * Both come off the same drawing, so a variant that only works in one of the
- * two has failed. The mark is not forced into a square: a quarter-turned delta
- * is wider than it is tall, and the sibling brand's own monogram file is a
- * wide crop for the same reason.
- */
-function deltaPCard(v: DeltaP) {
-  return html`
-    <article class="${PANEL} overflow-hidden">
-      <div class="lab-dark px-8 py-9 flex items-center justify-center">
-        ${deltaPLockup(v, { height: 58 })}
-      </div>
-      <div class="flex items-baseline justify-between gap-3 px-5 pt-4 border-t border-rule">
-        <h3 class="text-h3 font-bold m-0">${v.name}</h3>
-        <code class="font-mono text-xs text-ink-subtle">${v.id}</code>
-      </div>
-      <div class="lab-paper px-5 divide-y divide-rule">
-        <div class="py-5 flex flex-wrap items-center gap-x-8 gap-y-4">
-          ${deltaPMark(v, 60)}
-          <span class="flex items-end gap-4">
-            ${SMALL_SIZES.map(
-              (px) => html`
-                <span class="flex flex-col items-center gap-1.5">
-                  ${deltaPMark(v, px)}
-                  <span class="font-mono text-[10px] text-ink-subtle leading-none">${px}px</span>
-                </span>
-              `,
-            )}
-          </span>
-        </div>
-        <div class="py-5 flex flex-wrap items-center gap-x-6 gap-y-3">
-          ${deltaPLockup(v, { height: 38 })}
-          <span class=${FIELD_LABEL}>sans</span>
-        </div>
-        <div class="py-5 flex flex-wrap items-center gap-x-6 gap-y-3">
-          ${deltaPLockup(v, { height: 20 })}
-          <span class=${FIELD_LABEL}>at header size</span>
-        </div>
-      </div>
-      <div class="px-5 py-5 border-t border-rule flex flex-col gap-3">
-        <p class="${PROSE} text-sm m-0">${v.idea}</p>
-        <p class="text-sm text-ink-subtle leading-[1.65] m-0">
-          <span class="text-ink font-semibold">The cost.</span> ${v.cost}
-        </p>
-      </div>
-    </article>
-  `;
-}
-
-/**
- * One drawn wordmark, shown the three ways it has to survive.
- *
- * Large on ink first, because that is where a drawing is judged. Then on paper
- * at the size a header actually sets it, because a wordmark that only works
- * above 60 pixels is a poster and not a logo. The band variants are shown on
- * both grounds for the same reason the candidate cards are: a cut in the paper
- * colour is the one thing that changes character when the paper does.
- */
-function wordmarkCard(v: Wordmark) {
-  return html`
-    <article class="${PANEL} overflow-hidden">
-      <div class="lab-dark px-8 py-10 flex items-center justify-center">
-        ${wordmarkLockup(v, 40)}
-      </div>
-
-      <div class="flex items-baseline justify-between gap-3 px-5 pt-4 border-t border-rule">
-        <h3 class="text-h3 font-bold m-0">${v.name}</h3>
-        <code class="font-mono text-xs text-ink-subtle">${v.id}</code>
-      </div>
-
-      <div class="lab-light px-5 py-6 border-t border-rule mt-4">${wordmarkLockup(v, 26)}</div>
-
-      <div class="lab-paper px-5 py-5 border-y border-rule flex flex-wrap items-end gap-6">
-        ${[18, 14].map(
-          (px) => html`
-            <span class="flex flex-col items-start gap-1.5">
-              ${wordmarkLockup(v, px)}
-              <span class="font-mono text-[10px] text-ink-subtle leading-none">${px}px</span>
-            </span>
-          `,
-        )}
-      </div>
-
-      <div class="px-5 py-5 flex flex-col gap-3">
-        <p class="${PROSE} text-sm m-0">${v.idea}</p>
-        <p class="text-sm text-ink-subtle leading-[1.65] m-0">
-          <span class="text-ink font-semibold">The cost.</span> ${v.cost}
-        </p>
-      </div>
-    </article>
-  `;
-}
-
 export default function LogoLabPage() {
   return html`
     <style>
@@ -292,89 +194,30 @@ export default function LogoLabPage() {
         font-weight: 600;
         letter-spacing: -0.02em;
       }
-      /* The whole-word treatments. Heavier than the lockup faces above,
-         because here the type carries the mark rather than sitting beside a
-         drawn letter that was doing the carrying. */
-      .dp-sans {
-        font-family: var(--font-sans);
-        font-weight: 800;
-        letter-spacing: -0.035em;
-      }
-      .dp-mono {
-        font-family: var(--font-mono);
-        font-weight: 600;
-      }
-      /* The Next.js-style tail on the drawn wordmark. Type rather than
-         drawing, because three characters at a quarter of the cap height are
-         below the size at which a drawn letter is worth the trouble. */
-      /* The two faces the drawn-name section sets the word in. Declared here
-         rather than passed inline so a variant states only the four decisions
-         it is actually making: case, weight, tracking, and the face. */
-      .wm-sans {
-        font-family: var(--font-sans);
-      }
-      .wm-mono {
-        font-family: var(--font-mono);
-      }
     </style>
 
     ${pageHero({
-      heading: 'Logo lab',
+      heading: 'The mark',
       lede: html`
-        Six candidate marks, drawn on one grid so they can be compared instead of
-        admired one at a time. Nothing here is chosen. Each card states the idea
-        the drawing carries and what that idea costs.
+        Delta, chosen out of six. This page is what it has to keep surviving:
+        both grounds, the sizes a favicon renders at, the word beside it, and
+        the header it lives in on nearly every page view.
       `,
     })}
 
     ${section({
-      id: 'candidates',
-      heading: 'The candidates',
+      id: 'mark',
+      heading: 'The drawing',
       layout: 'split',
       lede: html`
-        Each is shown on deep ink and on warm paper, because a drawing tuned
-        against black often goes muddy when it is inverted. The strip underneath
-        is the same file at the sizes a favicon and an avatar actually render at,
-        which is where most marks fall apart.
+        Shown on deep ink and on warm paper, because a drawing tuned against
+        black often goes muddy when it is inverted. The strip underneath is the
+        same file at the sizes a favicon and an avatar actually render at, which
+        is where most marks fall apart.
       `,
       body: html`
-        <div class="grid gap-6 mid:grid-cols-2 wide:grid-cols-3">
-          ${CANDIDATES.map((c) => card(c))}
-        </div>
-      `,
-    })}
-
-    ${section({
-      id: 'delta-p',
-      heading: 'The delta over the word',
-      layout: 'split',
-      lede: html`
-        The delta exactly as drawn, turned and set above the word so it sits
-        over the i and the l rather than across them, with a thin stem dropped
-        from the cut the mark already carries. Nothing here reshapes it.
-      `,
-      body: html`
-        <p class="${PROSE} mb-9">
-          A quarter turn on its own cannot clear both letters. The wing's
-          underside runs at about fifteen degrees there, while the step from the
-          i's shoulder up to the l's ascender is nearer forty. Lift it clear of
-          the l and it floats far above the i. Turning the mark back to
-          sixty-four degrees puts that underside on the slope the word actually
-          makes, so the wing follows the letters instead of ignoring them.
-          Which edge is even the underside changes with the turn, so the drawing
-          is measured rather than reasoned about: the lean means the mark's own
-          axis is already some twenty degrees off vertical, and working from the
-          upright shape gets the angle wrong by that much.
-        </p>
-        <p class="${PROSE} mb-9">
-          The stem is the mark's own partition, carried through the same
-          transform and run down to the baseline, drawn at the weight of the
-          letters around it. The word sits at ordinary spacing in every variant
-          and the delta is what moves, which is what keeps a gap from opening up
-          beside the i. The i is dotless, since the wing is over it.
-        </p>
         <div class="grid gap-6 mid:grid-cols-2">
-          ${DELTA_PS.map((v) => deltaPCard(v))}
+          ${card(DELTA)}
         </div>
       `,
     })}
@@ -384,60 +227,17 @@ export default function LogoLabPage() {
       heading: 'Against the word',
       body: html`
         <p class="${PROSE} mb-6">
-          The header sets the name in mono today, which reads as an instrument
-          label and also, at a glance, as a filename. The second column asks
-          whether a heavier sans carries the name better once the mark is doing
-          the technical talking.
+          The header sets the name in mono, which reads as an instrument label
+          and also, at a glance, as a filename. The second column asks whether a
+          heavier sans carries the name better once the mark is doing the
+          technical talking. That one is not settled.
         </p>
         <div class="border-t border-rule">
           <div class="hidden mid:grid grid-cols-[9rem_1fr_1fr] gap-5 pt-4">
             <span></span>
             ${WORD_FACES.map((w) => html`<span class=${FIELD_LABEL}>${w.label}</span>`)}
           </div>
-          ${CANDIDATES.map((c) => lockupRow(c))}
-        </div>
-      `,
-    })}
-
-    ${section({
-      id: 'wordmark',
-      heading: 'The name, treated',
-      layout: 'split',
-      lede: html`
-        The mark is settled. This is the other half: the six letters beside it,
-        and what is done to them that a typeface alone would not do.
-      `,
-      body: html`
-        <p class="${PROSE} mb-6">
-          Both references were opened and looked at. Next.js draws its W from
-          scratch, an angular stack of chevrons owing nothing to any typeface,
-          and sets only the letters after it. eve goes further and reduces its
-          three letters to bars and a diagonal. In each case one authored shape
-          carries the brand and the type carries the reading.
-        </p>
-        <p class="${PROSE} mb-6">
-          Two rounds were thrown away getting here, and both are worth stating
-          because they narrow what is left. The letters were built by hand first:
-          a compass-drawn S and a squared O are exactly where amateur lettering
-          announces itself, so the letters now come from a face somebody spent
-          years drawing. Then the capital P was rebuilt out of the delta, on the
-          theory that it could be this brand's W. That one fails for a reason
-          worth keeping: a P is read from its counter, the enclosed hole in the
-          bowl, and a solid triangle has no counter to give. Against a stem it
-          reads as a play button, and the lockup said something other than the
-          name. A W is all strokes and no counter, which is why the same move
-          works there and not here.
-        </p>
-        <p class="${PROSE} mb-9">
-          What is left to own is not a redrawn letter but a treatment across all
-          six, and the mark already carries the one worth extending. The band cut
-          through it is the only feature no other triangle has. The letters below
-          are outlined paths rather than live text, because this site sets its
-          type in a system stack and a wordmark set that way is a different
-          typeface on every operating system.
-        </p>
-        <div class="grid gap-6 mid:grid-cols-2">
-          ${WORDMARKS.map((v) => wordmarkCard(v))}
+          ${lockupRow(DELTA)}
         </div>
       `,
     })}
@@ -448,12 +248,12 @@ export default function LogoLabPage() {
       layout: 'split',
       lede: html`
         The placement that matters most, since it is on every page view. A mark
-        that resolves on a card and then vanishes beside four nav links has not
+        that resolves on a card and then vanishes beside six nav links has not
         passed.
       `,
       body: html`
-        <div class="grid gap-4 wide:grid-cols-2">
-          ${CANDIDATES.map((c) => headerMock(c))}
+        <div class="grid gap-4">
+          ${headerMock(DELTA)}
         </div>
       `,
     })}
@@ -461,10 +261,10 @@ export default function LogoLabPage() {
     <div class="max-w-6xl mx-auto px-6 pb-20">
       <hr class="border-0 border-t border-rule m-0 mb-6" />
       <p class="text-sm text-ink-subtle max-w-[62ch] m-0">
-        This route is in the nav but stays out of the index and the sitemap
-        while the marks still disagree with each other. When one wins it moves
-        into a brand module beside the other design tokens, the losers come out
-        of the repo, and what is left here becomes a real brand page.
+        The mark is settled and the losing drawings are out of the repo. This
+        route stays out of the index and the sitemap all the same: it is a
+        working surface for whoever is checking the mark still holds up, not a
+        brand page for a stranger arriving cold.
       </p>
     </div>
   `;
