@@ -49,7 +49,8 @@ export function lazyFigure() {
     caption: html`The page-fault handler runs ${inlineFact('faultWorkers')} workers and answers faults by
       copying pages into the guest's address space. The accented edge is why it works at all: without
       one coalesced range read of the packed data, a cold restore costs a separate round trip for every
-      ${inlineFact('block')} page. The block handler reads through to the template and only consults its
+      ${inlineFact('block')} block, and on a hugepage host a single fault covers a great many of them.
+      The block handler reads through to the template and only consults its
       own cache where the machine genuinely wrote, which is what the dirty bitmap records. Inferring
       that from the file's allocated extents instead is not a substitute, because a filesystem may
       report data where there is a hole.`,

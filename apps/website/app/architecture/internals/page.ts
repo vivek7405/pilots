@@ -25,7 +25,7 @@ import { pipelineFigure } from '#modules/internals/diagrams/pipeline.ts';
  * engineer and too long for everyone else, which is what the single page was
  * becoming.
  *
- * Everything here is drawn from ARCHITECTURE.md and the phase issues #2 to #7.
+ * Everything here is drawn from ARCHITECTURE.md and the phase issues #2 to #7 and #15.
  * Nothing is invented to fill a figure. Where a mechanism is not built yet the
  * page says which phase owns it rather than describing it in the present tense,
  * because a roadmap written in the present tense is the thing this project's
