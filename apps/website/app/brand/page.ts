@@ -4,6 +4,7 @@ import { pageHero } from '#lib/ui/page-hero.ts';
 import { PROSE, FIELD_LABEL, PANEL } from '#lib/design/recipes.ts';
 import { CANDIDATES, markSvg, type Candidate } from '#lib/design/logo-candidates.ts';
 import { DELTA_PS, deltaPMark, deltaPLockup, type DeltaP } from '#lib/design/delta-p.ts';
+import { WORDMARKS, wordmarkLockup, type Wordmark } from '#lib/design/wordmark.ts';
 
 /**
  * /brand
@@ -204,6 +205,50 @@ function deltaPCard(v: DeltaP) {
   `;
 }
 
+/**
+ * One drawn wordmark, shown the three ways it has to survive.
+ *
+ * Large on ink first, because that is where a drawing is judged. Then on paper
+ * at the size a header actually sets it, because a wordmark that only works
+ * above 60 pixels is a poster and not a logo. The band variants are shown on
+ * both grounds for the same reason the candidate cards are: a cut in the paper
+ * colour is the one thing that changes character when the paper does.
+ */
+function wordmarkCard(v: Wordmark) {
+  return html`
+    <article class="${PANEL} overflow-hidden">
+      <div class="lab-dark px-8 py-10 flex items-center justify-center">
+        ${wordmarkLockup(v, 40)}
+      </div>
+
+      <div class="flex items-baseline justify-between gap-3 px-5 pt-4 border-t border-rule">
+        <h3 class="text-h3 font-bold m-0">${v.name}</h3>
+        <code class="font-mono text-xs text-ink-subtle">${v.id}</code>
+      </div>
+
+      <div class="lab-light px-5 py-6 border-t border-rule mt-4">${wordmarkLockup(v, 26)}</div>
+
+      <div class="lab-paper px-5 py-5 border-y border-rule flex flex-wrap items-end gap-6">
+        ${[18, 14].map(
+          (px) => html`
+            <span class="flex flex-col items-start gap-1.5">
+              ${wordmarkLockup(v, px)}
+              <span class="font-mono text-[10px] text-ink-subtle leading-none">${px}px</span>
+            </span>
+          `,
+        )}
+      </div>
+
+      <div class="px-5 py-5 flex flex-col gap-3">
+        <p class="${PROSE} text-sm m-0">${v.idea}</p>
+        <p class="text-sm text-ink-subtle leading-[1.65] m-0">
+          <span class="text-ink font-semibold">The cost.</span> ${v.cost}
+        </p>
+      </div>
+    </article>
+  `;
+}
+
 export default function LogoLabPage() {
   return html`
     <style>
@@ -258,6 +303,18 @@ export default function LogoLabPage() {
       .dp-mono {
         font-family: var(--font-mono);
         font-weight: 600;
+      }
+      /* The Next.js-style tail on the drawn wordmark. Type rather than
+         drawing, because three characters at a quarter of the cap height are
+         below the size at which a drawn letter is worth the trouble. */
+      /* The two faces the drawn-name section sets the word in. Declared here
+         rather than passed inline so a variant states only the four decisions
+         it is actually making: case, weight, tracking, and the face. */
+      .wm-sans {
+        font-family: var(--font-sans);
+      }
+      .wm-mono {
+        font-family: var(--font-mono);
       }
     </style>
 
@@ -338,6 +395,49 @@ export default function LogoLabPage() {
             ${WORD_FACES.map((w) => html`<span class=${FIELD_LABEL}>${w.label}</span>`)}
           </div>
           ${CANDIDATES.map((c) => lockupRow(c))}
+        </div>
+      `,
+    })}
+
+    ${section({
+      id: 'wordmark',
+      heading: 'The name, treated',
+      layout: 'split',
+      lede: html`
+        The mark is settled. This is the other half: the six letters beside it,
+        and what is done to them that a typeface alone would not do.
+      `,
+      body: html`
+        <p class="${PROSE} mb-6">
+          Both references were opened and looked at. Next.js draws its W from
+          scratch, an angular stack of chevrons owing nothing to any typeface,
+          and sets only the letters after it. eve goes further and reduces its
+          three letters to bars and a diagonal. In each case one authored shape
+          carries the brand and the type carries the reading.
+        </p>
+        <p class="${PROSE} mb-6">
+          Two rounds were thrown away getting here, and both are worth stating
+          because they narrow what is left. The letters were built by hand first:
+          a compass-drawn S and a squared O are exactly where amateur lettering
+          announces itself, so the letters now come from a face somebody spent
+          years drawing. Then the capital P was rebuilt out of the delta, on the
+          theory that it could be this brand's W. That one fails for a reason
+          worth keeping: a P is read from its counter, the enclosed hole in the
+          bowl, and a solid triangle has no counter to give. Against a stem it
+          reads as a play button, and the lockup said something other than the
+          name. A W is all strokes and no counter, which is why the same move
+          works there and not here.
+        </p>
+        <p class="${PROSE} mb-9">
+          What is left to own is not a redrawn letter but a treatment across all
+          six, and the mark already carries the one worth extending. The band cut
+          through it is the only feature no other triangle has. The letters below
+          are outlined paths rather than live text, because this site sets its
+          type in a system stack and a wordmark set that way is a different
+          typeface on every operating system.
+        </p>
+        <div class="grid gap-6 mid:grid-cols-2">
+          ${WORDMARKS.map((v) => wordmarkCard(v))}
         </div>
       `,
     })}

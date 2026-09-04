@@ -38,7 +38,7 @@ const ACCENT_INK = 'var(--logo-accent, currentColor)';
 const BASELINE = 108;
 
 /** The candidate drawing, verbatim, inside the translate and lean it was drawn with. */
-const DELTA_D = 'M16 3.8 L26.8 27.6 L16 21.4 L5.2 27.6 Z';
+export const DELTA_D = 'M16 3.8 L26.8 27.6 L16 21.4 L5.2 27.6 Z';
 /** Centre of its ink box in its own 32-unit grid. */
 const D_CX = 16.035;
 const D_CY = 15.7;
