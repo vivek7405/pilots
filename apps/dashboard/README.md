@@ -187,20 +187,12 @@ app imports `@pilots/sdk` from the `sdks/js` workspace. The compose file sets
 that context; the root `.dockerignore` keeps kernels, rootfs images and the Go
 data plane out of it.
 
-### One prerequisite that has not landed yet
+### Why the rate limiters trust the proxy
 
 Every rate limiter in this app sets `trustProxy: true`, which it has to: the
 workload router fronts the dashboard, so without it the socket peer is the
-router on every request and the limit becomes a single shared bucket.
-
-`trustProxy` has one precondition, which is that the proxy in front **strips**
-an inbound `X-Forwarded-For` before appending the peer.
-`apps/hostd/internal/router/router.go` does not do that yet: its `Director`
-sets the proxy-port header and leaves the rest alone, so Go's `ReverseProxy`
-appends the peer to whatever the client sent and the leftmost entry is the
-client's own choice. `X-Forwarded-Proto` is not set either, which is why HSTS
-never turns on.
-
-Until that lands, a caller can select its own rate-limit bucket by sending a
-header. The fix is a few lines in that `Director` plus a router test, and it
-belongs to the engine.
+router on every request and the limit becomes a single shared bucket. That is
+safe because the router deletes an inbound `X-Forwarded-For` at the public
+entry before appending the peer, and sets `X-Forwarded-Proto` and
+`X-Forwarded-Host` there too, so the leftmost entry is always an address the
+edge observed rather than one a caller chose.

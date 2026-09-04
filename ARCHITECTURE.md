@@ -74,6 +74,12 @@ compose fragment on the ordinary primitives, not a product tier. See
    free tier). One wildcard cert via ACME DNS-01 (certmagic + Cloudflare API
    token), shared to hosts via S3. Custom domains: per-domain on-demand
    certs via HTTP-01 (any host can answer the challenge).
+   The router owns the forwarded headers, set once at the public entry and
+   preserved across a mesh hop: `X-Forwarded-For` is deleted inbound so what
+   reaches the guest is the peer this edge saw, `X-Forwarded-Proto` is `https`
+   when the edge terminated TLS, and `X-Forwarded-Host` is the name the user
+   typed. A rate limiter behind us reads the leftmost entry, so a caller must
+   not be able to supply it.
    In code: every host calls `certmagic.ManageAsync` for `*.<workload
    domain>`, the workload apex and the dashboard apex; the shared `certs`
    Storage lock is what makes N hosts running the identical call produce ONE

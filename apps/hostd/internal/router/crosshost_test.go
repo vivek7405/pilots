@@ -436,3 +436,74 @@ func TestAForwardedOrphanIsNotForwardedAgain(t *testing.T) {
 		t.Errorf("status %d, want 404 rather than a second hop", w.Code)
 	}
 }
+
+// The mesh hop must not let a forged client through either. forwardTo's
+// ReverseProxy appends the peer to whatever survives ServeHTTP, so the owner
+// has to see the peer alone.
+func TestAForgedForwardedForIsStrippedBeforeTheMeshHop(t *testing.T) {
+	var got atomic.Value
+	owner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Store(r.Header.Clone())
+	}))
+	defer owner.Close()
+
+	r := New(Options{
+		Domain: "pilotrun.app", HostID: "host-a",
+		Store: &stubStore{machines: []state.Machine{
+			{ID: "m-1", Name: "alpha", HostID: "host-b", Domain: "alpha.pilotrun.app"},
+		}},
+		Peers: &stubPeers{addrs: map[string]string{
+			"host-b": strings.TrimPrefix(owner.URL, "http://"),
+		}},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "https://alpha.pilotrun.app/x", nil)
+	req.Host = "alpha.pilotrun.app"
+	req.Header.Set("X-Forwarded-For", "203.0.113.9")
+	r.ServeHTTP(httptest.NewRecorder(), req)
+
+	h, _ := got.Load().(http.Header)
+	if h == nil {
+		t.Fatal("the owner was never reached")
+	}
+	if want := "192.0.2.1"; h.Get("X-Forwarded-For") != want {
+		t.Errorf("the owner saw X-Forwarded-For %q, want %q alone", h.Get("X-Forwarded-For"), want)
+	}
+	if h.Get("X-Forwarded-Proto") != "https" {
+		t.Errorf("X-Forwarded-Proto = %q, want https", h.Get("X-Forwarded-Proto"))
+	}
+	if h.Get("X-Forwarded-Host") != "alpha.pilotrun.app" {
+		t.Errorf("X-Forwarded-Host = %q", h.Get("X-Forwarded-Host"))
+	}
+}
+
+// The second hop rewrites nothing. The public entry already recorded the
+// client; erasing it here would hand every rate limiter the mesh peer instead,
+// and every request from a machine's own host would look like one caller.
+func TestTheInternalListenerPreservesWhatTheEdgeRecorded(t *testing.T) {
+	var got atomic.Value
+	r := edgeRouter(t, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		got.Store(req.Header.Clone())
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "http://alpha.pilotrun.app/x", nil)
+	req.Host = "alpha.pilotrun.app"
+	req.Header.Set(forwardedHeader, "host-z")
+	req.Header.Set("X-Forwarded-For", "203.0.113.9, 10.0.0.1")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "alpha.pilotrun.app")
+	r.InternalHandler().ServeHTTP(httptest.NewRecorder(), req)
+
+	h, _ := got.Load().(http.Header)
+	if h == nil {
+		t.Fatal("the guest was never reached")
+	}
+	// The client stays leftmost and this hop's peer lands last.
+	if want := "203.0.113.9, 10.0.0.1, 192.0.2.1"; h.Get("X-Forwarded-For") != want {
+		t.Errorf("the guest saw X-Forwarded-For %q, want %q", h.Get("X-Forwarded-For"), want)
+	}
+	// The proto the edge set survives: TLS terminated there, not here.
+	if h.Get("X-Forwarded-Proto") != "https" {
+		t.Errorf("X-Forwarded-Proto = %q, want the edge's https", h.Get("X-Forwarded-Proto"))
+	}
+}

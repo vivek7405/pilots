@@ -17,6 +17,10 @@ func (s *stubStore) ListMachines(context.Context) ([]state.Machine, error) {
 	return s.machines, nil
 }
 
+// TouchMachine is a no-op: serveLocally records activity in a goroutine, and
+// the embedded nil state.Store would panic there.
+func (s *stubStore) TouchMachine(context.Context, string, int64) error { return nil }
+
 func (s *stubStore) GetMachine(_ context.Context, id string) (*state.Machine, error) {
 	for i := range s.machines {
 		if s.machines[i].ID == id {
