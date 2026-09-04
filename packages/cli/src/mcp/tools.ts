@@ -328,9 +328,13 @@ export function registerTools(server: McpServer, client: PilotsClient): void {
           const { join } = await import('node:path')
           const path = join(args.dir, 'Dockerfile')
           // Never overwritten: a Dockerfile already in the tree is the repo's
-          // own answer, and resolution order puts it first.
-          if (!existsSync(path)) writeFileSync(path, recipe.dockerfile)
-          return { ...recipe, written: !existsSync(path) ? false : true, path }
+          // own answer, and resolution order puts it first. The check has to
+          // be taken BEFORE the write and kept: re-reading it afterwards is
+          // true either way, which would report a recipe as written when the
+          // repo's own file is what the build will actually use.
+          const existed = existsSync(path)
+          if (!existed) writeFileSync(path, recipe.dockerfile)
+          return { ...recipe, written: !existed, path }
         }
         return recipe
       }),

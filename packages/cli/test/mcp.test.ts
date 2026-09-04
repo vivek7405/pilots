@@ -9,7 +9,7 @@
 
 import { strict as assert } from 'node:assert'
 import { spawn } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
@@ -217,6 +217,34 @@ test('generate_dockerfile detects the bare Django app and answers with a recipe'
     assert.equal(recipe.port, 8000)
     assert.match(recipe.dockerfile, /--bind 0\.0\.0\.0:/)
     assert.match(recipe.dockerfile, /\$\{PORT/)
+  } finally {
+    await close()
+    await api.close()
+  }
+})
+
+test('write reports whether it actually wrote, and never overwrites the repo\'s own Dockerfile', async () => {
+  const api = await startFakeAPI()
+  const dir = mkdtempSync(join(tmpdir(), 'pilot-mcp-write-'))
+  roots.push(dir)
+  // The smallest tree the detector calls django.
+  writeFileSync(join(dir, 'manage.py'), '')
+  writeFileSync(join(dir, 'requirements.txt'), 'django\n')
+  const { client, close } = await connect(serverEnv(api.url))
+  try {
+    const first = await client.callTool({ name: 'generate_dockerfile', arguments: { dir, write: true } })
+    const wrote = JSON.parse(textOf(first)) as { written: boolean; dockerfile: string }
+    assert.equal(wrote.written, true)
+    assert.equal(readFileSync(join(dir, 'Dockerfile'), 'utf8'), wrote.dockerfile)
+
+    // The repo's own answer wins, and the flag has to SAY that the recipe did
+    // not land: an agent reading `written: true` here would build the wrong
+    // Dockerfile believing it was its own.
+    writeFileSync(join(dir, 'Dockerfile'), 'FROM scratch\n')
+    const second = await client.callTool({ name: 'generate_dockerfile', arguments: { dir, write: true } })
+    const skipped = JSON.parse(textOf(second)) as { written: boolean }
+    assert.equal(skipped.written, false)
+    assert.equal(readFileSync(join(dir, 'Dockerfile'), 'utf8'), 'FROM scratch\n')
   } finally {
     await close()
     await api.close()
