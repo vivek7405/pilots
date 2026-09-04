@@ -1597,7 +1597,7 @@ async function serviceAssertions() {
     });
 
     let client;
-    await step(`${`web-${tag}`}.internal for a service at zero resolves and its next request wakes it`, async () => {
+    await step(`web-${tag}.internal for a service at zero resolves and its next request wakes it`, async () => {
       const { status, json } = await request('/v1/machines', {
         method: 'POST',
         body: {
