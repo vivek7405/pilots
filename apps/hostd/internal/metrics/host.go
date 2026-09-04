@@ -39,4 +39,12 @@ var (
 
 	QuotaRefusals = NewCounterVec(Default, "pilots_quota_refusals_total",
 		"Requests refused by an org limit, by limit.", "quota")
+
+	// Fleet-wide rather than host-local, and so the same on every host: the
+	// row is replicated and every host's dispatch swallows the hostname, so
+	// any host is right to report it. Alert on it. Nothing else notices.
+	APIHostnameShadowed = NewGauge(Default, "pilots_api_hostname_shadowed",
+		"Machines unreachable at their own URL because the control API "+
+			"hostname answers there. Above zero is a permanent URL that has "+
+			"stopped being served; see the host log for which machine.")
 )

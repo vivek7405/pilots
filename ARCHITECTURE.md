@@ -96,7 +96,12 @@ compose fragment on the ordinary primitives, not a product tier. See
    documented base URL. The machine name under that hostname is therefore
    reserved -- `api` by default: a tenant that took it would own a URL it
    could never be reached at. The reservation is derived from
-   `PILOT_API_HOSTNAME`, so moving the control API moves it.
+   `PILOT_API_HOSTNAME`, so moving the control API moves it. It only guards
+   creates, though, so a machine that already held the name when the API was
+   pointed at it is reported rather than silently swallowed: hostd logs an
+   error naming it and publishes `pilots_api_hostname_shadowed`. Refusing to
+   start would turn one machine's lost URL into a fleet-wide outage, since
+   the row is replicated to every host.
 6. **Fleet is CPU-vendor-homogeneous — vendor is a cost decision, not a
    technical one.** FC memory snapshots carry raw CPUID; a snapshot never
    restores across the Intel/AMD boundary (cpu_templates normalize within a

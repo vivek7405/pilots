@@ -372,6 +372,11 @@ func run() error {
 	// almost always set after the domain is registered.
 	go runDomainVerifier(ctx, cfg.HostID, store, cfg.WorkloadDomain)
 
+	// A machine that held the API hostname before the control API was pointed
+	// at it keeps its URL and stops being served on it. The create-time
+	// reservation cannot see that machine, so this does, and says so.
+	go runAPIHostnameShadowCheck(ctx, store, cfg.APIHostname)
+
 	// Push-to-deploy and pull-request previews. The webhook is an ordinary
 	// route on every host; exactly one acts on any delivery.
 	ghApp, err := github.LoadApp(cfg.GitHubAppID, cfg.GitHubKeyPath, cfg.GitHubWebhookKey)
