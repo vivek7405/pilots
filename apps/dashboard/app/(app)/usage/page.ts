@@ -7,7 +7,7 @@
  */
 import { html } from '@webjsdev/core';
 import type { PageProps } from '@webjsdev/core';
-import { requireOrg } from '#modules/auth/session.server.ts';
+import { orUnauthorized, requireOrg } from '#modules/auth/session.server.ts';
 import { usageForOrg } from '#modules/usage/queries/usage-for-org.server.ts';
 import type { UsageSample } from '#db/schema.server.ts';
 import { toJson } from '#modules/usage/export.server.ts';
@@ -28,7 +28,7 @@ export default async function UsagePage({ searchParams }: PageProps) {
     typeof searchParams.since === 'string' ? searchParams.since : null,
     typeof searchParams.until === 'string' ? searchParams.until : null,
   );
-  const rows = await usageForOrg({ orgId: ctx.org.id, since, until });
+  const rows = orUnauthorized(await usageForOrg({ since, until }));
   const { totals } = toJson(rows);
   const hosts = await fleet.hosts.list().catch(() => []);
 

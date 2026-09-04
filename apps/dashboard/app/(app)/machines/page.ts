@@ -6,7 +6,7 @@
  * the heading and the description stay HTML the browser never pays for.
  */
 import { html } from '@webjsdev/core';
-import { requireOrg } from '#modules/auth/session.server.ts';
+import { orUnauthorized, requireOrg } from '#modules/auth/session.server.ts';
 import { listMachines } from '#modules/machines/queries/list-machines.server.ts';
 import { lede, pageHeading } from '#lib/utils/ui.ts';
 import '#modules/machines/components/machine-list.ts';
@@ -15,7 +15,7 @@ export const metadata = { title: 'Machines' };
 
 export default async function MachinesPage() {
   const ctx = (await requireOrg())!;
-  const machines = await listMachines(ctx.org.id).catch(() => []);
+  const machines = orUnauthorized(await listMachines().catch(() => []));
 
   return html`
     ${pageHeading('Machines')}

@@ -8,12 +8,17 @@
  *
  * A release route the engine does not serve yet answers 404, so `releases`
  * degrades to an empty list instead of taking the page down with it.
+ *
+ * The org the service is checked against is the SESSION's, so a caller cannot
+ * pass the org id that would make the tenancy check pass.
  */
 import { eq } from 'drizzle-orm';
 import { db } from '#db/connection.server.ts';
 import { repoConnections } from '#db/schema.server.ts';
 import { fleet, listMachines } from '#modules/fleet/client.server.ts';
 import { assertOwned } from '#modules/fleet/org-filter.server.ts';
+import { requireOrg, signedOut } from '#modules/auth/session.server.ts';
+import type { SignedOut } from '#modules/auth/session.server.ts';
 import type { RepoConnection } from '#db/schema.server.ts';
 import type { Machine, Release, Service } from '@pilots/sdk';
 
@@ -24,17 +29,19 @@ export interface ServiceDetail {
   repo: RepoConnection | null;
 }
 
-export async function getService(input: { orgId: string; id: string }): Promise<ServiceDetail | null> {
+export async function getService(input: { id: string }): Promise<ServiceDetail | null | SignedOut> {
+  const ctx = await requireOrg();
+  if (!ctx) return signedOut();
   let service: Service;
   try {
     service = await fleet.services.get(input.id);
   } catch {
     return null;
   }
-  if (!assertOwned(input.orgId, service)) return null;
+  if (!assertOwned(ctx.org.id, service)) return null;
 
   const releases = await fleet.services.releases(input.id).catch(() => [] as Release[]);
-  const machines = await listMachines(input.orgId).catch(() => [] as Machine[]);
+  const machines = await listMachines(ctx.org.id).catch(() => [] as Machine[]);
   // A PR preview is named `pr-<number>-<app>`, which is the engine's own
   // convention; there is no separate previews route to ask.
   const app = service.app ?? service.name;

@@ -13,6 +13,7 @@
  */
 
 import { and, eq } from 'drizzle-orm';
+import { unauthorized } from '@webjsdev/core';
 import { getRequest } from '@webjsdev/server';
 import { db } from '#db/connection.server.ts';
 import { memberships, orgs, users } from '#db/schema.server.ts';
@@ -36,6 +37,42 @@ export interface OrgContext {
   user: User;
   org: Org;
   role: Role;
+}
+
+/**
+ * What a `'use server'` query returns to a caller with no session.
+ *
+ * Every export of a `'use server'` file is an RPC endpoint the browser can POST
+ * to, guarded by the CSRF origin check and nothing else. So a query resolves
+ * the org from the session itself and never takes a tenant id as an argument,
+ * and when there is no session it RETURNS this envelope rather than throwing:
+ * a throw inside an action is sanitized to a generic 500, which loses the
+ * status the caller needed. The framework reads `status` off the envelope.
+ */
+export interface SignedOut {
+  success: false;
+  error: string;
+  status: 401;
+}
+
+export function signedOut(): SignedOut {
+  return { success: false, error: 'Sign in to continue.', status: 401 };
+}
+
+export function isSignedOut(value: unknown): value is SignedOut {
+  return typeof value === 'object' && value !== null && (value as { success?: unknown }).success === false;
+}
+
+/**
+ * A page's view of a query result: the data, or the 401 boundary.
+ *
+ * Only a page render may call this; `unauthorized()` is a control-flow throw
+ * that a route handler must not raise. Pages sit behind the segment gate, so
+ * the throw is reachable only when a session ends between two reads.
+ */
+export function orUnauthorized<T>(value: T | SignedOut): T {
+  if (isSignedOut(value)) throw unauthorized();
+  return value;
 }
 
 /**

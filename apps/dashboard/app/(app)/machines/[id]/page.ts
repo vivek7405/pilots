@@ -7,7 +7,7 @@
  */
 import { html, notFound } from '@webjsdev/core';
 import type { PageProps } from '@webjsdev/core';
-import { requireOrg } from '#modules/auth/session.server.ts';
+import { orUnauthorized, requireOrg } from '#modules/auth/session.server.ts';
 import { getMachine } from '#modules/machines/queries/get-machine.server.ts';
 import { stateBadge } from '#modules/machines/utils/ui/state.ts';
 import { badgeClass } from '#components/ui/badge.ts';
@@ -29,7 +29,7 @@ export async function generateMetadata({ params }: PageProps) {
 
 export default async function MachinePage({ params }: PageProps) {
   const ctx = (await requireOrg())!;
-  const found = await getMachine({ orgId: ctx.org.id, id: params.id });
+  const found = orUnauthorized(await getMachine({ id: params.id }));
   if (!found) throw notFound();
   const { machine, checkpoints } = found;
 

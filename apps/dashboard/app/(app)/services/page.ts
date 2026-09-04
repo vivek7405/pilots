@@ -5,7 +5,7 @@
  * promoting a sandbox, both of which carry a build the dashboard does not have.
  */
 import { html } from '@webjsdev/core';
-import { requireOrg } from '#modules/auth/session.server.ts';
+import { orUnauthorized, requireOrg } from '#modules/auth/session.server.ts';
 import { listServices } from '#modules/services/queries/list-services.server.ts';
 import { dataTable, emptyState, lede, pageHeading } from '#lib/utils/ui.ts';
 import type { Service } from '@pilots/sdk';
@@ -14,7 +14,7 @@ export const metadata = { title: 'Services' };
 
 export default async function ServicesPage() {
   const ctx = (await requireOrg())!;
-  const services = await listServices(ctx.org.id).catch(() => []);
+  const services = orUnauthorized(await listServices().catch(() => []));
 
   return html`
     ${pageHeading('Services')}

@@ -1,7 +1,7 @@
 /** Volumes, read-only: they come from a deploy, not from a button here. */
 import { html } from '@webjsdev/core';
 import type { Volume } from '@pilots/sdk';
-import { requireOrg } from '#modules/auth/session.server.ts';
+import { orUnauthorized, requireOrg } from '#modules/auth/session.server.ts';
 import { listVolumes } from '#modules/volumes/queries/list-volumes.server.ts';
 import { dataTable, emptyState, lede, pageHeading } from '#lib/utils/ui.ts';
 
@@ -9,7 +9,7 @@ export const metadata = { title: 'Volumes' };
 
 export default async function VolumesPage() {
   const ctx = (await requireOrg())!;
-  const volumes = await listVolumes(ctx.org.id).catch(() => []);
+  const volumes = orUnauthorized(await listVolumes().catch(() => []));
 
   return html`
     ${pageHeading('Volumes')} ${lede('Created by a deploy from the volumes a compose file names.')}

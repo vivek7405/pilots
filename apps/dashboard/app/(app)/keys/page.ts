@@ -7,7 +7,7 @@
  */
 import { html } from '@webjsdev/core';
 import type { PageProps } from '@webjsdev/core';
-import { requireOrg } from '#modules/auth/session.server.ts';
+import { orUnauthorized, requireOrg } from '#modules/auth/session.server.ts';
 import { listKeys } from '#modules/keys/queries/list-keys.server.ts';
 import type { KeyRow } from '#modules/keys/queries/list-keys.server.ts';
 import { createKey } from '#modules/keys/actions/create-key.server.ts';
@@ -26,7 +26,7 @@ export const metadata = { title: 'Keys' };
 
 export default async function KeysPage({ actionData }: PageProps) {
   const ctx = (await requireOrg())!;
-  const keys = await listKeys(ctx.org.id);
+  const keys = orUnauthorized(await listKeys());
   const result =
     (actionData as
       | { data?: { key: string; name: string }; error?: string; fieldErrors?: Record<string, string> }

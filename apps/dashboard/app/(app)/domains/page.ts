@@ -1,7 +1,7 @@
 /** Custom domains, and the CNAME each one needs. */
 import { html } from '@webjsdev/core';
 import type { PageProps } from '@webjsdev/core';
-import { requireOrg } from '#modules/auth/session.server.ts';
+import { orUnauthorized, requireOrg } from '#modules/auth/session.server.ts';
 import { listDomains } from '#modules/domains/queries/list-domains.server.ts';
 import type { DomainRow } from '#modules/domains/queries/list-domains.server.ts';
 import { listServices } from '#modules/services/queries/list-services.server.ts';
@@ -22,15 +22,15 @@ import {
   sectionHeading,
 } from '#lib/utils/ui.ts';
 import { cn } from '#lib/utils/cn.ts';
+import type { Service } from '@pilots/sdk';
 
 export const metadata = { title: 'Domains' };
 
 export default async function DomainsPage({ actionData }: PageProps) {
   const ctx = (await requireOrg())!;
-  const [rows, services] = await Promise.all([
-    listDomains(ctx.org.id).catch(() => []),
-    listServices(ctx.org.id).catch(() => []),
-  ]);
+  const [rows, services] = (
+    await Promise.all([listDomains().catch(() => []), listServices().catch(() => [])])
+  ).map(orUnauthorized) as [DomainRow[], Service[]];
   const errors = (actionData as { fieldErrors?: Record<string, string>; error?: string } | undefined) ?? {};
 
   return html`

@@ -11,6 +11,7 @@ import { html, asset, cspNonce } from '@webjsdev/core';
 import type { LayoutProps } from '@webjsdev/core';
 import { currentUser } from '#modules/auth/queries/current-user.server.ts';
 import { listOrgs } from '#modules/orgs/queries/list-orgs.server.ts';
+import { isSignedOut } from '#modules/auth/session.server.ts';
 import { switchOrg } from '#modules/orgs/actions/switch-org.server.ts';
 import { buttonClass } from '#components/ui/button.ts';
 import { nativeSelectClass, nativeSelectIconClass, nativeSelectWrapperClass } from '#components/ui/native-select.ts';
@@ -34,7 +35,8 @@ const NAV = [
 
 export default async function RootLayout({ children, url }: LayoutProps) {
   const me = await currentUser();
-  const orgs = me ? await listOrgs(me.id) : [];
+  const listed = me ? await listOrgs() : [];
+  const orgs = isSignedOut(listed) ? [] : listed;
   const path = new URL(url ?? 'http://localhost/').pathname;
   const nonce = cspNonce();
 

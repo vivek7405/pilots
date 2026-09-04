@@ -1,7 +1,7 @@
 /** Who is in the org, and the two things an owner can do about it. */
 import { html } from '@webjsdev/core';
 import type { PageProps } from '@webjsdev/core';
-import { requireOrg } from '#modules/auth/session.server.ts';
+import { orUnauthorized, requireOrg } from '#modules/auth/session.server.ts';
 import { listMembers } from '#modules/orgs/queries/list-members.server.ts';
 import type { MemberRow } from '#modules/orgs/queries/list-members.server.ts';
 import { inviteMember } from '#modules/orgs/actions/invite-member.server.ts';
@@ -24,7 +24,7 @@ export const metadata = { title: 'Org' };
 
 export default async function OrgPage({ actionData }: PageProps) {
   const ctx = (await requireOrg())!;
-  const members = await listMembers(ctx.org.id);
+  const members = orUnauthorized(await listMembers());
   const result = (actionData as { error?: string; fieldErrors?: Record<string, string> } | undefined) ?? {};
   const isOwner = ctx.role === 'owner';
 

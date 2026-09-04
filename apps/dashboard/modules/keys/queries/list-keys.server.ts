@@ -1,6 +1,7 @@
 'use server';
 /**
- * The org's keys as the page renders them.
+ * The acting org's keys as the page renders them. The org comes from the
+ * session, never from an argument.
  *
  * Neither the plaintext (never stored) nor the hash leaves this function. The
  * hash is a revoke handle, so a page has no use for it and a rendered page is
@@ -9,6 +10,8 @@
 import { desc, eq } from 'drizzle-orm';
 import { db } from '#db/connection.server.ts';
 import { apiKeys } from '#db/schema.server.ts';
+import { requireOrg, signedOut } from '#modules/auth/session.server.ts';
+import type { SignedOut } from '#modules/auth/session.server.ts';
 
 export interface KeyRow {
   id: string;
@@ -20,11 +23,13 @@ export interface KeyRow {
   revokedAt: Date | null;
 }
 
-export async function listKeys(orgId: string): Promise<KeyRow[]> {
+export async function listKeys(): Promise<KeyRow[] | SignedOut> {
+  const ctx = await requireOrg();
+  if (!ctx) return signedOut();
   const rows = await db
     .select()
     .from(apiKeys)
-    .where(eq(apiKeys.orgId, orgId))
+    .where(eq(apiKeys.orgId, ctx.org.id))
     .orderBy(desc(apiKeys.createdAt))
     .all();
   return rows.map((k) => ({

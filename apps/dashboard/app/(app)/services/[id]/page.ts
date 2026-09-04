@@ -8,7 +8,7 @@
 import { html, notFound } from '@webjsdev/core';
 import type { PageProps } from '@webjsdev/core';
 import type { Machine, Release } from '@pilots/sdk';
-import { requireOrg } from '#modules/auth/session.server.ts';
+import { orUnauthorized, requireOrg } from '#modules/auth/session.server.ts';
 import { getService } from '#modules/services/queries/get-service.server.ts';
 import { deployService } from '#modules/services/actions/deploy-service.server.ts';
 import { rollbackService } from '#modules/services/actions/rollback-service.server.ts';
@@ -32,7 +32,7 @@ export async function generateMetadata({ params }: PageProps) {
 
 export default async function ServicePage({ params, actionData }: PageProps) {
   const ctx = (await requireOrg())!;
-  const detail = await getService({ orgId: ctx.org.id, id: params.id });
+  const detail = orUnauthorized(await getService({ id: params.id }));
   if (!detail) throw notFound();
   const { service, releases, previews, repo } = detail;
 

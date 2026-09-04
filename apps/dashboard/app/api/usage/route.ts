@@ -7,7 +7,7 @@
  */
 import { orgOr401, isResponse, jsonBody, notFoundResponse } from '#modules/http/guards.server.ts';
 import { roleOn } from '#modules/auth/session.server.ts';
-import { usageForOrg } from '#modules/usage/queries/usage-for-org.server.ts';
+import { samplesForOrg } from '#modules/usage/samples.server.ts';
 import { csvFilename, toCsv, toJson } from '#modules/usage/export.server.ts';
 import { resolvePeriod } from '#modules/usage/period.ts';
 import { db } from '#db/connection.server.ts';
@@ -30,7 +30,7 @@ export async function GET(req: Request): Promise<Response> {
   }
 
   const { since, until } = resolvePeriod(url.searchParams.get('since'), url.searchParams.get('until'));
-  const rows = await usageForOrg({ orgId, since, until });
+  const rows = samplesForOrg(orgId, since, until);
 
   if (url.searchParams.get('format') === 'csv') {
     return new Response(toCsv(rows), {
