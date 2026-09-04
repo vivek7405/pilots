@@ -89,7 +89,12 @@ export function createServicesCommand(): Command {
       if (opts.replicas !== undefined) req.replicas = opts.replicas as number
       if (opts.repo !== undefined) req.repo = opts.repo as string
       if (opts.branch !== undefined) req.branch = opts.branch as string
-      if (opts.autodeploy !== undefined) req.autodeploy = opts.autodeploy !== 'false'
+      // Every spelling of "no", not only the literal `false`: a bare
+      // `--autodeploy` means on, and `--autodeploy no` meaning ON is a push
+      // that ships to production the next time someone commits.
+      if (opts.autodeploy !== undefined) {
+        req.autodeploy = !/^(false|no|off|0)$/i.test(String(opts.autodeploy))
+      }
 
       if (opts.env || opts.unsetEnv) {
         // Merged onto what the service already has, because PATCH replaces the
