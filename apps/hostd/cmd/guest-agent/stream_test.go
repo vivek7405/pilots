@@ -89,14 +89,9 @@ func TestStdinFramesReachTheProcess(t *testing.T) {
 		t.Fatalf("write eof frame: %v", err)
 	}
 
-	kind, payload = readBinary(t, ctx, conn)
-	if kind != frameExit || len(payload) != 1 || payload[0] != 0 {
-		t.Fatalf("frame %d payload %v, want exit 0", kind, payload)
-	}
-
 	typ, data := readFrame(t, ctx, conn)
 	if typ != websocket.MessageText {
-		t.Fatalf("got a %v frame after the exit, want the text verdict", typ)
+		t.Fatalf("got a %v frame %q, want the text verdict first", typ, data)
 	}
 	var verdict struct {
 		Type     string `json:"type"`
@@ -108,20 +103,47 @@ func TestStdinFramesReachTheProcess(t *testing.T) {
 	if verdict.Type != "exit" || verdict.ExitCode != 0 {
 		t.Fatalf("text verdict = %+v, want exit 0", verdict)
 	}
+
+	kind, payload = readBinary(t, ctx, conn)
+	if kind != frameExit || len(payload) != 1 || payload[0] != 0 {
+		t.Fatalf("frame %d payload %v, want exit 0", kind, payload)
+	}
 }
 
-// The text verdict carries the real code, and the binary one truncates to a
-// byte. Both SDKs take whichever arrives first, so the two must agree.
-func TestTheTextExitFrameFollowsTheBinaryOne(t *testing.T) {
+// The text verdict comes FIRST, and the binary frame follows it.
+//
+// Both SDKs act on whichever verdict arrives first: they close the socket and
+// return. A text frame written after the binary one is therefore a frame
+// nothing can receive, which is what it was for a while -- documented as the
+// untruncated fallback and structurally unable to fire.
+func TestTheTextExitVerdictPrecedesTheBinaryOne(t *testing.T) {
 	conn, ctx := dialStream(t, "stdin=false&cmd=sh&cmd=-c&cmd=exit+3")
 
+	typ, data := readFrame(t, ctx, conn)
+	if typ != websocket.MessageText || string(data) != `{"type":"exit","exit_code":3}` {
+		t.Fatalf("got %v %q, want the text exit verdict for 3 first", typ, data)
+	}
 	kind, payload := readBinary(t, ctx, conn)
 	if kind != frameExit || len(payload) != 1 || payload[0] != 3 {
 		t.Fatalf("frame %d payload %v, want exit 3", kind, payload)
 	}
+}
+
+// The untruncated code is what the ordering buys.
+//
+// A command killed by a signal has an ExitCode of -1, and byte(-1) is 255 --
+// indistinguishable from a command that genuinely exited 255. The text verdict
+// carries -1, and because it arrives first that is the code an SDK reports.
+func TestASignalDeathIsUntruncatedInTheTextVerdict(t *testing.T) {
+	conn, ctx := dialStream(t, "stdin=false&cmd=sh&cmd=-c&cmd=kill+-9+%24%24")
+
 	typ, data := readFrame(t, ctx, conn)
-	if typ != websocket.MessageText || string(data) != `{"type":"exit","exit_code":3}` {
-		t.Fatalf("got %v %q, want the text exit verdict for 3", typ, data)
+	if typ != websocket.MessageText || string(data) != `{"type":"exit","exit_code":-1}` {
+		t.Fatalf("got %v %q, want the text verdict carrying -1", typ, data)
+	}
+	kind, payload := readBinary(t, ctx, conn)
+	if kind != frameExit || len(payload) != 1 || payload[0] != 255 {
+		t.Fatalf("frame %d payload %v, want the byte frame truncating to 255", kind, payload)
 	}
 }
 
@@ -137,12 +159,18 @@ func TestAStdinFrameIsIgnoredWhenStdinIsOff(t *testing.T) {
 
 	var out strings.Builder
 	for {
-		kind, payload := readBinary(t, ctx, conn)
-		if kind == frameExit {
+		typ, data := readFrame(t, ctx, conn)
+		if typ == websocket.MessageText {
+			continue // the text verdict, which now precedes the binary one
+		}
+		if len(data) == 0 {
+			t.Fatal("an empty binary frame")
+		}
+		if data[0] == frameExit {
 			break
 		}
-		if kind == frameStdout {
-			out.WriteString(string(payload))
+		if data[0] == frameStdout {
+			out.WriteString(string(data[1:]))
 		}
 	}
 	if got := strings.TrimSpace(out.String()); got != "got:" {

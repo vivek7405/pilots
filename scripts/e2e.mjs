@@ -2423,14 +2423,22 @@ const WS_API = API.replace(/^http/, 'ws');
 // openStream dials an exec stream and collects every frame it sends.
 //
 // It resolves with the concatenated stdout and stderr, the exit code from the
-// binary frame, the exit code from the text verdict, and the subprotocol the
-// server chose. An empty subprotocol means the 101 did not echo what was
-// offered, which is a connection every browser client refuses.
+// binary frame, the exit code from the text verdict, which of the two arrived
+// first, and the subprotocol the server chose. An empty subprotocol means the
+// 101 did not echo what was offered, which is a connection every browser
+// client refuses.
+//
+// firstVerdict is load-bearing: both SDKs act on whichever verdict arrives
+// first and then close the socket, so the one that goes out second is a frame
+// no client can receive.
 function openStream(path, { onOpen } = {}) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(WS_API + path, [`authorization.bearer.${KEY}`]);
     ws.binaryType = 'arraybuffer';
-    const out = { stdout: '', stderr: '', code: null, textCode: null, protocol: '' };
+    const out = {
+      stdout: '', stderr: '', code: null, textCode: null,
+      firstVerdict: null, protocol: '',
+    };
     const decoder = new TextDecoder();
     const timer = setTimeout(() => {
       try { ws.close(); } catch { /* already closed */ }
@@ -2445,7 +2453,10 @@ function openStream(path, { onOpen } = {}) {
       if (typeof event.data === 'string') {
         try {
           const parsed = JSON.parse(event.data);
-          if (parsed.type === 'exit') out.textCode = parsed.exit_code;
+          if (parsed.type === 'exit') {
+            out.textCode = parsed.exit_code;
+            out.firstVerdict ??= 'text';
+          }
         } catch { /* not the verdict */ }
         return;
       }
@@ -2454,7 +2465,10 @@ function openStream(path, { onOpen } = {}) {
       const payload = bytes.subarray(1);
       if (bytes[0] === 1) out.stdout += decoder.decode(payload);
       else if (bytes[0] === 2) out.stderr += decoder.decode(payload);
-      else if (bytes[0] === 3) out.code = payload.length > 0 ? payload[0] : 0;
+      else if (bytes[0] === 3) {
+        out.code = payload.length > 0 ? payload[0] : 0;
+        out.firstVerdict ??= 'binary';
+      }
     });
     ws.addEventListener('error', () => {
       clearTimeout(timer);
@@ -2535,6 +2549,12 @@ async function execStreamAssertions() {
       assert(out.stdout === 'hi\n', `stdout = ${JSON.stringify(out.stdout)}`);
       assert(out.code === 3, `binary exit frame = ${out.code}`);
       assert(out.textCode === 3, `text exit verdict = ${out.textCode}`);
+      // The text verdict must LEAD. Both SDKs settle on the first verdict they
+      // see and close the socket, so a text frame sent second is one nothing
+      // can ever read -- and it is the only one that carries an untruncated
+      // code.
+      assert(out.firstVerdict === 'text',
+        `the ${out.firstVerdict} verdict arrived first; no client reads the other`);
       assert(out.protocol === `authorization.bearer.${KEY}`,
         `the 101 chose ${JSON.stringify(out.protocol)}; a browser client would refuse it`);
     });

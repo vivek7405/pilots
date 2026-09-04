@@ -388,8 +388,11 @@ covers MONOTONIC; without this poke a restored guest's TLS/cron/JS clocks are
 frozen at snapshot time) · `POST /exec` (buffered; `bash -c`; default user
 uid-1000 = `sprite`, home `/home/sprite`, Node 24 on PATH; root opt-in) ·
 `GET /exec/stream` WS — binary frames, **byte 0: 1=stdout 2=stderr 3=exit
-(payload[0]=code)**, then a text `{"type":"exit","exit_code":n}` carrying the
-untruncated code; client to server **0=stdin 4=stdin_eof**, read only when the
+(payload[0]=code)**; the verdict goes out as a text
+`{"type":"exit","exit_code":n}` FIRST and the binary `3` after it, because a
+client settles on the first verdict it sees and only the text one is
+untruncated (a signal death is -1, which one byte reports as 255); client to
+server **0=stdin 4=stdin_eof**, read only when the
 stream was opened with `stdin=true` (the default is `stdin=false`, the
 agent-runner path, where nothing is read from the socket and a `0` frame sent
 anyway is ignored); single write-mutex · `GET /terminal` WS (pty, JSON frames) ·
