@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -28,6 +29,12 @@ const msgBinary = websocket.MessageBinary
 // `user`, and `stdin=true` to opt into forwarding client messages to the
 // process. stdin is off by default -- most callers never write, and a process
 // holding an open stdin it never reads can hang.
+//
+// Frames server to client are 1 stdout, 2 stderr, 3 exit, followed by a text
+// {"type":"exit","exit_code":n}. Client to server they are 0 stdin and 4
+// stdin EOF, and they are read only when the stream opted into stdin: with
+// stdin=false nothing is read from the socket at all, so a 0 frame sent
+// anyway is ignored rather than an error.
 func handleExecStream(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	argv := q["cmd"]
@@ -106,10 +113,21 @@ func handleExecStream(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					return
 				}
-				if typ == websocket.MessageBinary || typ == websocket.MessageText {
-					if _, err := stdin.Write(data); err != nil {
+				// The sprites frame protocol, client to server: byte 0 is the
+				// stream id. Text frames carry control messages this agent does
+				// not implement (resize, port events) and are ignored; so is an
+				// empty frame and any id this agent does not know, which means a
+				// legacy raw-stdin client is refused rather than guessed at.
+				if typ != websocket.MessageBinary || len(data) == 0 {
+					continue
+				}
+				switch data[0] {
+				case frameStdin:
+					if _, err := stdin.Write(data[1:]); err != nil {
 						return
 					}
+				case frameStdinEOF:
+					return // the deferred Close delivers EOF to the process
 				}
 			}
 		}()
@@ -121,5 +139,8 @@ func handleExecStream(w http.ResponseWriter, r *http.Request) {
 	code := exitCodeOf(cmd.Wait())
 
 	_ = fw.write(frameExit, []byte{byte(code)})
+	// The text form of the same verdict. The byte frame truncates the code to
+	// 8 bits; both SDKs treat this as a fallback and the first arrival wins.
+	_ = fw.writeText(fmt.Appendf(nil, `{"type":"exit","exit_code":%d}`, code))
 	_ = conn.Close(websocket.StatusNormalClosure, "")
 }

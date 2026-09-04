@@ -16,6 +16,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // defaultGuestUser is the unprivileged account baked into the golden rootfs at
@@ -215,6 +217,11 @@ func exitCodeOf(err error) int {
 // exit code. This is byte-compatible with the sprites protocol so existing
 // clients work unchanged.
 const (
+	// Client to server. Honoured only when the stream was opened with
+	// stdin=true; with stdin=false nothing is read from the socket at all.
+	frameStdin    byte = 0
+	frameStdinEOF byte = 4
+
 	frameStdout byte = 1
 	frameStderr byte = 2
 	frameExit   byte = 3
@@ -234,6 +241,17 @@ func (fw *frameWriter) write(kind byte, payload []byte) error {
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
 	return fw.conn.Write(fw.ctx, msgBinary, append([]byte{kind}, payload...))
+}
+
+// writeText sends a text message under the same mutex as the binary frames.
+//
+// Same lock because the exit pair is written by the handler goroutine while a
+// late pump write can still be in flight, and coder/websocket forbids
+// concurrent writers.
+func (fw *frameWriter) writeText(payload []byte) error {
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+	return fw.conn.Write(fw.ctx, websocket.MessageText, payload)
 }
 
 // pump copies one stream into frames until EOF.
