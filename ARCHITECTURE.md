@@ -79,7 +79,10 @@ compose fragment on the ordinary primitives, not a product tier. See
    reaches the guest is the peer this edge saw, `X-Forwarded-Proto` is `https`
    when the edge terminated TLS, and `X-Forwarded-Host` is the name the user
    typed. A rate limiter behind us reads the leftmost entry, so a caller must
-   not be able to supply it.
+   not be able to supply it. The sibling client-IP headers (`X-Real-IP`,
+   `CF-Connecting-IP`, `True-Client-IP` and RFC 7239 `Forwarded`) are deleted
+   with it, since deleting only one of them moves the forgery rather than
+   ending it.
    In code: every host calls `certmagic.ManageAsync` for `*.<workload
    domain>`, the workload apex and the dashboard apex; the shared `certs`
    Storage lock is what makes N hosts running the identical call produce ONE

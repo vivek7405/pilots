@@ -225,8 +225,24 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 // are set here because TLS terminates here. Only the public entry runs this;
 // a request forwarded over the mesh keeps the values the first hop set, and
 // its own ReverseProxy appends the mesh peer after the client.
+//
+// The sibling client-IP headers go with it. Deleting X-Forwarded-For alone
+// only moves the forgery: an application that reads X-Real-IP (the nginx
+// convention, and what several frameworks fall back to), CF-Connecting-IP or
+// RFC 7239 Forwarded would still be reading a value the caller chose. Nothing
+// in front of this edge sets any of them, so any that arrives is a client's.
+var clientIPHeaders = []string{
+	"X-Forwarded-For",
+	"X-Real-IP",
+	"CF-Connecting-IP",
+	"True-Client-IP",
+	"Forwarded",
+}
+
 func setEdgeHeaders(req *http.Request) {
-	req.Header.Del("X-Forwarded-For")
+	for _, h := range clientIPHeaders {
+		req.Header.Del(h)
+	}
 	proto := "http"
 	if req.TLS != nil {
 		proto = "https"

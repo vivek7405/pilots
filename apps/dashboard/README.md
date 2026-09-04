@@ -195,4 +195,7 @@ router on every request and the limit becomes a single shared bucket. That is
 safe because the router deletes an inbound `X-Forwarded-For` at the public
 entry before appending the peer, and sets `X-Forwarded-Proto` and
 `X-Forwarded-Host` there too, so the leftmost entry is always an address the
-edge observed rather than one a caller chose.
+edge observed rather than one a caller chose. The sibling headers a limiter
+might fall back to -- `X-Real-IP`, `CF-Connecting-IP`, `True-Client-IP` and
+RFC 7239 `Forwarded` -- are deleted at the same point, so there is no second
+header to forge instead.

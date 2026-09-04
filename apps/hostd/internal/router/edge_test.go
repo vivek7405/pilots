@@ -30,6 +30,12 @@ func TestSetEdgeHeadersOwnsTheForwardedTriple(t *testing.T) {
 			if tc.inbound != "" {
 				req.Header.Set("X-Forwarded-For", tc.inbound)
 			}
+			// The siblings an application may read instead, forged the same
+			// way and on every case, not just the ones with an inbound chain.
+			req.Header.Set("X-Real-IP", "1.2.3.4")
+			req.Header.Set("CF-Connecting-IP", "1.2.3.4")
+			req.Header.Set("True-Client-IP", "1.2.3.4")
+			req.Header.Set("Forwarded", "for=1.2.3.4;proto=https")
 
 			setEdgeHeaders(req)
 
@@ -37,6 +43,13 @@ func TestSetEdgeHeadersOwnsTheForwardedTriple(t *testing.T) {
 			// whatever survives, and a forged entry would sit leftmost.
 			if got := req.Header.Get("X-Forwarded-For"); got != "" {
 				t.Errorf("X-Forwarded-For = %q, want it deleted", got)
+			}
+			// Deleting X-Forwarded-For alone would only move the forgery to
+			// whichever sibling header the application happens to read.
+			for _, h := range []string{"X-Real-IP", "CF-Connecting-IP", "True-Client-IP", "Forwarded"} {
+				if got := req.Header.Get(h); got != "" {
+					t.Errorf("%s = %q, want it deleted", h, got)
+				}
 			}
 			if got := req.Header.Get("X-Forwarded-Proto"); got != tc.wantProto {
 				t.Errorf("X-Forwarded-Proto = %q, want %q", got, tc.wantProto)
