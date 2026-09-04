@@ -4,11 +4,11 @@
  * Two rules here are load-bearing rather than tidy:
  *
  *   - **Nothing in this module touches the network.** The dashboard mints a
- *     key and is never consulted again. fly's tkdb outage (`docs/prior-art/
- *     fly-io.md` COPY 18) is the argument: a CLI that validates its cached
+ *     key and is never consulted again. A CLI that validates its cached
  *     credential against a service has made every command depend on that
  *     service being up, which is exactly the central dependency this platform
- *     exists without.
+ *     exists without. Published outages elsewhere have turned a token store
+ *     into a fleet-wide outage precisely this way.
  *   - **The file is the lowest-precedence source.** `PILOT_API_KEY` and
  *     `PILOT_API_URL` win over it and `--api-url` wins over everything, so a
  *     CI job and a one-off against a staging fleet need no file at all.
