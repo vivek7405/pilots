@@ -3,9 +3,25 @@ import { html } from '@webjsdev/core';
 import type { PageProps } from '@webjsdev/core';
 import { requireOrg } from '#modules/auth/session.server.ts';
 import { listDomains } from '#modules/domains/queries/list-domains.server.ts';
+import type { DomainRow } from '#modules/domains/queries/list-domains.server.ts';
 import { listServices } from '#modules/services/queries/list-services.server.ts';
 import { addDomain } from '#modules/domains/actions/add-domain.server.ts';
 import { deleteDomain } from '#modules/domains/actions/delete-domain.server.ts';
+import { badgeClass } from '#components/ui/badge.ts';
+import { buttonClass } from '#components/ui/button.ts';
+import { inputClass } from '#components/ui/input.ts';
+import { nativeSelectClass, nativeSelectIconClass, nativeSelectWrapperClass } from '#components/ui/native-select.ts';
+import {
+  dataTable,
+  emptyState,
+  errorAlert,
+  field,
+  formRowClass,
+  lede,
+  pageHeading,
+  sectionHeading,
+} from '#lib/utils/ui.ts';
+import { cn } from '#lib/utils/cn.ts';
 
 export const metadata = { title: 'Domains' };
 
@@ -18,69 +34,79 @@ export default async function DomainsPage({ actionData }: PageProps) {
   const errors = (actionData as { fieldErrors?: Record<string, string>; error?: string } | undefined) ?? {};
 
   return html`
-    <h1 class="text-2xl font-semibold tracking-tight m-0">Domains</h1>
-    <p class="text-muted-foreground mt-1 mb-6">
-      A certificate is issued over HTTP-01, which any host in the fleet can answer.
-    </p>
-
-    ${errors.error ? html`<p role="alert" class="text-destructive">${errors.error}</p>` : ''}
-
+    ${pageHeading('Domains')}
+    ${lede('A certificate is issued over HTTP-01, which any host in the fleet can answer.')}
+    ${errors.error ? errorAlert(errors.error) : ''}
     ${rows.length === 0
-      ? html`<p class="text-muted-foreground">No custom domains.</p>`
+      ? emptyState('No custom domains.')
       : html`
-          <div class="overflow-x-auto mb-8">
-            <table class="w-full text-sm border-collapse">
-              <thead>
-                <tr class="text-left text-muted-foreground border-b border-border">
-                  <th class="py-2 pr-4 font-medium">Hostname</th>
-                  <th class="py-2 pr-4 font-medium">Service</th>
-                  <th class="py-2 pr-4 font-medium">Verified</th>
-                  <th class="py-2 pr-4 font-medium">CNAME target</th>
-                  <th class="py-2 font-medium"><span class="sr-only">Actions</span></th>
-                </tr>
-              </thead>
-              <tbody>
-                ${rows.map(
-                  ({ domain, service }) => html`
-                    <tr class="border-b border-border">
-                      <td class="py-2 pr-4">${domain.hostname}</td>
-                      <td class="py-2 pr-4">
-                        ${service
-                          ? html`<a href=${`/services/${service.id}`} class="text-foreground">${service.name}</a>`
-                          : '-'}
-                      </td>
-                      <td class="py-2 pr-4">${domain.verified ? 'yes' : 'pending'}</td>
-                      <td class="py-2 pr-4 font-mono text-muted-foreground">${domain.cname_target}</td>
-                      <td class="py-2 text-right">
-                        <form action=${deleteDomain}>
-                          <input type="hidden" name="hostname" value=${domain.hostname}>
-                          <button type="submit" class="rounded-md border border-border px-2 py-1 hover:bg-muted">
-                            Remove
-                          </button>
-                        </form>
-                      </td>
-                    </tr>
+          <div class="mb-8">
+            ${dataTable<DomainRow>({
+              caption: 'Custom domains in this organisation',
+              rows,
+              columns: [
+                { header: 'Hostname', cell: ({ domain }) => domain.hostname },
+                {
+                  header: 'Service',
+                  cell: ({ service }) =>
+                    service ? html`<a href=${`/services/${service.id}`} class="text-foreground">${service.name}</a>` : '-',
+                },
+                {
+                  header: 'Certificate',
+                  cell: ({ domain }) =>
+                    html`<span class=${badgeClass({ variant: domain.verified ? 'secondary' : 'outline' })}
+                      >${domain.verified ? 'verified' : 'pending'}</span
+                    >`,
+                },
+                {
+                  header: 'CNAME target',
+                  cellClass: 'font-mono text-muted-foreground',
+                  cell: ({ domain }) => domain.cname_target,
+                },
+                {
+                  header: 'Actions',
+                  headerHidden: true,
+                  align: 'right',
+                  cell: ({ domain }) => html`
+                    <form action=${deleteDomain}>
+                      <input type="hidden" name="hostname" value=${domain.hostname}>
+                      <button type="submit" class=${buttonClass({ variant: 'outline', size: 'sm' })}>Remove</button>
+                    </form>
                   `,
-                )}
-              </tbody>
-            </table>
+                },
+              ],
+            })}
           </div>
         `}
 
-    <h2 class="text-lg font-medium m-0 mb-2">Add a domain</h2>
-    <form action=${addDomain} class="flex flex-wrap items-end gap-3">
-      <label class="text-sm">
-        <span class="block text-muted-foreground">Hostname</span>
-        <input name="hostname" placeholder="app.example.com" required class="mt-1 rounded-md border border-border bg-background px-2 py-1">
-      </label>
-      <label class="text-sm">
-        <span class="block text-muted-foreground">Service</span>
-        <select name="service" required class="mt-1 rounded-md border border-border bg-background px-2 py-1">
-          ${services.map((s) => html`<option value=${s.id}>${s.name}</option>`)}
-        </select>
-      </label>
-      <button type="submit" class="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted">Add</button>
+    ${sectionHeading('Add a domain')}
+    <form action=${addDomain} class=${formRowClass()}>
+      ${field({
+        id: 'hostname',
+        label: 'Hostname',
+        error: errors.fieldErrors?.hostname,
+        control: html`<input
+          id="hostname"
+          name="hostname"
+          placeholder="app.example.com"
+          required
+          aria-invalid=${errors.fieldErrors?.hostname ? 'true' : 'false'}
+          class=${inputClass()}
+        >`,
+      })}
+      ${field({
+        id: 'domain-service',
+        label: 'Service',
+        control: html`
+          <div class=${cn(nativeSelectWrapperClass(), 'w-full')}>
+            <select id="domain-service" name="service" required class=${nativeSelectClass()}>
+              ${services.map((s) => html`<option value=${s.id}>${s.name}</option>`)}
+            </select>
+            <svg class=${nativeSelectIconClass()} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
+          </div>
+        `,
+      })}
+      <button type="submit" class=${buttonClass()}>Add</button>
     </form>
-    ${errors.fieldErrors?.hostname ? html`<p class="text-sm text-destructive">${errors.fieldErrors.hostname}</p>` : ''}
   `;
 }

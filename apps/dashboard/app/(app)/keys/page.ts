@@ -9,9 +9,18 @@ import { html } from '@webjsdev/core';
 import type { PageProps } from '@webjsdev/core';
 import { requireOrg } from '#modules/auth/session.server.ts';
 import { listKeys } from '#modules/keys/queries/list-keys.server.ts';
+import type { KeyRow } from '#modules/keys/queries/list-keys.server.ts';
 import { createKey } from '#modules/keys/actions/create-key.server.ts';
 import { revokeKey } from '#modules/keys/actions/revoke-key.server.ts';
 import { SCOPES } from '#modules/keys/scopes.ts';
+import { alertClass, alertDescriptionClass, alertTitleClass } from '#components/ui/alert.ts';
+import { badgeClass } from '#components/ui/badge.ts';
+import { buttonClass } from '#components/ui/button.ts';
+import { checkboxClass } from '#components/ui/checkbox.ts';
+import { inputClass } from '#components/ui/input.ts';
+import { labelClass } from '#components/ui/label.ts';
+import { dataTable, emptyState, errorAlert, field, footnote, formRowClass, lede, pageHeading } from '#lib/utils/ui.ts';
+import { cn } from '#lib/utils/cn.ts';
 
 export const metadata = { title: 'Keys' };
 
@@ -24,39 +33,52 @@ export default async function KeysPage({ actionData }: PageProps) {
       | undefined) ?? {};
 
   return html`
-    <h1 class="text-2xl font-semibold tracking-tight m-0">API keys</h1>
-    <p class="text-muted-foreground mt-1 mb-6">
-      Minted here, verified on every host from its own replica. This dashboard is in no request path.
-    </p>
+    ${pageHeading('API keys')}
+    ${lede('Minted here, verified on every host from its own replica. This dashboard is in no request path.')}
 
     ${result.data
       ? html`
-          <div role="alert" class="mb-6 rounded-md border border-border bg-muted p-4">
-            <p class="m-0 font-medium">Copy this key now. It is shown once.</p>
-            <code class="mt-2 block break-all font-mono text-sm">${result.data.key}</code>
-            <p class="m-0 mt-2 text-xs text-muted-foreground">
-              Only its hash was stored, so it cannot be shown again.
-            </p>
+          <div role="alert" class=${cn(alertClass(), 'mb-6')}>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z" />
+            </svg>
+            <div data-slot="alert-title" class=${alertTitleClass()}>Copy this key now. It is shown once.</div>
+            <div data-slot="alert-description" class=${alertDescriptionClass()}>
+              <code class="block w-full break-all font-mono text-sm text-foreground">${result.data.key}</code>
+              <span class="text-xs">Only its hash was stored, so it cannot be shown again.</span>
+            </div>
           </div>
         `
       : ''}
-    ${result.error ? html`<p role="alert" class="text-destructive">${result.error}</p>` : ''}
+    ${result.error ? errorAlert(result.error) : ''}
 
-    <form action=${createKey} class="flex flex-wrap items-end gap-4 mb-8">
-      <label class="text-sm">
-        <span class="block text-muted-foreground">Name</span>
-        <input name="name" placeholder="ci" required class="mt-1 rounded-md border border-border bg-background px-2 py-1">
-      </label>
-      <fieldset class="border-0 p-0 m-0 text-sm">
-        <legend class="text-muted-foreground">Scopes</legend>
-        <div class="mt-1 flex gap-4">
+    <form action=${createKey} class=${cn(formRowClass(), 'gap-4 mb-8')}>
+      ${field({
+        id: 'key-name',
+        label: 'Name',
+        error: result.fieldErrors ? Object.values(result.fieldErrors).join(' ') : undefined,
+        control: html`<input
+          id="key-name"
+          name="name"
+          placeholder="ci"
+          required
+          aria-invalid=${result.fieldErrors ? 'true' : 'false'}
+          class=${inputClass()}
+        >`,
+      })}
+      <fieldset class="border-0 p-0 m-0 grid gap-1.5">
+        <legend class="text-sm leading-none font-medium text-muted-foreground p-0">Scopes</legend>
+        <div class="flex items-center gap-4 h-9">
           ${SCOPES.map(
             (scope) => html`
-              <label class="flex items-center gap-1.5">
+              <label class=${labelClass()} for=${`scope-${scope}`}>
                 <input
+                  id=${`scope-${scope}`}
                   type="checkbox"
                   name="scopes"
                   value=${scope}
+                  data-slot="checkbox"
+                  class=${checkboxClass()}
                   ?disabled=${scope === 'admin' && ctx.role !== 'owner'}
                 >
                 <span class="font-mono">${scope}</span>
@@ -65,55 +87,42 @@ export default async function KeysPage({ actionData }: PageProps) {
           )}
         </div>
       </fieldset>
-      <button type="submit" class="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted">Mint</button>
+      <button type="submit" class=${buttonClass()}>Mint</button>
     </form>
-    ${result.fieldErrors
-      ? html`<p class="text-sm text-destructive">${Object.values(result.fieldErrors).join(' ')}</p>`
-      : ''}
 
     ${keys.length === 0
-      ? html`<p class="text-muted-foreground">No keys yet.</p>`
+      ? emptyState('No keys yet.')
       : html`
-          <div class="overflow-x-auto">
-            <table class="w-full text-sm border-collapse">
-              <thead>
-                <tr class="text-left text-muted-foreground border-b border-border">
-                  <th class="py-2 pr-4 font-medium">Name</th>
-                  <th class="py-2 pr-4 font-medium">Prefix</th>
-                  <th class="py-2 pr-4 font-medium">Scopes</th>
-                  <th class="py-2 pr-4 font-medium">Created</th>
-                  <th class="py-2 font-medium"><span class="sr-only">Actions</span></th>
-                </tr>
-              </thead>
-              <tbody>
-                ${keys.map(
-                  (k) => html`
-                    <tr class=${k.revokedAt ? 'border-b border-border opacity-50' : 'border-b border-border'}>
-                      <td class="py-2 pr-4">${k.name}</td>
-                      <td class="py-2 pr-4 font-mono">${k.prefix}…</td>
-                      <td class="py-2 pr-4 font-mono">${k.scopes.join(' ')}</td>
-                      <td class="py-2 pr-4 text-muted-foreground">${k.createdAt.toISOString().slice(0, 10)}</td>
-                      <td class="py-2 text-right">
-                        ${k.revokedAt
-                          ? html`<span class="text-muted-foreground">revoked</span>`
-                          : html`
-                              <form action=${revokeKey}>
-                                <input type="hidden" name="id" value=${k.id}>
-                                <button type="submit" class="rounded-md border border-border px-2 py-1 hover:bg-muted">
-                                  Revoke
-                                </button>
-                              </form>
-                            `}
-                      </td>
-                    </tr>
-                  `,
-                )}
-              </tbody>
-            </table>
-          </div>
-          <p class="mt-3 text-xs text-muted-foreground">
-            A revoked key keeps its row. Deleting it would erase the record that it ever existed.
-          </p>
+          ${dataTable<KeyRow>({
+            caption: 'API keys for this organisation',
+            rows: keys,
+            rowClass: (k) => (k.revokedAt ? 'opacity-50' : ''),
+            columns: [
+              { header: 'Name', cell: (k) => k.name },
+              { header: 'Prefix', cellClass: 'font-mono', cell: (k) => html`${k.prefix}…` },
+              { header: 'Scopes', cellClass: 'font-mono', cell: (k) => k.scopes.join(' ') },
+              {
+                header: 'Created',
+                cellClass: 'text-muted-foreground tabular-nums',
+                cell: (k) => k.createdAt.toISOString().slice(0, 10),
+              },
+              {
+                header: 'Actions',
+                headerHidden: true,
+                align: 'right',
+                cell: (k) =>
+                  k.revokedAt
+                    ? html`<span class=${badgeClass({ variant: 'outline' })}>revoked</span>`
+                    : html`
+                        <form action=${revokeKey}>
+                          <input type="hidden" name="id" value=${k.id}>
+                          <button type="submit" class=${buttonClass({ variant: 'outline', size: 'sm' })}>Revoke</button>
+                        </form>
+                      `,
+              },
+            ],
+          })}
+          ${footnote('A revoked key keeps its row. Deleting it would erase the record that it ever existed.')}
         `}
   `;
 }

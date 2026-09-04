@@ -7,6 +7,10 @@
  */
 
 import { WebComponent, html, prop, connectWS } from '@webjsdev/core';
+import { badgeClass } from '#components/ui/badge.ts';
+import { cardClass } from '#components/ui/card.ts';
+import { emptyState } from '#lib/utils/ui.ts';
+import { cn } from '#lib/utils/cn.ts';
 
 interface Host {
   id: string;
@@ -47,17 +51,17 @@ class HostsStrip extends WebComponent({
   }
 
   render() {
-    if (this.hosts.length === 0) return html`<p class="text-muted-foreground text-sm">No hosts reporting.</p>`;
+    if (this.hosts.length === 0) return emptyState('No hosts reporting.');
     return html`
       <ul class="flex flex-wrap gap-3 list-none p-0 m-0 text-sm">
         ${this.hosts.map(
           (h) => html`
-            <li class="rounded-md border border-border px-3 py-2">
+            <li class=${cn(cardClass({ size: 'sm' }), 'flex-row items-center gap-3 px-4')} data-slot="card" data-size="sm">
               <span class="font-mono">${h.id}</span>
-              <span class=${h.alive ? 'text-muted-foreground' : 'text-destructive'}>
+              <span class=${badgeClass({ variant: h.alive ? 'secondary' : 'destructive' })}>
                 ${h.alive ? 'up' : 'down'}
               </span>
-              <span class="text-muted-foreground">${h.cpu_free} cpu · ${h.mem_free_mib} MiB</span>
+              <span class="text-muted-foreground tabular-nums">${h.cpu_free} cpu · ${h.mem_free_mib} MiB</span>
             </li>
           `,
         )}

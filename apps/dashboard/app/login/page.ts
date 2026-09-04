@@ -8,8 +8,8 @@
 import { html } from '@webjsdev/core';
 import type { PageProps } from '@webjsdev/core';
 import { signInLink } from '#modules/auth/sign-in-link.ts';
-import { alertClass, alertDescriptionClass, alertTitleClass } from '#components/ui/alert.ts';
 import { cardClass, cardContentClass, cardHeaderClass, cardTitleClass } from '#components/ui/card.ts';
+import { errorAlert } from '#lib/utils/ui.ts';
 
 export const metadata = { title: 'Sign in' };
 
@@ -22,20 +22,7 @@ export default function Login({ searchParams }: PageProps) {
   const error = String(searchParams.error ?? '');
   return html`
     <div class="max-w-md mx-auto py-24 grid gap-6">
-      ${error
-        ? html`
-            <div role="alert" class=${alertClass({ variant: 'destructive' })}>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-                <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" />
-                <path d="M12 9v4M12 17h.01" />
-              </svg>
-              <div data-slot="alert-title" class=${alertTitleClass()}>Sign-in failed</div>
-              <div data-slot="alert-description" class=${alertDescriptionClass()}>
-                ${MESSAGES[error] ?? 'That sign-in did not complete.'}
-              </div>
-            </div>
-          `
-        : ''}
+      ${error ? errorAlert(MESSAGES[error] ?? 'That sign-in did not complete.') : ''}
 
       <div class=${cardClass()} data-slot="card">
         <div class=${cardHeaderClass()}>

@@ -14,6 +14,7 @@
 import { html } from '@webjsdev/core';
 import type { TemplateResult } from '@webjsdev/core';
 import { cn } from '#lib/utils/cn.ts';
+import { alertClass, alertDescriptionClass } from '#components/ui/alert.ts';
 import {
   tableBodyClass,
   tableCaptionClass,
@@ -52,6 +53,25 @@ export function footnote(content: unknown): TemplateResult {
 
 /** Horizontal row of form fields ending in a submit button. */
 export const formRowClass = (): string => 'flex flex-wrap items-end gap-3';
+
+/**
+ * The banner an action's `error` renders into.
+ *
+ * `role="alert"` is what makes it reach a screen reader at all, and it is the
+ * reason this is a helper: five pages render one, and a missing role on any of
+ * them would be a silent failure rather than a visible one.
+ */
+export function errorAlert(message: unknown): TemplateResult {
+  return html`
+    <div role="alert" class=${cn(alertClass({ variant: 'destructive' }), 'mb-6')}>
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z" />
+        <path d="M12 9v4M12 17h.01" />
+      </svg>
+      <div data-slot="alert-description" class=${alertDescriptionClass()}>${message}</div>
+    </div>
+  `;
+}
 
 /**
  * A labelled control.

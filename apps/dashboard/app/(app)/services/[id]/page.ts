@@ -7,6 +7,7 @@
  */
 import { html, notFound } from '@webjsdev/core';
 import type { PageProps } from '@webjsdev/core';
+import type { Machine, Release } from '@pilots/sdk';
 import { requireOrg } from '#modules/auth/session.server.ts';
 import { getService } from '#modules/services/queries/get-service.server.ts';
 import { deployService } from '#modules/services/actions/deploy-service.server.ts';
@@ -16,6 +17,14 @@ import { connectRepo } from '#modules/github/actions/connect-repo.server.ts';
 import { disconnectRepo } from '#modules/github/actions/disconnect-repo.server.ts';
 import { githubAppConfigured } from '#modules/github/app-jwt.server.ts';
 import { installUrl } from '#modules/github/installations.server.ts';
+import { stateBadge } from '#modules/machines/utils/ui/state.ts';
+import { badgeClass } from '#components/ui/badge.ts';
+import { buttonClass } from '#components/ui/button.ts';
+import { checkboxClass } from '#components/ui/checkbox.ts';
+import { inputClass } from '#components/ui/input.ts';
+import { labelClass } from '#components/ui/label.ts';
+import { dataTable, emptyState, errorAlert, field, formRowClass, pageHeading, sectionHeading } from '#lib/utils/ui.ts';
+import { cn } from '#lib/utils/cn.ts';
 
 export async function generateMetadata({ params }: PageProps) {
   return { title: `Service ${params.id}` };
@@ -34,103 +43,105 @@ export default async function ServicePage({ params, actionData }: PageProps) {
   const appConfigured = githubAppConfigured();
 
   return html`
-    <h1 class="text-2xl font-semibold tracking-tight m-0">${service.name}</h1>
+    ${pageHeading(service.name)}
     <p class="text-muted-foreground mt-1 mb-6">
       ${service.url ? html`<a href=${service.url} rel="noopener">${service.url}</a>` : 'No URL yet'}
     </p>
 
-    ${errors.error ? html`<p role="alert" class="text-destructive">${errors.error}</p>` : ''}
+    ${errors.error ? errorAlert(errors.error) : ''}
 
     <section class="mb-8">
-      <h2 class="text-lg font-medium m-0 mb-2">Scale</h2>
-      <form action=${patchService} class="flex flex-wrap items-end gap-3">
+      ${sectionHeading('Scale')}
+      <form action=${patchService} class=${formRowClass()}>
         <input type="hidden" name="service" value=${service.id}>
-        <label class="text-sm">
-          <span class="block text-muted-foreground">Replicas</span>
-          <input
+        ${field({
+          id: 'replicas',
+          label: 'Replicas',
+          error: errors.fieldErrors?.replicas,
+          control: html`<input
+            id="replicas"
             name="replicas"
             type="number"
             min="0"
             max="100"
             value=${String(service.replicas)}
-            class="mt-1 w-24 rounded-md border border-border bg-background px-2 py-1"
-          >
-        </label>
-        <button type="submit" class="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted">Save</button>
+            aria-invalid=${errors.fieldErrors?.replicas ? 'true' : 'false'}
+            class=${cn(inputClass(), 'w-24 tabular-nums')}
+          >`,
+        })}
+        <button type="submit" class=${buttonClass()}>Save</button>
       </form>
-      ${errors.fieldErrors?.replicas
-        ? html`<p class="text-sm text-destructive">${errors.fieldErrors.replicas}</p>`
-        : ''}
     </section>
 
     <section class="mb-8">
-      <h2 class="text-lg font-medium m-0 mb-2">Releases</h2>
+      ${sectionHeading('Releases')}
       ${releases.length === 0
-        ? html`<p class="text-muted-foreground">
-            No releases recorded. The engine's release history route is not serving yet.
-          </p>`
-        : html`
-            <div class="overflow-x-auto">
-              <table class="w-full text-sm border-collapse">
-                <thead>
-                  <tr class="text-left text-muted-foreground border-b border-border">
-                    <th class="py-2 pr-4 font-medium">Release</th>
-                    <th class="py-2 pr-4 font-medium">Health</th>
-                    <th class="py-2 pr-4 font-medium">Build</th>
-                    <th class="py-2 font-medium"><span class="sr-only">Actions</span></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  ${releases.map(
-                    (r) => html`
-                      <tr class="border-b border-border">
-                        <td class="py-2 pr-4 font-mono">
-                          ${r.id}${r.id === service.release_id ? html` <span class="text-xs">(current)</span>` : ''}
-                        </td>
-                        <td class="py-2 pr-4">${r.healthy ? 'healthy' : 'never passed'}</td>
-                        <td class="py-2 pr-4 font-mono text-muted-foreground">${r.rootfs_build_id ?? '-'}</td>
-                        <td class="py-2 text-right">
-                          ${rollbackTarget && r.id === rollbackTarget.id
-                            ? html`
-                                <form action=${rollbackService}>
-                                  <input type="hidden" name="service" value=${service.id}>
-                                  <button
-                                    type="submit"
-                                    class="rounded-md border border-border px-2 py-1 hover:bg-muted"
-                                  >
-                                    Roll back to this
-                                  </button>
-                                </form>
-                              `
-                            : ''}
-                        </td>
-                      </tr>
-                    `,
-                  )}
-                </tbody>
-              </table>
-            </div>
-          `}
+        ? emptyState("No releases recorded. The engine's release history route is not serving yet.")
+        : dataTable<Release>({
+            caption: 'Releases of this service, newest first',
+            rows: releases,
+            columns: [
+              {
+                header: 'Release',
+                cellClass: 'font-mono',
+                cell: (r) => html`
+                  ${r.id}${r.id === service.release_id
+                    ? html` <span class=${cn(badgeClass({ variant: 'secondary' }), 'ml-1')}>current</span>`
+                    : ''}
+                `,
+              },
+              {
+                header: 'Health',
+                cell: (r) =>
+                  html`<span class=${badgeClass({ variant: r.healthy ? 'secondary' : 'outline' })}
+                    >${r.healthy ? 'healthy' : 'never passed'}</span
+                  >`,
+              },
+              {
+                header: 'Build',
+                cellClass: 'font-mono text-muted-foreground',
+                cell: (r) => r.rootfs_build_id ?? '-',
+              },
+              {
+                header: 'Actions',
+                headerHidden: true,
+                align: 'right',
+                cell: (r) =>
+                  rollbackTarget && r.id === rollbackTarget.id
+                    ? html`
+                        <form action=${rollbackService}>
+                          <input type="hidden" name="service" value=${service.id}>
+                          <button type="submit" class=${buttonClass({ variant: 'outline', size: 'sm' })}>
+                            Roll back to this
+                          </button>
+                        </form>
+                      `
+                    : '',
+              },
+            ],
+          })}
     </section>
 
     <section class="mb-8">
-      <h2 class="text-lg font-medium m-0 mb-2">Deploy</h2>
-      <form action=${deployService} class="flex flex-wrap items-end gap-3">
+      ${sectionHeading('Deploy')}
+      <form action=${deployService} class=${formRowClass()}>
         <input type="hidden" name="service" value=${service.id}>
-        <label class="text-sm">
-          <span class="block text-muted-foreground">Release</span>
-          <input name="release" placeholder="rel_..." class="mt-1 rounded-md border border-border bg-background px-2 py-1 font-mono">
-        </label>
-        <label class="text-sm">
-          <span class="block text-muted-foreground">or Build</span>
-          <input name="build" placeholder="bld_..." class="mt-1 rounded-md border border-border bg-background px-2 py-1 font-mono">
-        </label>
-        <button type="submit" class="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted">Deploy</button>
+        ${field({
+          id: 'release',
+          label: 'Release',
+          control: html`<input id="release" name="release" placeholder="rel_..." class=${cn(inputClass(), 'font-mono')}>`,
+        })}
+        ${field({
+          id: 'build',
+          label: 'or Build',
+          control: html`<input id="build" name="build" placeholder="bld_..." class=${cn(inputClass(), 'font-mono')}>`,
+        })}
+        <button type="submit" class=${buttonClass()}>Deploy</button>
       </form>
     </section>
 
     <section class="mb-8">
-      <h2 class="text-lg font-medium m-0 mb-2">Repository</h2>
+      ${sectionHeading('Repository')}
       ${repo
         ? html`
             <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1 text-sm mb-3">
@@ -139,7 +150,11 @@ export default async function ServicePage({ params, actionData }: PageProps) {
               <dt class="text-muted-foreground">Branch</dt>
               <dd class="m-0 font-mono">${repo.branch}</dd>
               <dt class="text-muted-foreground">Autodeploy</dt>
-              <dd class="m-0">${repo.autodeploy ? 'on' : 'off'}</dd>
+              <dd class="m-0">
+                <span class=${badgeClass({ variant: repo.autodeploy ? 'secondary' : 'outline' })}
+                  >${repo.autodeploy ? 'on' : 'off'}</span
+                >
+              </dd>
               <dt class="text-muted-foreground">App</dt>
               <dd class="m-0">
                 ${!appConfigured
@@ -152,50 +167,55 @@ export default async function ServicePage({ params, actionData }: PageProps) {
             </dl>
             <form action=${disconnectRepo}>
               <input type="hidden" name="service" value=${service.id}>
-              <button type="submit" class="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted">
-                Disconnect
-              </button>
+              <button type="submit" class=${buttonClass({ variant: 'outline' })}>Disconnect</button>
             </form>
           `
         : html`
-            <form action=${connectRepo} class="flex flex-wrap items-end gap-3">
+            <form action=${connectRepo} class=${formRowClass()}>
               <input type="hidden" name="service" value=${service.id}>
-              <label class="text-sm">
-                <span class="block text-muted-foreground">Repo</span>
-                <input name="repo" placeholder="owner/name" required class="mt-1 rounded-md border border-border bg-background px-2 py-1">
+              ${field({
+                id: 'repo',
+                label: 'Repo',
+                error: errors.fieldErrors?.repo,
+                control: html`<input
+                  id="repo"
+                  name="repo"
+                  placeholder="owner/name"
+                  required
+                  aria-invalid=${errors.fieldErrors?.repo ? 'true' : 'false'}
+                  class=${inputClass()}
+                >`,
+              })}
+              ${field({
+                id: 'branch',
+                label: 'Branch',
+                control: html`<input id="branch" name="branch" value="main" class=${cn(inputClass(), 'font-mono')}>`,
+              })}
+              <label class=${cn(labelClass(), 'h-9')} for="autodeploy">
+                <input id="autodeploy" name="autodeploy" type="checkbox" data-slot="checkbox" checked class=${checkboxClass()}>
+                Autodeploy
               </label>
-              <label class="text-sm">
-                <span class="block text-muted-foreground">Branch</span>
-                <input name="branch" value="main" class="mt-1 rounded-md border border-border bg-background px-2 py-1">
-              </label>
-              <label class="text-sm flex items-center gap-2">
-                <input name="autodeploy" type="checkbox" checked> Autodeploy
-              </label>
-              <button type="submit" class="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-muted">
-                Connect
-              </button>
+              <button type="submit" class=${buttonClass()}>Connect</button>
             </form>
-            ${errors.fieldErrors?.repo ? html`<p class="text-sm text-destructive">${errors.fieldErrors.repo}</p>` : ''}
           `}
     </section>
 
     <section>
-      <h2 class="text-lg font-medium m-0 mb-2">Pull-request previews</h2>
+      ${sectionHeading('Pull-request previews')}
       ${previews.length === 0
-        ? html`<p class="text-muted-foreground">None open.</p>`
-        : html`
-            <ul class="text-sm list-none p-0 m-0">
-              ${previews.map(
-                (m) => html`
-                  <li class="border-b border-border py-2 flex flex-wrap gap-x-4">
-                    <a href=${`/machines/${m.id}`} class="text-foreground">${m.name}</a>
-                    <span class="font-mono text-muted-foreground">${m.state}</span>
-                    ${m.url ? html`<a href=${m.url} rel="noopener">${m.url}</a>` : ''}
-                  </li>
-                `,
-              )}
-            </ul>
-          `}
+        ? emptyState('None open.')
+        : dataTable<Machine>({
+            caption: 'Machines serving open pull-request previews',
+            rows: previews,
+            columns: [
+              {
+                header: 'Preview',
+                cell: (m) => html`<a href=${`/machines/${m.id}`} class="text-foreground">${m.name}</a>`,
+              },
+              { header: 'State', cell: (m) => stateBadge(m.state) },
+              { header: 'URL', cell: (m) => (m.url ? html`<a href=${m.url} rel="noopener">${m.url}</a>` : '') },
+            ],
+          })}
     </section>
   `;
 }
