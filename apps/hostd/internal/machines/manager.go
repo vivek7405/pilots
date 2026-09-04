@@ -62,14 +62,20 @@ var ErrNotFound = fmt.Errorf("machines: %w", state.ErrNotFound)
 
 // Options configures the manager.
 type Options struct {
-	HostID    string
-	Domain    string // e.g. "pilotrun.app"
-	StateRoot string // /var/lib/pilots/machines
-	CacheRoot string // /var/cache/pilots
-	FCConfig  fc.Config
-	Store     state.Store
-	Uploader  fc.Uploader
-	PoolSize  int
+	HostID string
+	Domain string // e.g. "pilotrun.app"
+	// APIHostname is the name the control API answers on, e.g.
+	// "api.pilotrun.app". dispatch claims it before the workload suffix, so
+	// the machine name that would produce it is reserved -- see
+	// ensureNotReserved. Empty means "api.<Domain>", which is what config
+	// derives when PILOT_API_HOSTNAME is unset.
+	APIHostname string
+	StateRoot   string // /var/lib/pilots/machines
+	CacheRoot   string // /var/cache/pilots
+	FCConfig    fc.Config
+	Store       state.Store
+	Uploader    fc.Uploader
+	PoolSize    int
 
 	// Chunks writes content-addressed builds, and BlockStore reads them back.
 	// Both address the same objects under the chunk prefix; they are separate
@@ -216,6 +222,9 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 	// A name becomes a DNS label and a routing key, so it has to be usable as
 	// both before the machine exists.
 	if err := validateName(name); err != nil {
+		return nil, err
+	}
+	if err := m.ensureNotReserved(name); err != nil {
 		return nil, err
 	}
 	if err := m.ensureNameFree(ctx, name); err != nil {

@@ -21,7 +21,6 @@ func TestValidateNameRejectsUnroutableNames(t *testing.T) {
 	for _, tc := range []struct{ name, why string }{
 		{"", "empty"},
 		{"has.dot", "a dot makes the hostname parse fail"},
-		{"api", "reserved: the control API answers on api.<workload domain>"},
 		{"8080-api", "parsed as port 8080 of a machine called api"},
 		{"3000-web-app", "same, with a longer name"},
 		{"UPPER", "hostnames are lowercase"},
@@ -106,12 +105,41 @@ func TestTheTemplateMachineKeepsThePlaceholderToken(t *testing.T) {
 // "api" is the one name a tenant may not take: dispatch claims
 // api.<workload domain> for the control API before the workload suffix, so a
 // machine of that name would own a hostname it can never be reached at.
-func TestValidateNameReservesTheAPIHostname(t *testing.T) {
-	err := validateName("api")
-	if err == nil {
-		t.Fatal("validateName(\"api\") accepted the control API's own hostname")
-	}
-	if !strings.Contains(err.Error(), "reserved") {
-		t.Errorf("error %q does not say the name is reserved", err)
+//
+// The reservation is DERIVED from the configured hostname rather than
+// hardcoded to "api". An operator who moves the control API with
+// PILOT_API_HOSTNAME moves what dispatch swallows, and a reservation left on
+// "api" would then leave the new name takeable -- which is the whole bug this
+// rule exists to prevent -- while refusing a name that now routes fine.
+func TestTheReservedNameFollowsTheConfiguredAPIHostname(t *testing.T) {
+	for _, tc := range []struct {
+		why         string
+		apiHostname string
+		machine     string
+		wantErr     bool
+	}{
+		{"the default reserves api", "", "api", true},
+		{"and nothing that merely starts with it", "", "apiary", false},
+		{"an override reserves its own label", "control.pilotrun.app", "control", true},
+		{"and frees the one it left behind", "control.pilotrun.app", "api", false},
+		{"a hostname off the workload domain reserves nothing, because " +
+			"dispatch does not claim it", "api.pilots.run", "api", false},
+	} {
+		t.Run(tc.why, func(t *testing.T) {
+			m := New(Options{Domain: "pilotrun.app", APIHostname: tc.apiHostname})
+			err := m.ensureNotReserved(tc.machine)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("%q was accepted, but the control API answers there", tc.machine)
+				}
+				if !strings.Contains(err.Error(), "reserved") {
+					t.Errorf("error %q does not say the name is reserved", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Errorf("%q was refused: %v", tc.machine, err)
+			}
+		})
 	}
 }

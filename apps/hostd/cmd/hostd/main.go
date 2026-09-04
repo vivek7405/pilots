@@ -211,15 +211,19 @@ func run() error {
 	}
 
 	mgr := machines.New(machines.Options{
-		HostID:     cfg.HostID,
-		Domain:     cfg.WorkloadDomain,
-		StateRoot:  cfg.MachineStateRoot(),
-		CacheRoot:  cfg.CacheRoot(),
-		Store:      store,
-		Uploader:   uploader,
-		Chunks:     chunks,
-		BlockStore: chunkReader(chunks),
-		NBDDevices: devices,
+		HostID: cfg.HostID,
+		Domain: cfg.WorkloadDomain,
+		// dispatch claims this hostname before the workload suffix, so the
+		// name under it is not a tenant's to take. Passed rather than
+		// hardcoded so the reservation follows PILOT_API_HOSTNAME.
+		APIHostname: cfg.APIHostname,
+		StateRoot:   cfg.MachineStateRoot(),
+		CacheRoot:   cfg.CacheRoot(),
+		Store:       store,
+		Uploader:    uploader,
+		Chunks:      chunks,
+		BlockStore:  chunkReader(chunks),
+		NBDDevices:  devices,
 		// The handlers are separate processes and read builds themselves, so
 		// they need this daemon's storage credentials.
 		HandlerEnv: os.Environ(),
