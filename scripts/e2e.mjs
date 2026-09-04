@@ -1322,20 +1322,26 @@ async function edgeAssertions() {
   try {
     await step('an image that echoes the forwarded headers builds', async () => {
       // busybox httpd with CGI, because the guest has to REPORT what it saw
-      // and the golden image ships no listener of its own. alpine's busybox
-      // has httpd built in, so this needs no package install and no network.
+      // and the golden image ships no listener of its own. httpd is not in
+      // alpine's base busybox -- its config has CONFIG_HTTPD unset and the
+      // applet lives in busybox-extras, a 63 KiB package whose own config has
+      // CONFIG_FEATURE_HTTPD_CGI=y. There is no /usr/bin/httpd symlink, so it
+      // is invoked through the busybox-extras binary.
       const res = await postTar('/v1/builds', tarball({
         'Dockerfile': [
           'FROM alpine:3.20',
+          'RUN apk add --no-cache busybox-extras',
           'RUN mkdir -p /www/cgi-bin',
           'COPY fwd /www/cgi-bin/fwd',
           'RUN chmod +x /www/cgi-bin/fwd',
           'EXPOSE 8080',
-          'CMD ["busybox", "httpd", "-f", "-p", "8080", "-h", "/www"]',
+          'CMD ["busybox-extras", "httpd", "-f", "-p", "8080", "-h", "/www"]',
           '',
         ].join('\n'),
         // One line, pipe-separated, so a missing header is an empty field
-        // rather than a shifted one.
+        // rather than a shifted one. busybox httpd converts every header it
+        // does not recognise into HTTP_<NAME> with non-alphanumerics as
+        // underscores, which is how the three below reach the script.
         'fwd': [
           '#!/bin/sh',
           'echo "Content-Type: text/plain"',
@@ -1382,12 +1388,17 @@ async function edgeAssertions() {
         }, { timeoutMs: 120_000, what: 'the guest to answer through the router' });
 
         const [xff, proto, xfh] = seen.split('|');
-        assert(!xff.includes(','),
-          `the guest saw a chain: ${JSON.stringify(xff)}. The forged entry was ` +
-          'appended to rather than deleted');
-        assert(xff !== '203.0.113.9',
-          'the guest saw the address the client chose, so a caller picks its own rate-limit bucket');
-        assert(xff.length > 0, 'the guest saw no X-Forwarded-For at all');
+        // Two hops reach the application: the router's proxy to the guest
+        // agent, and the agent's proxy to the port inside the guest. Each
+        // appends its own peer, so a chain is expected -- what must not be
+        // in it is anything the caller supplied.
+        assert(!xff.includes('203.0.113.9'),
+          `the guest saw the forged address in ${JSON.stringify(xff)}: the ` +
+          'inbound header was appended to rather than deleted');
+        const client = xff.split(',')[0].trim();
+        assert(client.length > 0, 'the guest saw no X-Forwarded-For at all');
+        assert(client !== '203.0.113.9',
+          'the leftmost entry is the address the client chose, so a caller picks its own rate-limit bucket');
 
         // The battery's listener is plain HTTP. The https case is the same
         // code path with req.TLS set, and the router unit tests cover it.
