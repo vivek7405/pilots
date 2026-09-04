@@ -1,7 +1,7 @@
 # pilots
 
 **The 2-in-1 sandbox + PaaS on Firecracker microVMs.** Instant sandboxes for
-AI agents; durable production services on the same primitive. No central
+AI agents, durable production services on the same primitive. No central
 control plane. Every host runs the identical stack and serves the full API.
 Bare-metal native (Hetzner). One command promotes a sandbox to production
 with its URL unchanged.

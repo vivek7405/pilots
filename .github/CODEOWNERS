@@ -1,0 +1,13 @@
+# Every path in this repository is owned by the maintainer.
+#
+# This does two things. It requests a review from @vivek7405 automatically on
+# every pull request, and -- if "require review from Code Owners" is ever
+# turned on in branch protection -- it makes that the ONLY approval that
+# counts, so an approving review from a contributor cannot satisfy the gate.
+#
+# Merge permission is separate and stricter: this is a user-owned repository,
+# so only accounts with write access can merge at all. Today that is the
+# maintainer alone. A fork PR from a contributor can be reviewed and approved
+# by anyone, and merged by nobody but the maintainer.
+
+*       @vivek7405
