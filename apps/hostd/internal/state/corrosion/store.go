@@ -1058,6 +1058,12 @@ func (s *Store) ListDomains(ctx context.Context) ([]state.Domain, error) {
 // is the local write clock and does not compare across hosts -- two replicas
 // that hold identical data but wrote a different share of it carry different
 // values, so a comparison of those says nothing at all.
+//
+// The table is cr-sqlite's, not this schema's: one row per actor, keyed by
+// site_id. Its shape is pinned in the test as crsqlDBVersionsDDL, taken from a
+// running corrosion agent at the version scripts/host-bootstrap.sh installs.
+// An error here reads as version 0 at the caller rather than a guess -- see
+// /v1/health, which logs it and stays up.
 func (s *Store) Version(ctx context.Context) (int64, error) {
 	rows, err := s.client.Query(ctx, `SELECT COALESCE(SUM(db_version), 0) FROM crsql_db_versions`)
 	if err != nil {
