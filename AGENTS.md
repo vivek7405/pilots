@@ -172,11 +172,11 @@ quiet early return retires every assertion below it at runtime.
 
 ## Working on the engine
 
-Reach for `~/Documents/Projects/sandbox/pilots-old` as an **answer key**: a
-predecessor that solved the same Firecracker problems and paid for the
-lessons now recorded in ARCHITECTURE.md. Read it; do not build on it and do
-not import it. Its control plane (central Postgres, SSH orchestration) is
-exactly what this repo exists to replace.
+The hard-won lessons from solving these Firecracker problems before are
+already recorded in ARCHITECTURE.md, which is why that file is the source of
+truth and why it says to change it BEFORE changing code that contradicts it.
+Read it first; the reasoning behind an invariant is usually an incident
+somebody already paid for.
 
 Two components are explicitly **ports, not rewrites** — they encode kernel
 ABI details that are expensive to rediscover:
