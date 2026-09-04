@@ -101,7 +101,7 @@ const PHASES: Phase[] = [
     status: 'active',
     issue: 7,
     summary:
-      'The product surface on a finished engine. Merged so far: tenancy, scoped keys, revocation and quotas on the API, typed JavaScript and Go clients, the hostility suite that replays every known incident class as a test, the fleet hardening the incident research asked for, and hugepage-backed guest memory. In review: the command line tool with the agent-facing tool server inside it, and the dashboard. Still open: metering, and the sign-off run on the production fleet.',
+      'The product surface on a finished engine. Merged: tenancy, scoped keys, revocation and quotas on the API, typed JavaScript and Go clients, the hostility suite that replays every known incident class as a test, the fleet hardening the incident research asked for, hugepage-backed guest memory, the command line tool with the agent-facing tool server inside it, and the dashboard. Still open: streaming exec and three other routes the clients are already written against, metering, and the sign-off run on the production fleet.',
     gate: 'A real product builds, iterates, checkpoints, and promotes an application end to end. The dashboard runs as a service on the platform it describes. The entire battery is green on the production fleet.',
   },
 ];

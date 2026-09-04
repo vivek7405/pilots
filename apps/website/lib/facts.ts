@@ -185,9 +185,9 @@ export const FACTS = {
     kind: 'measured',
   },
   assertions: {
-    value: '98',
+    value: '104',
     label: 'steps in the battery',
-    source: 'scripts/e2e.mjs on main, counted 2026-09-04: await step calls, beside 21 numbered sections in scripts/cluster/gate.sh',
+    source: 'scripts/e2e.mjs on main, counted 2026-09-04: await step calls, beside 22 numbered sections in scripts/cluster/gate.sh',
     kind: 'measured',
   },
   rescue: {

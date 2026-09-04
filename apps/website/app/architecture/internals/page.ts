@@ -595,7 +595,7 @@ export default function Internals() {
       id: 'surface',
       heading: 'What drives all of this',
       lede: html`The engine finished ahead of the surface over it. What exists on the API today is
-        tenancy, scoped keys, revocation, and quotas. The dashboard and the command line are in review,
+        tenancy, scoped keys, revocation, and quotas. The dashboard and the command line have landed,
         and the tool server for agents ships inside the command line.`,
       body: html`
         <div class="grid gap-10 wide:grid-cols-[0.9fr_1.1fr]">
@@ -648,7 +648,7 @@ export default function Internals() {
             ['3', 4, 'closed', 'The instant engine', 'Everything under the storage and lazy-paging figures: content-addressed blocks, the header format, the two handlers, fault-order replay, and checkpoints that resume before they finish uploading.'],
             ['4', 5, 'closed', 'Cross-host and resilience', 'The gossiped replica replacing a local database, the encrypted mesh, any host serving any machine, and the self-heal loop with the standing-down rule.'],
             ['5', 15, 'closed', 'Volumes and the PaaS face', 'Durable volumes on object storage, the build pipeline, guest-to-guest naming, sealed environment values, and services with health-gated deploys. All three parts merged and the gate passed.'],
-            ['6', 7, 'in progress', 'Product surface and sign-off', 'Tenancy, scoped keys and quotas on the API, typed clients, the hostility suite, and hugepage-backed guest memory have merged. The command line with the agent tool server, and the dashboard, are in review. Metering and the fleet sign-off remain.'],
+            ['6', 7, 'in progress', 'Product surface and sign-off', 'Tenancy, scoped keys and quotas on the API, typed clients, the hostility suite, hugepage-backed guest memory, the command line with the agent tool server, and the dashboard have all merged. Streaming exec and three other routes the clients are written against, metering, and the fleet sign-off remain.'],
           ].map(
             ([n, issue, status, title, body], i) => html`
               <li class="py-7 ${i > 0 ? 'border-t border-rule' : ''}">
