@@ -86,8 +86,10 @@ class LogPane extends WebComponent({
 
   render() {
     return html`
-      <div class="flex items-center justify-between mb-1.5">
-        <span class="text-xs text-muted-foreground">Console</span>
+      <!-- Status only, with no label beside it: the page already renders a
+           "Console" heading above this element, and repeating it here read as
+           two different things rather than one. -->
+      <div class="flex justify-end mb-1.5">
         <span class=${badgeClass({ variant: this.status === 'live' ? 'secondary' : 'outline' })}>${this.status}</span>
       </div>
       <pre ${ref(this.pane)} class=${cn(PANE)} aria-live="polite" aria-label="Console output"></pre>

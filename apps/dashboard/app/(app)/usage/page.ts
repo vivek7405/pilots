@@ -77,11 +77,12 @@ export default async function UsagePage({ searchParams }: PageProps) {
     </dl>
 
     ${sectionHeading('Samples')}
-    ${rows.length === 0
-      ? emptyState('Nothing recorded for this period.')
-      : html`
-          <div class="mb-8">
-            ${dataTable<UsageSample>({
+    <!-- One wrapper around BOTH branches, so the gap before the Fleet heading
+         does not disappear when the period is empty. -->
+    <div class="mb-8">
+      ${rows.length === 0
+        ? emptyState('Nothing recorded for this period.')
+        : dataTable<UsageSample>({
               caption: 'Usage samples for the selected period',
               rows,
               columns: [
@@ -97,8 +98,7 @@ export default async function UsagePage({ searchParams }: PageProps) {
                 { header: 'Volume GiB s', align: 'right', cellClass: 'tabular-nums', cell: (r) => r.volumeGibSeconds },
               ],
             })}
-          </div>
-        `}
+    </div>
 
     ${sectionHeading('Fleet')}
     <hosts-strip .initial=${hosts}></hosts-strip>

@@ -37,10 +37,12 @@ export default async function DomainsPage({ actionData }: PageProps) {
     ${pageHeading('Domains')}
     ${lede('A certificate is issued over HTTP-01, which any host in the fleet can answer.')}
     ${errors.error ? errorAlert(errors.error) : ''}
-    ${rows.length === 0
-      ? emptyState('No custom domains.')
-      : html`
-          <div class="mb-8">
+    <!-- One wrapper around BOTH branches, so the gap before the form below does
+         not disappear when the list is empty. -->
+    <div class="mb-8">
+      ${rows.length === 0
+        ? emptyState('No custom domains.')
+        : html`
             ${dataTable<DomainRow>({
               caption: 'Custom domains in this organisation',
               rows,
@@ -76,8 +78,8 @@ export default async function DomainsPage({ actionData }: PageProps) {
                 },
               ],
             })}
-          </div>
-        `}
+          `}
+    </div>
 
     ${sectionHeading('Add a domain')}
     <form action=${addDomain} class=${formRowClass()}>

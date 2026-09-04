@@ -66,8 +66,13 @@ export default async function KeysPage({ actionData }: PageProps) {
           class=${inputClass()}
         >`,
       })}
-      <fieldset class="border-0 p-0 m-0 grid gap-1.5">
-        <legend class="text-sm leading-none font-medium text-muted-foreground p-0">Scopes</legend>
+      <!-- A fieldset and legend, not a label: a label's for attribute names one
+           control, and this names the whole group. The legend carries an
+           explicit margin rather than riding a grid gap, because a legend is
+           laid out specially and does not take part in its fieldset's grid,
+           which left it half a step above the fields beside it. -->
+      <fieldset class="border-0 p-0 m-0">
+        <legend class="text-sm leading-none font-medium text-muted-foreground p-0 mb-1.5">Scopes</legend>
         <div class="flex items-center gap-4 h-9">
           ${SCOPES.map(
             (scope) => html`
