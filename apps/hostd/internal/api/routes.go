@@ -52,6 +52,13 @@ type Deps struct {
 	// unlimited, which is what a test wants and what a host with no builder
 	// configured never reaches.
 	BuildGate *quota.HostGate
+	// Lookup resolves a machine by NAME from an in-memory replica, sparing
+	// the sprites alias a full ListMachines scan per request -- which on a
+	// Corrosion host is a full-table query over HTTP to the local agent.
+	// This is the same handle and the same cache the router's hot path
+	// reads. Optional; nil, and a miss (a row the subscription has not
+	// delivered yet), fall back to the store scan.
+	Lookup func(name string) (state.Machine, bool)
 	// KeySource is where a minted key's randomness comes from. Nil is
 	// crypto/rand, which is what production uses; a test supplies a fixed
 	// reader so it can know the hash a mint will produce.

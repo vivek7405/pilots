@@ -255,15 +255,26 @@ var machineIDShape = regexp.MustCompile(`^m-[0-9a-f]{24}$`)
 
 // machineIDByName resolves the alias's path segment.
 //
-// An id-shaped value that names a row wins, because that is one row read
-// rather than a list scan; anything else is the live machine of that name with
-// the lowest id, the rule the router's cache already applies. Two live rows
-// with one name is a bug elsewhere, and the lowest id is the stable answer to
-// it rather than whichever the store listed first.
+// The same order the router applies, and for the same reason: an id-shaped
+// value that names a row wins, because that is one row read rather than a list
+// scan; then the subscription cache, a mutex and a map lookup rather than a
+// full-table query over HTTP; then a store scan for the row the subscription
+// has not delivered yet. Without the cache step the alias cost a scan on the
+// forwarding host AND another on the owner, which made it materially more
+// expensive than the /v1/machines/{id}/exec/stream it aliases.
+//
+// The answer in every case is the live machine of that name with the lowest
+// id. Two live rows with one name is a bug elsewhere, and the lowest id is the
+// stable answer to it rather than whichever the store listed first.
 func (d Deps) machineIDByName(ctx context.Context, name string) (string, bool) {
 	if machineIDShape.MatchString(name) {
 		if _, err := d.Store.GetMachine(ctx, name); err == nil {
 			return name, true
+		}
+	}
+	if d.Lookup != nil {
+		if m, ok := d.Lookup(name); ok {
+			return m.ID, true
 		}
 	}
 	rows, err := d.Store.ListMachines(ctx)

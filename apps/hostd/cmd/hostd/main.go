@@ -37,6 +37,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/seal"
 	"github.com/vivek7405/pilots/hostd/internal/selfheal"
 	"github.com/vivek7405/pilots/hostd/internal/services"
+	"github.com/vivek7405/pilots/hostd/internal/state"
 	"github.com/vivek7405/pilots/hostd/internal/volumes"
 )
 
@@ -387,6 +388,7 @@ func run() error {
 		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink, HugePages: cfg.HugePages,
 		Builds: builder, Rollout: rollout, Domain: cfg.WorkloadDomain,
 		Peers: peerLookup(f), Tenancy: tenancy, BuildGate: &quota.HostGate{},
+		Lookup: machineByName(f),
 		GitHub: github.Handler(github.Deps{
 			HostID: cfg.HostID, App: ghApp, Store: store, Builds: builder,
 			Rollout: rollout, Machines: mgr, Domain: cfg.WorkloadDomain,
@@ -591,6 +593,16 @@ func newCertStore(cfg *config.Config) (*s3.Client, error) {
 		Endpoint: cfg.S3Endpoint, Region: cfg.S3Region, Bucket: cfg.S3Bucket,
 		Prefix: "certs", AccessKey: cfg.S3AccessKey, SecretKey: cfg.S3SecretKey,
 	})
+}
+
+// machineByName is the sprites alias's name resolution, from the same
+// subscription cache the router's hot path reads. Nil on a single box, where
+// there is no cache and a store scan is a local file read anyway.
+func machineByName(f *fleet) func(string) (state.Machine, bool) {
+	if f == nil {
+		return nil
+	}
+	return f.cache.MachineByName
 }
 
 // peerLookup resolves other hosts for service-write forwarding. Nil on a

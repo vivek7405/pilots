@@ -226,3 +226,57 @@ func TestLogsWithoutFollowEnd(t *testing.T) {
 		t.Errorf("body = %q", rec.Body.String())
 	}
 }
+
+// countingStore counts the full-table scans a resolution costs.
+type countingStore struct {
+	state.Store
+	lists int
+}
+
+func (c *countingStore) ListMachines(ctx context.Context) ([]state.Machine, error) {
+	c.lists++
+	return c.Store.ListMachines(ctx)
+}
+
+// The alias reads the subscription cache before it scans.
+//
+// ListMachines on a Corrosion host is a full-table query over HTTP, and a
+// cross-host alias call pays it on the forwarding host and again on the owner.
+// The router's hot path has always tried the in-memory replica first; the
+// alias resolves the same names and must be no more expensive.
+func TestMachineIDByNameReadsTheCacheBeforeItScans(t *testing.T) {
+	_, st, _ := newTestServerWithManager(t)
+	ctx := context.Background()
+	for _, m := range []state.Machine{
+		{ID: "m_x", Name: "api", HostID: "host-test", State: "running"},
+		{ID: "m_y", Name: "worker", HostID: "host-test", State: "running"},
+	} {
+		if err := st.PutMachine(ctx, &m); err != nil {
+			t.Fatalf("PutMachine: %v", err)
+		}
+	}
+
+	counted := &countingStore{Store: st}
+	d := Deps{HostID: "host-test", Store: counted, Lookup: func(name string) (state.Machine, bool) {
+		if name == "api" {
+			return state.Machine{ID: "m_x", Name: "api"}, true
+		}
+		return state.Machine{}, false // not delivered to this replica yet
+	}}
+
+	if id, ok := d.machineIDByName(ctx, "api"); !ok || id != "m_x" {
+		t.Errorf("machineIDByName(api) = %q, %v; want m_x", id, ok)
+	}
+	if counted.lists != 0 {
+		t.Errorf("a cache hit still cost %d ListMachines scans, want 0", counted.lists)
+	}
+
+	// A miss falls through, so a row the subscription has not delivered still
+	// resolves -- the cache is an optimisation, never the authority.
+	if id, ok := d.machineIDByName(ctx, "worker"); !ok || id != "m_y" {
+		t.Errorf("machineIDByName(worker) = %q, %v; want m_y", id, ok)
+	}
+	if counted.lists != 1 {
+		t.Errorf("a cache miss cost %d scans, want 1", counted.lists)
+	}
+}
