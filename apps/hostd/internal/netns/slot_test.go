@@ -302,3 +302,30 @@ func TestASlotWithoutAMeshPrefixHasNoIPv6Machine(t *testing.T) {
 		t.Errorf("machine address is %s, want none", s.Machine6)
 	}
 }
+
+// Free is what pilots_slots_free publishes, so it must count what the pool can
+// still hand out -- max-1, because index 0 is the unallocated sentinel and is
+// never allocated. Off by one here reads as a host with spare capacity that
+// refuses the next create.
+func TestPoolFreeCountsWhatIsStillAllocatable(t *testing.T) {
+	p := NewPool(8, testPrefix)
+	if got := p.Free(); got != 7 {
+		t.Errorf("Free on a fresh pool of 8 = %d, want 7", got)
+	}
+
+	first, err := p.Take("m1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Take("m2"); err != nil {
+		t.Fatal(err)
+	}
+	if got := p.Free(); got != 5 {
+		t.Errorf("Free after two Takes = %d, want 5", got)
+	}
+
+	p.Return(first.Idx)
+	if got := p.Free(); got != 6 {
+		t.Errorf("Free after a Return = %d, want 6", got)
+	}
+}

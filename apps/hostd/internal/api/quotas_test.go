@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
+	"github.com/vivek7405/pilots/hostd/internal/quota"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -138,5 +140,51 @@ func TestAnAdmittedCreateCarriesTheOrg(t *testing.T) {
 	}
 	if fake.lastCreateVolume.OrgID != "org_1" {
 		t.Errorf("the volume was created in %q, want org_1", fake.lastCreateVolume.OrgID)
+	}
+}
+
+// Every 429 is counted, by the limit that produced it. Which limit an org
+// keeps hitting is what separates a real capacity problem from one runaway
+// client, and it is not visible in the response body alone.
+//
+// Deltas, not absolutes: the registry is package-level and shared.
+func TestAQuotaRefusalIsCounted(t *testing.T) {
+	h, st, _ := newTestServerWithManager(t)
+	seedKey(t, st, "pilot_org1", "org_1", "machines")
+	if err := st.PutQuota(context.Background(), &state.Quota{
+		OrgID: "org_1", MaxMachines: 0, MaxVCPUs: 10, MaxMemMiB: 4096, MaxVolumeGiB: 10,
+	}); err != nil {
+		t.Fatalf("PutQuota: %v", err)
+	}
+
+	before := metrics.QuotaRefusals.With("machines").Load()
+	if rec := postJSON(t, h, "/v1/machines", "pilot_org1",
+		`{"vcpus":1,"mem_mib":512}`); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("got %d, want 429", rec.Code)
+	}
+	if d := metrics.QuotaRefusals.With("machines").Load() - before; d != 1 {
+		t.Errorf("the refusal counted %d times, want exactly 1", d)
+	}
+}
+
+// The build gate refuses on its own rather than through writeQuotaError, so it
+// is the one 429 that could be counted nowhere.
+func TestABuildGateRefusalIsCounted(t *testing.T) {
+	_, st, fake := newTestServerWithManager(t)
+	if err := st.PutQuota(context.Background(), &state.Quota{
+		OrgID: "org_1", MaxMachines: 20, MaxVCPUs: 40, MaxMemMiB: 65536,
+		MaxVolumeGiB: 100, MaxBuilds: 0,
+	}); err != nil {
+		t.Fatalf("PutQuota: %v", err)
+	}
+	h := Routes(Deps{HostID: "host-test", Store: st, Machines: fake,
+		Builds: &readingBuilder{}, BuildGate: &quota.HostGate{}})
+
+	before := metrics.QuotaRefusals.With("builds").Load()
+	if rec := postTar(t, h, "/v1/builds", nil); rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("got %d, want 429 (%s)", rec.Code, rec.Body.String())
+	}
+	if d := metrics.QuotaRefusals.With("builds").Load() - before; d != 1 {
+		t.Errorf("the refusal counted %d times, want exactly 1", d)
 	}
 }

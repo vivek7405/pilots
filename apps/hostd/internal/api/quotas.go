@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/quota"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
@@ -76,6 +77,9 @@ func writeQuotaError(w http.ResponseWriter, err error) bool {
 	if !errors.As(err, &ex) {
 		return false
 	}
+	// Counted by limit name, not by org: which limit an org keeps hitting is
+	// what tells a real capacity problem from a runaway client.
+	metrics.QuotaRefusals.With(ex.Quota).Inc()
 	writeJSON(w, http.StatusTooManyRequests, QuotaExceededResponse{
 		Error: "quota exceeded", Quota: ex.Quota,
 		Limit: ex.Limit, Used: ex.Used, Scope: ex.Scope,

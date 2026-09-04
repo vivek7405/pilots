@@ -8,6 +8,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/quota"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
@@ -78,6 +79,9 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	org := OrgID(r.Context())
 	limits := quota.For(r.Context(), d.Store, org)
 	if used, ok := d.BuildGate.Acquire(org, limits.MaxBuilds); !ok {
+		// The build gate is the one refusal that does not go through
+		// writeQuotaError, so it counts itself.
+		metrics.QuotaRefusals.With("builds").Inc()
 		writeJSON(w, http.StatusTooManyRequests, QuotaExceededResponse{
 			Error: "quota exceeded", Quota: "builds",
 			Limit: limits.MaxBuilds, Used: used, Scope: "host",

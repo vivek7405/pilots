@@ -74,8 +74,33 @@ func TestHealthIsPublic(t *testing.T) {
 
 func TestMetricsIsPublic(t *testing.T) {
 	h, _ := newTestServer(t)
-	if rec := do(t, h, "GET", "/metrics", ""); rec.Code != http.StatusOK {
-		t.Errorf("GET /metrics: got %d, want 200", rec.Code)
+	rec := do(t, h, "GET", "/metrics", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /metrics: got %d, want 200", rec.Code)
+	}
+	body := rec.Body.String()
+
+	// The host families render even on a host that has done nothing, which is
+	// what makes a scrape of a fresh host readable rather than empty.
+	for _, name := range []string{
+		"pilots_wake_seconds",
+		"pilots_checkpoint_durable_seconds",
+		"pilots_nbd_cache_hits_total",
+		"pilots_nbd_cache_misses_total",
+		"pilots_router_inflight",
+		"pilots_slots_free",
+	} {
+		if !strings.Contains(body, "# TYPE "+name+" ") {
+			t.Errorf("%s is missing from the scrape", name)
+		}
+	}
+
+	// Cardinality is the one thing that cannot be fixed after the fact: a
+	// series per machine melts the scrape exactly when a host is busiest.
+	for _, label := range []string{"machine_id=", "org_id=", "host_id="} {
+		if strings.Contains(body, label) {
+			t.Errorf("the scrape carries a %s label", label)
+		}
 	}
 }
 

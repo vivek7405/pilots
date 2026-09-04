@@ -247,3 +247,15 @@ func (p *Pool) InUse() int {
 	defer p.mu.Unlock()
 	return len(p.inUse)
 }
+
+// Free reports how many indices this pool can still hand out.
+//
+// max-1, not max: index 0 is the unallocated sentinel and is never handed out,
+// so a pool of size max serves max-1 machines. Published as
+// pilots_slots_free, which is what says a host is out of capacity before a
+// create starts failing.
+func (p *Pool) Free() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.max - 1 - len(p.inUse)
+}

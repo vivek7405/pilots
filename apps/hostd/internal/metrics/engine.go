@@ -3,11 +3,12 @@ package metrics
 // The engine's families, declared in one place so the names are reviewable
 // together and nothing publishes a second series meaning the same thing.
 //
-// Issue #7 adds its own families to this registry -- machines by state, wake
-// latency, S3 op counts, NBD cache hit rate, router in-flight, slot-pool free
-// count. It must NOT re-implement the uffd or snapshot families below: two
-// fault counters means two series with one meaning that disagree, and the
-// disagreement shows up as a graph nobody can trust rather than as an error.
+// The host's own families -- machines by state, wake latency, S3 op counts,
+// NBD cache hit rate, router in-flight, slot-pool free count -- live beside
+// these in host.go. Nothing there re-implements the uffd or snapshot families
+// below: two fault counters means two series with one meaning that disagree,
+// and the disagreement shows up as a graph nobody can trust rather than as an
+// error.
 var (
 	// UffdFaults counts faults answered across every handler on this host.
 	UffdFaults = NewCounter(Default, "pilots_uffd_faults_total",

@@ -258,6 +258,16 @@ GET    /v1/quotas/:org               admin: the org's limits, or the defaults
 PUT    /v1/quotas/:org               admin: set them
 GET    /v1/health                    liveness (unauthenticated)
 GET    /metrics                      Prometheus (unauthenticated)
+                                     engine: pilots_uffd_*, pilots_snapshot_*
+                                     host: pilots_machines{state},
+                                     pilots_wake_seconds,
+                                     pilots_checkpoint_durable_seconds,
+                                     pilots_s3_ops_total{op},
+                                     pilots_s3_op_seconds{op},
+                                     pilots_nbd_cache_hits_total,
+                                     pilots_nbd_cache_misses_total,
+                                     pilots_router_inflight, pilots_slots_free,
+                                     pilots_quota_refusals_total{quota}
 ```
 
 Every read is scoped to the caller's org. An id another org owns answers

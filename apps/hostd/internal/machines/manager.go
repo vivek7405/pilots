@@ -25,6 +25,7 @@ import (
 
 	"github.com/vivek7405/pilots/hostd/internal/block"
 	"github.com/vivek7405/pilots/hostd/internal/fc"
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/nbd"
 	"github.com/vivek7405/pilots/hostd/internal/netns"
 	"github.com/vivek7405/pilots/hostd/internal/seal"
@@ -666,6 +667,7 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 		return err
 	}
 
+	start := time.Now()
 	fcm, err := m.wakeFromSuspend(ctx, row)
 	if err != nil {
 		row.State = StateError
@@ -675,6 +677,10 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 		return err
 	}
 	m.put(id, fcm)
+
+	// Only a wake that worked is a latency. A failed one is an error, and
+	// folding it in would make the histogram measure how fast this host fails.
+	metrics.WakeSeconds.Observe(time.Since(start).Seconds())
 
 	row.State = StateRunning
 	stampSlot(row, fcm)
