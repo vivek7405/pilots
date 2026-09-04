@@ -1,5 +1,5 @@
 # uncloud — architecture notes
-_Research date: 2026-09-03, against the local clone at commit `1c29d4d` (2026-08-28, 1186 commits since 2024-07-20, essentially one author: Pasha/Pavel Sviderski ~1046 commits, plus Anton Ovchinnikov, Miek Gieben, Justin Bradford). Paths relative to `/home/vivek/Documents/Projects/hosting/uncloud`. "(inferred)" marks conclusions not stated in code/docs._
+_Research date: 2026-09-03, against the local clone at commit `1c29d4d` (2026-08-28, 1186 commits since 2024-07-20, essentially one author: Pasha/Pavel Sviderski ~1046 commits, plus Anton Ovchinnikov, Miek Gieben, Justin Bradford). Paths relative to `~/uncloud`. "(inferred)" marks conclusions not stated in code/docs._
 
 ## One-paragraph summary
 
@@ -213,7 +213,7 @@ Docker named volumes only, **host-pinned**; "As of April 2025, the volume must b
 
 ## What pilots BORROWED and how it maps
 
-pilots refs are to `/home/vivek/Documents/Projects/sandbox/pilots/ARCHITECTURE.md` (rules 1-7, Contracts) and `apps/hostd/internal/*`.
+pilots refs are to `ARCHITECTURE.md` (rules 1-7, Contracts) and `apps/hostd/internal/*`.
 
 | uncloud mechanism | uncloud path | pilots mechanism | pilots location |
 |---|---|---|---|

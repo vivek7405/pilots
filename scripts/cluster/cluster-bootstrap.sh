@@ -32,6 +32,11 @@ export PILOT_AGENT_TOKEN_SECRET="${PILOT_AGENT_TOKEN_SECRET:-$(head -c 32 /dev/u
 # Full base64 here, unlike the two above -- it is a 32-byte AES key, not an
 # opaque string, so the padding matters.
 export PILOT_FLEET_KEY="${PILOT_FLEET_KEY:-$(head -c 32 /dev/urandom | base64)}"
+# The object store for the LOCAL rig only: a throwaway minio on the developer's
+# own machine, reachable from the cluster's libvirt bridge and nothing else.
+# The credentials below are fixed on purpose so the rig needs no setup, and
+# they are worthless outside it -- do not copy this block to a real host, where
+# every one of these comes from the operator instead.
 export PILOT_S3_ENDPOINT="${PILOT_S3_ENDPOINT:-http://${NET_SUBNET}.1:9000}"
 export PILOT_S3_BUCKET="${PILOT_S3_BUCKET:-pilots}"
 export PILOT_S3_ACCESS_KEY="${PILOT_S3_ACCESS_KEY:-pilots}"
