@@ -61,7 +61,17 @@ function fingerprint(m: Machine): string {
   return [m.state, m.host_id ?? '', m.url ?? '', m.name ?? ''].join('\u0000');
 }
 
-/** Registers a socket for an org and sends it the opening snapshot. */
+/**
+ * Registers a socket for an org and sends it the opening snapshot.
+ *
+ * `last` is per-org state shared by every viewer of that org, and only
+ * `tick()` may advance it. A subscribe that overwrote it with a fresh read
+ * would swallow a pending delta: a machine changes, a second tab opens before
+ * the next tick and re-reads the fleet, the map now already holds the new
+ * fingerprint, and the tick finds nothing to send, so the first tab shows the
+ * old state until something else changes. So the map is seeded only when the
+ * org has no entry yet, and the joining socket's snapshot leaves it alone.
+ */
 export async function subscribe(orgId: string, ws: LiveSocket): Promise<void> {
   const s = state();
   const set = s.orgs.get(orgId) ?? new Set<LiveSocket>();
@@ -69,7 +79,7 @@ export async function subscribe(orgId: string, ws: LiveSocket): Promise<void> {
   s.orgs.set(orgId, set);
 
   const machines = await listMachines(orgId);
-  s.last.set(orgId, new Map(machines.map((m) => [m.id, fingerprint(m)])));
+  if (!s.last.has(orgId)) s.last.set(orgId, new Map(machines.map((m) => [m.id, fingerprint(m)])));
   ws.send(JSON.stringify({ type: 'snapshot', machines } satisfies Snapshot));
 
   if (!s.timer) {

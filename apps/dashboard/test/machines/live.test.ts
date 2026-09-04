@@ -113,6 +113,45 @@ test('a delta carries removals and skips rows nothing visible changed on', async
   }
 });
 
+test('a second viewer joining before the tick does not swallow a pending delta', async () => {
+  app.fleet.data.machines.push(machine('a1', 'org-a'));
+
+  const first = socket();
+  await live.subscribe('org-a', first);
+  const second = socket();
+  try {
+    // The change lands, and a second tab opens BEFORE the next tick.
+    app.fleet.data.machines[0].state = 'suspended';
+    await live.subscribe('org-a', second);
+    assert.equal(second.messages[0].machines![0].state, 'suspended', 'the newcomer starts from the current state');
+
+    await live.tick();
+
+    const delta = first.messages.filter((m) => m.type === 'delta');
+    assert.equal(delta.length, 1, 'the first tab still receives the change it has not seen');
+    assert.equal(delta[0].upsert![0].id, 'a1');
+    assert.equal(delta[0].upsert![0].state, 'suspended');
+  } finally {
+    live.unsubscribe('org-a', first);
+    live.unsubscribe('org-a', second);
+  }
+});
+
+test('a lone viewer whose snapshot already carries the state gets no delta for it', async () => {
+  // The counterpart: seeding on the FIRST subscribe is still right, so an
+  // unchanged fleet stays silent rather than replaying the snapshot as a delta.
+  app.fleet.data.machines.push(machine('a1', 'org-a', 'suspended'));
+
+  const ws = socket();
+  await live.subscribe('org-a', ws);
+  try {
+    await live.tick();
+    assert.equal(ws.messages.filter((m) => m.type === 'delta').length, 0);
+  } finally {
+    live.unsubscribe('org-a', ws);
+  }
+});
+
 test('the shared tick stops when the last subscriber leaves', async () => {
   const ws = socket();
   await live.subscribe('org-a', ws);
