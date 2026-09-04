@@ -18,6 +18,37 @@ type Knobs struct {
 	SoftLimit          int    `json:"soft_limit"`
 }
 
+// KnobsPatch is a PARTIAL lifecycle policy: the shape a REQUEST carries.
+//
+// hostd decodes a request's knobs onto a value it has already seeded -- its
+// own defaults on a create, the sibling replica's policy on a deploy -- so a
+// field the caller leaves out keeps the value it had. Expressing that needs a
+// per-field "absent", and *Knobs cannot say it: Knobs carries no omitempty
+// (responses always spell all four), so &Knobs{SoftLimit: 50} serialises all
+// four and the three nobody mentioned are merged as zeros.
+//
+// That is not a cosmetic difference. It lands auto_start false, and a machine
+// with auto_start false suspends after a minute and is then refused its wake
+// -- a permanently dead URL earned by raising a concurrency limit. In the
+// other direction &Knobs{MinMachinesRunning: 1} silently drops soft_limit to
+// 0 and concurrency scale-up stops.
+//
+// So every field here is a pointer. Nil is absent; a pointer to the zero
+// value is a deliberate zero, which is what makes min_machines_running: 0
+// (scale to zero) and auto_start: false sayable at all -- an omitempty value
+// type could not say either. Fill one in with Ptr:
+//
+//	pilots.KnobsPatch{SoftLimit: pilots.Ptr(50)}
+type KnobsPatch struct {
+	AutoStop           *string `json:"auto_stop,omitempty"`            // off|stop|suspend
+	AutoStart          *bool   `json:"auto_start,omitempty"`           // wake on an inbound request
+	MinMachinesRunning *int    `json:"min_machines_running,omitempty"` // 0 = scale to zero
+	SoftLimit          *int    `json:"soft_limit,omitempty"`
+}
+
+// Ptr returns a pointer to v, so a KnobsPatch field can be set inline.
+func Ptr[T any](v T) *T { return &v }
+
 // Machine is the one primitive. Its id, name and URL never change, across
 // suspend, wake, checkpoint, restore, promote and host migration.
 type Machine struct {
@@ -52,12 +83,13 @@ type CreateMachineRequest struct {
 	Checkpoint string `json:"checkpoint,omitempty"`
 	VCPUs      int    `json:"vcpus,omitempty"`
 	MemMiB     int    `json:"mem_mib,omitempty"`
-	// A pointer so an absent policy merges onto hostd's defaults rather than
-	// zeroing every field the caller did not mention.
-	Knobs  *Knobs `json:"knobs,omitempty"`
-	Volume string `json:"volume,omitempty"`
-	App    string `json:"app,omitempty"`
-	Cmd    string `json:"cmd,omitempty"`
+	// A patch, not a policy: hostd merges what is present onto its defaults,
+	// so the fields left nil keep theirs. See KnobsPatch for why a *Knobs
+	// here mints a dead URL.
+	Knobs  *KnobsPatch `json:"knobs,omitempty"`
+	Volume string      `json:"volume,omitempty"`
+	App    string      `json:"app,omitempty"`
+	Cmd    string      `json:"cmd,omitempty"`
 	// Set by a rollout, not by a client.
 	MemBuildID    string            `json:"mem_build_id,omitempty"`
 	RootfsBuildID string            `json:"rootfs_build_id,omitempty"`
@@ -159,13 +191,16 @@ type Service struct {
 }
 
 type CreateServiceRequest struct {
-	Name     string       `json:"name"`
-	App      string       `json:"app,omitempty"`
-	Release  string       `json:"release,omitempty"`
-	Build    string       `json:"build,omitempty"`
-	Replicas int          `json:"replicas,omitempty"`
-	Knobs    *Knobs       `json:"knobs,omitempty"`
-	Health   *HealthCheck `json:"health,omitempty"`
+	Name     string `json:"name"`
+	App      string `json:"app,omitempty"`
+	Release  string `json:"release,omitempty"`
+	Build    string `json:"build,omitempty"`
+	Replicas int    `json:"replicas,omitempty"`
+	// Accepted for wire compatibility and not persisted -- a service row keeps
+	// no knobs, so a policy set here goes nowhere and the deploy is where it
+	// belongs. A patch for the same reason every other request's is.
+	Knobs  *KnobsPatch  `json:"knobs,omitempty"`
+	Health *HealthCheck `json:"health,omitempty"`
 	// Domain is the subdomain label under the fleet's domain. Empty means the
 	// service mints no route rows and is reachable over <name>.internal only.
 	Domain       string            `json:"domain,omitempty"`
@@ -183,7 +218,10 @@ type DeployRequest struct {
 	// Knobs is the lifecycle policy for the replicas this deploy creates,
 	// merged onto what the previous release's replicas carry. A service row
 	// keeps no knobs, so the deploy is where they travel.
-	Knobs *Knobs `json:"knobs,omitempty"`
+	//
+	// A patch, so raising one field does not zero the three the caller never
+	// mentioned. See KnobsPatch.
+	Knobs *KnobsPatch `json:"knobs,omitempty"`
 }
 
 // PromoteRequest turns a sandbox into a durable service. The machine's URL is
@@ -382,18 +420,21 @@ type ComposeStep struct {
 	Cmd        string            `json:"cmd,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 	// SecretRefs maps an env key to a secret name; the value never appears.
-	SecretRefs   map[string]string `json:"secret_refs,omitempty"`
-	Ports        []int             `json:"ports,omitempty"`
-	Health       *HealthCheck      `json:"health,omitempty"`
-	Volumes      []ComposeVolume   `json:"volumes,omitempty"`
-	Replicas     int               `json:"replicas"`
-	VCPUs        int               `json:"vcpus"`
-	MemMiB       int               `json:"mem_mib"`
-	DependsOn    []string          `json:"depends_on,omitempty"`
-	Knobs        *Knobs            `json:"knobs,omitempty"`
-	Domain       string            `json:"domain,omitempty"`
-	CustomDomain string            `json:"custom_domain,omitempty"`
-	PreDeploy    string            `json:"pre_deploy,omitempty"`
+	SecretRefs map[string]string `json:"secret_refs,omitempty"`
+	Ports      []int             `json:"ports,omitempty"`
+	Health     *HealthCheck      `json:"health,omitempty"`
+	Volumes    []ComposeVolume   `json:"volumes,omitempty"`
+	Replicas   int               `json:"replicas"`
+	VCPUs      int               `json:"vcpus"`
+	MemMiB     int               `json:"mem_mib"`
+	DependsOn  []string          `json:"depends_on,omitempty"`
+	// A patch: a step's knobs are whatever the compose file spelled out, and
+	// they are spread straight onto a DeployRequest, so the fields the file
+	// left out must stay absent rather than arrive as zeros.
+	Knobs        *KnobsPatch `json:"knobs,omitempty"`
+	Domain       string      `json:"domain,omitempty"`
+	CustomDomain string      `json:"custom_domain,omitempty"`
+	PreDeploy    string      `json:"pre_deploy,omitempty"`
 }
 
 type ComposePlan struct {
@@ -410,6 +451,10 @@ type ComposeUnsupported struct {
 // wireTypes is every struct above, once. The drift test reflects over it, and
 // fails when hostd carries a tagged struct nobody listed here -- so a new wire
 // shape cannot land unmirrored.
+//
+// KnobsPatch is deliberately absent: it is not a hostd struct but the partial
+// ENCODING of one, which hostd receives as a json.RawMessage. It is held to
+// Knobs by TestKnobsPatchCoversEveryKnob instead.
 var wireTypes = []any{
 	Knobs{},
 	Machine{},
