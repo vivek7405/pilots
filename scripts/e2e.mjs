@@ -2599,8 +2599,13 @@ async function execStreamAssertions() {
     // The tail is opened BEFORE the line is written, so what it delivers can
     // only have arrived on the response that was already open.
     await step('logs?follow survives a suspend and ends on destroy', async () => {
+      // Aborted rather than merely deadlined: a read on a response the server
+      // never ends blocks forever, and a battery that hangs reports nothing.
+      const abort = new AbortController();
+      const guard = setTimeout(() => abort.abort(), 180_000);
       const res = await fetch(`${API}/v1/machines/${id}/logs?follow=1`, {
         headers: { Authorization: `Bearer ${KEY}` },
+        signal: abort.signal,
       });
       assert(res.status === 200, `expected 200, got ${res.status}`);
       const reader = res.body.getReader();
@@ -2635,10 +2640,18 @@ async function execStreamAssertions() {
       await request(`/v1/machines/${id}`, { method: 'DELETE' });
       destroyed = true;
       const deadline = Date.now() + 15_000;
-      for (;;) {
-        const { done } = await reader.read();
-        if (done) break;
-        assert(Date.now() < deadline, 'the follow outlived the machine it was tailing');
+      const ender = setTimeout(() => abort.abort(), 15_000);
+      try {
+        for (;;) {
+          const { done } = await reader.read();
+          if (done) break;
+          assert(Date.now() < deadline, 'the follow outlived the machine it was tailing');
+        }
+      } catch (err) {
+        assert(false, `the follow never ended after the destroy: ${err.message}`);
+      } finally {
+        clearTimeout(ender);
+        clearTimeout(guard);
       }
     });
   } finally {
