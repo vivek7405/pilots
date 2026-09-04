@@ -9,8 +9,19 @@ import { html, notFound } from '@webjsdev/core';
 import type { PageProps } from '@webjsdev/core';
 import { requireOrg } from '#modules/auth/session.server.ts';
 import { getMachine } from '#modules/machines/queries/get-machine.server.ts';
+import { stateBadge } from '#modules/machines/utils/ui/state.ts';
+import { badgeClass } from '#components/ui/badge.ts';
+import { cardClass, cardContentClass } from '#components/ui/card.ts';
+import { dataTable, emptyState, footnote, pageHeading, sectionHeading } from '#lib/utils/ui.ts';
+import { cn } from '#lib/utils/cn.ts';
 import '#modules/machines/components/log-pane.ts';
 import '#modules/machines/components/exec-console.ts';
+
+interface Checkpoint {
+  id: string;
+  durable: boolean;
+  comment?: string | null;
+}
 
 export async function generateMetadata({ params }: PageProps) {
   return { title: `Machine ${params.id}` };
@@ -23,52 +34,53 @@ export default async function MachinePage({ params }: PageProps) {
   const { machine, checkpoints } = found;
 
   return html`
-    <div class="flex flex-wrap items-baseline gap-3">
-      <h1 class="text-2xl font-semibold tracking-tight m-0">${machine.name || machine.id}</h1>
-      <span class="font-mono text-sm text-muted-foreground">${machine.state}</span>
+    <div class="flex flex-wrap items-center gap-3">
+      ${pageHeading(machine.name || machine.id)} ${stateBadge(machine.state)}
     </div>
 
-    <dl class="mt-4 grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1 text-sm">
-      <dt class="text-muted-foreground">Id</dt>
-      <dd class="m-0 font-mono">${machine.id}</dd>
-      <dt class="text-muted-foreground">Host</dt>
-      <dd class="m-0 font-mono">${machine.host_id ?? '-'}</dd>
-      <dt class="text-muted-foreground">URL</dt>
-      <dd class="m-0">${machine.url ? html`<a href=${machine.url} rel="noopener">${machine.url}</a>` : '-'}</dd>
-    </dl>
+    <div class=${cn(cardClass({ size: 'sm' }), 'mt-4')} data-slot="card" data-size="sm">
+      <div class=${cardContentClass()}>
+        <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1 text-sm m-0">
+          <dt class="text-muted-foreground">Id</dt>
+          <dd class="m-0 font-mono">${machine.id}</dd>
+          <dt class="text-muted-foreground">Host</dt>
+          <dd class="m-0 font-mono">${machine.host_id ?? '-'}</dd>
+          <dt class="text-muted-foreground">URL</dt>
+          <dd class="m-0">${machine.url ? html`<a href=${machine.url} rel="noopener">${machine.url}</a>` : '-'}</dd>
+        </dl>
+      </div>
+    </div>
 
     <section class="mt-8">
-      <h2 class="text-lg font-medium m-0 mb-2">Console</h2>
+      ${sectionHeading('Console')}
       <log-pane machine-id=${machine.id}></log-pane>
     </section>
 
     <section class="mt-8">
-      <h2 class="text-lg font-medium m-0 mb-2">Run a command</h2>
+      ${sectionHeading('Run a command')}
       <exec-console machine-id=${machine.id}></exec-console>
     </section>
 
     <section class="mt-8">
-      <h2 class="text-lg font-medium m-0 mb-2">Checkpoints</h2>
+      ${sectionHeading('Checkpoints')}
       ${checkpoints.length === 0
-        ? html`<p class="text-muted-foreground">
-            None yet. A checkpoint is copy-on-write metadata, so taking one costs no data copy.
-          </p>`
-        : html`
-            <ul class="text-sm list-none p-0 m-0">
-              ${checkpoints.map(
-                (c) => html`
-                  <li class="border-b border-border py-2 flex flex-wrap gap-x-4">
-                    <span class="font-mono">${c.id}</span>
-                    <span class="text-muted-foreground">${c.durable ? 'durable' : 'local only'}</span>
-                    ${c.comment ? html`<span>${c.comment}</span>` : ''}
-                  </li>
-                `,
-              )}
-            </ul>
-          `}
-      <p class="text-xs text-muted-foreground mt-2">
-        A restore is in place: the machine keeps its id and its URL.
-      </p>
+        ? emptyState('None yet. A checkpoint is copy-on-write metadata, so taking one costs no data copy.')
+        : dataTable<Checkpoint>({
+            caption: 'Checkpoints of this machine',
+            rows: checkpoints,
+            columns: [
+              { header: 'Checkpoint', cellClass: 'font-mono', cell: (c) => c.id },
+              {
+                header: 'Storage',
+                cell: (c) =>
+                  html`<span class=${badgeClass({ variant: c.durable ? 'secondary' : 'outline' })}
+                    >${c.durable ? 'durable' : 'local only'}</span
+                  >`,
+              },
+              { header: 'Comment', cellClass: 'text-muted-foreground', cell: (c) => c.comment ?? '' },
+            ],
+          })}
+      ${footnote('A restore is in place: the machine keeps its id and its URL.')}
     </section>
   `;
 }

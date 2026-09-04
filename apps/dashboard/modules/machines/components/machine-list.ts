@@ -14,6 +14,11 @@
 
 import { WebComponent, html, prop, connectWS, richFetch } from '@webjsdev/core';
 import type { Machine } from '#modules/machines/types.ts';
+import { buttonClass } from '#components/ui/button.ts';
+import { badgeClass } from '#components/ui/badge.ts';
+import { stateBadge } from '#modules/machines/utils/ui/state.ts';
+import { dataTable, emptyState } from '#lib/utils/ui.ts';
+import { cn } from '#lib/utils/cn.ts';
 
 interface Snapshot {
   type: 'snapshot';
@@ -100,56 +105,49 @@ class MachineList extends WebComponent({
 
   render() {
     if (this.rows.length === 0) {
-      return html`<p class="text-muted-foreground">No machines yet. Create one with <code>pilot</code> or the API.</p>`;
+      return emptyState(html`No machines yet. Create one with <code class="font-mono">pilot</code> or the API.`);
     }
     return html`
-      <div class="overflow-x-auto">
-        <table class="w-full text-sm border-collapse">
-          <thead>
-            <tr class="text-left text-muted-foreground border-b border-border">
-              <th class="py-2 pr-4 font-medium">Name</th>
-              <th class="py-2 pr-4 font-medium">State</th>
-              <th class="py-2 pr-4 font-medium">Host</th>
-              <th class="py-2 pr-4 font-medium">URL</th>
-              <th class="py-2 font-medium"><span class="sr-only">Actions</span></th>
-            </tr>
-          </thead>
-          <tbody>
-            ${this.rows.map(
-              (m) => html`
-                <tr class="border-b border-border">
-                  <td class="py-2 pr-4">
-                    <a href=${`/machines/${m.id}`} class="text-foreground">${m.name || m.id}</a>
-                  </td>
-                  <td class="py-2 pr-4"><span class="font-mono">${m.state}</span></td>
-                  <td class="py-2 pr-4 text-muted-foreground">${m.host_id ?? ''}</td>
-                  <td class="py-2 pr-4">
-                    ${m.url ? html`<a href=${m.url} rel="noopener">${m.url}</a>` : ''}
-                  </td>
-                  <td class="py-2 text-right whitespace-nowrap">
-                    <button
-                      class="rounded-md border border-border px-2 py-1 hover:bg-muted disabled:opacity-50"
-                      ?disabled=${this.busy === m.id}
-                      @click=${() => this.act(m.id, m.state === 'suspended' ? 'wake' : 'suspend')}
-                    >
-                      ${m.state === 'suspended' ? 'Wake' : 'Suspend'}
-                    </button>
-                    <button
-                      class="rounded-md border border-border px-2 py-1 hover:bg-muted disabled:opacity-50"
-                      ?disabled=${this.busy === m.id}
-                      @click=${() => this.act(m.id, 'destroy')}
-                    >
-                      Destroy
-                    </button>
-                  </td>
-                </tr>
-              `,
-            )}
-          </tbody>
-        </table>
-      </div>
-      <p class="mt-3 text-xs text-muted-foreground">
-        ${this.online ? 'Live' : 'Reconnecting'} · ${this.rows.length} machines
+      ${dataTable<Machine>({
+        caption: 'Machines in this organisation',
+        rows: this.rows,
+        columns: [
+          {
+            header: 'Name',
+            cell: (m) => html`<a href=${`/machines/${m.id}`} class="text-foreground">${m.name || m.id}</a>`,
+          },
+          { header: 'State', cell: (m) => stateBadge(m.state) },
+          { header: 'Host', cellClass: 'font-mono text-muted-foreground', cell: (m) => m.host_id ?? '' },
+          { header: 'URL', cell: (m) => (m.url ? html`<a href=${m.url} rel="noopener">${m.url}</a>` : '') },
+          {
+            header: 'Actions',
+            headerHidden: true,
+            align: 'right',
+            cellClass: 'whitespace-nowrap',
+            cell: (m) => html`
+              <button
+                class=${buttonClass({ variant: 'outline', size: 'xs' })}
+                ?disabled=${this.busy === m.id}
+                @click=${() => this.act(m.id, m.state === 'suspended' ? 'wake' : 'suspend')}
+              >
+                ${m.state === 'suspended' ? 'Wake' : 'Suspend'}
+              </button>
+              <button
+                class=${cn(buttonClass({ variant: 'ghost', size: 'xs' }), 'text-muted-foreground hover:text-destructive')}
+                ?disabled=${this.busy === m.id}
+                @click=${() => this.act(m.id, 'destroy')}
+              >
+                Destroy
+              </button>
+            `,
+          },
+        ],
+      })}
+      <p class="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+        <span class=${badgeClass({ variant: this.online ? 'secondary' : 'outline' })}>
+          ${this.online ? 'Live' : 'Reconnecting'}
+        </span>
+        ${this.rows.length} machines
       </p>
     `;
   }

@@ -8,6 +8,11 @@
 
 import { WebComponent, html, prop } from '@webjsdev/core';
 import { createRef, ref } from '@webjsdev/core/directives';
+import { badgeClass } from '#components/ui/badge.ts';
+import { cn } from '#lib/utils/cn.ts';
+
+/** The pane itself: a bordered, scrolling, monospaced surface for guest bytes. */
+const PANE = 'h-72 overflow-auto rounded-md border border-border bg-muted p-3 text-xs font-mono whitespace-pre-wrap';
 
 class LogPane extends WebComponent({
   machineId: prop(String, { attribute: 'machine-id' }),
@@ -81,13 +86,11 @@ class LogPane extends WebComponent({
 
   render() {
     return html`
-      <div class="flex items-center justify-between text-xs text-muted-foreground mb-1">
-        <span>Console</span><span>${this.status}</span>
+      <div class="flex items-center justify-between mb-1.5">
+        <span class="text-xs text-muted-foreground">Console</span>
+        <span class=${badgeClass({ variant: this.status === 'live' ? 'secondary' : 'outline' })}>${this.status}</span>
       </div>
-      <pre
-        ${ref(this.pane)}
-        class="h-72 overflow-auto rounded-md border border-border bg-muted p-3 text-xs font-mono whitespace-pre-wrap"
-      ></pre>
+      <pre ${ref(this.pane)} class=${cn(PANE)} aria-live="polite" aria-label="Console output"></pre>
     `;
   }
 }

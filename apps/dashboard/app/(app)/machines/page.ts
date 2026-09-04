@@ -8,6 +8,7 @@
 import { html } from '@webjsdev/core';
 import { requireOrg } from '#modules/auth/session.server.ts';
 import { listMachines } from '#modules/machines/queries/list-machines.server.ts';
+import { lede, pageHeading } from '#lib/utils/ui.ts';
 import '#modules/machines/components/machine-list.ts';
 
 export const metadata = { title: 'Machines' };
@@ -17,10 +18,8 @@ export default async function MachinesPage() {
   const machines = await listMachines(ctx.org.id).catch(() => []);
 
   return html`
-    <h1 class="text-2xl font-semibold tracking-tight m-0">Machines</h1>
-    <p class="text-muted-foreground mt-1 mb-6">
-      Sandboxes and service instances in <strong>${ctx.org.slug}</strong>. The list updates as they change.
-    </p>
+    ${pageHeading('Machines')}
+    ${lede(html`Sandboxes and service instances in <strong>${ctx.org.slug}</strong>. The list updates as they change.`)}
     <machine-list .initial=${machines}></machine-list>
   `;
 }
