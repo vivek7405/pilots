@@ -135,6 +135,49 @@ func TestExecStreamProxiesToTheGuest(t *testing.T) {
 	}
 }
 
+// The echo covers offers that carry no key.
+//
+// A client may authenticate with the Authorization header and still offer a
+// subprotocol of its own. Echoing only the `authorization.bearer.` entry left
+// that client answered with none, which the WHATWG handshake algorithm treats
+// as a failed connection: authenticated, upgraded, and immediately dropped.
+func TestExecStreamEchoesASubprotocolThatCarriesNoKey(t *testing.T) {
+	m, _ := streamManager(t)
+	seen := make(chan seenRequest, 1)
+	release := make(chan struct{})
+	guest := fakeGuest(t, seen, release)
+	addr := strings.TrimPrefix(guest.URL, "http://")
+
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		m.execStreamAt(w, r, "m_1", addr)
+	}))
+	defer front.Close()
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, res, err := websocket.Dial(ctx,
+		"ws"+strings.TrimPrefix(front.URL, "http")+"/v1/machines/m_1/exec/stream?cmd=ls",
+		&websocket.DialOptions{
+			Subprotocols: []string{"pilots.v1"},
+			HTTPHeader:   http.Header{"Authorization": []string{"Bearer k"}},
+		})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	if res.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status %d, want 101", res.StatusCode)
+	}
+	if got := conn.Subprotocol(); got != "pilots.v1" {
+		t.Errorf("the 101 chose %q, want the first offered entry echoed", got)
+	}
+	if got := <-seen; got.subprotocol != "" {
+		t.Errorf("the guest was asked to negotiate %q", got.subprotocol)
+	}
+}
+
 // A guest that cannot be reached is a JSON 502, not a hijacked socket and not
 // an empty body.
 func TestExecStreamAnswers502WhenTheGuestIsUnreachable(t *testing.T) {

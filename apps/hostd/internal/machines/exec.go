@@ -77,7 +77,10 @@ func (m *Manager) execStreamAt(w http.ResponseWriter, r *http.Request, machineID
 	defer m.Touch(context.WithoutCancel(r.Context()), machineID)
 
 	target := &url.URL{Scheme: "http", Host: agentAddr}
-	offered, _ := api.BearerSubprotocol(r)
+	// Every offer, not only the one that carries a key: a client is free to
+	// authenticate with the Authorization header and still offer a
+	// subprotocol, and answering that with none fails the connection.
+	offered := api.OfferedSubprotocol(r)
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
 	proxy.Director = func(out *http.Request) {
@@ -92,7 +95,9 @@ func (m *Manager) execStreamAt(w http.ResponseWriter, r *http.Request, machineID
 	}
 	// ModifyResponse runs BEFORE the 101 is hijacked, which is the only moment
 	// the chosen subprotocol can be put on the response. A client that offered
-	// one and is answered with none fails the connection.
+	// one and is answered with none fails the connection, so what goes back is
+	// the client's own first offer -- the guest negotiated nothing, because the
+	// Director deleted the header before the request left this host.
 	proxy.ModifyResponse = func(res *http.Response) error {
 		if offered != "" && res.StatusCode == http.StatusSwitchingProtocols {
 			res.Header.Set("Sec-WebSocket-Protocol", offered)

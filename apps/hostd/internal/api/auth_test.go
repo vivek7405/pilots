@@ -188,3 +188,27 @@ func TestBearerSubprotocolReturnsTheOfferedEntry(t *testing.T) {
 		})
 	}
 }
+
+// The echo must cover an offer that carries no key: a client authenticating
+// with the Authorization header may still offer a subprotocol, and a 101 that
+// chose none fails that connection.
+func TestOfferedSubprotocolReturnsTheFirstEntry(t *testing.T) {
+	for _, tc := range []struct{ name, header, want string }{
+		{"no header", "", ""},
+		{"a name this server does not know", "pilots.v1", "pilots.v1"},
+		{"the first of several", " pilots.v1 , chat ", "pilots.v1"},
+		{"the bearer entry when it leads", "authorization.bearer.k, chat", "authorization.bearer.k"},
+		{"the bearer entry when it does not", "chat, authorization.bearer.k", "chat"},
+		{"empty entries are skipped", ", , pilots.v1", "pilots.v1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/v1/machines/m_1/exec/stream", nil)
+			if tc.header != "" {
+				req.Header.Set("Sec-WebSocket-Protocol", tc.header)
+			}
+			if got := OfferedSubprotocol(req); got != tc.want {
+				t.Errorf("OfferedSubprotocol = %q; want %q", got, tc.want)
+			}
+		})
+	}
+}

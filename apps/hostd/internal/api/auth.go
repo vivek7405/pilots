@@ -245,6 +245,28 @@ func BearerSubprotocol(r *http.Request) (string, bool) {
 	return "", false
 }
 
+// OfferedSubprotocol returns the FIRST Sec-WebSocket-Protocol entry the client
+// offered, verbatim, or "" when it offered none.
+//
+// This is what a proxy echoes on the 101, and it has to cover every offer
+// rather than only the one that carries a key. The WHATWG algorithm fails a
+// connection whose client offered subprotocols and whose server chose none, so
+// a client that authenticates with the Authorization header and offers, say,
+// `pilots.v1` would otherwise be answered with none and drop the connection --
+// authenticated, upgraded, and unusable.
+//
+// The first entry rather than a preferred one: a client lists its offers in
+// its own order of preference, and choosing the head is the answer that needs
+// no agreement about which names this server knows.
+func OfferedSubprotocol(r *http.Request) string {
+	for _, p := range strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			return p
+		}
+	}
+	return ""
+}
+
 func unauthorized(w http.ResponseWriter) {
 	w.Header().Set("WWW-Authenticate", `Bearer realm="pilots"`)
 	writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "unauthorized"})
