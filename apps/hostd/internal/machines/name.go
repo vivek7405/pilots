@@ -37,6 +37,8 @@ func validateName(name string) error {
 	case !validName.MatchString(name):
 		return fmt.Errorf("machines: name must be lowercase alphanumerics and hyphens, " +
 			"starting and ending with an alphanumeric")
+	case name == "api":
+		return fmt.Errorf("machines: the name %q is reserved for the control API hostname", name)
 	case leadingPortSegment.MatchString(name):
 		return fmt.Errorf("machines: name must not start with a number followed by a hyphen; "+
 			"that form is reserved for addressing a port, as in 8080-%s", name)

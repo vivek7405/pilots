@@ -471,11 +471,18 @@ func run() error {
 // control API.
 func dispatch(cfg *config.Config, rtr http.Handler, ctrl http.Handler) http.Handler {
 	suffix := "." + strings.ToLower(cfg.WorkloadDomain)
+	apiHost := strings.ToLower(cfg.APIHostname)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := strings.ToLower(r.Host)
 		if h, _, err := net.SplitHostPort(host); err == nil {
 			host = h
+		}
+		// The API hostname sits under the workload wildcard, so it must be
+		// claimed before the suffix check hands it to the router.
+		if host == apiHost {
+			ctrl.ServeHTTP(w, r)
+			return
 		}
 		if strings.HasSuffix(host, suffix) {
 			rtr.ServeHTTP(w, r)

@@ -1,10 +1,13 @@
 package machines
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestValidateNameAcceptsUsableLabels(t *testing.T) {
 	for _, name := range []string{
-		"webapp", "amber-harbor-k3x9", "a", "a1", "2fast", "api-v2",
+		"webapp", "amber-harbor-k3x9", "a", "a1", "2fast", "api-v2", "api-2", "apiary",
 	} {
 		if err := validateName(name); err != nil {
 			t.Errorf("validateName(%q) rejected a usable name: %v", name, err)
@@ -18,6 +21,7 @@ func TestValidateNameRejectsUnroutableNames(t *testing.T) {
 	for _, tc := range []struct{ name, why string }{
 		{"", "empty"},
 		{"has.dot", "a dot makes the hostname parse fail"},
+		{"api", "reserved: the control API answers on api.<workload domain>"},
 		{"8080-api", "parsed as port 8080 of a machine called api"},
 		{"3000-web-app", "same, with a longer name"},
 		{"UPPER", "hostnames are lowercase"},
@@ -96,5 +100,18 @@ func TestTheTemplateMachineKeepsThePlaceholderToken(t *testing.T) {
 	if got := m.token("m-abc123"); got == templateToken {
 		t.Error("a real machine got the placeholder; it would be reachable by " +
 			"anything holding the golden rootfs")
+	}
+}
+
+// "api" is the one name a tenant may not take: dispatch claims
+// api.<workload domain> for the control API before the workload suffix, so a
+// machine of that name would own a hostname it can never be reached at.
+func TestValidateNameReservesTheAPIHostname(t *testing.T) {
+	err := validateName("api")
+	if err == nil {
+		t.Fatal("validateName(\"api\") accepted the control API's own hostname")
+	}
+	if !strings.Contains(err.Error(), "reserved") {
+		t.Errorf("error %q does not say the name is reserved", err)
 	}
 }

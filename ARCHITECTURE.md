@@ -88,7 +88,10 @@ compose fragment on the ordinary primitives, not a product tier. See
    on-demand path still serves custom domains, so this degrades rather than
    fails. The API hostname `api.<workload domain>` needs no record and no
    certificate of its own: the wildcard A record and the wildcard
-   certificate already cover it.
+   certificate already cover it. `dispatch` claims that hostname for the
+   control API before the workload suffix check, so every host answers the
+   documented base URL. `api` is therefore a reserved machine name: a tenant
+   that took it would own a URL it could never be reached at.
 6. **Fleet is CPU-vendor-homogeneous — vendor is a cost decision, not a
    technical one.** FC memory snapshots carry raw CPUID; a snapshot never
    restores across the Intel/AMD boundary (cpu_templates normalize within a
