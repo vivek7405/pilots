@@ -142,6 +142,24 @@ test('a stream that closes with no exit frame is an error, never a silent 0', as
   }
 })
 
+test('--timeout-ms kills a command that never exits and names the deadline', async () => {
+  // A guest that speaks and then goes quiet for ever: the exit frame never
+  // comes. Without the deadline the CLI waits with it, which is what
+  // `--timeout-ms` exists to prevent -- and a flag that parses but does
+  // nothing is worse than no flag, because the caller stops watching.
+  const ws = await fleet((conn) => conn.frame(1, 'still working\n'))
+  try {
+    const res = await pilot(loggedIn(ws.url), [
+      'machines', 'exec', 'box', '--timeout-ms', '300', '--', 'sleep', '3600',
+    ])
+    assert.equal(res.code, 1)
+    assert.match(res.stderr, /timed out after 300ms/)
+    assert.equal(res.stdout, 'still working\n')
+  } finally {
+    await ws.close()
+  }
+})
+
 test('exec with nothing to run says so instead of opening a socket', async () => {
   const ws = await fleet(() => {})
   try {

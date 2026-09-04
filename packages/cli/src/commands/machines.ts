@@ -223,6 +223,18 @@ async function execStream(
     process.stdin.on('data', onStdin)
     process.stdin.on('end', onStdinEnd)
   }
+  // The deadline is enforced here rather than on the wire: the streaming exec
+  // takes no timeout, unlike the buffered one. Closing the socket cancels the
+  // guest's context, which is the same thing SIGINT does below.
+  const timeoutMs = Number(opts.timeoutMs)
+  let timedOut = false
+  const timer =
+    Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? setTimeout(() => {
+          timedOut = true
+          stream.kill()
+        }, timeoutMs)
+      : undefined
   // SIGINT closes the socket, which cancels the guest's context and kills the
   // command; 130 is what a shell reports for the same interruption.
   const onSigint = () => {
@@ -232,7 +244,13 @@ async function execStream(
   process.once('SIGINT', onSigint)
   try {
     return await stream.wait()
+  } catch (err) {
+    // The stream's own "closed before exit" is true but useless here: the
+    // caller asked for the deadline and deserves to be told it was hit.
+    if (timedOut) throw new CliError(`timed out after ${timeoutMs}ms: the command was killed`)
+    throw err
   } finally {
+    if (timer) clearTimeout(timer)
     process.off('SIGINT', onSigint)
     if (opts.stdin) {
       // Reading stdin keeps the handle referenced, so without this the CLI
