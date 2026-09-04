@@ -131,7 +131,7 @@ export default function RootLayout({ children }: LayoutProps) {
           class="on-paper flex items-center gap-2 font-mono text-[15px] font-semibold tracking-tight text-ink no-underline mr-2"
         >
           ${brandMark(22)}
-          <span>pilots</span>
+          <span>Pilots</span>
         </a>
         <nav class="hidden mid:flex items-center gap-0.5" aria-label="Main">
           ${NAV.map((n) => html`<a class=${navLink} href=${n.href}>${n.label}</a>`)}
