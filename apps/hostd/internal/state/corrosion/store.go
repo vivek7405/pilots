@@ -1051,3 +1051,24 @@ func (s *Store) ListDomains(ctx context.Context) ([]state.Domain, error) {
 	}
 	return out, rows.Err()
 }
+
+// Version is the sum of the replica's version vector, one db_version per
+// actor: the number of changes this replica has applied from every host, so
+// two hosts' values say how far apart they are. The scalar crsql_db_version()
+// is the local write clock and does not compare across hosts -- two replicas
+// that hold identical data but wrote a different share of it carry different
+// values, so a comparison of those says nothing at all.
+func (s *Store) Version(ctx context.Context) (int64, error) {
+	rows, err := s.client.Query(ctx, `SELECT COALESCE(SUM(db_version), 0) FROM crsql_db_versions`)
+	if err != nil {
+		return 0, fmt.Errorf("state: store version: %w", err)
+	}
+	defer rows.Close()
+	var v int64
+	if rows.Next() {
+		if err := rows.Scan(&v); err != nil {
+			return 0, fmt.Errorf("state: store version: %w", err)
+		}
+	}
+	return v, rows.Err()
+}

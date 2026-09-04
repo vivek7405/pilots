@@ -422,6 +422,11 @@ type HealthResponse struct {
 	// at all. It is also what capacity is counted from, since reserved
 	// hugepages do not appear in MemAvailable.
 	HugePages bool `json:"hugepages"`
+	// StoreVersion is the sum of the local replica's version vector: how many
+	// changes, from every host, this replica has applied. 0 on SQLite. Two
+	// hosts far apart on this number are a replication problem before they
+	// are anything else.
+	StoreVersion int64 `json:"store_version"`
 }
 
 type ErrorResponse struct {

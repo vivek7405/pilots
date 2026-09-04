@@ -256,7 +256,9 @@ POST   /v1/api-keys/:hash/revoke     admin: tombstone a key; no row is deleted
 GET    /v1/api-keys?org=             admin: list an org's keys, revoked ones included
 GET    /v1/quotas/:org               admin: the org's limits, or the defaults
 PUT    /v1/quotas/:org               admin: set them
-GET    /v1/health                    liveness (unauthenticated)
+GET    /v1/health                    liveness (unauthenticated); carries
+                                     store_version, the sum of this replica's
+                                     version vector (0 on SQLite)
 GET    /metrics                      Prometheus (unauthenticated)
                                      engine: pilots_uffd_*, pilots_snapshot_*
                                      host: pilots_machines{state},

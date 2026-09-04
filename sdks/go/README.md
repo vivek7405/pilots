@@ -60,6 +60,11 @@ structs from hostd's compose package under a `Compose` prefix.
 `types_drift_test.go` parses hostd's source on every `go test` and fails naming
 the struct and the tag when the two sides drift, in either direction.
 
+`Health` carries `StoreVersion`, the sum of that host's replica version
+vector: how many changes, from every host, it has applied. Comparable across
+hosts, so two hosts far apart on it are a replication problem. 0 on a
+single-box SQLite host, which has no replica.
+
 ## Errors
 
 ```go

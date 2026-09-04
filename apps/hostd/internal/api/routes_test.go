@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -69,6 +70,56 @@ func TestHealthIsPublic(t *testing.T) {
 	}
 	if !got.OK || got.HostID != "host-test" {
 		t.Errorf("health payload = %+v", got)
+	}
+	// SQLite: no replica, so the field is a real 0 rather than absent. The
+	// gate reads it as a number on every host, single-box ones included.
+	if got.StoreVersion != 0 {
+		t.Errorf("store_version = %d with no replica, want 0", got.StoreVersion)
+	}
+}
+
+// A host that has fallen behind on replication answers 200 and looks healthy
+// from every other angle. store_version is the only thing on this response
+// that says otherwise, which is why it is on the unauthenticated health route
+// rather than behind an admin key.
+func TestHealthReportsTheStoreVersion(t *testing.T) {
+	h := Routes(Deps{
+		HostID:       "host-test",
+		StoreVersion: func(context.Context) (int64, error) { return 42, nil },
+	})
+	rec := do(t, h, "GET", "/v1/health", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200", rec.Code)
+	}
+	var got HealthResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.StoreVersion != 42 {
+		t.Errorf("store_version = %d, want 42", got.StoreVersion)
+	}
+}
+
+// A store that cannot be read is not a dead host. Failing liveness on a
+// replica hiccup takes the host out of rotation for a problem that is not
+// the host's, and every machine it owns with it.
+func TestHealthStaysOKWhenTheStoreVersionCannotBeRead(t *testing.T) {
+	h := Routes(Deps{
+		HostID: "host-test",
+		StoreVersion: func(context.Context) (int64, error) {
+			return 0, errors.New("corrosion: connection refused")
+		},
+	})
+	rec := do(t, h, "GET", "/v1/health", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200 even with the store unreadable", rec.Code)
+	}
+	var got HealthResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.OK || got.StoreVersion != 0 {
+		t.Errorf("health payload = %+v, want ok with store_version 0", got)
 	}
 }
 

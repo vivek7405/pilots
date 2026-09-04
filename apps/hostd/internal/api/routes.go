@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 
 	"github.com/vivek7405/pilots/hostd/internal/metrics"
@@ -21,6 +23,9 @@ type Deps struct {
 	// HugePages is this host's guest page size setting; see
 	// HealthResponse.HugePages.
 	HugePages bool
+	// StoreVersion reads the replica's version, for HealthResponse.StoreVersion.
+	// Nil on SQLite, where there is no replica and the field is 0.
+	StoreVersion func(context.Context) (int64, error)
 	// Builds turns a Dockerfile context into a rootfs build. Nil on a host
 	// with no object storage, where a build has nowhere to publish to.
 	Builds BuildRunner
@@ -67,10 +72,22 @@ func Routes(d Deps) http.Handler {
 
 	// Unauthenticated: liveness and metrics.
 	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, HealthResponse{
+		resp := HealthResponse{
 			OK: true, HostID: d.HostID, Reflink: d.Reflink,
 			HugePages: d.HugePages,
-		})
+		}
+		if d.StoreVersion != nil {
+			// A replica that cannot be read is not a dead host: liveness
+			// still answers 200 and the version stays 0, because a health
+			// check that fails on a store hiccup takes the host out of
+			// rotation for a problem that is not the host's.
+			if v, err := d.StoreVersion(r.Context()); err != nil {
+				slog.Warn("could not read the store version", "err", err)
+			} else {
+				resp.StoreVersion = v
+			}
+		}
+		writeJSON(w, http.StatusOK, resp)
 	})
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
 		// Collected on the scrape rather than on a timer: the memory handlers

@@ -563,3 +563,44 @@ func TestQuotaRoundTripsThroughCorrosion(t *testing.T) {
 		t.Errorf("read back %+v, want %+v", got, want)
 	}
 }
+
+// The comparable number is the version VECTOR summed, not the scalar
+// crsql_db_version(). That scalar is the local write clock: two replicas
+// holding identical data but having written a different share of it carry
+// different values, so comparing it across hosts says nothing.
+//
+// The fake agent is plain SQLite with no cr-sqlite extension, so the test
+// creates the table the extension would have provided.
+func TestStoreVersionSumsTheVersionVector(t *testing.T) {
+	store, agent := newTestStore(t, "host-a")
+	agent.exec(t, `CREATE TABLE crsql_db_versions (site_id BLOB, db_version INTEGER)`)
+	agent.exec(t, `INSERT INTO crsql_db_versions VALUES (x'01', 3), (x'02', 4)`)
+
+	v, err := store.Version(context.Background())
+	if err != nil {
+		t.Fatalf("Version: %v", err)
+	}
+	if v != 7 {
+		t.Errorf("Version = %d, want 7: the sum across every actor, not one of them", v)
+	}
+
+	if !agent.asked(t, "crsql_db_versions") {
+		t.Error("the version was not read from crsql_db_versions")
+	}
+}
+
+// A replica that has applied nothing reads 0, not an error and not a NULL
+// scan. gate.sh treats 0 as a host whose agent is not answering, so the empty
+// case has to be a real zero.
+func TestStoreVersionIsZeroWithNoActors(t *testing.T) {
+	store, agent := newTestStore(t, "host-a")
+	agent.exec(t, `CREATE TABLE crsql_db_versions (site_id BLOB, db_version INTEGER)`)
+
+	v, err := store.Version(context.Background())
+	if err != nil {
+		t.Fatalf("Version: %v", err)
+	}
+	if v != 0 {
+		t.Errorf("Version = %d on an empty version vector, want 0", v)
+	}
+}
