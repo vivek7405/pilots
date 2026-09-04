@@ -291,3 +291,21 @@ export function markSvg(c: Candidate, px: number) {
     </svg>
   `;
 }
+
+/**
+ * The mark the site ships today: Delta, against the word.
+ *
+ * A working choice, not the decision. It exists so the header and the footer
+ * render the SAME drawing the brand lab reviewed, at the size the lab's header
+ * strip judged it at, rather than a retyped copy that drifts. When a mark is
+ * chosen for good, this is the one function that changes.
+ *
+ * `--logo-bg` is the paper the mark sits on: the drawing cuts its horizon line
+ * out of the shape with that colour, so a container on a different surface
+ * must set it or the cut shows as a bar of the wrong tone.
+ */
+export function brandMark(px: number) {
+  const delta = CANDIDATES.find((c) => c.id === 'delta');
+  if (!delta) throw new Error('logo candidate "delta" is missing');
+  return markSvg(delta, px);
+}

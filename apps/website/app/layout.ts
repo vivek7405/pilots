@@ -5,6 +5,7 @@ import { NAV, GH_URL, SITE_ORIGIN, NEW_TAB } from '#lib/links.ts';
 import { THEME_STORAGE_KEY, FORCED_THEMES } from '#lib/theme.ts';
 import { siteFooter } from '#lib/ui/site-footer.ts';
 import { BTN_PRIMARY } from '#lib/design/recipes.ts';
+import { brandMark } from '#lib/design/logo-candidates.ts';
 
 /**
  * Root layout: the only file that writes the document shell.
@@ -125,8 +126,12 @@ export default function RootLayout({ children }: LayoutProps) {
          grid scrolling underneath it. -->
     <header class="sticky top-0 z-40 border-b border-rule bg-paper">
       <div class="max-w-6xl mx-auto px-6 h-14 flex items-center gap-3">
-        <a href="/" class="font-mono text-[15px] font-semibold tracking-tight text-ink no-underline mr-2">
-          pilots
+        <a
+          href="/"
+          class="on-paper flex items-center gap-2 font-mono text-[15px] font-semibold tracking-tight text-ink no-underline mr-2"
+        >
+          ${brandMark(22)}
+          <span>pilots</span>
         </a>
         <nav class="hidden mid:flex items-center gap-0.5" aria-label="Main">
           ${NAV.map((n) => html`<a class=${navLink} href=${n.href}>${n.label}</a>`)}

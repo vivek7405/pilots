@@ -1,6 +1,7 @@
 import { html } from '@webjsdev/core';
 import { GH_URL, GH_BOARD_URL, WEBJS_URL, WORKLOAD_APEX, NEW_TAB, NAV } from '#lib/links.ts';
 import { FIELD_LABEL } from '#lib/design/recipes.ts';
+import { brandMark } from '#lib/design/logo-candidates.ts';
 
 const col = 'flex flex-col gap-2.5';
 const link = 'text-sm text-ink-muted no-underline hover:text-ink transition-colors w-fit';
@@ -19,7 +20,10 @@ export function siteFooter() {
       <div class="max-w-6xl mx-auto px-6 py-14">
         <div class="grid gap-10 mid:grid-cols-[1.4fr_1fr_1fr_1fr]">
           <div class="${col}">
-            <span class="font-mono text-sm font-semibold tracking-tight">pilots</span>
+            <span class="on-paper flex items-center gap-2 font-mono text-sm font-semibold tracking-tight">
+              ${brandMark(18)}
+              <span>pilots</span>
+            </span>
             <p class="text-sm text-ink-muted m-0 max-w-[34ch]">
               Sandboxes and production services on Firecracker microVMs. One primitive,
               two faces, no control plane.
