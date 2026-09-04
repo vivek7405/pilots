@@ -777,6 +777,7 @@ agent-drivable via MCP:
    base image, ports, start command).
 3. Build fails → the agent reads the structured NDJSON error, patches the
    Dockerfile, retries — the loop the structured logs exist for.
+
 The fleet-wide layer cache is keyed **server-side on the Dockerfile's content
 hash**, so a client passes no cache name at all — and every app built from the
 same scaffold Dockerfile shares one partition, which is why the first deploy of
