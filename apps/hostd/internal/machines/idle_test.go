@@ -1,6 +1,8 @@
 package machines
 
 import (
+	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -20,6 +22,18 @@ func testManager() *Manager {
 	return &Manager{opts: Options{HostID: "host-a"}, flight: newInFlight()}
 }
 
+// storeManager is testManager with real state behind it, for the rows whose
+// owner cannot be decided without reading the service.
+func storeManager(t *testing.T) (*Manager, state.Store) {
+	t.Helper()
+	st, err := state.Open(":memory:")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	return &Manager{opts: Options{HostID: "host-a", Store: st}, flight: newInFlight()}, st
+}
+
 // Both signals must agree before a machine is suspended.
 //
 // The timer alone would suspend a machine that is busy but generating no HTTP
@@ -30,7 +44,7 @@ func TestShouldSuspendRequiresTimerAndConcurrency(t *testing.T) {
 	knobs := api.Knobs{AutoStop: "suspend", AutoStart: true}
 
 	t.Run("idle long enough and nothing in flight", func(t *testing.T) {
-		if !m.shouldSuspend(idleRow(knobs, 2*DefaultIdleTimeout)) {
+		if !m.shouldSuspend(t.Context(), idleRow(knobs, 2*DefaultIdleTimeout)) {
 			t.Error("should have suspended")
 		}
 	})
@@ -39,13 +53,13 @@ func TestShouldSuspendRequiresTimerAndConcurrency(t *testing.T) {
 		row := idleRow(knobs, 2*DefaultIdleTimeout)
 		m.flight.begin(row.ID)
 		defer m.flight.end(row.ID)
-		if m.shouldSuspend(row) {
+		if m.shouldSuspend(t.Context(), row) {
 			t.Error("suspended a machine that was still serving a request")
 		}
 	})
 
 	t.Run("recently active", func(t *testing.T) {
-		if m.shouldSuspend(idleRow(knobs, time.Second)) {
+		if m.shouldSuspend(t.Context(), idleRow(knobs, time.Second)) {
 			t.Error("suspended a machine that was active a second ago")
 		}
 	})
@@ -57,7 +71,7 @@ func TestShouldSuspendHonoursKnobs(t *testing.T) {
 
 	t.Run("autoStop off never suspends", func(t *testing.T) {
 		row := idleRow(api.Knobs{AutoStop: "off"}, longIdle)
-		if m.shouldSuspend(row) {
+		if m.shouldSuspend(t.Context(), row) {
 			t.Error("suspended a machine with autoStop off")
 		}
 	})
@@ -66,14 +80,14 @@ func TestShouldSuspendHonoursKnobs(t *testing.T) {
 	// candidate, however quiet it is.
 	t.Run("minMachinesRunning above zero never suspends", func(t *testing.T) {
 		row := idleRow(api.Knobs{AutoStop: "suspend", MinMachinesRunning: 1}, longIdle)
-		if m.shouldSuspend(row) {
+		if m.shouldSuspend(t.Context(), row) {
 			t.Error("suspended a machine with a running floor")
 		}
 	})
 
 	t.Run("scale to zero is allowed for a service", func(t *testing.T) {
 		row := idleRow(api.Knobs{AutoStop: "suspend", MinMachinesRunning: 0}, longIdle)
-		if !m.shouldSuspend(row) {
+		if !m.shouldSuspend(t.Context(), row) {
 			t.Error("a production service with minMachinesRunning=0 must scale to zero")
 		}
 	})
@@ -164,18 +178,123 @@ func TestGeneratedNamesAreDistinct(t *testing.T) {
 // running capacity. The discriminator is the release rather than a knob,
 // because a promoted sandbox keeps the knobs it was created with.
 func TestTheIdleMonitorLeavesServiceReplicasToTheAutoscaler(t *testing.T) {
-	m := testManager()
+	m, st := storeManager(t)
 	knobs := api.Knobs{AutoStop: "suspend", AutoStart: true}
+	putService(t, st, "svc-1", "rel-1")
 
 	replica := idleRow(knobs, 2*DefaultIdleTimeout)
 	replica.ServiceID = "svc-1"
 	replica.ReleaseID = "rel-1"
-	if m.shouldSuspend(replica) {
+	if m.shouldSuspend(t.Context(), replica) {
 		t.Error("the idle monitor suspended a service replica behind the autoscaler's back")
 	}
 
 	// The same row without a release is an ordinary sandbox and still suspends.
-	if !m.shouldSuspend(idleRow(knobs, 2*DefaultIdleTimeout)) {
+	if !m.shouldSuspend(t.Context(), idleRow(knobs, 2*DefaultIdleTimeout)) {
 		t.Error("a sandbox with no release stopped suspending")
+	}
+}
+
+// Every running machine needs exactly one controller.
+//
+// Stepping aside for any release id at all left a superseded replica with
+// none: the autoscaler only enumerates the CURRENT release's replicas, so a
+// replica of the release the service rolled off is in neither set. Deploy and
+// Rollback suspend those themselves, but best-effort -- one failed Suspend
+// and a Firecracker runs and bills forever with nothing that will ever
+// reconsider it. That backstop is this monitor.
+func TestASupersededReplicaIsStillTheIdleMonitorsToSuspend(t *testing.T) {
+	m, st := storeManager(t)
+	knobs := api.Knobs{AutoStop: "suspend", AutoStart: true}
+	putService(t, st, "svc-1", "rel-2")
+
+	superseded := idleRow(knobs, 2*DefaultIdleTimeout)
+	superseded.ServiceID = "svc-1"
+	superseded.ReleaseID = "rel-1"
+	if !m.shouldSuspend(t.Context(), superseded) {
+		t.Error("a replica of a superseded release was left running with no controller at all")
+	}
+
+	current := idleRow(knobs, 2*DefaultIdleTimeout)
+	current.ServiceID = "svc-1"
+	current.ReleaseID = "rel-2"
+	if m.shouldSuspend(t.Context(), current) {
+		t.Error("the current release's replica is the autoscaler's, not this monitor's")
+	}
+}
+
+// A floor is a property of a release's replica SET, and a superseded release
+// has no set left to keep warm -- the traffic went to the new release the
+// moment the service row flipped. Honouring it here would leave the leak open
+// for exactly the warm services that set a floor in the first place.
+func TestASupersededReplicaSuspendsDespiteAFloor(t *testing.T) {
+	m, st := storeManager(t)
+	putService(t, st, "svc-1", "rel-2")
+
+	row := idleRow(api.Knobs{AutoStop: "suspend", AutoStart: true, MinMachinesRunning: 2},
+		2*DefaultIdleTimeout)
+	row.ServiceID = "svc-1"
+	row.ReleaseID = "rel-1"
+	if !m.shouldSuspend(t.Context(), row) {
+		t.Error("a superseded replica kept running to satisfy a floor its release no longer has")
+	}
+
+	// autoStop off is an explicit operator instruction and still wins.
+	row.KindKnobs, _ = marshalKnobs(api.Knobs{AutoStop: "off"})
+	if m.shouldSuspend(t.Context(), row) {
+		t.Error("suspended a machine with autoStop off")
+	}
+}
+
+// A replica whose service row is gone is nobody's either: nothing enumerates
+// it, so it falls to the idle monitor rather than to no one.
+func TestAReplicaOfADeletedServiceStillSuspends(t *testing.T) {
+	m, _ := storeManager(t)
+
+	row := idleRow(api.Knobs{AutoStop: "suspend", AutoStart: true}, 2*DefaultIdleTimeout)
+	row.ServiceID = "svc-gone"
+	row.ReleaseID = "rel-1"
+	if !m.shouldSuspend(t.Context(), row) {
+		t.Error("a replica of a service that no longer exists was left with no controller")
+	}
+}
+
+// When the read that decides ownership is the thing that failed, take the
+// reversible side. A machine left running until the next tick reads the row
+// is recoverable; a second controller racing the autoscaler on a live replica
+// is the exact mid-flight suspend the split exists to prevent.
+func TestAnUnreadableServiceLeavesTheReplicaAlone(t *testing.T) {
+	m, st := storeManager(t)
+	m.opts.Store = brokenServiceStore{Store: st}
+
+	row := idleRow(api.Knobs{AutoStop: "suspend", AutoStart: true}, 2*DefaultIdleTimeout)
+	row.ServiceID = "svc-1"
+	row.ReleaseID = "rel-1"
+	if m.shouldSuspend(t.Context(), row) {
+		t.Error("suspended a replica whose owner could not be determined")
+	}
+
+	// A sandbox never reads the service at all, so it is unaffected.
+	if !m.shouldSuspend(t.Context(), idleRow(api.Knobs{AutoStop: "suspend"}, 2*DefaultIdleTimeout)) {
+		t.Error("a store that cannot answer for services stopped sandboxes suspending")
+	}
+}
+
+// brokenServiceStore answers everything normally except the one read the
+// ownership decision turns on.
+type brokenServiceStore struct {
+	state.Store
+}
+
+func (brokenServiceStore) GetService(context.Context, string) (*state.Service, error) {
+	return nil, errors.New("brokenServiceStore: injected failure")
+}
+
+func putService(t *testing.T, st state.Store, id, releaseID string) {
+	t.Helper()
+	if err := st.PutService(t.Context(), &state.Service{
+		ID: id, Name: id, ReleaseID: releaseID, Replicas: 1,
+	}); err != nil {
+		t.Fatalf("PutService: %v", err)
 	}
 }
