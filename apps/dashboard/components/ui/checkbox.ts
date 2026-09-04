@@ -53,8 +53,17 @@ import { cn } from '../../lib/utils/cn.ts';
 // Keep the two in sync: the rule keys on `data-slot="checkbox"`, which every
 // call site below is still required to set.
 
+// `dark:checked:*` is an addition to the registry string, and it is load-bearing
+// rather than belt-and-braces. The stock string pairs `checked:bg-primary` with
+// `dark:bg-input/30`; both are single-variant utilities, so on a dark page the
+// later one wins and a CHECKED box keeps the unchecked tint. The tick is chosen
+// separately, by the theme stylesheet, which picks the near-black mark that
+// belongs on a light primary fill, and the two then disagree: a black tick on a
+// dark box, which is invisible. Compounding the two variants raises the
+// specificity above the bare `dark:` rule, so the checked fill wins in both
+// themes and the tick has the surface it was drawn for.
 const CHECKBOX_CLASS =
-  'peer size-4 shrink-0 appearance-none rounded-[4px] border border-input bg-transparent shadow-xs transition-shadow outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 checked:border-primary checked:bg-primary checked:bg-no-repeat checked:bg-center dark:bg-input/30 dark:aria-invalid:ring-destructive/40';
+  'peer size-4 shrink-0 appearance-none rounded-[4px] border border-input bg-transparent shadow-xs transition-shadow outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 checked:border-primary checked:bg-primary checked:bg-no-repeat checked:bg-center dark:bg-input/30 dark:checked:border-primary dark:checked:bg-primary dark:aria-invalid:ring-destructive/40';
 
 /**
  * Tailwind classes for a styled native `<input type="checkbox">`.

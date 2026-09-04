@@ -102,7 +102,19 @@ export default async function RootLayout({ children, url }: LayoutProps) {
         --muted-foreground:     light-dark(#5a6270, #949cab);
         --accent:               light-dark(#e8ebf0, #2a2f37);
         --accent-foreground:    light-dark(#15181d, #e3e6ea);
-        --destructive:          light-dark(#c0332b, #e5484d);
+        /* The dark half is lighter than a red normally wants to be, because
+           this token is read as TEXT more often than it is painted as a fill:
+           the kit's destructive alert renders its description in it against
+           --card. At #e5484d that pair measured 3.3:1 and axe failed it. Where
+           it IS a fill the kit already dims it (dark:bg-destructive/60), so the
+           lighter value costs nothing there. */
+        --destructive:          light-dark(#c0332b, #f87171);
+        /* Text ON a filled destructive surface. The kit's own filled variants
+           hard-code text-white, so this is what a text-destructive-foreground
+           call site would resolve to, and it has to exist for that utility to
+           render at all. (No backticks anywhere in this block: it is inside a
+           template literal, so one would end it.) */
+        --destructive-foreground: light-dark(#ffffff, #12141a);
         --border:               light-dark(#e1e4ea, #30353d);
         --border-strong:        light-dark(#c8cdd6, #3f454f);
         --input:                light-dark(#e1e4ea, #30353d);

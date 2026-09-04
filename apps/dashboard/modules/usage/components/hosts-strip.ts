@@ -58,7 +58,11 @@ class HostsStrip extends WebComponent({
           (h) => html`
             <li class=${cn(cardClass({ size: 'sm' }), 'flex-row items-center gap-3 px-4')} data-slot="card" data-size="sm">
               <span class="font-mono">${h.id}</span>
-              <span class=${badgeClass({ variant: h.alive ? 'secondary' : 'destructive' })}>
+              <span
+                class=${h.alive
+                  ? badgeClass({ variant: 'secondary' })
+                  : cn(badgeClass({ variant: 'outline' }), 'border-destructive/40 text-destructive')}
+              >
                 ${h.alive ? 'up' : 'down'}
               </span>
               <span class="text-muted-foreground tabular-nums">${h.cpu_free} cpu · ${h.mem_free_mib} MiB</span>
