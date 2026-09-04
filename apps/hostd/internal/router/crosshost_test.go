@@ -8,6 +8,9 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
 
 	"github.com/vivek7405/pilots/hostd/internal/netns"
 	"github.com/vivek7405/pilots/hostd/internal/state"
@@ -434,5 +437,188 @@ func TestAForwardedOrphanIsNotForwardedAgain(t *testing.T) {
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status %d, want 404 rather than a second hop", w.Code)
+	}
+}
+
+// The sprites alias is machine-scoped like every other exec route, but keyed
+// by NAME. Without resolving that name here, the alias is served locally on
+// every host that does not own the machine -- two hosts in three.
+func TestTheSpriteAliasIsForwardedToTheOwner(t *testing.T) {
+	rows := []state.Machine{{ID: "m-1", Name: "alpha", HostID: "host-b", Domain: "alpha.pilotrun.app"}}
+
+	for _, tc := range []struct {
+		name string
+		opts Options
+		path string
+	}{
+		{
+			name: "by name, from the store",
+			opts: Options{Store: &stubStore{machines: rows}},
+			path: "/v1/sprites/alpha/exec",
+		},
+		{
+			name: "by name, from the subscription cache",
+			opts: Options{Lookup: func(n string) (state.Machine, bool) {
+				if n == "alpha" {
+					return rows[0], true
+				}
+				return state.Machine{}, false
+			}},
+			path: "/v1/sprites/alpha/exec",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var got atomic.Value
+			owner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				got.Store(r.URL.Path + "|" + r.Header.Get(forwardedHeader))
+				fmt.Fprint(w, "from the owner")
+			}))
+			defer owner.Close()
+
+			opts := tc.opts
+			opts.Domain, opts.HostID = "pilotrun.app", "host-a"
+			opts.Peers = &stubPeers{addrs: map[string]string{
+				"host-b": strings.TrimPrefix(owner.URL, "http://"),
+			}}
+			r := New(opts)
+
+			h := r.ForwardAPI(func(_ context.Context, id string) (string, bool) {
+				if id == "m-1" {
+					return "host-b", true
+				}
+				return "", false
+			}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+				t.Error("the alias was served locally instead of forwarded")
+			}))
+
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, tc.path+"?cmd=ls", nil))
+
+			if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), "from the owner") {
+				t.Fatalf("status %d body %q", w.Code, w.Body.String())
+			}
+			// The path crosses verbatim: the owner resolves the name again
+			// from its own replica.
+			if s, _ := got.Load().(string); s != tc.path+"|host-a" {
+				t.Errorf("the owner received %q", s)
+			}
+		})
+	}
+}
+
+// An id-shaped segment resolves through the owner lookup, with no list scan.
+func TestTheSpriteAliasAcceptsAnIDShapedSegment(t *testing.T) {
+	const id = "m-0123456789abcdef01234567"
+	var got atomic.Value
+	owner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got.Store(r.URL.Path)
+		fmt.Fprint(w, "from the owner")
+	}))
+	defer owner.Close()
+
+	r := New(Options{
+		Domain: "pilotrun.app", HostID: "host-a",
+		Peers: &stubPeers{addrs: map[string]string{
+			"host-b": strings.TrimPrefix(owner.URL, "http://"),
+		}},
+	})
+	h := r.ForwardAPI(func(_ context.Context, want string) (string, bool) {
+		return "host-b", want == id
+	}, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("an id-shaped alias segment was served locally")
+	}))
+
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/v1/sprites/"+id+"/exec?cmd=ls", nil))
+	if w.Code != http.StatusOK {
+		t.Fatalf("status %d body %q", w.Code, w.Body.String())
+	}
+	if s, _ := got.Load().(string); s != "/v1/sprites/"+id+"/exec" {
+		t.Errorf("the owner received %q", s)
+	}
+}
+
+// A name nothing matches is served here, so the local handler answers its own
+// 404 rather than the router inventing one.
+func TestAnUnknownSpriteNameIsServedLocally(t *testing.T) {
+	served := false
+	r := New(Options{
+		Domain: "pilotrun.app", HostID: "host-a",
+		Store: &stubStore{machines: []state.Machine{{ID: "m-1", Name: "alpha", HostID: "host-b"}}},
+		Peers: &stubPeers{addrs: map[string]string{"host-b": "unused"}},
+	})
+	h := r.ForwardAPI(func(context.Context, string) (string, bool) { return "host-b", true },
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) { served = true }))
+
+	h.ServeHTTP(httptest.NewRecorder(),
+		httptest.NewRequest(http.MethodGet, "/v1/sprites/nobody/exec?cmd=ls", nil))
+	if !served {
+		t.Error("an unknown sprite name was forwarded somewhere")
+	}
+}
+
+// A destroyed row is never the answer: its name is free for a new machine.
+func TestASpriteNameSkipsDestroyedRows(t *testing.T) {
+	r := New(Options{
+		Domain: "pilotrun.app", HostID: "host-a",
+		Store: &stubStore{machines: []state.Machine{
+			{ID: "m-0", Name: "alpha", HostID: "host-b", State: state.StateDestroyed},
+			{ID: "m-2", Name: "alpha", HostID: "host-b", State: "running"},
+			{ID: "m-1", Name: "alpha", HostID: "host-b", State: "running"},
+		}},
+	})
+	owner := func(context.Context, string) (string, bool) { return "host-b", true }
+	if got := r.machineIDByName(context.Background(), owner, "alpha"); got != "m-1" {
+		t.Errorf("machineIDByName(alpha) = %q, want the lowest live id m-1", got)
+	}
+}
+
+// The 101 has to cross the hop, or a stream through a non-owner host is a
+// dead socket rather than a slower one.
+func TestAWebsocketUpgradeIsForwardedToTheOwner(t *testing.T) {
+	owner := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
+		if err != nil {
+			t.Errorf("accept: %v", err)
+			return
+		}
+		defer conn.CloseNow()
+		_ = conn.Write(r.Context(), websocket.MessageBinary, []byte{1, 'h', 'i'})
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+	}))
+	defer owner.Close()
+
+	r := New(Options{
+		Domain: "pilotrun.app", HostID: "host-a",
+		Peers: &stubPeers{addrs: map[string]string{
+			"host-b": strings.TrimPrefix(owner.URL, "http://"),
+		}},
+	})
+	h := r.ForwardAPI(func(context.Context, string) (string, bool) { return "host-b", true },
+		http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+			t.Error("an upgrade was served locally instead of forwarded")
+		}))
+
+	front := httptest.NewServer(h)
+	defer front.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, res, err := websocket.Dial(ctx,
+		"ws"+strings.TrimPrefix(front.URL, "http")+"/v1/machines/m-1/exec/stream?cmd=ls", nil)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer conn.CloseNow()
+
+	if res.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status %d, want 101 across the hop", res.StatusCode)
+	}
+	_, data, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("read across the hop: %v", err)
+	}
+	if string(data) != "\x01hi" {
+		t.Errorf("frame %q crossed the hop", data)
 	}
 }
