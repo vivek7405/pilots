@@ -73,11 +73,15 @@ func applyWakeRules(c *nftables.Conn, table *nftables.Table, targets []WakeTarge
 }
 
 // WakeCounts reads how many packets have arrived for each suspended machine.
+func WakeCounts() (map[string]uint64, error) { return chainCounts(wakeChain) }
+
+// chainCounts reads one counted rule per machine out of a chain of this
+// table's.
 //
 // Keyed by machine id, which travels in the rule's UserData -- the kernel
 // hands rules back in the order they were added, but matching on position
 // would break the moment a machine is added or removed between passes.
-func WakeCounts() (map[string]uint64, error) {
+func chainCounts(chain string) (map[string]uint64, error) {
 	c, err := nftables.New()
 	if err != nil {
 		return nil, err
@@ -99,7 +103,7 @@ func WakeCounts() (map[string]uint64, error) {
 		return nil, nil
 	}
 
-	rules, err := c.GetRules(table, &nftables.Chain{Name: wakeChain, Table: table})
+	rules, err := c.GetRules(table, &nftables.Chain{Name: chain, Table: table})
 	if err != nil {
 		// A fleet that has never suspended a service replica has no chain, and
 		// that is not an error worth logging every tick.
