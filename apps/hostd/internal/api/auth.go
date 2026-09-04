@@ -223,9 +223,23 @@ func bearerToken(r *http.Request) (string, bool) {
 
 	// No ?token= form on purpose: a credential in a query string lands in
 	// access logs, in proxy logs and in shell history.
+	if p, ok := BearerSubprotocol(r); ok {
+		return strings.TrimPrefix(p, subprotocolBearer), true
+	}
+	return "", false
+}
+
+// BearerSubprotocol returns the offered Sec-WebSocket-Protocol entry that
+// carries a key, verbatim, so a proxy can echo exactly what the client offered.
+//
+// Verbatim matters: the handshake fails unless the server chooses one of the
+// values the client actually offered, so echoing the key alone -- or a
+// re-spelled entry -- would break every browser client.
+func BearerSubprotocol(r *http.Request) (string, bool) {
 	for _, p := range strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",") {
-		if key, ok := strings.CutPrefix(strings.TrimSpace(p), subprotocolBearer); ok && key != "" {
-			return key, true
+		p = strings.TrimSpace(p)
+		if key, ok := strings.CutPrefix(p, subprotocolBearer); ok && key != "" {
+			return p, true
 		}
 	}
 	return "", false

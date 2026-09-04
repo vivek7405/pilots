@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"net/http"
+	"sync"
 
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
@@ -22,6 +24,13 @@ type fakeManager struct {
 	// from the key and never from the body.
 	lastCreate       CreateMachineRequest
 	lastCreateVolume CreateVolumeRequest
+
+	// The follow tests drive these from another goroutine while the handler
+	// reads them, so both sides go through mu.
+	mu       sync.Mutex
+	logs     string
+	logsErr  error
+	streamed []string
 }
 
 func newFakeManager() *fakeManager {
@@ -35,6 +44,7 @@ func newFakeManager() *fakeManager {
 			ID: "vol-1", Name: "data", SizeMiB: 10240, HostID: "host-test",
 			MountPath: "/data",
 		},
+		logs: "boot log",
 	}
 }
 
@@ -64,7 +74,55 @@ func (f *fakeManager) Exec(context.Context, string, ExecRequest) (*ExecResponse,
 	return &ExecResponse{Stdout: "hello\n", ExitCode: 0}, f.err
 }
 func (f *fakeManager) Logs(context.Context, string) ([]byte, error) {
-	return []byte("boot log"), f.err
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return []byte(f.logs), f.err
+}
+
+// ExecStream records the machine and answers 200. An httptest recorder cannot
+// hijack, so the fake never answers 101; what the proxy does with a real
+// socket is tested in internal/machines against an httptest server.
+func (f *fakeManager) ExecStream(w http.ResponseWriter, _ *http.Request, machineID string) error {
+	f.mu.Lock()
+	f.streamed = append(f.streamed, machineID)
+	f.mu.Unlock()
+	if f.err != nil {
+		return f.err
+	}
+	_, _ = w.Write([]byte("stream"))
+	return nil
+}
+
+func (f *fakeManager) LogsFrom(_ context.Context, _ string, offset int64) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.logsErr != nil {
+		return nil, f.logsErr
+	}
+	if offset >= int64(len(f.logs)) {
+		return nil, nil
+	}
+	return []byte(f.logs[offset:]), nil
+}
+
+// appendLog is what a guest writing to its console looks like to a follow.
+func (f *fakeManager) appendLog(line string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.logs += line
+}
+
+func (f *fakeManager) fail(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.logsErr = err
+}
+
+// streamedMachines is the recorded list, copied under the lock.
+func (f *fakeManager) streamedMachines() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.streamed...)
 }
 func (f *fakeManager) CreateVolume(_ context.Context, req CreateVolumeRequest) (*state.Volume, error) {
 	f.volumesCreated++

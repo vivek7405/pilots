@@ -119,6 +119,7 @@ func TestEveryRouteIsRegistered(t *testing.T) {
 		{"DELETE", "/v1/machines/m_1"},
 		{"POST", "/v1/machines/m_1/exec"},
 		{"GET", "/v1/machines/m_1/exec/stream"},
+		{"GET", "/v1/sprites/webapp/exec"},
 		{"GET", "/v1/machines/m_1/logs"},
 		{"POST", "/v1/machines/m_1/suspend"},
 		{"POST", "/v1/machines/m_1/wake"},

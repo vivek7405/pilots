@@ -90,7 +90,9 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("GET /v1/machines/{id}", d.handleGetMachine)
 	mux.HandleFunc("DELETE /v1/machines/{id}", d.handleDestroyMachine)
 	mux.HandleFunc("POST /v1/machines/{id}/exec", d.handleExec)
-	mux.HandleFunc("GET /v1/machines/{id}/exec/stream", notImplemented)
+	mux.HandleFunc("GET /v1/machines/{id}/exec/stream", d.handleExecStream)
+	// The sprites alias, name-keyed: see handleSpriteExec.
+	mux.HandleFunc("GET /v1/sprites/{name}/exec", d.handleSpriteExec)
 	mux.HandleFunc("GET /v1/machines/{id}/logs", d.handleLogs)
 
 	// Lifecycle. Suspend/wake are the scale-to-zero pair; stop/start are the
