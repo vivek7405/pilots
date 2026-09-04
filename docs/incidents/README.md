@@ -1,11 +1,12 @@
 # Incidents
 
-Fly's incident history is our incident list in advance — the same daemon, the
-same gossip store, the same "one host must never depend on another" claim.
-Reading theirs is why several of the rules in `ARCHITECTURE.md` exist before
-we ever hit the failure (`docs/prior-art/fly-io.md` §10 is where they are
-summarised). This directory is where ours go, so the next person gets the same
-head start.
+Several rules in `ARCHITECTURE.md` exist because someone running this shape of
+system hit the failure first and wrote it down: a per-host daemon, a gossiped
+state store, and the claim that no host may depend on another. Reading other
+operators' public post-mortems is how those rules landed before we paid for
+them ourselves.
+
+This directory is where ours go, so the next person gets the same head start.
 
 ## What goes here
 
