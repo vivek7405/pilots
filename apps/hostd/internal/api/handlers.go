@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -411,6 +412,21 @@ const logFollowInterval = 500 * time.Millisecond
 // something a reader can tell from the network.
 const logRowInterval = 5 * time.Second
 
+// logFollowRetries is how many CONSECUTIVE read failures a follow absorbs
+// before it ends.
+//
+// A transient failure clears on the next tick, and ending a tail there would
+// cut a session the caller cannot restart from where it stopped. A persistent
+// one never clears: EIO on the state dir, a permission change, a disk that
+// went away. Retrying that forever wrote a warn line twice a second for as
+// long as the client held the connection, and left the reader watching what
+// looked like a machine that had simply gone quiet. Ten ticks is five seconds,
+// which is well past transient and well short of a session.
+//
+// A destroyed machine is not this: the row check ends that tail, and a missing
+// file is nil rather than an error.
+const logFollowRetries = 10
+
 func (d Deps) handleLogs(w http.ResponseWriter, r *http.Request) {
 	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
 		return
@@ -455,6 +471,7 @@ func (d Deps) followLogs(w http.ResponseWriter, r *http.Request, id string, offs
 		rowPoll = d.LogRowInterval
 	}
 
+	fails := 0
 	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
 	rowTicker := time.NewTicker(rowPoll)
@@ -473,11 +490,25 @@ func (d Deps) followLogs(w http.ResponseWriter, r *http.Request, id string, offs
 
 		delta, err := d.Machines.LogTail(id, offset)
 		if err != nil {
-			// A read that failed once is not a reason to end a tail the caller
-			// cannot restart from where it stopped.
-			slog.Warn("log follow read failed; will retry", "machine", id, "err", err)
-			continue
+			fails++
+			if fails == 1 {
+				// Once per run of failures, not once per tick: the same line
+				// twice a second for the life of a connection is a log flood,
+				// and it says nothing the first one did not.
+				slog.Warn("log follow read failed; will retry", "machine", id, "err", err)
+			}
+			if fails < logFollowRetries {
+				continue
+			}
+			slog.Error("log follow gave up", "machine", id, "failures", fails, "err", err)
+			// Said out loud on the stream. A tail that just stops is
+			// indistinguishable from a machine that went quiet, and the
+			// reader would wait on output that is never coming.
+			_, _ = fmt.Fprintf(w, "\n[pilots] log follow ended: %v\n", err)
+			flush()
+			return
 		}
+		fails = 0
 		if len(delta) == 0 {
 			continue
 		}

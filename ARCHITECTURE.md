@@ -230,8 +230,9 @@ GET    /v1/machines/:id/exec/stream  WS: query argv/dir/env/stdin → frames (be
 GET    /v1/sprites/:name/exec       WS alias of exec/stream, keyed by machine NAME
                                      (an id-shaped value is tried as an id first);
                                      sprites-compatible
-GET    /v1/machines/:id/logs?follow  stream; a follow ends on disconnect or destroy,
-                                     never on suspend
+GET    /v1/machines/:id/logs?follow  stream; a follow ends on disconnect, destroy,
+                                     or a read that keeps failing (it says so on
+                                     the stream), never on suspend
 POST   /v1/machines/:id/suspend|wake|stop|start
 POST   /v1/machines/:id/checkpoints  {comment?} → {id, seq}
 GET    /v1/machines/:id/checkpoints  list

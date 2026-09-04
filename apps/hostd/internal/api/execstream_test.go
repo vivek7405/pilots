@@ -276,6 +276,100 @@ func newFollowServer(t *testing.T) (http.Handler, state.Store, *fakeManager, *co
 	return h, st, fake, counted
 }
 
+// A PERSISTENT read failure ends the tail and says so.
+//
+// The retry exists for a failure that clears on the next tick. One that never
+// clears -- EIO on the state dir, a permission change -- used to be retried
+// for as long as the client held the connection: a warn line twice a second,
+// forever, and a reader watching what looked like a machine that had gone
+// quiet.
+func TestLogsFollowEndsOnAPersistentReadFailure(t *testing.T) {
+	h, _, fake, _ := newFollowServer(t)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	fake.logs = "boot log\n"
+	fake.fail(errors.New("input/output error"))
+
+	req, err := http.NewRequest("GET", srv.URL+"/v1/machines/m_1/logs?follow=1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testKey)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	// Generous next to the budget (logFollowRetries ticks) and far short of
+	// forever, which is what this used to be.
+	done := make(chan []byte, 1)
+	go func() {
+		body, err := io.ReadAll(res.Body)
+		if err != nil {
+			t.Errorf("read body: %v", err)
+		}
+		done <- body
+	}()
+
+	select {
+	case body := <-done:
+		if !strings.HasPrefix(string(body), "boot log\n") {
+			t.Errorf("body did not start with the backlog: %q", body)
+		}
+		if !strings.Contains(string(body), "log follow ended") {
+			t.Errorf("the tail ended without telling the reader why: %q", body)
+		}
+		if !strings.Contains(string(body), "input/output error") {
+			t.Errorf("the reason never reached the reader: %q", body)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the follow never ended on a failure that never clears")
+	}
+}
+
+// A failure that clears resets the budget, so a tail that saw one hiccup an
+// hour ago is not one tick closer to being cut.
+func TestLogsFollowRetriesClearAfterASuccessfulRead(t *testing.T) {
+	h, _, fake, _ := newFollowServer(t)
+	srv := httptest.NewServer(h)
+	defer srv.Close()
+
+	fake.logs = "boot log\n"
+	req, err := http.NewRequest("GET", srv.URL+"/v1/machines/m_1/logs?follow=1", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testKey)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+
+	// Two runs of failures with a good read between them. Summed they are the
+	// whole budget; consecutively they are never more than half of it.
+	go func() {
+		for range 2 {
+			fake.fail(errors.New("transient"))
+			time.Sleep(time.Duration(logFollowRetries/2) * followPoll)
+			fake.fail(nil)
+			fake.appendLog("still here\n")
+			time.Sleep(2 * followPoll)
+		}
+		res.Body.Close()
+	}()
+
+	body, _ := io.ReadAll(res.Body)
+	if strings.Contains(string(body), "log follow ended") {
+		t.Errorf("transient failures cut the tail: %q", body)
+	}
+	if strings.Count(string(body), "still here") != 2 {
+		t.Errorf("the tail stopped delivering across the hiccups: %q", body)
+	}
+}
+
 // Without follow the body is exactly the backlog and the response ends, which
 // is what every non-following reader depends on.
 func TestLogsWithoutFollowEnd(t *testing.T) {
