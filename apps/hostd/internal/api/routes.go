@@ -64,14 +64,14 @@ type Deps struct {
 	KeySource io.Reader
 }
 
-// Routes registers the full public API. Phase 1 lands the shapes; the handlers
-// answer 501 until Phase 2 implements them. Writing the table now means the
-// CLI and SDKs can be built against a real route list, and a typo shows up as
-// a failing test rather than a 404 in production.
 // storeVersionTimeout bounds the one store read /v1/health does. Liveness has
 // to answer on a host whose replica is wedged, not wait for it.
 const storeVersionTimeout = 2 * time.Second
 
+// Routes registers the full public API. Phase 1 lands the shapes; the handlers
+// answer 501 until Phase 2 implements them. Writing the table now means the
+// CLI and SDKs can be built against a real route list, and a typo shows up as
+// a failing test rather than a 404 in production.
 func Routes(d Deps) http.Handler {
 	mux := http.NewServeMux()
 
