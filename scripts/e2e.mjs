@@ -103,6 +103,37 @@ async function reach(id, url, seconds = 5) {
   return { code: code ?? '000', ip: ip ?? '' };
 }
 
+// viaRouter sends a request the way a browser would: to the fleet's API
+// listener, carrying a workload hostname. The listener hands anything with a
+// workload Host to the router, so this is the public wake path rather than an
+// internal one. node:http rather than fetch because the Host header is the
+// whole point of the request.
+async function viaRouter(hostname, path = '/', timeoutMs = 120_000) {
+  const { hostname: apiHost, port } = new URL(API);
+  const http = await import('node:http');
+  return await new Promise((resolve) => {
+    const req = http.request(
+      { host: apiHost, port: port || 80, path, method: 'GET', headers: { Host: hostname }, timeout: timeoutMs },
+      (res) => {
+        let body = '';
+        res.on('data', (c) => { body += c; });
+        res.on('end', () => resolve({ status: res.statusCode, body }));
+      },
+    );
+    req.on('timeout', () => { req.destroy(); resolve({ status: 0, body: 'timeout' }); });
+    req.on('error', (err) => resolve({ status: 0, body: String(err.message) }));
+    req.end();
+  });
+}
+
+// hold opens a TCP session from inside a guest and keeps it open, with no
+// traffic on it at all. That is the case an activity counter cannot see and
+// conntrack can: a client mid-transaction, silent.
+async function hold(id, host, port, seconds) {
+  return await exec(id,
+    `nohup bash -c 'exec 3<>/dev/tcp/${host}/${port}; sleep ${seconds}' >/dev/null 2>&1 & echo held`);
+}
+
 async function waitFor(fn, { timeoutMs = 120_000, everyMs = 500, what = 'condition' } = {}) {
   const deadline = Date.now() + timeoutMs;
   let lastErr;
@@ -1670,6 +1701,165 @@ async function serviceAssertions() {
     console.log(`      promote p50 ${p50.toFixed(0)}ms  [${samples.map((s) => s.toFixed(0)).join(', ')}]`);
     enforce(reflink, p50, 5000, 5000, 1500, 'promote');
   });
+
+  // -------------------------------------------------------------------------
+  // Scale to zero, on the deploy face.
+  //
+  // The point of restoring a microVM in milliseconds is that an idle one can
+  // be given back. These steps assert the whole loop on the public API: a
+  // default service sleeps, its URL still answers, .internal still wakes it,
+  // an open session keeps it up, and a floor on the deploy pins it.
+  // -------------------------------------------------------------------------
+
+  let webBuild;
+  let web;
+  let webReplica;
+  await step('a service deployed with no knobs carries the machine defaults and a floor of zero', async () => {
+    const res = await postTar('/v1/builds', tarball({
+      'Dockerfile': [
+        'FROM alpine:3.20',
+        'RUN mkdir /www && echo ok > /www/index.html',
+        'CMD ["httpd","-f","-p","8080","-h","/www"]',
+        '',
+      ].join('\n'),
+    }));
+    assert(res.status === 200, `build: HTTP ${res.status}`);
+    const text = await res.text();
+    for (const line of text.trim().split('\n')) {
+      try {
+        const obj = JSON.parse(line);
+        if (obj.result) webBuild = obj.result;
+      } catch {}
+    }
+    assert(webBuild, `the build stream produced no rootfs id:\n${text.slice(-400)}`);
+
+    const { status, json } = await request('/v1/services', {
+      method: 'POST',
+      body: {
+        name: `web-${tag}`, app: `e2e-svc-${tag}`, replicas: 1, domain: `web-${tag}`,
+        health: { type: 'http', path: '/', grace: 60 },
+      },
+    });
+    assert(status === 201, `create service: ${status} ${JSON.stringify(json)}`);
+    web = json;
+
+    const dep = await request(`/v1/services/${web.id}/deploy`, {
+      method: 'POST', body: { build: webBuild },
+    });
+    assert(dep.status === 200, `deploy: ${dep.status} ${JSON.stringify(dep.json)}`);
+
+    const reps = await replicasOf(web.id);
+    assert(reps.length === 1, `deploy made ${reps.length} replicas, want 1`);
+    webReplica = reps[0];
+    const k = webReplica.knobs ?? {};
+    assert(k.min_machines_running === 0,
+      `the replica floor is ${k.min_machines_running}, want 0: a deployed service cannot sleep`);
+    assert(k.auto_stop === 'suspend', `auto_stop is ${k.auto_stop}, want suspend`);
+    assert(k.auto_start === true, `auto_start is ${k.auto_start}, want true`);
+  });
+
+  if (web && webReplica) {
+    // The count and the floor are different numbers. Only the floor moved: the
+    // service keeps its one replica, and that replica keeps its URL.
+    await step('the last idle replica of a default service is suspended after the scale-down window', async () => {
+      const url = webReplica.url;
+      await waitFor(async () => {
+        const { json } = await request(`/v1/machines/${webReplica.id}`);
+        return json?.state === 'suspended';
+      }, { timeoutMs: 120_000, what: 'the idle replica to suspend' });
+
+      const reps = await replicasOf(web.id);
+      assert(reps.length === 1,
+        `the service has ${reps.length} replicas after a scale-down; it must suspend, never destroy`);
+      assert(reps[0].url === url, `the URL changed while suspended: ${url} -> ${reps[0].url}`);
+    });
+
+    await step('a request to the suspended replica URL is held and answered on the same URL', async () => {
+      const url = webReplica.url;
+      const res = await viaRouter(new URL(url).host, '/');
+      assert(res.status === 200,
+        `the wake path answered ${res.status} rather than holding the request: ${res.body.slice(0, 200)}`);
+      assert(res.body.trim() === 'ok', `the app did not answer: ${res.body.slice(0, 200)}`);
+
+      const { json } = await request(`/v1/machines/${webReplica.id}`);
+      assert(json?.state === 'running', `the replica is ${json?.state} after a request that returned 200`);
+      assert(json?.url === url, `the URL changed across a wake: ${url} -> ${json?.url}`);
+    });
+
+    let client;
+    await step(`web-${tag}.internal for a service at zero resolves and its next request wakes it`, async () => {
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST',
+        body: {
+          app: `e2e-svc-${tag}`, vcpus: 1, mem_mib: 512, cmd: 'sleep 86400',
+          knobs: { auto_stop: 'off' },
+        },
+      });
+      assert(status === 201, `create client: ${status} ${JSON.stringify(json)}`);
+      client = json;
+      created.push(client.id);
+
+      await waitFor(async () => {
+        const { json: row } = await request(`/v1/machines/${webReplica.id}`);
+        return row?.state === 'suspended';
+      }, { timeoutMs: 120_000, what: 'the replica to suspend again' });
+
+      const hit = await reach(client.id, `http://web-${tag}.internal:8080/`, 15);
+      assert(hit.code === '200',
+        `a peer got ${hit.code} for a service at zero; the reserved address or the waker is gone`);
+      const { json: row } = await request(`/v1/machines/${webReplica.id}`);
+      assert(row?.state === 'running', `the replica is ${row?.state} after a peer reached it`);
+    });
+
+    if (client) {
+      // The case an activity counter cannot see: a session open and silent.
+      // Suspending here is a transaction killed mid-flight.
+      await step('an open guest-to-guest session holds a replica at floor zero past the scale-down window', async () => {
+        await hold(client.id, `web-${tag}.internal`, 8080, 300);
+        for (let i = 0; i < 14; i++) {
+          await sleep(5000);
+          const { json } = await request(`/v1/machines/${webReplica.id}`);
+          assert(json?.state === 'running',
+            `the replica was ${json?.state} after ${(i + 1) * 5}s with a session open on it`);
+        }
+      });
+
+      await step('closing the session lets the replica suspend again', async () => {
+        await request(`/v1/machines/${client.id}/exec`, {
+          method: 'POST', body: { cmd: 'pkill -f "sleep 300" || true', user: 'root' },
+        });
+        await waitFor(async () => {
+          const { json } = await request(`/v1/machines/${webReplica.id}`);
+          return json?.state === 'suspended';
+        }, { timeoutMs: 120_000, what: 'the replica to suspend once its session closed' });
+      });
+    }
+
+    await step('min_machines_running of one on the deploy keeps a replica resident through the window', async () => {
+      const dep = await request(`/v1/services/${web.id}/deploy`, {
+        method: 'POST', body: { build: webBuild, knobs: { min_machines_running: 1 } },
+      });
+      assert(dep.status === 200, `deploy: ${dep.status} ${JSON.stringify(dep.json)}`);
+
+      const reps = (await replicasOf(web.id)).filter((m) => m.release_id === dep.json.id);
+      assert(reps.length === 1, `the redeploy made ${reps.length} replicas, want 1`);
+      const warm = reps[0];
+      const k = warm.knobs ?? {};
+      assert(k.min_machines_running === 1,
+        `the deploy's knobs were dropped: floor is ${k.min_machines_running}`);
+      assert(k.auto_stop === 'suspend',
+        `the merge replaced instead of merging: auto_stop is ${k.auto_stop}`);
+
+      for (let i = 0; i < 12; i++) {
+        await sleep(5000);
+        const { json } = await request(`/v1/machines/${warm.id}`);
+        assert(json?.state === 'running',
+          `a replica with a floor of one was ${json?.state} after ${(i + 1) * 5}s`);
+      }
+    });
+
+    for (const m of await replicasOf(web.id)) created.push(m.id);
+  }
 
   // Cleanup: destroy this battery's machines so later runs start clean.
   for (const m of await replicasOf(svc.id)) created.push(m.id);

@@ -254,6 +254,32 @@ test('a failing pre_deploy stops the deploy and still destroys the machine', asy
   }
 })
 
+test('the compose file\'s knobs travel on the deploy, not on the create', async () => {
+  const api = await startFakeAPI()
+  withPlan(api, plan())
+  const env = loggedIn(api.url, { shop: { database_url: 'x' } })
+  try {
+    assert.equal((await pilot(env, ['--json', 'deploy'])).code, 0)
+
+    // A service row has nowhere to keep knobs, so the create drops them on the
+    // floor. The deploy is what creates the replicas they apply to.
+    const created = api.all('POST', '/v1/services').map((r) => JSON.parse(r.body) as Record<string, unknown>)
+      .find((b) => b.name === 'postgres')!
+    assert.equal('knobs' in created, false, 'knobs on the create are discarded by hostd')
+
+    const deploys = api.requests
+      .filter((r) => r.method === 'POST' && r.path.endsWith('/deploy'))
+      .map((r) => JSON.parse(r.body) as Record<string, unknown>)
+    const withKnobs = deploys.filter((b) => 'knobs' in b)
+    assert.equal(withKnobs.length, 1, 'only the step that declared knobs sends them')
+    assert.deepEqual(withKnobs[0].knobs, {
+      auto_stop: 'off', auto_start: false, min_machines_running: 1, soft_limit: 20,
+    })
+  } finally {
+    await api.close()
+  }
+})
+
 test('the second run patches instead of creating, with no knobs in the body', async () => {
   const api = await startFakeAPI()
   withPlan(api, plan())
@@ -268,8 +294,9 @@ test('the second run patches instead of creating, with no knobs in the body', as
     assert.equal(patches.length, 3, 'one PATCH per service on the second run')
     for (const patch of patches) {
       const body = JSON.parse(patch.body) as Record<string, unknown>
-      // #30 Decision 8: the PATCH body is a 400 with `knobs`.
-      assert.equal('knobs' in body, false, 'knobs are create-only')
+      // #30 Decision 8: the PATCH body is a 400 with `knobs`. They travel on
+      // the deploy instead, which is where the replicas they apply to are made.
+      assert.equal('knobs' in body, false, 'knobs never go on the PATCH')
       assert.ok('replicas' in body)
     }
     assert.equal(
@@ -277,9 +304,6 @@ test('the second run patches instead of creating, with no knobs in the body', as
       false,
       'nothing is created twice',
     )
-    // The compose file asks for knobs the running service does not have, and
-    // the run says so rather than silently ignoring the difference.
-    assert.match(second.stderr, /warning: postgres: knobs are set at create and were not changed/)
   } finally {
     await api.close()
   }

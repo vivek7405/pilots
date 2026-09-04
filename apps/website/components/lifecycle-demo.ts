@@ -76,7 +76,10 @@ export class LifecycleDemo extends WebComponent {
     if (this.face.get() === 'service') return;
     this.face.set('service');
     this.state.set('running');
-    this.record('promote', 'now a production service with health checks and replicas');
+    this.record(
+      'promote',
+      'now a production service with a release, health checks and replicas; still sleeps when idle',
+    );
   }
 
   reset() {
@@ -130,9 +133,11 @@ export class LifecycleDemo extends WebComponent {
               <dt class="text-ink-subtle">state</dt>
               <dd class="m-0 text-ink">${state}</dd>
               <dt class="text-ink-subtle">autoStop</dt>
-              <dd class="m-0 text-ink">${face === 'sandbox' ? 'suspend' : 'off'}</dd>
+              <dd class="m-0 text-ink">suspend</dd>
               <dt class="text-ink-subtle">minRunning</dt>
-              <dd class="m-0 text-ink">${face === 'sandbox' ? '0' : '1'}</dd>
+              <dd class="m-0 text-ink">0</dd>
+              <dt class="text-ink-subtle">replicas</dt>
+              <dd class="m-0 text-ink">${face === 'sandbox' ? 'one' : 'one or more'}</dd>
               <dt class="text-ink-subtle">checkpoints</dt>
               <dd class="m-0 text-ink">${this.checkpoints.get()}</dd>
             </dl>

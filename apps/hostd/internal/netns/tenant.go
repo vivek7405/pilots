@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"net/netip"
 	"os"
 	"sort"
@@ -70,6 +71,10 @@ type TenantRules struct {
 	// what brings the machine back -- the mechanism that lets a service scale
 	// to zero and stay reachable by name.
 	Wake []WakeTarget
+	// Activity is every running service replica this host holds. Traffic to
+	// one is counted and let through, and the count is how a replica serving
+	// only .internal clients is known to be in use.
+	Activity []WakeTarget
 }
 
 // Fingerprint is a stable summary of the desired state.
@@ -109,6 +114,18 @@ func (r TenantRules) Fingerprint() string {
 	sort.Strings(wake)
 	for _, w := range wake {
 		h.Write([]byte(w))
+		h.Write([]byte{0})
+	}
+
+	// The activity set too, or a replica that just started running keeps no
+	// counter until something else moves.
+	activity := make([]string, 0, len(r.Activity))
+	for _, t := range r.Activity {
+		activity = append(activity, "C|"+t.MachineID+"@"+t.Addr.String())
+	}
+	sort.Strings(activity)
+	for _, a := range activity {
+		h.Write([]byte(a))
 		h.Write([]byte{0})
 	}
 
@@ -249,9 +266,22 @@ func ApplyTenantFilter(r TenantRules) error {
 	}
 
 	applyWakeRules(c, table, r.Wake)
+	applyActivityRules(c, table, r.Activity)
 
 	if err := c.Flush(); err != nil {
 		return fmt.Errorf("netns: apply the tenant filter: %w", err)
+	}
+
+	// The rules that made these replicas suspended are in; forget the
+	// sessions that were open to them, or a peer's stale socket keeps a
+	// replica "held" after it wakes. Best effort: the filter is applied
+	// either way.
+	addrs := make([]netip.Addr, 0, len(r.Wake))
+	for _, t := range r.Wake {
+		addrs = append(addrs, t.Addr)
+	}
+	if err := ForgetFlowsTo(addrs); err != nil {
+		slog.Debug("could not forget flows to suspended replicas", "err", err)
 	}
 	return nil
 }

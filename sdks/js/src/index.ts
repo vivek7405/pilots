@@ -70,6 +70,7 @@ export type {
   HealthResponse,
   Host,
   Knobs,
+  KnobsPatch,
   Machine,
   MachineState,
   MachineVolume,

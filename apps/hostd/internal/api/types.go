@@ -263,13 +263,17 @@ type Service struct {
 }
 
 type CreateServiceRequest struct {
-	Name     string       `json:"name"`
-	App      string       `json:"app,omitempty"`
-	Release  string       `json:"release,omitempty"`
-	Build    string       `json:"build,omitempty"`
-	Replicas int          `json:"replicas,omitempty"`
-	Knobs    *Knobs       `json:"knobs,omitempty"`
-	Health   *HealthCheck `json:"health,omitempty"`
+	Name     string `json:"name"`
+	App      string `json:"app,omitempty"`
+	Release  string `json:"release,omitempty"`
+	Build    string `json:"build,omitempty"`
+	Replicas int    `json:"replicas,omitempty"`
+	// Knobs is accepted for wire compatibility and not persisted: a service
+	// row has no knobs column and the first replica does not exist until the
+	// first deploy. The knobs a service runs with are the ones on
+	// DeployRequest.
+	Knobs  *Knobs       `json:"knobs,omitempty"`
+	Health *HealthCheck `json:"health,omitempty"`
 	// Domain is the subdomain label under the fleet's domain. Empty means the
 	// service mints no route rows -- legal, and reachable by peers over
 	// <name>.internal instead.
@@ -296,6 +300,13 @@ type CreateServiceRequest struct {
 type DeployRequest struct {
 	Release string `json:"release,omitempty"`
 	Build   string `json:"build,omitempty"`
+	// Knobs is the lifecycle policy for the replicas this deploy creates,
+	// partial and merged onto what the previous release's replicas carry (or
+	// the machine defaults for a first deploy), exactly as
+	// CreateMachineRequest.Knobs is merged. A service row keeps no knobs, so
+	// the deploy is where they travel: {"min_machines_running":1} is how a
+	// replica is kept warm, and a redeploy with different knobs changes them.
+	Knobs json.RawMessage `json:"knobs,omitempty"`
 }
 
 // PromoteRequest turns a sandbox into a durable service. The machine's URL is

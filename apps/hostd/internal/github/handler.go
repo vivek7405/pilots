@@ -3,6 +3,7 @@ package github
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -37,7 +38,7 @@ type BuildRunner interface {
 }
 
 type Rollout interface {
-	Deploy(ctx context.Context, serviceID, rootfsBuildID string) (*state.Release, error)
+	Deploy(ctx context.Context, serviceID, rootfsBuildID string, knobs json.RawMessage) (*state.Release, error)
 }
 
 type MachineManager interface {
@@ -126,7 +127,9 @@ func (d Deps) onPush(ctx context.Context, ev Event) error {
 	if err != nil {
 		return err
 	}
-	_, err = d.Rollout.Deploy(ctx, svc.ID, build)
+	// A push carries no policy of its own; the replicas inherit whatever the
+	// previous release's carry.
+	_, err = d.Rollout.Deploy(ctx, svc.ID, build, nil)
 	return err
 }
 

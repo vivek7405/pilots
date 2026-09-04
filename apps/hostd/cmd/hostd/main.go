@@ -321,8 +321,13 @@ func run() error {
 		}
 	}
 
+	guest := newGuestLoad()
 	if machinePrefix.IsValid() {
 		go runTenantFilter(ctx, cfg.HostID, view, locator)
+		// Traffic to a running replica's address is activity, and an open
+		// session to it holds it. Read beside the filter that writes the
+		// counters.
+		go runActivity(ctx, view, locator, mgr, guest)
 	}
 
 	routerOpts := router.Options{
@@ -363,7 +368,7 @@ func run() error {
 	// Only the arbiter for a service acts on it, so every host can run this
 	// loop: they all see every service in their local replica, and all but one
 	// will decline for any given service.
-	go rollout.RunAutoscaler(ctx, mgr)
+	go rollout.RunAutoscaler(ctx, load{Manager: mgr, guest: guest})
 
 	// Traffic to a suspended service replica's address brings it back. Runs
 	// beside the tenant filter that writes the counters it reads.
