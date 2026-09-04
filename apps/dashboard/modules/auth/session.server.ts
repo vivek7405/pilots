@@ -13,6 +13,7 @@
  */
 
 import { and, eq } from 'drizzle-orm';
+import { getRequest } from '@webjsdev/server';
 import { db } from '#db/connection.server.ts';
 import { memberships, orgs, users } from '#db/schema.server.ts';
 import type { Membership, Org, User } from '#db/schema.server.ts';
@@ -145,7 +146,12 @@ export function orgCookie(orgId: string): string {
 }
 
 function readOrgCookie(req?: Request): string | null {
-  const header = req?.headers.get('cookie');
+  // Fall back to the in-flight request when the caller passed none. A page or
+  // an action calls `requireOrg()` bare, because the framework already holds
+  // the request in its own scope; without this fallback the cookie is invisible
+  // to every one of them and `currentOrg` silently drops back to the personal
+  // org, so the org switcher appeared to work and then acted as the wrong org.
+  const header = (req ?? getRequest())?.headers.get('cookie');
   if (!header) return null;
   for (const part of header.split(';')) {
     const [name, ...rest] = part.trim().split('=');
