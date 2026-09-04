@@ -18,7 +18,8 @@ Change this file *before* changing code that contradicts it.
 One primitive: the **machine** (a Firecracker microVM booting an ext4 rootfs,
 with an identity that never changes). Lifecycle is per-machine config, not a
 mode: `autoStop: off|stop|suspend`, `autoStart: bool`,
-`minMachinesRunning: int` (0 = scale-to-zero, valid for production services).
+`minMachinesRunning: int` (0 = scale-to-zero, the default on both faces; a
+deploy sets it on its replicas, and a promoted sandbox keeps the knobs it had).
 
 | Capability | Definition of done |
 |---|---|
@@ -332,6 +333,17 @@ Without it a guest can put a peer's address in packets it sends: the reply goes
 to the real owner so it steals no traffic, but the receiving machine's filter
 sees a connection opening from inside its own app and accepts it. The ingress
 veth is the host's own knowledge; a source address is the guest's.
+
+**Guest-to-guest traffic is activity.** Nothing a peer sends over NAT66 passes
+the router, so the root namespace keeps two counters per service replica beside
+the tenant filter: a counted drop on a suspended replica's kept address, whose
+rising count is the wake, and a counted pass-through on a running replica's
+address, whose rising count touches `last_activity`. Open sessions come from
+conntrack, which the established-accept rule already loads: an ESTABLISHED TCP
+flow to a replica from a machine that is running holds the replica up, however
+long it is silent, and stops holding it the tick after the client suspends. A
+health probe never counts, because it dials the veth's host-side IPv4 address
+and never crosses this hook.
 
 Landmines:
 
@@ -691,10 +703,18 @@ connection**, restore locally (or trigger the owner), then proxy. Touch
 `last_activity` on every request AND every exec. Idle monitor suspends when
 BOTH the wall-clock timer (default 60s, per-machine) and concurrency
 (in-flight = 0 against `softLimit`) say idle — exec/WS activity counts, so an
-agent mid-build with zero HTTP traffic is never suspended. N-replica:
-round-robin among healthy replicas, `softLimit` overflow starts the next
-stopped replica, excess capacity stops them (respecting
-`minMachinesRunning`).
+agent mid-build with zero HTTP traffic is never suspended. That monitor owns
+sandboxes only. A machine with a release (a rollout's replica or a promoted
+sandbox) is the autoscaler's: the host that HOLDS the replica gives it back
+when its own in-flight count, its held sessions and the row's `last_activity`
+all say idle for the scale-down window and the floor allows it, and the
+arbiter alone adds capacity. Every host ranks the same replicated rows the
+same way, so only one host ever concludes it is the one to act. A suspended
+machine holds no host memory and runs no process; what it costs is the
+storage its snapshot occupies. N-replica: round-robin among healthy replicas,
+`softLimit` overflow starts the next stopped replica, excess capacity suspends
+them down to `minMachinesRunning`, which defaults to zero; `autoStop: off` on
+a deploy means never.
 
 **Self-heal:** every hostd heartbeats `hosts.last_seen`; a host silent
 >30s is dead; each survivor rescues the slice
