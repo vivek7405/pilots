@@ -17,5 +17,3 @@ Monorepo:
 | `scripts/` | one-shot bash: host bootstrap, golden rootfs, e2e battery |
 
 Architecture: `ARCHITECTURE.md`.
-
-Licensed under the Apache License 2.0. See `LICENSE`.
