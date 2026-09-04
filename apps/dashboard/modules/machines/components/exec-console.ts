@@ -34,6 +34,14 @@ class ExecConsole extends WebComponent({
   private out = createRef<HTMLPreElement>();
   private input = createRef<HTMLInputElement>();
   private conn: { send(data: unknown): void; close(): void } | null = null;
+  /**
+   * One streaming decoder per output stream. A frame carries raw bytes, and a
+   * multi-byte character can be split across two of them; `stream: true` holds
+   * the partial sequence until the next frame completes it. stdout and stderr
+   * are separate byte streams that interleave on the socket, so each keeps its
+   * own partial state.
+   */
+  private decoders = { stdout: new TextDecoder(), stderr: new TextDecoder() };
 
   constructor() {
     super();
@@ -55,12 +63,14 @@ class ExecConsole extends WebComponent({
 
     this.running = true;
     this.lastExit = '';
+    this.decoders = { stdout: new TextDecoder(), stderr: new TextDecoder() };
     this.write(`$ ${command}\n`);
 
     this.conn = connectWS(`/api/machines/${this.machineId}/exec`, {
       onOpen: () => this.conn?.send({ cmd: ['sh', '-c', command] }),
       onMessage: (frame: Frame) => this.onFrame(frame),
       onClose: () => {
+        this.flush();
         this.running = false;
         this.conn = null;
       },
@@ -69,15 +79,29 @@ class ExecConsole extends WebComponent({
 
   private onFrame(frame: Frame) {
     if (frame.type === 'stdout' || frame.type === 'stderr') {
-      this.write(atob(frame.data ?? ''));
+      // `atob` yields one JS char per BYTE, so it is only the transport
+      // decoding; the bytes still have to be decoded as UTF-8, or anything
+      // outside ASCII renders as mojibake.
+      this.write(this.decoders[frame.type].decode(bytesOf(frame.data ?? ''), { stream: true }));
       return;
     }
+    // The output streams end before the exit arrives, so anything still held
+    // by a decoder is an incomplete sequence and is emitted as such.
+    this.flush();
     if (frame.type === 'exit') {
       this.lastExit = String(frame.code ?? 0);
       this.write(`\n[exit ${frame.code ?? 0}]\n\n`);
       return;
     }
     if (frame.type === 'error') this.write(`\n[error: ${frame.message ?? 'unknown'}]\n\n`);
+  }
+
+  /** Emit whatever partial sequence each decoder still holds. */
+  private flush() {
+    for (const decoder of Object.values(this.decoders)) {
+      const rest = decoder.decode();
+      if (rest) this.write(rest);
+    }
   }
 
   private write(text: string) {
@@ -110,6 +134,11 @@ class ExecConsole extends WebComponent({
       </p>
     `;
   }
+}
+
+/** The raw bytes a base64 frame carries. */
+function bytesOf(base64: string): Uint8Array {
+  return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
 }
 
 ExecConsole.register('exec-console');
