@@ -74,6 +74,15 @@ compose fragment on the ordinary primitives, not a product tier. See
    free tier). One wildcard cert via ACME DNS-01 (certmagic + Cloudflare API
    token), shared to hosts via S3. Custom domains: per-domain on-demand
    certs via HTTP-01 (any host can answer the challenge).
+   The router owns the forwarded headers, set once at the public entry and
+   preserved across a mesh hop: `X-Forwarded-For` is deleted inbound so what
+   reaches the guest is the peer this edge saw, `X-Forwarded-Proto` is `https`
+   when the edge terminated TLS, and `X-Forwarded-Host` is the name the user
+   typed. A rate limiter behind us reads the leftmost entry, so a caller must
+   not be able to supply it. The sibling client-IP headers (`X-Real-IP`,
+   `CF-Connecting-IP`, `True-Client-IP` and RFC 7239 `Forwarded`) are deleted
+   with it, since deleting only one of them moves the forgery rather than
+   ending it.
    In code: every host calls `certmagic.ManageAsync` for `*.<workload
    domain>`, the workload apex and the dashboard apex; the shared `certs`
    Storage lock is what makes N hosts running the identical call produce ONE
@@ -82,7 +91,17 @@ compose fragment on the ordinary primitives, not a product tier. See
    on-demand path still serves custom domains, so this degrades rather than
    fails. The API hostname `api.<workload domain>` needs no record and no
    certificate of its own: the wildcard A record and the wildcard
-   certificate already cover it.
+   certificate already cover it. `dispatch` claims that hostname for the
+   control API before the workload suffix check, so every host answers the
+   documented base URL. The machine name under that hostname is therefore
+   reserved -- `api` by default: a tenant that took it would own a URL it
+   could never be reached at. The reservation is derived from
+   `PILOT_API_HOSTNAME`, so moving the control API moves it. It only guards
+   creates, though, so a machine that already held the name when the API was
+   pointed at it is reported rather than silently swallowed: hostd logs an
+   error naming it and publishes `pilots_api_hostname_shadowed`. Refusing to
+   start would turn one machine's lost URL into a fleet-wide outage, since
+   the row is replicated to every host.
 6. **Fleet is CPU-vendor-homogeneous — vendor is a cost decision, not a
    technical one.** FC memory snapshots carry raw CPUID; a snapshot never
    restores across the Intel/AMD boundary (cpu_templates normalize within a
@@ -252,8 +271,20 @@ POST   /v1/api-keys/:hash/revoke     admin: tombstone a key; no row is deleted
 GET    /v1/api-keys?org=             admin: list an org's keys, revoked ones included
 GET    /v1/quotas/:org               admin: the org's limits, or the defaults
 PUT    /v1/quotas/:org               admin: set them
-GET    /v1/health                    liveness (unauthenticated)
+GET    /v1/health                    liveness (unauthenticated); carries
+                                     store_version, the sum of this replica's
+                                     version vector (0 on SQLite)
 GET    /metrics                      Prometheus (unauthenticated)
+                                     engine: pilots_uffd_*, pilots_snapshot_*
+                                     host: pilots_machines{state},
+                                     pilots_wake_seconds,
+                                     pilots_checkpoint_durable_seconds,
+                                     pilots_s3_ops_total{op},
+                                     pilots_s3_op_seconds{op},
+                                     pilots_nbd_cache_hits_total,
+                                     pilots_nbd_cache_misses_total,
+                                     pilots_router_inflight, pilots_slots_free,
+                                     pilots_quota_refusals_total{quota}
 ```
 
 Every read is scoped to the caller's org. An id another org owns answers
@@ -997,9 +1028,14 @@ The battery's exec-stream section drives the
 frames, both key carriers, the sprites alias, the `logs?follow` tail across a
 suspend, and the guest contract (`sprite`, `/home/sprite`, Node 24) through
 Node's global `WebSocket`; the gate streams the same command through every
-host that does not own the machine, by id and through the alias. `go test
-./...` for netns/block/header/state/s3 (block-layer round-trip + diff-chain
-tests are mandatory). Drift tests in both SDKs parse `internal/api` on every
+host that does not own the machine, by id and through the alias. Its edge
+section drives a machine that echoes what reached it, so a forged
+`X-Forwarded-For`, the API hostname and the per-state machine gauge are
+asserted through the router rather than in a unit test; `gate.sh` section 1b
+asserts the same hostname on every host and that their replica versions have
+not drifted apart. `go test ./...` for netns/block/header/state/s3
+(block-layer round-trip + diff-chain tests are mandatory). Drift tests in
+both SDKs parse `internal/api` on every
 `npm test`. Dashboard: `webjs check` / `doctor --json` / `typecheck` /
 `test`. CI runs unit tests + the single-VM e2e on every push, and at a tag
 builds the golden rootfs and asserts it matches the committed pin. Phase 6f

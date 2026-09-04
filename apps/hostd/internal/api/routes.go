@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -22,6 +24,9 @@ type Deps struct {
 	// HugePages is this host's guest page size setting; see
 	// HealthResponse.HugePages.
 	HugePages bool
+	// StoreVersion reads the replica's version, for HealthResponse.StoreVersion.
+	// Nil on SQLite, where there is no replica and the field is 0.
+	StoreVersion func(context.Context) (int64, error)
 	// Builds turns a Dockerfile context into a rootfs build. Nil on a host
 	// with no object storage, where a build has nowhere to publish to.
 	Builds BuildRunner
@@ -73,6 +78,10 @@ type Deps struct {
 	KeySource io.Reader
 }
 
+// storeVersionTimeout bounds the one store read /v1/health does. Liveness has
+// to answer on a host whose replica is wedged, not wait for it.
+const storeVersionTimeout = 2 * time.Second
+
 // Routes registers the full public API. Phase 1 lands the shapes; the handlers
 // answer 501 until Phase 2 implements them. Writing the table now means the
 // CLI and SDKs can be built against a real route list, and a typo shows up as
@@ -82,10 +91,30 @@ func Routes(d Deps) http.Handler {
 
 	// Unauthenticated: liveness and metrics.
 	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, HealthResponse{
+		resp := HealthResponse{
 			OK: true, HostID: d.HostID, Reflink: d.Reflink,
 			HugePages: d.HugePages,
-		})
+		}
+		if d.StoreVersion != nil {
+			// Bounded, and short. The corrosion client sets no response
+			// timeout, so an agent that accepts the connection and then stops
+			// answering would hold this handler open until the client gave
+			// up -- on the one unauthenticated route every load balancer
+			// polls, which is the opposite of what the paragraph below
+			// promises. A hung replica has to read as "version 0", fast.
+			ctx, cancel := context.WithTimeout(r.Context(), storeVersionTimeout)
+			defer cancel()
+			// A replica that cannot be read is not a dead host: liveness
+			// still answers 200 and the version stays 0, because a health
+			// check that fails on a store hiccup takes the host out of
+			// rotation for a problem that is not the host's.
+			if v, err := d.StoreVersion(ctx); err != nil {
+				slog.Warn("could not read the store version", "err", err)
+			} else {
+				resp.StoreVersion = v
+			}
+		}
+		writeJSON(w, http.StatusOK, resp)
 	})
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
 		// Collected on the scrape rather than on a timer: the memory handlers

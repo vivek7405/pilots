@@ -44,6 +44,27 @@ func validateName(name string) error {
 	return nil
 }
 
+// ensureNotReserved rejects the one name a tenant may not take: the label
+// that would produce the control API's own hostname.
+//
+// dispatch claims that hostname before the workload suffix check, so a machine
+// holding it would own a URL it could never be reached at. Derived from the
+// configured hostname rather than hardcoded to "api": an operator who moves
+// the control API with PILOT_API_HOSTNAME moves the reservation with it, and
+// one who moves it off the workload domain entirely frees the name -- nothing
+// claims it there, so it routes like any other machine.
+func (m *Manager) ensureNotReserved(name string) error {
+	apiHost := m.opts.APIHostname
+	if apiHost == "" {
+		apiHost = "api." + m.opts.Domain
+	}
+	if strings.EqualFold(name+"."+m.opts.Domain, apiHost) {
+		return fmt.Errorf("machines: the name %q is reserved for the control API hostname %q",
+			name, apiHost)
+	}
+	return nil
+}
+
 // ensureNameFree rejects a name already in use.
 //
 // Two machines sharing a name is not a cosmetic problem: the router returns

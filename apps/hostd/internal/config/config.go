@@ -131,6 +131,11 @@ type Config struct {
 	// reachable: the host that takes it over has never held that machine's
 	// token, and the hash on its row cannot authenticate to the guest.
 	AgentTokenSecret string // PILOT_AGENT_TOKEN_SECRET
+
+	// APIHostname is the name the control API answers on, under the workload
+	// wildcard so it needs no record and no certificate of its own. Checked
+	// before the workload suffix in dispatch, and reserved as a machine name.
+	APIHostname string // PILOT_API_HOSTNAME
 }
 
 // Fleet reports whether this host is part of a cluster.
@@ -220,6 +225,11 @@ func Load() (*Config, error) {
 		FleetKey:         os.Getenv("PILOT_FLEET_KEY"),
 		DNSUpstream:      env("PILOT_DNS_UPSTREAM", "1.1.1.1:53,8.8.8.8:53"),
 		AgentTokenSecret: os.Getenv("PILOT_AGENT_TOKEN_SECRET"),
+		APIHostname:      os.Getenv("PILOT_API_HOSTNAME"),
+	}
+
+	if c.APIHostname == "" {
+		c.APIHostname = "api." + c.WorkloadDomain
 	}
 
 	if c.HostID == "" {

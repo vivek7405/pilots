@@ -212,15 +212,19 @@ func run() error {
 	}
 
 	mgr := machines.New(machines.Options{
-		HostID:     cfg.HostID,
-		Domain:     cfg.WorkloadDomain,
-		StateRoot:  cfg.MachineStateRoot(),
-		CacheRoot:  cfg.CacheRoot(),
-		Store:      store,
-		Uploader:   uploader,
-		Chunks:     chunks,
-		BlockStore: chunkReader(chunks),
-		NBDDevices: devices,
+		HostID: cfg.HostID,
+		Domain: cfg.WorkloadDomain,
+		// dispatch claims this hostname before the workload suffix, so the
+		// name under it is not a tenant's to take. Passed rather than
+		// hardcoded so the reservation follows PILOT_API_HOSTNAME.
+		APIHostname: cfg.APIHostname,
+		StateRoot:   cfg.MachineStateRoot(),
+		CacheRoot:   cfg.CacheRoot(),
+		Store:       store,
+		Uploader:    uploader,
+		Chunks:      chunks,
+		BlockStore:  chunkReader(chunks),
+		NBDDevices:  devices,
 		// The handlers are separate processes and read builds themselves, so
 		// they need this daemon's storage credentials.
 		HandlerEnv: os.Environ(),
@@ -369,6 +373,11 @@ func run() error {
 	// almost always set after the domain is registered.
 	go runDomainVerifier(ctx, cfg.HostID, store, cfg.WorkloadDomain)
 
+	// A machine that held the API hostname before the control API was pointed
+	// at it keeps its URL and stops being served on it. The create-time
+	// reservation cannot see that machine, so this does, and says so.
+	go runAPIHostnameShadowCheck(ctx, store, cfg.APIHostname)
+
 	// Push-to-deploy and pull-request previews. The webhook is an ordinary
 	// route on every host; exactly one acts on any delivery.
 	ghApp, err := github.LoadApp(cfg.GitHubAppID, cfg.GitHubKeyPath, cfg.GitHubWebhookKey)
@@ -386,7 +395,8 @@ func run() error {
 
 	controlAPI := api.Routes(api.Deps{
 		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink, HugePages: cfg.HugePages,
-		Builds: builder, Rollout: rollout, Domain: cfg.WorkloadDomain,
+		StoreVersion: storeVersion(store),
+		Builds:       builder, Rollout: rollout, Domain: cfg.WorkloadDomain,
 		Peers: peerLookup(f), Tenancy: tenancy, BuildGate: &quota.HostGate{},
 		Lookup: machineByName(f),
 		GitHub: github.Handler(github.Deps{
@@ -473,11 +483,18 @@ func run() error {
 // control API.
 func dispatch(cfg *config.Config, rtr http.Handler, ctrl http.Handler) http.Handler {
 	suffix := "." + strings.ToLower(cfg.WorkloadDomain)
+	apiHost := strings.ToLower(cfg.APIHostname)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		host := strings.ToLower(r.Host)
 		if h, _, err := net.SplitHostPort(host); err == nil {
 			host = h
+		}
+		// The API hostname sits under the workload wildcard, so it must be
+		// claimed before the suffix check hands it to the router.
+		if host == apiHost {
+			ctrl.ServeHTTP(w, r)
+			return
 		}
 		if strings.HasSuffix(host, suffix) {
 			rtr.ServeHTTP(w, r)

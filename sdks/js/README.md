@@ -67,6 +67,11 @@ JSON tags as its properties. The types from hostd's compose package carry a
 `Compose` prefix, so `compose.Step` is `ComposeStep`. A test in this package
 parses hostd's source on every run and fails when the two sides drift.
 
+`health()` carries `store_version`, the sum of that host's replica version
+vector: how many changes, from every host, it has applied. Comparable across
+hosts, so two hosts far apart on it are a replication problem. 0 on a
+single-box SQLite host, which has no replica.
+
 ## Errors
 
 Every non-2xx throws. The subclass tells you what to do about it.

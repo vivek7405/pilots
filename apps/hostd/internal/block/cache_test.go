@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"golang.org/x/sys/unix"
 )
 
@@ -392,4 +393,55 @@ func blocksAllocated(t *testing.T, path string) int64 {
 		t.Fatal(err)
 	}
 	return st.Blocks * 512
+}
+
+// The overlay is the copy-on-write view the NBD handler serves, so it is where
+// a block read is either answered from the machine's own writes or falls
+// through to the shared template. That ratio is the whole point of
+// pilots_nbd_cache_hits_total: a machine whose reads all miss is paying the
+// template's cost on every fault.
+//
+// Deltas, not absolutes: the registry is package-level and shared with every
+// other test in this package.
+func TestOverlayReadsAreCountedAsCacheHitsAndMisses(t *testing.T) {
+	dir := t.TempDir()
+	in := writeBlocks(t, dir, 1, 2, 3, 4)
+	buildDir := filepath.Join(dir, "template")
+	chunkifyTo(t, in, buildDir, "", uuid.New())
+
+	template, err := OpenLocalBuild(buildDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer template.Close()
+
+	o := NewOverlay(template, newTestCache(t, template.Size()))
+	got := make([]byte, testBlock)
+
+	// An unwritten block: a miss, and no hit.
+	hits, misses := metrics.NBDCacheHits.Load(), metrics.NBDCacheMisses.Load()
+	if _, err := o.ReadAt(got, testBlock); err != nil {
+		t.Fatal(err)
+	}
+	if d := metrics.NBDCacheMisses.Load() - misses; d != 1 {
+		t.Errorf("template read counted %d misses, want 1", d)
+	}
+	if d := metrics.NBDCacheHits.Load() - hits; d != 0 {
+		t.Errorf("template read counted %d hits, want 0", d)
+	}
+
+	// The same block after a write: a hit, and no miss.
+	if _, err := o.WriteAt(bytes.Repeat([]byte{99}, int(testBlock)), testBlock); err != nil {
+		t.Fatal(err)
+	}
+	hits, misses = metrics.NBDCacheHits.Load(), metrics.NBDCacheMisses.Load()
+	if _, err := o.ReadAt(got, testBlock); err != nil {
+		t.Fatal(err)
+	}
+	if d := metrics.NBDCacheHits.Load() - hits; d != 1 {
+		t.Errorf("a written block counted %d hits, want 1", d)
+	}
+	if d := metrics.NBDCacheMisses.Load() - misses; d != 0 {
+		t.Errorf("a written block counted %d misses, want 0", d)
+	}
 }

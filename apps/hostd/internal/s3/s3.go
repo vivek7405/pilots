@@ -22,6 +22,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
+
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -102,6 +104,19 @@ func New(ctx context.Context, cfg Config) (*Client, error) {
 }
 
 // key applies the configured prefix.
+// observe records one call.
+//
+// Deferred with time.Now() evaluated at the CALL site, so the duration covers
+// the whole method including the SDK's retries -- which is the number that
+// matters, since a caller waits for the retries too.
+//
+// The op label is the method name lowercased: seven values, fixed here, and
+// deliberately not the key or the bucket. See the metrics package doc.
+func observe(op string, start time.Time) {
+	metrics.S3Ops.With(op).Inc()
+	metrics.S3OpSeconds.With(op).Observe(time.Since(start).Seconds())
+}
+
 func (c *Client) key(k string) string {
 	if c.prefix == "" {
 		return k
@@ -111,6 +126,8 @@ func (c *Client) key(k string) string {
 
 // Get fetches a whole object.
 func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
+	defer observe("get", time.Now())
+
 	out, err := c.api.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(c.bucket), Key: aws.String(c.key(key)),
 	})
@@ -135,9 +152,14 @@ func (c *Client) Get(ctx context.Context, key string) ([]byte, error) {
 // the chunk store relies on distinguishing "this object is empty because the
 // diff was all zeros" from "this fetch failed".
 func (c *Client) GetRange(ctx context.Context, key string, offset, length int64) ([]byte, error) {
+	// Below the guard, not above it: a zero-length range makes no call at
+	// all, and counting one would add a call that never happened plus a
+	// near-zero latency sample that drags every getrange quantile down.
 	if length <= 0 {
 		return nil, nil
 	}
+	defer observe("getrange", time.Now())
+
 	rng := fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)
 
 	out, err := c.api.GetObject(ctx, &s3.GetObjectInput{
@@ -163,6 +185,8 @@ func (c *Client) GetRange(ctx context.Context, key string, offset, length int64)
 
 // Put uploads bytes.
 func (c *Client) Put(ctx context.Context, key string, data []byte) error {
+	defer observe("put", time.Now())
+
 	_, err := c.api.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:        aws.String(c.bucket),
 		Key:           aws.String(c.key(key)),
@@ -181,6 +205,8 @@ func (c *Client) Put(ctx context.Context, key string, data []byte) error {
 // one into a buffer to upload it would multiply hostd's footprint by the
 // number of concurrent suspends.
 func (c *Client) PutFile(ctx context.Context, key, filePath string) error {
+	defer observe("putfile", time.Now())
+
 	f, err := os.Open(filePath)
 	if err != nil {
 		return fmt.Errorf("s3: open %s: %w", filePath, err)
@@ -206,6 +232,8 @@ func (c *Client) PutFile(ctx context.Context, key, filePath string) error {
 
 // GetToFile streams an object to disk, for the same reason PutFile exists.
 func (c *Client) GetToFile(ctx context.Context, key, filePath string) error {
+	defer observe("gettofile", time.Now())
+
 	out, err := c.api.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(c.bucket), Key: aws.String(c.key(key)),
 	})
@@ -248,6 +276,8 @@ func (c *Client) GetToFile(ctx context.Context, key, filePath string) error {
 // the store as well as the host: object storage is the only truth, so state
 // left behind there is a machine that still exists in every way that counts.
 func (c *Client) Delete(ctx context.Context, key string) error {
+	defer observe("delete", time.Now())
+
 	_, err := c.api.DeleteObject(ctx, &s3.DeleteObjectInput{
 		Bucket: aws.String(c.bucket), Key: aws.String(c.key(key)),
 	})
@@ -291,6 +321,8 @@ type ObjectInfo struct {
 // what is under a prefix and silently getting the first thousand is the kind
 // of truncation that reads as "the rest was deleted".
 func (c *Client) List(ctx context.Context, prefix string) ([]ObjectInfo, error) {
+	defer observe("list", time.Now())
+
 	full := c.key(prefix)
 	var out []ObjectInfo
 	var token *string

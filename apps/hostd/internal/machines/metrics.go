@@ -4,6 +4,7 @@ import (
 	"sync"
 
 	"github.com/vivek7405/pilots/hostd/internal/metrics"
+	"github.com/vivek7405/pilots/hostd/internal/state"
 	"github.com/vivek7405/pilots/hostd/internal/uffd"
 )
 
@@ -126,6 +127,43 @@ func (m *Manager) CollectMetrics() {
 	metrics.UffdPrefetchHit.Set(hit)
 	metrics.UffdStartupPages.Set(startupPages)
 	metrics.UffdStartupBytes.Set(startupBytes)
+
+	// Both are pure in-memory reads, so the scrape can ask for them directly.
+	metrics.RouterInflight.Set(int64(m.flight.total()))
+	metrics.SlotsFree.Set(int64(m.pool.Free()))
+}
+
+// countByState publishes pilots_machines{state} from rows the caller already
+// holds.
+//
+// Called from the idle tick rather than from the scrape: it needs a store
+// read, and CollectMetrics runs on the request path of /metrics. Every state
+// is seeded at zero first, because a gauge that is simply not set keeps its
+// last value -- the last machine leaving "running" would otherwise leave the
+// series reading 1 forever. Rows belonging to another host are skipped
+// (single-writer: a host publishes its own machines only) and so are
+// tombstones, which ListMachines returns.
+func (m *Manager) countByState(rows []state.Machine) {
+	counts := map[string]int64{
+		StateCreating:  0,
+		StateRunning:   0,
+		StateSuspended: 0,
+		StateStopped:   0,
+		StateError:     0,
+	}
+	for _, row := range rows {
+		if row.HostID != m.opts.HostID || row.State == state.StateDestroyed {
+			continue
+		}
+		// Only the five known states, so the label set stays the bounded one
+		// the metrics package doc names even if a row carries something else.
+		if _, ok := counts[row.State]; ok {
+			counts[row.State]++
+		}
+	}
+	for s, n := range counts {
+		metrics.Machines.With(s).Set(n)
+	}
 }
 
 // foldStats sums one scrape's worth of handler reports.
