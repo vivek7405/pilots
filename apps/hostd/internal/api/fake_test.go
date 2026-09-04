@@ -15,6 +15,7 @@ type fakeManager struct {
 	err        error
 
 	created, destroyed, suspended, woken, restored int
+	collected                                      int
 	volumesCreated                                 int
 	// lastCreate is the request as the handler passed it down, so a test can
 	// assert what the handler filled in -- the org above all, which must come
@@ -79,3 +80,5 @@ func (f *fakeManager) MachineVolume(context.Context, string) (*MachineVolume, er
 		Device: "/dev/vdb", CacheType: "Writeback",
 	}, f.err
 }
+
+func (f *fakeManager) CollectMetrics() { f.collected++ }

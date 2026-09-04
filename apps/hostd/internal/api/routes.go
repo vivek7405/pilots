@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/quota"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
@@ -17,6 +18,9 @@ type Deps struct {
 	Machines Manager
 	// Reflink is the startup probe's result; see HealthResponse.Reflink.
 	Reflink bool
+	// HugePages is this host's guest page size setting; see
+	// HealthResponse.HugePages.
+	HugePages bool
 	// Builds turns a Dockerfile context into a rootfs build. Nil on a host
 	// with no object storage, where a build has nowhere to publish to.
 	Builds BuildRunner
@@ -65,11 +69,19 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("GET /v1/health", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, HealthResponse{
 			OK: true, HostID: d.HostID, Reflink: d.Reflink,
+			HugePages: d.HugePages,
 		})
 	})
 	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
+		// Collected on the scrape rather than on a timer: the memory handlers
+		// are separate processes that have to be asked, and asking them on a
+		// schedule nobody is reading is work for nothing.
+		if d.Machines != nil {
+			d.Machines.CollectMetrics()
+		}
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 		w.WriteHeader(http.StatusOK)
+		metrics.Default.Render(w)
 	})
 
 	// Machines: the one primitive.

@@ -415,6 +415,13 @@ type HealthResponse struct {
 	// on the health response so that a degraded host is visible from the
 	// outside rather than only in a latency graph nobody is watching.
 	Reflink bool `json:"reflink"`
+	// HugePages reports whether guest memory on this host is backed by 2MiB
+	// pages. Unlike Reflink this is not only a speed signal: the page size is
+	// recorded in every snapshot and cannot be reinterpreted at restore, so a
+	// host that disagrees with the fleet cannot restore the fleet's machines
+	// at all. It is also what capacity is counted from, since reserved
+	// hugepages do not appear in MemAvailable.
+	HugePages bool `json:"hugepages"`
 }
 
 type ErrorResponse struct {

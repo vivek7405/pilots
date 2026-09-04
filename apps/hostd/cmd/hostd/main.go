@@ -236,6 +236,7 @@ func run() error {
 			JailerBin:      cfg.JailerBin,
 			ChrootBase:     cfg.ChrootBase,
 			CPUTemplate:    cfg.CPUTemplate,
+			HugePages:      cfg.HugePages,
 			JailUID:        cfg.JailUID,
 			JailGID:        cfg.JailGID,
 			Limits:         fc.Limits{PidsMax: 2048},
@@ -383,7 +384,7 @@ func run() error {
 	}
 
 	controlAPI := api.Routes(api.Deps{
-		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink,
+		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink, HugePages: cfg.HugePages,
 		Builds: builder, Rollout: rollout, Domain: cfg.WorkloadDomain,
 		Peers: peerLookup(f), Tenancy: tenancy, BuildGate: &quota.HostGate{},
 		GitHub: github.Handler(github.Deps{

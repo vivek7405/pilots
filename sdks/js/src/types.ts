@@ -238,6 +238,13 @@ export interface HealthResponse {
   ok: boolean
   host_id: string
   reflink: boolean
+  /**
+   * Whether guest memory on this host is backed by 2MiB pages. Unlike
+   * reflink this is not only a speed signal: the page size is recorded in
+   * every snapshot and cannot be reinterpreted at restore, so a host that
+   * disagrees with the fleet cannot restore the fleet's machines at all.
+   */
+  hugepages: boolean
 }
 
 export interface ErrorResponse {

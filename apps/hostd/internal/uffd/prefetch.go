@@ -25,7 +25,74 @@ const (
 	// prefetchCopyWorkers keeps the kernel's queue draining while pages
 	// are still arriving.
 	prefetchCopyWorkers = 4
+	// prefetchDiffCap bounds the ranges taken from the last cycle's diff.
+	//
+	// Uncapped, a machine that rewrote most of its memory turns its wake into
+	// a full image read -- the fault storm the bulk fetch exists to avoid,
+	// moved one layer up. 64MiB is an eighth of the default 512MiB machine.
+	prefetchDiffCap = 64 << 20
 )
+
+// diffEntries are the ranges a build stores ITSELF, which is exactly what the
+// machine changed since the template it was diffed against.
+//
+// The set costs nothing to obtain: it is the self-pointing half of the
+// mapping the build already carries, so this needs no new persisted state.
+// The pages a machine dirtied last cycle are the best available predictor of
+// what it will touch next cycle, and the recorded fault order cannot cover a
+// page the previous run never faulted in order.
+//
+// Returned ascending by offset, capped, with the tail dropped and counted.
+func diffEntries(src block.Slicer, pageSize uint64) ([]entry, int) {
+	hs, ok := src.(block.HeaderedSlicer)
+	if !ok {
+		return nil, 0
+	}
+	hdr := hs.Header()
+	if hdr == nil || hdr.Metadata == nil {
+		return nil, 0
+	}
+	self := hdr.Metadata.BuildId
+	if hdr.Metadata.BaseBuildId == self {
+		// A build with no parent -- the template itself, or a Full chunked
+		// without one -- stores EVERY range, so "what it changed" is all of
+		// memory. Replaying that would prefault the first 64MiB of every
+		// machine created from the template: pages the guest may never ask
+		// for and, under 2MiB backing, thirty-two hugepages taken from the
+		// pool for nothing. The recorded fault order still covers a create.
+		return nil, 0
+	}
+
+	// A build mapping is aligned to the BLOCK size (4KiB), and the guest
+	// faults at the PAGE size, which under hugepage backing is 2MiB. Emitting
+	// a mapping's own offset would hand UFFDIO_COPY a destination that is not
+	// page-aligned, and the kernel rejects every one of them -- 469 failed
+	// copies out of 481 on the first hugepage host this ran on, which is how
+	// this was found. Align down, cover the mapping's whole span, and
+	// deduplicate: at 2MiB many 4KiB mappings fall inside one guest page.
+	seen := make(map[uint64]struct{})
+	var out []entry
+	var span uint64
+	var dropped int
+	for _, m := range hdr.Mapping {
+		if m == nil || m.BuildId != self {
+			continue // served by the parent: unchanged, and not worth fetching
+		}
+		for off := m.Offset &^ (pageSize - 1); off < m.Offset+m.Length; off += pageSize {
+			if _, ok := seen[off]; ok {
+				continue
+			}
+			if span+pageSize > prefetchDiffCap {
+				dropped++
+				continue
+			}
+			seen[off] = struct{}{}
+			out = append(out, entry{off: int64(off), length: int64(pageSize)})
+			span += pageSize
+		}
+	}
+	return out, dropped
+}
 
 // recorder appends the fault order to a file, for the next wake to replay.
 type recorder struct {
@@ -112,8 +179,13 @@ func parsePrefetch(contents []byte) []entry {
 // idempotent -- a page another worker already installed comes back EEXIST --
 // so racing is safe, and doing it first would block Firecracker's resume for
 // as long as the replay takes.
+// extra is appended AFTER the recorded order. The recorded order is a
+// SEQUENCE whose value is that it matches the guest's real access order; extra
+// is a SET with no ordering, so putting it first would delay the pages the
+// guest is about to ask for. A page the recorded order already carries is
+// dropped from extra rather than replayed twice; see withoutRecorded.
 func prefault(ctx context.Context, h *handshake, src block.Slicer,
-	contents []byte, stats *Stats) {
+	contents []byte, extra []entry, stats *Stats) {
 
 	// One bulk fetch first, always, list or no list.
 	//
@@ -130,20 +202,44 @@ func prefault(ctx context.Context, h *handshake, src block.Slicer,
 	}
 
 	entries := parsePrefetch(contents)
+	entries = append(entries, withoutRecorded(extra, entries)...)
 	if len(entries) == 0 {
 		return
 	}
 	replay(ctx, h, src, entries, stats)
 }
 
+// withoutRecorded drops from extra the pages the recorded order already
+// carries.
+//
+// A page the guest faulted last cycle is very likely one it also dirtied, so
+// the two sets overlap heavily, and the overlap is not free: the second copy
+// of a page answers EEXIST, which replay counts as the guest having got there
+// first -- a MISS -- so the hit rate a wake is judged on drifts down with
+// every duplicate, while a fetch worker and a copy worker each spend a page
+// read finding out.
+func withoutRecorded(extra, recorded []entry) []entry {
+	if len(extra) == 0 || len(recorded) == 0 {
+		return extra
+	}
+	seen := make(map[int64]struct{}, len(recorded))
+	for _, e := range recorded {
+		seen[e.off] = struct{}{}
+	}
+	out := make([]entry, 0, len(extra))
+	for _, e := range extra {
+		if _, ok := seen[e.off]; !ok {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // replay installs every recorded page, fetching and copying in parallel.
 func replay(ctx context.Context, h *handshake, src block.Slicer,
 	entries []entry, stats *Stats) {
 
-	type fetched struct {
-		off  int64
-		data []byte
-	}
+	type fetched struct{ off int64 }
 
 	work := make(chan entry, len(entries))
 	for _, e := range entries {
@@ -152,7 +248,7 @@ func replay(ctx context.Context, h *handshake, src block.Slicer,
 	close(work)
 
 	pages := make(chan fetched, prefetchFetchWorkers*4)
-	var copied, skipped atomic.Int64
+	var copied, skipped, late atomic.Int64
 	start := time.Now()
 
 	var fetchWg sync.WaitGroup
@@ -164,13 +260,16 @@ func replay(ctx context.Context, h *handshake, src block.Slicer,
 				if ctx.Err() != nil {
 					return
 				}
-				data, err := src.Slice(ctx, e.off, e.length)
-				if err != nil {
+				// Warm the local cache for this range; the copy worker
+				// below does the authoritative read into its own page
+				// buffer, because filling a whole guest page can take
+				// several Slice calls (see fillPage).
+				if _, err := src.Slice(ctx, e.off, e.length); err != nil {
 					skipped.Add(1)
 					continue
 				}
 				select {
-				case pages <- fetched{off: e.off, data: data}:
+				case pages <- fetched{off: e.off}:
 				case <-ctx.Done():
 					return
 				}
@@ -193,14 +292,28 @@ func replay(ctx context.Context, h *handshake, src block.Slicer,
 					skipped.Add(1)
 					continue
 				}
-				for i := copy(buf, p.data); i < len(buf); i++ {
-					buf[i] = 0
+				// The SAME fill the demand path uses. This was a single
+				// Slice plus a zero-fill of the remainder, which is correct
+				// only while one block covers one page: at 2MiB it installed
+				// 4KiB of real data and ~2MB of zeros over the guest's
+				// memory, and the machine never came back from a restore.
+				if err := fillPage(ctx, src, p.off, buf); err != nil {
+					skipped.Add(1)
+					continue
 				}
 				// Best-effort by design: a page that fails here is simply
 				// served on demand later. It must NOT count toward the fault
 				// stats, which exist to show what the guest actually needed.
-				if err := installPage(h.uffd, addr, buf, h.pageSize, stats); err != nil {
+				existed, err := installPage(h.uffd, addr, buf, h.pageSize, stats)
+				if err != nil {
 					skipped.Add(1)
+					continue
+				}
+				if existed {
+					// The guest faulted this page before the replay reached
+					// it, so it was served on demand anyway and the replay
+					// saved nothing. Counted as a miss.
+					late.Add(1)
 					continue
 				}
 				copied.Add(1)
@@ -212,7 +325,17 @@ func replay(ctx context.Context, h *handshake, src block.Slicer,
 	close(pages)
 	copyWg.Wait()
 
+	// Counted here rather than per page: what a scrape wants is how many
+	// pages this replay put in ahead of demand, and installAll's own prefault
+	// goes through the same function, so both are visible as replay work.
+	// Replayed counts every page the replay put in ahead of demand; Hit counts
+	// those the guest had not already asked for, which is the same set here.
+	// The difference between them and `late` is the prediction's accuracy.
+	stats.Replayed.Add(copied.Load() + late.Load())
+	stats.PrefetchHit.Add(copied.Load())
+
 	slog.Info("uffd prefetch replay done",
-		"entries", len(entries), "installed", copied.Load(), "skipped", skipped.Load(),
+		"entries", len(entries), "installed", copied.Load(),
+		"guest_got_there_first", late.Load(), "skipped", skipped.Load(),
 		"ms", time.Since(start).Milliseconds())
 }

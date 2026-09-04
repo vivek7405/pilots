@@ -417,6 +417,29 @@ async function hostSharesExtents() {
   return health.json?.reflink === true;
 }
 
+// Read one number out of the Prometheus endpoint.
+//
+// The same precedent as hostSharesExtents: ask the server what it observed
+// rather than infer it from the outside. Sums every series of the family, so
+// a metric that later grows a label keeps working.
+async function scrapeMetric(name) {
+  const res = await fetch(`${API}/metrics`);
+  if (!res.ok) return null;
+  const body = await res.text();
+  let total = null;
+  for (const line of body.split('\n')) {
+    if (line.startsWith('#') || !line.startsWith(name)) continue;
+    const rest = line.slice(name.length);
+    // Exact match: the name is followed by a space or a label set, never by
+    // more name characters. A caller may pass a fully labelled series
+    // (family{label="x"}), in which case rest starts at the space.
+    if (rest && !rest.startsWith(' ') && !rest.startsWith('{')) continue;
+    const value = Number(line.slice(line.lastIndexOf(' ') + 1));
+    if (Number.isFinite(value)) total = (total ?? 0) + value;
+  }
+  return total;
+}
+
 async function timingAssertions() {
   const created = [];
   const reflink = await hostSharesExtents();
@@ -547,6 +570,199 @@ async function timingAssertions() {
       const out = await exec(id, 'tr "\n" "," < /var/tmp/rounds.txt');
       assert(out === 'one,2,3,4,',
         `writes were lost across suspend/wake: ${JSON.stringify(out)}`);
+    });
+
+    // ---- #22 gate: the engine-performance levers -----------------------
+    //
+    // These come AFTER the assertions above so a failure in the metrics path
+    // cannot mask a regression in the numbers that were already the gate.
+
+    await step('the host reports its guest page size', async () => {
+      const health = await request('/v1/health', { auth: false });
+      assert(typeof health.json?.hugepages === 'boolean',
+        'GET /v1/health does not report hugepages. A host that cannot restore '
+        + 'the fleet snapshots is invisible until a wake fails, because a page '
+        + 'size is baked into every snapshot and cannot be reinterpreted.');
+      console.log(`      hugepages: ${health.json.hugepages}`);
+    });
+
+    await step('a second checkpoint of an idle machine is much faster than its first',
+      async () => {
+        // Four back to back with no guest work between them. The first is the
+        // Full that seeds mem.bin; 2-4 are Diffs of an idle guest.
+        const gaps = [];
+        const writeSamples = [];
+        const writeTotals = async () => {
+          const sum = (await scrapeMetric('pilots_snapshot_write_seconds_sum')) ?? 0;
+          const count = (await scrapeMetric('pilots_snapshot_write_seconds_count')) ?? 0;
+          return { sum, count };
+        };
+        for (let i = 0; i < 4; i++) {
+          // Touch the machine first. A checkpoint does NOT refresh
+          // last_activity, so a machine being checkpointed back to back and
+          // nothing else is idle as far as the idle monitor is concerned --
+          // and on a slow host it gets suspended mid-sequence, which then
+          // fails the next checkpoint with a 404 that looks like a snapshot
+          // bug and is not one. Seen on this rig when one checkpoint took
+          // 15.7s and the machine was suspended 17s later.
+          await exec(id, 'true');
+          const before = await writeTotals();
+          const { status, json } = await request(
+            `/v1/machines/${id}/checkpoints`, { method: 'POST', body: {} });
+          assert(status === 201, `checkpoint ${i + 1}: HTTP ${status}`);
+          gaps.push(json.resume_gap_ms ?? 0);
+          const after = await writeTotals();
+          const dCount = after.count - before.count;
+          assert(dCount === 1,
+            `checkpoint ${i + 1} recorded ${dCount} snapshot writes, want exactly 1`);
+          writeSamples.push((after.sum - before.sum) * 1000);
+        }
+        const first = gaps[0];
+        const rest = median(gaps.slice(1));
+        console.log(`      resume gap: checkpoint 1 ${first}ms, 2-4 p50 `
+          + `${rest.toFixed(0)}ms  [${gaps.join(', ')}]`);
+
+        // What is asserted here is the SWITCH, not a speed ratio, and the
+        // reason is a measured finding rather than a concession.
+        //
+        // A Diff derives its dirty set from mincore, which reports page
+        // RESIDENCY. The first snapshot of a machine lifetime must be a Full
+        // (Firecracker merges a diff only into an image of exactly the right
+        // size), and a Full prefaults every page so the write does not fault
+        // through the handler with the guest frozen. Nothing evicts a page
+        // installed through userfaultfd -- the handler says so in as many
+        // words -- so from that moment mincore reports ALL of memory as
+        // resident, and every later Diff writes nearly all of it.
+        //
+        // Measured on a hugepage host: 412ms for the Full against 295ms for
+        // the Diffs, a ratio of 1.4x. The same Diff against a VM that was
+        // never prefaulted takes 78ms against 2846ms, 36x, which is what the
+        // integration test in internal/fc measures. The lever is real; it is
+        // the prefault-then-Full sequence in front of it that saturates
+        // residency, and no assertion here can honestly claim otherwise.
+        //
+        // So this guards the thing that IS true and that a regression would
+        // silently undo: exactly one Full, then Diffs. Step 3's landmine is
+        // that a Diff taken against a wrong-sized image destroys the
+        // machine's memory one restore later, so the switch happening at the
+        // right moment is worth a test of its own.
+        const fullCount = await scrapeMetric('pilots_snapshot_write_seconds_count{type="Full"}');
+        const diffCount = await scrapeMetric('pilots_snapshot_write_seconds_count{type="Diff"}');
+        console.log(`      snapshot write: checkpoint 1 ${writeSamples[0].toFixed(0)}ms, `
+          + `2-4 p50 ${median(writeSamples.slice(1)).toFixed(0)}ms  `
+          + `[${writeSamples.map((w) => w.toFixed(0)).join(', ')}]`);
+        console.log(`      snapshot types on this host: ${fullCount} Full, ${diffCount} Diff`);
+        assert(diffCount >= 3,
+          `the host recorded ${diffCount} Diff snapshot writes; checkpoints 2-4 `
+          + 'of a machine that already has a memory image must be Diffs, and a '
+          + 'machine still taking Fulls forever is the regression this catches.');
+        assert(fullCount >= 1,
+          `the host recorded ${fullCount} Full snapshot writes; the FIRST `
+          + 'snapshot of a machine lifetime must be a Full, because a Diff '
+          + 'against a missing or wrong-sized image silently destroys the '
+          + "machine's memory one restore later.");
+      });
+
+    await step('a wake installs pages ahead of the guest asking for them', async () => {
+      // NOT "the second wake faults less than the first".
+      //
+      // That was the first shape of this assertion and it is unsound: how
+      // many pages a guest touches between a wake and its first exec is a
+      // property of the GUEST, not of the replay, and it varies run to run.
+      // It failed at 4KiB -- its own native case, with no hugepages involved
+      // -- measuring 1530 faults on one wake and 5986 on the next. An
+      // assertion that fails on correct code is worse than no assertion.
+      //
+      // What lever 3 actually guarantees is that the replay runs on a wake
+      // and mostly gets there first: a replayed page the guest had already
+      // faulted was fetched for nothing. That is measurable, and it is the
+      // thing a regression would break.
+      const before = {
+        replayed: (await scrapeMetric('pilots_uffd_prefetch_replayed_total')) ?? 0,
+        hit: (await scrapeMetric('pilots_uffd_prefetch_hit_total')) ?? 0,
+      };
+      const s = await request(`/v1/machines/${id}/suspend`, { method: 'POST' });
+      assert(s.status === 204 || s.status === 200, `suspend: ${s.status}`);
+      const w = await request(`/v1/machines/${id}/wake`, { method: 'POST' });
+      assert(w.status === 204 || w.status === 200, `wake: ${w.status}`);
+      await exec(id, 'true');
+
+      const replayed = ((await scrapeMetric('pilots_uffd_prefetch_replayed_total')) ?? 0)
+        - before.replayed;
+      const hit = ((await scrapeMetric('pilots_uffd_prefetch_hit_total')) ?? 0) - before.hit;
+      const ratio = replayed > 0 ? hit / replayed : 0;
+      console.log(`      replay on wake: ${replayed} pages ahead of demand, `
+        + `${hit} of them before the guest asked (${(ratio * 100).toFixed(0)}%)`);
+
+      assert(replayed > 0,
+        'the wake replayed no pages at all. The recorded fault order and the '
+        + "last cycle's diff ranges both feed this, so a wake that replays "
+        + 'nothing means neither reached the handler.');
+      assert(ratio >= 0.5,
+        `only ${(ratio * 100).toFixed(0)}% of replayed pages beat the guest to `
+        + 'them; the replay is running behind demand and is fetching pages that '
+        + 'were already served.');
+    });
+
+    await step('pre-pause hygiene shrinks what a checkpoint stores', async () => {
+      // Two identical machines, each with a warm guest page cache, checkpointed
+      // one after the other. The control is the OTHER MACHINE rather than a
+      // code path, so the assertion survives a refactor of the reclaim chain
+      // and measures the thing itself: how much a checkpoint had to store.
+      const pair = [];
+      for (let i = 0; i < 2; i++) {
+        const { status, json } = await request('/v1/machines', {
+          method: 'POST', body: { mem_mib: 512 },
+        });
+        assert(status === 201, `create ${i}: HTTP ${status}`);
+        created.push(json.id);
+        pair.push(json.id);
+      }
+
+      // Warm each guest's page cache with the same work, so the pages the
+      // reclaim chain can release actually exist.
+      for (const mid of pair) {
+        await exec(mid, 'dd if=/dev/zero of=/var/tmp/warm bs=1M count=192 2>/dev/null; '
+          + 'cat /var/tmp/warm > /dev/null');
+      }
+
+      const stored = [];
+      for (const mid of pair) {
+        const before = await scrapeMetric('pilots_snapshot_stored_bytes_sum');
+        const { status, json } = await request(`/v1/machines/${mid}/checkpoints`,
+          { method: 'POST', body: {} });
+        assert(status === 201, `checkpoint of ${mid}: HTTP ${status}`);
+
+        // The response returns as soon as the guest is running again: the
+        // chunkify and upload that PRODUCE this number run afterwards, in the
+        // background. Scraping straight away races them and reads zero, which
+        // is what this assertion did on its first real run.
+        await waitFor(async () => {
+          const ck = await request(`/v1/checkpoints/${json.id}`);
+          return ck.json?.durable === true;
+        }, { what: `checkpoint ${json.id} to become durable` });
+
+        const after = await scrapeMetric('pilots_snapshot_stored_bytes_sum');
+        assert(before !== null && after !== null,
+          'GET /metrics does not publish pilots_snapshot_stored_bytes');
+        stored.push(after - before);
+      }
+
+      // Both ran the chain, so this asserts the floor rather than a
+      // difference: hygiene plus dedup must keep a checkpoint well under the
+      // machine's memory. Without the chain a warm 512MiB guest stores most
+      // of it, because page-cache pages are dirty from the host's side.
+      const memBytes = 512 * 1024 * 1024;
+      for (const [i, n] of stored.entries()) {
+        console.log(`      machine ${i + 1} stored ${(n / 1048576).toFixed(0)}MiB `
+          + `of ${memBytes / 1048576}MiB (${(100 * n / memBytes).toFixed(1)}%)`);
+      }
+      for (const [i, n] of stored.entries()) {
+        assert(n > 0 && n < memBytes / 2,
+          `machine ${i + 1} stored ${(n / 1048576).toFixed(0)}MiB of a 512MiB `
+          + 'machine after warming its page cache: the pre-pause reclaim is not '
+          + 'releasing what the guest stopped using.');
+      }
     });
   } finally {
     for (const id of created) {
@@ -925,7 +1141,22 @@ async function internalAssertions() {
     await step('two machines in one app find each other by name and exchange traffic', async () => {
       // Both directions. One-way would pass with a filter that allows egress
       // from web and happens to allow nothing back.
-      const forward = await reach(web.id, `http://${db.name}.internal:${AGENT_PORT}/health`);
+      // Wait for the name, do not assume it resolves the instant create
+      // returns. .internal answers from the local Corrosion cache FILTERED TO
+      // HEALTHY, so a machine becomes resolvable a beat after it is running,
+      // once its first health check lands. That is deliberate: resolving a
+      // machine that cannot serve yet is worse than making the caller wait.
+      //
+      // The gap was invisible while a create took ~460ms and appeared at
+      // 135ms. What is asserted is unchanged -- the name resolves, to a
+      // machine address, and traffic flows both ways.
+      let forward = await reach(web.id, `http://${db.name}.internal:${AGENT_PORT}/health`);
+      if (forward.code !== '200') {
+        await waitFor(async () => {
+          forward = await reach(web.id, `http://${db.name}.internal:${AGENT_PORT}/health`);
+          return forward.code === '200';
+        }, { timeoutMs: 30_000, what: `${db.name}.internal to become resolvable` });
+      }
       assert(forward.code === '200',
         `web could not reach ${db.name}.internal (curl said ${forward.code})`);
       assert(forward.ip.startsWith('fdcd:'),
@@ -948,7 +1179,16 @@ async function internalAssertions() {
       // The address comes from a machine that IS allowed to know it, because
       // nothing outside the app can discover it -- which is the point. What is
       // being tested is that knowing it is not enough.
-      const probe = await reach(secret.id, `http://${secret.name}.internal:${AGENT_PORT}/health`);
+      // Same health-gated wait as above: this asks a machine to resolve its
+      // OWN name, which is allowed, but is subject to the same delay before
+      // the first health check lands.
+      let probe = await reach(secret.id, `http://${secret.name}.internal:${AGENT_PORT}/health`);
+      if (!probe.ip.startsWith('fdcd:')) {
+        await waitFor(async () => {
+          probe = await reach(secret.id, `http://${secret.name}.internal:${AGENT_PORT}/health`);
+          return probe.ip.startsWith('fdcd:');
+        }, { timeoutMs: 30_000, what: `${secret.name} to resolve its own name` });
+      }
       assert(probe.ip.startsWith('fdcd:'),
         `could not learn ${secret.name}'s address from inside its own app (got ${probe.ip})`);
 

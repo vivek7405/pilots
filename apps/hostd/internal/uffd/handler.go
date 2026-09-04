@@ -47,6 +47,19 @@ type Stats struct {
 	EventsIgnore atomic.Int64
 	MinorFaults  atomic.Int64
 	WPFaults     atomic.Int64
+	// Replayed counts pages installed ahead of demand, from a recorded fault
+	// order or a diff's own ranges. A replayed page the guest never asks for
+	// was bandwidth spent for nothing, so this is the denominator for how
+	// good the prediction is.
+	Replayed atomic.Int64
+	// PrefetchHit counts replayed pages the guest had NOT already faulted --
+	// the ones the prediction was early enough to matter for. Over Replayed,
+	// this is how good the prediction is.
+	PrefetchHit atomic.Int64
+	// StartupPages is Faults sampled at the moment the machine first answered
+	// a health check, which is where "how much of the image did this wake
+	// actually need" is answered. Zero until that sample is taken.
+	StartupPages atomic.Int64
 }
 
 // handshake is what Firecracker sends when it loads a snapshot: the region map
@@ -261,12 +274,29 @@ func handleFault(ctx context.Context, h *handshake, src block.Slicer,
 		return fmt.Errorf("address %#x is not in any region", faultAddr)
 	}
 
-	// Loop, because a Slicer is allowed to return less than asked for -- it
-	// stops at a mapping boundary, and a page spans more than one whenever the
-	// build's block size is smaller than the guest's. Treating the first short
-	// return as the end of the image would zero-fill the rest of a page whose
-	// bytes are sitting in the very next mapping, and the guest would resume on
-	// memory that is half correct and half holes.
+	if err := fillPage(ctx, src, off, buf); err != nil {
+		return err
+	}
+
+	_, err := installPage(h.uffd, pageAddr, buf, h.pageSize, stats)
+	return err
+}
+
+// fillPage reads one guest page of the image into buf.
+//
+// It LOOPS, because a Slicer is allowed to return less than asked for -- it
+// stops at a mapping boundary, and a page spans more than one whenever the
+// build's block size is smaller than the guest's, which is every page once
+// guest memory is backed by 2MiB pages and the block size is 4KiB. Treating
+// the first short return as the end of the image would zero-fill the rest of
+// a page whose bytes are sitting in the very next mapping, and the guest
+// would resume on memory that is half correct and half holes.
+//
+// Shared with the prefetch replay rather than written twice. The replay had
+// its own single-Slice-then-zero-fill version, which was invisible at 4KiB
+// (one block IS one page) and silently corrupted almost every replayed page
+// at 2MiB -- a restored guest that resumed onto zeros and never ran.
+func fillPage(ctx context.Context, src block.Slicer, off int64, buf []byte) error {
 	filled := 0
 	for filled < len(buf) {
 		chunk, err := src.Slice(ctx, off+int64(filled), int64(len(buf)-filled))
@@ -285,53 +315,92 @@ func handleFault(ctx context.Context, h *handshake, src block.Slicer,
 	for i := filled; i < len(buf); i++ {
 		buf[i] = 0
 	}
+	return nil
+}
 
-	return installPage(h.uffd, pageAddr, buf, h.pageSize, stats)
+// uffdioCopy issues one UFFDIO_COPY and reports the kernel's errno, writing
+// the bytes it installed back into req.Copy.
+//
+// It is a variable so a test can drive installPage's resume path. A real
+// kernel only takes that path on hugetlb under memory pressure, which is not
+// something a test can provoke on demand -- and it is the path whose absence
+// hangs a guest thread for ever, so it must be tested.
+var uffdioCopy = func(uffd int, req *copyRequest) syscall.Errno {
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL,
+		uintptr(uffd), ioctlCopy, uintptr(unsafe.Pointer(req)))
+	return errno
 }
 
 // installPage copies one page into guest memory, which is also what unblocks
 // the faulting guest thread.
-func installPage(uffd int, dst uint64, buf []byte, pageSize uint64, stats *Stats) error {
+//
+// The request is advanced in place rather than reissued from the top, because
+// a copy can install part of a page and stop: a hugetlb UFFDIO_COPY may be
+// preempted mid-page, and EAGAIN can arrive after some bytes have already
+// landed. The kernel reports what it managed in Copy and does NOT redeliver
+// the fault, so resuming from there is the only thing that ever unblocks the
+// guest thread. At 4KiB a page is one physical page and this never happens.
+// The bool reports that the page was ALREADY installed (EEXIST). On the
+// replay path that means the guest faulted it first and the replay arrived
+// too late to have saved anything, which is the only honest way to tell a
+// prediction that paid off from one that did not: a page installed ahead of
+// demand never faults again, so its usefulness cannot be observed directly.
+func installPage(uffd int, dst uint64, buf []byte, pageSize uint64, stats *Stats) (bool, error) {
 	req := copyRequest{
 		Dst: dst,
 		Src: uint64(uintptr(unsafe.Pointer(&buf[0]))),
 		Len: pageSize,
 	}
 
-	for attempt := 0; ; attempt++ {
-		_, _, errno := syscall.Syscall(syscall.SYS_IOCTL,
-			uintptr(uffd), ioctlCopy, uintptr(unsafe.Pointer(&req)))
+	// advance consumes the bytes the kernel reported installing, so the next
+	// ioctl asks only for the remainder. Copy is an out-parameter, so it is
+	// always cleared: a retry must not inherit a stale count.
+	advance := func() {
+		done := uint64(req.Copy)
+		req.Copy = 0
+		if done == 0 || done > req.Len {
+			return
+		}
+		req.Dst += done
+		req.Src += done
+		req.Len -= done
+	}
 
-		switch errno {
+	for attempt := 0; ; attempt++ {
+		switch errno := uffdioCopy(uffd, &req); errno {
 		case 0:
-			if req.Copy != int64(pageSize) {
-				// The kernel installed less than a page. The guest thread
-				// stays blocked on the rest, so reporting success here would
-				// hang the VM with no error anywhere.
-				stats.CopyShort.Add(1)
-				return fmt.Errorf("UFFDIO_COPY at %#x installed %d of %d bytes",
-					dst, req.Copy, pageSize)
+			if req.Copy == int64(req.Len) {
+				return false, nil
 			}
-			return nil
+			// Short copy. Nothing installed at all means no progress is
+			// possible, so that stays an error rather than a spin.
+			stats.CopyShort.Add(1)
+			if req.Copy <= 0 {
+				return false, fmt.Errorf("UFFDIO_COPY at %#x installed %d of %d bytes",
+					req.Dst, req.Copy, req.Len)
+			}
+			if attempt >= copyRetries {
+				return false, fmt.Errorf("UFFDIO_COPY at %#x was still short after "+
+					"%d resumes", dst, attempt)
+			}
+			advance()
 
 		case syscall.EEXIST:
 			// Another worker, or the prefetch replay, already installed it.
 			stats.CopyEEXIST.Add(1)
-			return nil
+			return true, nil
 
 		case syscall.EAGAIN:
 			stats.CopyEAGAIN.Add(1)
 			if attempt >= copyRetries {
-				return fmt.Errorf("UFFDIO_COPY at %#x returned EAGAIN %d times",
+				return false, fmt.Errorf("UFFDIO_COPY at %#x returned EAGAIN %d times",
 					dst, attempt)
 			}
-			// Copy is an out-parameter the kernel may have written; clear it
-			// so a retry cannot inherit a stale count.
-			req.Copy = 0
+			advance()
 
 		default:
 			stats.CopyFailed.Add(1)
-			return fmt.Errorf("UFFDIO_COPY at %#x: %w", dst, errno)
+			return false, fmt.Errorf("UFFDIO_COPY at %#x: %w", dst, errno)
 		}
 	}
 }

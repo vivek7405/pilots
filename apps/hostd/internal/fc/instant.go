@@ -18,6 +18,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/vivek7405/pilots/hostd/internal/block"
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/nbd"
 	"github.com/vivek7405/pilots/hostd/internal/netns"
 	"github.com/vivek7405/pilots/hostd/internal/uffd"
@@ -220,6 +221,7 @@ func RestoreInstant(ctx context.Context, cfg InstantConfig, dl Uploader,
 
 	m = &Machine{
 		ID:        cfg.MachineID,
+		MemMiB:    cfg.MemMiB,
 		Slot:      cfg.Slot,
 		Cmd:       cmd,
 		Client:    NewClient(filepath.Join(chrootDir, "run", "fc.sock")),
@@ -539,7 +541,16 @@ func (m *Machine) SuspendInstant(ctx context.Context, up Uploader, chunks Upload
 	// write, and pages that are not resident fault in with the guest frozen.
 	// See CheckpointInstant.
 	m.awaitCapture()
-	m.makeMemoryResident()
+	// Only a Full snapshot needs this. Firecracker reads ALL of guest memory
+	// to write one, so a page still lazily backed faults through the handler
+	// with the guest frozen -- 5.8 seconds against 450ms on a 512MiB machine.
+	//
+	// A Diff must NOT get it. Without track_dirty_pages Firecracker's dirty
+	// set is the RESIDENT set, so installing every page first turns the Diff
+	// straight back into a Full and costs the whole lever.
+	if m.snapshotType(m.snapshotPaths().hostMem, m.MemMiB) == SnapshotFull {
+		m.makeMemoryResident()
+	}
 
 	p, err := m.pauseAndSnapshot(ctx)
 	if err != nil {
@@ -634,7 +645,16 @@ func (m *Machine) CheckpointInstant(ctx context.Context, up Uploader, chunks Upl
 	// frozen. On a machine's first checkpoint that is its entire memory, one
 	// page at a time, inside the window the user experiences as a freeze --
 	// measured at 5.8 seconds for 512MiB, against 450ms once resident.
-	m.makeMemoryResident()
+	// Only a Full snapshot needs this. Firecracker reads ALL of guest memory
+	// to write one, so a page still lazily backed faults through the handler
+	// with the guest frozen -- 5.8 seconds against 450ms on a 512MiB machine.
+	//
+	// A Diff must NOT get it. Without track_dirty_pages Firecracker's dirty
+	// set is the RESIDENT set, so installing every page first turns the Diff
+	// straight back into a Full and costs the whole lever.
+	if m.snapshotType(m.snapshotPaths().hostMem, m.MemMiB) == SnapshotFull {
+		m.makeMemoryResident()
+	}
 
 	// The resume gap is the only part of a checkpoint a user experiences, so
 	// it is measured rather than assumed.
@@ -653,6 +673,7 @@ func (m *Machine) CheckpointInstant(ctx context.Context, up Uploader, chunks Upl
 	// machine already serving.
 	defer func() {
 		res.ResumeGap = time.Since(pausedAt)
+		metrics.SnapshotResumeGapSeconds.Observe(res.ResumeGap.Seconds())
 		slog.Info("checkpoint resume gap", "machine", m.ID,
 			"ms", res.ResumeGap.Milliseconds())
 		if rerr := m.Client.Resume(context.WithoutCancel(ctx)); rerr != nil {
@@ -727,13 +748,22 @@ func (m *Machine) finishCheckpoint(up Uploader, chunks Uploader, opts SnapshotOp
 		_ = os.WriteFile(filepath.Join(localDir, failedMarker), []byte(err.Error()), 0o644)
 	}
 
-	if _, _, err := block.Chunkify(ctx, block.ChunkifyOpts{
+	_, memStats, err := block.Chunkify(ctx, block.ChunkifyOpts{
 		In:      memPath,
 		OutDir:  filepath.Join(opts.BuildDir, ids.MemBuildID.String()),
 		BuildID: ids.MemBuildID, ParentDir: opts.MemParentDir,
-	}); err != nil {
+	})
+	if err != nil {
 		fail(err)
 		return
+	}
+	// What this checkpoint actually added to storage, which is the O(dirty)
+	// number. See metrics.SnapshotStoredBytes for why mem.bin's own size --
+	// apparent or allocated -- is not it.
+	metrics.SnapshotStoredBytes.Observe(float64(memStats.PackedBytes))
+	if m.MemMiB > 0 {
+		metrics.SnapshotStoredRatio.Observe(
+			float64(memStats.PackedBytes) / float64(int64(m.MemMiB)<<20))
 	}
 
 	// Deliberately NOT posix_fadvise(DONTNEED) on the image here. Dropping it
@@ -742,6 +772,12 @@ func (m *Machine) finishCheckpoint(up Uploader, chunks Uploader, opts SnapshotOp
 	// outliers back. Firecracker fully overwrites this file on the next
 	// checkpoint, and on a copy-on-write filesystem that rewrite goes faster
 	// with the extents still cached.
+	//
+	// Under Diff snapshots that reasoning changes and the conclusion holds
+	// harder: Firecracker now rewrites only the dirty extents of this file
+	// rather than all of it, so it is cumulative state rather than a scratch
+	// buffer, and dropping its cache costs the next merge rather than saving
+	// anything.
 
 	if ids.RootfsBuildID != uuid.Nil {
 		if _, _, err := block.Chunkify(ctx, block.ChunkifyOpts{

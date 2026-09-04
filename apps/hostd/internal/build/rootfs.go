@@ -231,6 +231,12 @@ func applyFixups(tarPath string, f Fixups, hasSystemd bool) error {
 		// as whatever user it ends up running as, and an operator debugging a
 		// machine that will not start needs to be able to see it.
 		{StartSpecPath, 0o644, startSpec},
+		// See scripts/rootfs/Dockerfile: proactive compaction dirties pages
+		// the host then has to carry in the next diff and fault back in on
+		// the next wake. A user-built image gets the same treatment as the
+		// golden one.
+		{"etc/sysctl.d/60-pilots-guest.conf", 0o644,
+			[]byte("vm.compaction_proactiveness = 0\n")},
 	}
 	if hasSystemd {
 		files = append(files,
@@ -240,6 +246,21 @@ func applyFixups(tarPath string, f Fixups, hasSystemd bool) error {
 				data []byte
 			}{"etc/systemd/system/guest-agent.service", 0o644, []byte(guestAgentUnit)})
 	}
+	// Directories the fixups write into, created first.
+	//
+	// mke2fs populates from this tar in order and will not create a parent
+	// implicitly: a file under a directory the base image happens not to ship
+	// fails the whole pack with "cannot find directory ... to create". A slim
+	// base image legitimately has no /etc/sysctl.d.
+	for _, dir := range []string{"etc/sysctl.d"} {
+		if err := tw.WriteHeader(&tar.Header{
+			Name: dir + "/", Typeflag: tar.TypeDir, Mode: 0o755,
+			ModTime: time.Now(),
+		}); err != nil {
+			return fmt.Errorf("build: mkdir %s: %w", dir, err)
+		}
+	}
+
 	for _, file := range files {
 		if err := tw.WriteHeader(&tar.Header{
 			Name: file.name, Typeflag: tar.TypeReg, Mode: file.mode,

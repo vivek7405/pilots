@@ -15,6 +15,11 @@ import (
 // Manager is the lifecycle surface the handlers drive. An interface rather
 // than the concrete type so the API can be tested without booting VMs.
 type Manager interface {
+	// CollectMetrics folds the per-machine engine counters into the metrics
+	// registry. Called on each scrape of GET /metrics, because the memory
+	// handlers are separate processes that have to be asked.
+	CollectMetrics()
+
 	Create(ctx context.Context, req CreateMachineRequest) (*state.Machine, error)
 	Destroy(ctx context.Context, id string) error
 	Suspend(ctx context.Context, id string) error

@@ -39,7 +39,11 @@ func TestGoldenRootfsCarriesThisAgent(t *testing.T) {
 	}
 
 	built := filepath.Join(t.TempDir(), "guest-agent")
-	cmd := exec.Command("go", "build", "-ldflags=-s -w", "-o", built, "./cmd/guest-agent")
+	// -trimpath must match scripts/build-golden-rootfs.sh exactly: without it
+	// the binary embeds the builder's paths, and this comparison fails
+	// whenever the image was packed by a different user.
+	cmd := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w", "-o", built,
+		"./cmd/guest-agent")
 	cmd.Dir = filepath.Join(root, "apps", "hostd")
 	cmd.Env = append(os.Environ(), "CGO_ENABLED=0")
 	if out, err := cmd.CombinedOutput(); err != nil {

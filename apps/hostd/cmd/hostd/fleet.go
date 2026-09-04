@@ -158,11 +158,11 @@ func startSelfHeal(ctx context.Context, cfg *config.Config, f *fleet, mgr *machi
 				WGPubKey:   f.keys.Public.String(),
 				PublicIP:   cfg.PublicIP,
 				CPUFree:    runtime.NumCPU(),
-				MemFreeMiB: freeMemMiB(),
+				MemFreeMiB: freeMemMiB(cfg.HugePages),
 			}
 		},
 		Capacity: func(vcpus, memMiB int) bool {
-			return memMiB <= freeMemMiB()
+			return memMiB <= freeMemMiB(cfg.HugePages)
 		},
 		Restore:        func(ctx context.Context, m *state.Machine) error { return mgr.Rescue(ctx, *m) },
 		RunningLocally: mgr.RunningIDs,
@@ -173,19 +173,37 @@ func startSelfHeal(ctx context.Context, cfg *config.Config, f *fleet, mgr *machi
 	go selfheal.RunRescue(ctx, opts)
 }
 
-// freeMemMiB reads available memory from the kernel.
+// freeMemMiB reports how much memory this host can still give to guests.
 //
 // MemAvailable, not MemFree: MemFree excludes reclaimable page cache, so a
 // host with a warm cache would look full and refuse every rescue.
-func freeMemMiB() int {
+//
+// And under 2MiB backing, neither one: reserved hugepages are subtracted from
+// MemFree AND MemAvailable outright, because they are no longer available to
+// anything but a hugepage mapping. A host reserving most of its RAM as a pool
+// therefore reads as nearly full, advertises ~0 free to the whole fleet, and
+// refuses every self-heal rescue -- with nothing in any log naming the cause.
+// When the pool is what guests come out of, the pool is what to count.
+func freeMemMiB(hugePages bool) int {
 	raw, err := os.ReadFile("/proc/meminfo")
 	if err != nil {
 		return 0
 	}
+	if !hugePages {
+		return meminfoKey(raw, "MemAvailable") / 1024
+	}
+	// HugePages_Free counts pages; Hugepagesize is in kB.
+	return meminfoKey(raw, "HugePages_Free") * meminfoKey(raw, "Hugepagesize") / 1024
+}
+
+// meminfoKey pulls one numeric value out of /proc/meminfo, in whatever unit
+// that key is published in. Missing reads as zero, which for every caller
+// here means "no capacity", the safe direction.
+func meminfoKey(raw []byte, key string) int {
 	for line := range splitLines(string(raw)) {
-		var kb int
-		if n, _ := fmt.Sscanf(line, "MemAvailable: %d kB", &kb); n == 1 {
-			return kb / 1024
+		var n int
+		if got, _ := fmt.Sscanf(line, key+": %d", &n); got == 1 {
+			return n
 		}
 	}
 	return 0

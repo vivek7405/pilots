@@ -2,6 +2,7 @@ package uffd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -220,6 +221,27 @@ func (p *Process) MakeResident() error {
 	}
 	_, err := ctlsock.Request(p.control, cmdPrefault)
 	return err
+}
+
+// Stats asks the handler process for its counters.
+//
+// A handler with no control socket, or one that has already exited, reports
+// nothing and no error: its machine is gone or was adopted without one, and a
+// scrape must not fail because a machine went away between the listing and
+// the question.
+func (p *Process) Stats() (StatsReport, bool) {
+	if p.control == "" {
+		return StatsReport{}, false
+	}
+	raw, err := ctlsock.Request(p.control, cmdStats)
+	if err != nil {
+		return StatsReport{}, false
+	}
+	var r StatsReport
+	if err := json.Unmarshal(raw, &r); err != nil {
+		return StatsReport{}, false
+	}
+	return r, true
 }
 
 func (p *Process) Pid() int { return p.pid }

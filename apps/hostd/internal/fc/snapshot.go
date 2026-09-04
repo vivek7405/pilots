@@ -5,7 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
+	"time"
+
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 )
 
 // Snapshot artifact names, both on disk and as object-storage keys.
@@ -33,21 +37,61 @@ func (m *Machine) snapshotPaths() snapshotPaths {
 	}
 }
 
+// Snapshot types, as Firecracker names them on /snapshot/create.
+const (
+	SnapshotFull = "Full"
+	SnapshotDiff = "Diff"
+)
+
+// snapshotType decides between writing a whole memory image and merging a
+// diff into the one already on disk.
+//
+// Firecracker merges a Diff INTO mem_file_path when that file exists and is
+// exactly mem_size_mib big, and OVERWRITES it with a hole-riddled partial
+// image when it is not. The check below is Firecracker's own condition, asked
+// first -- because when it does not hold, a Diff does not fail. It silently
+// produces an image whose untouched pages read back as zeros, and the machine
+// loses its memory on the NEXT restore rather than here.
+//
+// So the first snapshot of every machine lifetime is Full. After a wake there
+// is no local image (SuspendInstant removes it), and after a restore
+// Firecracker has reset its own dirty-page accounting.
+//
+// The file's existence and size are the authority rather than a flag carried
+// on the machine, because that is exactly Firecracker's condition, and a flag
+// would outlive a mem.bin that some other path removed.
+func (m *Machine) snapshotType(hostMem string, memMiB int) string {
+	if memMiB <= 0 {
+		return SnapshotFull // unknown size: cannot verify the merge condition
+	}
+	info, err := os.Stat(hostMem)
+	if err != nil || info.Size() != int64(memMiB)<<20 {
+		return SnapshotFull
+	}
+	return SnapshotDiff
+}
+
 // pauseAndSnapshot freezes the guest and writes its state to disk.
 //
 // The guest is stopped for exactly this window, so everything that can happen
 // afterwards -- uploading, copying -- happens after the resume.
 func (m *Machine) pauseAndSnapshot(ctx context.Context) (snapshotPaths, error) {
 	p := m.snapshotPaths()
+	kind := m.snapshotType(p.hostMem, m.MemMiB)
 
 	if err := m.Client.Pause(ctx); err != nil {
 		return p, fmt.Errorf("fc: pause %s: %w", m.ID, err)
 	}
+	started := time.Now()
 	if err := m.Client.CreateSnapshot(ctx, SnapshotCreate{
-		SnapshotType: "Full", SnapshotPath: p.jailSnap, MemFilePath: p.jailMem,
+		SnapshotType: kind, SnapshotPath: p.jailSnap, MemFilePath: p.jailMem,
 	}); err != nil {
-		return p, fmt.Errorf("fc: snapshot %s: %w", m.ID, err)
+		return p, fmt.Errorf("fc: snapshot %s (%s): %w", m.ID, kind, err)
 	}
+	// Inside the pause, so this is guest-visible freeze time and the number
+	// the Full-to-Diff switch moves.
+	metrics.SnapshotWriteSeconds.With(kind).Observe(time.Since(started).Seconds())
+	m.lastSnapshotType = kind
 	return p, nil
 }
 

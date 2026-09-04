@@ -8,6 +8,9 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime/debug"
+	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -52,8 +55,18 @@ type uffdioRegister struct {
 
 // newUserfaultfd creates a region backed by a userfaultfd, the way Firecracker
 // does when it loads a snapshot.
-func newUserfaultfd(t *testing.T, pages int) (fd int, base uint64, mem []byte) {
+// newUserfaultfd builds a registered region at the given page size.
+//
+// A 2MiB region is backed by real hugetlb, because that is what a
+// hugepage-configured Firecracker hands the handler, and because a 2MiB
+// UFFDIO_COPY onto an ordinary 4KiB-page VMA is a different kernel path that
+// proves nothing about production.
+func newUserfaultfd(t *testing.T, pages int, pageSize uint64) (fd int, base uint64, mem []byte) {
 	t.Helper()
+	if pageSize == hugePageSize && freeHugePages() < pages+1 {
+		t.Skipf("needs %d free 2MiB hugepages, have %d (set vm.nr_hugepages)",
+			pages+1, freeHugePages())
+	}
 
 	raw, _, errno := syscall.Syscall(unix.SYS_USERFAULTFD,
 		uintptr(unix.O_CLOEXEC|unix.O_NONBLOCK), 0, 0)
@@ -72,15 +85,23 @@ func newUserfaultfd(t *testing.T, pages int) (fd int, base uint64, mem []byte) {
 		t.Fatalf("UFFDIO_API: %v", errno)
 	}
 
-	size := pages * int(testPageSize)
-	mem, err := unix.Mmap(-1, 0, size,
-		unix.PROT_READ|unix.PROT_WRITE, unix.MAP_PRIVATE|unix.MAP_ANONYMOUS)
+	size := pages * int(pageSize)
+	flags := unix.MAP_PRIVATE | unix.MAP_ANONYMOUS
+	if pageSize == hugePageSize {
+		flags |= unix.MAP_HUGETLB
+	}
+	mem, err := unix.Mmap(-1, 0, size, unix.PROT_READ|unix.PROT_WRITE, flags)
 	if err != nil {
-		t.Fatalf("mmap: %v", err)
+		t.Fatalf("mmap (page size %d): %v", pageSize, err)
 	}
 	t.Cleanup(func() { _ = unix.Munmap(mem) })
 
 	base = uint64(uintptr(unsafe.Pointer(&mem[0])))
+	if base&(pageSize-1) != 0 {
+		t.Fatalf("region at %#x is not %d-aligned; handleFault masks a fault "+
+			"address down to a page boundary and would compute an offset "+
+			"outside the region", base, pageSize)
+	}
 	reg := uffdioRegister{Start: base, Len: uint64(size), Mode: registerModeMissing}
 	if _, _, errno := syscall.Syscall(syscall.SYS_IOCTL,
 		uintptr(fd), ioctlRegister, uintptr(unsafe.Pointer(&reg))); errno != 0 {
@@ -90,12 +111,12 @@ func newUserfaultfd(t *testing.T, pages int) (fd int, base uint64, mem []byte) {
 }
 
 // memImage writes a file whose pages each hold a distinct byte.
-func memImage(t *testing.T, pages int) (path string, want []byte) {
+func memImage(t *testing.T, pages int, pageSize uint64) (path string, want []byte) {
 	t.Helper()
 
 	var buf bytes.Buffer
 	for i := 0; i < pages; i++ {
-		buf.Write(bytes.Repeat([]byte{byte(i + 1)}, int(testPageSize)))
+		buf.Write(bytes.Repeat([]byte{byte(i + 1)}, int(pageSize)))
 	}
 	path = filepath.Join(t.TempDir(), "mem.bin")
 	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
@@ -104,214 +125,277 @@ func memImage(t *testing.T, pages int) (path string, want []byte) {
 	return path, buf.Bytes()
 }
 
+// hugePageSize is the second size the handler must serve. Mixed sizes are
+// refused at the handshake (TestAcceptRejectsMixedPageSizes); a uniform one of
+// either size must work.
+const hugePageSize = uint64(2) << 20
+
+// freeHugePages reports the host's 2MiB pool, so a test needing one skips
+// rather than fails on a machine that has not reserved it.
+func freeHugePages() int {
+	raw, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(line, "HugePages_Free:") {
+			n, _ := strconv.Atoi(strings.TrimSpace(
+				strings.TrimPrefix(line, "HugePages_Free:")))
+			return n
+		}
+	}
+	return 0
+}
+
+// forEachPageSize runs a serve-path test at both sizes the handler accepts.
+// 2MiB is not a variation on 4KiB: it changes the copy length, the fault
+// address mask, and how many mappings one fault spans.
+func forEachPageSize(t *testing.T, body func(t *testing.T, pageSize uint64)) {
+	t.Helper()
+	for _, ps := range []struct {
+		name string
+		size uint64
+	}{
+		{"4KiB", testPageSize},
+		{"2MiB", hugePageSize},
+	} {
+		t.Run(ps.name, func(t *testing.T) {
+			// The collector is stopped for the whole subtest, and this is not
+			// tuning. A goroutine that touches the region blocks
+			// uninterruptibly in the kernel until the handler answers, so a GC
+			// that tries to stop the world while it is stuck can never finish
+			// -- and every goroutine in the process wedges, including the
+			// handler that would have unblocked it. Nothing times out, because
+			// the timeout goroutines are wedged too.
+			//
+			// It is an artifact of faulting and serving in ONE process. In
+			// production the faulting side is the guest VM, a different
+			// process entirely, so the handler is unaffected. Any allocation
+			// on the faulting path must still happen BEFORE the first touch;
+			// see readRegion.
+			prev := debug.SetGCPercent(-1)
+			defer debug.SetGCPercent(prev)
+			body(t, ps.size)
+		})
+	}
+}
+
+// readRegion faults in the whole region and returns what the guest would see.
+func readRegion(t *testing.T, mem []byte) []byte {
+	t.Helper()
+	// Allocated BEFORE the first fault: see forEachPageSize for why an
+	// allocation after one can wedge the whole process.
+	got := make([]byte, len(mem))
+	copy(got, mem)
+	return got
+}
+
 // The whole ABI in one test: the ioctl number, the message layout, the region
 // arithmetic and UFFDIO_COPY. Every one of them is a magic number that
 // produces a plausible-looking failure when wrong -- an ENOTTY that reads as
 // "not a userfaultfd", or pages installed at the wrong address -- so the only
 // way to know they are right is to fault a real page and look at it.
 func TestServeInstallsFaultedPages(t *testing.T) {
-	fd, base, mem := newUserfaultfd(t, testPages)
-	path, want := memImage(t, testPages)
+	forEachPageSize(t, func(t *testing.T, pageSize uint64) {
+		fd, base, mem := newUserfaultfd(t, testPages, pageSize)
+		path, want := memImage(t, testPages, pageSize)
 
-	src, err := block.OpenFileSlicer(path, int64(testPageSize))
-	if err != nil {
-		t.Fatalf("OpenFileSlicer: %v", err)
-	}
-	defer src.Close()
-
-	h := &handshake{
-		uffd: fd, pageSize: testPageSize,
-		regions: []Region{{
-			BaseHostVirtAddr: base,
-			Size:             uint64(testPages) * testPageSize,
-			Offset:           0,
-			PageSize:         testPageSize,
-		}},
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var stats Stats
-	done := make(chan error, 1)
-	go func() { done <- serve(ctx, h, src, &stats, &recorder{}) }()
-
-	// Touching the mapping traps into the handler. The read blocks until the
-	// page is installed, so if any of the ABI is wrong this hangs rather than
-	// returning wrong bytes -- hence the timeout below.
-	read := make(chan []byte, 1)
-	go func() {
-		got := make([]byte, len(mem))
-		copy(got, mem)
-		read <- got
-	}()
-
-	select {
-	case got := <-read:
-		if !bytes.Equal(got, want) {
-			t.Errorf("guest memory differs from the image at byte %d", firstDiff(got, want))
-		}
-	case <-time.After(15 * time.Second):
-		t.Fatalf("faults were never served: %d handled, %d failed",
-			stats.Faults.Load(), stats.CopyFailed.Load())
-	}
-
-	if stats.Faults.Load() == 0 {
-		t.Error("no faults were counted")
-	}
-	if n := stats.CopyFailed.Load(); n != 0 {
-		t.Errorf("%d copies failed", n)
-	}
-	if n := stats.CopyShort.Load(); n != 0 {
-		t.Errorf("%d copies installed a partial page", n)
-	}
-
-	cancel()
-	select {
-	case err := <-done:
+		src, err := block.OpenFileSlicer(path, int64(pageSize))
 		if err != nil {
-			t.Errorf("serve: %v", err)
+			t.Fatalf("OpenFileSlicer: %v", err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Error("serve did not return after its context was cancelled")
-	}
+		defer src.Close()
+
+		h := &handshake{
+			uffd: fd, pageSize: pageSize,
+			regions: []Region{{
+				BaseHostVirtAddr: base,
+				Size:             uint64(testPages) * pageSize,
+				Offset:           0,
+				PageSize:         pageSize,
+			}},
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		var stats Stats
+		done := make(chan error, 1)
+		go func() { done <- serve(ctx, h, src, &stats, &recorder{}) }()
+
+		// Touching the mapping traps into the handler. The read blocks until the
+		// page is installed, so if any of the ABI is wrong this hangs rather than
+		// returning wrong bytes -- hence the timeout below.
+		read := make(chan []byte, 1)
+		go func() { read <- readRegion(t, mem) }()
+
+		select {
+		case got := <-read:
+			if !bytes.Equal(got, want) {
+				t.Errorf("guest memory differs from the image at byte %d", firstDiff(got, want))
+			}
+		case <-time.After(15 * time.Second):
+			t.Fatalf("faults were never served: %d handled, %d failed",
+				stats.Faults.Load(), stats.CopyFailed.Load())
+		}
+
+		if stats.Faults.Load() == 0 {
+			t.Error("no faults were counted")
+		}
+		if n := stats.CopyFailed.Load(); n != 0 {
+			t.Errorf("%d copies failed", n)
+		}
+		if n := stats.CopyShort.Load(); n != 0 {
+			t.Errorf("%d copies installed a partial page", n)
+		}
+
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("serve: %v", err)
+			}
+		case <-time.After(5 * time.Second):
+			t.Error("serve did not return after its context was cancelled")
+		}
+	})
 }
 
 // A page beyond the end of the image is a legitimately elided tail: it must
 // install as zeros. Failing the fault instead leaves the guest thread blocked
 // forever on a page it will never get.
 func TestServeZeroFillsPastTheEndOfTheImage(t *testing.T) {
-	fd, base, mem := newUserfaultfd(t, testPages)
+	forEachPageSize(t, func(t *testing.T, pageSize uint64) {
+		fd, base, mem := newUserfaultfd(t, testPages, pageSize)
 
-	// An image covering only the first half of the region.
-	path, _ := memImage(t, testPages/2)
-	src, err := block.OpenFileSlicer(path, int64(testPageSize))
-	if err != nil {
-		t.Fatalf("OpenFileSlicer: %v", err)
-	}
-	defer src.Close()
-
-	h := &handshake{
-		uffd: fd, pageSize: testPageSize,
-		regions: []Region{{
-			BaseHostVirtAddr: base,
-			Size:             uint64(testPages) * testPageSize,
-			PageSize:         testPageSize,
-		}},
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var stats Stats
-	go serve(ctx, h, src, &stats, &recorder{})
-
-	tail := make(chan []byte, 1)
-	go func() {
-		got := make([]byte, testPageSize)
-		copy(got, mem[len(mem)-int(testPageSize):])
-		tail <- got
-	}()
-
-	select {
-	case got := <-tail:
-		if !bytes.Equal(got, make([]byte, testPageSize)) {
-			t.Error("a page past the end of the image did not read back as zeros")
+		// An image covering only the first half of the region.
+		path, _ := memImage(t, testPages/2, pageSize)
+		src, err := block.OpenFileSlicer(path, int64(pageSize))
+		if err != nil {
+			t.Fatalf("OpenFileSlicer: %v", err)
 		}
-	case <-time.After(15 * time.Second):
-		t.Fatal("the fault past the end of the image was never served")
-	}
+		defer src.Close()
+
+		h := &handshake{
+			uffd: fd, pageSize: pageSize,
+			regions: []Region{{
+				BaseHostVirtAddr: base,
+				Size:             uint64(testPages) * pageSize,
+				PageSize:         pageSize,
+			}},
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		var stats Stats
+		go serve(ctx, h, src, &stats, &recorder{})
+
+		tail := make(chan []byte, 1)
+		go func() { tail <- readRegion(t, mem[len(mem)-int(pageSize):]) }()
+
+		select {
+		case got := <-tail:
+			if !bytes.Equal(got, make([]byte, pageSize)) {
+				t.Error("a page past the end of the image did not read back as zeros")
+			}
+		case <-time.After(15 * time.Second):
+			t.Fatal("the fault past the end of the image was never served")
+		}
+	})
 }
 
 // The recorded fault order is what makes the next wake fast, so it has to
 // contain real offsets in the order they were needed.
 func TestServeRecordsTheFaultOrder(t *testing.T) {
-	fd, base, mem := newUserfaultfd(t, testPages)
-	path, _ := memImage(t, testPages)
+	forEachPageSize(t, func(t *testing.T, pageSize uint64) {
+		fd, base, mem := newUserfaultfd(t, testPages, pageSize)
+		path, _ := memImage(t, testPages, pageSize)
 
-	src, err := block.OpenFileSlicer(path, int64(testPageSize))
-	if err != nil {
-		t.Fatalf("OpenFileSlicer: %v", err)
-	}
-	defer src.Close()
-
-	capture := filepath.Join(t.TempDir(), "prefetch.txt")
-	rec, err := newRecorder(capture)
-	if err != nil {
-		t.Fatalf("newRecorder: %v", err)
-	}
-
-	h := &handshake{
-		uffd: fd, pageSize: testPageSize,
-		regions: []Region{{
-			BaseHostVirtAddr: base,
-			Size:             uint64(testPages) * testPageSize,
-			PageSize:         testPageSize,
-		}},
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var stats Stats
-	done := make(chan error, 1)
-	go func() { done <- serve(ctx, h, src, &stats, rec) }()
-
-	// Touch the last page, then the first, so the recording cannot pass by
-	// accident from being written in offset order. Each touch waits for its
-	// fault to be counted before the next: the guest thread unblocks the
-	// moment UFFDIO_COPY returns, which is before the worker gets around to
-	// recording it, so touching both at once races the recorder.
-	//
-	// The reads go through a sink the compiler cannot elide. `_ = mem[i]` is
-	// only a bounds check and gets optimised away, which silently produces a
-	// test that faults nothing and records nothing.
-	var sink byte
-	touch := func(i int, wantFaults int64) {
-		t.Helper()
-		done := make(chan struct{})
-		go func() { sink += mem[i]; close(done) }()
-		select {
-		case <-done:
-		case <-time.After(15 * time.Second):
-			t.Fatalf("the fault at byte %d was never served", i)
+		src, err := block.OpenFileSlicer(path, int64(pageSize))
+		if err != nil {
+			t.Fatalf("OpenFileSlicer: %v", err)
 		}
-		deadline := time.Now().Add(15 * time.Second)
-		for stats.Faults.Load() < wantFaults {
-			if time.Now().After(deadline) {
-				t.Fatalf("only %d faults were counted, want %d",
-					stats.Faults.Load(), wantFaults)
+		defer src.Close()
+
+		capture := filepath.Join(t.TempDir(), "prefetch.txt")
+		rec, err := newRecorder(capture)
+		if err != nil {
+			t.Fatalf("newRecorder: %v", err)
+		}
+
+		h := &handshake{
+			uffd: fd, pageSize: pageSize,
+			regions: []Region{{
+				BaseHostVirtAddr: base,
+				Size:             uint64(testPages) * pageSize,
+				PageSize:         pageSize,
+			}},
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+
+		var stats Stats
+		done := make(chan error, 1)
+		go func() { done <- serve(ctx, h, src, &stats, rec) }()
+
+		// Touch the last page, then the first, so the recording cannot pass by
+		// accident from being written in offset order. Each touch waits for its
+		// fault to be counted before the next: the guest thread unblocks the
+		// moment UFFDIO_COPY returns, which is before the worker gets around to
+		// recording it, so touching both at once races the recorder.
+		//
+		// The reads go through a sink the compiler cannot elide. `_ = mem[i]` is
+		// only a bounds check and gets optimised away, which silently produces a
+		// test that faults nothing and records nothing.
+		var sink byte
+		touch := func(i int, wantFaults int64) {
+			t.Helper()
+			done := make(chan struct{})
+			go func() { sink += mem[i]; close(done) }()
+			select {
+			case <-done:
+			case <-time.After(15 * time.Second):
+				t.Fatalf("the fault at byte %d was never served", i)
 			}
-			time.Sleep(time.Millisecond)
+			deadline := time.Now().Add(15 * time.Second)
+			for stats.Faults.Load() < wantFaults {
+				if time.Now().After(deadline) {
+					t.Fatalf("only %d faults were counted, want %d",
+						stats.Faults.Load(), wantFaults)
+				}
+				time.Sleep(time.Millisecond)
+			}
 		}
-	}
-	touch(len(mem)-1, 1)
-	touch(0, 2)
+		touch(len(mem)-1, 1)
+		touch(0, 2)
 
-	cancel()
-	<-done
-	if err := rec.Close(); err != nil {
-		t.Fatalf("close recorder: %v", err)
-	}
-
-	raw, err := os.ReadFile(capture)
-	if err != nil {
-		t.Fatal(err)
-	}
-	entries := parsePrefetch(raw)
-	if len(entries) < 2 {
-		t.Fatalf("recorded %d faults, want at least 2:\n%s", len(entries), raw)
-	}
-	lastPageOff := int64(testPages-1) * int64(testPageSize)
-	if entries[0].off != lastPageOff {
-		t.Errorf("first recorded fault is offset %d, want %d (the page touched first)",
-			entries[0].off, lastPageOff)
-	}
-	for _, e := range entries {
-		if e.length != int64(testPageSize) {
-			t.Errorf("recorded length %d, want %d", e.length, testPageSize)
+		cancel()
+		<-done
+		if err := rec.Close(); err != nil {
+			t.Fatalf("close recorder: %v", err)
 		}
-	}
+
+		raw, err := os.ReadFile(capture)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries := parsePrefetch(raw)
+		if len(entries) < 2 {
+			t.Fatalf("recorded %d faults, want at least 2:\n%s", len(entries), raw)
+		}
+		lastPageOff := int64(testPages-1) * int64(pageSize)
+		if entries[0].off != lastPageOff {
+			t.Errorf("first recorded fault is offset %d, want %d (the page touched first)",
+				entries[0].off, lastPageOff)
+		}
+		for _, e := range entries {
+			if e.length != int64(pageSize) {
+				t.Errorf("recorded length %d, want %d", e.length, pageSize)
+			}
+		}
+	})
 }
 
 func firstDiff(a, b []byte) int {
@@ -459,5 +543,201 @@ func TestAcceptTimesOutRatherThanWaitingForever(t *testing.T) {
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Errorf("accept waited %s past its 200ms deadline", elapsed)
+	}
+}
+
+// A hugetlb UFFDIO_COPY can install part of a page and stop. The kernel
+// reports what it managed and does NOT redeliver the fault, so a handler that
+// treats a short copy as failure leaves the guest thread blocked for ever --
+// the VM hangs with nothing but a log line to say why. Only reachable through
+// a stubbed ioctl: a real kernel takes this path under memory pressure at
+// 2MiB, which a test cannot provoke on demand.
+func TestInstallPageResumesAShortCopy(t *testing.T) {
+	const pageSize = 2 << 20
+
+	restore := uffdioCopy
+	defer func() { uffdioCopy = restore }()
+
+	var calls []copyRequest
+	uffdioCopy = func(_ int, req *copyRequest) syscall.Errno {
+		calls = append(calls, *req)
+		if len(calls) == 1 {
+			req.Copy = int64(req.Len) / 2 // preempted mid-page
+			return 0
+		}
+		req.Copy = int64(req.Len)
+		return 0
+	}
+
+	buf := make([]byte, pageSize)
+	var stats Stats
+	if _, err := installPage(0, 0x7f0000000000, buf, pageSize, &stats); err != nil {
+		t.Fatalf("installPage: %v", err)
+	}
+
+	if len(calls) != 2 {
+		t.Fatalf("issued %d copies, want 2", len(calls))
+	}
+	if got := stats.CopyShort.Load(); got != 1 {
+		t.Errorf("CopyShort = %d, want 1", got)
+	}
+	half := uint64(pageSize / 2)
+	if got := calls[1].Dst - calls[0].Dst; got != half {
+		t.Errorf("resumed at +%d, want +%d", got, half)
+	}
+	if got := calls[1].Src - calls[0].Src; got != half {
+		t.Errorf("resumed reading at +%d, want +%d", got, half)
+	}
+	if calls[1].Len != half {
+		t.Errorf("resumed asking for %d bytes, want %d", calls[1].Len, half)
+	}
+	if calls[1].Copy != 0 {
+		t.Errorf("Copy carried %d into the resume, want 0", calls[1].Copy)
+	}
+}
+
+// A kernel that reports installing nothing, with no error, cannot be resumed
+// from -- advancing by zero would reissue the same request for ever. That one
+// stays a hard failure.
+func TestInstallPageFailsWhenNothingWasInstalled(t *testing.T) {
+	restore := uffdioCopy
+	defer func() { uffdioCopy = restore }()
+
+	calls := 0
+	uffdioCopy = func(_ int, req *copyRequest) syscall.Errno {
+		calls++
+		req.Copy = 0
+		return 0
+	}
+
+	buf := make([]byte, testPageSize)
+	var stats Stats
+	_, err := installPage(0, 0x7f0000000000, buf, testPageSize, &stats)
+	if err == nil {
+		t.Fatal("a copy that installed nothing was reported as success")
+	}
+	if calls != 1 {
+		t.Errorf("issued %d copies, want 1 -- a zero copy must not be retried", calls)
+	}
+}
+
+// EAGAIN can arrive after part of the page has already landed. Clearing Copy
+// without consuming it would reinstall those bytes and overrun the page.
+func TestInstallPageKeepsProgressAcrossEAGAIN(t *testing.T) {
+	const pageSize = 2 << 20
+
+	restore := uffdioCopy
+	defer func() { uffdioCopy = restore }()
+
+	var calls []copyRequest
+	uffdioCopy = func(_ int, req *copyRequest) syscall.Errno {
+		calls = append(calls, *req)
+		if len(calls) == 1 {
+			req.Copy = int64(req.Len) / 4
+			return syscall.EAGAIN
+		}
+		req.Copy = int64(req.Len)
+		return 0
+	}
+
+	buf := make([]byte, pageSize)
+	var stats Stats
+	if _, err := installPage(0, 0x7f0000000000, buf, pageSize, &stats); err != nil {
+		t.Fatalf("installPage: %v", err)
+	}
+	if got := stats.CopyEAGAIN.Load(); got != 1 {
+		t.Errorf("CopyEAGAIN = %d, want 1", got)
+	}
+	quarter := uint64(pageSize / 4)
+	if got := calls[1].Dst - calls[0].Dst; got != quarter {
+		t.Errorf("resumed at +%d, want +%d", got, quarter)
+	}
+	if calls[1].Len != uint64(pageSize)-quarter {
+		t.Errorf("resumed asking for %d bytes, want %d",
+			calls[1].Len, uint64(pageSize)-quarter)
+	}
+}
+
+// The sibling of TestAcceptTakesTheRegionsAndTheDescriptor at the size lever 1
+// runs at. Mixed sizes are refused (see TestAcceptRejectsMixedPageSizes); a
+// uniform 2MiB guest must be accepted, and its page size carried through.
+func TestAcceptTakesUniformHugePages(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "uffd.sock")
+	ln, err := listen(sock)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+
+	spare, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer spare.Close()
+
+	const huge = uint64(2 << 20)
+	sent := sendHandshake(sock, []Region{
+		{BaseHostVirtAddr: 0x7f0000000000, Size: 4 << 20, Offset: 0, PageSize: huge},
+		{BaseHostVirtAddr: 0x7f0000400000, Size: 4 << 20, Offset: 4 << 20, PageSize: huge},
+	}, int(spare.Fd()))
+
+	h, err := accept(ln, 5*time.Second)
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	if err := <-sent; err != nil {
+		t.Fatalf("send handshake: %v", err)
+	}
+	defer syscall.Close(h.uffd)
+
+	if h.pageSize != huge {
+		t.Errorf("page size = %d, want %d", h.pageSize, huge)
+	}
+}
+
+// A page installed ahead of demand never faults again, so whether the
+// prediction was USEFUL cannot be observed directly. What can be observed is
+// the opposite: a replayed page the guest had already faulted was served on
+// demand anyway, and the replay arrived too late to save anything. installPage
+// reports that as EEXIST, which is what separates a hit from a miss.
+func TestInstallPageReportsAnAlreadyPresentPage(t *testing.T) {
+	restore := uffdioCopy
+	defer func() { uffdioCopy = restore }()
+
+	uffdioCopy = func(_ int, _ *copyRequest) syscall.Errno { return syscall.EEXIST }
+
+	buf := make([]byte, testPageSize)
+	var stats Stats
+	existed, err := installPage(0, 0x7f0000000000, buf, testPageSize, &stats)
+	if err != nil {
+		t.Fatalf("installPage: %v", err)
+	}
+	if !existed {
+		t.Error("an EEXIST copy was not reported as already present, so a late " +
+			"replay would be counted as a page the prediction won")
+	}
+	if got := stats.CopyEEXIST.Load(); got != 1 {
+		t.Errorf("CopyEEXIST = %d, want 1", got)
+	}
+}
+
+// The ordinary case: a page the replay got to first.
+func TestInstallPageReportsAFreshInstall(t *testing.T) {
+	restore := uffdioCopy
+	defer func() { uffdioCopy = restore }()
+
+	uffdioCopy = func(_ int, req *copyRequest) syscall.Errno {
+		req.Copy = int64(req.Len)
+		return 0
+	}
+
+	buf := make([]byte, testPageSize)
+	var stats Stats
+	existed, err := installPage(0, 0x7f0000000000, buf, testPageSize, &stats)
+	if err != nil {
+		t.Fatalf("installPage: %v", err)
+	}
+	if existed {
+		t.Error("a fresh install was reported as already present")
 	}
 }

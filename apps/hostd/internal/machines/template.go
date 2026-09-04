@@ -45,6 +45,21 @@ type Template struct {
 	RootfsBuildID uuid.UUID `json:"rootfs_build_id"`
 	SnapKey       string    `json:"snap_key"`
 	CreatedAt     int64     `json:"created_at"`
+	// PageSizeKiB is the guest page size baked into MemBuildID. Firecracker
+	// cannot restore a 2MiB memory image into a 4KiB VM or the reverse, so a
+	// manifest that disagrees with this host's setting is not stale, it is
+	// unusable -- the template is rebuilt rather than repaired. Zero means a
+	// manifest written before page size was recorded, which is treated the
+	// same way.
+	PageSizeKiB int `json:"page_size_kib"`
+}
+
+// pageSizeKiB is the guest page size this host photographs templates at.
+func (m *Manager) pageSizeKiB() int {
+	if m.opts.FCConfig.HugePages {
+		return 2048
+	}
+	return 4
 }
 
 // templateRoot is where the template's builds and manifest live on this host.
@@ -153,7 +168,17 @@ func (m *Manager) adoptFleetTemplate(ctx context.Context) (*Template, error) {
 		return nil, err
 	}
 
-	t := &Template{SnapKey: row.SnapKey, CreatedAt: row.CreatedAt}
+	// Stamped with THIS host's page size, because the row does not carry one
+	// and the setting is fleet-wide by construction: every host photographs
+	// at the same size or none of them can restore each other's machines
+	// (see fc.HugePages2M). If a host is misprovisioned the restore fails
+	// loudly on the snapshot itself, which is the right place for it -- a
+	// page size guessed into the manifest would be believed instead.
+	t := &Template{
+		SnapKey:     row.SnapKey,
+		CreatedAt:   row.CreatedAt,
+		PageSizeKiB: m.pageSizeKiB(),
+	}
 	if t.MemBuildID, err = uuid.Parse(row.MemBuildID); err != nil {
 		return nil, fmt.Errorf("machines: fleet template has an unusable memory build %q: %w",
 			row.MemBuildID, err)
@@ -228,8 +253,24 @@ func (m *Manager) loadTemplate() (*Template, error) {
 			return nil, fmt.Errorf("machines: template build %s is gone: %w", dir, err)
 		}
 	}
+
+	// A memory image photographed at another page size cannot be restored
+	// here at all -- Firecracker reads the size back out of the snapshot and
+	// refuses to reinterpret it. Reporting "no template" rebuilds; returning
+	// it would fail every create on this host instead, at restore time,
+	// naming neither the page size nor the manifest.
+	// No guard for a template with no memory build: the loop above already
+	// refuses one, because memParentDir returns an empty path for it.
+	if want := m.pageSizeKiB(); t.PageSizeKiB != want {
+		return nil, fmt.Errorf("machines: template is %d KiB pages, this host "+
+			"runs %d KiB: %w", t.PageSizeKiB, want, errTemplatePageSize)
+	}
 	return &t, nil
 }
+
+// errTemplatePageSize marks a template this host cannot restore because it was
+// photographed at a different guest page size.
+var errTemplatePageSize = errors.New("machines: template page size mismatch")
 
 func (m *Manager) saveTemplate(t *Template) error {
 	if err := os.MkdirAll(m.templateRoot(), 0o755); err != nil {
@@ -260,8 +301,9 @@ func (m *Manager) buildTemplate(ctx context.Context) (*Template, error) {
 	//
 	// The wasted duplicate build is fine. Overwriting is not.
 	t := &Template{
-		SnapKey:   filepath.Join("template", uuid.NewString(), fc.SnapFile),
-		CreatedAt: time.Now().Unix(),
+		SnapKey:     filepath.Join("template", uuid.NewString(), fc.SnapFile),
+		CreatedAt:   time.Now().Unix(),
+		PageSizeKiB: m.pageSizeKiB(),
 	}
 
 	// The disk template needs no VM at all: it is the golden rootfs, chunked.
@@ -424,4 +466,18 @@ func (m *Manager) templateFor(ctx context.Context, row *state.Machine) (*Templat
 	// The vmstate key is only needed to START from a template. A machine being
 	// woken or restored has its own snapshot and never reads the template's.
 	return &Template{MemBuildID: memID, RootfsBuildID: rootfsID}, nil
+}
+
+// validateMemMiB refuses a size this host cannot back.
+//
+// Firecracker rejects an odd mem_size_mib under 2MiB pages, and its own error
+// names neither the field nor the reason -- so it arrives as a create failure
+// that reads like a bug in hostd. Refusing at the API boundary puts the
+// explanation where the caller can act on it.
+func (m *Manager) validateMemMiB(memMiB int) error {
+	if m.opts.FCConfig.HugePages && memMiB%2 != 0 {
+		return fmt.Errorf("machines: mem_mib must be even on this host (%d is "+
+			"odd); guest memory is backed by 2MiB pages", memMiB)
+	}
+	return nil
 }

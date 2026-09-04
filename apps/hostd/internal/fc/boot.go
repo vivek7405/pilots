@@ -37,7 +37,12 @@ const BakedRootfsPath = "/srv/pilots/rootfs.ext4"
 // The ip= addresses match the golden rootfs's static network config exactly
 // and are identical for every machine on every host, which is what keeps a
 // snapshot host-agnostic.
+// rootflags=discard is what gives fstrim something to release: without it the
+// guest never issues discards and the pre-snapshot reclaim chain trims
+// nothing. It is host-agnostic -- no address, no path, no host identity -- so
+// invariant 5 is untouched.
 const BootArgs = "console=ttyS0 reboot=k panic=1 pci=off ro root=/dev/vda " +
+	"rootflags=discard " +
 	"clocksource=kvm-clock random.trust_cpu=on i8042.nokbd i8042.noaux " +
 	"ipv6.disable=0 ipv6.autoconf=1 " +
 	"ip=" + netns.TapGuestIP + "::" + netns.TapHostIP + ":255.255.255.252:instance:eth0:off:"
@@ -75,6 +80,11 @@ type Config struct {
 
 	VCPUs  int
 	MemMiB int
+	// HugePages backs guest memory with 2MiB pages. It comes from the host's
+	// own configuration, never from a machine's request: the page size is
+	// baked into every snapshot this host takes, so it has to be uniform
+	// across the fleet. See HugePages2M.
+	HugePages bool
 
 	KernelPath     string
 	TemplateRootfs string
@@ -104,9 +114,14 @@ type Config struct {
 // Machine is a running Firecracker process and everything needed to reach,
 // snapshot, or kill it.
 type Machine struct {
-	ID        string
-	Slot      *netns.Slot
-	Cmd       *exec.Cmd
+	ID   string
+	Slot *netns.Slot
+	Cmd  *exec.Cmd
+	// MemMiB is the guest's configured memory. Kept on the machine because
+	// two things need it after boot: the snapshot-type decision compares the
+	// on-disk memory image's size against it, and the diff-ratio metric
+	// divides by it.
+	MemMiB    int
 	Client    *Client
 	ChrootDir string
 	StateDir  string
@@ -118,6 +133,10 @@ type Machine struct {
 	// a machine booted from a template file rather than restored.
 	NBD  *nbd.Process
 	Uffd *uffd.Process
+
+	// lastSnapshotType is what the most recent snapshot actually was, for the
+	// metrics and for a test to assert the Full-to-Diff switch happened.
+	lastSnapshotType string
 
 	// captureDone is closed when the background half of the previous snapshot
 	// finishes. See awaitCapture.
@@ -283,6 +302,7 @@ func Boot(ctx context.Context, cfg Config) (*Machine, error) {
 
 	m := &Machine{
 		ID:        cfg.MachineID,
+		MemMiB:    cfg.MemMiB,
 		Slot:      cfg.Slot,
 		Cmd:       cmd,
 		Client:    NewClient(filepath.Join(chrootDir, "run", "fc.sock")),
@@ -305,10 +325,14 @@ func Boot(ctx context.Context, cfg Config) (*Machine, error) {
 }
 
 func (m *Machine) configure(ctx context.Context, cfg Config) error {
-	if err := m.Client.SetMachineConfig(ctx, MachineConfig{
+	mc := MachineConfig{
 		VCPUCount: cfg.VCPUs, MemSizeMiB: cfg.MemMiB, SMT: false,
 		CPUTemplate: cfg.CPUTemplate,
-	}); err != nil {
+	}
+	if cfg.HugePages {
+		mc.HugePages = HugePages2M
+	}
+	if err := m.Client.SetMachineConfig(ctx, mc); err != nil {
 		return err
 	}
 	if err := m.Client.SetBootSource(ctx, BootSource{

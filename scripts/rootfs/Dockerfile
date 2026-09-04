@@ -47,6 +47,15 @@ RUN userdel -r ubuntu 2>/dev/null || true; \
 # Trim the boot: wait-online stalls ~2 minutes on a link that is already
 # statically configured; multi-user is the target; a passwordless root makes
 # the serial console usable for the boot gate.
+# Proactive compaction is wrong under a snapshotting hypervisor. Every page
+# the guest kernel migrates to defragment its own memory is a page the HOST
+# sees dirtied, so it lands in the next diff snapshot and is faulted back in on
+# the next wake -- work done to tidy memory that nothing in the guest asked
+# for. The pre-snapshot reclaim chain compacts deliberately, once, at the
+# moment it is useful.
+RUN install -d -m0755 /etc/sysctl.d \
+ && printf 'vm.compaction_proactiveness = 0\n' > /etc/sysctl.d/60-pilots-guest.conf
+
 RUN systemctl mask systemd-networkd-wait-online.service \
     && systemctl set-default multi-user.target \
     && passwd -d root || true
