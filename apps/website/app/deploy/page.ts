@@ -127,8 +127,10 @@ export default function Deploy() {
           <div>
             <p class="font-semibold m-0 mb-1.5">Scale to zero, honestly</p>
             <p class="text-sm text-ink-muted m-0">
-              A floor of zero is allowed for a real service. The first request afterwards is held
-              while the machine comes back rather than being shown a splash page.
+              A floor of zero is the default for a real service, not a setting to find. The first
+              request afterwards is held while the machine comes back rather than being shown a
+              splash page, and a database is kept up for as long as a client holds a connection to
+              it.
             </p>
           </div>
         </div>
@@ -137,11 +139,12 @@ export default function Deploy() {
 
     ${section({
       id: 'promote',
-      heading: 'Promotion changes three numbers on a row',
-      lede: html`A prototype becomes a production service by changing three numbers on its row:
-        whether it stops when idle, whether it starts on demand, and how many copies stay running.
-        Nothing is rebuilt and nothing is copied, because there was never a second kind of thing to
-        copy it into.`,
+      heading: 'Promotion changes one number on a row',
+      lede: html`A prototype becomes a production service by changing one number on its row, how
+        many copies to run, and giving it a release and a health check. Its lifecycle knobs do not
+        move: it still suspends when idle and still wakes on demand, because a service that cannot
+        sleep is the thing this platform exists to avoid. Nothing is rebuilt and nothing is copied,
+        because there was never a second kind of thing to copy it into.`,
       body: html`
         <div class="grid gap-6 mid:grid-cols-2">
           <div class="${PANEL} p-6">
@@ -150,14 +153,16 @@ export default function Deploy() {
               <dt class="text-ink-subtle">autoStop</dt><dd class="m-0">suspend</dd>
               <dt class="text-ink-subtle">autoStart</dt><dd class="m-0">true</dd>
               <dt class="text-ink-subtle">minRunning</dt><dd class="m-0">0</dd>
+              <dt class="text-ink-subtle">replicas</dt><dd class="m-0">one</dd>
             </dl>
           </div>
           <div class="${PANEL} p-6">
             <p class="font-semibold m-0 mb-2.5">After promote</p>
             <dl class="m-0 grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 font-mono text-sm">
-              <dt class="text-ink-subtle">autoStop</dt><dd class="m-0">off</dd>
+              <dt class="text-ink-subtle">autoStop</dt><dd class="m-0">suspend</dd>
               <dt class="text-ink-subtle">autoStart</dt><dd class="m-0">true</dd>
-              <dt class="text-ink-subtle">minRunning</dt><dd class="m-0">1</dd>
+              <dt class="text-ink-subtle">minRunning</dt><dd class="m-0">0</dd>
+              <dt class="text-ink-subtle">replicas</dt><dd class="m-0">one or more</dd>
             </dl>
           </div>
         </div>

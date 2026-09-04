@@ -84,3 +84,29 @@ func TestEveryLocalSlotGetsItsOwnRules(t *testing.T) {
 		t.Errorf("local rules are not ordered by slot: %v", rules.Local)
 	}
 }
+
+// The two counters are the same mechanism pointing opposite ways: a suspended
+// replica's address gets a counted drop whose rise is a wake, a running one's
+// gets a counted pass-through whose rise is activity. A machine with no
+// release is in neither, because a sandbox gives its slot and its address back
+// when it suspends and has nothing for a peer to address.
+func TestARunningReplicaGetsACounterAndASuspendedOneAWakeRule(t *testing.T) {
+	const self = "host-a"
+	rows := []state.Machine{
+		{ID: "m-run", HostID: self, Slot: 3, App: "shop", State: "running", ReleaseID: "rel-1"},
+		{ID: "m-susp", HostID: self, Slot: 4, App: "shop", State: "suspended", ReleaseID: "rel-1"},
+		{ID: "m-box", HostID: self, Slot: 5, App: "shop", State: "running"},
+	}
+
+	rules := tenantRules(self, fakeView{machines: rows}, testLocator(t, self))
+
+	if len(rules.Activity) != 1 || rules.Activity[0].MachineID != "m-run" {
+		t.Errorf("activity counters = %v, want only the running replica", rules.Activity)
+	}
+	if len(rules.Wake) != 1 || rules.Wake[0].MachineID != "m-susp" {
+		t.Errorf("wake rules = %v, want only the suspended replica", rules.Wake)
+	}
+	if !rules.Activity[0].Addr.IsValid() {
+		t.Error("the running replica's counter has no address to match on")
+	}
+}

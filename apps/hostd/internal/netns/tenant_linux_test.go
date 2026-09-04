@@ -138,3 +138,58 @@ func TestApplyTenantFilterForgetsAMachineThatLeft(t *testing.T) {
 		t.Errorf("a machine that left the host still has rules:\n%s", out)
 	}
 }
+
+// The activity chain is the one rule set nothing else proves. A malformed
+// counted pass-through is not a compile error and shows up nowhere but here:
+// on a real host the Flush fails and the whole tenant filter goes with it.
+func TestActivityRulesLoadIntoTheKernel(t *testing.T) {
+	requirePrivateNetns(t)
+
+	rules := tenantFixture()
+	rules.Activity = []WakeTarget{
+		{MachineID: "m-7", Addr: netip.MustParseAddr("fdcd:1::7")},
+	}
+	if err := ApplyTenantFilter(rules); err != nil {
+		t.Fatalf("ApplyTenantFilter: %v", err)
+	}
+
+	out, err := exec.Command("nft", "list", "table", "inet", tenantTable).CombinedOutput()
+	if err != nil {
+		t.Skipf("nft unavailable: %v\n%s", err, out)
+	}
+	ruleset := string(out)
+
+	if !strings.Contains(ruleset, "chain "+activityChain) {
+		t.Fatalf("the activity chain did not load:\n%s", ruleset)
+	}
+	chain := chainBody(ruleset, activityChain)
+	if !strings.Contains(chain, "fdcd:1::7") || !strings.Contains(chain, "counter") {
+		t.Errorf("no counted rule for the running replica:\n%s", chain)
+	}
+	// A verdict here would either drop a peer's traffic or accept it past the
+	// tenant boundary. The rule counts and lets evaluation continue.
+	if strings.Contains(chain, "drop") || strings.Contains(chain, "accept") {
+		t.Errorf("the activity chain decides something:\n%s", chain)
+	}
+}
+
+// chainBody returns the RULE lines of one chain out of an `nft list table`
+// dump. The chain's own declaration is left out: its policy is an accept and
+// the caller is asking about verdicts the rules carry.
+func chainBody(ruleset, name string) string {
+	var out []string
+	var in bool
+	for _, line := range strings.Split(ruleset, "\n") {
+		switch {
+		case strings.Contains(line, "chain "+name+" {"):
+			in = true
+		case in && strings.TrimSpace(line) == "}":
+			return strings.Join(out, "\n")
+		case in && strings.Contains(line, "policy "):
+			// the chain declaration, not a rule
+		case in:
+			out = append(out, line)
+		}
+	}
+	return strings.Join(out, "\n")
+}

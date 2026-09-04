@@ -49,6 +49,11 @@ func TestFingerprintIsStableAndSensitive(t *testing.T) {
 			Local: []TenantMachine{{SlotIdx: 3, Addr: addr("fdcd:1::3"), App: "blog"}},
 			Apps:  base.Apps,
 		},
+		"a replica started running": {
+			Local:    base.Local,
+			Apps:     base.Apps,
+			Activity: []WakeTarget{{MachineID: "m-1", Addr: addr("fdcd:1::3")}},
+		},
 		"a peer left": {
 			Local: base.Local,
 			Apps: map[string][]netip.Addr{

@@ -102,7 +102,14 @@ export async function executePlan(
     }
     await runPreDeploy(client, app, step, rootfs, secretEnv)
     const service = await upsertService(client, app, step, rootfs, secretEnv)
-    const release = await client.services.deploy(service.id, { build: rootfs })
+    // Knobs travel on the deploy, not on the create: a service row has
+    // nowhere to keep them, and the create and the first deploy are separate
+    // requests. Sending them here is also what makes a redeploy with changed
+    // knobs actually change them.
+    const release = await client.services.deploy(service.id, {
+      build: rootfs,
+      ...(step.knobs ? { knobs: step.knobs } : {}),
+    })
 
     let releaseId = release.id
     if (opts.wait !== false) {
@@ -245,7 +252,6 @@ async function upsertService(
       app,
       build: rootfs,
       replicas: step.replicas,
-      ...(step.knobs ? { knobs: step.knobs } : {}),
       ...(step.health ? { health: step.health } : {}),
       ...(step.domain ? { domain: step.domain } : {}),
       ...(step.custom_domain ? { custom_domain: step.custom_domain } : {}),
@@ -255,12 +261,6 @@ async function upsertService(
     return await client.services.create(req)
   }
 
-  // `knobs` is create-only (#30 Decision 8): the PATCH body is a 400 with it.
-  // Saying so beats sending it and beats silently ignoring a difference the
-  // compose file plainly asks for.
-  if (step.knobs && differ(step.knobs, existing.knobs)) {
-    note(`warning: ${step.name}: knobs are set at create and were not changed`)
-  }
   const req: UpdateServiceRequest = {
     replicas: step.replicas,
     ...(step.health ? { health: step.health } : {}),
@@ -268,10 +268,6 @@ async function upsertService(
     ...(Object.keys(secretEnv).length > 0 ? { secret_env: secretEnv } : {}),
   }
   return await client.services.patch(existing.id, req)
-}
-
-function differ(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a) !== JSON.stringify(b)
 }
 
 /** Polls until the service reports the release just created, or gives up. */

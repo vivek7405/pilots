@@ -98,8 +98,8 @@ export default function Home() {
       id: 'faces',
       layout: 'split',
       heading: 'Two things to want, one thing to run',
-      lede: html`A sandbox and a production service differ by three numbers on a row in a database:
-        when to stop, whether to start on demand, and how many to keep running. They are not two
+      lede: html`A sandbox and a production service differ by a release, a health check and how many
+        copies to run. Both suspend when idle and wake on the next request. They are not two
         products, and pilots does not build them as two.`,
       body: html`
         <div class="grid gap-6 wide:grid-cols-[1.25fr_1fr]">

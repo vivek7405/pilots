@@ -24,6 +24,22 @@ export interface Knobs {
   soft_limit: number
 }
 
+/**
+ * A PARTIAL lifecycle policy: the shape a REQUEST carries.
+ *
+ * hostd decodes a request's knobs onto a value it has already seeded -- its
+ * own defaults on a create, the sibling replica's policy on a deploy -- so a
+ * key left out keeps the value it had. A full `Knobs` here would force the
+ * caller to spell all four, and the three they did not care about would be
+ * merged as zeros: `auto_start: false` suspends the replica after a minute
+ * and the router then refuses to wake it, which is a permanently dead URL
+ * earned by raising a concurrency limit.
+ *
+ * Omit a key to leave it alone; send it to set it, zero values included, so
+ * `min_machines_running: 0` (scale to zero) stays sayable.
+ */
+export type KnobsPatch = Partial<Knobs>
+
 /** The platform's one primitive. Its id, name and URL never change. */
 export interface Machine {
   /**
@@ -58,8 +74,8 @@ export interface CreateMachineRequest {
   checkpoint?: string
   vcpus?: number
   mem_mib?: number
-  /** Raw on the wire so a partial object merges onto hostd's defaults. */
-  knobs?: unknown
+  /** A patch: what is present merges onto hostd's defaults, the rest stay. */
+  knobs?: KnobsPatch
   volume?: string
   app?: string
   cmd?: string
@@ -150,7 +166,12 @@ export interface CreateServiceRequest {
   release?: string
   build?: string
   replicas?: number
-  knobs?: Knobs
+  /**
+   * Accepted for wire compatibility and not persisted: a service row keeps no
+   * knobs, so a policy set here goes nowhere and the deploy is where it
+   * belongs.
+   */
+  knobs?: KnobsPatch
   health?: HealthCheck
   domain?: string
   custom_domain?: string
@@ -164,6 +185,14 @@ export interface CreateServiceRequest {
 export interface DeployRequest {
   release?: string
   build?: string
+  /**
+   * Lifecycle policy for the replicas this deploy creates, merged onto what
+   * the previous release's replicas carry. A service row keeps no knobs, so
+   * the deploy is where they travel.
+   *
+   * A patch, so raising one field does not zero the three nobody mentioned.
+   */
+  knobs?: KnobsPatch
 }
 
 export interface PromoteRequest {
@@ -363,7 +392,12 @@ export interface ComposeStep {
   vcpus: number
   mem_mib: number
   depends_on?: string[]
-  knobs?: Knobs
+  /**
+   * A patch: a step's knobs are whatever the compose file spelled out, and
+   * they are spread straight onto a DeployRequest, so a key the file left out
+   * must stay absent rather than arrive as a zero.
+   */
+  knobs?: KnobsPatch
   domain?: string
   custom_domain?: string
   pre_deploy?: string

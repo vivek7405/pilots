@@ -2,6 +2,7 @@ package machines
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -118,7 +119,7 @@ func (m *Manager) suspendIdleMachines(ctx context.Context) {
 		if row.HostID != m.opts.HostID || row.State != StateRunning {
 			continue
 		}
-		if !m.shouldSuspend(row) {
+		if !m.shouldSuspend(ctx, row) {
 			continue
 		}
 		if err := m.Suspend(ctx, row.ID); err != nil {
@@ -135,15 +136,55 @@ func (m *Manager) suspendIdleMachines(ctx context.Context) {
 // Concurrency alone would suspend a machine between two requests. The timer
 // alone would suspend one that is busy but generating no HTTP traffic. Only
 // the conjunction is safe.
-func (m *Manager) shouldSuspend(row state.Machine) bool {
+func (m *Manager) shouldSuspend(ctx context.Context, row state.Machine) bool {
+	// Whose machine is this? Every running machine needs exactly one
+	// controller: two would race, none bills forever.
+	//
+	// A replica of the service's CURRENT release is the autoscaler's. It
+	// reads the same knobs plus the fleet-wide floor and gives the replica
+	// back to its owner host, so the idle monitor steps aside. Keyed on the
+	// release rather than a knob: a promoted sandbox keeps its sandbox knobs
+	// and changes owner the moment it gets a release, and a rollout's replica
+	// is the same. Suspend keeps a slot and the tenant filter writes a wake
+	// rule on the same key.
+	//
+	// A replica of a SUPERSEDED release is nobody's. The autoscaler only ever
+	// enumerates the current release's replicas, so stepping aside for every
+	// release id at all left these with no controller. Deploy and Rollback do
+	// suspend them, but best-effort: one failed Suspend -- a transient lock, a
+	// jailer hiccup -- and a Firecracker runs and bills forever with nothing
+	// that will ever reconsider it. They stay the idle monitor's.
+	superseded := false
+	if row.ReleaseID != "" {
+		current, err := m.currentRelease(ctx, row.ServiceID)
+		if err != nil {
+			// Which controller owns it is exactly what could not be read, so
+			// take the reversible side: a machine left running until the next
+			// tick reads the row is recoverable, a second controller racing
+			// the autoscaler on a live replica is not.
+			slog.Warn("idle monitor could not tell whether a replica is current; leaving it alone",
+				"machine", row.ID, "service", row.ServiceID, "err", err)
+			return false
+		}
+		if current == row.ReleaseID {
+			return false
+		}
+		superseded = true
+	}
+
 	knobs := ParseKnobs(row.KindKnobs)
 
 	if knobs.AutoStop == "off" {
 		return false
 	}
-	// A service with a floor of running instances is not a scale-to-zero
-	// candidate. Phase 5 makes this per-service rather than per-machine.
-	if knobs.MinMachinesRunning > 0 {
+	// A sandbox asked to keep a floor is not a scale-to-zero candidate.
+	//
+	// A floor is a property of a release's replica SET, though, and a
+	// superseded release has no set left to keep warm -- its traffic went to
+	// the new release the moment the service row flipped. Honouring the floor
+	// there would re-open the leak for every warm service, which is the
+	// common case for the workloads that set a floor at all.
+	if knobs.MinMachinesRunning > 0 && !superseded {
 		return false
 	}
 	if m.flight.count(row.ID) > 0 {
@@ -152,4 +193,28 @@ func (m *Manager) shouldSuspend(row state.Machine) bool {
 
 	idleFor := time.Since(time.Unix(row.LastActivity, 0))
 	return idleFor >= DefaultIdleTimeout
+}
+
+// currentRelease is the release a service is serving right now, or "" when
+// there is no service to ask.
+//
+// A local point read on a row this host already holds, once per running
+// replica per tick -- the same order of cost as the ListMachines above it,
+// and on the same local-state-only path the routing rules demand.
+//
+// A machine that names a release but no service, or names a service that no
+// longer exists, is not the autoscaler's either: nothing enumerates it. Both
+// answer "" so it falls through to the idle monitor rather than to nobody.
+func (m *Manager) currentRelease(ctx context.Context, serviceID string) (string, error) {
+	if serviceID == "" {
+		return "", nil
+	}
+	svc, err := m.opts.Store.GetService(ctx, serviceID)
+	if errors.Is(err, state.ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return svc.ReleaseID, nil
 }
