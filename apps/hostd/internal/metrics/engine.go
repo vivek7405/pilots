@@ -9,6 +9,29 @@ package metrics
 // fault counters means two series with one meaning that disagree, and the
 // disagreement shows up as a graph nobody can trust rather than as an error.
 var (
+	// ActivityReadErrors counts failed reads of the root namespace, by the
+	// two things the autoscaler learns there: the per-machine packet counters
+	// and the conntrack table. Both degrade the scale-down decision rather
+	// than erroring anything a caller sees, so a counter is how an operator
+	// finds out at all.
+	ActivityReadErrors = NewCounter(Default, "pilots_activity_read_errors_total",
+		"Failed reads of the root namespace's activity counters or conntrack "+
+			"table. Non-zero and rising means the autoscaler is deciding "+
+			"scale-down on degraded signals.")
+
+	// SessionSignalBlind is 1 while the held-session signal is unreadable.
+	//
+	// Worth its own series because the consequence is specific: while it is
+	// 1, no replica on this host is given back, so a rising bill and a flat
+	// replica count have one explanation to check first. ConntrackTableList
+	// needs nf_conntrack_netlink, a different module from the nf_conntrack
+	// the tenant chain's ct rule pulls in and not one host-bootstrap.sh
+	// loads, so a host where nfnetlink's request_module does not fire sits
+	// here permanently.
+	SessionSignalBlind = NewGauge(Default, "pilots_session_signal_blind",
+		"1 while open guest-to-guest sessions cannot be read, so every "+
+			"replica on this host is treated as holding one.")
+
 	// UffdFaults counts faults answered across every handler on this host.
 	UffdFaults = NewCounter(Default, "pilots_uffd_faults_total",
 		"Page faults answered by this host's memory handlers.")

@@ -316,7 +316,7 @@ func run() error {
 		}
 	}
 
-	guest := &guestLoad{}
+	guest := newGuestLoad()
 	if machinePrefix.IsValid() {
 		go runTenantFilter(ctx, cfg.HostID, view, locator)
 		// Traffic to a running replica's address is activity, and an open
