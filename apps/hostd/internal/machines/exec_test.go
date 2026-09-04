@@ -199,14 +199,14 @@ func TestExecStreamAnswers502WhenTheGuestIsUnreachable(t *testing.T) {
 	}
 }
 
-// LogsFrom is what a follow polls. It reads from an offset, answers nothing
-// when there is nothing new, and ErrNotFound once the row is deleted -- which
-// is the only thing that ends a follow besides the client leaving.
-func TestLogsFromReadsAnOffsetAndEndsOnDestroy(t *testing.T) {
+// LogTail is what a follow polls. It reads from an offset, answers nothing
+// when there is nothing new, and costs no store query -- the follow polls it
+// twice a second, and a query per tick is what made an idle tail expensive.
+func TestLogTailReadsAnOffsetWithoutAStoreQuery(t *testing.T) {
 	m, st := streamManager(t)
 	ctx := context.Background()
 
-	if got, err := m.LogsFrom(ctx, "m_1", 0); err != nil || got != nil {
+	if got, err := m.LogTail("m_1", 0); err != nil || got != nil {
 		t.Errorf("with no file: %q, %v; want nil, nil", got, err)
 	}
 
@@ -222,7 +222,7 @@ func TestLogsFromReadsAnOffsetAndEndsOnDestroy(t *testing.T) {
 		offset int64
 		want   string
 	}{{0, "abc"}, {2, "c"}, {3, ""}} {
-		got, err := m.LogsFrom(ctx, "m_1", tc.offset)
+		got, err := m.LogTail("m_1", tc.offset)
 		if err != nil {
 			t.Fatalf("offset %d: %v", tc.offset, err)
 		}
@@ -231,11 +231,14 @@ func TestLogsFromReadsAnOffsetAndEndsOnDestroy(t *testing.T) {
 		}
 	}
 
+	// A deleted row does NOT change the answer: whether the machine still
+	// exists is the follow's own question, asked on its own far slower
+	// cadence, and this read must stay free of it.
 	if err := st.DeleteMachine(ctx, "m_1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.LogsFrom(ctx, "m_1", 0); err == nil {
-		t.Error("a destroyed machine's follow never ends")
+	if got, err := m.LogTail("m_1", 0); err != nil || string(got) != "abc" {
+		t.Errorf("after the row was deleted: %q, %v; want %q, nil", got, err, "abc")
 	}
 }
 

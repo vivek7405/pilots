@@ -172,15 +172,14 @@ func (m *Manager) Logs(ctx context.Context, machineID string) ([]byte, error) {
 	return raw, nil
 }
 
-// LogsFrom is Logs from a byte offset, for a follow.
+// LogTail is Logs from a byte offset, for a follow.
 //
-// The row is checked first so a follow of a destroyed machine ends: Destroy
-// removes the state dir and then deletes the row, and a missing file alone is
+// No store read: this is what a follow polls twice a second, and on a
+// Corrosion host every store read is an HTTP round trip to the local agent.
+// Whether the machine still exists is a separate, far rarer question, asked by
+// the follow itself -- a missing file alone cannot answer it, being
 // indistinguishable from a machine that has not written anything yet.
-func (m *Manager) LogsFrom(ctx context.Context, machineID string, offset int64) ([]byte, error) {
-	if _, err := m.opts.Store.GetMachine(ctx, machineID); err != nil {
-		return nil, err // ErrNotFound after a destroy, exactly as Logs
-	}
+func (m *Manager) LogTail(machineID string, offset int64) ([]byte, error) {
 	f, err := os.Open(filepath.Join(m.stateDir(machineID), "lifecycle.log"))
 	if err != nil {
 		if os.IsNotExist(err) {

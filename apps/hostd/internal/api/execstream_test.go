@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -157,16 +158,41 @@ func TestMachineIDByNamePrefersTheLowestLiveID(t *testing.T) {
 	}
 }
 
+// countingRowStore counts the row reads a follow costs.
+type countingRowStore struct {
+	state.Store
+	mu   sync.Mutex
+	gets int
+}
+
+func (c *countingRowStore) GetMachine(ctx context.Context, id string) (*state.Machine, error) {
+	c.mu.Lock()
+	c.gets++
+	c.mu.Unlock()
+	return c.Store.GetMachine(ctx, id)
+}
+
+func (c *countingRowStore) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.gets
+}
+
 // A follow keeps the response open and delivers what the guest writes after
 // the request started. It ends when the row is gone, which is what a destroy
 // leaves behind.
+//
+// The two cadences are the other assertion here. The file is read every tick;
+// the ROW is read far more rarely, because on a Corrosion host a row read is
+// an HTTP round trip and a per-tick one made every open tail cost 2 queries a
+// second for its whole life.
 func TestLogsFollowStreamsAndEndsOnDestroy(t *testing.T) {
-	h, _, fake := newTestServerWithManager(t)
-	srv := httptest.NewServer(h)
-	defer srv.Close()
-
 	for _, query := range []string{"?follow=1", "?follow"} {
 		t.Run(query, func(t *testing.T) {
+			h, st, fake, counted := newFollowServer(t)
+			srv := httptest.NewServer(h)
+			defer srv.Close()
+
 			fake.logs = "boot log\n"
 			// A read that fails once must not end a tail the caller cannot
 			// restart from where it stopped.
@@ -190,17 +216,29 @@ func TestLogsFollowStreamsAndEndsOnDestroy(t *testing.T) {
 				t.Errorf("content-type = %q", ct)
 			}
 
+			// The row reads the request itself already paid, before a single
+			// tick: the tenancy check and the backlog read.
+			opened := counted.count()
+
 			// The transient failure clears, a guest writes to its console, and
 			// then the row is deleted -- which is what a destroy leaves behind
 			// and the only thing besides a disconnect that ends a follow.
 			go func() {
 				// Past the first tick, so the transient failure is one the
 				// follow actually saw and continued through.
-				time.Sleep(logFollowInterval + 100*time.Millisecond)
+				time.Sleep(followPoll + 20*time.Millisecond)
 				fake.fail(nil)
 				fake.appendLog("late line\n")
-				time.Sleep(3 * logFollowInterval)
-				fake.fail(state.ErrNotFound)
+				time.Sleep(3 * followPoll)
+				ticks := counted.count() - opened
+				if err := st.DeleteMachine(context.Background(), "m_1"); err != nil {
+					t.Errorf("DeleteMachine: %v", err)
+				}
+				// Four file ticks have passed and the row was read at most
+				// once. Reading it every tick is the cost this split removes.
+				if ticks > 1 {
+					t.Errorf("the follow read the row %d times across 4 file ticks", ticks)
+				}
 			}()
 
 			body, err := io.ReadAll(res.Body)
@@ -215,6 +253,27 @@ func TestLogsFollowStreamsAndEndsOnDestroy(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The follow's two cadences, shrunk so a test need not wait out a real one.
+// The ratio is what production runs: the row is read once per several file
+// ticks, never once per tick.
+const (
+	followPoll = 100 * time.Millisecond
+	followRow  = 500 * time.Millisecond
+)
+
+// newFollowServer is newTestServerWithManager with a store that counts row
+// reads and a follow that runs on the shortened cadences.
+func newFollowServer(t *testing.T) (http.Handler, state.Store, *fakeManager, *countingRowStore) {
+	t.Helper()
+	_, st, fake := newTestServerWithManager(t)
+	counted := &countingRowStore{Store: st}
+	h := Routes(Deps{
+		HostID: "host-test", Store: counted, Machines: fake,
+		LogFollowInterval: followPoll, LogRowInterval: followRow,
+	})
+	return h, st, fake, counted
 }
 
 // Without follow the body is exactly the backlog and the response ends, which

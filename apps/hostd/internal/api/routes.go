@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/quota"
@@ -59,6 +60,13 @@ type Deps struct {
 	// reads. Optional; nil, and a miss (a row the subscription has not
 	// delivered yet), fall back to the store scan.
 	Lookup func(name string) (state.Machine, bool)
+	// LogFollowInterval and LogRowInterval are the two cadences a log follow
+	// runs at: how often it reads the log file, and how often it re-reads the
+	// row to notice a destroy. Zero means the defaults, which is what
+	// production uses; a test shortens them so it need not wait out a real
+	// destroy check.
+	LogFollowInterval time.Duration
+	LogRowInterval    time.Duration
 	// KeySource is where a minted key's randomness comes from. Nil is
 	// crypto/rand, which is what production uses; a test supplies a fixed
 	// reader so it can know the hash a mint will produce.

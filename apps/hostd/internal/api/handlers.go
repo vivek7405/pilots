@@ -36,9 +36,11 @@ type Manager interface {
 	// returned only before anything was written (a wake that failed, a machine
 	// that is not running); once the upgrade has been attempted it is nil.
 	ExecStream(w http.ResponseWriter, r *http.Request, machineID string) error
-	// LogsFrom is Logs from a byte offset, for a follow. ErrNotFound once the
-	// machine is destroyed; nil, nil when nothing new has been written.
-	LogsFrom(ctx context.Context, machineID string, offset int64) ([]byte, error)
+	// LogTail is Logs from a byte offset, for a follow. nil, nil when nothing
+	// new has been written. It reads the file and nothing else: a follow polls
+	// it twice a second, and whether the machine still exists is asked far
+	// more rarely and separately.
+	LogTail(machineID string, offset int64) ([]byte, error)
 	CreateVolume(ctx context.Context, req CreateVolumeRequest) (*state.Volume, error)
 	ListVolumes(ctx context.Context) ([]state.Volume, error)
 	MachineVolume(ctx context.Context, machineID string) (*MachineVolume, error)
@@ -391,10 +393,23 @@ func (d Deps) handleCheckpointStatus(w http.ResponseWriter, r *http.Request) {
 
 // logFollowInterval is how often a follow looks for new console output.
 //
-// A poll rather than inotify: it is one bounded read of one file per open
+// A poll rather than inotify: one bounded read of one local file per open
 // tail, and the consumer is a human reading a pane or an agent tailing a boot.
 // Nothing reads faster than this, and nothing here is a dependency.
 const logFollowInterval = 500 * time.Millisecond
+
+// logRowInterval is how often a follow re-checks that the machine still
+// exists.
+//
+// Deliberately much slower than the file poll, and that gap is the point. The
+// file read is local; the row read is a store query, which on a Corrosion host
+// is an HTTP round trip to the local agent. Asking both every tick made every
+// open tail cost 2 queries per second for its whole life, on every host,
+// whether or not the log had grown -- the same cost the router's cache exists
+// to keep off the hot path. The row only has to be read often enough to notice
+// a destroy, and a few extra seconds of silence before a tail ends is not
+// something a reader can tell from the network.
+const logRowInterval = 5 * time.Second
 
 func (d Deps) handleLogs(w http.ResponseWriter, r *http.Request) {
 	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
@@ -432,19 +447,31 @@ func (d Deps) followLogs(w http.ResponseWriter, r *http.Request, id string, offs
 	}
 	flush()
 
-	ticker := time.NewTicker(logFollowInterval)
+	poll, rowPoll := logFollowInterval, logRowInterval
+	if d.LogFollowInterval > 0 {
+		poll = d.LogFollowInterval
+	}
+	if d.LogRowInterval > 0 {
+		rowPoll = d.LogRowInterval
+	}
+
+	ticker := time.NewTicker(poll)
 	defer ticker.Stop()
+	rowTicker := time.NewTicker(rowPoll)
+	defer rowTicker.Stop()
 	for {
 		select {
 		case <-r.Context().Done():
 			return
+		case <-rowTicker.C:
+			if _, err := d.Store.GetMachine(r.Context(), id); errors.Is(err, state.ErrNotFound) {
+				return // destroyed: the row is gone, and so is the file
+			}
+			continue
 		case <-ticker.C:
 		}
 
-		delta, err := d.Machines.LogsFrom(r.Context(), id, offset)
-		if errors.Is(err, state.ErrNotFound) {
-			return // destroyed: the row is gone, and so is the file
-		}
+		delta, err := d.Machines.LogTail(id, offset)
 		if err != nil {
 			// A read that failed once is not a reason to end a tail the caller
 			// cannot restart from where it stopped.

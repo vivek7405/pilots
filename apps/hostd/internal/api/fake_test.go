@@ -93,7 +93,7 @@ func (f *fakeManager) ExecStream(w http.ResponseWriter, _ *http.Request, machine
 	return nil
 }
 
-func (f *fakeManager) LogsFrom(_ context.Context, _ string, offset int64) ([]byte, error) {
+func (f *fakeManager) LogTail(_ string, offset int64) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.logsErr != nil {
