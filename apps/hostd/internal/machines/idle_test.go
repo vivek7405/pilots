@@ -154,3 +154,28 @@ func TestGeneratedNamesAreDistinct(t *testing.T) {
 		seen[n] = true
 	}
 }
+
+// A machine with a release has exactly one controller, and it is not this one.
+//
+// The autoscaler reads the same knobs plus the service's floor and gives the
+// replica back to the host that holds it. Both loops acting on one machine is
+// the race the split exists to prevent: this monitor suspends on its own
+// sixty-second clock while the autoscaler is still counting the replica as
+// running capacity. The discriminator is the release rather than a knob,
+// because a promoted sandbox keeps the knobs it was created with.
+func TestTheIdleMonitorLeavesServiceReplicasToTheAutoscaler(t *testing.T) {
+	m := testManager()
+	knobs := api.Knobs{AutoStop: "suspend", AutoStart: true}
+
+	replica := idleRow(knobs, 2*DefaultIdleTimeout)
+	replica.ServiceID = "svc-1"
+	replica.ReleaseID = "rel-1"
+	if m.shouldSuspend(replica) {
+		t.Error("the idle monitor suspended a service replica behind the autoscaler's back")
+	}
+
+	// The same row without a release is an ordinary sandbox and still suspends.
+	if !m.shouldSuspend(idleRow(knobs, 2*DefaultIdleTimeout)) {
+		t.Error("a sandbox with no release stopped suspending")
+	}
+}

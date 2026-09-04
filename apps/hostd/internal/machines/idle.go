@@ -120,13 +120,24 @@ func (m *Manager) suspendIdleMachines(ctx context.Context) {
 // alone would suspend one that is busy but generating no HTTP traffic. Only
 // the conjunction is safe.
 func (m *Manager) shouldSuspend(row state.Machine) bool {
+	// A service replica belongs to the autoscaler, which reads the same
+	// knobs plus the floor and gives the replica back to its owner host.
+	// Two controllers on one machine would race, so this is the one place
+	// the idle monitor steps aside. Keyed on the release rather than a
+	// knob: a promoted sandbox keeps its sandbox knobs and changes owner
+	// the moment it gets a release, and a rollout's replica is the same.
+	// Suspend keeps a slot and the tenant filter writes a wake rule on the
+	// same key.
+	if row.ReleaseID != "" {
+		return false
+	}
+
 	knobs := ParseKnobs(row.KindKnobs)
 
 	if knobs.AutoStop == "off" {
 		return false
 	}
-	// A service with a floor of running instances is not a scale-to-zero
-	// candidate. Phase 5 makes this per-service rather than per-machine.
+	// A sandbox asked to keep a floor is not a scale-to-zero candidate.
 	if knobs.MinMachinesRunning > 0 {
 		return false
 	}
