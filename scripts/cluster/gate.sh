@@ -63,6 +63,41 @@ print(sum(1 for h in json.load(sys.stdin) if h.get('alive')))" 2>/dev/null || ec
   [ "$N" = "${#IPS[@]}" ] && ok "${ip} sees ${N} hosts" || bad "${ip} sees ${N} hosts, want ${#IPS[@]}"
 done
 
+say "1b. Every host answers on the API hostname and reports a replica version"
+# The API hostname sits under the workload wildcard, so nothing routes to it
+# unless dispatch claims it before the suffix check. There is no DNS and no
+# TLS on this cluster, so the hostname is asserted with a Host: header against
+# the IP -- which is exactly what the check reads anyway.
+WD="${PILOT_WORKLOAD_DOMAIN:-pilotrun.app}"
+VERSIONS=()
+for ip in "${IPS[@]}"; do
+  H=$(curl -sf -m 5 -H "Host: api.${WD}" "http://${ip}:8080/v1/health" 2>/dev/null)
+  [ "$(echo "$H" | jf ok)" = "True" ] \
+    && ok "${ip} answers on api.${WD}" \
+    || bad "${ip} does not answer on api.${WD}: ${H:-no response}"
+
+  # The sum of the replica's version vector. Zero means the local corrosion
+  # agent is not answering, which is a broken host wearing a healthy 200.
+  V=$(echo "$H" | jf store_version)
+  case "$V" in
+    ''|*[!0-9]*) bad "${ip} reports store_version ${V:-empty}, want an integer" ;;
+    0) bad "${ip} reports store_version 0, so its replica is not readable" ;;
+    *) ok "${ip} has applied ${V} changes"; VERSIONS+=("$V") ;;
+  esac
+done
+
+if [ "${#VERSIONS[@]}" = "${#IPS[@]}" ]; then
+  # Each host may be one heartbeat behind every other host at the instant of
+  # the read, so the fleet size is the allowance. A wider spread than that is
+  # replication falling behind, not sampling.
+  MAXV=$(printf '%s\n' "${VERSIONS[@]}" | sort -n | tail -1)
+  MINV=$(printf '%s\n' "${VERSIONS[@]}" | sort -n | head -1)
+  SPREAD=$((MAXV - MINV))
+  [ "$SPREAD" -le "${#IPS[@]}" ] \
+    && ok "replica versions are within ${SPREAD} of each other (${VERSIONS[*]})" \
+    || bad "replica versions span ${SPREAD}, want at most ${#IPS[@]} (${VERSIONS[*]})"
+fi
+
 say "2. A machine created on one host is visible and routable from every host"
 # auto_stop off for the same reason step 5 turns it off: this machine is used
 # by every step below, minutes apart, and a machine that idle-suspends between

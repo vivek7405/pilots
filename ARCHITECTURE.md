@@ -993,7 +993,11 @@ containment, capacity refusal, quota parity) is in `e2e.mjs`, and the
 host-shell half (the NBD wedge and its deliberate negative control, the
 per-host resource counts, cgroup containment, Firecracker API exhaustion,
 orphan pile-up) is in `scripts/cluster/gate.sh` as numbered sections.
-`go test ./...` for
+The battery's edge section drives a machine that echoes what
+reached it, so a forged `X-Forwarded-For`, the API hostname and the per-state
+machine gauge are asserted through the router rather than in a unit test;
+`gate.sh` section 1b asserts the same hostname on every host and that their
+replica versions have not drifted apart. `go test ./...` for
 netns/block/header/state/s3 (block-layer round-trip + diff-chain tests are
 mandatory). Drift tests in both SDKs parse `internal/api` on every
 `npm test`. Dashboard: `webjs check` / `doctor --json` / `typecheck` /
