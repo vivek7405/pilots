@@ -2603,55 +2603,67 @@ async function execStreamAssertions() {
       // never ends blocks forever, and a battery that hangs reports nothing.
       const abort = new AbortController();
       const guard = setTimeout(() => abort.abort(), 180_000);
-      const res = await fetch(`${API}/v1/machines/${id}/logs?follow=1`, {
-        headers: { Authorization: `Bearer ${KEY}` },
-        signal: abort.signal,
-      });
-      assert(res.status === 200, `expected 200, got ${res.status}`);
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let seen = '';
-
-      const waitForMarker = async (marker) => {
-        const deadline = Date.now() + 60_000;
-        while (Date.now() < deadline) {
-          const { done, value } = await reader.read();
-          if (done) throw new Error(`the follow ended before ${marker} arrived`);
-          seen += decoder.decode(value, { stream: true });
-          if (seen.includes(marker)) return;
-        }
-        throw new Error(`${marker} never arrived on the follow`);
-      };
-
-      await exec(id, 'echo follow-marker-one > /dev/console');
-      await waitForMarker('follow-marker-one');
-
-      // A suspend must not end a follow. The idle monitor suspends a quiet
-      // sandbox after a minute, so a tail that ended there would cut every
-      // agent's log one minute into a session.
-      const sus = await request(`/v1/machines/${id}/suspend`, { method: 'POST' });
-      assert(sus.status === 204, `suspend: ${sus.status}`);
-      const woke = await request(`/v1/machines/${id}/wake`, { method: 'POST' });
-      assert(woke.status === 204, `wake: ${woke.status}`);
-      await exec(id, 'echo follow-marker-two > /dev/console');
-      await waitForMarker('follow-marker-two');
-
-      // A destroy ends it: the row the follow polls is deleted.
-      await request(`/v1/machines/${id}`, { method: 'DELETE' });
-      destroyed = true;
-      const deadline = Date.now() + 15_000;
-      const ender = setTimeout(() => abort.abort(), 15_000);
+      // Everything below is inside the try, so the guard is disarmed and the
+      // body reader closed however this step leaves. Node keeps the event loop
+      // alive for both, so an assertion that throws here used to hang the
+      // battery for the rest of the 180 s -- three silent minutes on the step
+      // whose failure it most wants to report at once.
+      let reader;
       try {
-        for (;;) {
-          const { done } = await reader.read();
-          if (done) break;
-          assert(Date.now() < deadline, 'the follow outlived the machine it was tailing');
+        const res = await fetch(`${API}/v1/machines/${id}/logs?follow=1`, {
+          headers: { Authorization: `Bearer ${KEY}` },
+          signal: abort.signal,
+        });
+        assert(res.status === 200, `expected 200, got ${res.status}`);
+        reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let seen = '';
+
+        const waitForMarker = async (marker) => {
+          const deadline = Date.now() + 60_000;
+          while (Date.now() < deadline) {
+            const { done, value } = await reader.read();
+            if (done) throw new Error(`the follow ended before ${marker} arrived`);
+            seen += decoder.decode(value, { stream: true });
+            if (seen.includes(marker)) return;
+          }
+          throw new Error(`${marker} never arrived on the follow`);
+        };
+
+        await exec(id, 'echo follow-marker-one > /dev/console');
+        await waitForMarker('follow-marker-one');
+
+        // A suspend must not end a follow. The idle monitor suspends a quiet
+        // sandbox after a minute, so a tail that ended there would cut every
+        // agent's log one minute into a session.
+        const sus = await request(`/v1/machines/${id}/suspend`, { method: 'POST' });
+        assert(sus.status === 204, `suspend: ${sus.status}`);
+        const woke = await request(`/v1/machines/${id}/wake`, { method: 'POST' });
+        assert(woke.status === 204, `wake: ${woke.status}`);
+        await exec(id, 'echo follow-marker-two > /dev/console');
+        await waitForMarker('follow-marker-two');
+
+        // A destroy ends it: the row the follow polls is deleted.
+        await request(`/v1/machines/${id}`, { method: 'DELETE' });
+        destroyed = true;
+        const deadline = Date.now() + 15_000;
+        const ender = setTimeout(() => abort.abort(), 15_000);
+        try {
+          for (;;) {
+            const { done } = await reader.read();
+            if (done) break;
+            assert(Date.now() < deadline, 'the follow outlived the machine it was tailing');
+          }
+        } catch (err) {
+          assert(false, `the follow never ended after the destroy: ${err.message}`);
+        } finally {
+          clearTimeout(ender);
         }
-      } catch (err) {
-        assert(false, `the follow never ended after the destroy: ${err.message}`);
       } finally {
-        clearTimeout(ender);
         clearTimeout(guard);
+        // Cancel rather than leave it: an open reader on a response the server
+        // has not ended is a live handle, and Node will not exit holding one.
+        await reader?.cancel().catch(() => {});
       }
     });
   } finally {
