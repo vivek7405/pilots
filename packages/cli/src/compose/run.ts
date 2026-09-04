@@ -88,7 +88,18 @@ export async function executePlan(
   for (const step of plan.steps) {
     const secretEnv = secretsByStep.get(step.name) ?? {}
     const rootfs = await buildStep(client, step, opts)
-    await ensureVolumes(client, app, step)
+    const volumes = await ensureVolumes(client, app, step)
+    // Said out loud because the gap is invisible from the compose file:
+    // `CreateServiceRequest` carries no volume, so a volume a step declares
+    // exists but is mounted by nothing. A Postgres deployed this way writes to
+    // the replica's ephemeral disk while the compose file says RPO 0, and the
+    // first replica replacement is the moment anyone finds out.
+    if (volumes.length > 0) {
+      note(
+        `warning: ${step.name}: ${volumes.map((v) => v.name).join(', ')} exists, but a service ` +
+          'cannot mount a volume yet -- this replica\'s data is NOT durable',
+      )
+    }
     await runPreDeploy(client, app, step, rootfs, secretEnv)
     const service = await upsertService(client, app, step, rootfs, secretEnv)
     const release = await client.services.deploy(service.id, { build: rootfs })
