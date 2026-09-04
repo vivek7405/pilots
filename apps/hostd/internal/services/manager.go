@@ -28,6 +28,10 @@ type MachineManager interface {
 	// and a route flip rather than a rebuild.
 	Suspend(ctx context.Context, id string) error
 	Wake(ctx context.Context, id string) error
+	// Touch records that a machine is in use, as the router does on every
+	// request. The autoscaler calls it for a busy replica so the row says so
+	// fleet-wide.
+	Touch(ctx context.Context, id string)
 	Exec(ctx context.Context, machineID string, req api.ExecRequest) (*api.ExecResponse, error)
 	Checkpoint(ctx context.Context, machineID, comment string) (*state.Checkpoint, error)
 	// AppAddr is where this host can reach the machine's application port,

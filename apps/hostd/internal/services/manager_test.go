@@ -25,6 +25,7 @@ type fakeMachines struct {
 	creates  int
 	noSnap   bool // Checkpoint produces no memory build
 	suspends []string
+	touches  []string
 }
 
 func newFakeMachines(store state.Store) *fakeMachines {
@@ -55,6 +56,7 @@ func (f *fakeMachines) Create(ctx context.Context, req api.CreateMachineRequest)
 	row := &state.Machine{
 		ID: id, Name: id, HostID: "host-a", State: "running",
 		ServiceID: req.Service, ReleaseID: req.Release,
+		KindKnobs: string(req.Knobs),
 	}
 	if err := f.store.PutMachine(ctx, row); err != nil {
 		return nil, err
@@ -83,6 +85,13 @@ func (f *fakeMachines) Wake(ctx context.Context, id string) error {
 	defer f.mu.Unlock()
 	f.log("wake:%s", id)
 	return nil
+}
+
+func (f *fakeMachines) Touch(ctx context.Context, id string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.log("touch:%s", id)
+	f.touches = append(f.touches, id)
 }
 
 func (f *fakeMachines) Exec(ctx context.Context, id string, req api.ExecRequest) (*api.ExecResponse, error) {
