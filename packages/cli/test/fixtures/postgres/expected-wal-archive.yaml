@@ -1,0 +1,29 @@
+# Two replicas because the health check is slow.
+services:
+  web:
+    build: .
+    replicas: 2
+  postgres:
+    build: ./.pilots/postgres
+    command:
+      - postgres
+      - -c
+      - archive_mode=on
+      - -c
+      - archive_timeout=60
+      - -c
+      - archive_command=test ! -f /archive/wal/%f && cp %p /archive/wal/%f
+    environment:
+      POSTGRES_PASSWORD: secret://postgres_password
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - pgarchive:/archive
+    healthcheck:
+      test: [ CMD-SHELL, pg_isready -U postgres ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    x-pilots:
+      durable_volume: false # data dir local, WAL shipped to the pgarchive volume every 60s (RPO 60s)
+volumes:
+  pgarchive: {}

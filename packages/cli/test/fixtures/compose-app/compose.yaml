@@ -1,0 +1,14 @@
+# The shop app: a database, a web service and a worker.
+services:
+  postgres:
+    image: postgres:17
+  web:
+    build: ./web
+    environment:
+      DATABASE_URL: secret://database_url
+    x-pilots:
+      pre_deploy: python manage.py migrate --noinput
+  worker:
+    build: ./worker
+    depends_on:
+      - postgres

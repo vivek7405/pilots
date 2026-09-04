@@ -1,0 +1,21 @@
+# Two replicas because the health check is slow.
+services:
+  web:
+    build: .
+    replicas: 2
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: secret://postgres_password
+      PGDATA: /var/lib/postgresql/data
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: [ CMD-SHELL, pg_isready -U postgres ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    x-pilots:
+      durable_volume: true # data dir on a volume: RPO 0, at an object-storage round trip per commit
+volumes:
+  pgdata: {}

@@ -777,6 +777,12 @@ agent-drivable via MCP:
    base image, ports, start command).
 3. Build fails → the agent reads the structured NDJSON error, patches the
    Dockerfile, retries — the loop the structured logs exist for.
+
+The fleet-wide layer cache is keyed **server-side on the Dockerfile's content
+hash**, so a client passes no cache name at all — and every app built from the
+same scaffold Dockerfile shares one partition, which is why the first deploy of
+a new webjs app is already warm on any host.
+
 **Deploy ingestion — two paths, one pipeline:**
 1. **Direct** (base primitive, GitHub-free): `pilot deploy` tars the local
    context → `POST /v1/builds` → health-gated deploy. What the CLI, SDKs,
@@ -846,9 +852,16 @@ snapshot; a database restores and then replays WAL.
   `createAuth({ providers: [GitHub] })`; handlers at
   `app/api/auth/[...path]`; `AUTH_SECRET` env). No passwords stored, ever.
 - **CLI:** `pilot login` runs the **GitHub device flow** (prints a code +
-  URL, polls) → the dashboard's API exchanges the GitHub identity for a
-  pilots **API key** → stored at `~/.config/pilots/credentials`. Headless
-  fallback: `pilot login --token` / `PILOT_API_KEY` env.
+  URL, polls) → `POST ${PILOT_DASHBOARD_URL:-https://pilots.run}/api/cli/exchange`
+  with `{github_access_token}` returns `{api_key, org_id, scopes}` → stored at
+  `${XDG_CONFIG_HOME:-~/.config}/pilots/credentials` as
+  `{api_key, api_url, org_id, secrets}`, directory `0700` and file `0600`
+  (a file readable by another user is refused, naming the path). The CLI
+  ships the App's public `client_id` and NO client secret, which is what the
+  device flow exists for. Headless fallback: `pilot login --token` /
+  `PILOT_API_KEY` env. **No command validates a cached key**: once the file
+  exists every command talks only to the fleet, so a dashboard outage cannot
+  take the CLI down with it (fly's tkdb outage is the precedent).
 - **Machine auth:** every hostd request carries `Authorization: Bearer
   <api-key>`. Key **hashes** live in the Corrosion `api_keys` table, written
   by whichever host serves the `POST /v1/api-keys` that minted them, so
@@ -908,7 +921,8 @@ pilots/
       internal/{fc,block,uffd,nbd,ctlsock,netns,router,state,s3,build,volumes,selfheal}/
       systemd/            # hostd.service, corrosion.service
     dashboard/            # webjs full-stack app (scaffolded `npm create webjs`)
-  packages/cli/           # `pilot` CLI (TS)
+  packages/cli/           # `pilot` CLI + its MCP server (TS, no build step:
+    bin/  src/{commands,compose,mcp}/   #   Node strips the types at run time)
   sdks/js/                # @pilots/sdk — typed client + sprites-compat adapter
   sdks/go/                # github.com/vivek7405/pilots/sdks/go
                           #   both hand-written; both carry a drift test that
