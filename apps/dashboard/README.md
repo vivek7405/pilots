@@ -92,6 +92,38 @@ The usage poller does not run under `webjs dev`; it is gated to
 `NODE_ENV=production`. Call `startUsagePoller` directly if you need to exercise
 it, as `test/usage/poller.test.ts` does.
 
+## The design system
+
+Every page is built from `@webjsdev/ui`, the framework's shadcn-style kit. Its
+source is copied into this repo, so these are ours to edit:
+
+- `components/ui/` holds the class helpers (`buttonClass`, `badgeClass`,
+  `tableCellClass`, ...). Add one with `npx webjsdev ui add <name>`; read the
+  structure it expects with `npx webjsdev ui view <name>`.
+- `lib/utils/ui.ts` holds the repeated *markup*: `pageHeading`, `lede`,
+  `field`, `errorAlert`, and `dataTable`. The split is deliberate. A repeated
+  class string belongs in `components/ui/`, a repeated chunk of markup belongs
+  here, and neither ships any JavaScript.
+- `app/layout.ts` holds the design tokens. `public/input.css` maps them into
+  Tailwind utilities with `@theme`, so a token defined in neither place renders
+  as nothing at all rather than as an error; `test/ui/design-system.test.ts`
+  asserts every mapped token has a value on the served page.
+
+Reach for the helpers rather than writing the utilities out. Two of them exist
+mainly to keep an accessibility obligation from being forgotten per page:
+`dataTable` requires a caption and emits `scope="col"` itself, and `field`
+requires the id that its label points at.
+
+Two local edits to the kit's own files are deliberate and commented in place:
+`components/ui/checkbox.ts` keeps its checkmark CSS in `public/input.css`
+instead of injecting it at module scope, which would ship a whole page's
+JavaScript and skip the first paint, and it carries a `dark:checked:` pair the
+registry lacks. Re-running `webjsdev ui add checkbox` overwrites both; run
+`npx webjsdev ui diff` to see where local copies have drifted from upstream.
+
+The stylesheet is compiled, not generated at runtime. `webjs dev` and
+`webjs start` rebuild it, and `npm run css:build` does it by hand.
+
 ## Tests
 
 ```sh
@@ -101,10 +133,21 @@ npx playwright install chromium     # first run only
 ```
 
 The browser layer is a separate script because it needs a real Chromium, so
-`npm test` stays green on a machine with no browsers installed. The one browser
-test that exists is required rather than optional: applying a delta to the
-rendered machine list is post-hydration behaviour, so the served bytes are
-identical whether it works or not.
+`npm test` stays green on a machine with no browsers installed. Nothing in it
+is optional; each file is there because the thing it checks is invisible to the
+server layer:
+
+- `test/machines/browser/` applies a delta to the rendered machine list, which
+  is post-hydration behaviour, so the served bytes are identical either way.
+- `test/theme/browser/` drives the theme toggle, which writes `localStorage`
+  and `<html>` attributes outside its own subtree, and measures the checkbox's
+  computed colours in both themes, which needs the compiled stylesheet parsed.
+- `test/ui/browser/` runs axe over the served pages and the live components, in
+  both themes. Contrast is computed colour, so this is the only layer that can
+  see it.
+
+Run `npm run css:build` before the browser layer if the stylesheet is stale:
+two of those files fetch `/public/tailwind.css` and assert it is served.
 
 Every layer runs against a fake fleet installed on `globalThis.__pilots_fleet`
 before the app boots, which `modules/fleet/client.server.ts` reads first. No
