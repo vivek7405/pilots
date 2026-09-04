@@ -80,3 +80,66 @@ test('PILOT_API_URL is present and is a public address, never loopback', () => {
     assert.equal(url.includes(forbidden), false, `a guest cannot reach the host over ${forbidden}`);
   }
 });
+
+/**
+ * A root-context build reads the ROOT `.dockerignore`, so a path the Dockerfile
+ * COPYs can be excluded by a rule written for a different reason: `apps/website`
+ * was excluded as "the other web app", and `COPY apps/website/package.json`
+ * then failed with "not found" because npm workspaces need every manifest the
+ * root lockfile names. This walks the same pattern loop moby/patternmatcher
+ * runs (`MatchesOrParentMatches`: in file order, an exclusion matching the path
+ * or a parent excludes it, a later negation matching the path itself brings it
+ * back), for the patterns this file uses: `*`, `**`, `?` and literal segments.
+ *
+ * Counterfactual: replace `apps/website/*` in the root `.dockerignore` with the
+ * bare `apps/website` and drop the negation, and the manifest assertion fails.
+ */
+const REPO_ROOT = join(APP_DIR, '..', '..');
+const rootIgnore = readFileSync(join(REPO_ROOT, '.dockerignore'), 'utf8');
+
+function toRegExp(pattern: string): RegExp {
+  let out = '^';
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === '*' && pattern[i + 1] === '*') {
+      i++;
+      if (pattern[i + 1] === '/') i++;
+      out += i === pattern.length - 1 ? '.*' : '(?:.*/)?';
+    } else if (ch === '*') out += '[^/]*';
+    else if (ch === '?') out += '[^/]';
+    else out += ch.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+  }
+  return new RegExp(`${out}$`);
+}
+
+function excludedByRootIgnore(file: string): boolean {
+  const patterns = rootIgnore
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('#'))
+    .map((l) => ({ negate: l.startsWith('!'), re: toRegExp(l.replace(/^!/, '').replace(/\/$/, '')) }));
+  const parents = file.split('/').slice(0, -1).map((_, i, all) => all.slice(0, i + 1).join('/'));
+  let matched = false;
+  for (const p of patterns) {
+    if (p.negate !== matched) continue;
+    if (p.re.test(file) || parents.some((dir) => p.re.test(dir))) matched = !p.negate;
+  }
+  return matched;
+}
+
+test('every path the Dockerfile copies survives the root .dockerignore', () => {
+  const sources = [...dockerfile.matchAll(/^COPY\s+(?!--from)(.+?)\s+\S+\s*$/gm)].flatMap((m) => m[1].split(/\s+/));
+  assert.ok(sources.length >= 6, `parsed the COPY lines: ${sources.join(', ')}`);
+  for (const src of sources) {
+    const probe = src.endsWith('/') || !src.includes('.') ? `${src.replace(/\/$/, '')}/package.json` : src;
+    assert.equal(excludedByRootIgnore(probe), false, `${src} is in the build context`);
+  }
+});
+
+test('the website manifest is the only part of that app in the context', () => {
+  assert.equal(excludedByRootIgnore('apps/website/package.json'), false, 'npm ci needs the workspace manifest');
+  assert.equal(excludedByRootIgnore('apps/website/app/page.ts'), true, 'and nothing else from the other app ships');
+  assert.equal(excludedByRootIgnore('apps/hostd/go.mod'), true, 'the Go data plane never enters a web image');
+  assert.equal(excludedByRootIgnore('apps/dashboard/.webjs/vendor/importmap.json'), false, 'the vendor manifest ships');
+  assert.equal(excludedByRootIgnore('apps/dashboard/test/auth/gate.test.ts'), true, 'tests do not');
+});
