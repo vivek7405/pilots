@@ -81,6 +81,13 @@ export function orUnauthorized<T>(value: T | SignedOut): T {
  *
  * One transaction, because a user row with no org would leave the account
  * signed in and unable to see anything, with no path to repair itself.
+ *
+ * Identity is the GitHub user id (`users.github_id`, unique), which GitHub
+ * never reuses. The login is NOT an identity: GitHub frees it for reuse the
+ * moment an account renames or is deleted. So the personal org is found by
+ * its owner, and its slug is only DERIVED from the login: the login when that
+ * is free, else the login with a numeric suffix. Nothing looks an org up by
+ * slug, so a suffixed one costs its owner nothing beyond the display name.
  */
 export async function upsertGithubUser(identity: GithubIdentity): Promise<User> {
   const githubId = String(identity.id);
@@ -111,15 +118,32 @@ export async function upsertGithubUser(identity: GithubIdentity): Promise<User> 
     const existing = tx.select().from(orgs).where(eq(orgs.ownerId, row.id)).all();
     if (existing.some((o) => o.personal)) return row;
 
-    // The slug is the GitHub login, which GitHub already guarantees unique.
     const [org] = tx
       .insert(orgs)
-      .values({ slug: identity.login, name: identity.login, personal: true, ownerId: row.id })
+      .values({ slug: freeSlug(tx, identity.login), name: identity.login, personal: true, ownerId: row.id })
       .returning()
       .all();
     tx.insert(memberships).values({ userId: row.id, orgId: org.id, role: 'owner' }).run();
     return row;
   });
+}
+
+/**
+ * The first free slug for a login: the login itself, else `login-2`,
+ * `login-3` and so on. Lower-cased, because GitHub logins are
+ * case-insensitive and the unique constraint is not, so `Alice` and `alice`
+ * would otherwise be two different slugs for one login. Runs inside the
+ * sign-in transaction, so two first sign-ins cannot both see a slug as free.
+ */
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
+function freeSlug(tx: Tx, login: string): string {
+  const base = login.toLowerCase();
+  for (let n = 1; ; n++) {
+    const slug = n === 1 ? base : `${base}-${n}`;
+    const taken = tx.select().from(orgs).where(eq(orgs.slug, slug)).get();
+    if (!taken) return slug;
+  }
 }
 
 /** The `users` row for the session on this request, or null when signed out. */
