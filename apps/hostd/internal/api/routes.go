@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/quota"
@@ -67,6 +68,10 @@ type Deps struct {
 // answer 501 until Phase 2 implements them. Writing the table now means the
 // CLI and SDKs can be built against a real route list, and a typo shows up as
 // a failing test rather than a 404 in production.
+// storeVersionTimeout bounds the one store read /v1/health does. Liveness has
+// to answer on a host whose replica is wedged, not wait for it.
+const storeVersionTimeout = 2 * time.Second
+
 func Routes(d Deps) http.Handler {
 	mux := http.NewServeMux()
 
@@ -77,11 +82,19 @@ func Routes(d Deps) http.Handler {
 			HugePages: d.HugePages,
 		}
 		if d.StoreVersion != nil {
+			// Bounded, and short. The corrosion client sets no response
+			// timeout, so an agent that accepts the connection and then stops
+			// answering would hold this handler open until the client gave
+			// up -- on the one unauthenticated route every load balancer
+			// polls, which is the opposite of what the paragraph below
+			// promises. A hung replica has to read as "version 0", fast.
+			ctx, cancel := context.WithTimeout(r.Context(), storeVersionTimeout)
+			defer cancel()
 			// A replica that cannot be read is not a dead host: liveness
 			// still answers 200 and the version stays 0, because a health
 			// check that fails on a store hiccup takes the host out of
 			// rotation for a problem that is not the host's.
-			if v, err := d.StoreVersion(r.Context()); err != nil {
+			if v, err := d.StoreVersion(ctx); err != nil {
 				slog.Warn("could not read the store version", "err", err)
 			} else {
 				resp.StoreVersion = v

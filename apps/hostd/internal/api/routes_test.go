@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
@@ -120,6 +121,51 @@ func TestHealthStaysOKWhenTheStoreVersionCannotBeRead(t *testing.T) {
 	}
 	if !got.OK || got.StoreVersion != 0 {
 		t.Errorf("health payload = %+v, want ok with store_version 0", got)
+	}
+}
+
+// A wedged replica is the case the error case above does not cover: the
+// corrosion client sets no response timeout, so an agent that accepts the
+// connection and then never answers would hold this handler open for as long
+// as the caller waits. On the one unauthenticated route every load balancer
+// polls, that is how a replica hiccup becomes the host being taken out of
+// rotation -- and it is cheap to trigger, since the route needs no key.
+//
+// The handler must give up on its own and answer 200 with 0.
+func TestHealthDoesNotWaitOnAWedgedStore(t *testing.T) {
+	released := make(chan struct{})
+	defer close(released)
+
+	h := Routes(Deps{
+		HostID: "host-test",
+		StoreVersion: func(ctx context.Context) (int64, error) {
+			select {
+			case <-ctx.Done():
+				return 0, ctx.Err()
+			case <-released:
+				return 99, nil
+			}
+		},
+	})
+
+	start := time.Now()
+	rec := do(t, h, "GET", "/v1/health", "")
+	took := time.Since(start)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200 with the store wedged", rec.Code)
+	}
+	var got HealthResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.OK || got.StoreVersion != 0 {
+		t.Errorf("health payload = %+v, want ok with store_version 0", got)
+	}
+	// Generous, so the test is not a stopwatch: what it rules out is the
+	// handler waiting on the store indefinitely.
+	if took > 5*storeVersionTimeout {
+		t.Errorf("health took %s, want it bounded by %s", took, storeVersionTimeout)
 	}
 }
 
