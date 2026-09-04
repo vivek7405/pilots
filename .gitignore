@@ -17,3 +17,11 @@ apps/hostd/hostd
 
 # Build output of the JS SDK (sdks/js).
 sdks/js/dist/
+
+# The prior-art research is a SEPARATE PRIVATE repo, cloned into this path so
+# every docs/prior-art/... reference in AGENTS.md resolves locally. It is not
+# vendored here because the notes judge named projects by name, which is what
+# makes them useful to an implementer and the wrong thing to publish.
+#
+#   git clone git@github.com:vivek7405/pilots-prior-art.git docs/prior-art
+/docs/prior-art/
