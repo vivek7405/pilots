@@ -162,3 +162,53 @@ func TestTheHeaderIsStillHonoured(t *testing.T) {
 		t.Errorf("got %d, want 200", rec.Code)
 	}
 }
+
+// The proxy echoes the entry the client OFFERED, not the key inside it: a
+// handshake fails unless the server's choice is one of the offered values.
+func TestBearerSubprotocolReturnsTheOfferedEntry(t *testing.T) {
+	for _, tc := range []struct {
+		name, header, want string
+		ok                 bool
+	}{
+		{"one of several", "chat, authorization.bearer.x", "authorization.bearer.x", true},
+		{"only entry", "authorization.bearer.pilot_k", "authorization.bearer.pilot_k", true},
+		{"empty key", "authorization.bearer.", "", false},
+		{"a bare key", "pilot_k", "", false},
+		{"no header", "", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/v1/machines/m_1/exec/stream", nil)
+			if tc.header != "" {
+				req.Header.Set("Sec-WebSocket-Protocol", tc.header)
+			}
+			got, ok := BearerSubprotocol(req)
+			if ok != tc.ok || got != tc.want {
+				t.Errorf("BearerSubprotocol = %q, %v; want %q, %v", got, ok, tc.want, tc.ok)
+			}
+		})
+	}
+}
+
+// The echo must cover an offer that carries no key: a client authenticating
+// with the Authorization header may still offer a subprotocol, and a 101 that
+// chose none fails that connection.
+func TestOfferedSubprotocolReturnsTheFirstEntry(t *testing.T) {
+	for _, tc := range []struct{ name, header, want string }{
+		{"no header", "", ""},
+		{"a name this server does not know", "pilots.v1", "pilots.v1"},
+		{"the first of several", " pilots.v1 , chat ", "pilots.v1"},
+		{"the bearer entry when it leads", "authorization.bearer.k, chat", "authorization.bearer.k"},
+		{"the bearer entry when it does not", "chat, authorization.bearer.k", "chat"},
+		{"empty entries are skipped", ", , pilots.v1", "pilots.v1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/v1/machines/m_1/exec/stream", nil)
+			if tc.header != "" {
+				req.Header.Set("Sec-WebSocket-Protocol", tc.header)
+			}
+			if got := OfferedSubprotocol(req); got != tc.want {
+				t.Errorf("OfferedSubprotocol = %q; want %q", got, tc.want)
+			}
+		})
+	}
+}

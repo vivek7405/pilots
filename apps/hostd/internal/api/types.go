@@ -179,6 +179,11 @@ type ExecResponse struct {
 // the exit code. This is byte-compatible with the sprites protocol on purpose,
 // so existing clients drop in unchanged.
 const (
+	// Client to server; honoured only when the stream was opened with stdin=true.
+	// hostd sends a text {"type":"exit","exit_code":n} after the binary exit.
+	FrameStdin    byte = 0
+	FrameStdinEOF byte = 4
+
 	FrameStdout byte = 1
 	FrameStderr byte = 2
 	FrameExit   byte = 3

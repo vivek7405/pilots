@@ -120,6 +120,19 @@ and `s.Stdin` becomes an `io.WriteCloser`; each `Write` is one stdin frame and
 `Close` is the stdin EOF frame. It is off by default because a process holding
 an open stdin it never reads hangs.
 
+**A text verdict LEADS the binary exit frame.** hostd sends
+`{"type":"exit","exit_code":n}` and then frame `3`, in that order, because the
+binary frame carries the code in one byte: a command killed by a signal has an
+exit code of -1, which one byte reports as 255 and no reader can tell from a
+command that genuinely exited 255. `Wait` settles on whichever verdict arrives
+first and closes the socket, so the text one has to be first for the
+untruncated code to be the one you get. Frame `3` still follows it, unchanged,
+for a client that reads only binary frames.
+
+**An exec that names no user runs as `sprite`.** The guest image bakes that
+account at uid 1000 with home `/home/sprite` and Node 24 on `PATH`, so a
+command needs neither a `User` nor a `Dir` to land where these examples assume.
+
 **A close with no exit frame is an error.** `Wait` returns it rather than a
 code of 0: an exit frame means the output that preceded it has already
 arrived, while a dropped socket means nobody knows what the command did.

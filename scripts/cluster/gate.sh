@@ -130,6 +130,44 @@ for ip in "${IPS[@]:1}"; do
     || bad "${ip} could not serve it (got '${OUT}')"
 done
 
+# The STREAM has to cross the hop too, or `pilot machines exec` and the
+# dashboard's console work on one host in three. Driven from here with Node's
+# global WebSocket, the same wire the SDK uses, printing "<stdout>|<exit>".
+stream_exec() { # stream_exec <ip> <path>
+  PILOT_WS="ws://${1}:8080${2}" PILOT_KEY="$KEY" node -e '
+    const ws = new WebSocket(process.env.PILOT_WS,
+      [`authorization.bearer.${process.env.PILOT_KEY}`]);
+    ws.binaryType = "arraybuffer";
+    let out = "", code = "";
+    const dec = new TextDecoder();
+    setTimeout(() => { console.log(`${out.trim()}|timeout`); process.exit(0); }, 60000);
+    ws.addEventListener("message", (e) => {
+      if (typeof e.data === "string") return;
+      const b = new Uint8Array(e.data);
+      if (b.length === 0) return;
+      if (b[0] === 1) out += dec.decode(b.subarray(1));
+      else if (b[0] === 3) code = String(b.length > 1 ? b[1] : 0);
+    });
+    ws.addEventListener("error", () => { console.log("|dial-failed"); process.exit(0); });
+    ws.addEventListener("close", () => { console.log(`${out.trim()}|${code}`); process.exit(0); });
+  ' 2>/dev/null
+}
+
+STREAM_ARGV='cmd=cat&cmd=%2Fvar%2Ftmp%2Fmarker&stdin=false'
+for ip in "${IPS[@]:1}"; do
+  OUT=$(stream_exec "$ip" "/v1/machines/${ID}/exec/stream?${STREAM_ARGV}")
+  [ "$OUT" = "before-failover|0" ] \
+    && ok "${ip} streamed an exec for a machine owned by ${OWNER}" \
+    || bad "${ip} could not stream it (got '${OUT}')"
+
+  # The same through the sprites alias, which is keyed by NAME and therefore
+  # needs its own resolution before the call can be forwarded at all.
+  OUT=$(stream_exec "$ip" "/v1/sprites/${NAME}/exec?${STREAM_ARGV}")
+  [ "$OUT" = "before-failover|0" ] \
+    && ok "${ip} served /v1/sprites/${NAME}/exec" \
+    || bad "${ip} could not serve the sprites alias (got '${OUT}')"
+done
+
 say "4. Give the machine a snapshot in object storage"
 # Only a machine with a snapshot can be rescued: its state lives in object
 # storage, not on the host that died. A machine created and never suspended

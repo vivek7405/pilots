@@ -2794,6 +2794,288 @@ async function quotaAssertions() {
 // first, egress next, then the two that deliberately push the host to a
 // ceiling. Each sub-battery owns its own cleanup in a finally, so one that
 // fails halfway leaves nothing for the next to trip over.
+// ---------------------------------------------------------------------------
+// Phase 6a-2: the exec stream, the sprites alias, and the guest contract.
+//
+// Driven through the same wire an SDK uses: Node's global WebSocket with the
+// API key as the `authorization.bearer.<key>` subprotocol, plus one raw
+// upgrade carrying the key in an Authorization header, which is the carrier
+// the Go SDK and a raw sprites client use.
+// ---------------------------------------------------------------------------
+
+const WS_API = API.replace(/^http/, 'ws');
+
+// openStream dials an exec stream and collects every frame it sends.
+//
+// It resolves with the concatenated stdout and stderr, the exit code from the
+// binary frame, the exit code from the text verdict, which of the two arrived
+// first, and the subprotocol the server chose. An empty subprotocol means the
+// 101 did not echo what was offered, which is a connection every browser
+// client refuses.
+//
+// firstVerdict is load-bearing: both SDKs act on whichever verdict arrives
+// first and then close the socket, so the one that goes out second is a frame
+// no client can receive.
+function openStream(path, { onOpen } = {}) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(WS_API + path, [`authorization.bearer.${KEY}`]);
+    ws.binaryType = 'arraybuffer';
+    const out = {
+      stdout: '', stderr: '', code: null, textCode: null,
+      firstVerdict: null, protocol: '',
+    };
+    const decoder = new TextDecoder();
+    const timer = setTimeout(() => {
+      try { ws.close(); } catch { /* already closed */ }
+      reject(new Error(`exec stream ${path} never finished`));
+    }, 60_000);
+
+    ws.addEventListener('open', () => {
+      out.protocol = ws.protocol;
+      if (onOpen) onOpen(ws);
+    });
+    ws.addEventListener('message', (event) => {
+      if (typeof event.data === 'string') {
+        try {
+          const parsed = JSON.parse(event.data);
+          if (parsed.type === 'exit') {
+            out.textCode = parsed.exit_code;
+            out.firstVerdict ??= 'text';
+          }
+        } catch { /* not the verdict */ }
+        return;
+      }
+      const bytes = new Uint8Array(event.data);
+      if (bytes.length === 0) return;
+      const payload = bytes.subarray(1);
+      if (bytes[0] === 1) out.stdout += decoder.decode(payload);
+      else if (bytes[0] === 2) out.stderr += decoder.decode(payload);
+      else if (bytes[0] === 3) {
+        out.code = payload.length > 0 ? payload[0] : 0;
+        out.firstVerdict ??= 'binary';
+      }
+    });
+    ws.addEventListener('error', () => {
+      clearTimeout(timer);
+      reject(new Error(`exec stream ${path} failed to connect`));
+    });
+    ws.addEventListener('close', () => {
+      clearTimeout(timer);
+      resolve(out);
+    });
+  });
+}
+
+// upgradeWithHeader performs the handshake by hand, because Node's global
+// WebSocket cannot set request headers and a header is the other carrier the
+// server must accept.
+async function upgradeWithHeader(path) {
+  const url = new URL(API + path);
+  const http = await import(url.protocol === 'https:' ? 'node:https' : 'node:http');
+  const wsKey = Buffer.from(crypto.randomUUID().replace(/-/g, ''), 'hex').toString('base64');
+
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      hostname: url.hostname,
+      port: url.port,
+      path: url.pathname + url.search,
+      headers: {
+        Authorization: `Bearer ${KEY}`,
+        Connection: 'Upgrade',
+        Upgrade: 'websocket',
+        'Sec-WebSocket-Version': '13',
+        'Sec-WebSocket-Key': wsKey,
+      },
+    });
+    const timer = setTimeout(() => {
+      req.destroy();
+      reject(new Error(`upgrade ${path} timed out`));
+    }, 30_000);
+    req.on('upgrade', (res, socket) => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve({ status: res.statusCode, protocol: res.headers['sec-websocket-protocol'] ?? '' });
+    });
+    req.on('response', (res) => {
+      clearTimeout(timer);
+      res.resume();
+      resolve({ status: res.statusCode, protocol: '' });
+    });
+    req.on('error', (err) => { clearTimeout(timer); reject(err); });
+    req.end();
+  });
+}
+
+async function execStreamAssertions() {
+  console.log('\n-- exec stream, sprites alias, guest contract (Phase 6a-2)');
+
+  let machine;
+  await step('create a machine to stream from', async () => {
+    const { status, json } = await request('/v1/machines', {
+      method: 'POST',
+      body: { vcpus: 1, mem_mib: 512 },
+    });
+    assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
+    machine = json;
+  });
+  if (!machine) {
+    console.log('  ! create failed; skipping the exec stream assertions');
+    return;
+  }
+
+  const id = machine.id;
+  const name = machine.name;
+  const argv = 'cmd=sh&cmd=-c&cmd=' + encodeURIComponent('echo hi; exit 3');
+  let destroyed = false;
+
+  try {
+    await step('the exec stream sends 1/3 frames and echoes the subprotocol', async () => {
+      const out = await openStream(`/v1/machines/${id}/exec/stream?${argv}&stdin=false`);
+      assert(out.stdout === 'hi\n', `stdout = ${JSON.stringify(out.stdout)}`);
+      assert(out.code === 3, `binary exit frame = ${out.code}`);
+      assert(out.textCode === 3, `text exit verdict = ${out.textCode}`);
+      // The text verdict must LEAD. Both SDKs settle on the first verdict they
+      // see and close the socket, so a text frame sent second is one nothing
+      // can ever read -- and it is the only one that carries an untruncated
+      // code.
+      assert(out.firstVerdict === 'text',
+        `the ${out.firstVerdict} verdict arrived first; no client reads the other`);
+      assert(out.protocol === `authorization.bearer.${KEY}`,
+        `the 101 chose ${JSON.stringify(out.protocol)}; a browser client would refuse it`);
+    });
+
+    await step('the key may ride an Authorization header instead', async () => {
+      const res = await upgradeWithHeader(`/v1/machines/${id}/exec/stream?${argv}&stdin=false`);
+      assert(res.status === 101, `expected 101, got ${res.status}`);
+      assert(res.protocol === '',
+        `the 101 chose ${JSON.stringify(res.protocol)} for a client that offered none`);
+    });
+
+    await step('the sprites alias serves the same stream by name and by id', async () => {
+      for (const seg of [name, id]) {
+        const out = await openStream(`/v1/sprites/${seg}/exec?${argv}&stdin=false`);
+        assert(out.stdout === 'hi\n', `${seg}: stdout = ${JSON.stringify(out.stdout)}`);
+        assert(out.code === 3, `${seg}: exit = ${out.code}`);
+      }
+    });
+
+    await step('stdin frames reach the command and frame 4 ends it', async () => {
+      const out = await openStream(`/v1/machines/${id}/exec/stream?cmd=cat&stdin=true`, {
+        onOpen(ws) {
+          const bytes = new TextEncoder().encode('abc');
+          const frame = new Uint8Array(bytes.length + 1);
+          frame[0] = 0;
+          frame.set(bytes, 1);
+          ws.send(frame);
+          setTimeout(() => ws.send(new Uint8Array([4])), 500);
+        },
+      });
+      assert(out.stdout === 'abc', `stdout = ${JSON.stringify(out.stdout)}`);
+      assert(out.code === 0, `exit = ${out.code}`);
+      assert(out.textCode === 0, `text verdict = ${out.textCode}`);
+    });
+
+    await step('an exec with no user runs as sprite in /home/sprite with Node 24', async () => {
+      const { status, json } = await request(`/v1/machines/${id}/exec`, {
+        method: 'POST', body: { cmd: 'id -un; pwd; node -v' },
+      });
+      assert(status === 200, `expected 200, got ${status}: ${json?.error}`);
+      assert(json.exit_code === 0, `exited ${json.exit_code}: ${json.stderr}`);
+      const [who, cwd, node] = json.stdout.trim().split('\n');
+      assert(who === 'sprite', `ran as ${who}`);
+      assert(cwd === '/home/sprite', `cwd = ${cwd}`);
+      assert(node?.startsWith('v24.'), `node -v said ${node}`);
+    });
+
+    // A foreign name must be indistinguishable from one that never existed: a
+    // 403 here would make the alias a machine-name oracle across tenants.
+    await step('a second org sees a 404 on the alias, not a 403', async () => {
+      const { status, json } = await request('/v1/api-keys', {
+        method: 'POST',
+        body: { org_id: `org_e2e_stream_${Date.now()}`, scopes: ['machines'] },
+      });
+      assert(status === 201, `minting a second key: ${status}`);
+      for (const seg of [name, id]) {
+        const res = await request(`/v1/sprites/${seg}/exec?cmd=ls`, { key: json.key });
+        assert(res.status === 404, `${seg}: expected 404, got ${res.status}`);
+      }
+    });
+
+    // The tail is opened BEFORE the line is written, so what it delivers can
+    // only have arrived on the response that was already open.
+    await step('logs?follow survives a suspend and ends on destroy', async () => {
+      // Aborted rather than merely deadlined: a read on a response the server
+      // never ends blocks forever, and a battery that hangs reports nothing.
+      const abort = new AbortController();
+      const guard = setTimeout(() => abort.abort(), 180_000);
+      // Everything below is inside the try, so the guard is disarmed and the
+      // body reader closed however this step leaves. Node keeps the event loop
+      // alive for both, so an assertion that throws here used to hang the
+      // battery for the rest of the 180 s -- three silent minutes on the step
+      // whose failure it most wants to report at once.
+      let reader;
+      try {
+        const res = await fetch(`${API}/v1/machines/${id}/logs?follow=1`, {
+          headers: { Authorization: `Bearer ${KEY}` },
+          signal: abort.signal,
+        });
+        assert(res.status === 200, `expected 200, got ${res.status}`);
+        reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let seen = '';
+
+        const waitForMarker = async (marker) => {
+          const deadline = Date.now() + 60_000;
+          while (Date.now() < deadline) {
+            const { done, value } = await reader.read();
+            if (done) throw new Error(`the follow ended before ${marker} arrived`);
+            seen += decoder.decode(value, { stream: true });
+            if (seen.includes(marker)) return;
+          }
+          throw new Error(`${marker} never arrived on the follow`);
+        };
+
+        await exec(id, 'echo follow-marker-one > /dev/console');
+        await waitForMarker('follow-marker-one');
+
+        // A suspend must not end a follow. The idle monitor suspends a quiet
+        // sandbox after a minute, so a tail that ended there would cut every
+        // agent's log one minute into a session.
+        const sus = await request(`/v1/machines/${id}/suspend`, { method: 'POST' });
+        assert(sus.status === 204, `suspend: ${sus.status}`);
+        const woke = await request(`/v1/machines/${id}/wake`, { method: 'POST' });
+        assert(woke.status === 204, `wake: ${woke.status}`);
+        await exec(id, 'echo follow-marker-two > /dev/console');
+        await waitForMarker('follow-marker-two');
+
+        // A destroy ends it: the row the follow polls is deleted.
+        await request(`/v1/machines/${id}`, { method: 'DELETE' });
+        destroyed = true;
+        const deadline = Date.now() + 15_000;
+        const ender = setTimeout(() => abort.abort(), 15_000);
+        try {
+          for (;;) {
+            const { done } = await reader.read();
+            if (done) break;
+            assert(Date.now() < deadline, 'the follow outlived the machine it was tailing');
+          }
+        } catch (err) {
+          assert(false, `the follow never ended after the destroy: ${err.message}`);
+        } finally {
+          clearTimeout(ender);
+        }
+      } finally {
+        clearTimeout(guard);
+        // Cancel rather than leave it: an open reader on a response the server
+        // has not ended is a live handle, and Node will not exit holding one.
+        await reader?.cancel().catch(() => {});
+      }
+    });
+  } finally {
+    if (!destroyed) await request(`/v1/machines/${id}`, { method: 'DELETE' });
+  }
+}
+
 async function hostilityAssertions() {
   console.log('\n-- hostility (Phase 6e)');
   await churnAssertions();
@@ -3126,6 +3408,7 @@ async function main() {
     await serviceAssertions();
     await multiServiceAssertions();
     await agentDeployAssertions();
+    await execStreamAssertions();
     await hostilityAssertions();
   } else {
     console.log('  - machine lifecycle skipped (set PILOTS_E2E_FULL=1 on a Firecracker host)');

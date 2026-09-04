@@ -26,6 +26,14 @@ import (
 // replicated state.
 var machinePath = regexp.MustCompile(`^/v1/machines/([^/]+)(/.*)?$`)
 
+// spritePath is the name-keyed exec alias. It is machine-scoped like the
+// routes above, but by NAME, so the owner lookup needs a resolution first.
+var spritePath = regexp.MustCompile(`^/v1/sprites/([^/]+)/exec$`)
+
+// machineIDShape matches an id minted by newID("m"). A path segment of this
+// shape is tried as an id before it is scanned for as a name.
+var machineIDShape = regexp.MustCompile(`^m-[0-9a-f]{24}$`)
+
 // MachineOwner reports which host owns a machine.
 type MachineOwner func(ctx context.Context, machineID string) (hostID string, ok bool)
 
@@ -40,13 +48,22 @@ func (r *Router) ForwardAPI(owner MachineOwner, next http.Handler) http.Handler 
 			return
 		}
 
-		m := machinePath.FindStringSubmatch(req.URL.Path)
-		if m == nil {
+		var id string
+		if m := machinePath.FindStringSubmatch(req.URL.Path); m != nil {
+			id = m[1]
+		} else if alias := spritePath.FindStringSubmatch(req.URL.Path); alias != nil {
+			// The alias carries a name. Resolving it here decides only WHERE
+			// the call is served; the owning host resolves it again from its
+			// own replica, so an empty answer is simply served locally and the
+			// local handler answers its own 404.
+			id = r.machineIDByName(req.Context(), owner, alias[1])
+		}
+		if id == "" {
 			next.ServeHTTP(w, req)
 			return
 		}
 
-		hostID, ok := owner(req.Context(), m[1])
+		hostID, ok := owner(req.Context(), id)
 		if !ok || hostID == "" || hostID == r.opts.HostID {
 			next.ServeHTTP(w, req)
 			return
@@ -63,7 +80,7 @@ func (r *Router) ForwardAPI(owner MachineOwner, next http.Handler) http.Handler 
 					http.StatusServiceUnavailable)
 				return
 			}
-			row, err := r.opts.Store.GetMachine(req.Context(), m[1])
+			row, err := r.opts.Store.GetMachine(req.Context(), id)
 			if err != nil {
 				http.Error(w, `{"error":"machine unavailable"}`, http.StatusServiceUnavailable)
 				return
@@ -74,7 +91,7 @@ func (r *Router) ForwardAPI(owner MachineOwner, next http.Handler) http.Handler 
 				// by a client that gives up mid-restore.
 				if err := r.opts.Rescue(context.WithoutCancel(req.Context()), *row); err != nil {
 					slog.Error("could not rescue a machine to serve an API call",
-						"machine", m[1], "dead_host", hostID, "err", err)
+						"machine", id, "dead_host", hostID, "err", err)
 					http.Error(w, `{"error":"machine unavailable"}`, http.StatusServiceUnavailable)
 					return
 				}
@@ -98,7 +115,7 @@ func (r *Router) ForwardAPI(owner MachineOwner, next http.Handler) http.Handler 
 		}
 		proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
 			slog.Error("could not forward an API call to the owning host",
-				"machine", m[1], "owner", hostID, "err", err)
+				"machine", id, "owner", hostID, "err", err)
 			http.Error(w, `{"error":"machine unavailable"}`, http.StatusBadGateway)
 		}
 

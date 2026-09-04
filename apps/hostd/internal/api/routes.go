@@ -58,6 +58,20 @@ type Deps struct {
 	// unlimited, which is what a test wants and what a host with no builder
 	// configured never reaches.
 	BuildGate *quota.HostGate
+	// Lookup resolves a machine by NAME from an in-memory replica, sparing
+	// the sprites alias a full ListMachines scan per request -- which on a
+	// Corrosion host is a full-table query over HTTP to the local agent.
+	// This is the same handle and the same cache the router's hot path
+	// reads. Optional; nil, and a miss (a row the subscription has not
+	// delivered yet), fall back to the store scan.
+	Lookup func(name string) (state.Machine, bool)
+	// LogFollowInterval and LogRowInterval are the two cadences a log follow
+	// runs at: how often it reads the log file, and how often it re-reads the
+	// row to notice a destroy. Zero means the defaults, which is what
+	// production uses; a test shortens them so it need not wait out a real
+	// destroy check.
+	LogFollowInterval time.Duration
+	LogRowInterval    time.Duration
 	// KeySource is where a minted key's randomness comes from. Nil is
 	// crypto/rand, which is what production uses; a test supplies a fixed
 	// reader so it can know the hash a mint will produce.
@@ -120,7 +134,9 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("GET /v1/machines/{id}", d.handleGetMachine)
 	mux.HandleFunc("DELETE /v1/machines/{id}", d.handleDestroyMachine)
 	mux.HandleFunc("POST /v1/machines/{id}/exec", d.handleExec)
-	mux.HandleFunc("GET /v1/machines/{id}/exec/stream", notImplemented)
+	mux.HandleFunc("GET /v1/machines/{id}/exec/stream", d.handleExecStream)
+	// The sprites alias, name-keyed: see handleSpriteExec.
+	mux.HandleFunc("GET /v1/sprites/{name}/exec", d.handleSpriteExec)
 	mux.HandleFunc("GET /v1/machines/{id}/logs", d.handleLogs)
 
 	// Lifecycle. Suspend/wake are the scale-to-zero pair; stop/start are the

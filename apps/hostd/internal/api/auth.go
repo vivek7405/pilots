@@ -223,12 +223,48 @@ func bearerToken(r *http.Request) (string, bool) {
 
 	// No ?token= form on purpose: a credential in a query string lands in
 	// access logs, in proxy logs and in shell history.
+	if p, ok := BearerSubprotocol(r); ok {
+		return strings.TrimPrefix(p, subprotocolBearer), true
+	}
+	return "", false
+}
+
+// BearerSubprotocol returns the offered Sec-WebSocket-Protocol entry that
+// carries a key, verbatim, so a proxy can echo exactly what the client offered.
+//
+// Verbatim matters: the handshake fails unless the server chooses one of the
+// values the client actually offered, so echoing the key alone -- or a
+// re-spelled entry -- would break every browser client.
+func BearerSubprotocol(r *http.Request) (string, bool) {
 	for _, p := range strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",") {
-		if key, ok := strings.CutPrefix(strings.TrimSpace(p), subprotocolBearer); ok && key != "" {
-			return key, true
+		p = strings.TrimSpace(p)
+		if key, ok := strings.CutPrefix(p, subprotocolBearer); ok && key != "" {
+			return p, true
 		}
 	}
 	return "", false
+}
+
+// OfferedSubprotocol returns the FIRST Sec-WebSocket-Protocol entry the client
+// offered, verbatim, or "" when it offered none.
+//
+// This is what a proxy echoes on the 101, and it has to cover every offer
+// rather than only the one that carries a key. The WHATWG algorithm fails a
+// connection whose client offered subprotocols and whose server chose none, so
+// a client that authenticates with the Authorization header and offers, say,
+// `pilots.v1` would otherwise be answered with none and drop the connection --
+// authenticated, upgraded, and unusable.
+//
+// The first entry rather than a preferred one: a client lists its offers in
+// its own order of preference, and choosing the head is the answer that needs
+// no agreement about which names this server knows.
+func OfferedSubprotocol(r *http.Request) string {
+	for _, p := range strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			return p
+		}
+	}
+	return ""
 }
 
 func unauthorized(w http.ResponseWriter) {

@@ -16,11 +16,14 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // defaultGuestUser is the unprivileged account baked into the golden rootfs at
-// uid 1000. Commands run as this user unless one is explicitly requested.
-const defaultGuestUser = "user"
+// uid 1000: the sandbox contract's `sprite`, home /home/sprite, with Node on
+// PATH. Commands run as this user unless one is explicitly requested.
+const defaultGuestUser = "sprite"
 
 const defaultExecTimeout = 30 * time.Second
 
@@ -103,12 +106,12 @@ func prepareCommand(cmd *exec.Cmd, username, cwd string, env map[string]string) 
 	// applyUserCredential. The DEFAULT is different, and the difference is not
 	// a loophole in that rule.
 	//
-	// `user` is an account the golden rootfs happens to bake in. An image
-	// built from someone's Dockerfile has no reason to have it -- alpine,
-	// distroless and slim images do not -- and Docker's own default there is
-	// root. Failing closed on an account the caller never asked for makes
-	// every exec on every built image fail with "user \"user\" does not
-	// exist", which is the machine refusing to run its owner's commands.
+	// `sprite` is an account the golden rootfs bakes in. An image built from
+	// someone's Dockerfile has no reason to have it -- alpine, distroless and
+	// slim images do not -- and Docker's own default there is root. Failing
+	// closed on an account the caller never asked for makes every exec on
+	// every built image fail with "user \"sprite\" does not exist", which is
+	// the machine refusing to run its owner's commands.
 	//
 	// So: no user requested and no default account present means run as the
 	// image's own default. Nothing unprivileged was asked for, so nothing was
@@ -215,6 +218,11 @@ func exitCodeOf(err error) int {
 // exit code. This is byte-compatible with the sprites protocol so existing
 // clients work unchanged.
 const (
+	// Client to server. Honoured only when the stream was opened with
+	// stdin=true; with stdin=false nothing is read from the socket at all.
+	frameStdin    byte = 0
+	frameStdinEOF byte = 4
+
 	frameStdout byte = 1
 	frameStderr byte = 2
 	frameExit   byte = 3
@@ -234,6 +242,17 @@ func (fw *frameWriter) write(kind byte, payload []byte) error {
 	fw.mu.Lock()
 	defer fw.mu.Unlock()
 	return fw.conn.Write(fw.ctx, msgBinary, append([]byte{kind}, payload...))
+}
+
+// writeText sends a text message under the same mutex as the binary frames.
+//
+// Same lock because the exit pair is written by the handler goroutine while a
+// late pump write can still be in flight, and coder/websocket forbids
+// concurrent writers.
+func (fw *frameWriter) writeText(payload []byte) error {
+	fw.mu.Lock()
+	defer fw.mu.Unlock()
+	return fw.conn.Write(fw.ctx, websocket.MessageText, payload)
 }
 
 // pump copies one stream into frames until EOF.

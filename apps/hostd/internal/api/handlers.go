@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/quota"
@@ -30,6 +33,15 @@ type Manager interface {
 	GetCheckpoint(ctx context.Context, checkpointID string) (*state.Checkpoint, error)
 	Exec(ctx context.Context, machineID string, req ExecRequest) (*ExecResponse, error)
 	Logs(ctx context.Context, machineID string) ([]byte, error)
+	// ExecStream proxies the agent's websocket exec stream onto w. An error is
+	// returned only before anything was written (a wake that failed, a machine
+	// that is not running); once the upgrade has been attempted it is nil.
+	ExecStream(w http.ResponseWriter, r *http.Request, machineID string) error
+	// LogTail is Logs from a byte offset, for a follow. nil, nil when nothing
+	// new has been written. It reads the file and nothing else: a follow polls
+	// it twice a second, and whether the machine still exists is asked far
+	// more rarely and separately.
+	LogTail(machineID string, offset int64) ([]byte, error)
 	CreateVolume(ctx context.Context, req CreateVolumeRequest) (*state.Volume, error)
 	ListVolumes(ctx context.Context) ([]state.Volume, error)
 	MachineVolume(ctx context.Context, machineID string) (*MachineVolume, error)
@@ -202,6 +214,88 @@ func (d Deps) handleExec(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+func (d Deps) handleExecStream(w http.ResponseWriter, r *http.Request) {
+	row, ok := d.ownedMachine(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	d.execStream(w, r, row.ID)
+}
+
+// handleSpriteExec is the sprites-compatible alias.
+//
+// {name} is a machine NAME, which is what a sprites consumer persists as the
+// sprite id; an id-shaped value is tried as an id first. Unknown or foreign is
+// a 404 like any other id, never a 403: a 403 would say the name exists.
+func (d Deps) handleSpriteExec(w http.ResponseWriter, r *http.Request) {
+	id, ok := d.machineIDByName(r.Context(), r.PathValue("name"))
+	if !ok {
+		notFound(w, "machine")
+		return
+	}
+	row, ok := d.ownedMachine(w, r, id)
+	if !ok {
+		return
+	}
+	d.execStream(w, r, row.ID)
+}
+
+// execStream is the half both stream routes share. Ownership is settled by the
+// caller, so a foreign machine is a 404 whether or not the query is well
+// formed.
+func (d Deps) execStream(w http.ResponseWriter, r *http.Request, id string) {
+	if len(r.URL.Query()["cmd"]) == 0 {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "cmd is required"})
+		return
+	}
+	if err := d.Machines.ExecStream(w, r, id); err != nil {
+		writeErr(w, err)
+	}
+}
+
+// machineIDShape matches an id minted by newID("m").
+var machineIDShape = regexp.MustCompile(`^m-[0-9a-f]{24}$`)
+
+// machineIDByName resolves the alias's path segment.
+//
+// The same order the router applies, and for the same reason: an id-shaped
+// value that names a row wins, because that is one row read rather than a list
+// scan; then the subscription cache, a mutex and a map lookup rather than a
+// full-table query over HTTP; then a store scan for the row the subscription
+// has not delivered yet. Without the cache step the alias cost a scan on the
+// forwarding host AND another on the owner, which made it materially more
+// expensive than the /v1/machines/{id}/exec/stream it aliases.
+//
+// The answer in every case is the live machine of that name with the lowest
+// id. Two live rows with one name is a bug elsewhere, and the lowest id is the
+// stable answer to it rather than whichever the store listed first.
+func (d Deps) machineIDByName(ctx context.Context, name string) (string, bool) {
+	if machineIDShape.MatchString(name) {
+		if _, err := d.Store.GetMachine(ctx, name); err == nil {
+			return name, true
+		}
+	}
+	if d.Lookup != nil {
+		if m, ok := d.Lookup(name); ok {
+			return m.ID, true
+		}
+	}
+	rows, err := d.Store.ListMachines(ctx)
+	if err != nil {
+		return "", false
+	}
+	id := ""
+	for _, row := range rows {
+		if row.Name != name || row.State == state.StateDestroyed {
+			continue
+		}
+		if id == "" || row.ID < id {
+			id = row.ID
+		}
+	}
+	return id, id != ""
+}
+
 func (d Deps) handleSuspend(w http.ResponseWriter, r *http.Request) {
 	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
 		return
@@ -298,11 +392,47 @@ func (d Deps) handleCheckpointStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, toAPICheckpoint(*ck))
 }
 
+// logFollowInterval is how often a follow looks for new console output.
+//
+// A poll rather than inotify: one bounded read of one local file per open
+// tail, and the consumer is a human reading a pane or an agent tailing a boot.
+// Nothing reads faster than this, and nothing here is a dependency.
+const logFollowInterval = 500 * time.Millisecond
+
+// logRowInterval is how often a follow re-checks that the machine still
+// exists.
+//
+// Deliberately much slower than the file poll, and that gap is the point. The
+// file read is local; the row read is a store query, which on a Corrosion host
+// is an HTTP round trip to the local agent. Asking both every tick made every
+// open tail cost 2 queries per second for its whole life, on every host,
+// whether or not the log had grown -- the same cost the router's cache exists
+// to keep off the hot path. The row only has to be read often enough to notice
+// a destroy, and a few extra seconds of silence before a tail ends is not
+// something a reader can tell from the network.
+const logRowInterval = 5 * time.Second
+
+// logFollowRetries is how many CONSECUTIVE read failures a follow absorbs
+// before it ends.
+//
+// A transient failure clears on the next tick, and ending a tail there would
+// cut a session the caller cannot restart from where it stopped. A persistent
+// one never clears: EIO on the state dir, a permission change, a disk that
+// went away. Retrying that forever wrote a warn line twice a second for as
+// long as the client held the connection, and left the reader watching what
+// looked like a machine that had simply gone quiet. Ten ticks is five seconds,
+// which is well past transient and well short of a session.
+//
+// A destroyed machine is not this: the row check ends that tail, and a missing
+// file is nil rather than an error.
+const logFollowRetries = 10
+
 func (d Deps) handleLogs(w http.ResponseWriter, r *http.Request) {
 	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
 		return
 	}
-	logs, err := d.Machines.Logs(r.Context(), r.PathValue("id"))
+	id := r.PathValue("id")
+	logs, err := d.Machines.Logs(r.Context(), id)
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -310,6 +440,84 @@ func (d Deps) handleLogs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write(logs)
+
+	if !r.URL.Query().Has("follow") { // follow=1 and a bare follow both work
+		return
+	}
+	d.followLogs(w, r, id, int64(len(logs)))
+}
+
+// followLogs streams the console log as it grows.
+//
+// It ends on exactly two things: the client leaving, and the machine being
+// destroyed. NOT on suspend -- the idle monitor suspends a quiet sandbox after
+// a minute, so a follow that ended there would cut every agent's tail one
+// minute into a session. A suspended machine keeps its state dir, so the file
+// stays where it is and the follow simply sees no delta until the wake.
+func (d Deps) followLogs(w http.ResponseWriter, r *http.Request, id string, offset int64) {
+	flusher, _ := w.(http.Flusher)
+	flush := func() {
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+	flush()
+
+	poll, rowPoll := logFollowInterval, logRowInterval
+	if d.LogFollowInterval > 0 {
+		poll = d.LogFollowInterval
+	}
+	if d.LogRowInterval > 0 {
+		rowPoll = d.LogRowInterval
+	}
+
+	fails := 0
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+	rowTicker := time.NewTicker(rowPoll)
+	defer rowTicker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-rowTicker.C:
+			if _, err := d.Store.GetMachine(r.Context(), id); errors.Is(err, state.ErrNotFound) {
+				return // destroyed: the row is gone, and so is the file
+			}
+			continue
+		case <-ticker.C:
+		}
+
+		delta, err := d.Machines.LogTail(id, offset)
+		if err != nil {
+			fails++
+			if fails == 1 {
+				// Once per run of failures, not once per tick: the same line
+				// twice a second for the life of a connection is a log flood,
+				// and it says nothing the first one did not.
+				slog.Warn("log follow read failed; will retry", "machine", id, "err", err)
+			}
+			if fails < logFollowRetries {
+				continue
+			}
+			slog.Error("log follow gave up", "machine", id, "failures", fails, "err", err)
+			// Said out loud on the stream. A tail that just stops is
+			// indistinguishable from a machine that went quiet, and the
+			// reader would wait on output that is never coming.
+			_, _ = fmt.Fprintf(w, "\n[pilots] log follow ended: %v\n", err)
+			flush()
+			return
+		}
+		fails = 0
+		if len(delta) == 0 {
+			continue
+		}
+		if _, err := w.Write(delta); err != nil {
+			return
+		}
+		flush()
+		offset += int64(len(delta))
+	}
 }
 
 // toAPIVolume converts a stored volume row to the wire shape.

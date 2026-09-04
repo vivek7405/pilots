@@ -151,6 +151,39 @@ func (r *Router) resolve(ctx context.Context, host string) (*Target, error) {
 	return nil, fmt.Errorf("router: no machine named %q", name)
 }
 
+// machineIDByName resolves the alias's path segment for forwarding.
+//
+// The same order the API handler applies: an id-shaped value the owner lookup
+// already knows wins, then the subscription cache, then a local list scan by
+// name with the lowest id. Empty when nothing matches, which leaves the call to
+// be served here and answered by the local handler's own 404.
+func (r *Router) machineIDByName(ctx context.Context, owner MachineOwner, name string) string {
+	if machineIDShape.MatchString(name) {
+		if _, ok := owner(ctx, name); ok {
+			return name
+		}
+	}
+	if r.opts.Lookup != nil {
+		if m, ok := r.opts.Lookup(name); ok {
+			return m.ID
+		}
+	}
+	if r.opts.Store == nil {
+		return ""
+	}
+	rows, err := r.opts.Store.ListMachines(ctx)
+	if err != nil {
+		return ""
+	}
+	id := ""
+	for _, row := range rows {
+		if row.Name == name && row.State != state.StateDestroyed && (id == "" || row.ID < id) {
+			id = row.ID
+		}
+	}
+	return id
+}
+
 // wakeOnce coalesces concurrent wakes of one machine.
 //
 // A sleeping machine that suddenly receives fifty requests must be restored
