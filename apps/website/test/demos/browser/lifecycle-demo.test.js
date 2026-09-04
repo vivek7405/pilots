@@ -27,6 +27,11 @@ const btn = (el, label) =>
   [...el.querySelectorAll('button')].find((b) => b.textContent.trim() === label);
 
 const url = (el) => el.textContent.match(/bold-otter\.[a-z.]+/)?.[0];
+/** The face badge in the URL bar, the only place the face is rendered. */
+const face = (el) =>
+  [...el.querySelectorAll('span')]
+    .map((s) => s.textContent.trim())
+    .find((t) => t === 'sandbox' || t === 'service');
 const field = (el, name) => {
   const dt = [...el.querySelectorAll('dt')].find((d) => d.textContent.trim() === name);
   return dt && dt.nextElementSibling.textContent.trim();
@@ -36,8 +41,10 @@ suite('lifecycle-demo', () => {
   test('starts running, as a sandbox, with nothing survived yet', async () => {
     const el = await mount();
     assert.equal(field(el, 'state'), 'running');
+    assert.equal(face(el), 'sandbox');
     assert.equal(field(el, 'autoStop'), 'suspend', 'a sandbox suspends when idle');
     assert.equal(field(el, 'minRunning'), '0', 'a sandbox may scale to zero');
+    assert.equal(field(el, 'replicas'), 'one', 'a sandbox is a single machine');
     assert.ok(url(el), 'the machine URL is rendered');
     el.remove();
   });
@@ -58,12 +65,18 @@ suite('lifecycle-demo', () => {
     el.remove();
   });
 
-  test('promote flips the knobs that define a production service', async () => {
+  test('promote changes the face and the replica count, not the idle knobs', async () => {
     const el = await mount();
     btn(el, 'promote').click();
     await el.updateComplete;
-    assert.equal(field(el, 'autoStop'), 'off', 'a service does not suspend itself');
-    assert.equal(field(el, 'minRunning'), '1', 'a service keeps one running');
+    assert.equal(face(el), 'service', 'promote changes the face');
+    assert.equal(field(el, 'replicas'), 'one or more', 'a service can have replicas');
+    // The claim the page makes about scale-to-zero. A promoted service keeps
+    // the sandbox's idle knobs, so it sleeps when nothing is talking to it and
+    // wakes on the next request. If these two ever read 'off' and '1' again,
+    // the demo is back to advertising an always-resident service.
+    assert.equal(field(el, 'autoStop'), 'suspend', 'a service still suspends when idle');
+    assert.equal(field(el, 'minRunning'), '0', 'a service still scales to zero');
     assert.ok(!btn(el, 'promote') || btn(el, 'promote').disabled, 'promote is spent once used');
     el.remove();
   });
