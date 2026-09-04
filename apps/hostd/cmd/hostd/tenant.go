@@ -163,6 +163,11 @@ func tenantRules(hostID string, view fleetView, loc *mesh.Locator) netns.TenantR
 				"slot", slot, "claimants", len(claimants), "using", winner.ID)
 		}
 		addr, _ := loc.MachineAddress(winner)
+		// A running replica gets a counted pass-through beside its filter
+		// block, the twin of the counted drop a suspended one gets above.
+		if winner.ReleaseID != "" && winner.State == "running" {
+			rules.Activity = append(rules.Activity, netns.WakeTarget{MachineID: winner.ID, Addr: addr})
+		}
 		rules.Local = append(rules.Local, netns.TenantMachine{
 			SlotIdx: winner.Slot, Addr: addr, App: winner.App,
 		})
@@ -172,5 +177,6 @@ func tenantRules(hostID string, view fleetView, loc *mesh.Locator) netns.TenantR
 	// and not of map iteration -- otherwise every tick rewrites the chain in a
 	// new order and no two hosts can be compared.
 	sort.Slice(rules.Local, func(i, j int) bool { return rules.Local[i].SlotIdx < rules.Local[j].SlotIdx })
+	sort.Slice(rules.Activity, func(i, j int) bool { return rules.Activity[i].MachineID < rules.Activity[j].MachineID })
 	return rules
 }
