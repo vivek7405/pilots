@@ -168,7 +168,7 @@ function next(): Recipe {
 RUN apk add --no-cache ca-certificates
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm ci
+RUN if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
 COPY . .
 RUN npm run build
 ENV NODE_ENV=production
@@ -189,7 +189,7 @@ function reactRouter(): Recipe {
 RUN apk add --no-cache ca-certificates
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm ci
+RUN if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
 COPY . .
 RUN npm run build
 ENV NODE_ENV=production
@@ -220,14 +220,14 @@ function vite(): Recipe {
     dockerfile: `FROM node:24-alpine AS build
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm ci
+RUN if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
 COPY . .
 RUN npm run build
 
 FROM nginx:alpine
 RUN rm /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
-RUN printf '%s\\n' \\
+RUN mkdir -p /etc/nginx/templates && printf '%s\\n' \\
   'server {' \\
   '  listen \${PORT};' \\
   '  root /usr/share/nginx/html;' \\
@@ -261,8 +261,12 @@ function django(dir: string): Recipe {
     dockerfile: `FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PORT=8000
 WORKDIR /app
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt gunicorn
+# Detection accepts either file, so the install has to as well: a COPY of a
+# requirements.txt a Poetry project does not have fails the build before pip
+# has said anything about dependencies.
+COPY requirements.txt* pyproject.toml* ./
+RUN pip install --no-cache-dir gunicorn && \\
+  if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; else pip install --no-cache-dir .; fi
 COPY . .
 EXPOSE 8000
 CMD ["sh", "-c", "${start}"]
@@ -276,13 +280,17 @@ function fastapi(dir: string): Recipe {
     framework: 'fastapi',
     port: 8000,
     health: { type: 'http', path: '/' },
-    notes: [`The ASGI app is taken as ${module}:app; rename the target if the callable is not called \`app\`.`],
+    notes: [
+      `The ASGI app is taken as ${module}:app; rename the target if the callable is not called \`app\`.`,
+      'Detection is the fastapi import alone, so nothing promises a requirements.txt: the install takes requirements.txt, then pyproject.toml, and installs only uvicorn if the repo declares its dependencies somewhere else.',
+    ],
     dockerfile: `FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PORT=8000
 WORKDIR /app
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt uvicorn
 COPY . .
+RUN pip install --no-cache-dir uvicorn && \\
+  if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; \\
+  elif [ -f pyproject.toml ]; then pip install --no-cache-dir .; fi
 EXPOSE 8000
 CMD ["sh", "-c", "uvicorn ${module}:app --host 0.0.0.0 --port \${PORT:-8000}"]
 `,
@@ -320,13 +328,14 @@ function go(): Recipe {
     notes: [
       'The binary must read PORT from the environment and listen on 0.0.0.0 (or ":"+port, which binds every interface). A hard-coded 127.0.0.1 builds cleanly and answers 502.',
       'The runtime stage is distroless, so there is no shell in the image: `exec` into this machine will not find /bin/sh.',
+      'The binary is the FIRST main package `go list ./...` reports, so a module whose entry point is under ./cmd/<name> builds without editing this file. `go build -o` cannot take `./...` directly: it refuses to write more than one package to one path.',
     ],
     dockerfile: `FROM golang:1.23 AS build
 WORKDIR /src
 COPY go.mod go.sum* ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /app ./...
+RUN CGO_ENABLED=0 go build -o /app $(go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./... | grep -v '^$' | head -n 1)
 
 FROM gcr.io/distroless/static
 COPY --from=build /app /app
