@@ -945,7 +945,12 @@ place.** `POST /v1/services` takes `volume` (create-only, replicas 1). One
 machine mounts a volume, so a service bound to one (the `service_volumes` row)
 has exactly one machine, and a rollout boots that same machine from the new
 image (the redeploy route): same row, same URL, same claim, no snapshot, no
-second machine. The window between the kill and the health gate is the price of
+second machine. A redeploy is **refused (409) while the machine has any
+checkpoint**: it repoints the row's template at the new image and clears the
+machine's local cache, so a checkpoint taken against the old one could only be
+restored as a diff against a base it was never taken from. Destroy deletes the
+checkpoint rows and discards their builds; a redeploy keeps the machine, so it
+names them and says to delete them first. The window between the kill and the health gate is the price of
 one volume; an HTTP request arriving inside it is held on the machine's lock
 until the new process serves, and over `.internal` the name has no address
 until then, exactly as across a rescue. On a failed gate the machine is put

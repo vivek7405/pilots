@@ -89,12 +89,24 @@ func decodeBody(r *http.Request, v any) error {
 	return json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(v)
 }
 
+// ErrConflict marks a lifecycle request the machine's current state forbids.
+//
+// The caller is allowed and the body is well formed; the machine simply
+// cannot do this right now, and the message says what to do about it. Lives
+// here rather than in machines because writeErr has to recognise it and
+// machines imports this package, not the other way round.
+var ErrConflict = errors.New("conflict")
+
 // writeErr maps a lifecycle error to a status. A missing machine is a 404
 // rather than a 500 so a client can tell "gone" from "broken".
 func writeErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, state.ErrNotFound):
 		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: err.Error()})
+	case errors.Is(err, ErrConflict):
+		// 409, not 400: nothing about the request is wrong. The machine is in
+		// a state that forbids it, and the same request works once it is not.
+		writeJSON(w, http.StatusConflict, ErrorResponse{Error: err.Error()})
 	default:
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
 	}

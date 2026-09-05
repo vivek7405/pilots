@@ -17,6 +17,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -751,6 +752,32 @@ func (m *Manager) Redeploy(ctx context.Context, id string, req api.RedeployReque
 	if row.HostID != m.opts.HostID {
 		return nil, fmt.Errorf("machines: %s is held by %s, not this host: %w",
 			id, row.HostID, state.ErrNotOwner)
+	}
+
+	// A checkpoint cannot survive a redeploy, so a machine that has one is
+	// refused rather than quietly broken.
+	//
+	// Every checkpoint's images are diffs against the template this row names,
+	// and the boot below repoints TemplateRootfsBuildID at the NEW image while
+	// the clear of CacheRoot/machines/<id> takes the checkpoints' local data
+	// with it. So afterwards a restore either blocks forever in awaitRestorable
+	// on a directory nothing will repopulate, or -- worse -- resolves and
+	// applies a diff against a base it was never taken from, which is the
+	// corruption TemplateRootfsBuildID's comment names. Destroy deletes the
+	// rows and discards the builds; a redeploy keeps the machine, so it cannot.
+	//
+	// Refusing is the reversible half: a redeploy that carries checkpoints
+	// forward can be built later, and silent corruption cannot be taken back.
+	if cks, err := m.opts.Store.ListCheckpoints(ctx, id); err != nil {
+		return nil, fmt.Errorf("machines: list checkpoints of %s: %w", id, err)
+	} else if len(cks) > 0 {
+		names := make([]string, 0, len(cks))
+		for _, c := range cks {
+			names = append(names, c.ID)
+		}
+		return nil, fmt.Errorf("%w: %s has %d checkpoint(s) (%s) taken against the "+
+			"image it is leaving; delete them before redeploying",
+			api.ErrConflict, id, len(cks), strings.Join(names, ", "))
 	}
 
 	// The process, taken down as Destroy takes it down -- and NOT as Suspend

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -352,5 +353,31 @@ func TestRedeployNeedsAnImageTheCallerOwns(t *testing.T) {
 	}
 	if fake.redeployed != 1 || fake.lastRedeploy.Image != "bld_mine" || fake.lastRedeploy.Release != "rel_2" {
 		t.Errorf("the manager saw %d redeploys, last %+v", fake.redeployed, fake.lastRedeploy)
+	}
+}
+
+// A refusal the machine's state produced is a 409, and it says why.
+//
+// Everything writeErr does not recognise is a 500, which tells a client
+// "pilots is broken" for a request that is simply not allowed right now --
+// a redeploy of a machine that still has checkpoints, most of all, where the
+// answer the operator needs is which checkpoints and what to do about them.
+func TestALifecycleRefusalIsA409ThatSaysWhy(t *testing.T) {
+	h, st, fake := twoTenants(t)
+	ctx := context.Background()
+	if err := st.PutTenancy(ctx, &state.Tenancy{ID: "bld_mine", OrgID: "org_1", Kind: "build"}); err != nil {
+		t.Fatalf("PutTenancy: %v", err)
+	}
+	fake.err = fmt.Errorf("%w: m_1 has 2 checkpoint(s) (ck_1, ck_2) taken against "+
+		"the image it is leaving; delete them before redeploying", ErrConflict)
+
+	rec := postJSON(t, h, "/v1/machines/m_1/redeploy", "pilot_org1", `{"image":"bld_mine"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("a refused redeploy: got %d, want 409 (%s)", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{"ck_1", "ck_2", "delete them"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("the 409 body does not name %q: %s", want, rec.Body.String())
+		}
 	}
 }
