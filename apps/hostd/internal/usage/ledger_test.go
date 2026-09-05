@@ -445,6 +445,61 @@ func TestRunTicksAndUploadsUntilTheContextEnds(t *testing.T) {
 	}
 }
 
+// A single box with no bucket is a supported configuration, not a fault. It
+// still meters -- the intervals stay on local disk and GET /v1/usage answers
+// from them -- and it says so once at start rather than warning every minute.
+func TestRunWithNoUploaderStillMeters(t *testing.T) {
+	l, c := newLedger(t)
+	l.interval = time.Millisecond
+
+	l.Open("m_1", "org_a", "running", 1, 512, 0)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { l.Run(ctx, nil, "h1"); close(done) }()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		c.advance(time.Second)
+		time.Sleep(time.Millisecond)
+		if len(nonEmpty(readAll(t, l))) > 0 {
+			break
+		}
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not return when its context ended")
+	}
+
+	since, until := wide()
+	got, _ := l.Sum(since, until)
+	if got["org_a"].MachineSeconds == 0 {
+		t.Error("a host with no object storage metered nothing")
+	}
+}
+
+// readAll is every ledger file's contents, concatenated.
+func readAll(t *testing.T, l *Ledger) string {
+	t.Helper()
+	entries, err := os.ReadDir(l.dir)
+	if err != nil {
+		t.Fatalf("reading the ledger: %v", err)
+	}
+	var out strings.Builder
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".ndjson") {
+			continue
+		}
+		raw, err := os.ReadFile(filepath.Join(l.dir, e.Name()))
+		if err != nil {
+			t.Fatalf("reading %s: %v", e.Name(), err)
+		}
+		out.Write(raw)
+	}
+	return out.String()
+}
+
 // Nil is the manager built without a ledger: a test manager, the fake. Every
 // method has to be a no-op so no call site needs a check.
 func TestEveryMethodIsNilSafe(t *testing.T) {
