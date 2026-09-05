@@ -292,6 +292,21 @@ func TestAnOrglessMachineIsSummedUnderTheEmptyString(t *testing.T) {
 	}
 }
 
+// A create followed immediately by a destroy, or any pair of state writes
+// inside one second, is a zero-length interval. It writes no line: a busy host
+// would otherwise fill the day file with rows that bill nothing.
+func TestAZeroLengthIntervalWritesNoLine(t *testing.T) {
+	l, _ := newLedger(t)
+	l.Open("m_1", "org_a", "running", 1, 512, 0)
+	l.Transition("m_1", "suspended")
+	l.Close("m_1")
+
+	if _, err := os.Stat(filepath.Join(l.dir, "2026-09-05.ndjson")); err == nil {
+		t.Errorf("a day file was written for intervals that bill nothing: %v",
+			linesOn(t, l, "2026-09-05"))
+	}
+}
+
 func TestSumIsNeverNil(t *testing.T) {
 	l, _ := newLedger(t)
 	got, err := l.Sum(0, 1)
