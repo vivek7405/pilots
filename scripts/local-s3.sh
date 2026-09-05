@@ -46,6 +46,10 @@ BUCKET="${PILOT_S3_BUCKET:-pilots}"
 ACCESS_KEY="${PILOT_S3_ACCESS_KEY:-pilots}"
 SECRET_KEY="${PILOT_S3_SECRET_KEY:-pilots-secret}"
 PORT="${ADDR##*:}"
+# The console is loopback-only and its port is a knob for the same reason the
+# data port is: a leftover container or a second copy of this script holds
+# 9001 as readily as it holds 9000.
+CONSOLE_PORT="${PILOT_S3_CONSOLE_PORT:-9001}"
 # The address this script itself talks to the store on. A wildcard bind is
 # reachable on loopback; a bind to one interface is NOT, and hardcoding
 # 127.0.0.1 would make the readiness probe below time out against a store that
@@ -67,6 +71,14 @@ if ss -lnt "sport = :$PORT" 2>/dev/null | grep -q LISTEN; then
   echo "port $PORT is already held:" >&2
   ss -lntp "sport = :$PORT" >&2 || true
   echo "stop it, or re-run with PILOT_S3_ADDR=0.0.0.0:<other-port>" >&2
+  exit 1
+fi
+# The console port too, and for the same reason: MinIO refuses to start over
+# either of them with the same message that names neither.
+if ss -lnt "sport = :$CONSOLE_PORT" 2>/dev/null | grep -q LISTEN; then
+  echo "console port $CONSOLE_PORT is already held:" >&2
+  ss -lntp "sport = :$CONSOLE_PORT" >&2 || true
+  echo "stop it, or re-run with PILOT_S3_CONSOLE_PORT=<other-port>" >&2
   exit 1
 fi
 
@@ -98,7 +110,7 @@ install -d -m0755 "$DATA" "$DATA/$BUCKET"
 
 echo "==> starting minio on $ADDR (data $DATA)"
 MINIO_ROOT_USER="$ACCESS_KEY" MINIO_ROOT_PASSWORD="$SECRET_KEY" \
-  "$BIN" server --address "$ADDR" --console-address 127.0.0.1:9001 "$DATA" &
+  "$BIN" server --address "$ADDR" --console-address "127.0.0.1:$CONSOLE_PORT" "$DATA" &
 minio_pid=$!
 trap 'kill "$minio_pid" 2>/dev/null || true' EXIT INT TERM
 

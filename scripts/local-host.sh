@@ -90,7 +90,12 @@ fi
 # this from host-bootstrap.sh, which writes the modprobe config and loads it;
 # a desktop kernel has the module built but not loaded, and the failure is a
 # create that dies with "no network block devices exist" 30 seconds in.
-if [ ! -e /dev/nbd0 ]; then
+#
+# The test is whether the MODULE is loaded, not whether /dev/nbd0 is there: a
+# stale or statically shipped device node makes the second question answer yes
+# while the module is absent, and then nothing loads it and the create fails
+# anyway -- the exact failure this block exists to prevent.
+if [ ! -d /sys/module/nbd ]; then
   echo "==> loading the nbd module (nbds_max=64)"
   modprobe nbd nbds_max=64
 else
@@ -99,11 +104,15 @@ else
   # exhaustion against that number, so a box with fewer device nodes fails the
   # 17th create with "all 64 devices are in use" and names nothing. Say it here
   # rather than reload the module out from under whatever is using it.
-  loaded="$(cat /sys/module/nbd/parameters/nbds_max 2>/dev/null || echo 64)"
-  if [ "$loaded" -lt 64 ]; then
-    echo "note: nbd is already loaded with nbds_max=$loaded, fewer than the 64" >&2
-    echo "hostd's pool assumes. Past that many machines a create fails with" >&2
-    echo "'all 64 devices are in use'. Fix, when nothing else is using nbd:" >&2
+  #
+  # Read defensively: an unreadable or non-numeric nbds_max must warn, never
+  # take the script down on "integer expression expected" under set -e.
+  loaded="$(cat /sys/module/nbd/parameters/nbds_max 2>/dev/null || true)"
+  if ! [ "${loaded:-0}" -ge 64 ] 2>/dev/null; then
+    echo "note: nbd is already loaded with nbds_max=${loaded:-unknown}, and the 64" >&2
+    echo "hostd's pool assumes may not be there. Past that many machines a" >&2
+    echo "create fails with 'all 64 devices are in use'. Fix, when nothing" >&2
+    echo "else is using nbd:" >&2
     echo "  sudo modprobe -r nbd && sudo modprobe nbd nbds_max=64" >&2
   fi
 fi

@@ -169,7 +169,12 @@ PILOT_FLEET_KEY=<generated once>
 
 Kernel, Firecracker, jailer, chroot base, template path, listen address and
 state DSN are the defaults, which are the same values a production host is
-given explicitly. Every line honours an already-exported `PILOT_*` variable.
+given explicitly. Every line honours a `PILOT_*` variable **passed through
+`sudo`**, which an exported one is not — `sudo` resets the environment:
+
+```sh
+sudo PILOT_WORKLOAD_DOMAIN=dev.localhost scripts/local-host.sh
+```
 
 A re-run keeps an existing file untouched, and the two secrets are why:
 rotating the fleet key is a re-seal sweep of every sealed environment, and
