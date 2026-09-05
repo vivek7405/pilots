@@ -96,10 +96,18 @@ export async function executePlan(
           'split the service or merge the mounts',
       )
     }
+    // Beside it, and for the same reason: a service's volume is set when the
+    // service is created, so a compose file that changes one is refused --
+    // before the build, and before ensureVolumes, which CREATES the volume it
+    // cannot find by name. Refusing after it costs a build and leaves a new,
+    // empty, billed volume behind that nothing will ever mount.
+    const existing = await findService(client, app, step.name)
+    await refuseVolumeChange(client, app, step, existing)
+
     const rootfs = await buildStep(client, step, opts)
     const [volume] = await ensureVolumes(client, app, step)
     await runPreDeploy(client, app, step, rootfs, secretEnv)
-    const service = await upsertService(client, app, step, rootfs, secretEnv, volume?.id)
+    const service = await upsertService(client, app, step, rootfs, secretEnv, existing, volume?.id)
     // Knobs travel on the deploy, not on the create: a service row has
     // nowhere to keep them, and the create and the first deploy are separate
     // requests. Sending them here is also what makes a redeploy with changed
@@ -234,17 +242,55 @@ async function runPreDeploy(
   }
 }
 
+/** The service a step deploys, if this app already has one by that name. */
+async function findService(
+  client: PilotsClient,
+  app: string,
+  name: string,
+): Promise<Service | undefined> {
+  const services = await client.services.list()
+  return services.find((s) => s.name === name && (s.app ?? '') === app)
+}
+
+/**
+ * Refuses a deploy that would change which volume a service mounts.
+ *
+ * Create-only, like knobs: hostd's PATCH carries no volume field, and nothing
+ * anywhere copies data between two volumes, so this is a data migration
+ * wearing a one-line compose edit. The name is what decides it, and the name
+ * is known before anything has been built or created.
+ */
+async function refuseVolumeChange(
+  client: PilotsClient,
+  app: string,
+  step: ComposeStep,
+  existing: Service | undefined,
+): Promise<void> {
+  if (!existing) return
+  const want = step.volumes?.[0]
+  const wantName = want ? `${app}-${want.name}` : ''
+  const mountedId = existing.volume_id ?? ''
+  if (!mountedId && !wantName) return
+
+  const volumes = await client.volumes.list()
+  if (mountedId && wantName && volumes.find((v) => v.name === wantName)?.id === mountedId) return
+
+  const mountedName = volumes.find((v) => v.id === mountedId)?.name || mountedId
+  throw new CliError(
+    `${step.name}: mounts ${mountedName || '(no volume)'} and the compose file names ` +
+      `${wantName || '(no volume)'}; a service's volume is set when it is created`,
+  )
+}
+
 async function upsertService(
   client: PilotsClient,
   app: string,
   step: ComposeStep,
   rootfs: string,
   secretEnv: Record<string, string>,
+  existing: Service | undefined,
   volumeId?: string,
 ): Promise<Service> {
-  const services = await client.services.list()
-  const existing = services.find((s) => s.name === step.name && (s.app ?? '') === app)
-
   if (!existing) {
     const req: CreateServiceRequest = {
       name: step.name,
@@ -259,17 +305,6 @@ async function upsertService(
       ...(Object.keys(secretEnv).length > 0 ? { secret_env: secretEnv } : {}),
     }
     return await client.services.create(req)
-  }
-
-  // Create-only, like knobs: a volume swap is a data migration and the
-  // platform copies nothing between volumes. Say so rather than send a body
-  // the server refuses as an unknown field.
-  if ((existing.volume_id ?? '') !== (volumeId ?? '')) {
-    throw new CliError(
-      `${step.name}: mounts volume ${existing.volume_id || '(none)'} and the compose file now ` +
-        `names ${volumeId || '(none)'}; a volume is set when the service is created, so create ` +
-        'a new service or restore the old volume name',
-    )
   }
 
   const req: UpdateServiceRequest = {

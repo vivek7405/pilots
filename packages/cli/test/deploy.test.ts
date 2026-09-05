@@ -464,6 +464,20 @@ test('the second run refuses a volume swap rather than sending one', async () =>
       false,
       'no PATCH is sent for a swap the server would refuse anyway',
     )
+    // Refused for free. ensureVolumes creates the name it cannot find, so a
+    // refusal after it would leave a brand-new, empty, billed volume behind
+    // and would have paid for a full image first.
+    const after = api.requests.slice(before)
+    assert.equal(
+      after.filter((r) => r.method === 'POST' && r.path === '/v1/volumes').length,
+      0,
+      'the renamed volume is never created',
+    )
+    assert.equal(
+      after.filter((r) => r.method === 'POST' && r.path === '/v1/builds').length,
+      0,
+      'nothing is built for a deploy that is refused',
+    )
   } finally {
     await api.close()
   }
