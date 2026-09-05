@@ -406,6 +406,16 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 		if slotIdx > 0 {
 			m.pool.Return(slotIdx)
 		}
+	} else if row.Slot > 0 && row.HostID == m.opts.HostID {
+		// A suspended service replica has no process here but still holds its
+		// index: Suspend keeps it so the replica stays resolvable while it
+		// sleeps, and takeSlot is what consumes it on the way back up. A
+		// destroy is the machine never coming back up, and the row that names
+		// the index is deleted below -- so this is the last moment anything
+		// can give it back. Without it a create/promote/suspend/destroy cycle
+		// walks the host through its 1023 indices exactly as a leaking wake
+		// did.
+		m.pool.Return(row.Slot)
 	}
 
 	// After the process is gone, never before: unmounting a volume under a
@@ -833,9 +843,17 @@ func (m *Manager) Redeploy(ctx context.Context, id string, req api.RedeployReque
 
 	row.ReleaseID = req.Release
 	row.State = StateCreating
-	stampSlot(row, nil)
 	row.UpdatedAt = time.Now().Unix()
-	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
+	// The store sees no slot while the new image boots, and the row the boot
+	// reads keeps the one the machine reserved when it suspended. A replica
+	// takes the ordinary floor of zero, so every deploy after the first
+	// reaches here SUSPENDED, with the pool still holding its index and
+	// nothing above having returned it: without this the boot below takes a
+	// fresh index instead, the kept one is abandoned, and a host that deploys
+	// often walks through its 1023 slots. A running machine's index was
+	// returned above and is taken straight back, so a redeploy no longer moves
+	// a machine's mesh address either way. See withoutSlot and takeSlot.
+	if err := m.opts.Store.PutMachine(ctx, withoutSlot(row)); err != nil {
 		return nil, err
 	}
 

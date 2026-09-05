@@ -120,3 +120,98 @@ func callersOf(t *testing.T, name string) []string {
 	sort.Strings(callers)
 	return callers
 }
+
+// Every bring-up gets its netns index through takeSlot, which is the one place
+// a kept reservation is consumed. A second pool.Take anywhere in this package
+// is a path that burns a slot per wake -- #64 arriving again, with the name of
+// whoever added it.
+//
+// captureTemplateMemory is the sanctioned exception: the throwaway machine a
+// golden template is photographed from has no row, so it has no reservation to
+// reuse, and it returns its index on the way out.
+func TestEveryBringUpGetsItsSlotThroughTakeSlot(t *testing.T) {
+	got := callersOf(t, "Take")
+	want := []string{"captureTemplateMemory", "takeSlot"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("pool.Take is called from %v, want exactly %v: a bring-up that "+
+			"takes its own index cannot consume the reservation a suspended "+
+			"replica kept, so it leaks one slot per cycle", got, want)
+	}
+}
+
+// Redeploy must not stamp the row to zero before it boots.
+//
+// The suspended replica it usually runs against still holds its index in the
+// pool and on its row, and takeSlot reads the row: a stamp to zero ahead of
+// the boot silently drops back to a fresh index, which looks fixed and leaks a
+// slot per deploy. The interim row the STORE sees is zeroed by withoutSlot,
+// which copies rather than mutates, so both facts stay true at once.
+//
+// Structural because Redeploy needs a Firecracker host and a real image before
+// it runs a line, exactly as the env invariant above is.
+func TestARedeployDoesNotClearTheSlotBeforeTheBoot(t *testing.T) {
+	body := funcBody(t, "manager.go", "Redeploy")
+
+	boot := -1
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		if sel, ok := call.Fun.(*ast.SelectorExpr); ok &&
+			sel.Sel.Name == "bootMachine" && boot < 0 {
+			boot = int(call.Pos())
+		}
+		return true
+	})
+	if boot < 0 {
+		t.Fatal("Redeploy no longer calls bootMachine; this test needs rewriting")
+	}
+
+	var hidden int
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		name := ""
+		switch fn := call.Fun.(type) {
+		case *ast.Ident:
+			name = fn.Name
+		case *ast.SelectorExpr:
+			name = fn.Sel.Name
+		}
+		if name == "withoutSlot" && int(call.Pos()) < boot {
+			hidden++
+		}
+		if name == "stampSlot" && int(call.Pos()) < boot {
+			t.Error("Redeploy stamps the row's slot before the boot: the boot then " +
+				"reads zero, takes a fresh index, and abandons the one a suspended " +
+				"replica kept. Zero the copy the store gets, with withoutSlot.")
+		}
+		return true
+	})
+	if hidden != 1 {
+		t.Errorf("Redeploy passes withoutSlot to %d calls before the boot, want 1: "+
+			"the row the store sees while a machine has no process must name no "+
+			"slot, or the mesh advertises an address nothing is listening on", hidden)
+	}
+}
+
+// funcBody returns the body of the named top-level function or method in file.
+func funcBody(t *testing.T, file, name string) *ast.BlockStmt {
+	t.Helper()
+
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, filepath.Join(".", file), nil, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", file, err)
+	}
+	for _, decl := range parsed.Decls {
+		if fn, ok := decl.(*ast.FuncDecl); ok && fn.Name.Name == name {
+			return fn.Body
+		}
+	}
+	t.Fatalf("%s has no function named %s", file, name)
+	return nil
+}

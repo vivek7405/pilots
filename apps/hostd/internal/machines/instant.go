@@ -190,6 +190,35 @@ func (m *Manager) restoreInstantImmutable(ctx context.Context, row *state.Machin
 	return m.restore(ctx, row, backends, snapKey, localDir, true)
 }
 
+// takeSlot hands a bring-up the netns slot it will run in.
+//
+// A row that names an index on THIS host is a machine that suspended here with
+// its slot kept: Suspend holds a service replica's index so the replica stays
+// resolvable while it sleeps (see the comment there), and this is where that
+// reservation is consumed. Taking the same index back is what stops the pool
+// growing by one per wake, and it keeps the replica's mesh address still, so a
+// peer that resolved the name before the suspend is still right after it. Only
+// a rescue moves the address, which is why .internal answers keep their
+// near-zero TTL.
+//
+// Everything else takes a fresh index: a create, whose row names no slot yet;
+// a rescue, whose index belongs to the dead host's pool and is cleared before
+// it gets here; and a reservation the pool will not honour, which is logged
+// and then treated as absent, because a wake that fails over bookkeeping is
+// worse than a wake onto a different index.
+func (m *Manager) takeSlot(row *state.Machine) (*netns.Slot, error) {
+	if row.Slot > 0 && row.HostID == m.opts.HostID {
+		slot, err := m.pool.Reserve(row.Slot, row.ID)
+		if err == nil {
+			return slot, nil
+		}
+		slog.Warn("a machine's kept slot could not be reused; it comes up in a "+
+			"fresh one and its mesh address moves",
+			"machine", row.ID, "slot", row.Slot, "err", err)
+	}
+	return m.pool.Take(row.ID)
+}
+
 func (m *Manager) restore(ctx context.Context, row *state.Machine, backends fc.Backends,
 	snapKey, localDir string, immutable bool) (*fc.Machine, *netns.Slot, error) {
 
@@ -205,7 +234,7 @@ func (m *Manager) restore(ctx context.Context, row *state.Machine, backends fc.B
 		}
 	}
 
-	slot, err := m.pool.Take(row.ID)
+	slot, err := m.takeSlot(row)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -284,6 +313,24 @@ func (m *Manager) Rescue(ctx context.Context, row state.Machine) error {
 	fresh, err := m.opts.Store.GetMachine(ctx, row.ID)
 	if err != nil {
 		return fmt.Errorf("machines: re-read %s after claiming it: %w", row.ID, err)
+	}
+	// The index on the row is the DEAD host's, and the claim above has already
+	// made this host the owner -- so takeSlot's owner check, which is what
+	// keeps a foreign index out of this pool, would now read it as one of
+	// ours. Cleared here so a rescue takes a fresh index, which is the only
+	// kind it can have.
+	//
+	// Written back, not just held in memory: the claim left a row saying "this
+	// host, that host's index", and the restore below runs for seconds against
+	// it. For as long as it stands, MachineAddress derives THIS host's prefix
+	// with a foreign index -- so .internal points peers at whatever local
+	// machine really holds it, and the tenant filter, which no longer sees the
+	// row as suspended, resolves the two claimants by newest write and takes
+	// the real occupant's rule away.
+	stampSlot(fresh, nil)
+	fresh.UpdatedAt = time.Now().Unix()
+	if err := m.opts.Store.PutMachine(ctx, fresh); err != nil {
+		return fmt.Errorf("machines: clear %s's old slot before rescuing it: %w", row.ID, err)
 	}
 
 	fcm, err := m.wakeFromSuspend(ctx, fresh)

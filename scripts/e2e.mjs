@@ -1674,6 +1674,90 @@ async function serviceAssertions() {
       'exec stopped working after promote: the agent token was rotated');
   });
 
+  // The client-visible half of gate.sh's section 15b.
+  //
+  // A promoted replica keeps its netns index reserved while it sleeps, so its
+  // peers keep resolving it -- and the wake has to take that same index back.
+  // A wake that takes a fresh one abandons the reservation, and a host walks
+  // through its 1023 slots in hours at a 60 second idle timer.
+  //
+  // The public API sees both halves of that without ever naming a slot:
+  // pilots_slots_free falls by one per wake, and a peer's .internal lookup
+  // returns the mesh address, whose low bits ARE the index.
+  const SLOT_CYCLES = 5;
+  await step(
+    `a promoted replica keeps its slot and its address across ${SLOT_CYCLES} suspend/wake cycles`,
+    async () => {
+      const { status, json: replica } = await request('/v1/machines', {
+        method: 'POST',
+        body: { app: `e2e-slot-${tag}`, vcpus: 1, mem_mib: 512, cmd: 'sleep 86400' },
+      });
+      assert(status === 201, `create: ${status} ${JSON.stringify(replica)}`);
+      created.push(replica.id);
+
+      const promoted = await request(`/v1/machines/${replica.id}/promote`,
+        { method: 'POST', body: {} });
+      assert(promoted.status === 200,
+        `promote: ${promoted.status} ${JSON.stringify(promoted.json)}`);
+
+      // A peer in the same app that never sleeps, so the address is read from
+      // outside the machine under test.
+      const { status: rstatus, json: resolver } = await request('/v1/machines', {
+        method: 'POST',
+        body: {
+          app: `e2e-slot-${tag}`, vcpus: 1, mem_mib: 512, cmd: 'sleep 86400',
+          knobs: { auto_stop: 'off' },
+        },
+      });
+      assert(rstatus === 201, `resolver create: ${rstatus} ${JSON.stringify(resolver)}`);
+      created.push(resolver.id);
+
+      let addrBefore = '';
+      await waitFor(async () => {
+        const r = await reach(resolver.id, `http://${replica.name}.internal:3001/health`);
+        if (r.code !== '200') return false;
+        addrBefore = r.ip;
+        return true;
+      }, { what: 'the replica resolving over .internal' });
+
+      const before = await metricValue('pilots_slots_free');
+      assert(before !== null, 'pilots_slots_free is not on the scrape');
+
+      for (let i = 1; i <= SLOT_CYCLES; i++) {
+        const susp = await request(`/v1/machines/${replica.id}/suspend`, { method: 'POST' });
+        assert(susp.status === 204, `cycle ${i} suspend: expected 204, got ${susp.status}`);
+        await waitFor(async () => {
+          const { json } = await request(`/v1/machines/${replica.id}`);
+          return json.state === 'suspended';
+        }, { what: `cycle ${i} to suspend` });
+
+        const wake = await request(`/v1/machines/${replica.id}/wake`, { method: 'POST' });
+        assert(wake.status === 204, `cycle ${i} wake: expected 204, got ${wake.status}`);
+        await waitFor(async () => {
+          const { json } = await request(`/v1/machines/${replica.id}`);
+          return json.state === 'running';
+        }, { what: `cycle ${i} to wake` });
+      }
+
+      // Greater-or-equal, not equal: an unrelated machine idling out in the
+      // background can only RAISE this gauge, and the leak lowers it by one
+      // per wake.
+      const after = await metricValue('pilots_slots_free');
+      assert(after !== null, 'pilots_slots_free left the scrape mid-run');
+      assert(after >= before,
+        `pilots_slots_free went ${before} -> ${after} across ${SLOT_CYCLES} wakes: a slot leaked per wake`);
+
+      let addrAfter = '';
+      await waitFor(async () => {
+        const r = await reach(resolver.id, `http://${replica.name}.internal:3001/health`);
+        if (r.code !== '200') return false;
+        addrAfter = r.ip;
+        return true;
+      }, { what: 'the replica resolving over .internal after the cycles' });
+      assert(addrAfter === addrBefore,
+        `the replica's address moved ${addrBefore} -> ${addrAfter} on wakes that never left the host`);
+    });
+
   // Promote's own clock. The step above proves it keeps the URL and the token;
   // this one holds it to a latency, because promote is what an agent runs when
   // its sandbox turns out to be worth keeping and it waits on the round trip.
