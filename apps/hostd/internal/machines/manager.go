@@ -727,6 +727,117 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 	return nil
 }
 
+// Redeploy boots a machine again from another image, in place: same row, same
+// URL, same volume claim. How a volume-backed service takes a release, because
+// a second machine cannot mount the volume beside the first (Fly updates a
+// Machine with a volume the same way).
+//
+// The memory goes with the process. A snapshot describes the rootfs this
+// machine is leaving, so restoring it against the new image would be a guest
+// whose memory and disk have never met -- the same reading startNewMachine
+// gives a machine with its own image.
+//
+// A request arriving while the process is down waits on this machine's lock
+// inside Wake, so the window is a held request rather than an error.
+func (m *Manager) Redeploy(ctx context.Context, id string, req api.RedeployRequest) (*state.Machine, error) {
+	lock := m.lockFor(id)
+	lock.Lock()
+	defer lock.Unlock()
+
+	row, err := m.opts.Store.GetMachine(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if row.HostID != m.opts.HostID {
+		return nil, fmt.Errorf("machines: %s is held by %s, not this host: %w",
+			id, row.HostID, state.ErrNotOwner)
+	}
+
+	// The process, taken down as Destroy takes it down -- and NOT as Suspend
+	// does: nothing is photographed, because the photograph would describe a
+	// disk this machine is about to stop having.
+	m.releaseDiscovery(id)
+	if fcm, ok := m.get(id); ok {
+		// The copy-on-write file holds every write since the last snapshot,
+		// and the new image supersedes all of it.
+		defer fcm.DiscardCow()
+		slotIdx := 0
+		if fcm.Slot != nil {
+			slotIdx = fcm.Slot.Idx
+		}
+		if err := fcm.Kill(); err != nil {
+			return nil, fmt.Errorf("machines: kill %s: %w", id, err)
+		}
+		m.drop(id)
+		if slotIdx > 0 {
+			m.pool.Return(slotIdx)
+		}
+	}
+	// Storage only from here: the row and the disk are held and nothing runs.
+	m.opts.Usage.Transition(id, StateCreating)
+
+	// The builds this redeploy supersedes. Both describe the rootfs the
+	// machine is leaving, so both are cleared from the row before the boot and
+	// discarded after it -- never before, or a failed write would leave the
+	// row naming objects that no longer exist.
+	superseded := []string{row.MemBuildID, row.RootfsBuildID}
+	row.MemBuildID, row.RootfsBuildID = "", ""
+	if err := os.RemoveAll(filepath.Join(m.opts.CacheRoot, "machines", id)); err != nil {
+		slog.Warn("redeploy could not clear the machine cache",
+			"machine", id, "err", err)
+	}
+
+	row.ReleaseID = req.Release
+	row.State = StateCreating
+	stampSlot(row, nil)
+	row.UpdatedAt = time.Now().Unix()
+	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
+		return nil, err
+	}
+
+	// A machine adopted after a hostd restart recovers its token from disk, so
+	// this is the credential the guest already has -- except for one that
+	// still carries the template placeholder, which gets a real one here for
+	// the same reason a create mints one.
+	token := m.token(id)
+	if token == templateToken {
+		token = newID("agt")
+		sum := sha256.Sum256([]byte(token))
+		row.AgentTokenHash = hex.EncodeToString(sum[:])
+	}
+
+	// The boot path, which re-claims the volume for this machine on this host
+	// (a no-op rewrite plus an idempotent attach), installs the token, mounts
+	// the volume in the guest and delivers the environment -- all of which a
+	// new process needs exactly as a first boot does. No command: an image
+	// built from a Dockerfile carries its own start spec.
+	fcm, err := m.bootMachine(ctx, row, token, row.VolumeID, req.Image, "")
+	if err != nil {
+		row.State = StateError
+		stampSlot(row, nil)
+		row.UpdatedAt = time.Now().Unix()
+		_ = m.opts.Store.PutMachine(ctx, row)
+		m.opts.Usage.Transition(id, StateError)
+		return row, err
+	}
+
+	m.put(id, fcm)
+	m.rememberToken(id, token)
+
+	row.State = StateRunning
+	stampSlot(row, fcm)
+	row.LastActivity = time.Now().Unix()
+	row.UpdatedAt = time.Now().Unix()
+	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
+		return row, err
+	}
+	m.opts.Usage.Transition(id, StateRunning)
+
+	// Only after the row no longer names them.
+	m.discardBuilds(ctx, superseded...)
+	return row, nil
+}
+
 // bindDiscovery starts the .internal responder inside a machine's namespace.
 //
 // Never fatal to the operation that triggered it. A machine whose responder
