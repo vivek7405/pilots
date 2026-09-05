@@ -94,6 +94,17 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	// machine at a time -- so the four things that could make this create
 	// wrong are refused here rather than discovered at the claim, minutes
 	// into the first deploy.
+	//
+	// Tenancy and the replica count are decided here for good. The last two --
+	// the volume already attached to a machine, and the volume already bound
+	// to another service -- are a fast, friendly refusal and NOT the
+	// enforcement: the read is local and the binding is written a few dozen
+	// lines below, and two creates naming one volume on two hosts arbitrate
+	// two different service ids, so both scans pass and both bindings are
+	// written. claimVolume (machines/volumes.go) is what actually prevents two
+	// mounters, because the volume row has one writer and the first deploy to
+	// claim it wins. What this saves is the common case: one operator, one
+	// mistake, told immediately instead of minutes into a build.
 	var volume *state.Volume
 	if req.Volume != "" {
 		v, ok := d.ownedVolume(w, r, req.Volume)
