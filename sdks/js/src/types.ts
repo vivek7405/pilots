@@ -65,6 +65,15 @@ export interface Machine {
   app?: string
   created_at: number
   last_activity: number
+  /**
+   * How this machine last came up. `restore` resumed its memory image;
+   * `boot` is the kernel boot a create with an image or a volume pays once,
+   * and every redeploy; `cold_boot` is a restore DOWNGRADED because no host
+   * of the image's CPU vendor was alive. A cold boot keeps the id, name, URL,
+   * disk and volume, and loses processes and everything in memory.
+   */
+  last_start?: 'restore' | 'boot' | 'cold_boot'
+  last_start_at?: number
 }
 
 export interface CreateMachineRequest {
@@ -269,6 +278,11 @@ export interface Host {
   mem_free_mib: number
   last_seen: number
   alive: boolean
+  /**
+   * Which vendor pool this host restores memory images from, the raw
+   * /proc/cpuinfo vendor_id. Absent on a host that has not published it yet.
+   */
+  cpu_vendor?: string
 }
 
 export interface AddDomainRequest {
@@ -302,6 +316,14 @@ export interface HealthResponse {
    * replication problem before they are anything else.
    */
   store_version: number
+  /**
+   * This host's CPU vendor pool, the raw /proc/cpuinfo vendor_id. A memory
+   * image never restores across the Intel/AMD boundary, so this says which
+   * of the fleet's snapshots this host can load.
+   */
+  cpu_vendor: string
+  /** True only when a fault flag is making this host lie about its CPU. */
+  cpu_vendor_forced?: boolean
 }
 
 export interface ErrorResponse {

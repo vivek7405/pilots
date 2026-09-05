@@ -58,7 +58,7 @@ type Manager interface {
 // orgID is passed in rather than looked up here: a list endpoint already knows
 // every row's owner from the pass it made to filter them, and re-asking per
 // row would turn one lookup into N.
-func toAPI(row state.Machine, orgID string) Machine {
+func toAPI(row state.Machine, orgID string, cpu state.MachineCPU) Machine {
 	return Machine{
 		ID: row.ID, Name: row.Name, HostID: row.HostID, State: row.State,
 		OrgID:        orgID,
@@ -74,6 +74,8 @@ func toAPI(row state.Machine, orgID string) Machine {
 		App:          row.App,
 		CreatedAt:    row.UpdatedAt,
 		LastActivity: row.LastActivity,
+		LastStart:    cpu.LastStart,
+		LastStartAt:  cpu.LastStartAt,
 	}
 }
 
@@ -154,7 +156,7 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, toAPI(*row, req.OrgID))
+	writeJSON(w, http.StatusCreated, toAPI(*row, req.OrgID, d.startOf(r.Context(), row.ID)))
 }
 
 // orDefault mirrors the machine manager's own defaulting, so the quota check
@@ -180,7 +182,7 @@ func (d Deps) handleListMachines(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			continue
 		}
-		out = append(out, toAPI(row, owner))
+		out = append(out, toAPI(row, owner, d.startOf(r.Context(), row.ID)))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -191,7 +193,7 @@ func (d Deps) handleGetMachine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), row.ID)
-	writeJSON(w, http.StatusOK, toAPI(*row, owner))
+	writeJSON(w, http.StatusOK, toAPI(*row, owner, d.startOf(r.Context(), row.ID)))
 }
 
 func (d Deps) handleDestroyMachine(w http.ResponseWriter, r *http.Request) {
@@ -362,7 +364,7 @@ func (d Deps) handleRedeploy(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, toAPI(*row, OrgID(r.Context())))
+	writeJSON(w, http.StatusOK, toAPI(*row, OrgID(r.Context()), d.startOf(r.Context(), row.ID)))
 }
 
 func (d Deps) handleCreateCheckpoint(w http.ResponseWriter, r *http.Request) {
@@ -419,7 +421,7 @@ func (d Deps) handleRestoreCheckpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), row.ID)
-	writeJSON(w, http.StatusOK, toAPI(*row, owner))
+	writeJSON(w, http.StatusOK, toAPI(*row, owner, d.startOf(r.Context(), row.ID)))
 }
 
 // handleCheckpointStatus lets a caller learn when a checkpoint became durable.
@@ -645,7 +647,8 @@ func (d Deps) handleListHosts(w http.ResponseWriter, r *http.Request) {
 		out = append(out, Host{
 			ID: h.ID, PublicIP: h.PublicIP, WGAddr: h.WGAddr,
 			CPUFree: h.CPUFree, MemFreeMiB: h.MemFreeMiB, LastSeen: h.LastSeen,
-			Alive: time.Since(time.Unix(h.LastSeen, 0)) < aliveWindow,
+			Alive:     time.Since(time.Unix(h.LastSeen, 0)) < aliveWindow,
+			CPUVendor: h.Vendor,
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

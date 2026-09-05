@@ -14,9 +14,15 @@ import (
 type fakeFleet struct {
 	machines []state.Machine
 	hosts    []state.Host
+	// vendors is which pool each machine's memory image belongs to. Absent
+	// means "in no pool", which is what a machine that predates machine_cpu
+	// reads as.
+	vendors map[string]string
 }
 
 func (f *fakeFleet) Machines() []state.Machine { return f.machines }
+
+func (f *fakeFleet) MachineVendor(id string) string { return f.vendors[id] }
 
 func (f *fakeFleet) LiveHosts(now time.Time, deadAfter time.Duration) []state.Host {
 	var out []state.Host
@@ -404,5 +410,164 @@ func TestTheHashIsStableAcrossProcesses(t *testing.T) {
 	}
 	if SliceOf("m-1", 0) != -1 {
 		t.Error("an empty fleet should own nothing")
+	}
+}
+
+func hostOf(id, vendor string, lastSeen time.Time) state.Host {
+	return state.Host{ID: id, Vendor: vendor, LastSeen: lastSeen.Unix()}
+}
+
+// rescuersOver runs one tick as each named host and reports who claimed what.
+func rescuersOver(t *testing.T, fleet *fakeFleet, now time.Time, selves ...string) map[string]string {
+	t.Helper()
+	rescuedBy := map[string]string{}
+	for _, self := range selves {
+		store := newFakeStore(fleet.machines...)
+		Tick(context.Background(), Options{
+			HostID: self,
+			Fleet:  fleet,
+			Store:  store,
+			Now:    func() time.Time { return now },
+			Restore: func(_ context.Context, m *state.Machine) error {
+				return store.ClaimMachine(context.Background(), m.ID, self, "creating",
+					state.WithDeadOwnerClaim(m.HostID))
+			},
+		})
+		for _, id := range store.claimed() {
+			if other, ok := rescuedBy[id]; ok {
+				t.Fatalf("%s was rescued by both %s and %s", id, other, self)
+			}
+			rescuedBy[id] = self
+		}
+	}
+	return rescuedBy
+}
+
+// Tier 2. While any host of the image's own vendor is alive, the rescue must
+// land there: a Firecracker memory snapshot carries raw CPUID and the other
+// vendor cannot load it at all. Without the filter the hash sends roughly half
+// of these to a host that would write them StateError.
+func TestARescueStaysInTheVendorPoolWhileOneHostOfItLives(t *testing.T) {
+	now := time.Now()
+
+	var ms []state.Machine
+	vendors := map[string]string{}
+	for i := 0; i < 60; i++ {
+		id := fmt.Sprintf("m-%02d", i)
+		ms = append(ms, machine(id, "host-dead"))
+		vendors[id] = "AuthenticAMD"
+	}
+
+	fleet := &fakeFleet{
+		machines: ms,
+		hosts: []state.Host{
+			hostOf("host-amd", "AuthenticAMD", now),
+			hostOf("host-intel-1", "GenuineIntel", now),
+			hostOf("host-intel-2", "GenuineIntel", now),
+			hostOf("host-dead", "AuthenticAMD", now.Add(-5*time.Minute)),
+		},
+		vendors: vendors,
+	}
+
+	rescuedBy := rescuersOver(t, fleet, now, "host-amd", "host-intel-1", "host-intel-2")
+	if len(rescuedBy) != len(ms) {
+		t.Fatalf("%d of %d machines were rescued", len(rescuedBy), len(ms))
+	}
+	for id, by := range rescuedBy {
+		if by != "host-amd" {
+			t.Fatalf("%s carries an AMD memory image and was rescued by %s, which cannot load it", id, by)
+		}
+	}
+}
+
+// Tier 3. With the pool empty, availability wins over continuity: the whole
+// live set ranks and the winner cold-boots the machine from its disk. Leaving
+// it unrescued instead would be strictly worse than a reboot.
+func TestARescueLeavesThePoolWhenItIsEmpty(t *testing.T) {
+	now := time.Now()
+
+	var ms []state.Machine
+	vendors := map[string]string{}
+	for i := 0; i < 30; i++ {
+		id := fmt.Sprintf("m-%02d", i)
+		ms = append(ms, machine(id, "host-dead"))
+		vendors[id] = "AuthenticAMD"
+	}
+
+	fleet := &fakeFleet{
+		machines: ms,
+		hosts: []state.Host{
+			hostOf("host-intel", "GenuineIntel", now),
+			hostOf("host-dead", "AuthenticAMD", now.Add(-5*time.Minute)),
+		},
+		vendors: vendors,
+	}
+
+	rescuedBy := rescuersOver(t, fleet, now, "host-intel")
+	if len(rescuedBy) != len(ms) {
+		t.Fatalf("%d of %d machines were rescued; a machine with no live pool was abandoned",
+			len(rescuedBy), len(ms))
+	}
+}
+
+// A mixed fleet must still partition: every machine claimed exactly once, by
+// exactly one host, with nothing coordinating them. The vendor narrows the
+// candidate set and must not break that.
+func TestSurvivorsPartitionAMixedVendorFleet(t *testing.T) {
+	now := time.Now()
+
+	hosts := []state.Host{
+		hostOf("host-a", "AuthenticAMD", now),
+		hostOf("host-b", "AuthenticAMD", now),
+		hostOf("host-c", "GenuineIntel", now),
+		hostOf("host-d", "GenuineIntel", now),
+		hostOf("host-dead", "AuthenticAMD", now.Add(-5*time.Minute)),
+	}
+
+	var ms []state.Machine
+	vendors := map[string]string{}
+	for i := 0; i < 90; i++ {
+		id := fmt.Sprintf("m-%02d", i)
+		ms = append(ms, machine(id, "host-dead"))
+		switch i % 3 {
+		case 0:
+			vendors[id] = "AuthenticAMD"
+		case 1:
+			vendors[id] = "GenuineIntel"
+			// case 2 leaves the machine in no pool, as one that predates the
+			// table is.
+		}
+	}
+
+	// Each survivor sees the fleet in its own order, which is the hazard rank
+	// has always had: a position in a list is only stable if the list is.
+	rescuedBy := map[string]string{}
+	orders := map[string][]state.Host{
+		"host-a": hosts,
+		"host-b": {hosts[3], hosts[1], hosts[4], hosts[0], hosts[2]},
+		"host-c": {hosts[2], hosts[4], hosts[0], hosts[3], hosts[1]},
+		"host-d": {hosts[1], hosts[0], hosts[2], hosts[4], hosts[3]},
+	}
+	for self, view := range orders {
+		fleet := &fakeFleet{machines: ms, hosts: view, vendors: vendors}
+		for id, by := range rescuersOver(t, fleet, now, self) {
+			if other, ok := rescuedBy[id]; ok {
+				t.Fatalf("%s was rescued by both %s and %s", id, other, by)
+			}
+			rescuedBy[id] = by
+		}
+	}
+	if len(rescuedBy) != len(ms) {
+		t.Fatalf("%d of %d machines were rescued; the slices do not cover the fleet",
+			len(rescuedBy), len(ms))
+	}
+
+	// And an image with a pool landed in it.
+	pool := map[string]string{"host-a": "AuthenticAMD", "host-b": "AuthenticAMD",
+		"host-c": "GenuineIntel", "host-d": "GenuineIntel"}
+	for id, by := range rescuedBy {
+		if v := vendors[id]; v != "" && pool[by] != v {
+			t.Fatalf("%s carries a %s image and was rescued by %s, which is %s", id, v, by, pool[by])
+		}
 	}
 }

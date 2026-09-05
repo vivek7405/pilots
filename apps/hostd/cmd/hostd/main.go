@@ -26,6 +26,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/build"
 	"github.com/vivek7405/pilots/hostd/internal/compose"
 	"github.com/vivek7405/pilots/hostd/internal/config"
+	"github.com/vivek7405/pilots/hostd/internal/cpuvendor"
 	"github.com/vivek7405/pilots/hostd/internal/dns"
 	"github.com/vivek7405/pilots/hostd/internal/fc"
 	"github.com/vivek7405/pilots/hostd/internal/github"
@@ -73,6 +74,33 @@ func run() error {
 		return err
 	}
 
+	// Which vendor pool this host is in. Read from /proc/cpuinfo, never from
+	// PILOT_CPU_TEMPLATE: the template is a fleet decision an operator can get
+	// wrong, and a host that trusted a wrong one would photograph memory images
+	// nobody can restore. The disagreement is caught HERE rather than at a
+	// customer's restore, mirroring what host-bootstrap.sh refuses at install.
+	cpu, err := cpuvendor.Detect()
+	if err != nil {
+		return err
+	}
+	if err := cpuvendor.CheckTemplate(cfg.CPUTemplate, cpu); err != nil {
+		return err
+	}
+	vendor, vendorForced := cpu.Vendor, false
+	// Fault injection for the fleet gate only, following internal/nbd/faults.go:
+	// two flags, because one set by accident would turn every wake on this host
+	// into a cold boot. Applied AFTER the template check, which always runs
+	// against the real CPU.
+	if os.Getenv("PILOT_FAULTS") == "1" {
+		if forced := os.Getenv("PILOT_FAULT_CPU_VENDOR"); forced != "" {
+			vendor, vendorForced = forced, true
+			slog.Warn("PILOT_FAULT_CPU_VENDOR is set; this host is lying about its CPU vendor",
+				"real", cpu.Vendor, "reported", forced)
+		}
+	}
+	slog.Info("cpu", "vendor", vendor, "family", cpu.Family, "model", cpu.Model,
+		"stepping", cpu.Stepping, "template", cfg.CPUTemplate)
+
 	for _, dir := range []string{
 		filepath.Dir(cfg.StateDSN),
 		cfg.MachineStateRoot(),
@@ -111,6 +139,17 @@ func run() error {
 
 	if cfg.Fleet() {
 		slog.Info("joining the fleet", "state", "corrosion", "agent", cfg.CorrosionAddr)
+	}
+
+	// Announce the pool BEFORE anything can heartbeat. A peer ranks a live host
+	// with no cpu row as "in no pool", so a host that heartbeat first would be
+	// a tier-3 candidate for machines it could have restored -- a needless cold
+	// boot, for as long as the gap lasted.
+	if err := store.PutHostCPU(ctx, &state.HostCPU{
+		HostID: cfg.HostID, Vendor: vendor, CPUTemplate: cfg.CPUTemplate,
+		UpdatedAt: time.Now().Unix(),
+	}); err != nil {
+		return fmt.Errorf("could not publish this host's cpu vendor: %w", err)
 	}
 
 	uploader, err := newUploader(cfg)
@@ -246,6 +285,7 @@ func run() error {
 		Discovery:        discovery,
 		FleetKey:         fleetKey,
 		Usage:            ledger,
+		Vendor:           vendor,
 		FCConfig: fc.Config{
 			KernelPath:     cfg.KernelPath,
 			TemplateRootfs: cfg.TemplateRootfs,
@@ -371,8 +411,12 @@ func run() error {
 		// claim and both start a Firecracker on one machine's state. Same rule
 		// and same function the rescue loop uses; there is only one definition
 		// of it on purpose.
+		// The vendor narrows the candidate set inside that same hash: a memory
+		// image restores only on its own pool, and only when no host of the
+		// pool is live does the whole fleet rank -- where the winner cold-boots
+		// the machine from its disk.
 		routerOpts.RescuerFor = func(machineID string) (string, bool) {
-			return selfheal.RescuerFor(machineID,
+			return selfheal.RescuerFor(machineID, f.cache.MachineVendor(machineID),
 				f.cache.LiveHosts(time.Now(), selfheal.DeadAfter))
 		}
 		// The hot path reads the subscription cache, not the agent.
@@ -387,7 +431,7 @@ func run() error {
 	// deploy's replicas are ordinary machines with ordinary lifecycles.
 	rollout := services.New(services.Options{
 		HostID: cfg.HostID, Store: store, Machines: mgr,
-		Peers: peerCaller(f, cfg.AgentTokenSecret),
+		Peers: peerCaller(f, cfg.AgentTokenSecret), Vendor: vendor,
 	})
 
 	// Only the arbiter for a service acts on it, so every host can run this
@@ -422,13 +466,20 @@ func run() error {
 	if f != nil {
 		tenancy = cachedTenancy{cache: f.cache, store: store}
 	}
+	// last_start reaches a machine's JSON from machine_cpu, read the same way
+	// and for the same reason: it is on every machine read.
+	var machineCPU api.MachineCPUView = api.StoreMachineCPU(store)
+	if f != nil {
+		machineCPU = cachedMachineCPU{cache: f.cache}
+	}
 
 	controlAPI := api.Routes(api.Deps{
 		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink, HugePages: cfg.HugePages,
 		StoreVersion: storeVersion(store),
 		Builds:       builder, Rollout: rollout, Domain: cfg.WorkloadDomain,
 		Peers: peerLookup(f), PeerToken: api.PeerTokenFor(cfg.AgentTokenSecret),
-		Tenancy: tenancy, BuildGate: &quota.HostGate{},
+		Tenancy: tenancy, MachineCPU: machineCPU, BuildGate: &quota.HostGate{},
+		CPUVendor: vendor, CPUVendorForced: vendorForced,
 		Usage:   ledger,
 		Compose: compose.Handler(),
 		Lookup:  machineByName(f),

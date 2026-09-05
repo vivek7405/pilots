@@ -42,6 +42,12 @@ const (
 type Fleet interface {
 	Machines() []state.Machine
 	LiveHosts(now time.Time, deadAfter time.Duration) []state.Host
+	// MachineVendor names the vendor pool a machine's memory image belongs to,
+	// or "" when nothing has recorded one. It narrows the rescue candidate set
+	// -- a snapshot never restores across the Intel/AMD boundary -- and an
+	// empty answer ranks over the whole fleet, which is what a machine that
+	// predates the table gets.
+	MachineVendor(id string) string
 }
 
 // Options wires the loops to the host they run on.
@@ -159,7 +165,7 @@ func Tick(ctx context.Context, opts Options) {
 		if liveIDs[m.HostID] || m.State == state.StateDestroyed {
 			continue
 		}
-		if rescuer, ok := RescuerFor(m.ID, live); !ok || rescuer != opts.HostID {
+		if rescuer, ok := RescuerFor(m.ID, opts.Fleet.MachineVendor(m.ID), live); !ok || rescuer != opts.HostID {
 			continue
 		}
 		if opts.Capacity != nil && !opts.Capacity(m.VCPUs, m.MemMiB) {
@@ -299,11 +305,12 @@ func rankOf(live []state.Host, hostID string) int {
 //
 // It sorts its own input for the same reason Tick does: rank is a position in
 // a list, and two hosts that order it differently compute different owners.
-func RescuerFor(machineID string, live []state.Host) (string, bool) {
+func RescuerFor(machineID, vendor string, live []state.Host) (string, bool) {
 	// One implementation, because the service arbiter in the corrosion store
 	// has to compute owners the same way this does. Two copies of a
-	// consensus-free ownership rule is two chances to disagree.
-	return state.OwnerFor(machineID, live)
+	// consensus-free ownership rule is two chances to disagree. The vendor only
+	// narrows the candidate set; the hash and the sort are OwnerFor's.
+	return state.MachineOwnerFor(machineID, vendor, live)
 }
 
 func hashID(s string) uint32 {
