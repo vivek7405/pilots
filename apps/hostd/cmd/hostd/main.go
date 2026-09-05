@@ -468,11 +468,14 @@ func run() error {
 	}
 
 	// The certificate store is opened HERE, before the API is built, because
-	// the same two facts that decide whether TLS starts decide the scheme
-	// every machine and service URL is rendered with. Evaluated once and used
-	// twice, so the URL a client is told can never disagree with the listener.
+	// the listener decision below needs it. The URL scheme deliberately does
+	// NOT: both read the same configured facts (tlsConfigured), evaluated once
+	// and used twice, but only the listener also requires this host's own
+	// store to have opened. This host renders `url` for every machine and
+	// service row in the fleet, so a scheme that moved with its runtime state
+	// would make a machine's permanent URL depend on which host answered.
 	certClient, certErr := newCertStore(cfg)
-	publicURL := api.PublicURLFor(certErr == nil && tlsEnabled(cfg, certClient), cfg.ListenAddr)
+	publicURL := publicURLFor(cfg)
 
 	controlAPI := api.Routes(api.Deps{
 		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink, HugePages: cfg.HugePages,

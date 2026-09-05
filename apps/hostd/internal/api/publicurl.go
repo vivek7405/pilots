@@ -5,10 +5,14 @@ import "net"
 // PublicURL is how a hostname becomes the URL a client is told: the scheme,
 // and the port when the fleet listens on one a browser would not assume.
 //
-// Decided ONCE at startup from whether TLS started (see cmd/hostd), never per
-// request: a machine's URL is a property of the fleet, not of which listener
-// the caller happened to use. A peer forwarding over the mesh asks over plain
-// HTTP on the internal listener, and the answer must not change because of it.
+// Decided ONCE at startup from the configuration that decides whether the
+// fleet serves TLS (see cmd/hostd's tlsConfigured), never per request and
+// never from the answering host's runtime state: a machine's URL is a property
+// of the fleet, not of which listener the caller happened to use nor of which
+// host took the call. A peer forwarding over the mesh asks over plain HTTP on
+// the internal listener, and the answer must not change because of it; a host
+// whose own certificate store failed to open must not answer differently from
+// its peers either.
 //
 // The zero value renders the production shape -- https, no port -- so a test
 // that does not care about the scheme gets exactly what a TLS host emits.

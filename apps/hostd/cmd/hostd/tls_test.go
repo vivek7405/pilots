@@ -83,29 +83,94 @@ func TestWildcardNamesDoNotRepeatTheApex(t *testing.T) {
 }
 
 // TLS needs both a place to share certificates from and a contact to register
-// with, and the URL every client is told is rendered from the same predicate.
-// One definition, read twice, so the two can never disagree: a host serving
-// plain HTTP that reports https:// hands out links that do not open.
+// with. tlsConfigured is that pair read from configuration alone; tlsEnabled
+// adds this host's store having opened. One definition, read twice, so the
+// listener and the URL can never disagree about the configuration.
 func TestTLSEnabledNeedsAStoreAndAContact(t *testing.T) {
 	store := &s3.Client{}
 
 	cases := []struct {
-		name    string
-		objects *s3.Client
-		email   string
-		want    bool
+		name       string
+		objects    *s3.Client
+		bucket     string
+		email      string
+		configured bool
+		want       bool
 	}{
-		{"no store, no contact", nil, "", false},
-		{"no store, a contact", nil, "ops@pilots.run", false},
-		{"a store, no contact", store, "", false},
-		{"both", store, "ops@pilots.run", true},
+		{"no bucket, no contact", nil, "", "", false, false},
+		{"no bucket, a contact", nil, "", "ops@pilots.run", false, false},
+		{"a bucket, no contact", store, "pilots", "", false, false},
+		{"both, store open", store, "pilots", "ops@pilots.run", true, true},
+		// The one case that separates the two predicates: the fleet is
+		// configured for TLS, this host's store did not open. It must not
+		// serve TLS, and -- see the test below -- it must still render the
+		// fleet's URLs.
+		{"both, store failed to open", nil, "pilots", "ops@pilots.run", true, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			cfg := &config.Config{ACMEEmail: tc.email}
+			cfg := &config.Config{S3Bucket: tc.bucket, ACMEEmail: tc.email}
+			if got := tlsConfigured(cfg); got != tc.configured {
+				t.Errorf("tlsConfigured = %v, want %v", got, tc.configured)
+			}
 			if got := tlsEnabled(cfg, tc.objects); got != tc.want {
 				t.Errorf("tlsEnabled = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// Every host holding the same configuration renders the same URL, whether or
+// not its own certificate store opened.
+//
+// This is AGENTS.md invariant 4 -- URLs are permanent -- and it is a fleet
+// property, not a per-host one: every host answers for every machine and
+// service row, not only its own. If the scheme were read from the answering
+// host's runtime state, a transient S3 failure on one host, or the window
+// during a rolling credentials change, would have that host report
+// http://<name>.<domain>:8080 for machines its peers report
+// https://<name>.<domain> for. Same machine, two URLs, decided by which host
+// took the call.
+func TestPublicURLIsTheSameOnEveryHostWithThisConfig(t *testing.T) {
+	cfg := &config.Config{
+		S3Bucket:   "pilots",
+		ACMEEmail:  "ops@pilots.run",
+		ListenAddr: ":8080",
+	}
+	const want = "https://webapp.pilotrun.app"
+
+	hosts := []struct {
+		name    string
+		objects *s3.Client
+		serves  bool
+	}{
+		{"certificate store open", &s3.Client{}, true},
+		// newCertStore returned an error -- S3 refused the connection at
+		// startup, or the credentials were mid-rotation -- so certClient is
+		// nil and startTLS never ran on this host.
+		{"certificate store failed to open", nil, false},
+	}
+	for _, h := range hosts {
+		t.Run(h.name, func(t *testing.T) {
+			// The fixture is the host it claims to be: these two genuinely
+			// differ in whether they serve TLS.
+			if got := tlsEnabled(cfg, h.objects); got != h.serves {
+				t.Fatalf("tlsEnabled = %v, want %v", got, h.serves)
+			}
+			if got := publicURLFor(cfg).Of("webapp.pilotrun.app"); got != want {
+				t.Errorf("renders %q, want %q -- every host with this "+
+					"configuration must agree on a machine's URL", got, want)
+			}
+		})
+	}
+}
+
+// The single box: no bucket, no contact, a plain listener on :8080. Every host
+// with that configuration agrees on the port too.
+func TestPublicURLOnASingleBoxCarriesThePlainPort(t *testing.T) {
+	cfg := &config.Config{ListenAddr: ":8080"}
+	const want = "http://webapp.pilots.localhost:8080"
+	if got := publicURLFor(cfg).Of("webapp.pilots.localhost"); got != want {
+		t.Errorf("renders %q, want %q", got, want)
 	}
 }
