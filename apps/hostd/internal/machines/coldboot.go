@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -49,16 +50,49 @@ func (m *Manager) bringUp(ctx context.Context, row *state.Machine) (*fc.Machine,
 			row.ID, row.MemBuildID)
 	}
 
-	cpu, err := m.opts.Store.GetMachineCPU(ctx, row.ID)
-	if err == nil && cpu.Vendor != "" && cpu.Vendor != m.opts.Vendor {
+	vendor, err := m.imageVendor(ctx, row.ID)
+	if err != nil {
+		return nil, "", err
+	}
+	if vendor != "" && vendor != m.opts.Vendor {
 		slog.Warn("cold-booting a machine from its disk: its memory image belongs to another CPU vendor",
-			"machine", row.ID, "image_vendor", cpu.Vendor, "host_vendor", m.opts.Vendor)
+			"machine", row.ID, "image_vendor", vendor, "host_vendor", m.opts.Vendor)
 		fcm, err := m.bootFromDisk(ctx, row, fc.Backends{}, row.RootfsBuildID)
 		return fcm, state.StartColdBoot, err
 	}
 
 	fcm, err := m.wakeFromSuspend(ctx, row)
 	return fcm, state.StartRestore, err
+}
+
+// imageVendor names the pool that photographed an image, or "" when nothing
+// has recorded one.
+//
+// ErrNotFound is the ONLY tolerated failure: it means there is no row, which
+// is what every image taken before this table looks like, and it reads as "in
+// no pool" -- the answer this code gave before the table existed. Any other
+// store error REFUSES the bring-up rather than falling through, because both
+// fall-through answers are worse than a retry:
+//
+//   - guessing "restore" surfaces a foreign image later as Firecracker's
+//     "corrupt snapshot", with nothing in the log saying the vendor lookup is
+//     why;
+//   - guessing "cold boot" is IRREVERSIBLE. recordStart clears the memory
+//     build and deletes the suspend image from object storage, so a cold boot
+//     taken on a store hiccup throws away an image that would have restored.
+//
+// A refused bring-up is retried by the next request. A discarded memory image
+// is not recoverable by anything.
+func (m *Manager) imageVendor(ctx context.Context, id string) (string, error) {
+	cpu, err := m.opts.Store.GetMachineCPU(ctx, id)
+	if errors.Is(err, state.ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("machines: could not read the CPU pool of %s, so whether its "+
+			"memory image can be restored here is unknown: %w", id, err)
+	}
+	return cpu.Vendor, nil
 }
 
 // bootFromDisk boots a machine's own disk chain with a kernel, discarding the

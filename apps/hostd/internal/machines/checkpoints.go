@@ -283,12 +283,15 @@ func (m *Manager) restoreFromCheckpoint(ctx context.Context, row *state.Machine,
 	// The checkpoint's memory image belongs to whichever pool photographed it,
 	// exactly as a machine's suspend image does, so the rollback asks the same
 	// question bringUp asks -- about the CHECKPOINT's id, not the machine's.
-	cpu, cerr := m.opts.Store.GetMachineCPU(ctx, ckpt.ID)
-	if cerr == nil && cpu.Vendor != "" && cpu.Vendor != m.opts.Vendor {
+	vendor, err := m.imageVendor(ctx, ckpt.ID)
+	if err != nil {
+		return nil, "", err
+	}
+	if vendor != "" && vendor != m.opts.Vendor {
 		slog.Warn("cold-booting a rollback from its disk: the checkpoint's memory "+
 			"image belongs to another CPU vendor",
 			"machine", row.ID, "checkpoint", ckpt.ID,
-			"image_vendor", cpu.Vendor, "host_vendor", m.opts.Vendor)
+			"image_vendor", vendor, "host_vendor", m.opts.Vendor)
 		// The copy-on-write file holds everything written since the
 		// checkpoint, and a rollback discards exactly that whichever way it
 		// comes up.

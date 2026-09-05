@@ -406,15 +406,32 @@ func (m *Manager) createReplica(ctx context.Context, svc *state.Service,
 	// added to a snapshot being restored, and Create restores whenever it sees
 	// a mem build regardless of the volume.
 	restore := rel.MemBuildID != "" && volumeID == ""
-	if cpu, err := m.opts.Store.GetMachineCPU(ctx, rel.ID); restore && err == nil &&
-		cpu.Vendor != "" && cpu.Vendor != m.opts.Vendor {
-		// The release's memory image was photographed on the other vendor and
-		// a Firecracker snapshot never restores across that boundary. Boot
-		// from its rootfs instead: the documented slow path, not an error.
-		slog.Info("a release's memory image belongs to another CPU vendor; "+
-			"this replica boots from its rootfs",
-			"release", rel.ID, "image_vendor", cpu.Vendor, "host_vendor", m.opts.Vendor)
-		restore = false
+	if restore {
+		cpu, err := m.opts.Store.GetMachineCPU(ctx, rel.ID)
+		switch {
+		case errors.Is(err, state.ErrNotFound):
+			// No row, which is what every release snapshotted before this
+			// table looks like. It reads as "in no pool" and restores, exactly
+			// as it did before the table existed.
+		case err != nil:
+			// NOT a fall-through. Whether this release's image can be restored
+			// here is now unknown, and both guesses are worse than a refused
+			// deploy: restoring a foreign image fails later as Firecracker's
+			// "corrupt snapshot" with nothing naming the vendor, and booting
+			// instead silently turns the measured sub-second path into a cold
+			// boot on every replica for as long as the store is unwell.
+			return nil, fmt.Errorf("services: could not read the CPU pool of release %s, so "+
+				"whether its memory image can be restored here is unknown: %w", rel.ID, err)
+		case cpu.Vendor != "" && cpu.Vendor != m.opts.Vendor:
+			// The release's memory image was photographed on the other vendor
+			// and a Firecracker snapshot never restores across that boundary.
+			// Boot from its rootfs instead: the documented slow path, not an
+			// error.
+			slog.Info("a release's memory image belongs to another CPU vendor; "+
+				"this replica boots from its rootfs",
+				"release", rel.ID, "image_vendor", cpu.Vendor, "host_vendor", m.opts.Vendor)
+			restore = false
+		}
 	}
 	req := api.CreateMachineRequest{
 		App:    svc.App,

@@ -994,3 +994,52 @@ func TestAnUnrecordedReleaseStillRestores(t *testing.T) {
 		t.Fatalf("an unrecorded release's replica %sed; it must restore", how)
 	}
 }
+
+// cpuErrStore makes GetMachineCPU fail the way a corrosion query fails: not
+// with ErrNotFound, and not because the row is absent.
+type cpuErrStore struct {
+	state.Store
+	err error
+}
+
+func (s *cpuErrStore) GetMachineCPU(ctx context.Context, id string) (*state.MachineCPU, error) {
+	return nil, s.err
+}
+
+// A store that cannot say which pool photographed a release refuses the
+// replica rather than guessing.
+//
+// The two guesses are both worse than a refused deploy. Restoring a foreign
+// image fails later inside Firecracker as "corrupt snapshot", with nothing
+// naming the vendor; booting instead silently turns the measured sub-second
+// path into a cold boot on every replica for as long as the store is unwell,
+// and a deploy that got slower for no stated reason is the kind of regression
+// nobody finds. TestAnUnrecordedReleaseStillRestores is the other half: an
+// ABSENT row is not a failure and must still restore.
+func TestAReplicaRefusesWhenTheCPUPoolCannotBeRead(t *testing.T) {
+	ctx := context.Background()
+	m, fm, store, svc := fixture(t, 2)
+	m.opts.Vendor = "AuthenticAMD"
+
+	rel := &state.Release{
+		ID: "rel-1", ServiceID: svc.ID,
+		RootfsBuildID: "rootfs-build", MemBuildID: "mem-build",
+	}
+	if err := store.PutRelease(ctx, rel); err != nil {
+		t.Fatal(err)
+	}
+
+	unwell := errors.New("corrosion: query timed out")
+	m.opts.Store = &cpuErrStore{Store: m.opts.Store, err: unwell}
+
+	_, err := m.createReplica(ctx, svc, rel, nil, "")
+	if !errors.Is(err, unwell) {
+		t.Fatalf("createReplica with an unreadable cpu row returned %v, want the store error", err)
+	}
+	if !strings.Contains(err.Error(), "CPU pool") {
+		t.Errorf("the error does not say the vendor lookup is why: %v", err)
+	}
+	if creates := eventsWithPrefix(fm, "create:"); len(creates) != 0 {
+		t.Errorf("a refused replica was created anyway: %v", creates)
+	}
+}
