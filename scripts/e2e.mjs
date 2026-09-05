@@ -1875,6 +1875,261 @@ async function replicasOf(serviceID) {
 }
 
 // ---------------------------------------------------------------------------
+// A service that mounts a volume.
+//
+// One machine, because one machine mounts a volume, and a deploy that replaces
+// that machine from the inside rather than beside it. The assertions here are
+// what a client can see: the volume on the row, the data in the guest, the
+// same machine id and URL across a redeploy, and a request that is held rather
+// than answered with an error while the process is down.
+// ---------------------------------------------------------------------------
+
+async function volumeServiceAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const created = [];
+
+  // /proc/self/mounts rather than findmnt: findmnt is util-linux, which a
+  // built alpine image does not have.
+  const mountSource = (path) =>
+    `awk '$2 == "${path}" { print $1 }' /proc/self/mounts`;
+
+  try {
+    let volume;
+    await step('a volume for a service is created', async () => {
+      const { status, json } = await request('/v1/volumes', {
+        method: 'POST',
+        body: { name: `svc-vol-${tag}`, size_gib: 1, mount_path: '/data' },
+      });
+      assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
+      assert(json.id, 'no volume id');
+      volume = json;
+    });
+
+    let svc;
+    await step('a volume-backed service is created with its volume and one replica', async () => {
+      const body = {
+        name: `vol-${tag}`, app: `e2e-vol-${tag}`, replicas: 1, volume: volume.id,
+        health: { type: 'cmd', test: ['CMD-SHELL', 'true'], grace: 90, interval: 2, healthy_threshold: 1 },
+      };
+      const { status, json } = await request('/v1/services', { method: 'POST', body });
+      assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
+      assert(json.volume_id === volume.id,
+        `volume_id = ${json.volume_id}; without it the volume is mounted by nothing`);
+      svc = json;
+
+      // Two replicas with a volume is refused: a volume is mounted by exactly
+      // one machine, and the claim would refuse the second one anyway, minutes
+      // into a deploy.
+      const two = await request('/v1/services', {
+        method: 'POST',
+        body: { ...body, name: `vol2-${tag}`, replicas: 2 },
+      });
+      assert(two.status === 400,
+        `two replicas with a volume: expected 400, got ${two.status}: ${JSON.stringify(two.json)}`);
+
+      // And the side door is shut too.
+      const patched = await request(`/v1/services/${svc.id}`, {
+        method: 'PATCH', body: { replicas: 2 },
+      });
+      assert(patched.status === 400,
+        `PATCH to two replicas: expected 400, got ${patched.status}: ${JSON.stringify(patched.json)}`);
+
+      // The volume itself is create-only, and the strict decoder says so.
+      const swapped = await request(`/v1/services/${svc.id}`, {
+        method: 'PATCH', body: { volume: 'vol_other' },
+      });
+      assert(swapped.status === 400,
+        `PATCH of the volume: expected 400, got ${swapped.status}: ${JSON.stringify(swapped.json)}`);
+      assert((swapped.json?.error ?? '').includes('volume'),
+        `the 400 does not name the field: ${swapped.json?.error}`);
+
+      const read = await request(`/v1/services/${svc.id}`);
+      assert(read.json?.volume_id === volume.id,
+        `GET returned volume_id ${read.json?.volume_id}; a client cannot tell it mounts one`);
+    });
+
+    let build;
+    await step('a build for the volume-backed service produces a rootfs', async () => {
+      const res = await postTar('/v1/builds', tarball({
+        'Dockerfile': [
+          'FROM alpine:3.20',
+          'RUN echo one > /etc/pilots-release-marker',
+          // A real listener, so the held request during a redeploy has
+          // something to be answered by rather than something to time out on.
+          'RUN mkdir /www && echo ok > /www/index.html',
+          'CMD ["httpd","-f","-p","8080","-h","/www"]',
+          '',
+        ].join('\n'),
+      }));
+      assert(res.status === 200, `build: HTTP ${res.status}`);
+      const text = await res.text();
+      for (const line of text.trim().split('\n')) {
+        try {
+          const obj = JSON.parse(line);
+          if (obj.result) build = obj.result;
+        } catch {}
+      }
+      assert(build, `the build stream produced no rootfs id:\n${text.slice(-400)}`);
+    });
+
+    let replica;
+    await step('the replica mounts the volume, verified from inside the guest', async () => {
+      const { status, json } = await request(`/v1/services/${svc.id}/deploy`, {
+        method: 'POST', body: { build },
+      });
+      assert(status === 200, `deploy: expected 200, got ${status}: ${JSON.stringify(json)}`);
+      assert(json.healthy, 'the release was flipped to without passing its health gate');
+      // No memory build, ever: a checkpoint of a volume machine carries the
+      // drive in its device state and nothing may restore it elsewhere.
+      assert(!json.mem_build_id,
+        `the release carries a memory build (${json.mem_build_id}); a volume machine is never checkpointed`);
+
+      const reps = await replicasOf(svc.id);
+      assert(reps.length === 1, `the service has ${reps.length} machines; a volume allows exactly one`);
+      replica = reps[0];
+      created.push(replica.id);
+      assert(replica.volume_id === volume.id,
+        `the replica's volume_id is ${replica.volume_id}, want ${volume.id}`);
+
+      const mounted = await exec(replica.id, `${mountSource('/data')} || true`);
+      assert(mounted.includes('vdb'),
+        `/data is backed by ${JSON.stringify(mounted)}, not the volume drive`);
+
+      await exec(replica.id, 'echo service-marker > /data/marker && sync');
+      const back = await exec(replica.id, 'cat /data/marker');
+      assert(back === 'service-marker', `read back ${JSON.stringify(back)}`);
+    });
+
+    let secondBuild;
+    await step('a second build gives the redeploy something to land on', async () => {
+      const res = await postTar('/v1/builds', tarball({
+        'Dockerfile': [
+          'FROM alpine:3.20',
+          'RUN echo two > /etc/pilots-release-marker',
+          'RUN mkdir /www && echo ok > /www/index.html',
+          'CMD ["httpd","-f","-p","8080","-h","/www"]',
+          '',
+        ].join('\n'),
+      }));
+      assert(res.status === 200, `build: HTTP ${res.status}`);
+      const text = await res.text();
+      for (const line of text.trim().split('\n')) {
+        try {
+          const obj = JSON.parse(line);
+          if (obj.result) secondBuild = obj.result;
+        } catch {}
+      }
+      assert(secondBuild, `the build stream produced no rootfs id:\n${text.slice(-400)}`);
+      assert(secondBuild !== build, 'the second build is the first one; the cache defeated the test');
+    });
+
+    await step('a redeploy keeps the data and the machine, and holds a request meanwhile', async () => {
+      const before = { id: replica.id, url: replica.url };
+
+      const deploying = request(`/v1/services/${svc.id}/deploy`, {
+        method: 'POST', body: { build: secondBuild },
+      });
+      // Started just after the deploy is posted, so it lands inside the
+      // window: the router resolves the row, calls Wake, and Wake blocks on
+      // the machine's lock until the new process serves. A holding page or an
+      // error here is the failure this asserts against.
+      const held = before.url
+        ? viaRouter(new URL(before.url).host, '/')
+        : Promise.resolve(null);
+
+      const { status, json } = await deploying;
+      assert(status === 200, `redeploy: expected 200, got ${status}: ${JSON.stringify(json)}`);
+
+      const reps = await replicasOf(svc.id);
+      assert(reps.length === 1, `the redeploy left ${reps.length} machines; it must replace the one`);
+      assert(reps[0].id === before.id,
+        `the redeploy created a new machine (${reps[0].id}); the volume follows the row, not a copy`);
+      assert(reps[0].url === before.url,
+        `the URL changed across a redeploy: ${before.url} -> ${reps[0].url}`);
+
+      const marker = await exec(replica.id, 'cat /data/marker');
+      assert(marker === 'service-marker', `the volume lost its data across a redeploy: ${JSON.stringify(marker)}`);
+      const release = await exec(replica.id, 'cat /etc/pilots-release-marker');
+      assert(release === 'two', `the machine is still on the old image: ${JSON.stringify(release)}`);
+
+      const answered = await held;
+      if (answered !== null) {
+        assert(answered.status === 200,
+          `a request inside the redeploy window was answered ${answered.status} rather than held ` +
+          `until the new process served: ${answered.body.slice(0, 200)}`);
+      }
+    });
+
+    await step('a rollback of a volume-backed service redeploys the same machine', async () => {
+      const { status, json } = await request(`/v1/services/${svc.id}/rollback`, { method: 'POST' });
+      assert(status === 200, `rollback: expected 200, got ${status}: ${JSON.stringify(json)}`);
+
+      const reps = await replicasOf(svc.id);
+      assert(reps.length === 1, `the rollback left ${reps.length} machines`);
+      assert(reps[0].id === replica.id, `the rollback created a new machine (${reps[0].id})`);
+
+      const release = await exec(replica.id, 'cat /etc/pilots-release-marker');
+      assert(release === 'one', `the rollback did not put the first image back: ${JSON.stringify(release)}`);
+      const marker = await exec(replica.id, 'cat /data/marker');
+      assert(marker === 'service-marker', `the volume lost its data across a rollback: ${JSON.stringify(marker)}`);
+    });
+
+    await step('a suspended volume-backed replica keeps its volume and wakes with it', async () => {
+      const before = await request('/v1/volumes');
+      const held = (before.json ?? []).find((v) => v.id === volume.id);
+      assert(held, 'the volume vanished from the list');
+      const hostBefore = held.host_id;
+
+      const suspended = await request(`/v1/machines/${replica.id}/suspend`, { method: 'POST' });
+      assert(suspended.status === 204, `suspend: expected 204, got ${suspended.status}`);
+
+      const after = await request('/v1/volumes');
+      const still = (after.json ?? []).find((v) => v.id === volume.id);
+      assert(still.machine_id === replica.id,
+        `the suspend detached the volume (machine_id = ${still.machine_id}); a wake would pay a metadata restore`);
+      assert(still.host_id === hostBefore,
+        `the volume moved hosts on a suspend: ${hostBefore} -> ${still.host_id}`);
+
+      const woken = await request(`/v1/machines/${replica.id}/wake`, { method: 'POST' });
+      assert(woken.status === 204, `wake: expected 204, got ${woken.status}`);
+      const marker = await exec(replica.id, 'cat /data/marker');
+      assert(marker === 'service-marker', `the volume lost its data across a wake: ${JSON.stringify(marker)}`);
+    });
+
+    await step('a volume-backed service at the default floor suspends when idle and wakes on its URL', async () => {
+      // No engine special case for a volume: a volume-backed replica takes the
+      // machine defaults, floor zero included, exactly as any other does.
+      await waitFor(async () => {
+        const { json } = await request(`/v1/machines/${replica.id}`);
+        return json?.state === 'suspended';
+      }, { timeoutMs: 180_000, what: 'the idle volume-backed replica to suspend' });
+
+      const reps = await replicasOf(svc.id);
+      assert(reps.length === 1, `an idle scale-down left ${reps.length} machines; it suspends, never destroys`);
+
+      const url = reps[0].url;
+      assert(url, 'the replica has no URL to wake it on');
+      const res = await viaRouter(new URL(url).host, '/');
+      assert(res.status === 200,
+        `the wake path answered ${res.status} for a suspended volume-backed replica ` +
+        `rather than holding the request: ${res.body.slice(0, 200)}`);
+
+      const { json } = await request(`/v1/machines/${replica.id}`);
+      assert(json?.state === 'running', `the replica is ${json?.state} after a request on its URL`);
+      assert(json?.url === url, `the URL changed across a wake: ${url} -> ${json?.url}`);
+      const marker = await exec(replica.id, 'cat /data/marker');
+      assert(marker === 'service-marker', `the volume lost its data across an idle suspend and wake: ${JSON.stringify(marker)}`);
+    });
+  } finally {
+    // The volume is left, as volumeAssertions leaves its own: destroying the
+    // machine releases it, and it is then unattached and reusable.
+    for (const id of created) {
+      try { await request(`/v1/machines/${id}`, { method: 'DELETE' }); } catch { /* best effort */ }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // The data routes: the usage ledger, the service patch, the release list, and
 // the compose plan.
 //
@@ -3775,6 +4030,7 @@ async function main() {
     await edgeAssertions();
     await envAssertions();
     await serviceAssertions();
+    await volumeServiceAssertions();
     await multiServiceAssertions();
     await agentDeployAssertions();
     await execStreamAssertions();
