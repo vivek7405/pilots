@@ -433,15 +433,21 @@ func (l *Ledger) upload(ctx context.Context, up Uploader, hostID string) {
 		marker := filepath.Join(l.dir, day+".uploaded")
 
 		if day == today {
+			// Cleared BEFORE the put, and re-set if the put fails. Clearing
+			// after would drop the mark a line appended DURING the upload set,
+			// and that line would then sit on local disk until the day rolled
+			// over -- object storage is the record, so up to a day of billing
+			// would live only on a host that can be wiped.
 			l.mu.Lock()
 			grew := l.dirty[day]
+			delete(l.dirty, day)
 			l.mu.Unlock()
 			if !grew {
 				continue
 			}
-			if err := l.put(ctx, up, hostID, day, path); err == nil {
+			if err := l.put(ctx, up, hostID, day, path); err != nil {
 				l.mu.Lock()
-				delete(l.dirty, day)
+				l.dirty[day] = true
 				l.mu.Unlock()
 			}
 			continue
