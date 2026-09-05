@@ -46,6 +46,12 @@ BUCKET="${PILOT_S3_BUCKET:-pilots}"
 ACCESS_KEY="${PILOT_S3_ACCESS_KEY:-pilots}"
 SECRET_KEY="${PILOT_S3_SECRET_KEY:-pilots-secret}"
 PORT="${ADDR##*:}"
+# The address this script itself talks to the store on. A wildcard bind is
+# reachable on loopback; a bind to one interface is NOT, and hardcoding
+# 127.0.0.1 would make the readiness probe below time out against a store that
+# came up perfectly.
+HOST="${ADDR%:*}"
+case "$HOST" in "" | 0.0.0.0 | "[::]" | "::") HOST=127.0.0.1 ;; esac
 
 [ "$(id -u)" = 0 ] || {
   echo "local-s3.sh installs into $PREFIX/bin and keeps data under a root-owned tree." >&2
@@ -100,25 +106,36 @@ for _ in $(seq 60); do
   if ! kill -0 "$minio_pid" 2>/dev/null; then
     echo "minio exited before it became healthy" >&2; exit 1
   fi
-  if curl -fsS "http://127.0.0.1:${PORT}/minio/health/live" >/dev/null 2>&1; then
+  if curl -fsS "http://${HOST}:${PORT}/minio/health/live" >/dev/null 2>&1; then
     healthy=1; break
   fi
   sleep 0.5
 done
 [ "${healthy:-}" = 1 ] || { echo "minio did not become healthy within 30s" >&2; exit 1; }
 
-# Confirm through the S3 API when a client is on PATH. Arch packages the MinIO
-# client as mcli, other distributions as mc. Neither present is fine: the
-# directory created above already is the bucket.
+# Create the bucket through the S3 API when a client is on PATH. Arch packages
+# the MinIO client as mcli, other distributions as mc.
+#
+# The directory made above is the bucket on the single-drive backend, but that
+# is the backend's business and not a contract, so when a client IS present the
+# API call is the one that decides. Without one, say so rather than claim a
+# confirmation nothing made: the symptom of being wrong is NoSuchBucket out of
+# the first POST /v1/machines, which reads as a hostd bug.
+confirmed=
 for client in mc mcli; do
   if command -v "$client" >/dev/null 2>&1; then
-    "$client" --no-color alias set pilots-local "http://127.0.0.1:${PORT}" \
+    "$client" --no-color alias set pilots-local "http://${HOST}:${PORT}" \
       "$ACCESS_KEY" "$SECRET_KEY" >/dev/null
     "$client" --no-color mb --ignore-existing "pilots-local/$BUCKET" >/dev/null
     echo "==> bucket $BUCKET confirmed through the S3 API with $client"
+    confirmed=1
     break
   fi
 done
+[ -n "$confirmed" ] || {
+  echo "note: no mc/mcli on PATH, so bucket $BUCKET is only the directory made" >&2
+  echo "under $DATA. If the first machine create fails with NoSuchBucket, install" >&2
+  echo "the MinIO client and re-run this script." >&2; }
 
 cat <<EOF
 

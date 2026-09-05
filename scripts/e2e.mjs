@@ -110,14 +110,20 @@ async function reach(id, url, seconds = 5) {
   return { code: code ?? '000', ip: ip ?? '' };
 }
 
-// assertOpenableURL holds the URL a client is told to one it can actually open:
-// its scheme and port are the ones this battery is using to reach the fleet.
-// On a TLS host that is https with no port, which is what this line asserted
-// before; on the rig and on a single box it is http with the listener's port.
+// assertOpenableURL holds the URL a client is told to one it can actually open.
+//
+// On the rig and on a single box that means the scheme and port THIS battery is
+// using, because the plain listener is the only way in. A TLS fleet is the one
+// case where the two legitimately differ: the router serves :443 whatever the
+// plain listener is bound to, so https with no port opens from anywhere and the
+// battery may well have reached the host over http://127.0.0.1:8080 -- which is
+// what every runbook in this repo tells you to do, including on metal.
 function assertOpenableURL(url, what) {
+  assert(typeof url === 'string' && url, `${what} returned no url`);
   const want = new URL(API);
   const got = new URL(url);
-  assert(got.protocol === want.protocol && got.port === want.port,
+  const overTLS = got.protocol === 'https:' && got.port === '';
+  assert(overTLS || (got.protocol === want.protocol && got.port === want.port),
     `${what} url ${url} does not open the way ${API} does`);
 }
 

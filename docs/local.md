@@ -291,6 +291,12 @@ kills any running hostd and wipes `/var/lib/pilots/machines`,
 
 ## 10. Start over
 
+A machine's namespace is named after the machine, so there is no prefix to
+filter on and the loop below deletes **every** named namespace on the box. Look
+at `ip netns list` first: on a workstation that also runs the libvirt rig
+(`scripts/cluster/`) or anything else `ip netns`-based, delete the pilots ones
+by name instead.
+
 ```sh
 # stop hostd (Ctrl-C in its shell), then
 sudo pkill -9 -x hostd

@@ -93,6 +93,19 @@ fi
 if [ ! -e /dev/nbd0 ]; then
   echo "==> loading the nbd module (nbds_max=64)"
   modprobe nbd nbds_max=64
+else
+  # Already loaded, possibly by something else and possibly at the module's own
+  # default of 16. hostd's pool is 64 wide (nbd.DefaultMaxDevices) and reports
+  # exhaustion against that number, so a box with fewer device nodes fails the
+  # 17th create with "all 64 devices are in use" and names nothing. Say it here
+  # rather than reload the module out from under whatever is using it.
+  loaded="$(cat /sys/module/nbd/parameters/nbds_max 2>/dev/null || echo 64)"
+  if [ "$loaded" -lt 64 ]; then
+    echo "note: nbd is already loaded with nbds_max=$loaded, fewer than the 64" >&2
+    echo "hostd's pool assumes. Past that many machines a create fails with" >&2
+    echo "'all 64 devices are in use'. Fix, when nothing else is using nbd:" >&2
+    echo "  sudo modprobe -r nbd && sudo modprobe nbd nbds_max=64" >&2
+  fi
 fi
 
 if [ ! -f "$GOLDEN_SRC" ]; then
@@ -152,15 +165,12 @@ PILOT_FLEET_KEY=${PILOT_FLEET_KEY:-$(head -c 32 /dev/urandom | base64)}
 EOF
   chmod 0600 "$CONFIG"
   umask 022
-  # Still 0600, but owned by whoever ran sudo rather than by root. hostd and
-  # `hostd bootstrap-key` are root and read it either way; the developer needs
-  # to as well, because cmd/hostd's bootstrap-key tests load this exact path
-  # and a root-owned file turns `go test ./...` on this box into two permission
-  # failures. Nothing on a fleet host is affected: host-bootstrap.sh writes
-  # that file, not this script.
-  if [ -n "${SUDO_UID:-}" ]; then
-    chown "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" "$CONFIG"
-  fi
+  # Deliberately left root-owned 0600. This script SOURCES it as root a few
+  # lines below and hostd reads PILOT_JAILER and PILOT_FIRECRACKER out of it,
+  # so a file the developer's own account can write is a root shell for
+  # anything running as that account -- and it holds PILOT_FLEET_KEY and
+  # PILOT_AGENT_TOKEN_SECRET besides. cmd/hostd's bootstrap-key tests used to
+  # need it readable; they now point at their own temp file instead.
 fi
 
 set -a
@@ -175,7 +185,7 @@ cat <<EOF
 ==> starting hostd. Ctrl-C drains HTTP and leaves the machines running.
 
     sudo $HOSTD bootstrap-key                       # mint an admin key
-    curl http://api.${domain}${listen}/v1/health
+    curl http://api.${domain}:${listen##*:}/v1/health
     docs/local.md                                   # the rest of the runbook
 
 EOF
