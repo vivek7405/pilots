@@ -758,9 +758,6 @@ func (m *Manager) Redeploy(ctx context.Context, id string, req api.RedeployReque
 	// disk this machine is about to stop having.
 	m.releaseDiscovery(id)
 	if fcm, ok := m.get(id); ok {
-		// The copy-on-write file holds every write since the last snapshot,
-		// and the new image supersedes all of it.
-		defer fcm.DiscardCow()
 		slotIdx := 0
 		if fcm.Slot != nil {
 			slotIdx = fcm.Slot.Idx
@@ -772,6 +769,12 @@ func (m *Manager) Redeploy(ctx context.Context, id string, req api.RedeployReque
 		if slotIdx > 0 {
 			m.pool.Return(slotIdx)
 		}
+		// The copy-on-write file holds every write since the last snapshot,
+		// and the new image supersedes all of it. Discarded HERE rather than
+		// deferred the way Destroy defers it: the path is derived from the
+		// machine's state dir, which the new boot reuses, so a deferred
+		// discard would delete the file the new process is running on.
+		fcm.DiscardCow()
 	}
 	// Storage only from here: the row and the disk are held and nothing runs.
 	m.opts.Usage.Transition(id, StateCreating)
