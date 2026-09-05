@@ -215,6 +215,11 @@ func run() error {
 
 	// The meter. Built before the manager because every lifecycle hook writes
 	// through it, and rooted beside the machine state it describes.
+	//
+	// A sibling of the per-machine directories, which reconcile also walks. It
+	// is skipped there because it carries neither a state file nor a pid, and
+	// no machine id is ever the string below -- but anything else that comes
+	// to iterate this root has to keep skipping it.
 	ledger := usage.New(filepath.Join(cfg.MachineStateRoot(), "usage"))
 
 	mgr := machines.New(machines.Options{
