@@ -256,10 +256,14 @@ type Service struct {
 	URL          string       `json:"url,omitempty"`
 	CustomDomain string       `json:"custom_domain,omitempty"`
 	ReleaseID    string       `json:"release_id,omitempty"`
-	Repo         string       `json:"repo,omitempty"`
-	Branch       string       `json:"branch,omitempty"`
-	Autodeploy   bool         `json:"autodeploy"`
-	CreatedAt    int64        `json:"created_at"`
+	// VolumeID is the volume every replica of this service mounts. A service
+	// with one runs one replica, because a volume is mounted by exactly one
+	// machine.
+	VolumeID   string `json:"volume_id,omitempty"`
+	Repo       string `json:"repo,omitempty"`
+	Branch     string `json:"branch,omitempty"`
+	Autodeploy bool   `json:"autodeploy"`
+	CreatedAt  int64  `json:"created_at"`
 }
 
 type CreateServiceRequest struct {
@@ -279,6 +283,10 @@ type CreateServiceRequest struct {
 	// <name>.internal instead.
 	Domain       string `json:"domain,omitempty"`
 	CustomDomain string `json:"custom_domain,omitempty"`
+	// Volume is create-only: a volume swap is a data migration, not a
+	// configuration change, and nothing here copies data between volumes, so
+	// the update route does not take it. Requires replicas of at most one.
+	Volume string `json:"volume,omitempty"`
 
 	Env map[string]string `json:"env,omitempty"`
 	// SecretEnv is plaintext over TLS and sealed by hostd with the fleet key
@@ -315,6 +323,15 @@ type PromoteRequest struct {
 	CustomDomain string       `json:"custom_domain,omitempty"`
 	Replicas     int          `json:"replicas,omitempty"`
 	Health       *HealthCheck `json:"health,omitempty"`
+}
+
+// RedeployRequest boots a machine again from another image, in place: same
+// row, same URL, same volume. How a volume-backed service takes a release,
+// because a second machine cannot mount the volume beside the first.
+// Internal: the rollout sends it, here or to the host holding the machine.
+type RedeployRequest struct {
+	Image   string `json:"image"`
+	Release string `json:"release,omitempty"`
 }
 
 // UpdateServiceRequest patches a service.

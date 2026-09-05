@@ -154,6 +154,11 @@ export interface Service {
   url?: string
   custom_domain?: string
   release_id?: string
+  /**
+   * The volume every replica of this service mounts. A service with one runs
+   * one replica, because a volume is mounted by exactly one machine.
+   */
+  volume_id?: string
   repo?: string
   branch?: string
   autodeploy: boolean
@@ -175,6 +180,12 @@ export interface CreateServiceRequest {
   health?: HealthCheck
   domain?: string
   custom_domain?: string
+  /**
+   * Create-only: a volume swap is a data migration, not a configuration
+   * change, so the update route does not take it. Requires replicas of at
+   * most one.
+   */
+  volume?: string
   env?: Record<string, string>
   secret_env?: Record<string, string>
   repo?: string
@@ -199,6 +210,16 @@ export interface PromoteRequest {
   custom_domain?: string
   replicas?: number
   health?: HealthCheck
+}
+
+/**
+ * Boots a machine again from another image, in place: same row, same URL,
+ * same volume. How a volume-backed service takes a release. Sent by the
+ * rollout inside the fleet; there is no client method for it.
+ */
+export interface RedeployRequest {
+  image: string
+  release?: string
 }
 
 export interface Release {
