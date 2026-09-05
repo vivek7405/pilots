@@ -337,17 +337,21 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 	// The pool, before the machine row, mirroring tenancy above and for the
 	// same shape of reason: no peer should ever see a machine whose vendor pool
 	// is unknown, because that machine ranks over the whole fleet and could be
-	// cold-booted needlessly. A create never has a foreign image -- a foreign
-	// release boots from its rootfs upstream, and the template is this pool's
-	// -- so the kind is known from the request rather than from a bring-up.
-	startKind := state.StartRestore
-	if req.MemBuildID == "" && (req.Volume != "" || req.Image != "") {
-		startKind = state.StartBoot
-	}
-	m.recordStart(ctx, row, startKind)
+	// cold-booted needlessly.
+	//
+	// The POOL only. The start is recorded after the guest is actually up: a
+	// create never has a foreign image -- a foreign release boots from its
+	// rootfs upstream, and the template is this pool's -- so the kind is known
+	// from the request here, but whether it happens is not.
+	m.recordPool(ctx, row)
 
 	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
 		return nil, err
+	}
+
+	startKind := state.StartRestore
+	if req.MemBuildID == "" && (req.Volume != "" || req.Image != "") {
+		startKind = state.StartBoot
 	}
 
 	// A release restore takes precedence over the image: the rollout passes
@@ -369,6 +373,10 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 
 	m.put(id, fcm)
 	m.rememberToken(id, token)
+	// Here, not before the boot. pilots_machine_starts_total counts starts,
+	// and last_start says how this machine came up -- a create that never got
+	// a guest did neither.
+	m.recordStart(ctx, row, startKind)
 
 	row.State = StateRunning
 	stampSlot(row, fcm)

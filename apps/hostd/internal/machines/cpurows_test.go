@@ -10,6 +10,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -173,5 +175,51 @@ func TestARollbackRefusesWhenTheCPUPoolCannotBeRead(t *testing.T) {
 	}
 	if errors.Is(err, errStoreUnwell) || strings.Contains(err.Error(), "CPU pool") {
 		t.Errorf("an absent cpu row was treated as a store failure: %v", err)
+	}
+}
+
+// A create that never gets a guest records no start.
+//
+// recordStart both counts pilots_machine_starts_total and stamps last_start /
+// last_start_at, and it ran before the boot. So a create that failed at
+// startNewMachine -- no Firecracker, no image, an exhausted slot pool -- still
+// counted a start and left a row claiming the machine came up by restore. The
+// counter measured attempts and the row described something that never
+// happened; both are read by people diagnosing exactly this failure.
+//
+// The vendor pool is still written up front, and must be: it goes in before
+// the machines row so no peer ever sees a machine whose pool is unknown.
+func TestAFailedCreateRecordsNoStart(t *testing.T) {
+	m, _, _ := newColdBootManager(t)
+	ctx := context.Background()
+
+	before := metrics.MachineStarts.With(state.StartRestore).Load()
+
+	row, err := m.Create(ctx, api.CreateMachineRequest{App: "app"})
+	if err == nil {
+		t.Fatal("a create succeeded without Firecracker; the test proves nothing")
+	}
+	if row == nil {
+		t.Fatal("a failed create returned no row, so there is nothing to assert about")
+	}
+
+	if got := metrics.MachineStarts.With(state.StartRestore).Load(); got != before {
+		t.Errorf("pilots_machine_starts_total{kind=restore} went %d -> %d on a create "+
+			"that never started a guest", before, got)
+	}
+
+	cpu, err := m.opts.Store.GetMachineCPU(ctx, row.ID)
+	if err != nil {
+		t.Fatalf("the vendor pool was not recorded: %v; it must go in before the "+
+			"machines row, or peers rank this machine over the whole fleet", err)
+	}
+	// The counterfactual for the assertion above: the row exists, and what it
+	// must NOT carry is a start.
+	if cpu.Vendor != m.opts.Vendor {
+		t.Errorf("the pool row says vendor %q, want %q", cpu.Vendor, m.opts.Vendor)
+	}
+	if cpu.LastStart != "" || cpu.LastStartAt != 0 {
+		t.Errorf("a create that never started a guest recorded last_start=%q at %d",
+			cpu.LastStart, cpu.LastStartAt)
 	}
 }

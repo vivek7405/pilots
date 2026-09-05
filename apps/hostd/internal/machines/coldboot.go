@@ -273,6 +273,28 @@ func (m *Manager) restartApp(ctx context.Context, row *state.Machine, slot *netn
 		"machine", row.ID, "reason", out.AppReason)
 }
 
+// recordPool writes the vendor pool a machine's images belong to, and claims
+// NO start.
+//
+// Split out of recordStart for the create path. A create must write the pool
+// BEFORE the machines row -- no peer may see a machine whose pool is unknown,
+// because such a machine ranks over the whole fleet and could be cold-booted
+// needlessly -- but at that point the guest has not started, and may not.
+// Calling recordStart there counted every ATTEMPT in
+// pilots_machine_starts_total and stamped a last_start onto creates that then
+// failed to boot, so the two observable facts disagreed with the machine.
+func (m *Manager) recordPool(ctx context.Context, row *state.Machine) {
+	if err := m.opts.Store.PutMachineCPU(ctx, &state.MachineCPU{
+		ID: row.ID, Kind: state.KindMachine, Vendor: m.opts.Vendor,
+		UpdatedAt: time.Now().Unix(),
+	}); err != nil {
+		// Not fatal: the machine is about to come up. But every peer now ranks
+		// this machine's rescue over the whole fleet, so it is worth shouting.
+		slog.Error("a machine's CPU pool was not recorded; peers will rank its "+
+			"rescue as if its image were in no pool", "machine", row.ID, "err", err)
+	}
+}
+
 // recordStart writes which vendor brought a machine up and how, and counts it.
 //
 // It makes NO usage-ledger call: the ledger is keyed on state, and a cold boot
