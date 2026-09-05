@@ -72,6 +72,13 @@ type Machine struct {
 	App          string `json:"app,omitempty"`
 	CreatedAt    int64  `json:"created_at"`
 	LastActivity int64  `json:"last_activity"`
+	// LastStart says how this machine last came up: "restore" of its memory
+	// image, the "boot" a create with an image or a volume pays once (and
+	// every redeploy), or "cold_boot", a restore DOWNGRADED because no host of
+	// the image's CPU vendor was alive. A cold boot keeps the id, name, URL,
+	// disk and volume, and loses everything that was in memory.
+	LastStart   string `json:"last_start,omitempty"`
+	LastStartAt int64  `json:"last_start_at,omitempty"`
 }
 
 // CreateMachineRequest creates a machine from exactly one source: a built
@@ -301,6 +308,9 @@ type Host struct {
 	MemFreeMiB int    `json:"mem_free_mib"`
 	LastSeen   int64  `json:"last_seen"`
 	Alive      bool   `json:"alive"`
+	// CPUVendor is which pool this host restores memory images from, the raw
+	// /proc/cpuinfo vendor_id. Empty until the host publishes it.
+	CPUVendor string `json:"cpu_vendor,omitempty"`
 }
 
 type HealthResponse struct {
@@ -320,6 +330,13 @@ type HealthResponse struct {
 	// SQLite host. Comparable across hosts, so two hosts far apart on this
 	// number are a replication problem before they are anything else.
 	StoreVersion int64 `json:"store_version"`
+	// CPUVendor is this host's vendor pool, the raw /proc/cpuinfo vendor_id.
+	// A memory image never restores across the Intel/AMD boundary, so this is
+	// what says which of the fleet's snapshots this host can load.
+	CPUVendor string `json:"cpu_vendor"`
+	// CPUVendorForced is true only when a fault flag is making this host lie
+	// about its CPU, which is how the fleet gate reaches the cold-boot tier.
+	CPUVendorForced bool `json:"cpu_vendor_forced,omitempty"`
 }
 
 type ErrorResponse struct {

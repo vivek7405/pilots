@@ -103,33 +103,46 @@ compose fragment on the ordinary primitives, not a product tier. See
    error naming it and publishes `pilots_api_hostname_shadowed`. Refusing to
    start would turn one machine's lost URL into a fleet-wide outage, since
    the row is replicated to every host.
-6. **Fleet is CPU-vendor-homogeneous — vendor is a cost decision, not a
-   technical one.** FC memory snapshots carry raw CPUID; a snapshot never
-   restores across the Intel/AMD boundary (cpu_templates normalize within a
-   vendor, not across). Since this is a fresh build with no snapshot lineage,
-   the fleet can be **all-Intel (Hetzner EX line / auction i7 — often
-   cheaper)** just as well as all-AMD; pick whichever is cheapest at order
-   time and pin the matching `cpu_template` (T2/T2CL Intel, T2A AMD) so
-   later same-vendor host generations mix safely. Two consequences: the dev
-   laptop is AMD, so laptop-built snapshots/templates never ship to an Intel
-   fleet — golden templates are always built ON the fleet by CI; and auction
-   i7 desktop boards have non-ECC RAM (acceptable at this stage; note it).
-   The two halves of a template are built in different places and that split
-   is the enforcement: the **rootfs** is an ext4 disk image with no CPUID in
-   it, so CI builds it at a tag and `scripts/rootfs/golden.ext4.sha256` pins
-   it — CI asserts the build matches the pin, and `host-bootstrap.sh`
-   refuses to ship a local `golden.ext4` that does not. The **memory
-   template** is never a file and is never shipped: it exists only as builds
-   a fleet host chunkified from its own boot and published through its own
-   replica, so no laptop can mint one. `PILOT_CPU_TEMPLATE` is pinned in
-   `/etc/pilots/config` and the bootstrap refuses a host whose CPU vendor
-   disagrees with it.
+6. **A memory image never crosses the CPU-vendor boundary; the fleet may mix
+   vendors.** FC memory snapshots carry raw CPUID; a snapshot never restores
+   across the Intel/AMD boundary (cpu_templates normalize within a vendor, not
+   across). That binds the **memory** half only, so the fleet holds both
+   vendors and buys whichever box is cheapest at order time. Every memory
+   image -- a machine's suspend image, a release's, a checkpoint's, a golden
+   template's -- belongs to the vendor pool that photographed it and is
+   recorded in `machine_cpu`; each host records its own vendor in `host_cpu`,
+   read from `/proc/cpuinfo` and never derived from the template. Resume is
+   pool-local: **tier 1** resumes in place while the owner is alive, **tier 2**
+   restores from S3 on another host of the same pool, and when no host of the
+   pool is live **tier 3** cold-boots the machine from its own disk on the
+   hashed host and reports it (`last_start = cold_boot`). Tier 3 keeps id,
+   name, URL, volume, agent token and every byte on disk, and loses processes
+   and in-memory state; the ranking is the same hash on a vendor-filtered
+   candidate set, so it needs no coordinator. **A mixed fleet wants at least
+   two hosts per vendor for tier 2 to exist**; with one host per vendor every
+   rescue is a tier 3. `T2CL` on Intel and `T2A` on AMD are the only templates
+   a fleet host may pin, because Firecracker designs that pair for
+   instruction-set parity, which is what makes a cold boot on the other vendor
+   safe for the guest's instruction stream. The two halves of a template are
+   built in different places and that split is the enforcement: the **rootfs**
+   is an ext4 disk image with no CPUID in it, so CI builds it at a tag and
+   `scripts/rootfs/golden.ext4.sha256` pins it -- CI asserts the build matches
+   the pin, and `host-bootstrap.sh` refuses to ship a local `golden.ext4` that
+   does not. The **memory template** is never a file and is never shipped: it
+   exists only as builds a fleet host chunkified from its own boot and
+   published through its own replica, so no laptop can mint one, and it is one
+   row per pool (`templates.id = "golden-<vendor>"`). `PILOT_CPU_TEMPLATE` is
+   pinned in `/etc/pilots/config`; the bootstrap refuses a host whose CPU
+   vendor or generation disagrees with it, and hostd refuses to start on the
+   same disagreement. Note that auction i7 desktop boards have non-ECC RAM
+   (acceptable at this stage; note it).
 7. **Fly-shaped orchestration, sprites-shaped storage.** Per-host autonomy
    (each host acts on its own machines: wake, restart, suspend, health) +
    any-host coordination (any host serves any API request, proposing
    placements that target hosts may refuse — "coordinators propose, hosts
    dispose"). Storage is content-addressed and host-agnostic (better than
-   Fly's host-pinned volumes).
+   Fly's host-pinned volumes) -- and the disk half is vendor-free; only memory
+   images are pool-local (rule 6).
 
 8. **Guest page size is fleet-wide.** Guest memory is backed by 2MiB
    hugepages when the host is configured for it (`PILOT_HUGEPAGES`, with the
@@ -429,8 +442,8 @@ and never crosses this hook.
 
 Landmines:
 
-- **Near-zero TTL, always.** A rescued machine lands on a new host with a new
-  slot, so its address changes. A guest holding a 300s answer talks to nothing.
+- **Near-zero TTL, always.** A rescued or cold-booted machine lands on a new
+  host with a new slot, so its address changes. A guest holding a 300s answer talks to nothing.
   A wake on the owning host is normally not a move: the replica takes back the
   index it kept while suspended, so the answer a peer resolved before the
   suspend is still right after it. Two things still move an address, which is
@@ -438,7 +451,9 @@ Landmines:
   the new host chose, and a wake whose kept index was handed to someone else
   while hostd was down — the pool is rebuilt from running machines only, so a
   sleeping replica's reservation does not survive a restart and its bring-up
-  falls back to a fresh index.
+  falls back to a fresh index. A tier-3 cold boot on the OWNING host is not a
+  move either, for the same reason a wake is not: the row's slot is untouched
+  and `takeSlot` reserves it back.
 - **TTL does not save an established connection.** A pool holding an open
   socket to a rescued machine's old address simply breaks. That is what every
   failover does, but it means `.internal` clients need reconnect logic, and
@@ -593,13 +608,21 @@ hides.
 
 Above those two tiers sits a third. `PILOTS_E2E_METAL=1` holds the host to the
 **metal SLOs** — create < 500ms, wake < 200ms, checkpoint resume gap < 500ms,
-release restore < 1s, promote < 1.5s — which is the latency the product is
+release restore < 1s, promote < 1.5s, cold boot from own disk < 5s — which is
+the latency the product is
 sold on and is only achievable on dedicated hardware. The switch is explicit
 rather than inferred, because extent sharing is necessary for those numbers
 and nowhere near sufficient: a nested-virtualisation laptop node on btrfs
 reports `reflink: true` and cannot create a machine in 500ms. Setting the
 flag on a host whose `/v1/health` does not report `reflink: true` is a FAILED
 step, never a quiet downgrade to the laptop ceilings.
+
+The cold boot is the one number in that list that is a *kernel* boot rather
+than a restore, so it has its own budget rather than sharing wake's: < 5s on
+dedicated hardware, and a degraded ceiling of 30s where extents cannot be
+shared, against 25s for the engine's own nested-KVM kernel-boot figure. It
+is asserted separately (`PILOTS_E2E_COLD_BOOT=1`) precisely so a regression in
+the resume path cannot hide behind it.
 
 (An earlier note here put the ext4 penalty at 2.2s per create. That measured
 `cp --reflink=auto` without `--sparse=always`, which is not what the engine
@@ -819,7 +842,11 @@ a deploy means never.
 >30s is dead; each survivor rescues the slice
 `hash(machine_id) mod live_hosts == my_index` — recreate from the machine's
 latest builds in S3, write the new `host_id`, URL unchanged. No leader, no
-election. Placement double-booking is prevented by hosts being final
+election. The survivor set is filtered by `host_cpu` **inside that same
+hash**: the hosts of the memory image's own vendor pool are ranked first
+(tier 2), and only when none of them is live is the whole live set ranked
+(tier 3), where the winner cold-boots the machine from its disk instead of
+restoring it (rule 6). There is no second ranking and no placer. Placement double-booking is prevented by hosts being final
 authority on their own capacity (a create/rescue targeting a full host is
 refused and re-hashed).
 

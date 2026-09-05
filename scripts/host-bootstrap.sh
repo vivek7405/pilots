@@ -21,9 +21,23 @@
 #   PILOT_REQUIRE_REFLINK=1    THE FLEET SWITCH. Refuses to finish on a host
 #                              that cannot share extents, and is also where the
 #                              fleet-only requirements below are enforced.
-#   PILOT_CPU_TEMPLATE         T2 / T2CL (Intel) or T2A (AMD). Required under
-#                              PILOT_REQUIRE_REFLINK=1, and checked against the
-#                              host's actual vendor before this exits.
+#   PILOT_CPU_TEMPLATE         T2CL (Intel Cascade Lake / Ice Lake) or T2A (AMD
+#                              Milan). Required under PILOT_REQUIRE_REFLINK=1,
+#                              checked against the host's vendor AND generation
+#                              before this exits. The pair is the only one
+#                              Firecracker designs for instruction-set parity,
+#                              which is what lets a machine cold-boot on the
+#                              other vendor; T2 and T2S are refused on a fleet
+#                              host because neither pairs with T2A.
+#   PILOT_CPU_TEMPLATE_UNVERIFIED=1
+#                              accepts a template on a CPU generation
+#                              Firecracker has not declared it safe on, and
+#                              records that you said so. Firecracker's list is
+#                              narrow and current Hetzner stock is mostly not on
+#                              it (Zen 3 desktop family 25 model 33, Genoa
+#                              25/17, Raptor Lake 6/183), so this is an
+#                              operator's acknowledgment at bootstrap -- never a
+#                              per-machine knob.
 #   PILOT_ACME_EMAIL           turns TLS on. Also turns on the port 80 and 443
 #                              reachability probes.
 #   PILOT_CLOUDFLARE_API_TOKEN DNS-01 credential for the wildcard certificate
@@ -35,8 +49,8 @@
 # WHAT IT REFUSES TO FINISH ON, and why each is a refusal rather than a warning
 #   * a golden.ext4 that is not the committed pin -- hosts bootstrapped on
 #     different days would carry different base images
-#   * a CPU vendor that disagrees with PILOT_CPU_TEMPLATE -- snapshots taken
-#     here would be unrestorable everywhere else
+#   * a CPU vendor or generation that disagrees with PILOT_CPU_TEMPLATE --
+#     snapshots taken here would be unrestorable everywhere else
 #   * a corrosion config key corrosion does not read -- it ignores unknown keys
 #     silently, so a typo runs on the default forever
 #   * a host this machine cannot reach on 8080, 80 or 443 -- the wildcard
@@ -83,11 +97,17 @@ AGENT_SECRET="${PILOT_AGENT_TOKEN_SECRET:-}"
 FLEET_KEY="${PILOT_FLEET_KEY:-}"
 DOMAIN="${PILOT_WORKLOAD_DOMAIN:-pilotrun.app}"
 S3_REGION="${PILOT_S3_REGION:-}"
-# The Firecracker CPU template this fleet is pinned to: T2 or T2CL on Intel,
-# T2A on AMD. It normalises CPUID WITHIN a vendor, which is what lets a later
-# host generation restore a snapshot an older one took. Unpinned, a fleet
-# works until the day a new box has a different stepping, and then it fails at
+# The Firecracker CPU template this fleet is pinned to: T2CL on Intel, T2A on
+# AMD. It normalises CPUID WITHIN a vendor, which is what lets a later host
+# generation restore a snapshot an older one took. Unpinned, a fleet works
+# until the day a new box has a different stepping, and then it fails at
 # restore reporting a bad snapshot.
+#
+# T2CL and T2A specifically, because the fleet may now hold BOTH vendors and
+# Firecracker designs that pair to expose the same instruction sets to the
+# guest. That parity is what makes a cold boot on the other vendor safe for an
+# application's instruction stream (ARCHITECTURE.md rule 6). T2 and T2S have no
+# AMD counterpart and are refused on a fleet host.
 CPU_TEMPLATE="${PILOT_CPU_TEMPLATE:-}"
 ACME_EMAIL="${PILOT_ACME_EMAIL:-}"
 CF_TOKEN="${PILOT_CLOUDFLARE_API_TOKEN:-}"
@@ -138,7 +158,10 @@ if [ "${PILOT_REQUIRE_REFLINK:-0}" = 1 ] && [ -z "$CPU_TEMPLATE" ]; then
   echo "Unpinned, the fleet works until the next box has a different" >&2
   echo "stepping, and then it fails at restore reporting a bad snapshot." >&2
   echo >&2
-  echo "  T2 or T2CL on Intel, T2A on AMD -- the SAME value on every host." >&2
+  echo "  T2CL on Intel, T2A on AMD -- one of the two on every host. The pair" >&2
+  echo "  is the only one with instruction-set parity across vendors, which is" >&2
+  echo "  what lets a machine cold-boot on the other vendor when its own pool" >&2
+  echo "  has no live host." >&2
   exit 2
 fi
 
@@ -625,6 +648,10 @@ PILOT_S3_ACCESS_KEY=${S3_KEY}
 PILOT_S3_SECRET_KEY=${S3_SECRET}
 PILOT_S3_REGION=${S3_REGION}
 PILOT_CPU_TEMPLATE=${CPU_TEMPLATE}
+# Recorded on the host, not just typed once at bootstrap: an operator reading
+# /etc/pilots/config months later has to be able to see that this host's
+# template was accepted on a generation Firecracker never declared it safe on.
+PILOT_CPU_TEMPLATE_UNVERIFIED=${PILOT_CPU_TEMPLATE_UNVERIFIED:-}
 PILOT_ACME_EMAIL=${ACME_EMAIL}
 # The DNS-01 credential for the wildcard certificate. Every host holds it and
 # every host manages the same names; the shared certificate storage lock is
@@ -1057,17 +1084,50 @@ if [ -n "$ACME_EMAIL" ]; then
 fi
 echo "  reachable: ${REACHED}"
 
-# The CPU template and the CPU must agree. A T2A on Intel or a T2 on AMD is
+# The CPU template and the CPU must agree, per GENERATION. A T2A on Intel is
 # not a slow host, it is a host whose snapshots the rest of the fleet cannot
 # restore -- and Firecracker reports that as a corrupt snapshot at restore
 # time, on a machine belonging to a customer, months after the mistake.
+#
+# The generation matters as much as the vendor now. Firecracker's cpu-templates
+# documentation declares T2CL safe only on Cascade Lake and Ice Lake, and T2A
+# only on Milan; the pair is what gives instruction-set parity ACROSS vendors,
+# which is what lets a machine cold-boot on the other one. A template applied
+# outside its declared range is a guest that may see a feature bit its host does
+# not back.
+#
+# Checked by family/model/stepping rather than by "model name": the marketing
+# string varies by SKU, the numbers do not.
 if [ -n "$CPU_TEMPLATE" ]; then
-  VENDOR=$(on_host "grep -m1 '^vendor_id' /proc/cpuinfo | awk '{print \$3}'")
+  # Guarded with == \"\" rather than with !, and joined on a separator rather
+  # than on spaces. A value of 0 is falsy in awk, so ! would let the NEXT
+  # matching line win -- and the line after \"model\" is \"model name\", whose
+  # value is a sentence. AMD family 25 model 0 is inside T2A's accepted range,
+  # so that is a host this check would have mis-parsed rather than a
+  # hypothetical. The separator keeps an empty field from shifting the rest one
+  # place left in read.
+  IFS='|' read -r VENDOR FAMILY MODEL STEPPING <<<"$(on_host "awk -F': *' '
+    /^vendor_id/ && v==\"\" {v=\$2} /^cpu family/ && f==\"\" {f=\$2}
+    /^model[[:space:]]/ && m==\"\" {m=\$2} /^stepping/ && s==\"\" {s=\$2}
+    END {print v \"|\" f \"|\" m \"|\" s}' /proc/cpuinfo")"
   case "$CPU_TEMPLATE" in
-    T2|T2CL) WANT_VENDOR=GenuineIntel ;;
-    T2A)     WANT_VENDOR=AuthenticAMD ;;
+    T2CL)
+      WANT_VENDOR=GenuineIntel
+      # family 6: model 85 stepping 5-7 is Cascade Lake (stepping 4 is
+      # Skylake-SP, 10-11 Cooper Lake); model 106 is Ice Lake-SP, 108 Ice Lake-D.
+      if [ "$FAMILY" = 6 ] && { { [ "$MODEL" = 85 ] && [ "$STEPPING" -ge 5 ] && [ "$STEPPING" -le 7 ]; } || [ "$MODEL" = 106 ] || [ "$MODEL" = 108 ]; }; then GEN_OK=1; else GEN_OK=0; fi
+      ;;
+    T2A)
+      WANT_VENDOR=AuthenticAMD
+      # family 25 (19h) models 0-15 are Milan and Milan-X. Rome is family 23,
+      # Genoa is family 25 model 16-31, desktop Zen 3 is family 25 model 33.
+      if [ "$FAMILY" = 25 ] && [ "$MODEL" -ge 0 ] && [ "$MODEL" -le 15 ]; then GEN_OK=1; else GEN_OK=0; fi
+      ;;
     *)
-      echo "  PILOT_CPU_TEMPLATE=${CPU_TEMPLATE} is not one of T2, T2CL, T2A." >&2
+      echo "  PILOT_CPU_TEMPLATE=${CPU_TEMPLATE} is not T2CL or T2A, the only pair" >&2
+      echo "    with instruction-set parity across CPU vendors. T2 and T2S are" >&2
+      echo "    Intel-only and have no AMD counterpart, so a fleet pinned to one" >&2
+      echo "    of them can never cold-boot a machine on the other vendor." >&2
       exit 1
       ;;
   esac
@@ -1078,7 +1138,15 @@ if [ -n "$CPU_TEMPLATE" ]; then
     echo "    PILOT_CPU_TEMPLATE is wrong. Refusing to finish." >&2
     exit 1
   fi
-  echo "  cpu template: ${CPU_TEMPLATE} on ${VENDOR}"
+  if [ "$GEN_OK" != 1 ]; then
+    echo "  cpu template: NO -- ${CPU_TEMPLATE} is not declared safe by Firecracker on" >&2
+    echo "    family ${FAMILY} model ${MODEL} stepping ${STEPPING}. Refusing to finish;" >&2
+    echo "    PILOT_CPU_TEMPLATE_UNVERIFIED=1 accepts it anyway and records that you did." >&2
+    [ "${PILOT_CPU_TEMPLATE_UNVERIFIED:-0}" = 1 ] || exit 1
+    echo "  cpu template: ${CPU_TEMPLATE} on an UNVERIFIED generation (family ${FAMILY} model ${MODEL}); you said so"
+  else
+    echo "  cpu template: ${CPU_TEMPLATE} on ${VENDOR} family ${FAMILY} model ${MODEL} stepping ${STEPPING}"
+  fi
 fi
 
 echo

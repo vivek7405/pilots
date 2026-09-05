@@ -104,7 +104,11 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
    that can mint a new URL for an existing machine is a bug.
 5. **Snapshots are host-agnostic.** Nothing host-specific may enter a
    snapshot — that is why guest networking uses constant addresses and the
-   rootfs is bind-mounted to a constant path. See ARCHITECTURE.md.
+   rootfs is bind-mounted to a constant path. See ARCHITECTURE.md. Host-agnostic
+   holds *within a CPU vendor pool*: the disk half is vendor-free, and a memory
+   image is never restored across the Intel/AMD boundary (ARCHITECTURE.md
+   rule 6), which is why a machine whose pool has no live host cold-boots from
+   its own disk instead.
 6. **Never `ALTER TABLE` a live Corrosion table, and never add a column to
    one that has rows.** cr-sqlite backfills every existing row on a column
    add and gossips the backfill; that took fly's fleet down twice for

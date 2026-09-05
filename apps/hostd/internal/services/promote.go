@@ -164,7 +164,7 @@ func (m *Manager) Promote(ctx context.Context, machineID string, req api.Promote
 	// knobs.
 	knobs := m.replicaKnobs(ctx, svc, nil)
 	for i := 1; i < replicas; i++ {
-		if _, err := m.createReplica(ctx, svc, rel, rel.MemBuildID != "", knobs, ""); err != nil {
+		if _, err := m.createReplica(ctx, svc, rel, knobs, ""); err != nil {
 			return nil, fmt.Errorf("services: replica %d of promoted %s: %w", i+1, machineID, err)
 		}
 	}

@@ -81,6 +81,25 @@ vector: how many changes, from every host, it has applied. Comparable across
 hosts, so two hosts far apart on it are a replication problem. 0 on a
 single-box SQLite host, which has no replica.
 
+Every machine carries `last_start` and `last_start_at`, which say how it last
+came up:
+
+| `last_start` | What happened |
+| --- | --- |
+| `restore` | its memory image was resumed -- the fast path, and the usual one |
+| `boot` | a kernel boot, which a create with an image or a volume pays once, and every redeploy |
+| `cold_boot` | a restore that was **downgraded**: no host of the memory image's CPU vendor was alive, so the machine booted from its own disk |
+
+A cold boot keeps the id, name, URL, volume, agent token and every byte on
+disk. It loses running processes, everything in memory, and open connections.
+It is automatic and uniform -- availability wins over continuity -- so a client
+that cares reads this field rather than a knob it can set. A machine that has
+not started since the field existed reports neither.
+
+`health()` also carries `cpu_vendor`, which pool that host restores memory
+images from, and `hosts()` carries each host's, so the fleet's split is visible
+without a shell on every box.
+
 ## Errors
 
 Every non-2xx throws. The subclass tells you what to do about it.

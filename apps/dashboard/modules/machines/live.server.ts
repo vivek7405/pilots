@@ -49,8 +49,14 @@ function state(): LiveState {
 
 /**
  * The fields a viewer can SEE change. A machine whose `last_activity` moved but
- * whose state, host, URL and name did not is not a change anyone is looking at,
- * and sending it every two seconds would make the delta a full list forever.
+ * whose state, host, URL, name and last start did not is not a change anyone is
+ * looking at, and sending it every two seconds would make the delta a full list
+ * forever.
+ *
+ * `last_start` is in here because a cold boot changes none of the others: the
+ * machine goes suspended and comes back running on some host with the same URL,
+ * which is exactly what a resume looks like. Without it the one visible sign
+ * that a guest lost its memory would never reach an open dashboard.
  */
 function fingerprint(m: Machine): string {
   // NUL as the separator: a machine name may contain a space, and none of
@@ -58,7 +64,7 @@ function fingerprint(m: Machine): string {
   // stays text. A raw 0x00 here made git classify the file as binary, which
   // hid every change to it from review, and anything that assumed text could
   // drop the byte and quietly turn this into join('').
-  return [m.state, m.host_id ?? '', m.url ?? '', m.name ?? ''].join('\u0000');
+  return [m.state, m.host_id ?? '', m.url ?? '', m.name ?? '', m.last_start ?? ''].join('\u0000');
 }
 
 /**

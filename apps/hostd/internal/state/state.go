@@ -89,6 +89,10 @@ type Host struct {
 	CPUFree    int
 	MemFreeMiB int
 	LastSeen   int64
+	// Vendor is read from host_cpu, never from a column of hosts: hosts carries
+	// rows, and a column add there is the backfill hard rule 6 forbids. Empty
+	// until the host_cpu row arrives, which ranks as "in no pool".
+	Vendor string
 }
 
 // Checkpoint is a named, restorable point in a machine's life. A checkpoint
@@ -178,8 +182,48 @@ type Template struct {
 	CreatedAt     int64
 }
 
-// GoldenTemplate is the id of the default template's row.
-const GoldenTemplate = "golden"
+// GoldenTemplateFor is the id of a vendor pool's template row. One row per
+// pool, because the template's memory image is a Firecracker snapshot and a
+// snapshot never restores across the Intel/AMD boundary.
+func GoldenTemplateFor(vendor string) string { return "golden-" + vendor }
+
+// HostCPU is what a host says about its own CPU. Written by the host itself,
+// before its first heartbeat, so a peer never ranks it into a pool it is not in.
+type HostCPU struct {
+	HostID      string
+	Vendor      string
+	CPUTemplate string
+	UpdatedAt   int64
+}
+
+// The kinds of object a MachineCPU row can describe. Keyed like tenancy,
+// because a release's and a checkpoint's memory images are as vendor-locked as
+// a machine's and a mixed fleet could otherwise neither deploy nor roll back.
+const (
+	KindMachine    = "machine"
+	KindRelease    = "release"
+	KindCheckpoint = "checkpoint"
+)
+
+// How a machine last came up. StartColdBoot is a restore that was DOWNGRADED
+// because no host of the memory image's vendor was alive: the machine keeps its
+// id, name, URL, volume and disk, and loses everything that was in memory.
+const (
+	StartRestore  = "restore"
+	StartBoot     = "boot"
+	StartColdBoot = "cold_boot"
+)
+
+// MachineCPU records which CPU vendor photographed a memory image, and -- for a
+// machine -- how that machine last started.
+type MachineCPU struct {
+	ID          string
+	Kind        string
+	Vendor      string
+	LastStart   string // machines only
+	LastStartAt int64
+	UpdatedAt   int64
+}
 
 // Volume is a persistent disk: a JuiceFS filesystem holding one raw ext4
 // image, handed to a machine as a second virtio-blk drive.
@@ -343,6 +387,29 @@ type Store interface {
 
 	PutHost(ctx context.Context, h *Host) error
 	ListHosts(ctx context.Context) ([]Host, error)
+
+	// PutHostCPU writes what a host says about its own CPU. A replicated store
+	// refuses a write about any host but itself, exactly as PutHost does.
+	PutHostCPU(ctx context.Context, h *HostCPU) error
+	ListHostCPU(ctx context.Context) ([]HostCPU, error)
+	// PutMachineCPU records the vendor that photographed a memory image. The
+	// writer is the host that writes the object row it describes, so a
+	// replicated store runs the same owner check that row's write runs.
+	PutMachineCPU(ctx context.Context, c *MachineCPU, opts ...WriteOption) error
+	// GetMachineCPU returns ErrNotFound when nothing is recorded, which reads
+	// as "in no pool" and ranks over the whole fleet.
+	GetMachineCPU(ctx context.Context, id string) (*MachineCPU, error)
+	// DeleteMachineCPU drops the pool record for an object that is being
+	// removed. Every site that removes a machine or a checkpoint calls it:
+	// this table is gossiped to the whole fleet AND materialized into a map in
+	// every host's cache, so a row that outlives its object leaks in as many
+	// places as there are hosts. A row that was never recorded is not an
+	// error -- the caller asked for it to be gone and it is.
+	//
+	// It is called BEFORE the row it describes is removed, the reverse of the
+	// write order: a replicated store resolves the writer by reading that row,
+	// so deleting that row first makes this unauthorizable.
+	DeleteMachineCPU(ctx context.Context, id string) error
 
 	PutCheckpoint(ctx context.Context, c *Checkpoint) error
 	ListCheckpoints(ctx context.Context, machineID string) ([]Checkpoint, error)
@@ -724,8 +791,11 @@ func (s *sqliteStore) PutHost(ctx context.Context, h *Host) error {
 }
 
 func (s *sqliteStore) ListHosts(ctx context.Context) ([]Host, error) {
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, wg_addr, public_ip, cpu_free, mem_free_mib, last_seen FROM hosts ORDER BY id`)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT h.id, h.wg_addr, h.public_ip, h.cpu_free, h.mem_free_mib, h.last_seen,
+			COALESCE(c.vendor, '')
+		FROM hosts h LEFT JOIN host_cpu c ON c.host_id = h.id
+		ORDER BY h.id`)
 	if err != nil {
 		return nil, fmt.Errorf("state: list hosts: %w", err)
 	}
@@ -734,12 +804,82 @@ func (s *sqliteStore) ListHosts(ctx context.Context) ([]Host, error) {
 	var out []Host
 	for rows.Next() {
 		var h Host
-		if err := rows.Scan(&h.ID, &h.WGAddr, &h.PublicIP, &h.CPUFree, &h.MemFreeMiB, &h.LastSeen); err != nil {
+		if err := rows.Scan(&h.ID, &h.WGAddr, &h.PublicIP, &h.CPUFree, &h.MemFreeMiB, &h.LastSeen, &h.Vendor); err != nil {
 			return nil, fmt.Errorf("state: scan host: %w", err)
 		}
 		out = append(out, h)
 	}
 	return out, rows.Err()
+}
+
+func (s *sqliteStore) PutHostCPU(ctx context.Context, h *HostCPU) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO host_cpu (host_id, vendor, cpu_template, updated_at)
+		VALUES (?,?,?,?)
+		ON CONFLICT(host_id) DO UPDATE SET
+			vendor=excluded.vendor, cpu_template=excluded.cpu_template,
+			updated_at=excluded.updated_at`,
+		h.HostID, h.Vendor, h.CPUTemplate, h.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put host cpu %q: %w", h.HostID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) ListHostCPU(ctx context.Context) ([]HostCPU, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT host_id, vendor, cpu_template, updated_at FROM host_cpu ORDER BY host_id`)
+	if err != nil {
+		return nil, fmt.Errorf("state: list host cpu: %w", err)
+	}
+	defer rows.Close()
+
+	var out []HostCPU
+	for rows.Next() {
+		var h HostCPU
+		if err := rows.Scan(&h.HostID, &h.Vendor, &h.CPUTemplate, &h.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("state: scan host cpu: %w", err)
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+func (s *sqliteStore) PutMachineCPU(ctx context.Context, c *MachineCPU, _ ...WriteOption) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO machine_cpu (id, kind, vendor, last_start, last_start_at, updated_at)
+		VALUES (?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+			kind=excluded.kind, vendor=excluded.vendor, last_start=excluded.last_start,
+			last_start_at=excluded.last_start_at, updated_at=excluded.updated_at`,
+		c.ID, c.Kind, c.Vendor, c.LastStart, c.LastStartAt, c.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put machine cpu %q: %w", c.ID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) GetMachineCPU(ctx context.Context, id string) (*MachineCPU, error) {
+	var c MachineCPU
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, kind, vendor, last_start, last_start_at, updated_at FROM machine_cpu WHERE id = ?`,
+		id).Scan(&c.ID, &c.Kind, &c.Vendor, &c.LastStart, &c.LastStartAt, &c.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get machine cpu %q: %w", id, err)
+	}
+	return &c, nil
+}
+
+// DeleteMachineCPU on a single-host store has no owner to check: this host is
+// the only writer of every row in it.
+func (s *sqliteStore) DeleteMachineCPU(ctx context.Context, id string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM machine_cpu WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("state: delete machine cpu %q: %w", id, err)
+	}
+	return nil
 }
 
 func (s *sqliteStore) PutCheckpoint(ctx context.Context, c *Checkpoint) error {
@@ -1196,6 +1336,35 @@ func OwnerFor(key string, live []Host) (string, bool) {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(key))
 	return sorted[int(h.Sum32()%uint32(len(sorted)))].ID, true
+}
+
+// MachineOwnerFor names the ONE host that brings a machine back when its
+// owner is gone. Same hash, same sort, same function as OwnerFor: only the
+// candidate set differs. A memory image restores only on its own vendor, so
+// the hosts of that vendor are ranked first; when none is live the whole
+// live set is ranked and the winner boots the machine from its disk.
+//
+// A live host with no host_cpu row yet is in the full set and in no pool;
+// every host writes host_cpu before its first heartbeat, so that window is
+// liveness's own gossip-lag window and closes the same way.
+//
+// This is the MACHINE ranking only. The row writers (a service's arbiter, a
+// domain's, a repo delivery's) keep calling OwnerFor over the unfiltered live
+// set: partitioning an arbiter by vendor would give one row two writers and
+// break single-writer through the merge, silently.
+func MachineOwnerFor(machineID, vendor string, live []Host) (string, bool) {
+	if vendor != "" {
+		pool := live[:0:0]
+		for _, h := range live {
+			if h.Vendor == vendor {
+				pool = append(pool, h)
+			}
+		}
+		if owner, ok := OwnerFor(machineID, pool); ok {
+			return owner, true
+		}
+	}
+	return OwnerFor(machineID, live)
 }
 
 func (s *sqliteStore) CASServiceRelease(ctx context.Context, id, from, to string) error {

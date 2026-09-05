@@ -119,7 +119,7 @@ func (m *Manager) EnsureTemplate(ctx context.Context) (*Template, error) {
 		return nil, err
 	}
 
-	slog.Info("no golden template in the fleet; building one")
+	slog.Info("no golden template in this vendor pool; building one", "vendor", m.opts.Vendor)
 	start := time.Now()
 
 	t, err := m.buildTemplate(ctx)
@@ -132,7 +132,7 @@ func (m *Manager) EnsureTemplate(ctx context.Context) (*Template, error) {
 	// loser must adopt the winner's rather than keep serving from a template
 	// no other host can restore against.
 	if err := m.opts.Store.PutTemplate(ctx, &state.Template{
-		ID: state.GoldenTemplate, MemBuildID: t.MemBuildID.String(),
+		ID: state.GoldenTemplateFor(m.opts.Vendor), MemBuildID: t.MemBuildID.String(),
 		RootfsBuildID: t.RootfsBuildID.String(), SnapKey: t.SnapKey,
 		CreatedAt: t.CreatedAt,
 	}); err != nil {
@@ -141,8 +141,8 @@ func (m *Manager) EnsureTemplate(ctx context.Context) (*Template, error) {
 
 	if winner, err := m.adoptFleetTemplate(ctx); err == nil {
 		if winner.MemBuildID != t.MemBuildID {
-			slog.Info("another host published a golden template first; adopting it",
-				"ours", t.MemBuildID, "theirs", winner.MemBuildID)
+			slog.Info("another host of this vendor published a golden template first; adopting it",
+				"vendor", m.opts.Vendor, "ours", t.MemBuildID, "theirs", winner.MemBuildID)
 		}
 		return winner, nil
 	}
@@ -150,7 +150,8 @@ func (m *Manager) EnsureTemplate(ctx context.Context) (*Template, error) {
 	if err := m.saveTemplate(t); err != nil {
 		return nil, err
 	}
-	slog.Info("golden template ready", "seconds", int(time.Since(start).Seconds()),
+	slog.Info("golden template ready", "vendor", m.opts.Vendor,
+		"seconds", int(time.Since(start).Seconds()),
 		"mem_build", t.MemBuildID, "rootfs_build", t.RootfsBuildID)
 	return t, nil
 }
@@ -163,7 +164,11 @@ func (m *Manager) EnsureTemplate(ctx context.Context) (*Template, error) {
 // That is what lets a host that has never run a template restore a machine
 // created from it.
 func (m *Manager) adoptFleetTemplate(ctx context.Context) (*Template, error) {
-	row, err := m.opts.Store.GetTemplate(ctx, state.GoldenTemplate)
+	// One row per vendor pool. The rootfs bytes are identical fleet-wide, but
+	// the memory half is a Firecracker snapshot and never restores across the
+	// Intel/AMD boundary, so a host adopts its OWN pool's row and nobody
+	// else's.
+	row, err := m.opts.Store.GetTemplate(ctx, state.GoldenTemplateFor(m.opts.Vendor))
 	if err != nil {
 		return nil, err
 	}

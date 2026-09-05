@@ -32,11 +32,16 @@ type initRequest struct {
 	AppCmd string `json:"app_cmd,omitempty"`
 	// StartApp asks the agent to start the application.
 	//
-	// Sent on a create and on NOTHING else. A wake resumes a snapshot in which
-	// the application is already running, and starting it there would restart
-	// the very process the guest just restored -- losing whatever it held in
-	// memory, in exchange for an environment change that a wake is not
-	// supposed to deliver anyway.
+	// Sent on a create and on a COLD BOOT, and on nothing else. A wake resumes
+	// a snapshot in which the application is already running, and starting it
+	// there would restart the very process the guest just restored -- losing
+	// whatever it held in memory, in exchange for an environment change that a
+	// wake is not supposed to deliver anyway.
+	//
+	// A cold boot is the other case: no host of the memory image's CPU vendor
+	// was alive, so the guest was booted from its own disk and nothing has
+	// started the application. That poke carries StartApp alone -- no
+	// environment, no command -- which is what marks it a restart. See below.
 	StartApp bool `json:"start_app,omitempty"`
 }
 
@@ -120,36 +125,69 @@ func applyInit(req initRequest) (initResponse, error) {
 	// comes up, answers health checks, reports app_started, and runs no
 	// application. See startspec.go.
 	cmd, env := req.AppCmd, req.Env
+
+	// A start poke carrying neither an environment nor a command is a RESTART:
+	// a cold boot on a host that could not resume the memory image. Everything
+	// the application needs is already in /etc/pilot on this machine's own
+	// disk, and rewriting it from the build's start spec would drop the
+	// deploy-time environment a Dockerfile image was given at create,
+	// replacing it with whatever the image was built with.
+	//
+	// StartApp is part of the shape, not decoration. A create that has an
+	// application to start always carries one of the two -- hostd sends no poke
+	// at all when it has neither -- so this cannot be mistaken for a create;
+	// and a poke that does not ask for a start is the clock nudge after a wake,
+	// which has always been allowed to fall through to the spec.
+	restart := req.StartApp && env == nil && cmd == ""
+
+	// Only when the caller named no command. An explicit app_cmd is the
+	// machine's own statement of what to run, and the image's WORKDIR and USER
+	// are part of running the image's command: inheriting them under a command
+	// nobody took from the image would silently run an explicitly-commanded
+	// application in another directory, as another user. A restart carries no
+	// command either, so this still covers it.
 	if cmd == "" {
 		if spec, ok := readStartSpec(); ok {
-			cmd = spec.Command()
-			// The Dockerfile's ENV is the application's baseline. What the
-			// create supplied wins on a collision: a deploy-time value is
-			// meant to override what the image was built with.
-			if len(spec.Env) > 0 {
-				merged := make(map[string]string, len(spec.Env)+len(env))
-				for k, v := range spec.Env {
-					merged[k] = v
-				}
-				for k, v := range env {
-					merged[k] = v
-				}
-				env = merged
-			}
+			// The unit's working directory and user come from the spec whether
+			// this is a create or a restart: they are properties of the image,
+			// and a restart starts the same unit a create did.
 			if spec.WorkDir != "" {
 				appWorkDir = spec.WorkDir
 			}
 			if spec.User != "" {
 				appUser = spec.User
 			}
+			// Without this fallback a machine created from a user's Dockerfile
+			// has a start command sitting in /etc/pilot-agent/start.json that
+			// nothing reads, comes up, answers health checks, reports
+			// app_started, and runs no application. See startspec.go.
+			if !restart {
+				cmd = spec.Command()
+				// The Dockerfile's ENV is the application's baseline. What the
+				// create supplied wins on a collision: a deploy-time value is
+				// meant to override what the image was built with.
+				if len(spec.Env) > 0 {
+					merged := make(map[string]string, len(spec.Env)+len(env))
+					for k, v := range spec.Env {
+						merged[k] = v
+					}
+					for k, v := range env {
+						merged[k] = v
+					}
+					env = merged
+				}
+			}
 		}
 	}
-	if err := writeEnv(env); err != nil {
-		return initResponse{}, err
-	}
-	if cmd != "" {
-		if err := writeAppCmd(cmd); err != nil {
+
+	if !restart {
+		if err := writeEnv(env); err != nil {
 			return initResponse{}, err
+		}
+		if cmd != "" {
+			if err := writeAppCmd(cmd); err != nil {
+				return initResponse{}, err
+			}
 		}
 	}
 

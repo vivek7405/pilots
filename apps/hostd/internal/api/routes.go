@@ -65,6 +65,15 @@ type Deps struct {
 	// single box wants; a fleet passes the subscription cache so neither
 	// question costs a query on the request path.
 	Tenancy TenancyView
+	// MachineCPU answers how a machine last came up, from local state. Nil
+	// falls back to the store; a fleet passes the subscription cache so the
+	// field costs a map read rather than a query on every machine read.
+	MachineCPU MachineCPUView
+	// CPUVendor is this host's pool, reported on /v1/health so an operator can
+	// see the fleet's split without a shell on every box. CPUVendorForced says
+	// the gate's fault flag is making this host lie about it.
+	CPUVendor       string
+	CPUVendorForced bool
 	// BuildGate bounds concurrent builds per org on THIS host. Nil means
 	// unlimited, which is what a test wants and what a host with no builder
 	// configured never reaches.
@@ -109,6 +118,7 @@ func Routes(d Deps) http.Handler {
 		resp := HealthResponse{
 			OK: true, HostID: d.HostID, Reflink: d.Reflink,
 			HugePages: d.HugePages,
+			CPUVendor: d.CPUVendor, CPUVendorForced: d.CPUVendorForced,
 		}
 		if d.StoreVersion != nil {
 			// Bounded, and short. The corrosion client sets no response

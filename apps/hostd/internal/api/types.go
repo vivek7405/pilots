@@ -97,6 +97,13 @@ type Machine struct {
 	App          string `json:"app,omitempty"`
 	CreatedAt    int64  `json:"created_at"`
 	LastActivity int64  `json:"last_activity"`
+	// LastStart says how this machine last came up: "restore" of a memory
+	// image, the "boot" a create with an image or a volume pays once (and every
+	// redeploy), or "cold_boot", a restore DOWNGRADED because no host of the
+	// image's CPU vendor was alive. A cold boot keeps URL, disk and volume and
+	// loses memory; this field is how a client tells it from a resume.
+	LastStart   string `json:"last_start,omitempty"`
+	LastStartAt int64  `json:"last_start_at,omitempty"`
 }
 
 // CreateMachineRequest creates a machine from exactly one source: a built
@@ -410,6 +417,10 @@ type Host struct {
 	MemFreeMiB int    `json:"mem_free_mib"`
 	LastSeen   int64  `json:"last_seen"`
 	Alive      bool   `json:"alive"`
+	// CPUVendor is which pool this host restores memory images from, the raw
+	// /proc/cpuinfo vendor_id. Empty on a host that has not published its row
+	// yet, which ranks as "in no pool".
+	CPUVendor string `json:"cpu_vendor,omitempty"`
 }
 
 // CreateAPIKeyRequest mints a key for an org. Admin-scoped: the org is named
@@ -505,6 +516,14 @@ type HealthResponse struct {
 	// hosts far apart on this number are a replication problem before they
 	// are anything else.
 	StoreVersion int64 `json:"store_version"`
+	// CPUVendor is this host's vendor pool, the raw /proc/cpuinfo vendor_id.
+	// A memory image never restores across the Intel/AMD boundary, so this is
+	// what says which of the fleet's snapshots this host can load.
+	CPUVendor string `json:"cpu_vendor"`
+	// CPUVendorForced is true when PILOT_FAULT_CPU_VENDOR is making this host
+	// lie about its CPU. It exists so the fleet gate can prove it armed the
+	// fault rather than assume it; a real host never sets it.
+	CPUVendorForced bool `json:"cpu_vendor_forced,omitempty"`
 }
 
 type ErrorResponse struct {

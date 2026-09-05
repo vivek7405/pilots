@@ -122,6 +122,12 @@ type Options struct {
 	// test manager and on the fake; every method is nil-safe, so no call site
 	// checks.
 	Usage *usage.Ledger
+
+	// Vendor is this host's CPU vendor, from cpuvendor.Detect: the raw
+	// /proc/cpuinfo vendor_id, GenuineIntel or AuthenticAMD. It decides which
+	// golden template pool this host builds into and whether a memory image
+	// can be restored here at all -- see bringUp.
+	Vendor string
 }
 
 // Manager is the per-host machine registry.
@@ -328,8 +334,24 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 			return nil, err
 		}
 	}
+	// The pool, before the machine row, mirroring tenancy above and for the
+	// same shape of reason: no peer should ever see a machine whose vendor pool
+	// is unknown, because that machine ranks over the whole fleet and could be
+	// cold-booted needlessly.
+	//
+	// The POOL only. The start is recorded after the guest is actually up: a
+	// create never has a foreign image -- a foreign release boots from its
+	// rootfs upstream, and the template is this pool's -- so the kind is known
+	// from the request here, but whether it happens is not.
+	m.recordPool(ctx, row)
+
 	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
 		return nil, err
+	}
+
+	startKind := state.StartRestore
+	if req.MemBuildID == "" && (req.Volume != "" || req.Image != "") {
+		startKind = state.StartBoot
 	}
 
 	// A release restore takes precedence over the image: the rollout passes
@@ -351,6 +373,10 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 
 	m.put(id, fcm)
 	m.rememberToken(id, token)
+	// Here, not before the boot. pilots_machine_starts_total counts starts,
+	// and last_start says how this machine came up -- a create that never got
+	// a guest did neither.
+	m.recordStart(ctx, row, startKind)
 
 	row.State = StateRunning
 	stampSlot(row, fcm)
@@ -440,6 +466,13 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	}
 	if err := m.deleteCheckpointRows(ctx, id); err != nil {
 		errs = append(errs, err)
+	}
+	// Before the machines row, not after: a replicated store resolves this
+	// row's writer by reading that row, so the other order cannot authorise
+	// itself. A row left behind is gossiped to every host and cached in each
+	// one's memory forever, for a machine that no longer exists.
+	if err := m.opts.Store.DeleteMachineCPU(ctx, id); err != nil {
+		errs = append(errs, fmt.Errorf("delete cpu row: %w", err))
 	}
 	if err := m.opts.Store.DeleteMachine(ctx, id); err != nil {
 		errs = append(errs, fmt.Errorf("delete row: %w", err))
@@ -538,6 +571,13 @@ func (m *Manager) deleteCheckpointRows(ctx context.Context, id string) error {
 	}
 	var errs []error
 	for _, c := range cks {
+		// The cpu row FIRST, for the reason Checkpoint writes it last: a
+		// replicated store finds this row's writer through
+		// checkpoints.machine_id, so a row deleted after its checkpoint has
+		// nothing left to prove ownership with and stays forever.
+		if err := m.opts.Store.DeleteMachineCPU(ctx, c.ID); err != nil {
+			errs = append(errs, fmt.Errorf("delete checkpoint %s cpu row: %w", c.ID, err))
+		}
 		if err := m.opts.Store.DeleteCheckpoint(ctx, c.ID); err != nil {
 			errs = append(errs, fmt.Errorf("delete checkpoint %s: %w", c.ID, err))
 		}
@@ -710,7 +750,7 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 	}
 
 	start := time.Now()
-	fcm, err := m.wakeFromSuspend(ctx, row)
+	fcm, kind, err := m.bringUp(ctx, row)
 	if err != nil {
 		row.State = StateError
 		stampSlot(row, nil)
@@ -725,16 +765,25 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 
 	// Only a wake that worked is a latency. A failed one is an error, and
 	// folding it in would make the histogram measure how fast this host fails.
-	metrics.WakeSeconds.Observe(time.Since(start).Seconds())
+	// A cold boot is not one either: it is a kernel boot with its own budget,
+	// and folding it in would make the wake SLO measure the wrong thing.
+	if kind == state.StartRestore {
+		metrics.WakeSeconds.Observe(time.Since(start).Seconds())
+	}
 
 	row.State = StateRunning
 	stampSlot(row, fcm)
 	row.LastActivity = time.Now().Unix()
 	row.UpdatedAt = time.Now().Unix()
+	// Before the row that names the machine running, so the pool is never
+	// unknown for a machine a peer can already see live. On a cold boot this
+	// clears the memory build too, so the write below carries it.
+	discard := m.recordStart(ctx, row, kind)
 	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
 		return err
 	}
 	m.opts.Usage.Transition(id, StateRunning)
+	discard()
 	return nil
 }
 
@@ -890,6 +939,13 @@ func (m *Manager) Redeploy(ctx context.Context, id string, req api.RedeployReque
 	stampSlot(row, fcm)
 	row.LastActivity = time.Now().Unix()
 	row.UpdatedAt = time.Now().Unix()
+	// AFTER the boot, deliberately: a redeploy's slot bookkeeping is asserted
+	// by the count of stampSlot and withoutSlot calls that precede the boot,
+	// and this must not disturb either. The boot happened on THIS vendor and
+	// the row has to say so before the machine's next suspend photographs here.
+	// Redeploy has already cleared MemBuildID, so this is a StartBoot and the
+	// cold-boot discard does not apply.
+	m.recordStart(ctx, row, state.StartBoot)
 	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
 		return row, err
 	}

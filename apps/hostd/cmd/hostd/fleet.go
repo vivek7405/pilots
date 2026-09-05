@@ -384,3 +384,14 @@ func storeVersion(store state.Store) func(context.Context) (int64, error) {
 	}
 	return cs.Version
 }
+
+// cachedMachineCPU answers a machine's last start from the subscription cache.
+//
+// A map read, because it is on every machine read the API serves. There is no
+// store fallback: an absent row means the machine has not started since this
+// table existed, which is exactly what the empty answer says.
+type cachedMachineCPU struct{ cache *corrosion.Cache }
+
+func (v cachedMachineCPU) MachineCPU(_ context.Context, id string) (state.MachineCPU, bool) {
+	return v.cache.MachineCPU(id)
+}

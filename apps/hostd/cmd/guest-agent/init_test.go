@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"path/filepath"
@@ -275,5 +276,47 @@ func TestAFailedStartIsReported(t *testing.T) {
 	}
 	if !strings.Contains(reason, "not found") {
 		t.Errorf("reason is %q and does not carry systemd's own words", reason)
+	}
+}
+
+// The third shape, after create and wake: a RESTART.
+//
+// A cold boot means no host of the memory image's CPU vendor was alive, so the
+// guest was booted from its own disk with a kernel. pilot-app.service is
+// started by this agent and never enabled in the image, so nothing has started
+// the application -- but everything it needs is already on that disk, written
+// at create. The poke therefore asks for a start and carries nothing else, and
+// must change no file.
+func TestARestartShapedInitStartsTheApplicationAndRewritesNothing(t *testing.T) {
+	redirect(t)
+	calls := stubStart(t, true, "")
+
+	if _, err := applyInit(initRequest{
+		TimestampNanos: 1,
+		Env:            map[string]string{"GREETING": "hello"},
+		AppCmd:         "/usr/bin/server",
+		StartApp:       true,
+	}); err != nil {
+		t.Fatalf("create-shaped init: %v", err)
+	}
+	envBefore, _ := os.ReadFile(envPath)
+	appBefore, _ := os.ReadFile(appPath)
+
+	resp, err := applyInit(initRequest{TimestampNanos: 2, StartApp: true})
+	if err != nil {
+		t.Fatalf("restart-shaped init: %v", err)
+	}
+	if !resp.AppStarted || *calls != 2 {
+		t.Fatalf("a cold boot did not start the application (started=%v calls=%d)",
+			resp.AppStarted, *calls)
+	}
+
+	envAfter, _ := os.ReadFile(envPath)
+	appAfter, _ := os.ReadFile(appPath)
+	if !bytes.Equal(envBefore, envAfter) {
+		t.Errorf("a restart rewrote the environment:\nbefore %q\nafter  %q", envBefore, envAfter)
+	}
+	if !bytes.Equal(appBefore, appAfter) {
+		t.Errorf("a restart rewrote the command:\nbefore %q\nafter  %q", appBefore, appAfter)
 	}
 }

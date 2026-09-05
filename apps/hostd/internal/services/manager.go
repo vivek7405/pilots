@@ -55,6 +55,11 @@ type Options struct {
 	// Peers reaches another host's internal API. Nil on a single box, where
 	// every machine is local and there is nowhere to forward to.
 	Peers PeerCaller
+	// Vendor is this host's CPU vendor. A release's memory image belongs to
+	// the pool that photographed it, so a replica created here restores that
+	// image only when the pools match, and boots from the rootfs when they do
+	// not -- the documented slow path, not an error.
+	Vendor string
 }
 
 // PeerCaller performs a lifecycle call against a machine held by another host.
@@ -226,7 +231,15 @@ func (m *Manager) rollOut(ctx context.Context, svc *state.Service, rel *state.Re
 
 	// Replica 1 BOOTS: a release has no memory image until something has
 	// proved this rootfs serves.
-	first, err := m.createReplica(ctx, svc, rel, false, knobs, "")
+	//
+	// Stated on a COPY rather than left to createReplica's own rule, because a
+	// rollback rolls out a release that already carries a memory image: without
+	// this, replica 1 would restore, and a rollback onto a release whose
+	// snapshot has since been discarded would fail outright instead of taking
+	// the slow path -- the exact fallback createReplica's doc promises.
+	firstRel := *rel
+	firstRel.MemBuildID = ""
+	first, err := m.createReplica(ctx, svc, &firstRel, knobs, "")
 	if err != nil {
 		return created, fmt.Errorf("services: first replica of %s: %w", rel.ID, err)
 	}
@@ -251,7 +264,7 @@ func (m *Manager) rollOut(ctx context.Context, svc *state.Service, rel *state.Re
 	}
 
 	for i := 1; i < replicas; i++ {
-		r, err := m.createReplica(ctx, svc, rel, rel.MemBuildID != "", knobs, "")
+		r, err := m.createReplica(ctx, svc, rel, knobs, "")
 		if err != nil {
 			return created, fmt.Errorf("services: replica %d of %s: %w", i+1, rel.ID, err)
 		}
@@ -328,7 +341,7 @@ func (m *Manager) rollOutOnVolume(ctx context.Context, svc *state.Service, rel *
 		// A first deploy. On a failed gate the machine is LEFT in place:
 		// destroying the only machine of a service deletes the service row,
 		// sealed environment included.
-		created, err := m.createReplica(ctx, svc, rel, false, m.replicaKnobs(ctx, svc, knobs), volumeID)
+		created, err := m.createReplica(ctx, svc, rel, m.replicaKnobs(ctx, svc, knobs), volumeID)
 		if err != nil {
 			return fmt.Errorf("services: first replica of %s: %w", rel.ID, err)
 		}
@@ -382,13 +395,43 @@ func (m *Manager) redeploy(ctx context.Context, mach *state.Machine, rel *state.
 // deploy because a snapshot was gone would be worse than one that took the
 // slow path.
 func (m *Manager) createReplica(ctx context.Context, svc *state.Service,
-	rel *state.Release, restore bool, knobs json.RawMessage, volumeID string) (*state.Machine, error) {
+	rel *state.Release, knobs json.RawMessage, volumeID string) (*state.Machine, error) {
 
+	// Whether this replica restores the release's memory image or boots its
+	// rootfs is decided HERE, not by the caller, because two of the three
+	// reasons to boot are properties of this host and this release rather than
+	// of the call site.
+	//
 	// A volume machine BOOTS (machines.startNewMachine): a drive cannot be
 	// added to a snapshot being restored, and Create restores whenever it sees
-	// a mem build regardless of the volume, so the choice is made here.
-	if volumeID != "" {
-		restore = false
+	// a mem build regardless of the volume.
+	restore := rel.MemBuildID != "" && volumeID == ""
+	if restore {
+		cpu, err := m.opts.Store.GetMachineCPU(ctx, rel.ID)
+		switch {
+		case errors.Is(err, state.ErrNotFound):
+			// No row, which is what every release snapshotted before this
+			// table looks like. It reads as "in no pool" and restores, exactly
+			// as it did before the table existed.
+		case err != nil:
+			// NOT a fall-through. Whether this release's image can be restored
+			// here is now unknown, and both guesses are worse than a refused
+			// deploy: restoring a foreign image fails later as Firecracker's
+			// "corrupt snapshot" with nothing naming the vendor, and booting
+			// instead silently turns the measured sub-second path into a cold
+			// boot on every replica for as long as the store is unwell.
+			return nil, fmt.Errorf("services: could not read the CPU pool of release %s, so "+
+				"whether its memory image can be restored here is unknown: %w", rel.ID, err)
+		case cpu.Vendor != "" && cpu.Vendor != m.opts.Vendor:
+			// The release's memory image was photographed on the other vendor
+			// and a Firecracker snapshot never restores across that boundary.
+			// Boot from its rootfs instead: the documented slow path, not an
+			// error.
+			slog.Info("a release's memory image belongs to another CPU vendor; "+
+				"this replica boots from its rootfs",
+				"release", rel.ID, "image_vendor", cpu.Vendor, "host_vendor", m.opts.Vendor)
+			restore = false
+		}
 	}
 	req := api.CreateMachineRequest{
 		App:    svc.App,
@@ -431,6 +474,15 @@ func (m *Manager) snapshotRelease(ctx context.Context, machineID string, rel *st
 	rel.MemBuildID = ck.MemBuildID
 	if ck.RootfsBuildID != "" {
 		rel.RootfsBuildID = ck.RootfsBuildID
+	}
+	// Record which pool photographed it, before the caller writes the release
+	// row that names the build. A replica created on the other vendor reads
+	// this and boots from the rootfs rather than failing at snapshot load.
+	if err := m.opts.Store.PutMachineCPU(ctx, &state.MachineCPU{
+		ID: rel.ID, Kind: state.KindRelease, Vendor: m.opts.Vendor,
+		UpdatedAt: time.Now().Unix(),
+	}); err != nil {
+		return fmt.Errorf("record the release's cpu vendor: %w", err)
 	}
 	return nil
 }

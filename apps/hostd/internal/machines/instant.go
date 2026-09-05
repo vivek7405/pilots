@@ -333,7 +333,7 @@ func (m *Manager) Rescue(ctx context.Context, row state.Machine) error {
 		return fmt.Errorf("machines: clear %s's old slot before rescuing it: %w", row.ID, err)
 	}
 
-	fcm, err := m.wakeFromSuspend(ctx, fresh)
+	fcm, kind, err := m.bringUp(ctx, fresh)
 	if err != nil {
 		fresh.State = StateError
 		stampSlot(fresh, nil)
@@ -349,6 +349,17 @@ func (m *Manager) Rescue(ctx context.Context, row state.Machine) error {
 	stampSlot(fresh, fcm)
 	fresh.LastActivity = time.Now().Unix()
 	fresh.UpdatedAt = fresh.LastActivity
+	// Before the row that names the machine running, so no peer reads it live
+	// without knowing which pool it is now in. On a cold boot this also clears
+	// the memory build, so the write below carries it.
+	//
+	// The claim goes with it. The store's guard re-reads the machines row to
+	// find the writer, and ClaimMachine above has already moved it here -- but
+	// only in the local replica, and a read that has not caught up would see
+	// the dead host and refuse. The same claim that authorised taking the
+	// machine authorises describing it, with liveness re-read as ClaimMachine
+	// re-reads it, so the window costs nothing.
+	discard := m.recordStart(ctx, fresh, kind, state.WithDeadOwnerClaim(row.HostID))
 	if err := m.opts.Store.PutMachine(ctx, fresh); err != nil {
 		return err
 	}
@@ -361,6 +372,7 @@ func (m *Manager) Rescue(ctx context.Context, row state.Machine) error {
 	}
 	m.opts.Usage.Open(fresh.ID, org, StateRunning, fresh.VCPUs, fresh.MemMiB,
 		m.volumeGiB(ctx, fresh.VolumeID))
+	discard()
 	return nil
 }
 

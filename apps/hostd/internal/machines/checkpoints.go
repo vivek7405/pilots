@@ -86,6 +86,22 @@ func (m *Manager) Checkpoint(ctx context.Context, machineID, comment string) (*s
 		return nil, err
 	}
 
+	// Which pool photographed this image. AFTER the checkpoint row, not
+	// before: the store's guard for a checkpoint's cpu row finds the writer by
+	// reading `checkpoints.machine_id`, so a cpu row written first is refused
+	// as describing a checkpoint nobody can prove this host owns -- which
+	// failed every checkpoint, and therefore every release snapshot, on a
+	// replicated store. A rollback on the other vendor reads this and
+	// cold-boots from the checkpoint's disk rather than failing at snapshot
+	// load; a checkpoint that briefly has no row reads as "unrecorded", which
+	// is what every checkpoint taken before this table looks like.
+	if err := m.opts.Store.PutMachineCPU(ctx, &state.MachineCPU{
+		ID: ckpt.ID, Kind: state.KindCheckpoint, Vendor: m.opts.Vendor,
+		UpdatedAt: time.Now().Unix(),
+	}); err != nil {
+		return nil, fmt.Errorf("machines: record the checkpoint's cpu vendor: %w", err)
+	}
+
 	// Watch for the upload to finish and record it. Without this the row's
 	// durable flag stayed false forever, so a client could never learn its
 	// checkpoint was safe -- which makes the whole async-durability design
@@ -189,7 +205,7 @@ func (m *Manager) RestoreCheckpoint(ctx context.Context, checkpointID string) (*
 		}
 	}
 
-	fcm, err := m.restoreFromCheckpoint(ctx, row, ckpt)
+	fcm, kind, err := m.restoreFromCheckpoint(ctx, row, ckpt)
 	if err != nil {
 		row.State = StateError
 		stampSlot(row, nil)
@@ -207,6 +223,9 @@ func (m *Manager) RestoreCheckpoint(ctx context.Context, checkpointID string) (*
 	stampSlot(row, fcm)
 	row.LastActivity = time.Now().Unix()
 	row.UpdatedAt = time.Now().Unix()
+	// row.MemBuildID describes the machine as it was BEFORE the rollback and is
+	// superseded either way, so a cold boot's discard is right here too.
+	discard := m.recordStart(ctx, row, kind)
 	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
 		return row, err
 	}
@@ -214,6 +233,7 @@ func (m *Manager) RestoreCheckpoint(ctx context.Context, checkpointID string) (*
 	// keep it metered as suspended for as long as it runs, billing storage for
 	// a guest that holds vCPU and memory.
 	m.opts.Usage.Transition(row.ID, StateRunning)
+	discard()
 	return row, nil
 }
 
@@ -253,21 +273,45 @@ func (m *Manager) findCheckpoint(ctx context.Context, checkpointID string) (*sta
 // this host reads the builds off local disk; making it wait for durability
 // would mean every rollback paid for an upload it never touches.
 func (m *Manager) restoreFromCheckpoint(ctx context.Context, row *state.Machine,
-	ckpt *state.Checkpoint) (*fc.Machine, error) {
-
-	t, err := m.templateFor(ctx, row)
-	if err != nil {
-		return nil, err
-	}
+	ckpt *state.Checkpoint) (*fc.Machine, string, error) {
 
 	localDir := m.checkpointDir(row.ID, ckpt.ID)
 	if err := m.awaitRestorable(ctx, localDir); err != nil {
-		return nil, err
+		return nil, "", err
+	}
+
+	// The checkpoint's memory image belongs to whichever pool photographed it,
+	// exactly as a machine's suspend image does, so the rollback asks the same
+	// question bringUp asks -- about the CHECKPOINT's id, not the machine's.
+	vendor, err := m.imageVendor(ctx, ckpt.ID)
+	if err != nil {
+		return nil, "", err
+	}
+	if vendor != "" && vendor != m.opts.Vendor {
+		slog.Warn("cold-booting a rollback from its disk: the checkpoint's memory "+
+			"image belongs to another CPU vendor",
+			"machine", row.ID, "checkpoint", ckpt.ID,
+			"image_vendor", vendor, "host_vendor", m.opts.Vendor)
+		// The copy-on-write file holds everything written since the
+		// checkpoint, and a rollback discards exactly that whichever way it
+		// comes up.
+		if err := os.Remove(fc.CowPath(m.stateDir(row.ID))); err != nil && !os.IsNotExist(err) {
+			return nil, "", fmt.Errorf("machines: discard the current disk: %w", err)
+		}
+		fcm, err := m.bootFromDisk(ctx, row, fc.Backends{}, ckpt.RootfsBuildID)
+		return fcm, state.StartColdBoot, err
+	}
+
+	// Asked AFTER the vendor decision: bootFromDisk resolves its own template,
+	// from the row's pin rather than from this host's pool.
+	t, err := m.templateFor(ctx, row)
+	if err != nil {
+		return nil, "", err
 	}
 
 	memBuild, err := uuid.Parse(ckpt.MemBuildID)
 	if err != nil {
-		return nil, fmt.Errorf("machines: checkpoint %s has no usable memory build (%q): %w",
+		return nil, "", fmt.Errorf("machines: checkpoint %s has no usable memory build (%q): %w",
 			ckpt.ID, ckpt.MemBuildID, err)
 	}
 	backends := fc.Backends{
@@ -278,7 +322,7 @@ func (m *Manager) restoreFromCheckpoint(ctx context.Context, row *state.Machine,
 	}
 	if ckpt.RootfsBuildID != "" {
 		if backends.RootfsDiffID, err = uuid.Parse(ckpt.RootfsBuildID); err != nil {
-			return nil, fmt.Errorf("machines: checkpoint %s has an unusable disk build (%q): %w",
+			return nil, "", fmt.Errorf("machines: checkpoint %s has an unusable disk build (%q): %w",
 				ckpt.ID, ckpt.RootfsBuildID, err)
 		}
 	}
@@ -286,12 +330,12 @@ func (m *Manager) restoreFromCheckpoint(ctx context.Context, row *state.Machine,
 	// The machine's copy-on-write file holds everything written since the
 	// checkpoint. Rolling back means discarding exactly that.
 	if err := os.Remove(fc.CowPath(m.stateDir(row.ID))); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("machines: discard the current disk: %w", err)
+		return nil, "", fmt.Errorf("machines: discard the current disk: %w", err)
 	}
 
 	fcm, _, err := m.restoreInstantImmutable(ctx, row, backends,
 		checkpointSnapKey(row.ID, ckpt.ID), localDir)
-	return fcm, err
+	return fcm, state.StartRestore, err
 }
 
 // awaitRestorable blocks until a checkpoint can actually be restored from.
