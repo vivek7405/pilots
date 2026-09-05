@@ -455,11 +455,14 @@ type ComposeVolume struct {
 }
 
 type ComposeStep struct {
-	Name       string            `json:"name"`
-	Build      *ComposeBuild     `json:"build,omitempty"`
-	Dockerfile string            `json:"dockerfile,omitempty"`
-	Cmd        string            `json:"cmd,omitempty"`
-	Env        map[string]string `json:"env,omitempty"`
+	Name       string        `json:"name"`
+	Build      *ComposeBuild `json:"build,omitempty"`
+	Dockerfile string        `json:"dockerfile,omitempty"`
+	// DockerfileAppend is what the compose file overrode -- command:,
+	// entrypoint:, working_dir:, user: -- rendered as Dockerfile instructions
+	// to append to the build context's own Dockerfile before uploading it.
+	DockerfileAppend string            `json:"dockerfile_append,omitempty"`
+	Env              map[string]string `json:"env,omitempty"`
 	// SecretRefs maps an env key to a secret name; the value never appears.
 	SecretRefs map[string]string `json:"secret_refs,omitempty"`
 	Ports      []int             `json:"ports,omitempty"`

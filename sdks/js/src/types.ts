@@ -425,7 +425,12 @@ export interface ComposeStep {
   name: string
   build?: ComposeBuild
   dockerfile?: string
-  cmd?: string
+  /**
+   * What the compose file overrode - command:, entrypoint:, working_dir:,
+   * user: - rendered as Dockerfile instructions to append to the build
+   * context's own Dockerfile before uploading it.
+   */
+  dockerfile_append?: string
   env?: Record<string, string>
   secret_refs?: Record<string, string>
   ports?: number[]
