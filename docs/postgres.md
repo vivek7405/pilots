@@ -36,7 +36,14 @@ service takes the ordinary floor of zero: an idle replica suspends, its volume
 stays claimed and mounted, and the next connection over `postgres.internal`
 wakes it, because the host counts guest-to-guest traffic and holds a replica
 with an open session. A database that must stay resident sets
-`x-pilots.min_machines_running: 1`, which travels on the deploy.
+`x-pilots.min_machines_running: 1` **before its first deploy**. A
+volume-backed service is one machine, and the knobs a deploy carries are
+applied when that machine is created -- which happens once. Every later deploy
+redeploys the same machine in place and leaves it the policy it already has, so
+changing a lifecycle knob on a volume-backed service that is already deployed
+does not take effect today: the deploy succeeds and the replica keeps its old
+policy. Until that is wired, the way to change one is to destroy the service
+and create it again; the volume and its data survive that.
 
 ## The default: local data directory, WAL shipped to a volume
 
