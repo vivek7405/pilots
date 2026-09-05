@@ -1285,6 +1285,118 @@ if [ -n "$H_IP" ]; then
     || bad "${ERRS} teardown error(s) in the journal; an EBUSY retry gave up"
 fi
 
+say "15b. A replica suspended and woken ten times holds one slot and one address"
+# Section 15 is this one's sibling: churn, then back to baseline. The
+# difference is what churns. A service replica KEEPS its netns index reserved
+# while it sleeps, so its peers keep resolving it, and the index has to be
+# taken back on the wake rather than left behind -- a slot abandoned per wake
+# walks a host through its 1023 indices in hours at a 60 second idle timer,
+# and then every create on that host fails with the pool full.
+#
+# The namespace count alone cannot see this. The namespace is torn down at the
+# suspend and rebuilt at the wake under the machine's own name, so it is flat
+# with the leak and without it. What sees it is the veth half, which is named
+# by the SLOT (veth-<idx>, netns/slot.go), the pilots_slots_free gauge, which
+# is the number an operator would be shown, and the mesh address a peer
+# resolves, whose low bits are that same index.
+SLOT_CYCLES=${GATE_SLOT_CYCLES:-10}
+if [ -n "$H_IP" ]; then
+  SL_APP="gate-slot-$$"
+  SL=$(api "$H_IP" POST /v1/machines \
+    "{\"app\":\"${SL_APP}\",\"vcpus\":1,\"mem_mib\":512,\"cmd\":\"sleep 86400\"}")
+  SL_ID=$(echo "$SL" | jf id); SL_NAME=$(echo "$SL" | jf name)
+  # The resolver is a peer in the same app that never sleeps itself, so the
+  # address is read from outside the machine under test.
+  SLC=$(api "$H_IP" POST /v1/machines \
+    "{\"app\":\"${SL_APP}\",\"vcpus\":1,\"mem_mib\":512,\"cmd\":\"sleep 86400\",\"knobs\":{\"auto_stop\":\"off\"}}")
+  SLC_ID=$(echo "$SLC" | jf id)
+
+  if [ -z "$SL_ID" ] || [ -z "$SLC_ID" ]; then
+    bad "could not create the pair for the slot-reuse step"
+  else
+    # Promoted, so it is a REPLICA: Suspend keeps the index only for a machine
+    # a rollout placed, which is what a release id records.
+    api "$H_IP" POST "/v1/machines/${SL_ID}/promote" '{}' >/dev/null 2>&1
+
+    SL_BASE_ADDR=""
+    OUT=$(curl_until "$H_IP" "$SLC_ID" "http://${SL_NAME}.internal:3001/health")
+    [ "${OUT%% *}" = "200" ] && SL_BASE_ADDR="${OUT##* }"
+    BASE_COUNTS=$(host_counts "$H_IP")
+    BASE_VETH=$($SSH "root@$H_IP" "ip -o link 2>/dev/null | grep -o 'veth-[0-9]*' | sort | tr '\n' ' '" 2>/dev/null | tr -d '\r')
+    BASE_FREE=$(curl -sf -m 5 "http://${H_IP}:8080/metrics" 2>/dev/null | awk '$1=="pilots_slots_free"{print $2}')
+
+    if [ -z "$SL_BASE_ADDR" ]; then
+      bad "the replica never resolved over .internal (curl said '${OUT}'); this step has no baseline"
+    elif [ -z "$BASE_FREE" ]; then
+      bad "pilots_slots_free is not on ${H_IP}'s scrape; this step has no baseline"
+    else
+      ok "baseline on ${H_IP}: address ${SL_BASE_ADDR}, pilots_slots_free ${BASE_FREE}"
+
+      SLOT_FAIL=0
+      for i in $(seq "$SLOT_CYCLES"); do
+        api "$H_IP" POST "/v1/machines/${SL_ID}/suspend" '{}' >/dev/null 2>&1
+        START=$SECONDS; STATE=""
+        while [ $((SECONDS - START)) -lt 60 ]; do
+          STATE=$(api "$H_IP" GET "/v1/machines/${SL_ID}" | jf state)
+          [ "$STATE" = "suspended" ] && [ -z "$(fc_pid "$H_IP" "$SL_ID")" ] && break
+          sleep 2
+        done
+        if [ "$STATE" != "suspended" ]; then
+          bad "cycle ${i}: it never suspended (state '${STATE}')"; SLOT_FAIL=1; break
+        fi
+        api "$H_IP" POST "/v1/machines/${SL_ID}/wake" '{}' >/dev/null 2>&1
+        START=$SECONDS; STATE=""
+        while [ $((SECONDS - START)) -lt 60 ]; do
+          STATE=$(api "$H_IP" GET "/v1/machines/${SL_ID}" | jf state)
+          [ "$STATE" = "running" ] && [ -n "$(fc_pid "$H_IP" "$SL_ID")" ] && break
+          sleep 2
+        done
+        if [ "$STATE" != "running" ]; then
+          bad "cycle ${i}: it never woke (state '${STATE}')"; SLOT_FAIL=1; break
+        fi
+      done
+      [ "$SLOT_FAIL" = 0 ] && ok "${SLOT_CYCLES} suspend/wake cycles completed"
+
+      # Read while it is awake and freshly touched, and given the same moment
+      # to settle that section 15 gives its counts.
+      AFTER=$(curl_until "$H_IP" "$SLC_ID" "http://${SL_NAME}.internal:3001/health")
+      SL_AFTER_ADDR="${AFTER##* }"
+      [ "${AFTER%% *}" = "200" ] || SL_AFTER_ADDR=""
+      [ "$SL_AFTER_ADDR" = "$SL_BASE_ADDR" ] \
+        && ok "${SL_NAME}.internal still answers at ${SL_AFTER_ADDR} after ${SLOT_CYCLES} wakes" \
+        || bad "the address moved ${SL_BASE_ADDR} -> ${SL_AFTER_ADDR} on wakes that never left the host"
+
+      AFTER_VETH=""; AFTER_COUNTS=""
+      for _ in $(seq 30); do
+        AFTER_VETH=$($SSH "root@$H_IP" "ip -o link 2>/dev/null | grep -o 'veth-[0-9]*' | sort | tr '\n' ' '" 2>/dev/null | tr -d '\r')
+        AFTER_COUNTS=$(host_counts "$H_IP")
+        [ "$AFTER_VETH" = "$BASE_VETH" ] && [ "$AFTER_COUNTS" = "$BASE_COUNTS" ] && break
+        sleep 2
+      done
+      [ "$AFTER_VETH" = "$BASE_VETH" ] \
+        && ok "the replica is on the same veth, so the same slot index, after ${SLOT_CYCLES} wakes" \
+        || bad "the veth set changed: '${BASE_VETH}' -> '${AFTER_VETH}'; the replica moved slot on a wake"
+      [ "$AFTER_COUNTS" = "$BASE_COUNTS" ] \
+        && ok "netns, veth halves and NBD devices are back to baseline (${AFTER_COUNTS})" \
+        || bad "the host did not return to baseline: ${BASE_COUNTS} -> ${AFTER_COUNTS}"
+
+      # Greater-or-equal, not equal: an unrelated machine idling out in the
+      # background can only RAISE this gauge, and the leak being asserted
+      # lowers it by one per wake.
+      AFTER_FREE=$(curl -sf -m 5 "http://${H_IP}:8080/metrics" 2>/dev/null | awk '$1=="pilots_slots_free"{print $2}')
+      if [ -n "$AFTER_FREE" ] && [ "$(printf '%.0f' "$AFTER_FREE")" -ge "$(printf '%.0f' "$BASE_FREE")" ]; then
+        ok "pilots_slots_free is ${AFTER_FREE}, no lower than the ${BASE_FREE} it started at"
+      else
+        bad "pilots_slots_free went ${BASE_FREE} -> ${AFTER_FREE}: a slot leaked per wake"
+      fi
+    fi
+  fi
+
+  for id in ${SL_ID:-} ${SLC_ID:-}; do
+    api "$H_IP" DELETE "/v1/machines/${id}" >/dev/null 2>&1
+  done
+fi
+
 say "16. A guest's memory and fork bombs stay inside its own cgroup slice"
 # The jailer puts every machine in a cgroup v2 slice with memory.max, cpu.max
 # and pids.max derived per machine (memory.max is mem_mib + 128 MiB). This is
