@@ -280,10 +280,11 @@ func (p peerAPI) peerURL(hostID, path string) (string, error) {
 }
 
 // mark sets what every peer call carries: the forwarding marker, so the far
-// side does not forward it onward and so its peer token is accepted at all,
-// and the credential itself.
+// side does not forward it onward, so its internal listener accepts the
+// request at all (InternalAPIHandler refuses one without it), and so its peer
+// token is accepted; and the credential itself.
 func (p peerAPI) mark(req *http.Request) {
-	req.Header.Set("X-Pilots-Forwarded-By", "autoscaler")
+	req.Header.Set(router.ForwardedHeader, "autoscaler")
 	if p.token != "" {
 		req.Header.Set("Authorization", "Bearer "+p.token)
 	}

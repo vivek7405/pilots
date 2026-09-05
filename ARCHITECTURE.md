@@ -333,8 +333,13 @@ A host's own calls to a peer's internal listener — the arbiter waking,
 suspending or redeploying a machine another host holds — carry the fleet peer
 token, derived from `PILOT_AGENT_TOKEN_SECRET`, and are accepted only on a
 request that also carries the forwarding marker, which the public listener
-strips. A request forwarded to a service's arbiter keeps the caller's own
-bearer instead and needs none of that.
+strips. The marker has exactly one name fleet-wide (`router.ForwardedHeader`):
+the internal listener refuses a request without it, the public listener
+deletes it, and both the router's proxy and a host's direct peer call set that
+one name — a second spelling anywhere means every forwarded call is refused
+before a handler sees it, and means the strip protects nothing. A request
+forwarded to a service's arbiter carries the same marker but authenticates
+with the caller's own bearer, so it needs no peer token.
 
 ### `.internal` service discovery and guest-to-guest traffic
 

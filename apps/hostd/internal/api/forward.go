@@ -73,4 +73,10 @@ func (d Deps) forwardToArbiter(w http.ResponseWriter, r *http.Request, serviceID
 }
 
 // forwardedHeader marks a request that has already been forwarded once.
-const forwardedHeader = "X-Pilots-Forwarded-By"
+//
+// The SAME name router.ForwardedHeader carries, and it has to be: the internal
+// listener a forwarded write lands on refuses a request that does not carry
+// it, and the public listener strips it so a client cannot forge one. A
+// second spelling here meant every arbiter forward and every peer call was
+// answered 400 before it reached a handler.
+const forwardedHeader = "X-Pilot-Forwarded"
