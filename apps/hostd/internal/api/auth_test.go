@@ -45,6 +45,7 @@ func TestScopesAreEnforced(t *testing.T) {
 		{"machines key on builds", machinesKey, "POST", "/v1/builds", http.StatusForbidden, "scope deploy required"},
 		{"machines key on services", machinesKey, "GET", "/v1/services", http.StatusForbidden, "scope deploy required"},
 		{"machines key on api-keys", machinesKey, "POST", "/v1/api-keys", http.StatusForbidden, "scope admin required"},
+		{"machines key on usage", machinesKey, "GET", "/v1/usage", http.StatusForbidden, "scope admin required"},
 		{"machines key on its own routes", machinesKey, "GET", "/v1/machines", http.StatusOK, ""},
 		{"deploy key on services", deployKey, "GET", "/v1/services", http.StatusOK, ""},
 		{"deploy key on machines", deployKey, "GET", "/v1/machines", http.StatusOK, ""},

@@ -72,6 +72,10 @@ type Deps struct {
 	// destroy check.
 	LogFollowInterval time.Duration
 	LogRowInterval    time.Duration
+	// Usage answers GET /v1/usage from this host's own ledger. Nil on a test
+	// server, where the route answers an empty set of orgs rather than
+	// vanishing from the table.
+	Usage UsageSource
 	// KeySource is where a minted key's randomness comes from. Nil is
 	// crypto/rand, which is what production uses; a test supplies a fixed
 	// reader so it can know the hash a mint will produce.
@@ -199,6 +203,7 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("POST /v1/api-keys", d.handleCreateAPIKey)
 	mux.HandleFunc("GET /v1/api-keys", d.handleListAPIKeys)
 	mux.HandleFunc("POST /v1/api-keys/{hash}/revoke", d.handleRevokeAPIKey)
+	mux.HandleFunc("GET /v1/usage", d.handleUsage)
 	mux.HandleFunc("GET /v1/quotas/{org}", d.handleGetQuota)
 	mux.HandleFunc("PUT /v1/quotas/{org}", d.handlePutQuota)
 

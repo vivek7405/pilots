@@ -263,6 +263,7 @@ func TestEveryRouteIsRegistered(t *testing.T) {
 		{"POST", "/v1/api-keys"},
 		{"GET", "/v1/api-keys"},
 		{"POST", "/v1/api-keys/abc/revoke"},
+		{"GET", "/v1/usage"},
 		{"GET", "/v1/quotas/org_1"},
 		{"PUT", "/v1/quotas/org_1"},
 	}

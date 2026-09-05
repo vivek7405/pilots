@@ -421,6 +421,29 @@ type QuotaExceededResponse struct {
 	Scope string `json:"scope,omitempty"`
 }
 
+// UsageTotals is one org's accrual on this host over the requested range.
+//
+// Compute (vcpu_seconds, mib_seconds) accrues only while a machine is running;
+// a suspended machine bills storage only, which is machine_seconds and
+// volume_gib_seconds. See internal/usage for the accrual rule in full.
+type UsageTotals struct {
+	MachineSeconds   int64 `json:"machine_seconds"`
+	VCPUSeconds      int64 `json:"vcpu_seconds"`
+	MiBSeconds       int64 `json:"mib_seconds"`
+	VolumeGiBSeconds int64 `json:"volume_gib_seconds"`
+}
+
+// UsageResponse is what THIS host metered, never the fleet's total: there is
+// no aggregator tier, so the dashboard polls every live host and sums. Orgs is
+// never null, because a client that exports a CSV of it would otherwise have
+// to distinguish "no usage" from "broken".
+type UsageResponse struct {
+	HostID string                 `json:"host_id"`
+	Since  int64                  `json:"since"`
+	Until  int64                  `json:"until"`
+	Orgs   map[string]UsageTotals `json:"orgs"`
+}
+
 type HealthResponse struct {
 	OK     bool   `json:"ok"`
 	HostID string `json:"host_id"`
