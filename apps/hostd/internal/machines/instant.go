@@ -319,7 +319,19 @@ func (m *Manager) Rescue(ctx context.Context, row state.Machine) error {
 	// keeps a foreign index out of this pool, would now read it as one of
 	// ours. Cleared here so a rescue takes a fresh index, which is the only
 	// kind it can have.
+	//
+	// Written back, not just held in memory: the claim left a row saying "this
+	// host, that host's index", and the restore below runs for seconds against
+	// it. For as long as it stands, MachineAddress derives THIS host's prefix
+	// with a foreign index -- so .internal points peers at whatever local
+	// machine really holds it, and the tenant filter, which no longer sees the
+	// row as suspended, resolves the two claimants by newest write and takes
+	// the real occupant's rule away.
 	stampSlot(fresh, nil)
+	fresh.UpdatedAt = time.Now().Unix()
+	if err := m.opts.Store.PutMachine(ctx, fresh); err != nil {
+		return fmt.Errorf("machines: clear %s's old slot before rescuing it: %w", row.ID, err)
+	}
 
 	fcm, err := m.wakeFromSuspend(ctx, fresh)
 	if err != nil {

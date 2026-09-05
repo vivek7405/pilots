@@ -1302,8 +1302,15 @@ say "15b. A replica suspended and woken ten times holds one slot and one address
 SLOT_CYCLES=${GATE_SLOT_CYCLES:-10}
 if [ -n "$H_IP" ]; then
   SL_APP="gate-slot-$$"
+  # auto_stop off on the machine under test too, not just on the resolver: a
+  # promoted replica of the CURRENT release belongs to the autoscaler rather
+  # than the idle monitor (idle.go, shouldSuspend), and it has no floor, so a
+  # background scale-to-zero mid-section would take veth-<idx> away and fail
+  # the strict comparisons below on something that never moved a slot. The
+  # explicit suspends this section drives are unaffected, and keepSlot turns
+  # on the release id, not on this knob.
   SL=$(api "$H_IP" POST /v1/machines \
-    "{\"app\":\"${SL_APP}\",\"vcpus\":1,\"mem_mib\":512,\"cmd\":\"sleep 86400\"}")
+    "{\"app\":\"${SL_APP}\",\"vcpus\":1,\"mem_mib\":512,\"cmd\":\"sleep 86400\",\"knobs\":{\"auto_stop\":\"off\"}}")
   SL_ID=$(echo "$SL" | jf id); SL_NAME=$(echo "$SL" | jf name)
   # The resolver is a peer in the same app that never sleeps itself, so the
   # address is read from outside the machine under test.
@@ -1316,7 +1323,12 @@ if [ -n "$H_IP" ]; then
   else
     # Promoted, so it is a REPLICA: Suspend keeps the index only for a machine
     # a rollout placed, which is what a release id records.
-    api "$H_IP" POST "/v1/machines/${SL_ID}/promote" '{}' >/dev/null 2>&1
+    # Checked: a promote that failed leaves a machine with no release id, so
+    # Suspend keeps no slot and every wake below legitimately takes a fresh
+    # index -- which would report the bug this section exists to catch, on a
+    # host where nothing is wrong.
+    api "$H_IP" POST "/v1/machines/${SL_ID}/promote" '{}' >/dev/null 2>&1 \
+      || bad "promote of ${SL_ID} failed; it is not a replica and this step asserts nothing"
 
     SL_BASE_ADDR=""
     OUT=$(curl_until "$H_IP" "$SLC_ID" "http://${SL_NAME}.internal:3001/health")

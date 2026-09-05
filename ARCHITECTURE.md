@@ -431,10 +431,14 @@ Landmines:
 
 - **Near-zero TTL, always.** A rescued machine lands on a new host with a new
   slot, so its address changes. A guest holding a 300s answer talks to nothing.
-  A wake on the owning host is not a move: the replica takes back the index it
-  kept while suspended, so the answer a peer resolved before the suspend is
-  still right after it. Only a rescue moves the address, which is why the TTL
-  stays where it is.
+  A wake on the owning host is normally not a move: the replica takes back the
+  index it kept while suspended, so the answer a peer resolved before the
+  suspend is still right after it. Two things still move an address, which is
+  why the TTL stays where it is: a rescue, which lands the machine in a slot
+  the new host chose, and a wake whose kept index was handed to someone else
+  while hostd was down — the pool is rebuilt from running machines only, so a
+  sleeping replica's reservation does not survive a restart and its bring-up
+  falls back to a fresh index.
 - **TTL does not save an established connection.** A pool holding an open
   socket to a rescued machine's old address simply breaks. That is what every
   failover does, but it means `.internal` clients need reconnect logic, and

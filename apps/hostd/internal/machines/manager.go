@@ -406,6 +406,16 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 		if slotIdx > 0 {
 			m.pool.Return(slotIdx)
 		}
+	} else if row.Slot > 0 && row.HostID == m.opts.HostID {
+		// A suspended service replica has no process here but still holds its
+		// index: Suspend keeps it so the replica stays resolvable while it
+		// sleeps, and takeSlot is what consumes it on the way back up. A
+		// destroy is the machine never coming back up, and the row that names
+		// the index is deleted below -- so this is the last moment anything
+		// can give it back. Without it a create/promote/suspend/destroy cycle
+		// walks the host through its 1023 indices exactly as a leaking wake
+		// did.
+		m.pool.Return(row.Slot)
 	}
 
 	// After the process is gone, never before: unmounting a volume under a
