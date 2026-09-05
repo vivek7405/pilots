@@ -122,6 +122,23 @@ func stampSlot(row *state.Machine, fcm *fc.Machine) {
 	}
 }
 
+// withoutSlot copies a row with its netns index stamped to zero.
+//
+// A redeploy writes the copy and boots from the original, because the two
+// disagree on purpose. The store has to see zero while the new image boots: a
+// row that names an index is resolvable, and the mesh locator answers with
+// that address whether or not anything is listening on it, so a redeploying
+// machine that kept the index on its row would advertise a live-looking
+// address in front of a process that does not exist yet. The original keeps
+// the index, because the pool still holds the reservation the machine made
+// when it suspended and takeSlot has to take that same index back -- otherwise
+// every deploy of a sleeping replica burns a slot and moves its address.
+func withoutSlot(row *state.Machine) *state.Machine {
+	stored := *row
+	stored.Slot = 0
+	return &stored
+}
+
 // templateMachinePrefix marks the throwaway machine a golden template is
 // captured from.
 const templateMachinePrefix = "tmpl-"

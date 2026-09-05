@@ -833,9 +833,17 @@ func (m *Manager) Redeploy(ctx context.Context, id string, req api.RedeployReque
 
 	row.ReleaseID = req.Release
 	row.State = StateCreating
-	stampSlot(row, nil)
 	row.UpdatedAt = time.Now().Unix()
-	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
+	// The store sees no slot while the new image boots, and the row the boot
+	// reads keeps the one the machine reserved when it suspended. A replica
+	// takes the ordinary floor of zero, so every deploy after the first
+	// reaches here SUSPENDED, with the pool still holding its index and
+	// nothing above having returned it: without this the boot below takes a
+	// fresh index instead, the kept one is abandoned, and a host that deploys
+	// often walks through its 1023 slots. A running machine's index was
+	// returned above and is taken straight back, so a redeploy no longer moves
+	// a machine's mesh address either way. See withoutSlot and takeSlot.
+	if err := m.opts.Store.PutMachine(ctx, withoutSlot(row)); err != nil {
 		return nil, err
 	}
 

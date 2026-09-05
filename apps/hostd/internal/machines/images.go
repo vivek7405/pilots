@@ -129,7 +129,7 @@ func (m *Manager) bootMachine(ctx context.Context, row *state.Machine,
 		row.VolumeID = v.ID
 	}
 
-	slot, err := m.pool.Take(row.ID)
+	slot, err := m.takeSlot(row)
 	if err != nil {
 		return nil, err
 	}
