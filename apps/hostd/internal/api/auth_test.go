@@ -216,3 +216,72 @@ func TestOfferedSubprotocolReturnsTheFirstEntry(t *testing.T) {
 		})
 	}
 }
+
+// Every cross-host wake and suspend the autoscaler makes was a 401: the call
+// carried the forwarding marker and no bearer, and the internal listener
+// serves the same WithAuth-wrapped API a tenant reaches. The credential is
+// derived from the secret that already unlocks every guest agent on the
+// fleet, and it is inert from outside the mesh because the public listener
+// strips the marker it needs.
+func TestAPeerTokenAuthenticatesOnlyWithTheForwardingMarker(t *testing.T) {
+	st, err := state.Open(":memory:")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	peer := PeerTokenFor("secret")
+
+	withMarker := func(h http.Handler, key string, marked bool) int {
+		req := httptest.NewRequest("GET", "/v1/machines", nil)
+		if key != "" {
+			req.Header.Set("Authorization", "Bearer "+key)
+		}
+		if marked {
+			req.Header.Set(forwardedHeader, "host-b")
+		}
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	h := Routes(Deps{HostID: "host-a", Store: st, Machines: newFakeManager(), PeerToken: peer})
+	if got := withMarker(h, peer, true); got != http.StatusOK {
+		t.Errorf("a marked peer call got %d, want 200", got)
+	}
+	if got := withMarker(h, peer, false); got != http.StatusUnauthorized {
+		t.Errorf("an unmarked peer token got %d, want 401", got)
+	}
+	if got := withMarker(h, PeerTokenFor("other"), true); got != http.StatusUnauthorized {
+		t.Errorf("another fleet's peer token got %d, want 401", got)
+	}
+
+	// A box with no agent-token secret has no peers. Its peer token is empty,
+	// which no bearer can equal -- WithAuth guards on that explicitly and
+	// bearerToken refuses an empty bearer before it, so the hole is closed
+	// twice. What actually keeps it closed is PeerTokenFor returning nothing
+	// for an empty secret, which TestPeerTokenIsDerivedOnce pins.
+	bare := Routes(Deps{HostID: "host-a", Store: st, Machines: newFakeManager(), PeerToken: PeerTokenFor("")})
+	for _, key := range []string{"", "peer-", peer} {
+		if got := withMarker(bare, key, true); got != http.StatusUnauthorized {
+			t.Errorf("bearer %q against a box with no secret got %d, want 401", key, got)
+		}
+	}
+}
+
+// One derivation, so main.go and the peer caller cannot disagree about the
+// credential -- and a label of its own, so the peer token space and the guest
+// agent token space cannot collide.
+func TestPeerTokenIsDerivedOnce(t *testing.T) {
+	if PeerTokenFor("s") != PeerTokenFor("s") {
+		t.Error("the derivation is not stable for one secret")
+	}
+	if PeerTokenFor("s") == PeerTokenFor("t") {
+		t.Error("two secrets derived the same peer token")
+	}
+	if PeerTokenFor("") != "" {
+		t.Error("a box with no secret got a peer token")
+	}
+	if !strings.HasPrefix(PeerTokenFor("s"), "peer-") {
+		t.Errorf("peer token %q is not in its own namespace", PeerTokenFor("s"))
+	}
+}

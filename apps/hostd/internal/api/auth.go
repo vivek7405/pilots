@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -159,6 +160,19 @@ func WithAuth(d Deps, next http.Handler) http.Handler {
 			return
 		}
 
+		// A peer of this fleet, calling over the mesh. Constant-time, marker
+		// required, admin because it acts for whichever tenant's rollout or
+		// scale decision it carries. No row is read: the secret this is
+		// derived from is the one that already unlocks every guest agent on
+		// the fleet.
+		if d.PeerToken != "" && r.Header.Get(forwardedHeader) != "" &&
+			subtle.ConstantTimeCompare([]byte(key), []byte(d.PeerToken)) == 1 {
+			ctx := context.WithValue(r.Context(), principalKey,
+				principal{Scopes: []string{ScopeAdmin}})
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
 		sum := sha256.Sum256([]byte(key))
 		hash := hex.EncodeToString(sum[:])
 
@@ -202,6 +216,22 @@ func WithAuth(d Deps, next http.Handler) http.Handler {
 			principal{OrgID: rec.OrgID, Scopes: splitScopes(rec.Scopes)})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+// PeerTokenFor derives this fleet's peer credential from the agent-token
+// secret every host already carries.
+//
+// One function, so no caller can derive it differently. The same construction
+// machines.Manager.token uses for a guest credential under a different label,
+// so the two token spaces cannot collide. Empty for an empty secret: a box
+// with no secret has no peers, and WithAuth never matches an empty token.
+func PeerTokenFor(agentTokenSecret string) string {
+	if agentTokenSecret == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, []byte(agentTokenSecret))
+	_, _ = mac.Write([]byte("hostd-peer"))
+	return "peer-" + hex.EncodeToString(mac.Sum(nil))
 }
 
 // subprotocolBearer is how a WebSocket client carries the key.
