@@ -56,6 +56,40 @@ type StartSpec struct {
 // Empty reports a spec that names no way to start anything.
 func (s StartSpec) Empty() bool { return len(s.Entrypoint) == 0 && len(s.Cmd) == 0 }
 
+// dockerDefaultPath is the PATH every container runtime gives a process when
+// the image config names none. It is in the OCI runtime spec's own defaults
+// and in Docker's, which is why a Dockerfile can say `CMD ["node", "x.js"]`
+// and mean /usr/local/bin/node.
+const dockerDefaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+// WithRuntimeDefaults fills in what the image config would have carried.
+//
+// PATH, and only PATH, because it is the one such value whose absence turns a
+// correct command into "not found". The guest agent execs the application with
+// the environment PID 1 was given, and PID 1 in a microVM is given the
+// KERNEL's PATH -- /sbin:/usr/sbin:/bin:/usr/bin, with no /usr/local/bin in
+// it. So `node`, `bun`, `python3` and every other interpreter that lives where
+// its base image put it is unresolvable, and the machine restart-loops on
+// `/bin/sh: exec: line 0: node: not found` while the image, the build and the
+// command are all correct.
+//
+// A Dockerfile's own ENV PATH still wins: this only fills a blank. What it
+// cannot see is a PATH the BASE image set and this Dockerfile did not, which
+// is the same blind spot FromDockerfileOnly records -- Docker's default is the
+// better guess than the kernel's, and it is a guess either way.
+func (s StartSpec) WithRuntimeDefaults() StartSpec {
+	if _, ok := s.Env["PATH"]; ok {
+		return s
+	}
+	env := make(map[string]string, len(s.Env)+1)
+	for k, v := range s.Env {
+		env[k] = v
+	}
+	env["PATH"] = dockerDefaultPath
+	s.Env = env
+	return s
+}
+
 // ParseStartSpec reads the final stage of a Dockerfile.
 //
 // The FINAL stage, because a multi-stage build's earlier stages describe a
