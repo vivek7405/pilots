@@ -33,6 +33,15 @@ import (
 // the guest just spent its restore bringing back. That is why this function is
 // called from createFromTemplate and from no other path: there is no flag to
 // get wrong, because there is no second call site.
+//
+// There is a SECOND caller of the guest's /init, and it is not this one. A cold
+// boot -- a machine whose memory image no live host could load, booted from its
+// own disk instead -- has to start the application, because a kernel boot leaves
+// it stopped. It carries NOTHING to deliver: the environment is already on that
+// machine's disk, written here at create, and rewriting it from the build's
+// start spec would drop what the deploy supplied. That poke is restartApp, in
+// coldboot.go, deliberately a separate function so this one's caller list stays
+// exactly two.
 
 // initTimeout bounds the delivery poke. Generous: the agent has just come back
 // from a restore and systemd is starting a unit behind it.

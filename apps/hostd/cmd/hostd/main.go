@@ -86,17 +86,11 @@ func run() error {
 	if err := cpuvendor.CheckTemplate(cfg.CPUTemplate, cpu); err != nil {
 		return err
 	}
-	vendor, vendorForced := cpu.Vendor, false
-	// Fault injection for the fleet gate only, following internal/nbd/faults.go:
-	// two flags, because one set by accident would turn every wake on this host
-	// into a cold boot. Applied AFTER the template check, which always runs
-	// against the real CPU.
-	if os.Getenv("PILOT_FAULTS") == "1" {
-		if forced := os.Getenv("PILOT_FAULT_CPU_VENDOR"); forced != "" {
-			vendor, vendorForced = forced, true
-			slog.Warn("PILOT_FAULT_CPU_VENDOR is set; this host is lying about its CPU vendor",
-				"real", cpu.Vendor, "reported", forced)
-		}
+	// Applied AFTER the template check, which always runs against the real CPU.
+	vendor, vendorForced := reportedVendor(cpu.Vendor)
+	if vendorForced {
+		slog.Warn("PILOT_FAULT_CPU_VENDOR is set; this host is lying about its CPU vendor",
+			"real", cpu.Vendor, "reported", vendor)
 	}
 	slog.Info("cpu", "vendor", vendor, "family", cpu.Family, "model", cpu.Model,
 		"stepping", cpu.Stepping, "template", cfg.CPUTemplate)

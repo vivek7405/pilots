@@ -17,6 +17,8 @@ type ownRowStore interface {
 	PutMachine(ctx context.Context, m *state.Machine, opts ...state.WriteOption) error
 	ListVolumes(ctx context.Context) ([]state.Volume, error)
 	PutVolume(ctx context.Context, v *state.Volume, opts ...state.WriteOption) error
+	GetMachineCPU(ctx context.Context, id string) (*state.MachineCPU, error)
+	PutMachineCPU(ctx context.Context, c *state.MachineCPU, opts ...state.WriteOption) error
 }
 
 // republishOwnRows re-writes every machine and volume row this host owns, so a
@@ -66,6 +68,31 @@ func republishOwnRows(ctx context.Context, hostID string, store ownRowStore) (in
 		// make: it would turn a repair into a fleet-wide overwrite.
 		if err := store.PutMachine(ctx, &machines[i]); err != nil {
 			return n, fmt.Errorf("republish machine %s: %w", machines[i].ID, err)
+		}
+		n++
+	}
+
+	// The cpu rows of those machines, for the reason above: a machine's pool is
+	// what every peer computes its rescue tier from, so a vendor write that
+	// never left this host leaves the fleet ranking a machine into the wrong
+	// pool -- and the failure is a needless cold boot, which looks like a
+	// working machine that lost its memory.
+	//
+	// Only rows for machines the loop above just republished, so ownership and
+	// the store's guard stay in step: the same claim that moves a machine moves
+	// the right to describe it.
+	for i := range machines {
+		if machines[i].HostID != hostID {
+			continue
+		}
+		cpu, err := store.GetMachineCPU(ctx, machines[i].ID)
+		if err != nil {
+			// No row means this machine has not started since the table
+			// existed. There is nothing to re-send.
+			continue
+		}
+		if err := store.PutMachineCPU(ctx, cpu); err != nil {
+			return n, fmt.Errorf("republish machine cpu %s: %w", machines[i].ID, err)
 		}
 		n++
 	}
