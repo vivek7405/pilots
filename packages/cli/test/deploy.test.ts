@@ -123,6 +123,16 @@ test('a three-service plan is executed in order, one primitive at a time', async
       size_gib: 10,
       mount_path: '/archive',
     })
+
+    // The created volume's id reaches the service that declared it, and only
+    // that one. Without this the volume exists, is billed, and is mounted by
+    // nothing -- which is what the CLI used to warn about.
+    const created = api.all('POST', '/v1/services').map((r) => JSON.parse(r.body) as Record<string, unknown>)
+    const byName = new Map(created.map((c) => [c.name as string, c]))
+    assert.equal(byName.get('postgres')?.volume, 'vol_1', 'the postgres create names the volume it made')
+    assert.equal('volume' in (byName.get('web') ?? {}), false, 'web declares none and sends none')
+    assert.equal('volume' in (byName.get('worker') ?? {}), false, 'worker declares none and sends none')
+    assert.doesNotMatch(res.stderr, /cannot mount a volume yet/)
   } finally {
     await api.close()
   }
@@ -297,6 +307,9 @@ test('the second run patches instead of creating, with no knobs in the body', as
       // #30 Decision 8: the PATCH body is a 400 with `knobs`. They travel on
       // the deploy instead, which is where the replicas they apply to are made.
       assert.equal('knobs' in body, false, 'knobs never go on the PATCH')
+      // Create-only, for the same reason: the server refuses it as an
+      // unknown field, and a volume swap is a data migration anyway.
+      assert.equal('volume' in body, false, 'the volume never goes on the PATCH')
       assert.ok('replicas' in body)
     }
     assert.equal(
@@ -400,6 +413,57 @@ test('no compose file names all four filenames it looked for', async () => {
     for (const name of ['compose.yaml', 'compose.yml', 'docker-compose.yml', 'docker-compose.yaml']) {
       assert.ok(res.stderr.includes(name), `${name} is not in the message`)
     }
+  } finally {
+    await api.close()
+  }
+})
+
+test('a service declaring two volumes is refused before anything is built', async () => {
+  const api = await startFakeAPI()
+  const twoVolumes = plan()
+  twoVolumes.steps[0]!.volumes = [
+    { name: 'pgdata', size_gib: 10, mount_path: '/var/lib/postgresql/data' },
+    { name: 'pgarchive', size_gib: 10, mount_path: '/archive' },
+  ]
+  withPlan(api, twoVolumes)
+  const env = loggedIn(api.url, { shop: { database_url: 'x' } })
+  try {
+    const res = await pilot(env, ['--json', 'deploy'])
+    assert.notEqual(res.code, 0)
+    assert.match(res.stdout + res.stderr, /postgres/)
+    assert.match(res.stdout + res.stderr, /mounts one/)
+    // Before the build, so a compose file that asks for two does not spend
+    // minutes on an image first.
+    assert.equal(api.all('POST', '/v1/builds').length, 0, 'nothing was built')
+  } finally {
+    await api.close()
+  }
+})
+
+test('the second run refuses a volume swap rather than sending one', async () => {
+  const api = await startFakeAPI()
+  withPlan(api, plan())
+  const env = loggedIn(api.url, { shop: { database_url: 'x' } })
+  try {
+    assert.equal((await pilot(env, ['--json', 'deploy'])).code, 0)
+
+    // The same app, with the volume renamed: a different volume, and the
+    // platform copies nothing between two of them.
+    const renamed = plan()
+    renamed.steps[0]!.volumes = [{ name: 'pgdata', size_gib: 10, mount_path: '/archive' }]
+    withPlan(api, renamed)
+    const before = api.requests.length
+
+    const second = await pilot(env, ['--json', 'deploy'])
+    assert.notEqual(second.code, 0)
+    const said = second.stdout + second.stderr
+    assert.match(said, /postgres/)
+    assert.match(said, /created/)
+    assert.equal(
+      api.requests.slice(before).some((r) => r.method === 'PATCH'),
+      false,
+      'no PATCH is sent for a swap the server would refuse anyway',
+    )
   } finally {
     await api.close()
   }

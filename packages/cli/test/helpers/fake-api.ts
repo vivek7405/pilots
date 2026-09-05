@@ -157,11 +157,14 @@ export async function startFakeAPI(): Promise<FakeAPI> {
 
     // Services.
     if (method === 'POST' && path === '/v1/services') {
-      const body = JSON.parse(req.body || '{}') as Partial<Service>
+      const body = JSON.parse(req.body || '{}') as Partial<Service> & { volume?: string }
       const svc = fakeService({
         ...(body.name ? { name: body.name } : {}),
         ...(body.app ? { app: body.app } : {}),
         ...(body.replicas !== undefined ? { replicas: body.replicas } : {}),
+        // Echoed as hostd echoes it, so a second run can see what the service
+        // already mounts and refuse a swap.
+        ...(body.volume ? { volume_id: body.volume } : {}),
       })
       state.services.push(svc)
       return json(res, 201, svc)
