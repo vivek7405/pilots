@@ -487,6 +487,11 @@ func run() error {
 		GitHub: github.Handler(github.Deps{
 			HostID: cfg.HostID, App: ghApp, Store: store, Builds: builder,
 			Rollout: rollout, Machines: mgr, Domain: cfg.WorkloadDomain,
+			// The same value the API handlers render URLs with, so the link
+			// on a pull request opens the way the one from POST /v1/machines
+			// does. Without it a single box tells a developer https://<name>
+			// on a host that only listens plain on :8080.
+			URL: publicURL,
 		}),
 	})
 
