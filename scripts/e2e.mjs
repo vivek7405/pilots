@@ -2261,7 +2261,10 @@ async function volumeServiceAssertions() {
     });
 
     await step('a redeploy keeps the data and the machine, and holds a request meanwhile', async () => {
-      const before = { id: replica.id, url: replica.url };
+      // last_start_at is carried too: comparing against an absent field is a
+      // comparison with undefined, which is false for >= and would fail the
+      // assertion below on every run.
+      const before = { id: replica.id, url: replica.url, last_start_at: replica.last_start_at ?? 0 };
 
       const deploying = request(`/v1/services/${svc.id}/deploy`, {
         method: 'POST', body: { build: secondBuild },

@@ -231,7 +231,15 @@ func (m *Manager) rollOut(ctx context.Context, svc *state.Service, rel *state.Re
 
 	// Replica 1 BOOTS: a release has no memory image until something has
 	// proved this rootfs serves.
-	first, err := m.createReplica(ctx, svc, rel, knobs, "")
+	//
+	// Stated on a COPY rather than left to createReplica's own rule, because a
+	// rollback rolls out a release that already carries a memory image: without
+	// this, replica 1 would restore, and a rollback onto a release whose
+	// snapshot has since been discarded would fail outright instead of taking
+	// the slow path -- the exact fallback createReplica's doc promises.
+	firstRel := *rel
+	firstRel.MemBuildID = ""
+	first, err := m.createReplica(ctx, svc, &firstRel, knobs, "")
 	if err != nil {
 		return created, fmt.Errorf("services: first replica of %s: %w", rel.ID, err)
 	}

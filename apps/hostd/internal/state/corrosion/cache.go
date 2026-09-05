@@ -702,8 +702,13 @@ func (c *Cache) Host(id string) (state.Host, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	h, ok := c.hosts[id]
+	if !ok {
+		// Stamping a vendor onto the zero Host would hand a caller that
+		// ignores ok a row that looks half-real.
+		return state.Host{}, false
+	}
 	h.Vendor = c.hostCPU[id].Vendor
-	return h, ok
+	return h, true
 }
 
 // LiveHosts returns the hosts heartbeating recently enough to count, SORTED BY

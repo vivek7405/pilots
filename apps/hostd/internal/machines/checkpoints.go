@@ -82,17 +82,24 @@ func (m *Manager) Checkpoint(ctx context.Context, machineID, comment string) (*s
 		ckpt.RootfsBuildID = ids.RootfsBuildID.String()
 	}
 
-	// Which pool photographed this image, before the row that names its builds.
-	// A rollback on the other vendor reads this and cold-boots from the
-	// checkpoint's disk rather than failing at snapshot load.
+	if err := m.opts.Store.PutCheckpoint(ctx, ckpt); err != nil {
+		return nil, err
+	}
+
+	// Which pool photographed this image. AFTER the checkpoint row, not
+	// before: the store's guard for a checkpoint's cpu row finds the writer by
+	// reading `checkpoints.machine_id`, so a cpu row written first is refused
+	// as describing a checkpoint nobody can prove this host owns -- which
+	// failed every checkpoint, and therefore every release snapshot, on a
+	// replicated store. A rollback on the other vendor reads this and
+	// cold-boots from the checkpoint's disk rather than failing at snapshot
+	// load; a checkpoint that briefly has no row reads as "unrecorded", which
+	// is what every checkpoint taken before this table looks like.
 	if err := m.opts.Store.PutMachineCPU(ctx, &state.MachineCPU{
 		ID: ckpt.ID, Kind: state.KindCheckpoint, Vendor: m.opts.Vendor,
 		UpdatedAt: time.Now().Unix(),
 	}); err != nil {
 		return nil, fmt.Errorf("machines: record the checkpoint's cpu vendor: %w", err)
-	}
-	if err := m.opts.Store.PutCheckpoint(ctx, ckpt); err != nil {
-		return nil, err
 	}
 
 	// Watch for the upload to finish and record it. Without this the row's

@@ -809,6 +809,24 @@ func TestACheckpointCPURowIsWrittenByItsMachinesOwner(t *testing.T) {
 	}
 }
 
+// The guard finds a checkpoint's writer through checkpoints.machine_id, so the
+// checkpoint row has to exist FIRST. Pinned because the natural instinct is to
+// write the pool before the row that names the builds -- which is what every
+// other cpu row does -- and here it refuses every checkpoint on a replicated
+// store, and with it every release snapshot a deploy takes.
+func TestACheckpointCPURowNeedsItsCheckpointRowFirst(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newTestStore(t, "host-a")
+	agent.exec(t, `INSERT INTO machines (id, host_id, state) VALUES ('m-1','host-a','running')`)
+
+	err := store.PutMachineCPU(ctx, &state.MachineCPU{
+		ID: "ck-unwritten", Kind: state.KindCheckpoint, Vendor: "AuthenticAMD"})
+	if err == nil {
+		t.Fatal("a cpu row for a checkpoint that does not exist yet was accepted; " +
+			"machines.Checkpoint must write PutCheckpoint before PutMachineCPU")
+	}
+}
+
 // The vendor reaches the ranking through ListHosts. A host with no cpu row
 // reads as empty rather than dropping out of the list: it is a host that has
 // not finished starting, and it is still live.

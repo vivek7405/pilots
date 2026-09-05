@@ -1099,9 +1099,17 @@ echo "  reachable: ${REACHED}"
 # Checked by family/model/stepping rather than by "model name": the marketing
 # string varies by SKU, the numbers do not.
 if [ -n "$CPU_TEMPLATE" ]; then
-  read -r VENDOR FAMILY MODEL STEPPING <<<"$(on_host "awk -F': *' '
-    /^vendor_id/ && !v {v=\$2} /^cpu family/ && !f {f=\$2} /^model[[:space:]]/ && !m {m=\$2}
-    /^stepping/ && !s {s=\$2} END {print v, f, m, s}' /proc/cpuinfo")"
+  # Guarded with == \"\" rather than with !, and joined on a separator rather
+  # than on spaces. A value of 0 is falsy in awk, so ! would let the NEXT
+  # matching line win -- and the line after \"model\" is \"model name\", whose
+  # value is a sentence. AMD family 25 model 0 is inside T2A's accepted range,
+  # so that is a host this check would have mis-parsed rather than a
+  # hypothetical. The separator keeps an empty field from shifting the rest one
+  # place left in read.
+  IFS='|' read -r VENDOR FAMILY MODEL STEPPING <<<"$(on_host "awk -F': *' '
+    /^vendor_id/ && v==\"\" {v=\$2} /^cpu family/ && f==\"\" {f=\$2}
+    /^model[[:space:]]/ && m==\"\" {m=\$2} /^stepping/ && s==\"\" {s=\$2}
+    END {print v \"|\" f \"|\" m \"|\" s}' /proc/cpuinfo")"
   case "$CPU_TEMPLATE" in
     T2CL)
       WANT_VENDOR=GenuineIntel
