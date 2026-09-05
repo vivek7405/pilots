@@ -33,6 +33,13 @@ const FULL = process.env.PILOTS_E2E_FULL === '1';
 // than to the laptop ceilings. See enforce() for why it is a flag and not a
 // property the battery infers.
 const METAL = process.env.PILOTS_E2E_METAL === '1';
+// The cold-boot tier: drive tier 3 -- the machine whose memory image no live
+// host of its CPU vendor can load, booted from its own disk instead. It needs
+// a host that is REPORTING a vendor it is not, which only the fleet gate's
+// fault flags arrange, so it is a flag rather than something the battery can
+// set up for itself. Same shape as METAL: the flag without the fact is a
+// failed step, never a quiet skip.
+const COLD_BOOT = process.env.PILOTS_E2E_COLD_BOOT === '1';
 
 let passed = 0;
 const failures = [];
@@ -163,6 +170,11 @@ async function processAssertions() {
     // it must be present, because the gate compares it across hosts.
     assert(typeof json?.store_version === 'number',
       `expected a numeric store_version, got ${JSON.stringify(json?.store_version)}`);
+    // Which vendor pool this host restores memory images from. A machine whose
+    // pool has no live host cold-boots instead of resuming, so a host that
+    // cannot say which pool it is in makes every rescue's tier unknowable.
+    assert(json?.cpu_vendor === 'GenuineIntel' || json?.cpu_vendor === 'AuthenticAMD',
+      `cpu_vendor is ${JSON.stringify(json?.cpu_vendor)}, want the raw /proc/cpuinfo vendor_id`);
   });
 
   await step('GET /metrics renders the host families and no per-machine label', async () => {
@@ -193,10 +205,17 @@ async function processAssertions() {
     assert(status === 401, `expected 401, got ${status}`);
   });
 
-  await step('GET /v1/hosts lists the fleet', async () => {
+  await step('GET /v1/hosts lists the fleet and each host\'s CPU vendor', async () => {
     const { status, json } = await request('/v1/hosts');
     assert(status === 200, `expected 200, got ${status}`);
     assert(Array.isArray(json), 'expected an array');
+    // Every host publishes its row before its first heartbeat, so a host in
+    // this list with no vendor is one whose start never finished -- and it
+    // ranks as "in no pool", which turns tier 2 into tier 3 for its machines.
+    for (const host of json) {
+      assert(typeof host.cpu_vendor === 'string' && host.cpu_vendor.length > 0,
+        `host ${host.id} reports no cpu_vendor, so the fleet cannot rank its pool`);
+    }
   });
 }
 
@@ -216,6 +235,12 @@ async function lifecycleAssertions() {
     assert(json.id, 'no machine id');
     assert(json.url?.startsWith('https://'), `unexpected url ${json.url}`);
     assert(json.state === 'running', `state is ${json.state}`);
+    // A create from the golden template is a RESTORE, which is what makes it
+    // sub-second. Reporting a boot here would mean the template's memory image
+    // was not used, and the only visible symptom would be the latency.
+    assert(json.last_start === 'restore',
+      `last_start is ${JSON.stringify(json.last_start)}, want restore`);
+    assert(json.last_start_at > 0, `last_start_at is ${json.last_start_at}`);
     machine = json;
   });
 
@@ -228,6 +253,16 @@ async function lifecycleAssertions() {
   const originalURL = machine.url;
 
   try {
+    await step('every start is counted by kind', async () => {
+      // Asserted here rather than in the empty-host family list, because this
+      // is a vec: it renders no series until a machine has started, and a
+      // family with no series is absent from the scrape rather than zero.
+      const restores = await scrapeMetric('pilots_machine_starts_total{kind="restore"}');
+      assert(restores !== null && restores > 0,
+        'pilots_machine_starts_total{kind="restore"} is missing after a create, '
+        + 'so a cold boot would be invisible to a scrape too');
+    });
+
     await step('exec runs a command and returns its output', async () => {
       const out = await exec(id, 'echo hello-from-guest');
       assert(out === 'hello-from-guest', `got ${JSON.stringify(out)}`);
@@ -318,6 +353,14 @@ async function lifecycleAssertions() {
       const { json: awake } = await request(`/v1/machines/${id}`);
       assert(awake.state === 'running', `state after wake is ${awake.state}`);
       assert(awake.url === originalURL, `URL changed across suspend/wake: ${awake.url}`);
+      // Still a restore, and a NEW one. A wake on a host of the image's own
+      // vendor must never be downgraded to a cold boot: the guest would keep
+      // its disk and lose every process, which looks exactly like this
+      // assertion passing.
+      assert(awake.last_start === 'restore',
+        `last_start after a wake is ${JSON.stringify(awake.last_start)}, want restore`);
+      assert(awake.last_start_at >= sleeping.last_start_at,
+        'last_start_at did not advance across a wake');
 
       const marker = await exec(id, 'cat /root/marker.txt');
       assert(marker === 'survives-suspend', `disk did not survive: ${marker}`);
@@ -538,6 +581,107 @@ async function timingAssertions() {
         + 'cannot fix. Run without the flag, or put the machine store on btrfs or '
         + 'on XFS made with -m reflink=1.');
     });
+
+    // ---- tier 3: the cold boot ----------------------------------------
+    //
+    // A machine whose memory image no live host of its CPU vendor can load
+    // boots from its own disk instead. It keeps its id, name, URL, volume and
+    // every byte on disk, and loses its processes -- so from a client's side
+    // the ONLY difference from a resume is last_start and the time it took.
+    // Both are asserted here, on the public API, and the host-side wreckage
+    // (one Firecracker, one NBD server, no uffd handler) in gate.sh section 20.
+    //
+    // The precondition cannot be arranged from the API, and this is why.
+    // hostd records the vendor it REPORTS, not the one it has -- which is what
+    // makes the next wake a normal restore again, and what the gate's section
+    // 20 step 6 asserts. So a machine created after the fault was armed carries
+    // the forced vendor and resumes normally: to reach a cold boot the machine
+    // has to have been suspended BEFORE this hostd came up lying. Naming it is
+    // the caller's job, and a run that asks for this tier without it FAILS
+    // rather than skipping -- a flag that quietly proved nothing is how a
+    // regression hides.
+    const coldBootMachine = process.env.PILOTS_E2E_COLD_BOOT_MACHINE ?? '';
+
+    if (COLD_BOOT) {
+      await step('PILOTS_E2E_COLD_BOOT=1 is only valid on a host forcing its CPU vendor', async () => {
+        const health = await request('/v1/health', { auth: false });
+        assert(health.json?.cpu_vendor_forced === true,
+          'PILOTS_E2E_COLD_BOOT=1 but /v1/health does not report cpu_vendor_forced: '
+          + 'this host is telling the truth about its CPU, so nothing it owns can '
+          + 'reach tier 3. Arm PILOT_FAULTS=1 and PILOT_FAULT_CPU_VENDOR=<the other '
+          + 'vendor> and restart hostd, as scripts/cluster/gate.sh section 20 does.');
+        assert(coldBootMachine !== '',
+          'PILOTS_E2E_COLD_BOOT=1 needs PILOTS_E2E_COLD_BOOT_MACHINE naming a machine '
+          + 'that was suspended BEFORE this hostd came up with the fault armed. A '
+          + 'machine created since then carries the forced vendor and resumes normally.');
+      });
+
+      await step('a machine whose vendor pool is gone cold-boots from its own disk', async () => {
+        const before = await request(`/v1/machines/${coldBootMachine}`);
+        assert(before.status === 200,
+          `PILOTS_E2E_COLD_BOOT_MACHINE ${coldBootMachine}: HTTP ${before.status}`);
+        const url = before.json.url;
+        const startedBefore = await scrapeMetric('pilots_machine_starts_total{kind="cold_boot"}') ?? 0;
+
+        if (before.json.state === 'running') {
+          const susp = await request(`/v1/machines/${coldBootMachine}/suspend`, { method: 'POST' });
+          assert(susp.status === 204 || susp.status === 200, `suspend: ${susp.status}`);
+        }
+
+        // Through the ROUTER, with its Host header, because a held request is
+        // what a real client experiences: the wake is not a waiting page, it
+        // is a request that takes longer. That is also what the budget is on.
+        const { ms, result } = await timed(() => viaRouter(new URL(url).host, '/'));
+        assert(result.status !== 0,
+          `the held request did not survive the cold boot: ${result.body.slice(0, 200)}`);
+
+        const after = await request(`/v1/machines/${coldBootMachine}`);
+        assert(after.json.state === 'running', `state after the wake is ${after.json.state}`);
+        assert(after.json.last_start === 'cold_boot',
+          `last_start is ${JSON.stringify(after.json.last_start)}: this wake was not the `
+          + 'downgrade, so nothing below is measuring one');
+        assert(after.json.url === url,
+          `the URL moved across a cold boot: ${url} -> ${after.json.url}`);
+
+        // What tier 3 promises to keep. The disk captured at suspend is
+        // filesystem-consistent -- reclaimChain runs sync in the guest first --
+        // so booting it is a clean boot, not a journal recovery.
+        const marker = await exec(coldBootMachine, 'cat /var/tmp/marker-cold');
+        assert(marker === 'cold-marker',
+          `the disk did not survive the cold boot: ${JSON.stringify(marker)}`);
+
+        const startedAfter = await scrapeMetric('pilots_machine_starts_total{kind="cold_boot"}');
+        assert(startedAfter === startedBefore + 1,
+          `pilots_machine_starts_total{kind="cold_boot"} went ${startedBefore} -> ${startedAfter}, `
+          + 'want exactly one more: a downgrade nothing counts is a downgrade nothing can alert on');
+
+        // ONE measurement, not TIMING_SAMPLES. The machine now records the
+        // vendor it just started on, so its next wake is an ordinary restore --
+        // which is the design, and it means the condition cannot be repeated
+        // without another hostd restart.
+        console.log(`      cold boot ${ms.toFixed(0)}ms (one sample; the condition is not repeatable)`);
+        enforce(reflink, ms, 25000, 30000, 5000, 'cold boot');
+      });
+
+      await step('the next wake of a cold-booted machine is an ordinary restore', async () => {
+        // The other half, and the one that proves the cold boot produced a
+        // resumable image on the pool it landed in rather than a machine that
+        // reboots forever.
+        const susp = await request(`/v1/machines/${coldBootMachine}/suspend`, { method: 'POST' });
+        assert(susp.status === 204 || susp.status === 200, `suspend: ${susp.status}`);
+        const wake = await request(`/v1/machines/${coldBootMachine}/wake`, { method: 'POST' });
+        assert(wake.status === 204 || wake.status === 200, `wake: ${wake.status}`);
+
+        const { json } = await request(`/v1/machines/${coldBootMachine}`);
+        assert(json.last_start === 'restore',
+          `last_start is ${JSON.stringify(json.last_start)}: a machine that cold-booted `
+          + 'once is cold-booting every time, so its suspend is producing an image its '
+          + 'own host cannot load');
+        const marker = await exec(coldBootMachine, 'cat /var/tmp/marker-cold');
+        assert(marker === 'cold-marker',
+          `the disk chain did not continue past the cold boot: ${JSON.stringify(marker)}`);
+      });
+    }
 
     await step('a host that cannot share extents says so on /v1/health', async () => {
       // Only meaningful where it is false; where it is true this asserts the
@@ -925,6 +1069,10 @@ async function volumeAssertions() {
       });
       assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
       assert(json.volume_id === volume.id, `volume_id = ${json.volume_id}`);
+      // A volume machine BOOTS: a drive cannot be added to a snapshot being
+      // restored, so the volume decides the path and the field says so.
+      assert(json.last_start === 'boot',
+        `last_start is ${JSON.stringify(json.last_start)}, want boot`);
       machine = json;
     });
 
@@ -1081,6 +1229,11 @@ async function buildAssertions() {
       });
       assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
       assert(json.state === 'running', `state is ${json.state}`);
+      // A machine with its own image BOOTS: the golden template's memory
+      // describes the golden template's disk, so it cannot be resumed against
+      // another root filesystem.
+      assert(json.last_start === 'boot',
+        `last_start is ${JSON.stringify(json.last_start)}, want boot`);
       machine = json;
 
       // Serving means the guest agent answers, which is what every other API
@@ -2135,6 +2288,13 @@ async function volumeServiceAssertions() {
       assert(marker === 'service-marker', `the volume lost its data across a redeploy: ${JSON.stringify(marker)}`);
       const release = await exec(replica.id, 'cat /etc/pilots-release-marker');
       assert(release === 'two', `the machine is still on the old image: ${JSON.stringify(release)}`);
+      // A redeploy kills the process and boots the row from another image, so
+      // it is a boot on THIS host's vendor and the row has to say so before the
+      // machine's next suspend photographs here.
+      assert(reps[0].last_start === 'boot',
+        `last_start after a redeploy is ${JSON.stringify(reps[0].last_start)}, want boot`);
+      assert(reps[0].last_start_at >= before.last_start_at,
+        'last_start_at did not advance across a redeploy');
 
       const answered = await held;
       if (answered !== null) {

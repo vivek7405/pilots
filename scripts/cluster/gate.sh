@@ -1727,6 +1727,161 @@ else
   fi
 fi
 
+say "20. The last host of a vendor is gone: the machine cold-boots on the other vendor"
+# A Firecracker memory snapshot carries raw CPUID and never restores across the
+# Intel/AMD boundary, so a machine whose owner is dead and whose vendor pool has
+# no live host cannot be resumed anywhere. It boots from its own disk instead:
+# same id, name, URL, volume and bytes on disk, and no processes.
+#
+# The tier-2-versus-tier-3 CHOICE over a real dead host is proved in Go, where a
+# fleet with two vendors can be built in a table. What needs a host is the boot
+# path itself, and this rig is single-vendor, so it does the equivalent: the last
+# live host is made to REPORT the other vendor, which removes the machine's pool
+# as the ranking sees it and makes that host the tier-3 rescuer of its own
+# machines. Two flags, both required, exactly as section 19 arms the NBD fault
+# and for the same reason -- one of them set by accident on a real host would
+# turn every wake in the fleet into a reboot.
+#
+# This section disarms itself, so it adds nothing to the "left the rig changed"
+# list below.
+if [ -z "$FAULT_IP" ]; then
+  bad "no host is alive to drive the cold boot on"
+else
+  CB_REAL=$(curl -sf -m 5 "http://${FAULT_IP}:8080/v1/health" 2>/dev/null | jf cpu_vendor)
+  case "$CB_REAL" in
+    GenuineIntel) CB_OTHER=AuthenticAMD ;;
+    AuthenticAMD) CB_OTHER=GenuineIntel ;;
+    *) CB_OTHER="" ;;
+  esac
+  if [ -z "$CB_OTHER" ]; then
+    bad "${FAULT_IP} reports cpu_vendor '${CB_REAL}'; without it there is no other vendor to force"
+  else
+    ok "${FAULT_IP} is ${CB_REAL}; forcing ${CB_OTHER}"
+
+    # auto_stop off, so the idle monitor cannot suspend this machine underneath
+    # the measurement and turn a timed wake into a race.
+    CB=$(api "$FAULT_IP" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
+    CB_ID=$(echo "$CB" | jf id)
+    CB_URL=$(echo "$CB" | jf url)
+    CB_HOST=$(echo "$CB" | jf host_id)
+    if [ -z "$CB_ID" ]; then
+      bad "could not create the machine to cold-boot: $CB"
+    else
+      api "$FAULT_IP" POST "/v1/machines/${CB_ID}/exec" \
+        '{"cmd":"echo cold-marker > /var/tmp/marker-cold","user":"root"}' >/dev/null 2>&1
+      # Created and suspended BEFORE the fault is armed, deliberately. hostd
+      # records the vendor it REPORTS, so a machine created afterwards would
+      # carry the forced one and resume normally -- which is the design, and is
+      # what step 6 below asserts.
+      api "$FAULT_IP" POST "/v1/machines/${CB_ID}/suspend" '{}' >/dev/null 2>&1
+      CB_BEFORE=$(curl -sf -m 5 "http://${FAULT_IP}:8080/metrics" 2>/dev/null \
+        | awk '$1=="pilots_machine_starts_total{kind=\"cold_boot\"}"{print $2}')
+      CB_BEFORE="${CB_BEFORE:-0}"
+      CB_NBD_BEFORE=$(nbd_attached "$FAULT_IP" | wc -l)
+
+      $SSH "root@$FAULT_IP" "mkdir -p /etc/pilots && printf 'PILOT_FAULTS=1\nPILOT_FAULT_CPU_VENDOR=%s\n' '$CB_OTHER' >> /etc/pilots/hostd.env && systemctl restart hostd" >/dev/null 2>&1
+      if wait_serving "$FAULT_IP" 120; then
+        CB_HEALTH=$(curl -sf -m 5 "http://${FAULT_IP}:8080/v1/health" 2>/dev/null)
+        if [ "$(echo "$CB_HEALTH" | jf cpu_vendor)" = "$CB_OTHER" ] \
+          && [ "$(echo "$CB_HEALTH" | jf cpu_vendor_forced)" = "True" ]; then
+          ok "${FAULT_IP} now reports ${CB_OTHER} and says the vendor is forced"
+        else
+          bad "${FAULT_IP} came back but does not report a forced ${CB_OTHER}: ${CB_HEALTH}"
+        fi
+
+        CB_START=$(date +%s%N)
+        api "$FAULT_IP" POST "/v1/machines/${CB_ID}/wake" '{}' >/dev/null 2>&1
+        CB_MS=$(( ($(date +%s%N) - CB_START) / 1000000 ))
+        CB_ROW=$(api "$FAULT_IP" GET "/v1/machines/${CB_ID}")
+
+        # 60s is the RIG ceiling, not the product budget. The tiered budget --
+        # 5s on metal, 25s under nested KVM -- is asserted by scripts/e2e.mjs;
+        # what this proves is that a cold boot completes at all, on hardware
+        # that boots a kernel inside a nested hypervisor.
+        [ "$CB_MS" -lt 60000 ] \
+          && ok "the cold boot completed in ${CB_MS}ms" \
+          || bad "the cold boot took ${CB_MS}ms, over the 60s rig ceiling"
+
+        [ "$(echo "$CB_ROW" | jf last_start)" = "cold_boot" ] \
+          && ok "the machine reports last_start=cold_boot" \
+          || bad "last_start is '$(echo "$CB_ROW" | jf last_start)', so this was not the downgrade"
+
+        CB_MARK=$(api "$FAULT_IP" POST "/v1/machines/${CB_ID}/exec" \
+          '{"cmd":"cat /var/tmp/marker-cold","user":"root"}' 2>/dev/null | jf stdout | tr -d '[:space:]')
+        [ "$CB_MARK" = "cold-marker" ] \
+          && ok "the disk survived the cold boot" \
+          || bad "the disk did not survive the cold boot: '${CB_MARK}'"
+
+        [ "$(echo "$CB_ROW" | jf url)" = "$CB_URL" ] \
+          && ok "the URL is unchanged across the cold boot" \
+          || bad "the URL moved: ${CB_URL} -> $(echo "$CB_ROW" | jf url)"
+
+        [ "$(echo "$CB_ROW" | jf host_id)" = "$CB_HOST" ] \
+          && ok "the machine stayed on ${CB_HOST}" \
+          || bad "host_id moved: ${CB_HOST} -> $(echo "$CB_ROW" | jf host_id)"
+
+        CB_AFTER=$(curl -sf -m 5 "http://${FAULT_IP}:8080/metrics" 2>/dev/null \
+          | awk '$1=="pilots_machine_starts_total{kind=\"cold_boot\"}"{print $2}')
+        [ "${CB_AFTER:-0}" = "$(( CB_BEFORE + 1 ))" ] \
+          && ok "pilots_machine_starts_total{kind=cold_boot} grew by one" \
+          || bad "the cold-boot counter went ${CB_BEFORE} -> ${CB_AFTER:-0}, want one more"
+
+        # What the host must look like afterwards. The memory came from a
+        # KERNEL, so there is no fault handler at all -- a uffd handler here
+        # would mean the machine restored something and this section proved
+        # nothing.
+        CB_FC=$($SSH "root@$FAULT_IP" "pgrep -fc 'firecracker.*--id ${CB_ID}' || true" 2>/dev/null | tr -d '[:space:]')
+        CB_PID=$(fc_pid "$FAULT_IP" "$CB_ID")
+        [ -n "$CB_PID" ] && [ "${CB_FC:-0}" -le 1 ] \
+          && ok "exactly one Firecracker is serving ${CB_ID}" \
+          || bad "found ${CB_FC:-0} Firecracker processes for ${CB_ID} (cgroup pid '${CB_PID}')"
+
+        CB_NBD_AFTER=$(nbd_attached "$FAULT_IP" | wc -l)
+        [ "$CB_NBD_AFTER" = "$(( CB_NBD_BEFORE + 1 ))" ] \
+          && ok "the cold boot took exactly one NBD device with a live server" \
+          || bad "NBD devices went ${CB_NBD_BEFORE} -> ${CB_NBD_AFTER}, want one more"
+
+        CB_UFFD=$($SSH "root@$FAULT_IP" "pgrep -fc 'uffd-handler.*${CB_ID}' || true" 2>/dev/null | tr -d '[:space:]')
+        [ "${CB_UFFD:-0}" = "0" ] \
+          && ok "no uffd handler was started; the memory came from a kernel" \
+          || bad "${CB_UFFD} uffd handlers are running for a machine that booted"
+
+        # And the machine is normal again. Its suspend image now belongs to the
+        # pool it landed in, so the next wake is an ordinary restore -- if it is
+        # not, the cold boot produced a machine that reboots forever.
+        api "$FAULT_IP" POST "/v1/machines/${CB_ID}/suspend" '{}' >/dev/null 2>&1
+        api "$FAULT_IP" POST "/v1/machines/${CB_ID}/wake" '{}' >/dev/null 2>&1
+        CB_ROW2=$(api "$FAULT_IP" GET "/v1/machines/${CB_ID}")
+        [ "$(echo "$CB_ROW2" | jf last_start)" = "restore" ] \
+          && ok "the next wake is an ordinary restore" \
+          || bad "the second wake reports '$(echo "$CB_ROW2" | jf last_start)'; the machine cold-boots forever"
+
+        CB_MARK2=$(api "$FAULT_IP" POST "/v1/machines/${CB_ID}/exec" \
+          '{"cmd":"cat /var/tmp/marker-cold","user":"root"}' 2>/dev/null | jf stdout | tr -d '[:space:]')
+        [ "$CB_MARK2" = "cold-marker" ] \
+          && ok "the disk chain continued past the cold boot" \
+          || bad "the disk chain broke after the cold boot: '${CB_MARK2}'"
+      else
+        bad "hostd did not come back after forcing the CPU vendor on ${FAULT_IP}"
+      fi
+
+      api "$FAULT_IP" DELETE "/v1/machines/${CB_ID}" >/dev/null 2>&1
+    fi
+
+    # Disarm, always, so this section leaves the rig as it found it.
+    $SSH "root@$FAULT_IP" "sed -i '/^PILOT_FAULTS=/d;/^PILOT_FAULT_CPU_VENDOR=/d' /etc/pilots/hostd.env && systemctl restart hostd" >/dev/null 2>&1
+    if wait_serving "$FAULT_IP" 120; then
+      CB_LEFT=$($SSH "root@$FAULT_IP" "grep -c PILOT_FAULT /etc/pilots/hostd.env" 2>/dev/null | tr -d '[:space:]')
+      CB_NOW=$(curl -sf -m 5 "http://${FAULT_IP}:8080/v1/health" 2>/dev/null | jf cpu_vendor)
+      [ "${CB_LEFT:-1}" = "0" ] && [ "$CB_NOW" = "$CB_REAL" ] \
+        && ok "the fault is disarmed and ${FAULT_IP} reports ${CB_REAL} again" \
+        || bad "${FAULT_IP} still carries a PILOT_FAULT line or reports '${CB_NOW}'"
+    else
+      bad "${FAULT_IP} did not come back after disarming the CPU vendor fault"
+    fi
+  fi
+fi
+
 say "Result"
 echo "  ${PASS} passed, ${FAIL} failed"
 echo
