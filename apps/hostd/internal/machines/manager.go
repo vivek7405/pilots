@@ -470,6 +470,11 @@ func (m *Manager) releaseService(ctx context.Context, row *state.Machine) error 
 	if err := m.opts.Store.DeleteService(ctx, row.ServiceID); err != nil {
 		return fmt.Errorf("delete service %s: %w", row.ServiceID, err)
 	}
+	// The binding goes with the row. The volume itself stays: unattached,
+	// listed, reusable by the next service that names it.
+	if err := m.opts.Store.DeleteServiceVolumes(ctx, row.ServiceID); err != nil {
+		return fmt.Errorf("delete service volumes %s: %w", row.ServiceID, err)
+	}
 	return nil
 }
 

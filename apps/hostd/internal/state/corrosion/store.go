@@ -1052,6 +1052,85 @@ func (s *Store) ListDomains(ctx context.Context) ([]state.Domain, error) {
 	return out, rows.Err()
 }
 
+const serviceVolumeCols = `id, service_id, ordinal, volume_id, created_at`
+
+// ServiceVolume reads the volume a service mounts.
+func (s *Store) ServiceVolume(ctx context.Context, serviceID string) (*state.ServiceVolume, error) {
+	rows, err := s.client.Query(ctx,
+		`SELECT `+serviceVolumeCols+` FROM service_volumes WHERE service_id = ? ORDER BY ordinal`, serviceID)
+	if err != nil {
+		return nil, fmt.Errorf("state: service volume %q: %w", serviceID, err)
+	}
+	defer rows.Close()
+	var out []state.ServiceVolume
+	for rows.Next() {
+		var id string
+		var sv state.ServiceVolume
+		if err := rows.Scan(&id, &sv.ServiceID, &sv.Ordinal, &sv.VolumeID, &sv.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, sv)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	switch len(out) {
+	case 0:
+		return nil, fmt.Errorf("state: service volume %q: %w", serviceID, state.ErrNotFound)
+	case 1:
+		return &out[0], nil
+	default:
+		return nil, fmt.Errorf("state: service %q mounts %d volumes; this build supports one", serviceID, len(out))
+	}
+}
+
+// PutServiceVolume writes the volume a service mounts.
+//
+// Guarded by the service's arbiter for the reason PutDomain is: the row names
+// a service, so there is no host column to enforce single-writer on. Written
+// once besides, so there is nothing for a merge to corrupt.
+func (s *Store) PutServiceVolume(ctx context.Context, sv *state.ServiceVolume) error {
+	if err := s.assertServiceWriter(ctx, sv.ServiceID); err != nil {
+		return err
+	}
+	_, err := s.client.Exec(ctx, `
+		INSERT INTO service_volumes (`+serviceVolumeCols+`) VALUES (?,?,?,?,?)
+		ON CONFLICT(id) DO NOTHING`,
+		state.ServiceVolumeID(sv.ServiceID, sv.Ordinal), sv.ServiceID, sv.Ordinal, sv.VolumeID, sv.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put service volume %q: %w", sv.ServiceID, err)
+	}
+	return nil
+}
+
+// DeleteServiceVolumes drops a service's bindings, beside DeleteService.
+func (s *Store) DeleteServiceVolumes(ctx context.Context, serviceID string) error {
+	if _, err := s.client.Exec(ctx,
+		`DELETE FROM service_volumes WHERE service_id = ?`, serviceID); err != nil {
+		return fmt.Errorf("state: delete service volumes %q: %w", serviceID, err)
+	}
+	return nil
+}
+
+// ListServiceVolumes returns every binding, read from the local replica.
+func (s *Store) ListServiceVolumes(ctx context.Context) ([]state.ServiceVolume, error) {
+	rows, err := s.client.Query(ctx, `SELECT `+serviceVolumeCols+` FROM service_volumes`)
+	if err != nil {
+		return nil, fmt.Errorf("state: list service volumes: %w", err)
+	}
+	defer rows.Close()
+	var out []state.ServiceVolume
+	for rows.Next() {
+		var id string
+		var sv state.ServiceVolume
+		if err := rows.Scan(&id, &sv.ServiceID, &sv.Ordinal, &sv.VolumeID, &sv.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, sv)
+	}
+	return out, rows.Err()
+}
+
 // Version is the sum of the replica's version vector, one db_version per
 // actor: the number of changes this replica has applied from every host, so
 // two hosts' values say how far apart they are. The scalar crsql_db_version()
