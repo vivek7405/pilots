@@ -20,14 +20,21 @@ import (
 func runBootstrapKeyCapturingStdout(t *testing.T) string {
 	t.Helper()
 
+	// Never the host's real /etc/pilots/config: on a developer box that file
+	// exists, is root-owned 0600 on purpose, and would either fail the open or
+	// leak a real fleet's configuration into this process.
+	saved := environmentFile
+	environmentFile = filepath.Join(t.TempDir(), "config")
+	t.Cleanup(func() { environmentFile = saved })
+
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("pipe: %v", err)
 	}
-	saved := os.Stdout
+	savedStdout := os.Stdout
 	os.Stdout = w
 	runErr := runBootstrapKey()
-	os.Stdout = saved
+	os.Stdout = savedStdout
 	w.Close()
 
 	var sb strings.Builder

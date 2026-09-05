@@ -647,3 +647,43 @@ func TestPromoteRefusesATemplateVolumeMachine(t *testing.T) {
 		t.Errorf("the ordinary promote did not reach the rollout (%d)", bareRoll.promotes)
 	}
 }
+
+// A service's URL follows the listener for the same reason a machine's does:
+// the rig and the local box serve plain HTTP on :8080, and a link that omits
+// either does not open.
+func TestServiceURLFollowsTheListener(t *testing.T) {
+	st, err := state.Open(":memory:")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	seedKey(t, st, testKey, "org_1", "admin")
+
+	ctx := context.Background()
+	if err := st.PutService(ctx, &state.Service{
+		ID: "s_1", Name: "web", Replicas: 1, Domain: "web", CreatedAt: 1,
+	}); err != nil {
+		t.Fatalf("PutService: %v", err)
+	}
+	if err := st.PutTenancy(ctx, &state.Tenancy{
+		ID: "s_1", OrgID: "org_1", Kind: "service", CreatedAt: 1,
+	}); err != nil {
+		t.Fatalf("PutTenancy: %v", err)
+	}
+	h := Routes(Deps{
+		HostID: "host-test", Store: st, Domain: "pilotrun.app",
+		URL: PublicURLFor(false, ":8080"),
+	})
+
+	rec := do(t, h, "GET", "/v1/services/s_1", testKey)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d: %s", rec.Code, rec.Body)
+	}
+	var got Service
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.URL != "http://web.pilotrun.app:8080" {
+		t.Errorf("url = %q, want the listener's scheme and port", got.URL)
+	}
+}

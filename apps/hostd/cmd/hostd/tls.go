@@ -13,11 +13,45 @@ import (
 	"github.com/libdns/cloudflare"
 	"github.com/mholt/acmez/v3"
 
+	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/certs"
 	"github.com/vivek7405/pilots/hostd/internal/config"
 	"github.com/vivek7405/pilots/hostd/internal/s3"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
+
+// tlsConfigured is the one definition of whether the FLEET serves TLS, and it
+// reads configuration ONLY: a place to share certificates from, and a contact
+// to register with. Every host given the same configuration answers the same
+// way, which is the property that matters, because every host renders `url`
+// for every machine and service row in the fleet and not only for its own. A
+// scheme read from one host's runtime state would make a machine's permanent
+// URL depend on which host answered the call -- AGENTS.md invariant 4.
+//
+// The trade is deliberate: a host whose TLS genuinely failed to start still
+// reports https:// URLs it cannot itself serve. That is the correct side to
+// fail on. The alternative is one host disagreeing with the rest of the fleet
+// about a permanent URL, and a host that cannot start TLS is a broken host for
+// an operator to fix, not a state a URL should describe.
+func tlsConfigured(cfg *config.Config) bool {
+	return cfg.S3Bucket != "" && cfg.ACMEEmail != ""
+}
+
+// tlsEnabled is whether THIS host can serve TLS: the fleet-wide fact above,
+// plus this host's own certificate store having actually opened. Strictly
+// narrower than tlsConfigured, and the difference between them is exactly the
+// host-local accident that must never reach a URL.
+func tlsEnabled(cfg *config.Config, objects *s3.Client) bool {
+	return objects != nil && tlsConfigured(cfg)
+}
+
+// publicURLFor is the URL shape this fleet renders, derived from the same one
+// definition the listener decision reads. A pure function of cfg on purpose --
+// no certificate store, no error from opening one -- so that two hosts holding
+// the same configuration cannot render a machine's URL differently.
+func publicURLFor(cfg *config.Config) api.PublicURL {
+	return api.PublicURLFor(tlsConfigured(cfg), cfg.ListenAddr)
+}
 
 // startTLS serves the router over HTTPS, obtaining certificates on demand.
 //
@@ -33,7 +67,7 @@ import (
 func startTLS(ctx context.Context, cfg *config.Config, store state.Store,
 	objects *s3.Client, handler http.Handler) error {
 
-	if objects == nil || cfg.ACMEEmail == "" {
+	if !tlsEnabled(cfg, objects) {
 		slog.Info("TLS is off; the router serves plain HTTP",
 			"reason", "no object storage or no ACME contact configured")
 		return nil

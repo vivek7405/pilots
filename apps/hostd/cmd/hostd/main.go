@@ -467,10 +467,20 @@ func run() error {
 		machineCPU = cachedMachineCPU{cache: f.cache}
 	}
 
+	// The certificate store is opened HERE, before the API is built, because
+	// the listener decision below needs it. The URL scheme deliberately does
+	// NOT: both read the same configured facts (tlsConfigured), evaluated once
+	// and used twice, but only the listener also requires this host's own
+	// store to have opened. This host renders `url` for every machine and
+	// service row in the fleet, so a scheme that moved with its runtime state
+	// would make a machine's permanent URL depend on which host answered.
+	certClient, certErr := newCertStore(cfg)
+	publicURL := publicURLFor(cfg)
+
 	controlAPI := api.Routes(api.Deps{
 		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink, HugePages: cfg.HugePages,
 		StoreVersion: storeVersion(store),
-		Builds:       builder, Rollout: rollout, Domain: cfg.WorkloadDomain,
+		Builds:       builder, Rollout: rollout, Domain: cfg.WorkloadDomain, URL: publicURL,
 		Peers: peerLookup(f), PeerToken: api.PeerTokenFor(cfg.AgentTokenSecret),
 		Tenancy: tenancy, MachineCPU: machineCPU, BuildGate: &quota.HostGate{},
 		CPUVendor: vendor, CPUVendorForced: vendorForced,
@@ -480,6 +490,11 @@ func run() error {
 		GitHub: github.Handler(github.Deps{
 			HostID: cfg.HostID, App: ghApp, Store: store, Builds: builder,
 			Rollout: rollout, Machines: mgr, Domain: cfg.WorkloadDomain,
+			// The same value the API handlers render URLs with, so the link
+			// on a pull request opens the way the one from POST /v1/machines
+			// does. Without it a single box tells a developer https://<name>
+			// on a host that only listens plain on :8080.
+			URL: publicURL,
 		}),
 	})
 
@@ -520,12 +535,12 @@ func run() error {
 	// TLS, when the fleet can share certificates. Serves the same handler on
 	// :443 with on-demand issuance; the plain listener below stays for the
 	// internal mesh and for fleets without object storage.
-	if certClient, cerr := newCertStore(cfg); cerr == nil && certClient != nil {
+	if certErr == nil && certClient != nil {
 		if err := startTLS(ctx, cfg, store, certClient, handler); err != nil {
 			return err
 		}
-	} else if cerr != nil {
-		slog.Warn("TLS is off: could not open the certificate store", "err", cerr)
+	} else if certErr != nil {
+		slog.Warn("TLS is off: could not open the certificate store", "err", certErr)
 	}
 
 	ln, err := net.Listen("tcp", cfg.ListenAddr)
@@ -541,7 +556,8 @@ func run() error {
 	}()
 
 	slog.Info("hostd listening",
-		"addr", ln.Addr().String(), "host_id", cfg.HostID, "domain", cfg.WorkloadDomain)
+		"addr", ln.Addr().String(), "host_id", cfg.HostID, "domain", cfg.WorkloadDomain,
+		"url", publicURL.Of(cfg.APIHostname))
 	notifyReady()
 
 	select {

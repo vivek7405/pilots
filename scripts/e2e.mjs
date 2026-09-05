@@ -110,6 +110,23 @@ async function reach(id, url, seconds = 5) {
   return { code: code ?? '000', ip: ip ?? '' };
 }
 
+// assertOpenableURL holds the URL a client is told to one it can actually open.
+//
+// On the rig and on a single box that means the scheme and port THIS battery is
+// using, because the plain listener is the only way in. A TLS fleet is the one
+// case where the two legitimately differ: the router serves :443 whatever the
+// plain listener is bound to, so https with no port opens from anywhere and the
+// battery may well have reached the host over http://127.0.0.1:8080 -- which is
+// what every runbook in this repo tells you to do, including on metal.
+function assertOpenableURL(url, what) {
+  assert(typeof url === 'string' && url, `${what} returned no url`);
+  const want = new URL(API);
+  const got = new URL(url);
+  const overTLS = got.protocol === 'https:' && got.port === '';
+  assert(overTLS || (got.protocol === want.protocol && got.port === want.port),
+    `${what} url ${url} does not open the way ${API} does`);
+}
+
 // viaRouter sends a request the way a browser would: to the fleet's API
 // listener, carrying a workload hostname. The listener hands anything with a
 // workload Host to the router, so this is the public wake path rather than an
@@ -233,7 +250,7 @@ async function lifecycleAssertions() {
     });
     assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
     assert(json.id, 'no machine id');
-    assert(json.url?.startsWith('https://'), `unexpected url ${json.url}`);
+    assertOpenableURL(json.url, 'machine');
     assert(json.state === 'running', `state is ${json.state}`);
     // A create from the golden template is a RESTORE, which is what makes it
     // sub-second. Reporting a boot here would mean the template's memory image
@@ -4217,7 +4234,7 @@ async function agentDeployAssertions() {
       service = JSON.parse(toolText(result));
       assert(service.service_id, `no service id: ${toolText(result)}`);
       serviceIDs.push(service.service_id);
-      assert(service.url?.startsWith('https://'), `unexpected url ${service.url}`);
+      assertOpenableURL(service.url, 'service');
       assert(service.release_id, 'the deploy returned no release');
     });
     if (!service) return;

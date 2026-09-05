@@ -12,6 +12,26 @@ import type { Service } from '@pilots/sdk';
 
 export const metadata = { title: 'Services' };
 
+/**
+ * Where a custom domain opens.
+ *
+ * The scheme is NOT hardcoded to https: a custom domain is served by the same
+ * listener the service's own URL names, so on a fleet without TLS -- the local
+ * single box, the three-node rig -- it opens over http on the plain listener's
+ * port. hostd already decides that once and renders it into `url` (see
+ * `internal/api/publicurl.go`), so read the shape off that rather than assume
+ * a second one here. https when the service has no URL to read.
+ */
+function customDomainHref(service: Service): string {
+  if (!service.url) return `https://${service.custom_domain}`;
+  try {
+    const base = new URL(service.url);
+    return `${base.protocol}//${service.custom_domain}${base.port ? `:${base.port}` : ''}`;
+  } catch {
+    return `https://${service.custom_domain}`;
+  }
+}
+
 export default async function ServicesPage() {
   const ctx = (await requireOrg())!;
   const services = orUnauthorized(await listServices().catch(() => []));
@@ -40,7 +60,7 @@ export default async function ServicesPage() {
               header: 'URL',
               cell: (s) =>
                 s.custom_domain
-                  ? html`<a href=${`https://${s.custom_domain}`} rel="noopener">${s.custom_domain}</a>`
+                  ? html`<a href=${customDomainHref(s)} rel="noopener">${s.custom_domain}</a>`
                   : s.url
                     ? html`<a href=${s.url} rel="noopener">${s.url}</a>`
                     : '-',

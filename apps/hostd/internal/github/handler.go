@@ -27,6 +27,11 @@ type Deps struct {
 	Rollout  Rollout
 	Machines MachineManager
 	Domain   string
+	// URL renders a machine's hostname the way a client can open it, decided
+	// once at startup exactly as it is for the API handlers (see
+	// api.PublicURL). The zero value is the production shape -- https, no
+	// port -- so a fleet that does not set it comments what it always did.
+	URL api.PublicURL
 }
 
 // BuildRunner is the build surface, matching api.BuildRunner so the same
@@ -189,11 +194,21 @@ func (d Deps) onPullRequest(ctx context.Context, ev Event) error {
 	if err != nil {
 		return err
 	}
-	body := fmt.Sprintf("Preview for `%s`: https://%s\n\nIt suspends when idle and "+
-		"wakes on the next request, and is destroyed when this pull request closes.",
-		ev.PullRequest.Head.SHA[:min(7, len(ev.PullRequest.Head.SHA))], mach.Domain)
 	return d.App.Comment(ctx, token, ev.Repository.FullName, ev.PullRequest.Number,
-		previewMarker, body)
+		previewMarker, d.previewComment(ev.PullRequest.Head.SHA, mach.Domain))
+}
+
+// previewComment renders the comment a preview announces itself with.
+//
+// The URL goes through d.URL rather than a hardcoded https:// because this is
+// the one place a client is handed a machine's address off the API path, and a
+// link a developer cannot click is the whole defect: a single box serving the
+// plain listener on :8080 rendered https://<name>.pilots.localhost here while
+// every other surface rendered the port.
+func (d Deps) previewComment(sha, domain string) string {
+	return fmt.Sprintf("Preview for `%s`: %s\n\nIt suspends when idle and "+
+		"wakes on the next request, and is destroyed when this pull request closes.",
+		sha[:min(7, len(sha))], d.URL.Of(domain))
 }
 
 func (d Deps) destroyPreview(ctx context.Context, name string, ev Event) error {

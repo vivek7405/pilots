@@ -35,6 +35,9 @@ type Deps struct {
 	Rollout Rollout
 	// Domain is the fleet's domain, for rendering a service's URL.
 	Domain string
+	// URL is the scheme and port every machine and service URL is rendered
+	// with. See PublicURL; the zero value is the production shape.
+	URL PublicURL
 	// Resolver verifies that a custom hostname points here. Nil uses the
 	// system resolver; a test supplies its own.
 	Resolver Resolver

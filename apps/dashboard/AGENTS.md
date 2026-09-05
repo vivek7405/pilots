@@ -142,10 +142,13 @@ check for UI work.
 
 ### Commands
 
+The dashboard runs on **3000, not webjs's default 8080**: hostd keeps 8080 and
+a `webjs dev` server left on it makes hostd's bind fail. See `docs/local.md` §7.
+
 ```sh
 npm install
 npm run gallery:clear        # shed the demo gallery before building a real app
-npm run dev                  # dev server at http://localhost:8080
+PORT=3000 npm run dev        # dev server at http://localhost:3000
 npm run start                # production server
 npm test                     # unit + browser tests
 npm run typecheck

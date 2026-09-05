@@ -31,12 +31,24 @@ const bootstrapKeyTimeout = 3 * time.Minute
 // default: an admin key is the fleet operator's, not a customer's.
 const bootstrapOrgEnv = "PILOT_BOOTSTRAP_ORG"
 
+// environmentFile is the systemd EnvironmentFile the units load, applied here
+// too because a root shell does not.
+//
+// A variable rather than a constant so the tests can point it at a temp file.
+// Reading the real host's copy would make `go test ./cmd/hostd` depend on
+// whatever /etc/pilots/config this machine happens to have -- it would fail
+// outright when that file is root-owned 0600, which is what it MUST be (it
+// carries PILOT_FLEET_KEY, and hostd reads PILOT_JAILER out of it), and it
+// would os.Setenv the host's real configuration into the test process for
+// every later test in the package.
+var environmentFile = "/etc/pilots/config"
+
 func runBootstrapKey() error {
 	// The systemd units read /etc/pilots/config as an EnvironmentFile; a root
 	// shell does not. Without this, a bootstrapped host running this command
 	// by hand would load defaults, open the wrong store, and write a key
 	// nothing authenticates against.
-	if err := loadEnvironmentFile("/etc/pilots/config"); err != nil {
+	if err := loadEnvironmentFile(environmentFile); err != nil {
 		return err
 	}
 
