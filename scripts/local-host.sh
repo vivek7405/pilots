@@ -152,6 +152,15 @@ PILOT_FLEET_KEY=${PILOT_FLEET_KEY:-$(head -c 32 /dev/urandom | base64)}
 EOF
   chmod 0600 "$CONFIG"
   umask 022
+  # Still 0600, but owned by whoever ran sudo rather than by root. hostd and
+  # `hostd bootstrap-key` are root and read it either way; the developer needs
+  # to as well, because cmd/hostd's bootstrap-key tests load this exact path
+  # and a root-owned file turns `go test ./...` on this box into two permission
+  # failures. Nothing on a fleet host is affected: host-bootstrap.sh writes
+  # that file, not this script.
+  if [ -n "${SUDO_UID:-}" ]; then
+    chown "$SUDO_UID:${SUDO_GID:-$SUDO_UID}" "$CONFIG"
+  fi
 fi
 
 set -a

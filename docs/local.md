@@ -9,8 +9,14 @@ Hetzner host behaves exactly as it did before this document existed.
 account, and a self-signed one would be a second certificate source production
 never runs). The mesh, and therefore rescue and self-heal, which need a second
 host. Builds from a Dockerfile, which need a rootless buildkitd at
-`PILOT_BUILDKIT_SOCK`. Hugepages. A CPU template, which only matters when a
+`PILOT_BUILDKIT_SOCK` and its own `buildctl`. Volumes, which need
+`/opt/pilots/bin/juicefs`. Hugepages. A CPU template, which only matters when a
 snapshot has to restore on a different box.
+
+Those last two are the only reason the e2e battery is not fully green on a box
+run this way: every volume and build assertion fails on a missing binary that
+`host-bootstrap.sh` installs and nothing here does. Both are out of scope for a
+single box today; see the run in the pull request that added this document.
 
 Requirements: x86_64, KVM (`/dev/kvm` readable and writable), root through
 `sudo`, and a disk filesystem that is not mounted `nodev` under
@@ -240,9 +246,24 @@ new PilotsClient(key, { baseURL: 'http://api.pilots.localhost:8080' })
 pilots.New(key, pilots.WithBaseURL("http://api.pilots.localhost:8080"))
 ```
 
-Both also read `PILOT_API_URL`. For the dashboard, put `PILOT_API_URL` and
-`PILOT_ADMIN_KEY` (that `$KEY`) in `apps/dashboard/.env`; it throws at boot
-without them. See `apps/dashboard/README.md`.
+Both also read `PILOT_API_URL`.
+
+The dashboard throws at boot without five values in `apps/dashboard/.env`:
+
+```
+PORT=3000
+PILOT_API_URL=http://api.pilots.localhost:8080
+PILOT_ADMIN_KEY=<the $KEY above>
+AUTH_SECRET=<node -e "console.log(require('crypto').randomBytes(32).toString('hex'))">
+AUTH_GITHUB_ID=<from a GitHub App>
+AUTH_GITHUB_SECRET=<from a GitHub App>
+```
+
+The last two cannot be faked: every page behind `/login` needs a real GitHub
+OAuth round trip, so a placeholder boots the app and serves the sign-in page
+but gets you no further. Register an App with
+`http://localhost:3000/api/auth/callback/github` as a callback URL. See
+`apps/dashboard/README.md`.
 
 ## 9. The e2e battery
 
@@ -253,6 +274,15 @@ PILOTS_E2E=1 PILOTS_E2E_FULL=1 \
 
 Without `PILOTS_E2E_FULL=1` it runs the process-only half and skips everything
 that boots a machine, which on a Firecracker host is most of what you want.
+
+**Guest egress to the public internet needs a host that forwards.** A guest is
+SNAT'd inside its namespace and the host has to route the packet out from
+there. A workstation running Docker and a firewall that denies routed traffic
+(`ufw status verbose` saying `deny (routed)`) drops it, and the battery's
+"a guest can still reach the public internet" fails while everything else about
+the guest's network passes: DNS resolves, the drop list still blocks private
+ranges, and the machine is reachable on its URL. A dedicated host has no such
+policy.
 
 `scripts/e2e-restart.sh` is a restart gate, not a way to run the product: it
 kills any running hostd and wipes `/var/lib/pilots/machines`,
