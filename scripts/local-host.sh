@@ -85,6 +85,16 @@ if findmnt -T "$CHROOT_BASE" -no OPTIONS 2>/dev/null | grep -qw nodev; then
   exit 1
 fi
 
+# A machine's disk is served over NBD, so the module has to be loaded with
+# enough devices for the machines this box will hold. A production host gets
+# this from host-bootstrap.sh, which writes the modprobe config and loads it;
+# a desktop kernel has the module built but not loaded, and the failure is a
+# create that dies with "no network block devices exist" 30 seconds in.
+if [ ! -e /dev/nbd0 ]; then
+  echo "==> loading the nbd module (nbds_max=64)"
+  modprobe nbd nbds_max=64
+fi
+
 if [ ! -f "$GOLDEN_SRC" ]; then
   echo "no golden rootfs at $GOLDEN_SRC. Build it:" >&2
   echo "  PATH=<docker shim>:\$PATH scripts/build-golden-rootfs.sh   # see docs/local.md" >&2

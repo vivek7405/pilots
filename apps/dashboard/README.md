@@ -85,11 +85,26 @@ in no compose file, no image, and no row in the clear.
 cp apps/dashboard/.env.example apps/dashboard/.env    # then fill in the values
 npm install                                            # from the repo root
 npm run build:sdk-js                                   # @pilots/sdk resolves to dist/
-npm run dev --workspace=apps/dashboard                 # http://localhost:8080
+PORT=3000 npm run dev --workspace=apps/dashboard       # http://localhost:3000
 ```
 
+Port 3000 rather than the default, because hostd keeps 8080 and the dashboard
+needs a fleet to talk to. See `docs/local.md` for the full port split.
+
+Two of the values are not optional: the dashboard throws at boot without
+`PILOT_API_URL` and `PILOT_ADMIN_KEY`. Against a single box run by
+`docs/local.md` they are
+
+```
+PILOT_API_URL=http://api.pilots.localhost:8080
+PILOT_ADMIN_KEY=<sudo /opt/pilots/bin/hostd bootstrap-key>
+```
+
+and against a real fleet, the fleet's API base and a key minted on the keys
+page.
+
 For sign-in to work locally, register a GitHub App (below) with
-`http://localhost:8080/api/auth/callback/github` as an additional callback URL.
+`http://localhost:3000/api/auth/callback/github` as an additional callback URL.
 
 The usage poller does not run under `webjs dev`; it is gated to
 `NODE_ENV=production`. Call `startUsagePoller` directly if you need to exercise
