@@ -32,7 +32,7 @@ deploy sets it on its replicas, and a promoted sandbox keeps the knobs it had).
 | Self-heal | dead host's machines return on survivors, zero human action |
 | Deploy | any Dockerfile → running service, streamed structured build logs |
 | Custom domains | CNAME + automatic per-domain certs |
-| Rollout | health-gated deploy, kept-old rollback |
+| Rollout | health-gated deploy, kept-old rollback; a volume-backed service is one machine redeployed in place |
 | Promote | sandbox checkpoint → production service, identity preserved |
 | N-replica | router LB, concurrency-driven autostop/autostart |
 | Volumes | persistent, per-write durable, survive host death |
@@ -185,6 +185,16 @@ CREATE TABLE services  (id TEXT PRIMARY KEY, name TEXT, app TEXT,
                        repo TEXT, branch TEXT, autodeploy INTEGER,
                        created_at INTEGER);           -- writer: host_id only
 
+-- The volume a service mounts. A NEW table rather than a column on services,
+-- for the reason domains and tenancy are ones: services carries rows, and
+-- cr-sqlite backfills every row of a table whose columns change. The key is
+-- <service_id>/<ordinal>, ordinal 1 today; a later volume-per-replica shape is
+-- more rows here, never a column add.
+CREATE TABLE service_volumes (id TEXT PRIMARY KEY, service_id TEXT,
+                       ordinal INTEGER,  -- 1 today; see above
+                       volume_id TEXT, created_at INTEGER);
+                       -- writer: the service's arbiter (write-once)
+
 -- Which org owns an object. A NEW table rather than an org_id column on
 -- machines, services and volumes: those tables carry rows, and cr-sqlite
 -- backfills every row of a table whose columns change -- the fleet-wide
@@ -217,7 +227,7 @@ CREATE TABLE org_quotas (org_id TEXT PRIMARY KEY, max_machines INTEGER,
 -- Operator note for a fleet that is already bootstrapped: corrosion reads
 -- schema_paths at agent start, so a host that has run before needs the new
 -- schema.sql copied and its corrosion unit restarted before it can serve the
--- three tables above. They backfill nothing -- they have no rows -- so the
+-- four tables above. They backfill nothing -- they have no rows -- so the
 -- restart is the whole of the rollout.
 
 -- Grouping is a property of the client's compose file, not a fleet object, so
@@ -254,11 +264,16 @@ GET    /v1/machines/:id/logs?follow  stream; a follow ends on disconnect, destro
                                      or a read that keeps failing (it says so on
                                      the stream), never on suspend
 POST   /v1/machines/:id/suspend|wake|stop|start
+POST   /v1/machines/:id/redeploy     {image, release?}  boot the same machine
+                                     from another image, in place (the rollout's;
+                                     a peer call carries the fleet's peer token)
 POST   /v1/machines/:id/checkpoints  {comment?} → {id, seq}
 GET    /v1/machines/:id/checkpoints  list
 POST   /v1/checkpoints/:id/restore   in-place restore
 POST   /v1/builds                    {dockerfile-context tar} → streamed structured log → {rootfs_build_id}
-POST   /v1/services                  {name, release|build, replicas, health, domain?}
+POST   /v1/services                  {name, release|build, replicas, health, domain?,
+                                     volume?}; volume is create-only and pins
+                                     replicas to one
 GET    /v1/services                  list
 GET    /v1/services/:id              info
 PATCH  /v1/services/:id              {replicas?, health?, env?, secret_env?, repo?,
@@ -313,6 +328,13 @@ sees every row and may narrow a list with `?org=`; a non-admin's `?org=` is
 ignored rather than refused. Creates take the org from the authenticated key
 and never from the request body. A create refused by a quota answers **429**
 with `{"error":"quota exceeded","quota","limit","used"}`.
+
+A host's own calls to a peer's internal listener — the arbiter waking,
+suspending or redeploying a machine another host holds — carry the fleet peer
+token, derived from `PILOT_AGENT_TOKEN_SECRET`, and are accepted only on a
+request that also carries the forwarding marker, which the public listener
+strips. A request forwarded to a service's arbiter keeps the caller's own
+bearer instead and needs none of that.
 
 ### `.internal` service discovery and guest-to-guest traffic
 
@@ -912,6 +934,23 @@ back missing whatever the previous host wrote.
 Volume machines pin to hosts only while mounted; on host death the volume
 remounts wherever the machine is rescued (per-write durability — this beats
 checkpoint-granularity disk state and is where application data belongs).
+
+**A service that mounts a volume runs one replica, and a deploy replaces it in
+place.** `POST /v1/services` takes `volume` (create-only, replicas 1). One
+machine mounts a volume, so a service bound to one (the `service_volumes` row)
+has exactly one machine, and a rollout boots that same machine from the new
+image (the redeploy route): same row, same URL, same claim, no snapshot, no
+second machine. The window between the kill and the health gate is the price of
+one volume; an HTTP request arriving inside it is held on the machine's lock
+until the new process serves, and over `.internal` the name has no address
+until then, exactly as across a rescue. On a failed gate the machine is put
+back on the previous release, on the same volume, with whatever the failed
+release wrote. Suspend keeps the claim and the mount, and a volume-backed
+replica takes the ordinary floor of zero; only a destroy or a self-heal claim
+moves a volume. A promoted volume-backed sandbox's release is the image it was
+created from. Availability across a deploy or a host death needs a volume per
+replica and application-level replication, Fly's answer too (at least two
+volumes per app), and is not built here.
 
 **Databases are the documented exception, and it is a default rather than a
 prohibition.** Per-write durability means an S3 round trip per fsync, which a
