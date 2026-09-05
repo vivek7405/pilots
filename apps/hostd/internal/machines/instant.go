@@ -350,10 +350,15 @@ func (m *Manager) Rescue(ctx context.Context, row state.Machine) error {
 	fresh.LastActivity = time.Now().Unix()
 	fresh.UpdatedAt = fresh.LastActivity
 	// Before the row that names the machine running, so no peer reads it live
-	// without knowing which pool it is now in. The claim goes with it: the
-	// machine_cpu row still names the dead host as its writer, and step 4's
-	// guard would otherwise refuse it. On a cold boot this also clears the
-	// memory build, so the write below carries it.
+	// without knowing which pool it is now in. On a cold boot this also clears
+	// the memory build, so the write below carries it.
+	//
+	// The claim goes with it. The store's guard re-reads the machines row to
+	// find the writer, and ClaimMachine above has already moved it here -- but
+	// only in the local replica, and a read that has not caught up would see
+	// the dead host and refuse. The same claim that authorised taking the
+	// machine authorises describing it, with liveness re-read as ClaimMachine
+	// re-reads it, so the window costs nothing.
 	discard := m.recordStart(ctx, fresh, kind, state.WithDeadOwnerClaim(row.HostID))
 	if err := m.opts.Store.PutMachine(ctx, fresh); err != nil {
 		return err
