@@ -19,6 +19,13 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
+// tlsEnabled is the one definition of whether this host serves TLS. Read here
+// by startTLS and once by run() to decide the scheme every URL is rendered
+// with, so the URL a client is told can never disagree with the listener.
+func tlsEnabled(cfg *config.Config, objects *s3.Client) bool {
+	return objects != nil && cfg.ACMEEmail != ""
+}
+
 // startTLS serves the router over HTTPS, obtaining certificates on demand.
 //
 // Every host does this, for every name, which is the point: wildcard DNS
@@ -33,7 +40,7 @@ import (
 func startTLS(ctx context.Context, cfg *config.Config, store state.Store,
 	objects *s3.Client, handler http.Handler) error {
 
-	if objects == nil || cfg.ACMEEmail == "" {
+	if !tlsEnabled(cfg, objects) {
 		slog.Info("TLS is off; the router serves plain HTTP",
 			"reason", "no object storage or no ACME contact configured")
 		return nil

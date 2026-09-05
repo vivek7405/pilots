@@ -467,10 +467,17 @@ func run() error {
 		machineCPU = cachedMachineCPU{cache: f.cache}
 	}
 
+	// The certificate store is opened HERE, before the API is built, because
+	// the same two facts that decide whether TLS starts decide the scheme
+	// every machine and service URL is rendered with. Evaluated once and used
+	// twice, so the URL a client is told can never disagree with the listener.
+	certClient, certErr := newCertStore(cfg)
+	publicURL := api.PublicURLFor(certErr == nil && tlsEnabled(cfg, certClient), cfg.ListenAddr)
+
 	controlAPI := api.Routes(api.Deps{
 		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink, HugePages: cfg.HugePages,
 		StoreVersion: storeVersion(store),
-		Builds:       builder, Rollout: rollout, Domain: cfg.WorkloadDomain,
+		Builds:       builder, Rollout: rollout, Domain: cfg.WorkloadDomain, URL: publicURL,
 		Peers: peerLookup(f), PeerToken: api.PeerTokenFor(cfg.AgentTokenSecret),
 		Tenancy: tenancy, MachineCPU: machineCPU, BuildGate: &quota.HostGate{},
 		CPUVendor: vendor, CPUVendorForced: vendorForced,
@@ -520,12 +527,12 @@ func run() error {
 	// TLS, when the fleet can share certificates. Serves the same handler on
 	// :443 with on-demand issuance; the plain listener below stays for the
 	// internal mesh and for fleets without object storage.
-	if certClient, cerr := newCertStore(cfg); cerr == nil && certClient != nil {
+	if certErr == nil && certClient != nil {
 		if err := startTLS(ctx, cfg, store, certClient, handler); err != nil {
 			return err
 		}
-	} else if cerr != nil {
-		slog.Warn("TLS is off: could not open the certificate store", "err", cerr)
+	} else if certErr != nil {
+		slog.Warn("TLS is off: could not open the certificate store", "err", certErr)
 	}
 
 	ln, err := net.Listen("tcp", cfg.ListenAddr)
@@ -541,7 +548,8 @@ func run() error {
 	}()
 
 	slog.Info("hostd listening",
-		"addr", ln.Addr().String(), "host_id", cfg.HostID, "domain", cfg.WorkloadDomain)
+		"addr", ln.Addr().String(), "host_id", cfg.HostID, "domain", cfg.WorkloadDomain,
+		"url", publicURL.Of(cfg.APIHostname))
 	notifyReady()
 
 	select {

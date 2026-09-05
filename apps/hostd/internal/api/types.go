@@ -89,7 +89,7 @@ type Machine struct {
 	ImageRef     string `json:"image_ref,omitempty"`
 	VCPUs        int    `json:"vcpus"`
 	MemMiB       int    `json:"mem_mib"`
-	URL          string `json:"url"`                     // https://<name>.pilotrun.app
+	URL          string `json:"url"`                     // <scheme>://<name>.<workload domain>[:port]; https and portless on a TLS host
 	CustomDomain string `json:"custom_domain,omitempty"` // services only
 	VolumeID     string `json:"volume_id,omitempty"`
 	ServiceID    string `json:"service_id,omitempty"`
