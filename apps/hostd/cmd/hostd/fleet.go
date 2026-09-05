@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -262,20 +264,70 @@ func machineOwner(store state.Store) router.MachineOwner {
 type peerAPI struct {
 	cache *corrosion.Cache
 	http  *http.Client
+	// token is the fleet peer credential. The far side serves the same
+	// WithAuth-wrapped API to a peer as to a tenant, so a call without one is
+	// a 401.
+	token string
+}
+
+// peerURL resolves a host id to a URL on its internal listener.
+func (p peerAPI) peerURL(hostID, path string) (string, error) {
+	h, ok := p.cache.Host(hostID)
+	if !ok || h.WGAddr == "" {
+		return "", fmt.Errorf("hostd: %s has no mesh address", hostID)
+	}
+	return "http://" + router.InternalAddrOf(h.WGAddr) + path, nil
+}
+
+// mark sets what every peer call carries: the forwarding marker, so the far
+// side does not forward it onward, so its internal listener accepts the
+// request at all (InternalAPIHandler refuses one without it), and so its peer
+// token is accepted; and the credential itself.
+func (p peerAPI) mark(req *http.Request) {
+	req.Header.Set(router.ForwardedHeader, "autoscaler")
+	if p.token != "" {
+		req.Header.Set("Authorization", "Bearer "+p.token)
+	}
 }
 
 func (p peerAPI) Post(ctx context.Context, hostID, path string) error {
-	h, ok := p.cache.Host(hostID)
-	if !ok || h.WGAddr == "" {
-		return fmt.Errorf("hostd: %s has no mesh address", hostID)
+	url, err := p.peerURL(hostID, path)
+	if err != nil {
+		return err
 	}
-	url := "http://" + router.InternalAddrOf(h.WGAddr) + path
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return err
 	}
-	// Marked as forwarded so the far side does not forward it onward.
-	req.Header.Set("X-Pilots-Forwarded-By", "autoscaler")
+	p.mark(req)
+
+	resp, err := p.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("hostd: %s %s: %s", hostID, path, resp.Status)
+	}
+	return nil
+}
+
+// PostJSON is Post with a body, for a call that names an image.
+func (p peerAPI) PostJSON(ctx context.Context, hostID, path string, body any) error {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	url, err := p.peerURL(hostID, path)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	p.mark(req)
 
 	resp, err := p.http.Do(req)
 	if err != nil {

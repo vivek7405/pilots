@@ -43,6 +43,13 @@ func (m *Manager) Promote(ctx context.Context, machineID string, req api.Promote
 	if replicas < 1 {
 		replicas = 1
 	}
+	// The handler refused this already; kept because a second claimant on the
+	// volume is the one mistake this path could make that nothing downstream
+	// would report as a mistake.
+	if row.VolumeID != "" && replicas > 1 {
+		return nil, fmt.Errorf("services: machine %s mounts a volume and its "+
+			"service runs one replica", machineID)
+	}
 
 	// The sandbox's own service row, minted by its create, is what this
 	// promotes -- reusing it keeps the machine's environment, sealed secrets
@@ -106,11 +113,28 @@ func (m *Manager) Promote(ctx context.Context, machineID string, req api.Promote
 		CreatedAt: time.Now().Unix(),
 		Healthy:   true, // it is serving right now; that is the proof
 	}
-	if err := m.snapshotRelease(ctx, machineID, rel); err != nil {
+	if row.VolumeID != "" {
+		// No checkpoint: it would carry the volume drive in its device state
+		// and nothing may ever restore it into another machine. The release
+		// names the image the sandbox booted from, which is what a redeploy or
+		// a rollback boots again. The handler refused a machine that has no
+		// image, because that release would boot nothing.
+		rel.RootfsBuildID = row.ImageRef
+	} else if err := m.snapshotRelease(ctx, machineID, rel); err != nil {
 		return nil, fmt.Errorf("services: promoting %s: %w", machineID, err)
 	}
 	svc.ReleaseID = rel.ID
 
+	// The binding first, as the create writes it first and for the same
+	// reason: a promote that dies here leaves a binding naming a service that
+	// never took the volume, which the next create sees and refuses out loud.
+	if row.VolumeID != "" {
+		if err := m.opts.Store.PutServiceVolume(ctx, &state.ServiceVolume{
+			ServiceID: svc.ID, Ordinal: 1, VolumeID: row.VolumeID, CreatedAt: svc.CreatedAt,
+		}); err != nil {
+			return nil, err
+		}
+	}
 	if err := m.opts.Store.PutService(ctx, svc); err != nil {
 		return nil, err
 	}
@@ -140,7 +164,7 @@ func (m *Manager) Promote(ctx context.Context, machineID string, req api.Promote
 	// knobs.
 	knobs := m.replicaKnobs(ctx, svc, nil)
 	for i := 1; i < replicas; i++ {
-		if _, err := m.createReplica(ctx, svc, rel, rel.MemBuildID != "", knobs); err != nil {
+		if _, err := m.createReplica(ctx, svc, rel, rel.MemBuildID != "", knobs, ""); err != nil {
 			return nil, fmt.Errorf("services: replica %d of promoted %s: %w", i+1, machineID, err)
 		}
 	}

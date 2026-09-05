@@ -45,6 +45,12 @@ type Deps struct {
 	// Peers resolves other hosts, so a service write that arrived at the
 	// wrong host can be forwarded to the one allowed to perform it.
 	Peers PeerLookup
+	// PeerToken authenticates a call from another host of this fleet on the
+	// internal listener. Derived from the agent-token secret every host
+	// already shares, and accepted only on a request that carries the
+	// forwarding marker, which the public listener strips. Empty on a single
+	// box, where there are no peers to authenticate.
+	PeerToken string
 	// Compose plans a compose file. Injected as a handler because the compose
 	// package imports this one for the wire structs its steps embed. Nil only
 	// in tests, where the route answers 503 rather than vanishing from the
@@ -152,6 +158,8 @@ func Routes(d Deps) http.Handler {
 	// non-snapshotting equivalents.
 	mux.HandleFunc("POST /v1/machines/{id}/suspend", d.handleSuspend)
 	mux.HandleFunc("POST /v1/machines/{id}/wake", d.handleWake)
+	// Redeploy is the rollout's: the same machine, booted from another image.
+	mux.HandleFunc("POST /v1/machines/{id}/redeploy", d.handleRedeploy)
 	mux.HandleFunc("POST /v1/machines/{id}/stop", notImplemented)
 	mux.HandleFunc("POST /v1/machines/{id}/start", notImplemented)
 

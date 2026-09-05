@@ -27,6 +27,9 @@ type Manager interface {
 	Destroy(ctx context.Context, id string) error
 	Suspend(ctx context.Context, id string) error
 	Wake(ctx context.Context, id string) error
+	// Redeploy boots a machine again from another image, in place: same row,
+	// same URL, same volume. How a volume-backed service takes a release.
+	Redeploy(ctx context.Context, id string, req RedeployRequest) (*state.Machine, error)
 	Checkpoint(ctx context.Context, machineID, comment string) (*state.Checkpoint, error)
 	ListCheckpoints(ctx context.Context, machineID string) ([]state.Checkpoint, error)
 	RestoreCheckpoint(ctx context.Context, checkpointID string) (*state.Machine, error)
@@ -86,12 +89,24 @@ func decodeBody(r *http.Request, v any) error {
 	return json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(v)
 }
 
+// ErrConflict marks a lifecycle request the machine's current state forbids.
+//
+// The caller is allowed and the body is well formed; the machine simply
+// cannot do this right now, and the message says what to do about it. Lives
+// here rather than in machines because writeErr has to recognise it and
+// machines imports this package, not the other way round.
+var ErrConflict = errors.New("conflict")
+
 // writeErr maps a lifecycle error to a status. A missing machine is a 404
 // rather than a 500 so a client can tell "gone" from "broken".
 func writeErr(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, state.ErrNotFound):
 		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: err.Error()})
+	case errors.Is(err, ErrConflict):
+		// 409, not 400: nothing about the request is wrong. The machine is in
+		// a state that forbids it, and the same request works once it is not.
+		writeJSON(w, http.StatusConflict, ErrorResponse{Error: err.Error()})
 	default:
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
 	}
@@ -316,6 +331,38 @@ func (d Deps) handleWake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleRedeploy boots a machine again from another image, in place.
+//
+// Internal by convention rather than by routing: the rollout is its only
+// caller, here or on the host that holds the machine. A peer's call
+// authenticates as admin, so the tenancy checks below pass for it exactly as
+// they do for the owner of the build.
+func (d Deps) handleRedeploy(w http.ResponseWriter, r *http.Request) {
+	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
+		return
+	}
+	var req RedeployRequest
+	if err := decodeBody(r, &req); err != nil && !errors.Is(err, io.EOF) {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad request body"})
+		return
+	}
+	if req.Image == "" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "image is required"})
+		return
+	}
+	// The build becomes this machine's root filesystem, which is the same
+	// tenancy crossing a create would be.
+	if !d.ownedBuild(w, r, req.Image) {
+		return
+	}
+	row, err := d.Machines.Redeploy(r.Context(), r.PathValue("id"), req)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, toAPI(*row, OrgID(r.Context())))
 }
 
 func (d Deps) handleCreateCheckpoint(w http.ResponseWriter, r *http.Request) {

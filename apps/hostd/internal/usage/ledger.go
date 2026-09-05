@@ -21,8 +21,9 @@
 //
 // # The accrual rule
 //
-// machine_seconds accrues in every recorded state (running, suspended, error).
-// vcpu_seconds and mib_seconds accrue in running only. volume_gib_seconds
+// machine_seconds accrues in every recorded state (running, suspended,
+// creating, error). vcpu_seconds and mib_seconds accrue in running only --
+// creating is a redeploy holding the row and the disk with nothing running. volume_gib_seconds
 // accrues whenever the interval carries a volume, in every state.
 //
 // A suspended machine bills storage only: wall-clock machine-seconds and
@@ -60,7 +61,7 @@ const defaultTick = 60 * time.Second
 type line struct {
 	MachineID string `json:"machine_id"`
 	OrgID     string `json:"org_id"`
-	State     string `json:"state"` // running|suspended|error
+	State     string `json:"state"` // running|suspended|creating|error
 	From      int64  `json:"from"`  // unix seconds, inclusive
 	To        int64  `json:"to"`    // unix seconds, exclusive
 	VCPUs     int    `json:"vcpus"`

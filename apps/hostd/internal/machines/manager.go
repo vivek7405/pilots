@@ -17,6 +17,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -470,6 +471,11 @@ func (m *Manager) releaseService(ctx context.Context, row *state.Machine) error 
 	if err := m.opts.Store.DeleteService(ctx, row.ServiceID); err != nil {
 		return fmt.Errorf("delete service %s: %w", row.ServiceID, err)
 	}
+	// The binding goes with the row. The volume itself stays: unattached,
+	// listed, reusable by the next service that names it.
+	if err := m.opts.Store.DeleteServiceVolumes(ctx, row.ServiceID); err != nil {
+		return fmt.Errorf("delete service volumes %s: %w", row.ServiceID, err)
+	}
 	return nil
 }
 
@@ -720,6 +726,160 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 	}
 	m.opts.Usage.Transition(id, StateRunning)
 	return nil
+}
+
+// Redeploy boots a machine again from another image, in place: same row, same
+// URL, same volume claim. How a volume-backed service takes a release, because
+// a second machine cannot mount the volume beside the first (Fly updates a
+// Machine with a volume the same way).
+//
+// The memory goes with the process. A snapshot describes the rootfs this
+// machine is leaving, so restoring it against the new image would be a guest
+// whose memory and disk have never met -- the same reading startNewMachine
+// gives a machine with its own image.
+//
+// A request arriving while the process is down waits on this machine's lock
+// inside Wake, so the window is a held request rather than an error.
+func (m *Manager) Redeploy(ctx context.Context, id string, req api.RedeployRequest) (*state.Machine, error) {
+	lock := m.lockFor(id)
+	lock.Lock()
+	defer lock.Unlock()
+
+	row, err := m.opts.Store.GetMachine(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if row.HostID != m.opts.HostID {
+		return nil, fmt.Errorf("machines: %s is held by %s, not this host: %w",
+			id, row.HostID, state.ErrNotOwner)
+	}
+
+	// A checkpoint cannot survive a redeploy, so a machine that has one is
+	// refused rather than quietly broken.
+	//
+	// Every checkpoint's images are diffs against the template this row names,
+	// and the boot below repoints TemplateRootfsBuildID at the NEW image while
+	// the clear of CacheRoot/machines/<id> takes the checkpoints' local data
+	// with it. So afterwards a restore either blocks forever in awaitRestorable
+	// on a directory nothing will repopulate, or -- worse -- resolves and
+	// applies a diff against a base it was never taken from, which is the
+	// corruption TemplateRootfsBuildID's comment names. Destroy deletes the
+	// rows and discards the builds; a redeploy keeps the machine, so it cannot.
+	//
+	// Refusing is the reversible half: a redeploy that carries checkpoints
+	// forward can be built later, and silent corruption cannot be taken back.
+	if cks, err := m.opts.Store.ListCheckpoints(ctx, id); err != nil {
+		return nil, fmt.Errorf("machines: list checkpoints of %s: %w", id, err)
+	} else if len(cks) > 0 {
+		names := make([]string, 0, len(cks))
+		for _, c := range cks {
+			names = append(names, c.ID)
+		}
+		return nil, fmt.Errorf("%w: %s has %d checkpoint(s) (%s) taken against the "+
+			"image it is leaving; delete them before redeploying",
+			api.ErrConflict, id, len(cks), strings.Join(names, ", "))
+	}
+
+	// The process, taken down as Destroy takes it down -- and NOT as Suspend
+	// does: nothing is photographed, because the photograph would describe a
+	// disk this machine is about to stop having.
+	m.releaseDiscovery(id)
+	if fcm, ok := m.get(id); ok {
+		slotIdx := 0
+		if fcm.Slot != nil {
+			slotIdx = fcm.Slot.Idx
+		}
+		if err := fcm.Kill(); err != nil {
+			return nil, fmt.Errorf("machines: kill %s: %w", id, err)
+		}
+		m.drop(id)
+		if slotIdx > 0 {
+			m.pool.Return(slotIdx)
+		}
+		// The copy-on-write file holds every write since the last snapshot,
+		// and the new image supersedes all of it. Discarded HERE rather than
+		// deferred the way Destroy defers it: the path is derived from the
+		// machine's state dir, which the new boot reuses, so a deferred
+		// discard would delete the file the new process is running on.
+		fcm.DiscardCow()
+	} else {
+		// The same discard, for a machine with no live process to ask.
+		//
+		// A service replica takes the ordinary floor of zero, so every deploy
+		// after the first reaches Redeploy with the replica SUSPENDED and
+		// nothing in the branch above runs. Without this, the copy-on-write
+		// file describing the image the machine is LEAVING stays in the state
+		// dir the new boot reuses -- a leaked file per deploy, and a disk the
+		// new process may serve writes from.
+		if err := os.Remove(fc.CowPath(m.stateDir(id))); err != nil &&
+			!errors.Is(err, os.ErrNotExist) {
+			slog.Warn("redeploy could not remove the copy-on-write file",
+				"machine", id, "err", err)
+		}
+	}
+	// Storage only from here: the row and the disk are held and nothing runs.
+	m.opts.Usage.Transition(id, StateCreating)
+
+	// The builds this redeploy supersedes. Both describe the rootfs the
+	// machine is leaving, so both are cleared from the row before the boot and
+	// discarded after it -- never before, or a failed write would leave the
+	// row naming objects that no longer exist.
+	superseded := []string{row.MemBuildID, row.RootfsBuildID}
+	row.MemBuildID, row.RootfsBuildID = "", ""
+	if err := os.RemoveAll(filepath.Join(m.opts.CacheRoot, "machines", id)); err != nil {
+		slog.Warn("redeploy could not clear the machine cache",
+			"machine", id, "err", err)
+	}
+
+	row.ReleaseID = req.Release
+	row.State = StateCreating
+	stampSlot(row, nil)
+	row.UpdatedAt = time.Now().Unix()
+	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
+		return nil, err
+	}
+
+	// A machine adopted after a hostd restart recovers its token from disk, so
+	// this is the credential the guest already has -- except for one that
+	// still carries the template placeholder, which gets a real one here for
+	// the same reason a create mints one.
+	token := m.token(id)
+	if token == templateToken {
+		token = newID("agt")
+		sum := sha256.Sum256([]byte(token))
+		row.AgentTokenHash = hex.EncodeToString(sum[:])
+	}
+
+	// The boot path, which re-claims the volume for this machine on this host
+	// (a no-op rewrite plus an idempotent attach), installs the token, mounts
+	// the volume in the guest and delivers the environment -- all of which a
+	// new process needs exactly as a first boot does. No command: an image
+	// built from a Dockerfile carries its own start spec.
+	fcm, err := m.bootMachine(ctx, row, token, row.VolumeID, req.Image, "")
+	if err != nil {
+		row.State = StateError
+		stampSlot(row, nil)
+		row.UpdatedAt = time.Now().Unix()
+		_ = m.opts.Store.PutMachine(ctx, row)
+		m.opts.Usage.Transition(id, StateError)
+		return row, err
+	}
+
+	m.put(id, fcm)
+	m.rememberToken(id, token)
+
+	row.State = StateRunning
+	stampSlot(row, fcm)
+	row.LastActivity = time.Now().Unix()
+	row.UpdatedAt = time.Now().Unix()
+	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
+		return row, err
+	}
+	m.opts.Usage.Transition(id, StateRunning)
+
+	// Only after the row no longer names them.
+	m.discardBuilds(ctx, superseded...)
+	return row, nil
 }
 
 // bindDiscovery starts the .internal responder inside a machine's namespace.

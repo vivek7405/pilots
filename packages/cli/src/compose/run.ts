@@ -22,7 +22,7 @@ import type {
 } from '@pilots/sdk'
 
 import type { Credentials } from '../config.ts'
-import { CliError, note } from '../output.ts'
+import { CliError } from '../output.ts'
 import { tarDirectory, tarFiles } from '../tar.ts'
 import { collectRefs, resolveSecrets } from './secrets.ts'
 
@@ -87,21 +87,27 @@ export async function executePlan(
   const deployed: DeployedService[] = []
   for (const step of plan.steps) {
     const secretEnv = secretsByStep.get(step.name) ?? {}
-    const rootfs = await buildStep(client, step, opts)
-    const volumes = await ensureVolumes(client, app, step)
-    // Said out loud because the gap is invisible from the compose file:
-    // `CreateServiceRequest` carries no volume, so a volume a step declares
-    // exists but is mounted by nothing. A Postgres deployed this way writes to
-    // the replica's ephemeral disk while the compose file says RPO 0, and the
-    // first replica replacement is the moment anyone finds out.
-    if (volumes.length > 0) {
-      note(
-        `warning: ${step.name}: ${volumes.map((v) => v.name).join(', ')} exists, but a service ` +
-          'cannot mount a volume yet -- this replica\'s data is NOT durable',
+    // One volume per service, because one machine mounts a volume and a
+    // volume-backed service runs one machine. Refused BEFORE the build, so a
+    // compose file that asks for two does not spend minutes on an image first.
+    if (step.volumes && step.volumes.length > 1) {
+      throw new CliError(
+        `${step.name}: declares ${step.volumes.length} volumes, and a service mounts one; ` +
+          'split the service or merge the mounts',
       )
     }
+    // Beside it, and for the same reason: a service's volume is set when the
+    // service is created, so a compose file that changes one is refused --
+    // before the build, and before ensureVolumes, which CREATES the volume it
+    // cannot find by name. Refusing after it costs a build and leaves a new,
+    // empty, billed volume behind that nothing will ever mount.
+    const existing = await findService(client, app, step.name)
+    await refuseVolumeChange(client, app, step, existing)
+
+    const rootfs = await buildStep(client, step, opts)
+    const [volume] = await ensureVolumes(client, app, step)
     await runPreDeploy(client, app, step, rootfs, secretEnv)
-    const service = await upsertService(client, app, step, rootfs, secretEnv)
+    const service = await upsertService(client, app, step, rootfs, secretEnv, existing, volume?.id)
     // Knobs travel on the deploy, not on the create: a service row has
     // nowhere to keep them, and the create and the first deploy are separate
     // requests. Sending them here is also what makes a redeploy with changed
@@ -236,16 +242,55 @@ async function runPreDeploy(
   }
 }
 
+/** The service a step deploys, if this app already has one by that name. */
+async function findService(
+  client: PilotsClient,
+  app: string,
+  name: string,
+): Promise<Service | undefined> {
+  const services = await client.services.list()
+  return services.find((s) => s.name === name && (s.app ?? '') === app)
+}
+
+/**
+ * Refuses a deploy that would change which volume a service mounts.
+ *
+ * Create-only, like knobs: hostd's PATCH carries no volume field, and nothing
+ * anywhere copies data between two volumes, so this is a data migration
+ * wearing a one-line compose edit. The name is what decides it, and the name
+ * is known before anything has been built or created.
+ */
+async function refuseVolumeChange(
+  client: PilotsClient,
+  app: string,
+  step: ComposeStep,
+  existing: Service | undefined,
+): Promise<void> {
+  if (!existing) return
+  const want = step.volumes?.[0]
+  const wantName = want ? `${app}-${want.name}` : ''
+  const mountedId = existing.volume_id ?? ''
+  if (!mountedId && !wantName) return
+
+  const volumes = await client.volumes.list()
+  if (mountedId && wantName && volumes.find((v) => v.name === wantName)?.id === mountedId) return
+
+  const mountedName = volumes.find((v) => v.id === mountedId)?.name || mountedId
+  throw new CliError(
+    `${step.name}: mounts ${mountedName || '(no volume)'} and the compose file names ` +
+      `${wantName || '(no volume)'}; a service's volume is set when it is created`,
+  )
+}
+
 async function upsertService(
   client: PilotsClient,
   app: string,
   step: ComposeStep,
   rootfs: string,
   secretEnv: Record<string, string>,
+  existing: Service | undefined,
+  volumeId?: string,
 ): Promise<Service> {
-  const services = await client.services.list()
-  const existing = services.find((s) => s.name === step.name && (s.app ?? '') === app)
-
   if (!existing) {
     const req: CreateServiceRequest = {
       name: step.name,
@@ -255,6 +300,7 @@ async function upsertService(
       ...(step.health ? { health: step.health } : {}),
       ...(step.domain ? { domain: step.domain } : {}),
       ...(step.custom_domain ? { custom_domain: step.custom_domain } : {}),
+      ...(volumeId ? { volume: volumeId } : {}),
       ...(step.env ? { env: step.env } : {}),
       ...(Object.keys(secretEnv).length > 0 ? { secret_env: secretEnv } : {}),
     }

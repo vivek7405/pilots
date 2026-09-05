@@ -33,8 +33,17 @@ func InternalAddrOf(meshAddr string) string {
 	return net.JoinHostPort(meshAddr, strconv.Itoa(InternalPort))
 }
 
-// forwardedHeader marks a request that has already been forwarded once.
-const forwardedHeader = "X-Pilot-Forwarded"
+// ForwardedHeader marks a request that has already been forwarded once.
+//
+// Exported because it is the fleet's ONE marker: the public listener strips
+// it (StripForwardMarker), the internal listener requires it
+// (InternalAPIHandler), the API's arbiter forwarding sets it, and so does a
+// host calling a peer directly. A second name for the same transport fact is
+// what made every peer call answer 400 at the internal listener.
+const ForwardedHeader = "X-Pilot-Forwarded"
+
+// forwardedHeader is the in-package spelling.
+const forwardedHeader = ForwardedHeader
 
 // forwardTimeout bounds how long a forwarded request may take to reach the
 // owner and produce response HEADERS, including a wake on the far side.

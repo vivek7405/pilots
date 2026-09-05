@@ -28,6 +28,7 @@ import (
 	"github.com/google/uuid"
 	"hash/fnv"
 	"sort"
+	"strconv"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver: hostd builds with CGO_ENABLED=0
@@ -236,6 +237,22 @@ type Domain struct {
 	CreatedAt  int64
 }
 
+// ServiceVolume is one volume a service mounts. Keyed by service and ordinal
+// so a later volume-per-replica shape is more rows rather than a column add on
+// a table that carries rows. Today the ordinal is always 1: a volume is
+// mounted by one machine, so a service that mounts one runs one replica.
+type ServiceVolume struct {
+	ServiceID string
+	Ordinal   int
+	VolumeID  string
+	CreatedAt int64
+}
+
+// ServiceVolumeID is the row key, <service_id>/<ordinal>.
+func ServiceVolumeID(serviceID string, ordinal int) string {
+	return serviceID + "/" + strconv.Itoa(ordinal)
+}
+
 type Service struct {
 	ID        string
 	Name      string
@@ -410,6 +427,20 @@ type Store interface {
 	PutDomain(ctx context.Context, d *Domain) error
 	DeleteDomain(ctx context.Context, hostname string) error
 	ListDomains(ctx context.Context) ([]Domain, error)
+
+	// ServiceVolume reads the volume a service mounts, ErrNotFound when it
+	// mounts none.
+	ServiceVolume(ctx context.Context, serviceID string) (*ServiceVolume, error)
+	// PutServiceVolume writes the binding. Write-once, from the service's
+	// arbiter: the row names a service, so there is no host column to enforce
+	// single-writer on and nothing a last-write-wins merge could corrupt.
+	PutServiceVolume(ctx context.Context, sv *ServiceVolume) error
+	// DeleteServiceVolumes drops a service's bindings, called beside
+	// DeleteService. The volume itself stays.
+	DeleteServiceVolumes(ctx context.Context, serviceID string) error
+	// ListServiceVolumes returns every binding -- what a create reads to
+	// refuse a volume another service already mounts.
+	ListServiceVolumes(ctx context.Context) ([]ServiceVolume, error)
 
 	// GetRelease reads one release. PutRelease writes one.
 	//
@@ -1232,6 +1263,76 @@ func (s *sqliteStore) ListDomains(ctx context.Context) ([]Domain, error) {
 			return nil, err
 		}
 		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+const serviceVolumeCols = `id, service_id, ordinal, volume_id, created_at`
+
+func (s *sqliteStore) ServiceVolume(ctx context.Context, serviceID string) (*ServiceVolume, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+serviceVolumeCols+` FROM service_volumes WHERE service_id = ? ORDER BY ordinal`, serviceID)
+	if err != nil {
+		return nil, fmt.Errorf("state: service volume %q: %w", serviceID, err)
+	}
+	defer rows.Close()
+	var out []ServiceVolume
+	for rows.Next() {
+		var id string
+		var sv ServiceVolume
+		if err := rows.Scan(&id, &sv.ServiceID, &sv.Ordinal, &sv.VolumeID, &sv.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, sv)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	switch len(out) {
+	case 0:
+		return nil, fmt.Errorf("state: service volume %q: %w", serviceID, ErrNotFound)
+	case 1:
+		return &out[0], nil
+	default:
+		return nil, fmt.Errorf("state: service %q mounts %d volumes; this build supports one", serviceID, len(out))
+	}
+}
+
+func (s *sqliteStore) PutServiceVolume(ctx context.Context, sv *ServiceVolume) error {
+	// Write-once: a second writer cannot change a value even by accident,
+	// which is what makes the arbiter's write safe under last-write-wins.
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO service_volumes (`+serviceVolumeCols+`) VALUES (?,?,?,?,?)
+		ON CONFLICT(id) DO NOTHING`,
+		ServiceVolumeID(sv.ServiceID, sv.Ordinal), sv.ServiceID, sv.Ordinal, sv.VolumeID, sv.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put service volume %q: %w", sv.ServiceID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) DeleteServiceVolumes(ctx context.Context, serviceID string) error {
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM service_volumes WHERE service_id = ?`, serviceID); err != nil {
+		return fmt.Errorf("state: delete service volumes %q: %w", serviceID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) ListServiceVolumes(ctx context.Context) ([]ServiceVolume, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+serviceVolumeCols+` FROM service_volumes`)
+	if err != nil {
+		return nil, fmt.Errorf("state: list service volumes: %w", err)
+	}
+	defer rows.Close()
+	var out []ServiceVolume
+	for rows.Next() {
+		var id string
+		var sv ServiceVolume
+		if err := rows.Scan(&id, &sv.ServiceID, &sv.Ordinal, &sv.VolumeID, &sv.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, sv)
 	}
 	return out, rows.Err()
 }

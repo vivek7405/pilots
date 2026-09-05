@@ -377,6 +377,84 @@ func TestServiceRoundTrip(t *testing.T) {
 	}
 }
 
+// The volume a service mounts is a row in its own table, not a column on
+// services -- services carries rows, and a column add on one of those is the
+// cr-sqlite backfill that took fly's fleet down twice.
+func TestServiceVolumeRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+
+	want := &ServiceVolume{ServiceID: "svc_1", Ordinal: 1, VolumeID: "vol-1", CreatedAt: 1700000000}
+	if err := s.PutServiceVolume(ctx, want); err != nil {
+		t.Fatalf("PutServiceVolume: %v", err)
+	}
+	got, err := s.ServiceVolume(ctx, "svc_1")
+	if err != nil {
+		t.Fatalf("ServiceVolume: %v", err)
+	}
+	if *got != *want {
+		t.Errorf("round trip mismatch:\n got %+v\nwant %+v", *got, *want)
+	}
+	if _, err := s.ServiceVolume(ctx, "svc_none"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("a service that mounts nothing returned %v, want ErrNotFound", err)
+	}
+	all, err := s.ListServiceVolumes(ctx)
+	if err != nil {
+		t.Fatalf("ListServiceVolumes: %v", err)
+	}
+	if len(all) != 1 || all[0] != *want {
+		t.Errorf("ListServiceVolumes returned %+v", all)
+	}
+	if err := s.DeleteServiceVolumes(ctx, "svc_1"); err != nil {
+		t.Fatalf("DeleteServiceVolumes: %v", err)
+	}
+	if _, err := s.ServiceVolume(ctx, "svc_1"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("the binding survived its delete: err=%v", err)
+	}
+}
+
+// The binding is written once, which is what makes the arbiter's write safe
+// under last-write-wins: two writers cannot disagree about a value neither of
+// them may change. A second write that took effect would let a later create
+// point a service at a volume the first one is already mounting.
+func TestServiceVolumeIsWriteOnce(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+
+	for _, vol := range []string{"vol-1", "vol-2"} {
+		if err := s.PutServiceVolume(ctx,
+			&ServiceVolume{ServiceID: "svc_1", Ordinal: 1, VolumeID: vol, CreatedAt: 1}); err != nil {
+			t.Fatalf("PutServiceVolume %s: %v", vol, err)
+		}
+	}
+	got, err := s.ServiceVolume(ctx, "svc_1")
+	if err != nil {
+		t.Fatalf("ServiceVolume: %v", err)
+	}
+	if got.VolumeID != "vol-1" {
+		t.Errorf("the second write took: volume_id=%q, want vol-1", got.VolumeID)
+	}
+}
+
+// A service with two bindings is the invariant this whole path exists to
+// keep, broken. Reading the first row silently would mount one volume and
+// quietly forget the other.
+func TestServiceVolumeRefusesTwoRows(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+
+	for i, vol := range []string{"vol-1", "vol-2"} {
+		if err := s.PutServiceVolume(ctx,
+			&ServiceVolume{ServiceID: "svc_1", Ordinal: i + 1, VolumeID: vol, CreatedAt: 1}); err != nil {
+			t.Fatalf("PutServiceVolume %s: %v", vol, err)
+		}
+	}
+	_, err := s.ServiceVolume(ctx, "svc_1")
+	if err == nil || !strings.Contains(err.Error(), "mounts 2 volumes") {
+		t.Errorf("two bindings returned %v, want an error naming both", err)
+	}
+}
+
 // A shape change to a replicated table is a new table, never an ALTER.
 //
 // cr-sqlite backfills every existing row when a table's columns change, and

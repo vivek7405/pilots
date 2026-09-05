@@ -387,7 +387,7 @@ func run() error {
 	// deploy's replicas are ordinary machines with ordinary lifecycles.
 	rollout := services.New(services.Options{
 		HostID: cfg.HostID, Store: store, Machines: mgr,
-		Peers: peerCaller(f),
+		Peers: peerCaller(f, cfg.AgentTokenSecret),
 	})
 
 	// Only the arbiter for a service acts on it, so every host can run this
@@ -427,7 +427,8 @@ func run() error {
 		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink, HugePages: cfg.HugePages,
 		StoreVersion: storeVersion(store),
 		Builds:       builder, Rollout: rollout, Domain: cfg.WorkloadDomain,
-		Peers: peerLookup(f), Tenancy: tenancy, BuildGate: &quota.HostGate{},
+		Peers: peerLookup(f), PeerToken: api.PeerTokenFor(cfg.AgentTokenSecret),
+		Tenancy: tenancy, BuildGate: &quota.HostGate{},
 		Usage:   ledger,
 		Compose: compose.Handler(),
 		Lookup:  machineByName(f),
@@ -715,9 +716,13 @@ func sealerOrNil(k seal.Key) api.Sealer {
 }
 
 // peerCaller lets the rollout act on machines other hosts hold.
-func peerCaller(f *fleet) services.PeerCaller {
+func peerCaller(f *fleet, agentTokenSecret string) services.PeerCaller {
 	if f == nil {
 		return nil
 	}
-	return peerAPI{cache: f.cache, http: &http.Client{Timeout: 2 * time.Minute}}
+	return peerAPI{
+		cache: f.cache,
+		http:  &http.Client{Timeout: 2 * time.Minute},
+		token: api.PeerTokenFor(agentTokenSecret),
+	}
 }

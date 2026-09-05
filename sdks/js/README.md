@@ -65,6 +65,9 @@ One method per route, grouped by the noun it acts on.
 `services.patch` replaces rather than merges: `env`, `secret_env` and
 `replicas` overwrite what is stored and take effect at the next deploy. `knobs`
 are refused there with a 400 naming the field and travel on `services.deploy`.
+`volume` on a service create is create-only and pins `replicas` to one; the
+patch refuses it as an unknown field and refuses `replicas` above one on a
+service that mounts a volume.
 `usage.get` answers for the ONE host it reached, so a fleet is the sum of a
 call to each; a suspended machine bills storage only.
 

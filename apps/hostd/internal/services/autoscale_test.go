@@ -395,3 +395,115 @@ func TestABusyReplicaTouchesItsRow(t *testing.T) {
 		}
 	}
 }
+
+const floorOneKnobs = `{"auto_stop":"suspend","auto_start":true,"min_machines_running":1,"soft_limit":20}`
+
+// A volume-backed service has ONE machine, and a scale-up that did not know
+// that would ask for a second one every tick: refused at the claim, logged,
+// forever. During a rollout or a rescue the machine carries a release the
+// arbiter is not looking at, which is exactly when it looks empty.
+func TestScaleUpNeverAddsASecondMachineToAVolumeService(t *testing.T) {
+	ctx := context.Background()
+	store, arbiter, _ := autoscaleFixture(t)
+	if err := store.PutServiceVolume(ctx,
+		&state.ServiceVolume{ServiceID: "svc-1", Ordinal: 1, VolumeID: "vol-1"}); err != nil {
+		t.Fatal(err)
+	}
+	fm := newFakeMachines(store)
+	arb := New(Options{HostID: arbiter, Store: store, Machines: fm})
+
+	if err := store.PutRelease(ctx, &state.Release{
+		ID: "rel-1", ServiceID: "svc-1", RootfsBuildID: "rootfs-1",
+		MemBuildID: "mem-1", Healthy: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	svc, err := store.GetService(ctx, "svc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The machine exists but carries another release and the state a redeploy
+	// leaves it in, so the replicas scaleUp was handed are empty -- which is
+	// exactly the shape a rollout and a rescue both present. scaleUp directly,
+	// because that is where the guard lives and what a floor above zero or a
+	// rescue window sends through it.
+	row := &state.Machine{
+		ID: "m-1", Name: "m-1", HostID: arbiter, State: "creating",
+		ServiceID: "svc-1", ReleaseID: "rel-2", VolumeID: "vol-1",
+		KindKnobs: floorOneKnobs,
+	}
+	if err := store.PutMachine(ctx, row); err != nil {
+		t.Fatal(err)
+	}
+	if err := arb.scaleUp(ctx, svc, nil); err != nil {
+		t.Fatalf("scaleUp: %v", err)
+	}
+	if got := eventsWithPrefix(fm, "create:"); len(got) != 0 {
+		t.Errorf("the autoscaler created a second machine for a volume service: %v", got)
+	}
+
+	// A suspended one is what the wake loop above the guard is for.
+	row.State = "suspended"
+	row.ReleaseID = "rel-1"
+	if err := store.PutMachine(ctx, row); err != nil {
+		t.Fatal(err)
+	}
+	fm.events = nil
+	if err := arb.scaleOnce(ctx, fakeLoad{}, map[string]time.Time{}); err != nil {
+		t.Fatalf("scaleOnce: %v", err)
+	}
+	if !slices.Contains(fm.events, "wake:m-1") {
+		t.Errorf("the arbiter did not wake the one suspended replica: %v", fm.events)
+	}
+
+	// And with NO machine at all it creates one, with the volume, and BOOTS
+	// it even though the release has a memory build: a drive cannot be added
+	// to a snapshot being restored. scaleUp directly, because with no machine
+	// there are no knobs to read a floor from and Decide never says Up.
+	if err := store.DeleteMachine(ctx, "m-1"); err != nil {
+		t.Fatal(err)
+	}
+	fm.events = nil
+	if err := arb.scaleUp(ctx, svc, nil); err != nil {
+		t.Fatalf("scaleUp: %v", err)
+	}
+	got := eventsWithPrefix(fm, "create:")
+	if len(got) != 1 || got[0] != "create:m-1:boot:vol=vol-1" {
+		t.Errorf("creates were %v, want exactly [create:m-1:boot:vol=vol-1]\nevents: %v", got, fm.events)
+	}
+}
+
+// A rollout owns its service's machines until it returns. Adding capacity
+// under it races the gate.
+func TestTheAutoscalerStepsAsideDuringARollout(t *testing.T) {
+	ctx := context.Background()
+	store, arbiter, _ := autoscaleFixture(t)
+	fm := newFakeMachines(store)
+	arb := New(Options{HostID: arbiter, Store: store, Machines: fm})
+
+	if err := store.PutMachine(ctx, &state.Machine{
+		ID: "m-1", Name: "m-1", HostID: arbiter, State: "suspended",
+		ServiceID: "svc-1", ReleaseID: "rel-1", KindKnobs: floorOneKnobs,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := arb.beginRollout("svc-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := arb.scaleOnce(ctx, fakeLoad{}, map[string]time.Time{}); err != nil {
+		t.Fatalf("scaleOnce: %v", err)
+	}
+	if len(fm.events) != 0 {
+		t.Errorf("the autoscaler acted under a rollout: %v", fm.events)
+	}
+
+	// And picks the service up again the moment the rollout returns.
+	arb.endRollout("svc-1")
+	if err := arb.scaleOnce(ctx, fakeLoad{}, map[string]time.Time{}); err != nil {
+		t.Fatalf("scaleOnce: %v", err)
+	}
+	if !slices.Contains(fm.events, "wake:m-1") {
+		t.Errorf("the autoscaler stayed away after the rollout ended: %v", fm.events)
+	}
+}

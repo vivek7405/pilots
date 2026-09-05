@@ -191,6 +191,46 @@ func TestReleasingTheLastMachineDeletesItsService(t *testing.T) {
 	}
 }
 
+// The volume binding goes with the service row, and the volume itself does
+// not. A binding left behind refuses that volume to the next service that
+// names it, forever, for a service nobody can see.
+func TestReleaseServiceDropsTheVolumeBinding(t *testing.T) {
+	ctx := context.Background()
+	m, store := envManager(t, true)
+
+	svcID, err := m.provisionService(ctx, "db", createEnv{App: "shop"})
+	if err != nil {
+		t.Fatalf("provisionService: %v", err)
+	}
+	if err := store.PutServiceVolume(ctx,
+		&state.ServiceVolume{ServiceID: svcID, Ordinal: 1, VolumeID: "vol-1"}); err != nil {
+		t.Fatalf("PutServiceVolume: %v", err)
+	}
+	if err := store.PutVolume(ctx, &state.Volume{ID: "vol-1", Name: "data", HostID: "host-a"}); err != nil {
+		t.Fatalf("PutVolume: %v", err)
+	}
+	row := &state.Machine{ID: "m-1", HostID: "host-a", ServiceID: svcID, VolumeID: "vol-1", State: "running"}
+	if err := store.PutMachine(ctx, row); err != nil {
+		t.Fatalf("PutMachine: %v", err)
+	}
+	if err := store.DeleteMachine(ctx, row.ID); err != nil {
+		t.Fatalf("DeleteMachine: %v", err)
+	}
+
+	if err := m.releaseService(ctx, row); err != nil {
+		t.Fatalf("releaseService: %v", err)
+	}
+	if _, err := store.GetService(ctx, svcID); !errors.Is(err, state.ErrNotFound) {
+		t.Errorf("the service row survived its last machine: err=%v", err)
+	}
+	if _, err := store.ServiceVolume(ctx, svcID); !errors.Is(err, state.ErrNotFound) {
+		t.Errorf("the volume binding survived its service: err=%v", err)
+	}
+	if _, err := store.GetVolume(ctx, "vol-1"); err != nil {
+		t.Errorf("the volume itself was deleted with the service: %v", err)
+	}
+}
+
 // And a service still carrying machines must survive, or destroying one
 // replica takes the environment away from its siblings.
 func TestAServiceWithMachinesLeftIsKept(t *testing.T) {

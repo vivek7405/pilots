@@ -195,6 +195,13 @@ type Replica struct {
 func (m *Manager) scaleService(ctx context.Context, load Load, svc *state.Service,
 	arbiter bool, idleSince map[string]time.Time) error {
 
+	// A rollout owns this service's machines until it returns. Adding capacity
+	// under it would race the gate, and for a volume-backed service would be
+	// refused at the claim anyway.
+	if m.isRolling(svc.ID) {
+		return nil
+	}
+
 	machines, err := m.replicasOf(ctx, svc.ID, svc.ReleaseID)
 	if err != nil {
 		return err
@@ -273,11 +280,27 @@ func (m *Manager) scaleUp(ctx context.Context, svc *state.Service, machines []st
 		}
 		return m.opts.Machines.Wake(ctx, mach.ID)
 	}
+	// A volume-backed service has one machine. If it exists and is not
+	// suspended it is running, or it belongs to a rollout or a rescue; a
+	// second one could not mount the volume anyway, and the create would be
+	// refused at the claim once a tick, forever.
+	vol, err := m.volumeOf(ctx, svc.ID)
+	if err != nil {
+		return err
+	}
+	if vol != "" {
+		mach, err := m.machineOf(ctx, svc.ID)
+		if err != nil || mach != nil {
+			return err
+		}
+	}
+
 	rel, err := m.opts.Store.GetRelease(ctx, svc.ReleaseID)
 	if err != nil {
 		return err
 	}
-	_, err = m.createReplica(ctx, svc, rel, rel.MemBuildID != "", m.replicaKnobs(ctx, svc, nil))
+	_, err = m.createReplica(ctx, svc, rel, rel.MemBuildID != "" && vol == "",
+		m.replicaKnobs(ctx, svc, nil), vol)
 	return err
 }
 

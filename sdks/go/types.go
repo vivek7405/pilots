@@ -184,10 +184,14 @@ type Service struct {
 	URL          string       `json:"url,omitempty"`
 	CustomDomain string       `json:"custom_domain,omitempty"`
 	ReleaseID    string       `json:"release_id,omitempty"`
-	Repo         string       `json:"repo,omitempty"`
-	Branch       string       `json:"branch,omitempty"`
-	Autodeploy   bool         `json:"autodeploy"`
-	CreatedAt    int64        `json:"created_at"`
+	// VolumeID is the volume every replica of this service mounts. A service
+	// with one runs one replica, because a volume is mounted by exactly one
+	// machine.
+	VolumeID   string `json:"volume_id,omitempty"`
+	Repo       string `json:"repo,omitempty"`
+	Branch     string `json:"branch,omitempty"`
+	Autodeploy bool   `json:"autodeploy"`
+	CreatedAt  int64  `json:"created_at"`
 }
 
 type CreateServiceRequest struct {
@@ -203,13 +207,17 @@ type CreateServiceRequest struct {
 	Health *HealthCheck `json:"health,omitempty"`
 	// Domain is the subdomain label under the fleet's domain. Empty means the
 	// service mints no route rows and is reachable over <name>.internal only.
-	Domain       string            `json:"domain,omitempty"`
-	CustomDomain string            `json:"custom_domain,omitempty"`
-	Env          map[string]string `json:"env,omitempty"`
-	SecretEnv    map[string]string `json:"secret_env,omitempty"`
-	Repo         string            `json:"repo,omitempty"`
-	Branch       string            `json:"branch,omitempty"`
-	Autodeploy   bool              `json:"autodeploy,omitempty"`
+	Domain       string `json:"domain,omitempty"`
+	CustomDomain string `json:"custom_domain,omitempty"`
+	// Volume is create-only: a volume swap is a data migration, not a
+	// configuration change, so the update route does not take it. Requires
+	// replicas of at most one.
+	Volume     string            `json:"volume,omitempty"`
+	Env        map[string]string `json:"env,omitempty"`
+	SecretEnv  map[string]string `json:"secret_env,omitempty"`
+	Repo       string            `json:"repo,omitempty"`
+	Branch     string            `json:"branch,omitempty"`
+	Autodeploy bool              `json:"autodeploy,omitempty"`
 }
 
 type DeployRequest struct {
@@ -230,6 +238,14 @@ type PromoteRequest struct {
 	CustomDomain string       `json:"custom_domain,omitempty"`
 	Replicas     int          `json:"replicas,omitempty"`
 	Health       *HealthCheck `json:"health,omitempty"`
+}
+
+// RedeployRequest boots a machine again from another image, in place: same
+// row, same URL, same volume. How a volume-backed service takes a release.
+// Sent by the rollout inside the fleet; there is no client method for it.
+type RedeployRequest struct {
+	Image   string `json:"image"`
+	Release string `json:"release,omitempty"`
 }
 
 type Release struct {
@@ -477,6 +493,7 @@ var wireTypes = []any{
 	CreateServiceRequest{},
 	DeployRequest{},
 	PromoteRequest{},
+	RedeployRequest{},
 	Release{},
 	Volume{},
 	MachineVolume{},

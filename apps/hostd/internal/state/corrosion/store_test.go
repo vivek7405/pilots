@@ -384,6 +384,46 @@ func TestOnlyTheArbiterWritesAService(t *testing.T) {
 	}
 }
 
+// The volume binding names a service, not a host, so there is no column to
+// guard the write on -- the guard is the same deterministic arbiter PutService
+// and PutDomain use. Without it two hosts could bind one service to different
+// volumes and last-write-wins would pick one, silently.
+func TestOnlyTheArbiterWritesAServiceVolume(t *testing.T) {
+	ctx := context.Background()
+
+	fleet := []state.Host{{ID: "host-a"}, {ID: "host-b"}, {ID: "host-c"}}
+	var owned, foreign string
+	for _, id := range []string{"svc-1", "svc-2", "svc-3", "svc-4", "svc-5", "svc-6"} {
+		o, _ := state.OwnerFor(id, fleet)
+		if o == "host-a" && owned == "" {
+			owned = id
+		}
+		if o != "host-a" && foreign == "" {
+			foreign = id
+		}
+	}
+	if owned == "" || foreign == "" {
+		t.Fatal("could not find both an owned and a foreign service id")
+	}
+
+	store, agent := newTestStore(t, "host-a")
+	liveFleet(t, agent, "host-a", "host-b", "host-c")
+
+	if err := store.PutServiceVolume(ctx,
+		&state.ServiceVolume{ServiceID: owned, Ordinal: 1, VolumeID: "vol-1"}); err != nil {
+		t.Fatalf("the arbiter was refused its own binding: %v", err)
+	}
+	err := store.PutServiceVolume(ctx,
+		&state.ServiceVolume{ServiceID: foreign, Ordinal: 1, VolumeID: "vol-2"})
+	if !errors.Is(err, state.ErrNotOwner) {
+		t.Fatalf("binding a service this host does not arbitrate returned %v, want ErrNotOwner", err)
+	}
+	if got := agent.scalar(t,
+		`SELECT count(*) FROM service_volumes WHERE service_id='`+foreign+`'`); got != "0" {
+		t.Errorf("the refused write landed anyway: count=%s", got)
+	}
+}
+
 // A single box has no one to race, and must not deadlock on its own arbiter.
 func TestASingleHostArbitratesEverything(t *testing.T) {
 	store, agent := newTestStore(t, "host-a")

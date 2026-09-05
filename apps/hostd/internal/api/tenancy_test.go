@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -273,5 +274,110 @@ func TestAForeignBuildLogIsNotReadable(t *testing.T) {
 	h.ServeHTTP(ownRec, own)
 	if ownRec.Code != http.StatusOK {
 		t.Errorf("the owning tenant was refused its own build log: %d (%s)", ownRec.Code, ownRec.Body.String())
+	}
+}
+
+// A service create may name a volume, which is the same tenancy crossing a
+// machine create is: the replica the rollout boots mounts that filesystem.
+func TestAForeignVolumeOnAServiceCreateIsA404(t *testing.T) {
+	h, st, _ := twoTenants(t)
+	ctx := context.Background()
+
+	if err := st.PutVolume(ctx, &state.Volume{
+		ID: "vol_1", Name: "data", SizeMiB: 1024, HostID: "host-test", MountPath: "/data",
+	}); err != nil {
+		t.Fatalf("PutVolume: %v", err)
+	}
+	if err := st.PutTenancy(ctx, &state.Tenancy{ID: "vol_1", OrgID: "org_1", Kind: "volume"}); err != nil {
+		t.Fatalf("PutTenancy: %v", err)
+	}
+	seedKey(t, st, "pilot_deploy2", "org_2", "deploy")
+
+	// 404 and never 403: existence must not leak across tenants.
+	rec := postJSON(t, h, "/v1/services", "pilot_deploy2",
+		`{"name":"db","app":"shop","replicas":1,"volume":"vol_1"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("naming a foreign volume: got %d, want 404 (%s)", rec.Code, rec.Body.String())
+	}
+	rows, err := st.ListServices(ctx)
+	if err != nil {
+		t.Fatalf("ListServices: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("the refused create wrote a service row: %+v", rows)
+	}
+	bindings, err := st.ListServiceVolumes(ctx)
+	if err != nil {
+		t.Fatalf("ListServiceVolumes: %v", err)
+	}
+	if len(bindings) != 0 {
+		t.Errorf("the refused create wrote a binding: %+v", bindings)
+	}
+
+	// An id that exists nowhere answers the same 404, so the two are
+	// indistinguishable from outside.
+	if missing := postJSON(t, h, "/v1/services", "pilot_deploy2",
+		`{"name":"db","app":"shop","replicas":1,"volume":"vol_nope"}`); missing.Code != http.StatusNotFound {
+		t.Errorf("naming an unknown volume: got %d, want 404 (%s)", missing.Code, missing.Body.String())
+	}
+}
+
+// The redeploy route hands a build to a machine as its new root filesystem,
+// which is the crossing a create's image would be, by another door.
+func TestRedeployNeedsAnImageTheCallerOwns(t *testing.T) {
+	h, st, fake := twoTenants(t)
+	ctx := context.Background()
+
+	if err := st.PutTenancy(ctx, &state.Tenancy{ID: "bld_1", OrgID: "org_2", Kind: "build"}); err != nil {
+		t.Fatalf("PutTenancy: %v", err)
+	}
+	if err := st.PutTenancy(ctx, &state.Tenancy{ID: "bld_mine", OrgID: "org_1", Kind: "build"}); err != nil {
+		t.Fatalf("PutTenancy: %v", err)
+	}
+
+	if rec := postJSON(t, h, "/v1/machines/m_1/redeploy", "pilot_org1", `{}`); rec.Code != http.StatusBadRequest {
+		t.Errorf("a redeploy with no image: got %d, want 400 (%s)", rec.Code, rec.Body.String())
+	}
+	if rec := postJSON(t, h, "/v1/machines/m_1/redeploy", "pilot_org1",
+		`{"image":"bld_1"}`); rec.Code != http.StatusNotFound {
+		t.Errorf("a redeploy onto a foreign build: got %d, want 404 (%s)", rec.Code, rec.Body.String())
+	}
+	if fake.redeployed != 0 {
+		t.Errorf("a refused redeploy reached the manager (%d)", fake.redeployed)
+	}
+
+	ok := postJSON(t, h, "/v1/machines/m_1/redeploy", "pilot_org1",
+		`{"image":"bld_mine","release":"rel_2"}`)
+	if ok.Code != http.StatusOK {
+		t.Fatalf("a redeploy onto the caller's own build: got %d, want 200 (%s)", ok.Code, ok.Body.String())
+	}
+	if fake.redeployed != 1 || fake.lastRedeploy.Image != "bld_mine" || fake.lastRedeploy.Release != "rel_2" {
+		t.Errorf("the manager saw %d redeploys, last %+v", fake.redeployed, fake.lastRedeploy)
+	}
+}
+
+// A refusal the machine's state produced is a 409, and it says why.
+//
+// Everything writeErr does not recognise is a 500, which tells a client
+// "pilots is broken" for a request that is simply not allowed right now --
+// a redeploy of a machine that still has checkpoints, most of all, where the
+// answer the operator needs is which checkpoints and what to do about them.
+func TestALifecycleRefusalIsA409ThatSaysWhy(t *testing.T) {
+	h, st, fake := twoTenants(t)
+	ctx := context.Background()
+	if err := st.PutTenancy(ctx, &state.Tenancy{ID: "bld_mine", OrgID: "org_1", Kind: "build"}); err != nil {
+		t.Fatalf("PutTenancy: %v", err)
+	}
+	fake.err = fmt.Errorf("%w: m_1 has 2 checkpoint(s) (ck_1, ck_2) taken against "+
+		"the image it is leaving; delete them before redeploying", ErrConflict)
+
+	rec := postJSON(t, h, "/v1/machines/m_1/redeploy", "pilot_org1", `{"image":"bld_mine"}`)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("a refused redeploy: got %d, want 409 (%s)", rec.Code, rec.Body.String())
+	}
+	for _, want := range []string{"ck_1", "ck_2", "delete them"} {
+		if !strings.Contains(rec.Body.String(), want) {
+			t.Errorf("the 409 body does not name %q: %s", want, rec.Body.String())
+		}
 	}
 }

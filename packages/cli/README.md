@@ -148,9 +148,14 @@ given a default, because the app is what groups the services that reach each
 other over `<name>.internal`. `--app` renames the plan after it comes back, so a
 nameless file needs `--env COMPOSE_PROJECT_NAME=<name>` instead.
 
-For each step, in dependency order: build the context, create any volumes, run
+For each step, in dependency order: build the context, create the volume it
+declares (one per service; the service mounts it and runs one replica), run
 `x-pilots.pre_deploy` as a one-shot machine, create or patch the service, deploy,
 and wait for the new release to become current.
+
+A volume is set when the service is created and never changed: nothing copies
+data between two volumes, so a compose file that renames one is refused rather
+than quietly deployed onto an empty disk.
 
 A `secret://name` value in the compose file never travels as a value. hostd
 returns the reference, the CLI resolves it from `PILOT_SECRET_<NAME>` or the

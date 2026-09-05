@@ -35,6 +35,32 @@ api() { # api <ip> <method> <path> [body]
 
 jf() { python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('$1',''))"; }
 
+# build_image <ip> <dockerfile> -> the rootfs build id on stdout, or empty.
+#
+# The build route takes a tar of a Dockerfile context and answers a stream of
+# NDJSON whose last line carries the id in `result`.
+build_image() {
+  local ip=$1 dockerfile=$2
+  local dir; dir=$(mktemp -d)
+  printf '%s' "$dockerfile" > "${dir}/Dockerfile"
+  tar -cf - -C "$dir" Dockerfile \
+    | curl -sf -m 900 -X POST "http://${ip}:8080/v1/builds" -H "$AUTH" \
+        -H 'Content-Type: application/x-tar' --data-binary @- \
+    | python3 -c "
+import sys, json
+out = ''
+for line in sys.stdin:
+    try:
+        o = json.loads(line)
+    except Exception:
+        continue
+    if o.get('result'):
+        out = o['result']
+print(out)
+"
+  rm -rf "$dir"
+}
+
 # Every host authenticates locally against replicated key hashes, so minting
 # the key on ONE host is enough -- which is itself worth asserting.
 #
@@ -802,6 +828,67 @@ else
       && ok "the guest wrote and fsynced to the volume" \
       || bad "the guest could not write to the volume (got '${MARK}')"
 
+    # And the same failover for a machine that is a SERVICE REPLICA rather
+    # than a bare machine, on a second volume: a service that mounts one runs
+    # exactly one machine, so its rescue is the only way it comes back at all.
+    SVOL=$(api "$VHOST" POST /v1/volumes '{"name":"gate-svc-volume","size_gib":1,"mount_path":"/data"}')
+    SVOLID=$(echo "$SVOL" | jf id)
+    [ -n "$SVOLID" ] && ok "created the service's volume ${SVOLID} on ${VHOST}" \
+      || bad "service volume create failed: $SVOL"
+
+    SVCVOL=$(api "$VHOST" POST /v1/services \
+      "{\"name\":\"gate-vol-$$\",\"app\":\"gate-vol-$$\",\"replicas\":1,\"volume\":\"${SVOLID}\",\"health\":{\"type\":\"cmd\",\"test\":[\"CMD-SHELL\",\"true\"],\"grace\":90,\"interval\":2,\"healthy_threshold\":1}}")
+    SVCVOLID=$(echo "$SVCVOL" | jf id)
+    SVCVOLBOUND=$(echo "$SVCVOL" | jf volume_id)
+    [ "$SVCVOLBOUND" = "$SVOLID" ] \
+      && ok "service ${SVCVOLID} mounts ${SVOLID}" \
+      || bad "the service create did not record its volume (got '${SVCVOLBOUND}'): $SVCVOL"
+
+    SVCBUILD=$(build_image "$VHOST" 'FROM alpine:3.20
+RUN mkdir /www && echo ok > /www/index.html
+CMD ["httpd","-f","-p","8080","-h","/www"]
+')
+    [ -n "$SVCBUILD" ] && ok "built ${SVCBUILD} for the volume-backed service" \
+      || bad "the build for the volume-backed service produced no rootfs id"
+
+    if [ -n "${SVCVOLID:-}" ] && [ -n "${SVCBUILD:-}" ]; then
+      api "$VHOST" POST "/v1/services/${SVCVOLID}/deploy" "{\"build\":\"${SVCBUILD}\"}" >/dev/null \
+        && ok "deployed the volume-backed service" \
+        || bad "the first deploy of the volume-backed service failed"
+
+      SREP=$(api "$VHOST" GET /v1/machines | python3 -c "
+import sys, json
+rows = json.load(sys.stdin)
+mine = [m for m in rows if m.get('service_id') == '${SVCVOLID}']
+print(mine[0]['id'] if len(mine) == 1 else '')
+")
+      SREPURL=$(api "$VHOST" GET "/v1/machines/${SREP}" 2>/dev/null | jf url)
+      [ -n "$SREP" ] && ok "the service has exactly one replica, ${SREP}" \
+        || bad "a volume-backed service must have exactly one replica"
+
+      if [ -n "$SREP" ]; then
+        api "$VHOST" POST "/v1/machines/${SREP}/exec" \
+          '{"cmd":"echo svc-marker > /data/marker && dd if=/data/marker of=/data/marker.sync conv=fsync 2>/dev/null && sync","user":"root"}' >/dev/null
+        SMARK=$(api "$VHOST" POST "/v1/machines/${SREP}/exec" '{"cmd":"cat /data/marker","user":"root"}' | jf stdout)
+        [ "$(echo "$SMARK" | tr -d '[:space:]')" = "svc-marker" ] \
+          && ok "the replica wrote and fsynced to its volume" \
+          || bad "the replica could not write to its volume (got '${SMARK}')"
+
+        # A snapshot to be rescued from, exactly as the bare machine gets one.
+        api "$VHOST" POST "/v1/machines/${SREP}/suspend" >/dev/null \
+          && ok "suspended the replica" \
+          || bad "the replica suspend failed; it has no snapshot to be rescued from"
+        api "$VHOST" POST "/v1/machines/${SREP}/wake" >/dev/null \
+          && ok "woke the replica" || bad "the replica wake failed after the suspend"
+
+        SVDEV=$(api "$VHOST" POST "/v1/machines/${SREP}/exec" \
+          '{"cmd":"awk \u0027$2 == \"/data\" { print $1 }\u0027 /proc/self/mounts","user":"root"}' 2>/dev/null | jf stdout)
+        echo "$SVDEV" | grep -q vdb \
+          && ok "/data is the volume drive inside the replica" \
+          || bad "/data in the replica is backed by '${SVDEV}', not the volume"
+      fi
+    fi
+
     # A machine can only be rescued from a snapshot in object storage, so give
     # it one -- exactly as step 4 does for the ordinary machine.
     # Asserted, not attempted. Both of these used to be `&& ok` with no
@@ -857,6 +944,80 @@ else
     echo "$VDEV" | grep -q vdb \
       && ok "/data is the volume drive on the rescuing host" \
       || bad "/data is backed by '${VDEV}', not the volume"
+
+    # The service replica takes the same journey, and then takes a DEPLOY on
+    # the far side of it. A volume-backed service is redeployed in place, so
+    # after a rescue the arbiter and the machine's owner routinely differ and
+    # the deploy has to reach the owner over the mesh -- which is the peer call
+    # that answered 401 until this fleet's hosts carried a credential.
+    if [ -n "${SREP:-}" ]; then
+      SOWNER=""
+      START=$SECONDS
+      while [ $((SECONDS - START)) -lt 240 ]; do
+        SOWNER=$(api "$VSURVIVOR" GET "/v1/machines/${SREP}" 2>/dev/null | jf host_id)
+        [ -n "$SOWNER" ] && [ "$SOWNER" != "$(echo "$VM" | jf host_id)" ] && break
+        sleep 5
+      done
+      [ -n "$SOWNER" ] && [ "$SOWNER" != "$(echo "$VM" | jf host_id)" ] \
+        && ok "the service replica was rescued onto ${SOWNER}" \
+        || bad "the volume-backed service replica was never rescued"
+
+      START=$SECONDS; SOUT=""
+      while [ $((SECONDS - START)) -lt 180 ]; do
+        SOUT=$(api "$VSURVIVOR" POST "/v1/machines/${SREP}/exec" \
+          '{"cmd":"cat /data/marker","user":"root"}' 2>/dev/null | jf stdout)
+        [ -n "$(echo "$SOUT" | tr -d '[:space:]')" ] && break
+        sleep 5
+      done
+      [ "$(echo "$SOUT" | tr -d '[:space:]')" = "svc-marker" ] \
+        && ok "the replica's fsynced write survived the hard kill and came back elsewhere" \
+        || bad "the service's volume lost its data across the failover (got '${SOUT}')"
+
+      SRDEV=$(api "$VSURVIVOR" POST "/v1/machines/${SREP}/exec" \
+        '{"cmd":"awk \u0027$2 == \"/data\" { print $1 }\u0027 /proc/self/mounts","user":"root"}' 2>/dev/null | jf stdout)
+      echo "$SRDEV" | grep -q vdb \
+        && ok "/data is the volume drive in the rescued replica" \
+        || bad "/data in the rescued replica is backed by '${SRDEV}', not the volume"
+
+      # Deployed through a host that is NOT the replica's new owner where the
+      # rig has one, so the redeploy has to travel to the owner. Where every
+      # survivor IS the owner, the survivor is used and the local branch is
+      # what is proved instead; either way the deploy has to work.
+      DEPLOY_VIA="$VSURVIVOR"
+      for ip in "${LIVE_IPS[@]}"; do
+        HID=$(api "$ip" GET /v1/health 2>/dev/null | jf host_id)
+        if [ -n "$HID" ] && [ "$HID" != "$SOWNER" ]; then DEPLOY_VIA="$ip"; break; fi
+      done
+      if [ "$(api "$DEPLOY_VIA" GET /v1/health 2>/dev/null | jf host_id)" = "$SOWNER" ]; then
+        printf '    (deploying through %s, which IS the replica owner: no other host is live)\n' "$DEPLOY_VIA"
+      else
+        printf '    (deploying through %s, which is NOT the replica owner %s)\n' "$DEPLOY_VIA" "$SOWNER"
+      fi
+
+      api "$DEPLOY_VIA" POST "/v1/services/${SVCVOLID}/deploy" "{\"build\":\"${SVCBUILD}\"}" >/dev/null \
+        && ok "redeployed the rescued volume-backed service through ${DEPLOY_VIA}" \
+        || bad "the deploy after the rescue failed; a peer call that cannot authenticate answers 401"
+
+      SREPS=$(api "$VSURVIVOR" GET /v1/machines | python3 -c "
+import sys, json
+rows = json.load(sys.stdin)
+print(' '.join(m['id'] for m in rows if m.get('service_id') == '${SVCVOLID}' and m.get('state') != 'destroyed'))
+")
+      [ "$SREPS" = "$SREP" ] \
+        && ok "the redeploy replaced the same machine in place: ${SREP}" \
+        || bad "the redeploy left machines '${SREPS}', want exactly ${SREP}"
+
+      SNEWURL=$(api "$VSURVIVOR" GET "/v1/machines/${SREP}" | jf url)
+      [ -n "$SREPURL" ] && [ "$SNEWURL" = "$SREPURL" ] \
+        && ok "the replica's URL is unchanged across the rescue and the redeploy: ${SREPURL}" \
+        || bad "the URL changed: ${SREPURL} -> ${SNEWURL}"
+
+      SAFTER=$(api "$VSURVIVOR" POST "/v1/machines/${SREP}/exec" \
+        '{"cmd":"cat /data/marker","user":"root"}' 2>/dev/null | jf stdout)
+      [ "$(echo "$SAFTER" | tr -d '[:space:]')" = "svc-marker" ] \
+        && ok "the volume's data survived the redeploy" \
+        || bad "the redeploy lost the volume's data (got '${SAFTER}')"
+    fi
   fi
 fi
 

@@ -164,6 +164,26 @@ CREATE TABLE IF NOT EXISTS domains (
   created_at  INTEGER
 );
 
+-- The volume a service mounts, one row per replica's volume.
+--
+-- A NEW table rather than a column on services, for the reason domains is
+-- one: services carries rows, and cr-sqlite backfills every row of a table
+-- whose columns change. The key is <service_id>/<ordinal>. Today a service
+-- mounts one volume and the API refuses more than one replica with it (a
+-- volume is mounted by exactly one machine; see volumes below); a later
+-- volume-per-replica shape is more rows here, never a column add.
+--
+-- Written once, on service create or promote, by the service's arbiter, the
+-- host that writes the service row, BEFORE that row for the reason tenancy is
+-- written before its object. Deleted with the service row.
+CREATE TABLE IF NOT EXISTS service_volumes (  -- writer: the service's arbiter (write-once)
+  id         TEXT NOT NULL PRIMARY KEY,   -- <service_id>/<ordinal>
+  service_id TEXT,
+  ordinal    INTEGER,                     -- 1 today; see above
+  volume_id  TEXT,
+  created_at INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS releases (
   id              TEXT NOT NULL PRIMARY KEY,
   service_id      TEXT,

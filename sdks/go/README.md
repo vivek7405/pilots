@@ -58,6 +58,9 @@ One method per route, grouped by the noun it acts on.
 `Services.Patch` replaces rather than merges: `Env`, `SecretEnv` and
 `Replicas` overwrite what is stored and take effect at the next deploy. Knobs
 are refused there with a 400 naming the field and travel on `Services.Deploy`.
+`Volume` on a service create is create-only and pins `Replicas` to one; the
+patch refuses it as an unknown field and refuses `Replicas` above one on a
+service that mounts a volume.
 `Usage.Get` answers for the ONE host it reached, so a fleet is the sum of a
 call to each; a suspended machine bills storage only.
 
