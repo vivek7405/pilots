@@ -183,12 +183,7 @@ func (m *Manager) Deploy(ctx context.Context, serviceID, rootfsBuildID string,
 	if err != nil {
 		// Nothing has been flipped, so the old release is still serving.
 		// Clear up what was half-built rather than leaving it to bill.
-		for _, id := range fresh {
-			if derr := m.opts.Machines.Destroy(ctx, id); derr != nil {
-				slog.Error("could not clean up a failed deploy's machine",
-					"machine", id, "service", svc.ID, "err", derr)
-			}
-		}
+		m.cleanUp(ctx, svc.ID, fresh, "deploy")
 		return nil, err
 	}
 
@@ -196,9 +191,7 @@ func (m *Manager) Deploy(ctx context.Context, serviceID, rootfsBuildID string,
 	// interleaving deploys cannot leave the service naming one release while
 	// the other's machines are the ones running.
 	if err := m.opts.Store.CASServiceRelease(ctx, svc.ID, svc.ReleaseID, rel.ID); err != nil {
-		for _, id := range fresh {
-			_ = m.opts.Machines.Destroy(ctx, id)
-		}
+		m.cleanUp(ctx, svc.ID, fresh, "deploy")
 		return nil, fmt.Errorf("services: another deploy moved %s: %w", svc.ID, err)
 	}
 
@@ -555,12 +548,7 @@ func (m *Manager) Rollback(ctx context.Context, serviceID string) (*state.Releas
 			// Same cleanup Deploy does in the same situation. rollOut returns
 			// what it created precisely so a failure does not leave half a
 			// rollout running and billing with nothing pointing at it.
-			for _, id := range fresh {
-				if derr := m.opts.Machines.Destroy(ctx, id); derr != nil {
-					slog.Error("could not clean up a failed rollback's machine",
-						"machine", id, "service", serviceID, "err", derr)
-				}
-			}
+			m.cleanUp(ctx, serviceID, fresh, "rollback")
 			return nil, err
 		}
 	} else {
@@ -596,6 +584,37 @@ func (m *Manager) Rollback(ctx context.Context, serviceID string) (*state.Releas
 	}
 	return target, nil
 }
+
+// cleanUp destroys the machines a rollout built and then could not flip to.
+//
+// On a context DETACHED from the request's, and that is the whole reason this
+// is a function rather than three loops. The commonest way a rollout fails is
+// that the caller hung up -- an SDK deadline, a Ctrl-C, a dropped connection --
+// and the failure it hands the rollout is the request's own cancellation. A
+// cleanup on that same context therefore cannot run: every Destroy returns
+// "context canceled" before it does anything, and what is left behind is the
+// worst shape available. The machine stays up carrying the new release, the
+// service row still names the old one (or none at all), and the client has
+// been told only that its request timed out.
+//
+// Bounded rather than unbounded, because this is the path a cancelled request
+// takes and an unbounded cleanup on a dead store would hold the rollout lock
+// for as long as the process lives.
+func (m *Manager) cleanUp(ctx context.Context, serviceID string, machines []string, what string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+	defer cancel()
+
+	for _, id := range machines {
+		if err := m.opts.Machines.Destroy(ctx, id); err != nil {
+			slog.Error("could not clean up a failed "+what+"'s machine",
+				"machine", id, "service", serviceID, "err", err)
+		}
+	}
+}
+
+// cleanupTimeout bounds the detached cleanup above. Generous: a Destroy stops
+// a guest, tears down a namespace and removes its caches.
+const cleanupTimeout = 2 * time.Minute
 
 // prune destroys the machines of every release except the current one and the
 // one being kept as a rollback target.

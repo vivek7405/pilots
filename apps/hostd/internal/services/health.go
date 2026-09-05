@@ -225,7 +225,19 @@ func (m *Manager) waitHealthy(ctx context.Context, machineID string, h HealthSpe
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			// Named, not passed through bare. This is overwhelmingly the
+			// caller hanging up -- a client deadline, a Ctrl-C -- and a bare
+			// "context canceled" in a deploy's error says neither which
+			// replica was being gated nor what it was answering, which is the
+			// one thing anybody needs. The last probe failure is the cause;
+			// the cancellation is only when we stopped waiting for it.
+			if last != nil {
+				return fmt.Errorf("machine %s was still not healthy when the "+
+					"deploy stopped waiting (%w); its last answer was: %v",
+					machineID, ctx.Err(), last)
+			}
+			return fmt.Errorf("machine %s: the deploy stopped waiting for it: %w",
+				machineID, ctx.Err())
 		case <-time.After(interval):
 		}
 	}
