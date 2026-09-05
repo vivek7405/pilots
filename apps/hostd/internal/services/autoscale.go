@@ -284,7 +284,10 @@ func (m *Manager) scaleUp(ctx context.Context, svc *state.Service, machines []st
 	// suspended it is running, or it belongs to a rollout or a rescue; a
 	// second one could not mount the volume anyway, and the create would be
 	// refused at the claim once a tick, forever.
-	vol := m.volumeOf(ctx, svc.ID)
+	vol, err := m.volumeOf(ctx, svc.ID)
+	if err != nil {
+		return err
+	}
 	if vol != "" {
 		mach, err := m.machineOf(ctx, svc.ID)
 		if err != nil || mach != nil {

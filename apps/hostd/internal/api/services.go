@@ -46,16 +46,24 @@ func serviceToAPI(svc state.Service, domain, orgID string) Service {
 	return out
 }
 
-// volumeOf is the volume a service mounts, or empty.
+// volumeOf is the volume a service mounts, empty when it mounts none.
 //
 // Separate from serviceToAPI so that stays a pure conversion; a list reads the
 // bindings once and joins in memory rather than querying per row.
-func (d Deps) volumeOf(ctx context.Context, serviceID string) string {
+//
+// A store error is returned rather than read as "no volume". On the patch
+// route that answer would open the side door the single-mounter rule closes:
+// a service that mounts a volume would take replicas: 2 because one read
+// blipped.
+func (d Deps) volumeOf(ctx context.Context, serviceID string) (string, error) {
 	sv, err := d.Store.ServiceVolume(ctx, serviceID)
-	if err != nil || sv == nil {
-		return ""
+	if errors.Is(err, state.ErrNotFound) {
+		return "", nil
 	}
-	return sv.VolumeID
+	if err != nil {
+		return "", err
+	}
+	return sv.VolumeID, nil
 }
 
 func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
@@ -251,9 +259,14 @@ func (d Deps) handleGetService(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	volumeID, err := d.volumeOf(r.Context(), svc.ID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
 	out := serviceToAPI(*svc, d.Domain, owner)
-	out.VolumeID = d.volumeOf(r.Context(), svc.ID)
+	out.VolumeID = volumeID
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -281,7 +294,11 @@ func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
 		return
 	}
-	volumeID := d.volumeOf(r.Context(), svc.ID)
+	volumeID, err := d.volumeOf(r.Context(), svc.ID)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
 	before := svc.Replicas
 	if err := d.applyServicePatch(svc, volumeID, req); err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
@@ -527,9 +544,14 @@ func (d Deps) handlePromote(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
+	volumeID, verr := d.volumeOf(r.Context(), svc.ID)
+	if verr != nil {
+		writeStoreError(w, verr)
+		return
+	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
 	out := serviceToAPI(*svc, d.Domain, owner)
-	out.VolumeID = d.volumeOf(r.Context(), svc.ID)
+	out.VolumeID = volumeID
 	writeJSON(w, http.StatusOK, out)
 }
 

@@ -153,7 +153,11 @@ func (m *Manager) Deploy(ctx context.Context, serviceID, rootfsBuildID string,
 	// place: a second machine could not mount the volume beside it, and
 	// destroying the first would take the service row with it. So there is no
 	// previous set to suspend and nothing to prune.
-	if vol := m.volumeOf(ctx, svc.ID); vol != "" {
+	vol, err := m.volumeOf(ctx, svc.ID)
+	if err != nil {
+		return nil, err
+	}
+	if vol != "" {
 		if err := m.rollOutOnVolume(ctx, svc, rel, health, knobs, vol); err != nil {
 			return nil, err
 		}
@@ -259,13 +263,21 @@ func (m *Manager) rollOut(ctx context.Context, svc *state.Service, rel *state.Re
 	return created, nil
 }
 
-// volumeOf is the volume a service mounts, or empty.
-func (m *Manager) volumeOf(ctx context.Context, serviceID string) string {
+// volumeOf is the volume a service mounts, empty when it mounts none.
+//
+// A store error is returned rather than read as "no volume": that answer would
+// send a volume-backed deploy down the ordinary rollout, which creates a
+// second machine, and the claim would refuse it after the release row was
+// already written.
+func (m *Manager) volumeOf(ctx context.Context, serviceID string) (string, error) {
 	sv, err := m.opts.Store.ServiceVolume(ctx, serviceID)
-	if err != nil || sv == nil {
-		return ""
+	if errors.Is(err, state.ErrNotFound) {
+		return "", nil
 	}
-	return sv.VolumeID
+	if err != nil {
+		return "", fmt.Errorf("services: the volume %s mounts: %w", serviceID, err)
+	}
+	return sv.VolumeID, nil
 }
 
 // machineOf is a volume-backed service's ONE machine, in any release and any
@@ -462,7 +474,11 @@ func (m *Manager) Rollback(ctx context.Context, serviceID string) (*state.Releas
 
 	// One machine, redeployed onto the target: a volume-backed service keeps
 	// no suspended previous release to wake.
-	if vol := m.volumeOf(ctx, serviceID); vol != "" {
+	vol, err := m.volumeOf(ctx, serviceID)
+	if err != nil {
+		return nil, err
+	}
+	if vol != "" {
 		if err := m.rollOutOnVolume(ctx, svc, target, health, nil, vol); err != nil {
 			return nil, err
 		}
