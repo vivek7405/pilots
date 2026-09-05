@@ -245,6 +245,7 @@ func TestEveryRouteIsRegistered(t *testing.T) {
 		{"GET", "/v1/machines/m_1/logs"},
 		{"POST", "/v1/machines/m_1/suspend"},
 		{"POST", "/v1/machines/m_1/wake"},
+		{"POST", "/v1/machines/m_1/redeploy"},
 		{"POST", "/v1/machines/m_1/stop"},
 		{"POST", "/v1/machines/m_1/start"},
 		{"POST", "/v1/machines/m_1/checkpoints"},

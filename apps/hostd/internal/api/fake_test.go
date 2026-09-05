@@ -17,6 +17,7 @@ type fakeManager struct {
 	err        error
 
 	created, destroyed, suspended, woken, restored int
+	redeployed                                     int
 	collected                                      int
 	volumesCreated                                 int
 	// lastCreate is the request as the handler passed it down, so a test can
@@ -24,6 +25,7 @@ type fakeManager struct {
 	// from the key and never from the body.
 	lastCreate       CreateMachineRequest
 	lastCreateVolume CreateVolumeRequest
+	lastRedeploy     RedeployRequest
 
 	// The follow tests drive these from another goroutine while the handler
 	// reads them, so both sides go through mu.
@@ -56,6 +58,12 @@ func (f *fakeManager) Create(_ context.Context, req CreateMachineRequest) (*stat
 func (f *fakeManager) Destroy(context.Context, string) error { f.destroyed++; return f.err }
 func (f *fakeManager) Suspend(context.Context, string) error { f.suspended++; return f.err }
 func (f *fakeManager) Wake(context.Context, string) error    { f.woken++; return f.err }
+
+func (f *fakeManager) Redeploy(_ context.Context, _ string, req RedeployRequest) (*state.Machine, error) {
+	f.redeployed++
+	f.lastRedeploy = req
+	return f.machine, f.err
+}
 
 func (f *fakeManager) Checkpoint(context.Context, string, string) (*state.Checkpoint, error) {
 	return f.checkpoint, f.err

@@ -158,6 +158,8 @@ func Routes(d Deps) http.Handler {
 	// non-snapshotting equivalents.
 	mux.HandleFunc("POST /v1/machines/{id}/suspend", d.handleSuspend)
 	mux.HandleFunc("POST /v1/machines/{id}/wake", d.handleWake)
+	// Redeploy is the rollout's: the same machine, booted from another image.
+	mux.HandleFunc("POST /v1/machines/{id}/redeploy", d.handleRedeploy)
 	mux.HandleFunc("POST /v1/machines/{id}/stop", notImplemented)
 	mux.HandleFunc("POST /v1/machines/{id}/start", notImplemented)
 

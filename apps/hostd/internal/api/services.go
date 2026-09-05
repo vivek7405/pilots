@@ -46,6 +46,18 @@ func serviceToAPI(svc state.Service, domain, orgID string) Service {
 	return out
 }
 
+// volumeOf is the volume a service mounts, or empty.
+//
+// Separate from serviceToAPI so that stays a pure conversion; a list reads the
+// bindings once and joins in memory rather than querying per row.
+func (d Deps) volumeOf(ctx context.Context, serviceID string) string {
+	sv, err := d.Store.ServiceVolume(ctx, serviceID)
+	if err != nil || sv == nil {
+		return ""
+	}
+	return sv.VolumeID
+}
+
 func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	var req CreateServiceRequest
 	if err := decodeBody(r, &req); err != nil {
@@ -68,6 +80,43 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 			"woken: give it a domain to route to, an app so peers can resolve it " +
 			"by name, or at least one replica"})
 		return
+	}
+
+	// A volume is another tenant's data, and it is mounted by exactly one
+	// machine at a time -- so the four things that could make this create
+	// wrong are refused here rather than discovered at the claim, minutes
+	// into the first deploy.
+	var volume *state.Volume
+	if req.Volume != "" {
+		v, ok := d.ownedVolume(w, r, req.Volume)
+		if !ok {
+			return // 404 on unknown and on foreign alike; existence never leaks
+		}
+		if req.Replicas > 1 {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "a service that " +
+				"mounts a volume runs exactly one replica: a volume is mounted by " +
+				"one machine at a time"})
+			return
+		}
+		if v.MachineID != "" {
+			writeJSON(w, http.StatusConflict, ErrorResponse{Error: fmt.Sprintf(
+				"volume %s is attached to machine %s; destroying it releases the volume",
+				v.ID, v.MachineID)})
+			return
+		}
+		bindings, err := d.Store.ListServiceVolumes(r.Context())
+		if err != nil {
+			writeStoreError(w, err)
+			return
+		}
+		for _, b := range bindings {
+			if b.VolumeID == v.ID {
+				writeJSON(w, http.StatusConflict, ErrorResponse{Error: fmt.Sprintf(
+					"volume %s is already mounted by service %s", v.ID, b.ServiceID)})
+				return
+			}
+		}
+		volume = v
 	}
 
 	// A service's replicas are machines, so a create is admitted against the
@@ -138,11 +187,31 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
+	// Before the service row, for the reason tenancy is: a create that dies
+	// between the two leaves a binding that refuses the volume loudly, not a
+	// service that exists and deploys without it quietly.
+	if volume != nil {
+		if err := d.Store.PutServiceVolume(r.Context(), &state.ServiceVolume{
+			ServiceID: svc.ID, Ordinal: 1, VolumeID: volume.ID, CreatedAt: svc.CreatedAt,
+		}); err != nil {
+			writeStoreError(w, err)
+			return
+		}
+	}
 	if err := d.Store.PutService(r.Context(), svc); err != nil {
+		if volume != nil {
+			// Best effort: the binding named a service that never appeared,
+			// and leaving it would refuse this volume to every later create.
+			_ = d.Store.DeleteServiceVolumes(r.Context(), svc.ID)
+		}
 		writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, serviceToAPI(*svc, d.Domain, req.OrgID))
+	out := serviceToAPI(*svc, d.Domain, req.OrgID)
+	if volume != nil {
+		out.VolumeID = volume.ID
+	}
+	writeJSON(w, http.StatusCreated, out)
 }
 
 func (d Deps) handleListServices(w http.ResponseWriter, r *http.Request) {
@@ -151,6 +220,18 @@ func (d Deps) handleListServices(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
 		return
 	}
+	// One read of the bindings, joined in memory: a query per row would turn
+	// a list into N of them against the local agent.
+	bindings, err := d.Store.ListServiceVolumes(r.Context())
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
+		return
+	}
+	mounts := make(map[string]string, len(bindings))
+	for _, b := range bindings {
+		mounts[b.ServiceID] = b.VolumeID
+	}
+
 	org, narrow := listOrg(r)
 	out := make([]Service, 0, len(rows))
 	for _, svc := range rows {
@@ -158,7 +239,9 @@ func (d Deps) handleListServices(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			continue
 		}
-		out = append(out, serviceToAPI(svc, d.Domain, owner))
+		row := serviceToAPI(svc, d.Domain, owner)
+		row.VolumeID = mounts[svc.ID]
+		out = append(out, row)
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -169,7 +252,9 @@ func (d Deps) handleGetService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
-	writeJSON(w, http.StatusOK, serviceToAPI(*svc, d.Domain, owner))
+	out := serviceToAPI(*svc, d.Domain, owner)
+	out.VolumeID = d.volumeOf(r.Context(), svc.ID)
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
@@ -196,8 +281,9 @@ func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
 		return
 	}
+	volumeID := d.volumeOf(r.Context(), svc.ID)
 	before := svc.Replicas
-	if err := d.applyServicePatch(svc, req); err != nil {
+	if err := d.applyServicePatch(svc, volumeID, req); err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
 		return
 	}
@@ -219,7 +305,9 @@ func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
-	writeJSON(w, http.StatusOK, serviceToAPI(*svc, d.Domain, owner))
+	out := serviceToAPI(*svc, d.Domain, owner)
+	out.VolumeID = volumeID
+	writeJSON(w, http.StatusOK, out)
 }
 
 // applyServicePatch applies the present fields onto the row and validates the
@@ -228,7 +316,7 @@ func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
 //
 // One function on purpose: every rule about a legal service lives here, and a
 // new field is a case in this switch plus a line in UpdateServiceRequest.
-func (d Deps) applyServicePatch(svc *state.Service, req UpdateServiceRequest) error {
+func (d Deps) applyServicePatch(svc *state.Service, volumeID string, req UpdateServiceRequest) error {
 	if req.Replicas != nil {
 		if *req.Replicas < 0 {
 			return errors.New("replicas cannot be negative")
@@ -294,6 +382,14 @@ func (d Deps) applyServicePatch(svc *state.Service, req UpdateServiceRequest) er
 		return errors.New("a service with no domain, no app and no running " +
 			"replicas can never be reached or woken: give it a domain to route " +
 			"to, an app so peers can resolve it by name, or at least one replica")
+	}
+
+	// The other create-time rule. A volume is mounted by one machine, so a
+	// service that mounts one runs one replica; the create refused more and
+	// the patch must not admit it by the side door.
+	if volumeID != "" && svc.Replicas > 1 {
+		return fmt.Errorf("service mounts volume %s and runs exactly one replica: "+
+			"a volume is mounted by one machine at a time", volumeID)
 	}
 	return nil
 }
@@ -395,7 +491,8 @@ func (d Deps) handlePromote(w http.ResponseWriter, r *http.Request) {
 			ErrorResponse{Error: "this host cannot promote: no object storage is configured"})
 		return
 	}
-	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
+	row, ok := d.ownedMachine(w, r, r.PathValue("id"))
+	if !ok {
 		return
 	}
 	var req PromoteRequest
@@ -405,13 +502,35 @@ func (d Deps) handlePromote(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if row.VolumeID != "" {
+		if req.Replicas > 1 {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: fmt.Sprintf(
+				"machine %s mounts volume %s, so the service it becomes runs exactly "+
+					"one replica: a volume is mounted by one machine at a time",
+				row.ID, row.VolumeID)})
+			return
+		}
+		// A volume-backed service is redeployed and rolled back by BOOTING
+		// its one machine from an image, never by restoring a checkpoint that
+		// carries the volume drive in its device state. A template sandbox
+		// has no image for that boot to use.
+		if row.ImageRef == "" {
+			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: fmt.Sprintf(
+				"machine %s mounts a volume and was created from the template, not "+
+					"from an image; a volume-backed service is redeployed from its "+
+					"image, so create the sandbox with image to promote it", row.ID)})
+			return
+		}
+	}
 	svc, err := d.Rollout.Promote(r.Context(), r.PathValue("id"), req)
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
-	writeJSON(w, http.StatusOK, serviceToAPI(*svc, d.Domain, owner))
+	out := serviceToAPI(*svc, d.Domain, owner)
+	out.VolumeID = d.volumeOf(r.Context(), svc.ID)
+	writeJSON(w, http.StatusOK, out)
 }
 
 type Release struct {
