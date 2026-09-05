@@ -775,6 +775,20 @@ func (m *Manager) Redeploy(ctx context.Context, id string, req api.RedeployReque
 		// machine's state dir, which the new boot reuses, so a deferred
 		// discard would delete the file the new process is running on.
 		fcm.DiscardCow()
+	} else {
+		// The same discard, for a machine with no live process to ask.
+		//
+		// A service replica takes the ordinary floor of zero, so every deploy
+		// after the first reaches Redeploy with the replica SUSPENDED and
+		// nothing in the branch above runs. Without this, the copy-on-write
+		// file describing the image the machine is LEAVING stays in the state
+		// dir the new boot reuses -- a leaked file per deploy, and a disk the
+		// new process may serve writes from.
+		if err := os.Remove(fc.CowPath(m.stateDir(id))); err != nil &&
+			!errors.Is(err, os.ErrNotExist) {
+			slog.Warn("redeploy could not remove the copy-on-write file",
+				"machine", id, "err", err)
+		}
 	}
 	// Storage only from here: the row and the disk are held and nothing runs.
 	m.opts.Usage.Transition(id, StateCreating)
