@@ -24,6 +24,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/block"
 	"github.com/vivek7405/pilots/hostd/internal/build"
+	"github.com/vivek7405/pilots/hostd/internal/compose"
 	"github.com/vivek7405/pilots/hostd/internal/config"
 	"github.com/vivek7405/pilots/hostd/internal/dns"
 	"github.com/vivek7405/pilots/hostd/internal/fc"
@@ -422,8 +423,9 @@ func run() error {
 		StoreVersion: storeVersion(store),
 		Builds:       builder, Rollout: rollout, Domain: cfg.WorkloadDomain,
 		Peers: peerLookup(f), Tenancy: tenancy, BuildGate: &quota.HostGate{},
-		Usage:  ledger,
-		Lookup: machineByName(f),
+		Usage:   ledger,
+		Compose: compose.Handler(),
+		Lookup:  machineByName(f),
 		GitHub: github.Handler(github.Deps{
 			HostID: cfg.HostID, App: ghApp, Store: store, Builds: builder,
 			Rollout: rollout, Machines: mgr, Domain: cfg.WorkloadDomain,

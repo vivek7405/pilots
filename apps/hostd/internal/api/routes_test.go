@@ -259,6 +259,7 @@ func TestEveryRouteIsRegistered(t *testing.T) {
 		{"POST", "/v1/services/s_1/deploy"},
 		{"POST", "/v1/services/s_1/rollback"},
 		{"POST", "/v1/machines/m_1/promote"},
+		{"POST", "/v1/compose/plan"},
 		{"POST", "/v1/volumes"},
 		{"GET", "/v1/volumes"},
 		{"GET", "/v1/hosts"},

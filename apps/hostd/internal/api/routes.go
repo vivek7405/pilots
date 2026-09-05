@@ -45,6 +45,11 @@ type Deps struct {
 	// Peers resolves other hosts, so a service write that arrived at the
 	// wrong host can be forwarded to the one allowed to perform it.
 	Peers PeerLookup
+	// Compose plans a compose file. Injected as a handler because the compose
+	// package imports this one for the wire structs its steps embed. Nil only
+	// in tests, where the route answers 503 rather than vanishing from the
+	// table -- a route that disappears in tests is a route nothing checks.
+	Compose http.HandlerFunc
 	// GitHub handles webhook deliveries. Nil when no app is configured, in
 	// which case the route answers 503 rather than accepting deliveries it
 	// cannot verify.
@@ -172,6 +177,17 @@ func Routes(d Deps) http.Handler {
 	// Promote: the sandbox-to-production step, and the whole point of one
 	// primitive serving both faces.
 	mux.HandleFunc("POST /v1/machines/{id}/promote", d.handlePromote)
+
+	// The compose plan. Injected because internal/compose imports this package
+	// for the wire types its steps embed, so the import cannot go both ways.
+	if d.Compose != nil {
+		mux.HandleFunc("POST /v1/compose/plan", d.Compose)
+	} else {
+		mux.HandleFunc("POST /v1/compose/plan", func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusServiceUnavailable,
+				ErrorResponse{Error: "no compose planner on this host"})
+		})
+	}
 
 	// Custom domains. Verification is what stops a caller spending the
 	// fleet's shared certificate rate limit on a name they do not own.
