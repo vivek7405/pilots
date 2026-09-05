@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -168,6 +170,137 @@ func (d Deps) handleGetService(w http.ResponseWriter, r *http.Request) {
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
 	writeJSON(w, http.StatusOK, serviceToAPI(*svc, d.Domain, owner))
+}
+
+func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
+	// Ownership before forwarding: a foreign service must not be told which
+	// host arbitrates it, and must not be acted on anywhere.
+	svc, ok := d.ownedService(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	// Only the arbiter may write this service; forward rather than refuse.
+	if d.forwardToArbiter(w, r, r.PathValue("id")) {
+		return
+	}
+
+	// Strict on THIS route alone, where decodeBody is lenient everywhere else.
+	// The clients send knobs nowhere but here, and a knobs key silently
+	// dropped is a compose file that says one thing and a service that does
+	// another -- an operator asking for a warm replica, being told it worked,
+	// and finding out from a cold start.
+	dec := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	var req UpdateServiceRequest
+	if err := dec.Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
+		return
+	}
+	if err := d.applyServicePatch(svc, req); err != nil {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
+		return
+	}
+	if err := d.Store.PutService(r.Context(), svc); err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
+	writeJSON(w, http.StatusOK, serviceToAPI(*svc, d.Domain, owner))
+}
+
+// applyServicePatch applies the present fields onto the row and validates the
+// MERGED result, so a patch is judged by what the service will be rather than
+// by what the body said.
+//
+// One function on purpose: every rule about a legal service lives here, and a
+// new field is a case in this switch plus a line in UpdateServiceRequest.
+func (d Deps) applyServicePatch(svc *state.Service, req UpdateServiceRequest) error {
+	if req.Replicas != nil {
+		if *req.Replicas < 0 {
+			return errors.New("replicas cannot be negative")
+		}
+		svc.Replicas = *req.Replicas
+	}
+	if req.Health != nil {
+		raw, err := json.Marshal(req.Health)
+		if err != nil {
+			return err
+		}
+		svc.Health = string(raw)
+	}
+	// A non-nil map REPLACES; an empty one clears. The client merges when it
+	// wants a merge, because only the client knows which of the two it meant.
+	if req.Env != nil {
+		if len(req.Env) == 0 {
+			svc.Env = ""
+		} else {
+			raw, err := json.Marshal(req.Env)
+			if err != nil {
+				return err
+			}
+			svc.Env = string(raw)
+		}
+	}
+	if req.SecretEnv != nil {
+		if len(req.SecretEnv) == 0 {
+			svc.EnvSealed = ""
+		} else {
+			// Refused rather than degraded, exactly as the create path
+			// refuses: writing these in the clear replicates them to every
+			// host and into every backup, and nothing downstream reports it.
+			if d.FleetKey == nil || !d.FleetKey.IsSet() {
+				return errors.New("this host has no fleet key, so it cannot " +
+					"store secrets; set PILOT_FLEET_KEY")
+			}
+			raw, err := json.Marshal(req.SecretEnv)
+			if err != nil {
+				return err
+			}
+			sealed, err := d.FleetKey.Seal(raw)
+			if err != nil {
+				return fmt.Errorf("sealing the environment: %w", err)
+			}
+			svc.EnvSealed = sealed
+		}
+	}
+	if req.Repo != nil {
+		svc.Repo = *req.Repo
+	}
+	if req.Branch != nil {
+		svc.Branch = *req.Branch
+	}
+	if req.Autodeploy != nil {
+		svc.Autodeploy = *req.Autodeploy
+	}
+
+	// The create-time rule, applied to the merged row. Scaling a routable
+	// service to zero is fine; scaling one that nothing can reach or wake to
+	// zero turns it into a support ticket six months later.
+	if svc.Replicas == 0 && svc.Domain == "" && svc.App == "" {
+		return errors.New("a service with no domain, no app and no running " +
+			"replicas can never be reached or woken: give it a domain to route " +
+			"to, an app so peers can resolve it by name, or at least one replica")
+	}
+	return nil
+}
+
+// handleListReleases lists a service's release history, newest first.
+func (d Deps) handleListReleases(w http.ResponseWriter, r *http.Request) {
+	if _, ok := d.ownedService(w, r, r.PathValue("id")); !ok {
+		return
+	}
+	// A read, so it is answered here rather than forwarded: every host serves
+	// this from its own replica, which is the whole point of having one.
+	rows, err := d.Store.ReleasesFor(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	out := make([]Release, 0, len(rows))
+	for _, rel := range rows {
+		out = append(out, releaseToAPI(rel))
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (d Deps) handleDeploy(w http.ResponseWriter, r *http.Request) {

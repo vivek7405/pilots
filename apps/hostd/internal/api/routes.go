@@ -164,6 +164,8 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("POST /v1/services", d.handleCreateService)
 	mux.HandleFunc("GET /v1/services", d.handleListServices)
 	mux.HandleFunc("GET /v1/services/{id}", d.handleGetService)
+	mux.HandleFunc("PATCH /v1/services/{id}", d.handleUpdateService)
+	mux.HandleFunc("GET /v1/services/{id}/releases", d.handleListReleases)
 	mux.HandleFunc("POST /v1/services/{id}/deploy", d.handleDeploy)
 	mux.HandleFunc("POST /v1/services/{id}/rollback", d.handleRollback)
 
