@@ -53,8 +53,10 @@ func TestACreateWithNoCommandFallsBackToTheBuildSpec(t *testing.T) {
 
 	// A create that carries no command of its own, which is every create from
 	// a built image: hostd has nothing to pass, because the command lives in
-	// the image rather than in the machine row.
-	if _, err := applyInit(initRequest{}); err != nil {
+	// the image rather than in the machine row. It carries an env map all the
+	// same, empty if the deploy set none -- that is what tells the agent this
+	// is a create rather than the clock nudge after a wake.
+	if _, err := applyInit(initRequest{Env: map[string]string{}}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -126,7 +128,7 @@ func TestAnExplicitCommandDoesNotInheritTheImagesWorkdirOrUser(t *testing.T) {
 	  "user": "nobody",
 	  "from_dockerfile_only": true
 	}`)
-	if _, err := applyInit(initRequest{}); err != nil {
+	if _, err := applyInit(initRequest{Env: map[string]string{}}); err != nil {
 		t.Fatal(err)
 	}
 	if appWorkDir != "/app" || appUser != "nobody" {
@@ -176,7 +178,7 @@ func TestShellAndExecFormRenderDifferently(t *testing.T) {
 func TestASpecWithNoCommandIsIgnored(t *testing.T) {
 	withSpec(t, `{"workdir": "/app", "from_dockerfile_only": true}`)
 
-	if _, err := applyInit(initRequest{}); err != nil {
+	if _, err := applyInit(initRequest{Env: map[string]string{}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(appPath); err == nil {
@@ -365,6 +367,61 @@ func TestARestartOnABuiltImageKeepsTheDeployTimeEnvironment(t *testing.T) {
 	}
 	// And the unit's working directory and user still come from the spec: they
 	// are properties of the image, and a restart starts the same unit.
+	if appWorkDir != "/app" {
+		t.Errorf("appWorkDir = %q, want /app", appWorkDir)
+	}
+}
+
+// A WAKE must not touch the environment the deploy delivered.
+//
+// hostd pokes /init after every resume to unfreeze CLOCK_REALTIME, and that
+// poke carries a timestamp and nothing else -- no environment, no command, and
+// StartApp false. It used to fall straight through to the build's start spec,
+// whose env was then written over /etc/pilot/env. The running process kept
+// what it started with, so nothing looked wrong; the loss surfaced the next
+// time the application restarted, coming back without a single value the
+// deploy gave it. Observed on a real machine: /etc/pilot/env reduced to the
+// image's own NODE_ENV and PATH while the running process still held
+// DATABASE_URL, PORT and every secret.
+func TestAWakeDoesNotRewriteTheDeployedEnvironment(t *testing.T) {
+	withSpec(t, `{
+	  "entrypoint": ["node"],
+	  "cmd": ["server.js"],
+	  "workdir": "/app",
+	  "env": {"NODE_ENV": "production"},
+	  "from_dockerfile_only": true
+	}`)
+	stubStart(t, true, "")
+
+	if _, err := applyInit(initRequest{
+		TimestampNanos: 1,
+		Env:            map[string]string{"DATABASE_URL": "postgres://db/app", "PORT": "8080"},
+		StartApp:       true,
+	}); err != nil {
+		t.Fatalf("create-shaped init: %v", err)
+	}
+	before, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("the create wrote no environment: %v", err)
+	}
+
+	// The wake: a timestamp and nothing else, which is exactly what
+	// fc.pokeGuestClock sends after every restore.
+	if _, err := applyInit(initRequest{TimestampNanos: 2}); err != nil {
+		t.Fatalf("wake-shaped init: %v", err)
+	}
+
+	after, _ := os.ReadFile(envPath)
+	if !bytes.Equal(before, after) {
+		t.Fatalf("a wake rewrote the environment from the image's spec:\nbefore %q\nafter  %q",
+			before, after)
+	}
+	if !strings.Contains(string(after), "DATABASE_URL") {
+		t.Errorf("the deploy-time environment is gone: %q", after)
+	}
+	// The image's directory still applies: it is a property of the image, and
+	// the unit a resume's application is running under is the one the create
+	// started.
 	if appWorkDir != "/app" {
 		t.Errorf("appWorkDir = %q, want /app", appWorkDir)
 	}

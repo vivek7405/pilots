@@ -3,6 +3,7 @@ package machines
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -288,5 +289,42 @@ func TestABuiltImageIsAlwaysToldToStart(t *testing.T) {
 	}
 	if !needsInit(map[string]string{"PORT": "8080"}, "", false) {
 		t.Error("a template create with an environment must be poked")
+	}
+}
+
+// A create's poke and a cold boot's poke must be distinguishable on the wire.
+//
+// The agent decides what to WRITE from whether the poke said anything about
+// the environment: an empty map means "this create sets it, and it is empty",
+// an absent one means "this poke says nothing", which is what a wake and a
+// cold boot send. omitempty on Env erased that difference by dropping an empty
+// map, so a create from a build with no environment arrived looking exactly
+// like a wake -- and the image's own start spec was left unread.
+func TestACreatePokeAlwaysCarriesAnEnvMap(t *testing.T) {
+	create, err := json.Marshal(initPayload{
+		TimestampNanos: 1, Env: map[string]string{}, StartApp: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(create), `"env":{}`) {
+		t.Errorf("a create with no environment encoded as %s; the agent cannot "+
+			"tell it from a wake", create)
+	}
+
+	// The cold boot, which deliberately says nothing: everything the
+	// application needs is already on the machine's own disk.
+	restart, err := json.Marshal(initPayload{TimestampNanos: 1, StartApp: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal(restart, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Env != nil {
+		t.Errorf("a restart poke carried an environment: %s", restart)
 	}
 }

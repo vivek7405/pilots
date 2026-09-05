@@ -189,9 +189,17 @@ func needsInit(env map[string]string, cmd string, fromBuild bool) bool {
 }
 
 // initPayload is the body of the create-time poke to the guest agent.
+//
+// Env carries NO omitempty, and that is load-bearing rather than style. An
+// empty map and an absent key mean different things to the agent -- "this
+// create sets the environment, and it is empty" against "this poke says
+// nothing about the environment" -- and omitempty erases exactly that
+// difference by dropping an empty map on the floor. A create from a build with
+// no environment would then arrive looking like the clock nudge after a wake,
+// and the agent would leave the image's own start spec unread.
 type initPayload struct {
 	TimestampNanos int64             `json:"timestamp_nanos"`
-	Env            map[string]string `json:"env,omitempty"`
+	Env            map[string]string `json:"env"`
 	AppCmd         string            `json:"app_cmd,omitempty"`
 	StartApp       bool              `json:"start_app"`
 }
@@ -216,6 +224,13 @@ func (m *Manager) deliverEnv(ctx context.Context, row *state.Machine,
 	}
 	if !needsInit(env, cmd, fromBuild) {
 		return nil
+	}
+	if env == nil {
+		// Never nil past here: nil is the agent's word for "this poke says
+		// nothing about the environment", which is what a wake sends and what
+		// a create must never look like. A machine with no service row has no
+		// environment, and that is an empty one rather than no statement.
+		env = map[string]string{}
 	}
 
 	body, err := json.Marshal(initPayload{
