@@ -215,3 +215,59 @@ func funcBody(t *testing.T, file, name string) *ast.BlockStmt {
 	t.Fatalf("%s has no function named %s", file, name)
 	return nil
 }
+
+// No path restores a memory image without first asking whose CPU vendor
+// photographed it.
+//
+// A Firecracker snapshot carries raw CPUID and never restores across the
+// Intel/AMD boundary. There is no flag on that decision, deliberately: it has
+// exactly one home, bringUp, and Wake and Rescue reach it through no other
+// door. A second caller of wakeFromSuspend is a path that will hand a foreign
+// vmstate to Firecracker and write the machine StateError -- which looks like
+// a broken machine rather than like the mistake it is.
+//
+// Structural for the reason the test above this one is: every path that could
+// get it wrong needs a Firecracker host and a real snapshot before it runs a
+// line, and this costs nothing and cannot be skipped.
+func TestNoRestoreSkipsTheVendorCheck(t *testing.T) {
+	for _, tc := range []struct {
+		callee string
+		want   []string
+		why    string
+	}{
+		{
+			callee: "wakeFromSuspend",
+			want:   []string{"bringUp"},
+			why: "a second caller restores a memory image without asking which " +
+				"CPU vendor photographed it, and Firecracker refuses a foreign " +
+				"vmstate at load rather than at a review",
+		},
+		{
+			callee: "bringUp",
+			want:   []string{"Rescue", "Wake"},
+			why: "these are the two paths that bring a suspended machine back " +
+				"locally; anything else reaching them is a bring-up outside the " +
+				"lock and the ledger hooks both of these own",
+		},
+		{
+			callee: "bootFromDisk",
+			want:   []string{"bringUp", "restoreFromCheckpoint"},
+			why: "the cold-boot path is entered from the vendor decision and " +
+				"from a rollback whose CHECKPOINT is foreign, and from nowhere " +
+				"else -- a caller that reached it directly would discard a " +
+				"resumable memory image for no reason",
+		},
+		{
+			callee: "restoreInstantImmutable",
+			want:   []string{"restoreFromCheckpoint"},
+			why: "a checkpoint restore is the only immutable-artifact restore, " +
+				"and it is where the checkpoint's own vendor is checked",
+		},
+	} {
+		got := callersOf(t, tc.callee)
+		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+			t.Errorf("%s is called from %v, want exactly %v: %s",
+				tc.callee, got, tc.want, tc.why)
+		}
+	}
+}

@@ -14,6 +14,9 @@ var (
 		"Time to restore a suspended machine on request.",
 		[]float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10})
 
+	MachineStarts = NewCounterVec(Default, "pilots_machine_starts_total",
+		"Machine starts by kind: restore, boot, cold_boot.", "kind")
+
 	CheckpointDurableSeconds = NewHistogram(Default, "pilots_checkpoint_durable_seconds",
 		"Pause to durable-in-object-storage, per checkpoint.",
 		[]float64{0.5, 1, 2, 5, 10, 20, 60, 120})

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
@@ -270,4 +271,57 @@ func TestSystemdReadsBackWhatWeWrote(t *testing.T) {
 		}
 	}
 	_ = out
+}
+
+// The failure the restart branch exists to prevent.
+//
+// A machine built from a Dockerfile carries the image's own ENV in
+// start.json and its deploy-time environment in /etc/pilot/env, where the
+// create merged them. A cold boot that fell through to the spec would rewrite
+// that file from the image alone, so the application would come back missing
+// every value the deploy gave it -- with nothing anywhere saying so.
+func TestARestartOnABuiltImageKeepsTheDeployTimeEnvironment(t *testing.T) {
+	withSpec(t, `{
+	  "entrypoint": ["node"],
+	  "cmd": ["server.js"],
+	  "workdir": "/app",
+	  "env": {"PORT": "8080"},
+	  "from_dockerfile_only": true
+	}`)
+	calls := stubStart(t, true, "")
+
+	// The create: the deploy's DATABASE_URL on top of the image's PORT.
+	if _, err := applyInit(initRequest{
+		TimestampNanos: 1,
+		Env:            map[string]string{"DATABASE_URL": "postgres://db/app"},
+		StartApp:       true,
+	}); err != nil {
+		t.Fatalf("create-shaped init: %v", err)
+	}
+	envBefore, err := os.ReadFile(envPath)
+	if err != nil {
+		t.Fatalf("the create wrote no environment: %v", err)
+	}
+
+	// The cold boot.
+	if _, err := applyInit(initRequest{TimestampNanos: 2, StartApp: true}); err != nil {
+		t.Fatalf("restart-shaped init: %v", err)
+	}
+	if *calls != 2 {
+		t.Fatalf("the cold boot did not start the application (calls=%d)", *calls)
+	}
+
+	envAfter, _ := os.ReadFile(envPath)
+	if !bytes.Equal(envBefore, envAfter) {
+		t.Fatalf("a cold boot rewrote the environment from the image's spec:\nbefore %q\nafter  %q",
+			envBefore, envAfter)
+	}
+	if !strings.Contains(string(envAfter), "DATABASE_URL") {
+		t.Errorf("the deploy-time environment is gone: %q", envAfter)
+	}
+	// And the unit's working directory and user still come from the spec: they
+	// are properties of the image, and a restart starts the same unit.
+	if appWorkDir != "/app" {
+		t.Errorf("appWorkDir = %q, want /app", appWorkDir)
+	}
 }

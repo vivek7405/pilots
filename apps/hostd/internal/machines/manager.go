@@ -334,6 +334,18 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 			return nil, err
 		}
 	}
+	// The pool, before the machine row, mirroring tenancy above and for the
+	// same shape of reason: no peer should ever see a machine whose vendor pool
+	// is unknown, because that machine ranks over the whole fleet and could be
+	// cold-booted needlessly. A create never has a foreign image -- a foreign
+	// release boots from its rootfs upstream, and the template is this pool's
+	// -- so the kind is known from the request rather than from a bring-up.
+	startKind := state.StartRestore
+	if req.MemBuildID == "" && (req.Volume != "" || req.Image != "") {
+		startKind = state.StartBoot
+	}
+	m.recordStart(ctx, row, startKind)
+
 	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
 		return nil, err
 	}
@@ -716,7 +728,7 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 	}
 
 	start := time.Now()
-	fcm, err := m.wakeFromSuspend(ctx, row)
+	fcm, kind, err := m.bringUp(ctx, row)
 	if err != nil {
 		row.State = StateError
 		stampSlot(row, nil)
@@ -731,16 +743,25 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 
 	// Only a wake that worked is a latency. A failed one is an error, and
 	// folding it in would make the histogram measure how fast this host fails.
-	metrics.WakeSeconds.Observe(time.Since(start).Seconds())
+	// A cold boot is not one either: it is a kernel boot with its own budget,
+	// and folding it in would make the wake SLO measure the wrong thing.
+	if kind == state.StartRestore {
+		metrics.WakeSeconds.Observe(time.Since(start).Seconds())
+	}
 
 	row.State = StateRunning
 	stampSlot(row, fcm)
 	row.LastActivity = time.Now().Unix()
 	row.UpdatedAt = time.Now().Unix()
+	// Before the row that names the machine running, so the pool is never
+	// unknown for a machine a peer can already see live. On a cold boot this
+	// clears the memory build too, so the write below carries it.
+	discard := m.recordStart(ctx, row, kind)
 	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
 		return err
 	}
 	m.opts.Usage.Transition(id, StateRunning)
+	discard()
 	return nil
 }
 
@@ -896,6 +917,13 @@ func (m *Manager) Redeploy(ctx context.Context, id string, req api.RedeployReque
 	stampSlot(row, fcm)
 	row.LastActivity = time.Now().Unix()
 	row.UpdatedAt = time.Now().Unix()
+	// AFTER the boot, deliberately: a redeploy's slot bookkeeping is asserted
+	// by the count of stampSlot and withoutSlot calls that precede the boot,
+	// and this must not disturb either. The boot happened on THIS vendor and
+	// the row has to say so before the machine's next suspend photographs here.
+	// Redeploy has already cleared MemBuildID, so this is a StartBoot and the
+	// cold-boot discard does not apply.
+	m.recordStart(ctx, row, state.StartBoot)
 	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
 		return row, err
 	}
