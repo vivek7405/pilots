@@ -302,7 +302,19 @@ func (m *Manager) Rescue(ctx context.Context, row state.Machine) error {
 	stampSlot(fresh, fcm)
 	fresh.LastActivity = time.Now().Unix()
 	fresh.UpdatedAt = fresh.LastActivity
-	return m.opts.Store.PutMachine(ctx, fresh)
+	if err := m.opts.Store.PutMachine(ctx, fresh); err != nil {
+		return err
+	}
+	// This host bills it from here. The dead owner's ledger ended at its last
+	// tick, so the seam between the two is bounded by one tick and neither
+	// side double-bills.
+	org := ""
+	if t, terr := m.opts.Store.GetTenancy(ctx, fresh.ID); terr == nil && t != nil {
+		org = t.OrgID
+	}
+	m.opts.Usage.Open(fresh.ID, org, StateRunning, fresh.VCPUs, fresh.MemMiB,
+		m.volumeGiB(ctx, fresh.VolumeID))
+	return nil
 }
 
 // StopLocal tears down a machine this host is running but no longer owns.
@@ -331,6 +343,10 @@ func (m *Manager) StopLocal(ctx context.Context, id string) error {
 	if slotIdx > 0 {
 		m.pool.Return(slotIdx)
 	}
+	// And stop metering it here: the row names another host, so the machine is
+	// billed by its rescuer now. Two hosts each with an open interval for the
+	// same machine is the one way this ledger can double-bill.
+	m.opts.Usage.Close(id)
 
 	// And let go of its volume's filesystem, which killing Firecracker does
 	// not do. This host was partitioned and the machine has been rescued

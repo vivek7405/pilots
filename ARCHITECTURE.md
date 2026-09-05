@@ -261,6 +261,14 @@ POST   /v1/builds                    {dockerfile-context tar} → streamed struc
 POST   /v1/services                  {name, release|build, replicas, health, domain?}
 GET    /v1/services                  list
 GET    /v1/services/:id              info
+PATCH  /v1/services/:id              {replicas?, health?, env?, secret_env?, repo?,
+                                     branch?, autodeploy?}; env and secret_env
+                                     REPLACE the stored map, and env, secret_env
+                                     and replicas take effect at the NEXT deploy;
+                                     knobs are refused with a 400 naming the field
+                                     (they travel on the deploy); forwarded to the
+                                     service's arbiter
+GET    /v1/services/:id/releases     newest first, [] for none
 POST   /v1/services/:id/deploy       health-gated cutover
 POST   /v1/services/:id/rollback
 POST   /v1/machines/:id/promote      {domain?} → service
@@ -272,6 +280,17 @@ POST   /v1/api-keys/:hash/revoke     admin: tombstone a key; no row is deleted
 GET    /v1/api-keys?org=             admin: list an org's keys, revoked ones included
 GET    /v1/quotas/:org               admin: the org's limits, or the defaults
 PUT    /v1/quotas/:org               admin: set them
+GET    /v1/usage?since=&until=       admin: what THIS host metered, in unix
+                                     seconds; {host_id, since, until, orgs:
+                                     {<org>: {machine_seconds, vcpu_seconds,
+                                     mib_seconds, volume_gib_seconds}}}. orgs is
+                                     never null; the range echoed back is the one
+                                     summed. Default window: the last 24 h
+POST   /v1/compose/plan              {compose, env} -> {app, steps[]} in Kahn order
+                                     over depends_on; `machines` scope. Every
+                                     unsupported key in the file comes back in ONE
+                                     400 as {error, unsupported:[{service, key,
+                                     message}]}
 GET    /v1/health                    liveness (unauthenticated); carries
                                      store_version, the sum of this replica's
                                      version vector (0 on SQLite)
@@ -405,7 +424,9 @@ instructive way — uncloud stores each container as JSON embedding the resolved
 env and inline config bodies, gossiping both fleet-wide.
 
 `secret://name` references are resolved **client-side**, before any spec is
-built, so the value never enters the repo. The CLI sends plaintext to hostd
+built, so the value never enters the repo. `POST /v1/compose/plan` therefore
+returns a step's `secret_refs` as NAMES and never values; the CLI resolves them
+from the operator's own store and sends `secret_env`, which hostd seals. The CLI sends plaintext to hostd
 over TLS; hostd seals it with a fleet key from `/etc/pilots/config` before the
 row is written. Non-secret values live in `services.env`, sealed ones in
 `services.env_sealed`. No plaintext in a gossiped row, none in object storage.
@@ -1010,6 +1031,18 @@ pilots/
                           #   build-golden-rootfs.sh, dev-vm.sh, e2e.mjs
 ```
 
+**Metering is host-local, like everything else.** Each hostd appends one closed
+interval per (machine, org, state) to `<machine state root>/usage/<UTC
+day>.ndjson`, closed and reopened on every state write it performs and on a
+60 s tick, and uploads each day file to `usage/<host_id>/<day>.ndjson` in object
+storage — outside the `chunks/` prefix, and what a wiped disk loses is bounded
+by one tick. `GET /v1/usage` answers from those files and from the intervals
+still open; the dashboard polls every live host once a minute and sums, and
+meters nothing itself. **A suspended machine bills storage only:
+machine-seconds and volume-GiB-seconds accrue, vCPU-seconds and MiB-seconds do
+not.** There is deliberately no replicated `usage` table: a write per minute per
+machine gossiped fleet-wide, on a live schema, is hard rule 6 with extra steps.
+
 webjs facts to honor: app joins root `workspaces`; delete the scaffold's
 nested `.git`; commands run inside the app dir
 (`npm run dev --workspace=apps/dashboard`); Node ≥24; gitignore
@@ -1053,7 +1086,13 @@ section drives a machine that echoes what reached it, so a forged
 `X-Forwarded-For`, the API hostname and the per-state machine gauge are
 asserted through the router rather than in a unit test; `gate.sh` section 1b
 asserts the same hostname on every host and that their replica versions have
-not drifted apart. `go test ./...` for netns/block/header/state/s3
+not drifted apart. Its data-route section drives the compose plan (the CLI's
+own fixture, its ordering, its `secret_refs`, and the one 400 listing every
+unsupported key), the service patch and its release list, and the usage ledger
+across a create, a suspend, a wake and a destroy — asserting there that a
+suspended machine kept accruing wall time and stopped accruing compute; `gate.sh`
+section 3 adds a service patch sent to a host that does not arbitrate it, and 3b
+that every host answers `/v1/usage` with its own `host_id`. `go test ./...` for netns/block/header/state/s3
 (block-layer round-trip + diff-chain tests are mandatory). Drift tests in
 both SDKs parse `internal/api` on every
 `npm test`. Dashboard: `webjs check` / `doctor --json` / `typecheck` /

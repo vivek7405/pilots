@@ -24,6 +24,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/block"
 	"github.com/vivek7405/pilots/hostd/internal/build"
+	"github.com/vivek7405/pilots/hostd/internal/compose"
 	"github.com/vivek7405/pilots/hostd/internal/config"
 	"github.com/vivek7405/pilots/hostd/internal/dns"
 	"github.com/vivek7405/pilots/hostd/internal/fc"
@@ -38,6 +39,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/selfheal"
 	"github.com/vivek7405/pilots/hostd/internal/services"
 	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/vivek7405/pilots/hostd/internal/usage"
 	"github.com/vivek7405/pilots/hostd/internal/volumes"
 )
 
@@ -211,6 +213,15 @@ func run() error {
 			"same value on every host.")
 	}
 
+	// The meter. Built before the manager because every lifecycle hook writes
+	// through it, and rooted beside the machine state it describes.
+	//
+	// A sibling of the per-machine directories, which reconcile also walks. It
+	// is skipped there because it carries neither a state file nor a pid, and
+	// no machine id is ever the string below -- but anything else that comes
+	// to iterate this root has to keep skipping it.
+	ledger := usage.New(filepath.Join(cfg.MachineStateRoot(), "usage"))
+
 	mgr := machines.New(machines.Options{
 		HostID: cfg.HostID,
 		Domain: cfg.WorkloadDomain,
@@ -234,6 +245,7 @@ func run() error {
 		MachinePrefix:    machinePrefix,
 		Discovery:        discovery,
 		FleetKey:         fleetKey,
+		Usage:            ledger,
 		FCConfig: fc.Config{
 			KernelPath:     cfg.KernelPath,
 			TemplateRootfs: cfg.TemplateRootfs,
@@ -277,6 +289,11 @@ func run() error {
 		slog.Info("re-adopted machines from a previous run", "count", adopted)
 	}
 
+	// Meter from the adopted set forward. The previous hostd's open intervals
+	// ended at its last tick, so the gap a restart leaves is bounded by one
+	// tick rather than by how long the process was down.
+	ledger.Recover(usageEntries(ctx, store, cfg.HostID))
+
 	// Re-gossip this host's own rows. A write that reached the local replica
 	// and never left the host -- a partition, a wedge, a kill between the two
 	// -- leaves every peer stale, and nothing else corrects it. See
@@ -304,6 +321,14 @@ func run() error {
 	// Sweeps up Firecrackers this host has no record of -- the residue of a
 	// hostd killed mid-create, or a destroy that failed partway.
 	go mgr.RunReaper(ctx)
+	// Never fc.UnconfiguredStore: a stub that fails every put would log a
+	// warning a minute on a single box that is configured exactly as intended.
+	// Nil instead, and the ledger says so once at start.
+	var usageUploader usage.Uploader
+	if s3c, ok := uploader.(*s3.Client); ok && cfg.S3Bucket != "" {
+		usageUploader = s3c
+	}
+	go ledger.Run(ctx, usageUploader, cfg.HostID)
 
 	// The fleet pieces, in the order they depend on each other: the mesh
 	// carries gossip and forwarded requests, so it comes up before anything
@@ -403,7 +428,9 @@ func run() error {
 		StoreVersion: storeVersion(store),
 		Builds:       builder, Rollout: rollout, Domain: cfg.WorkloadDomain,
 		Peers: peerLookup(f), Tenancy: tenancy, BuildGate: &quota.HostGate{},
-		Lookup: machineByName(f),
+		Usage:   ledger,
+		Compose: compose.Handler(),
+		Lookup:  machineByName(f),
 		GitHub: github.Handler(github.Deps{
 			HostID: cfg.HostID, App: ghApp, Store: store, Builds: builder,
 			Rollout: rollout, Machines: mgr, Domain: cfg.WorkloadDomain,
@@ -507,6 +534,45 @@ func dispatch(cfg *config.Config, rtr http.Handler, ctrl http.Handler) http.Hand
 		}
 		ctrl.ServeHTTP(w, r)
 	})
+}
+
+// usageEntries is this host's machines as the ledger needs them after a
+// restart: every state is reopened as recorded, because the row and the disk
+// are still there whatever the machine is doing.
+//
+// The org and the volume size are read here rather than inside the ledger, so
+// internal/usage imports neither the store nor the API and stays a file
+// format with a clock.
+func usageEntries(ctx context.Context, store state.Store, hostID string) []usage.Entry {
+	rows, err := store.ListMachines(ctx)
+	if err != nil {
+		slog.Warn("could not list machines to resume metering; usage for "+
+			"machines adopted at start will resume at their next state change",
+			"err", err)
+		return nil
+	}
+	out := make([]usage.Entry, 0, len(rows))
+	for _, row := range rows {
+		if row.HostID != hostID {
+			continue
+		}
+		e := usage.Entry{
+			MachineID: row.ID, State: row.State,
+			VCPUs: row.VCPUs, MemMiB: row.MemMiB,
+		}
+		// Empty on ErrNotFound: a row created before tenancy existed has no
+		// org, and it is metered under the empty one rather than dropped.
+		if t, terr := store.GetTenancy(ctx, row.ID); terr == nil && t != nil {
+			e.OrgID = t.OrgID
+		}
+		if row.VolumeID != "" {
+			if v, verr := store.GetVolume(ctx, row.VolumeID); verr == nil && v != nil {
+				e.VolumeGiB = v.SizeMiB / 1024
+			}
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // reconcile re-adopts machines left running by a previous hostd.

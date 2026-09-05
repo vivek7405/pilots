@@ -16,7 +16,10 @@ here, and do not put this app in front of anything.
 **It aggregates usage. It never meters it.** Each host answers
 `GET /v1/usage?since=&until=` from its own ledger. A poller here reads every
 live host once a minute and upserts what it says. A host that cannot reach this
-app keeps metering; the dashboard catches up on its next tick.
+app keeps metering; the dashboard catches up on its next tick. What the numbers
+mean is the host's rule, not this app's: a suspended machine bills storage only,
+so `machine_seconds` and `volume_gib_seconds` keep accruing while `vcpu_seconds`
+and `mib_seconds` do not.
 
 **It records repo connections. It never handles a webhook.** Delivery
 verification, the exactly-one-host election, the build and PR previews are the

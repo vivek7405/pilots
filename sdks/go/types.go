@@ -325,13 +325,16 @@ type DomainResponse struct {
 	CreatedAt int64  `json:"created_at"`
 }
 
-// --- Shapes hostd grows in #30 -------------------------------------------
+// --- The data routes -----------------------------------------------------
 //
-// Mirrored now so the client methods calling those routes are written once.
-// The drift test starts checking them the day the structs land in hostd.
+// The service patch, the usage ledger and the compose plan. hostd serves all
+// three, and the drift test checks every shape below against internal/api and
+// internal/compose on each run.
 
 // UpdateServiceRequest patches a service. Pointer fields so an absent value is
-// distinguishable from a zero one; Env and SecretEnv REPLACE the stored map.
+// distinguishable from a zero one; Env, SecretEnv and Replicas REPLACE what is
+// stored and take effect at the next deploy. Knobs are refused here and travel
+// on the deploy.
 type UpdateServiceRequest struct {
 	Replicas   *int              `json:"replicas,omitempty"`
 	Health     *HealthCheck      `json:"health,omitempty"`

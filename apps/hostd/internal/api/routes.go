@@ -45,6 +45,11 @@ type Deps struct {
 	// Peers resolves other hosts, so a service write that arrived at the
 	// wrong host can be forwarded to the one allowed to perform it.
 	Peers PeerLookup
+	// Compose plans a compose file. Injected as a handler because the compose
+	// package imports this one for the wire structs its steps embed. Nil only
+	// in tests, where the route answers 503 rather than vanishing from the
+	// table -- a route that disappears in tests is a route nothing checks.
+	Compose http.HandlerFunc
 	// GitHub handles webhook deliveries. Nil when no app is configured, in
 	// which case the route answers 503 rather than accepting deliveries it
 	// cannot verify.
@@ -72,6 +77,10 @@ type Deps struct {
 	// destroy check.
 	LogFollowInterval time.Duration
 	LogRowInterval    time.Duration
+	// Usage answers GET /v1/usage from this host's own ledger. Nil on a test
+	// server, where the route answers an empty set of orgs rather than
+	// vanishing from the table.
+	Usage UsageSource
 	// KeySource is where a minted key's randomness comes from. Nil is
 	// crypto/rand, which is what production uses; a test supplies a fixed
 	// reader so it can know the hash a mint will produce.
@@ -160,12 +169,25 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("POST /v1/services", d.handleCreateService)
 	mux.HandleFunc("GET /v1/services", d.handleListServices)
 	mux.HandleFunc("GET /v1/services/{id}", d.handleGetService)
+	mux.HandleFunc("PATCH /v1/services/{id}", d.handleUpdateService)
+	mux.HandleFunc("GET /v1/services/{id}/releases", d.handleListReleases)
 	mux.HandleFunc("POST /v1/services/{id}/deploy", d.handleDeploy)
 	mux.HandleFunc("POST /v1/services/{id}/rollback", d.handleRollback)
 
 	// Promote: the sandbox-to-production step, and the whole point of one
 	// primitive serving both faces.
 	mux.HandleFunc("POST /v1/machines/{id}/promote", d.handlePromote)
+
+	// The compose plan. Injected because internal/compose imports this package
+	// for the wire types its steps embed, so the import cannot go both ways.
+	if d.Compose != nil {
+		mux.HandleFunc("POST /v1/compose/plan", d.Compose)
+	} else {
+		mux.HandleFunc("POST /v1/compose/plan", func(w http.ResponseWriter, r *http.Request) {
+			writeJSON(w, http.StatusServiceUnavailable,
+				ErrorResponse{Error: "no compose planner on this host"})
+		})
+	}
 
 	// Custom domains. Verification is what stops a caller spending the
 	// fleet's shared certificate rate limit on a name they do not own.
@@ -199,6 +221,7 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("POST /v1/api-keys", d.handleCreateAPIKey)
 	mux.HandleFunc("GET /v1/api-keys", d.handleListAPIKeys)
 	mux.HandleFunc("POST /v1/api-keys/{hash}/revoke", d.handleRevokeAPIKey)
+	mux.HandleFunc("GET /v1/usage", d.handleUsage)
 	mux.HandleFunc("GET /v1/quotas/{org}", d.handleGetQuota)
 	mux.HandleFunc("PUT /v1/quotas/{org}", d.handlePutQuota)
 

@@ -29,6 +29,13 @@ point is bounded by `archive_timeout` rather than zero.
 `x-pilots.durable_volume`, with the trade written on the same line, so a file
 somebody opens in six months says which side it took.
 
+Neither mode changes what the replica costs while it is up, but suspension
+does: a suspended machine bills storage only -- wall-clock machine-seconds and
+volume-GiB-seconds accrue, vCPU-seconds and MiB-seconds do not. So pin
+`x-pilots.min_machines_running: 1` on the Postgres service: a database that
+scaled to zero would be cheaper and would also not be there when something
+connected to it.
+
 ## The default: local data directory, WAL shipped to a volume
 
 ```yaml

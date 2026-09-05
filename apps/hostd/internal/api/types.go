@@ -317,6 +317,28 @@ type PromoteRequest struct {
 	Health       *HealthCheck `json:"health,omitempty"`
 }
 
+// UpdateServiceRequest patches a service.
+//
+// Pointer fields so an absent value is distinguishable from a zero one: the
+// dashboard disconnects a repo by sending repo: "", which only a pointer can
+// carry. Env and SecretEnv REPLACE the stored map rather than merging into it,
+// so a client that wants a merge does it client-side and sends the result.
+//
+// Env, SecretEnv and Replicas take effect at the NEXT DEPLOY, which is where a
+// rollout reads them. No knobs: a service row has no knobs column, and replica
+// rows are single-writer to their own hosts, so the arbiter could not apply
+// them if it had them. They travel on the deploy, and a body carrying one is a
+// 400 naming the field.
+type UpdateServiceRequest struct {
+	Replicas   *int              `json:"replicas,omitempty"`
+	Health     *HealthCheck      `json:"health,omitempty"`
+	Env        map[string]string `json:"env,omitempty"`
+	SecretEnv  map[string]string `json:"secret_env,omitempty"`
+	Repo       *string           `json:"repo,omitempty"`
+	Branch     *string           `json:"branch,omitempty"`
+	Autodeploy *bool             `json:"autodeploy,omitempty"`
+}
+
 // Volume is persistent, per-write-durable storage: one filesystem in object
 // storage holding one disk image, handed to a machine as a second drive.
 //
@@ -419,6 +441,29 @@ type QuotaExceededResponse struct {
 	// Scope is "host" when the limit is per host rather than fleet-wide,
 	// which is true of builds alone: a build is not a replicated object.
 	Scope string `json:"scope,omitempty"`
+}
+
+// UsageTotals is one org's accrual on this host over the requested range.
+//
+// Compute (vcpu_seconds, mib_seconds) accrues only while a machine is running;
+// a suspended machine bills storage only, which is machine_seconds and
+// volume_gib_seconds. See internal/usage for the accrual rule in full.
+type UsageTotals struct {
+	MachineSeconds   int64 `json:"machine_seconds"`
+	VCPUSeconds      int64 `json:"vcpu_seconds"`
+	MiBSeconds       int64 `json:"mib_seconds"`
+	VolumeGiBSeconds int64 `json:"volume_gib_seconds"`
+}
+
+// UsageResponse is what THIS host metered, never the fleet's total: there is
+// no aggregator tier, so the dashboard polls every live host and sums. Orgs is
+// never null, because a client that exports a CSV of it would otherwise have
+// to distinguish "no usage" from "broken".
+type UsageResponse struct {
+	HostID string                 `json:"host_id"`
+	Since  int64                  `json:"since"`
+	Until  int64                  `json:"until"`
+	Orgs   map[string]UsageTotals `json:"orgs"`
 }
 
 type HealthResponse struct {

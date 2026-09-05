@@ -62,6 +62,12 @@ One method per route, grouped by the noun it acts on.
 | `usage.get({since, until})` | `GET /v1/usage` |
 | `compose.plan({compose, env})` | `POST /v1/compose/plan` |
 
+`services.patch` replaces rather than merges: `env`, `secret_env` and
+`replicas` overwrite what is stored and take effect at the next deploy. `knobs`
+are refused there with a 400 naming the field and travel on `services.deploy`.
+`usage.get` answers for the ONE host it reached, so a fleet is the sum of a
+call to each; a suspended machine bills storage only.
+
 Every wire type is exported under the name hostd's Go struct carries, with the
 JSON tags as its properties. The types from hostd's compose package carry a
 `Compose` prefix, so `compose.Step` is `ComposeStep`. A test in this package

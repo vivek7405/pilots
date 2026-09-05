@@ -168,6 +168,48 @@ for ip in "${IPS[@]:1}"; do
     || bad "${ip} could not serve the sprites alias (got '${OUT}')"
 done
 
+# A service write reaches the right host too. Only the arbiter may write a
+# service row, and which host that is changes with fleet membership -- so the
+# host that RECEIVED the patch forwards it rather than making the caller
+# discover the rule. Refusing on the others is what a caller would see as a 409
+# from two hosts in three.
+SVC=$(api "${IPS[0]}" POST /v1/services "{\"name\":\"gate-patch-$$\",\"app\":\"gate-$$\",\"replicas\":1}")
+SVCID=$(echo "$SVC" | jf id)
+if [ -n "$SVCID" ]; then
+  ok "created service ${SVCID}"
+  for ip in "${IPS[@]}"; do
+    R=$(api "$ip" PATCH "/v1/services/${SVCID}" '{"replicas":2}' 2>/dev/null | jf replicas)
+    [ "$R" = "2" ] \
+      && ok "${ip} applied a service patch through the arbiter" \
+      || bad "${ip} could not patch the service (replicas='${R}')"
+    # And back, so the next host's patch is a real change rather than a no-op.
+    api "$ip" PATCH "/v1/services/${SVCID}" '{"replicas":1}' >/dev/null 2>&1
+  done
+else
+  bad "could not create a service to patch: ${SVC}"
+fi
+
+# Billing is host-local: every host meters its own machines and answers for
+# itself, and the dashboard sums the fleet. A host answering with a peer's id
+# would be double-counted the moment two hosts did it.
+say "3b. Every host answers GET /v1/usage from its own ledger"
+for ip in "${IPS[@]}"; do
+  MINE=$(api "$ip" GET /v1/health | jf host_id)
+  U=$(api "$ip" GET /v1/usage)
+  SAID=$(echo "$U" | jf host_id)
+  [ -n "$MINE" ] && [ "$SAID" = "$MINE" ] \
+    && ok "${ip} answers usage as ${SAID}" \
+    || bad "${ip} answered usage as '${SAID}', want its own id '${MINE}'"
+  # orgs is an object and never null: a client that exports it would otherwise
+  # have to tell "no usage" from "broken".
+  echo "$U" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+sys.exit(0 if isinstance(d.get('orgs'), dict) else 1)" 2>/dev/null \
+    && ok "${ip} answers an orgs object" \
+    || bad "${ip} answered orgs=$(echo "$U" | jf orgs), want an object"
+done
+
 say "4. Give the machine a snapshot in object storage"
 # Only a machine with a snapshot can be rescued: its state lives in object
 # storage, not on the host that died. A machine created and never suspended

@@ -30,6 +30,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/netns"
 	"github.com/vivek7405/pilots/hostd/internal/seal"
 	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/vivek7405/pilots/hostd/internal/usage"
 )
 
 // Machine states.
@@ -115,6 +116,11 @@ type Options struct {
 	// one runs machines that cannot reach a peer -- correct on a single box,
 	// where there is no peer to reach.
 	MachinePrefix netip.Prefix
+
+	// Usage meters this host's machines by state, for GET /v1/usage. Nil on a
+	// test manager and on the fake; every method is nil-safe, so no call site
+	// checks.
+	Usage *usage.Ledger
 }
 
 // Manager is the per-host machine registry.
@@ -351,6 +357,11 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
 		return row, err
 	}
+	// Metering starts where billing does: at the running write. Nothing is
+	// opened on the error write above, because that machine never ran and its
+	// row is the record of a failed create rather than of a resource held.
+	m.opts.Usage.Open(id, org, StateRunning, row.VCPUs, row.MemMiB,
+		m.volumeGiB(ctx, row.VolumeID))
 	return row, nil
 }
 
@@ -422,6 +433,9 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	if err := m.opts.Store.DeleteMachine(ctx, id); err != nil {
 		errs = append(errs, fmt.Errorf("delete row: %w", err))
 	}
+	// After the process is gone, so the last seconds it really ran are billed.
+	// A destroyed machine has no open interval, so nothing accrues past here.
+	m.opts.Usage.Close(id)
 	if err := m.releaseService(ctx, row); err != nil {
 		errs = append(errs, err)
 	}
@@ -619,6 +633,9 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
 		return err
 	}
+	// Storage only from here: the guest holds no vCPU and no memory, and the
+	// interval that just closed is the last one billed for either.
+	m.opts.Usage.Transition(id, StateSuspended)
 
 	// Only AFTER the row names the new builds. Deleting first would, on a
 	// failed write, leave the row pointing at objects that no longer exist --
@@ -683,6 +700,9 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 		stampSlot(row, nil)
 		row.UpdatedAt = time.Now().Unix()
 		_ = m.opts.Store.PutMachine(ctx, row)
+		// The row and its disk are still here, so wall time and storage keep
+		// accruing; compute does not, because nothing is running.
+		m.opts.Usage.Transition(id, StateError)
 		return err
 	}
 	m.put(id, fcm)
@@ -695,7 +715,11 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 	stampSlot(row, fcm)
 	row.LastActivity = time.Now().Unix()
 	row.UpdatedAt = time.Now().Unix()
-	return m.opts.Store.PutMachine(ctx, row)
+	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
+		return err
+	}
+	m.opts.Usage.Transition(id, StateRunning)
+	return nil
 }
 
 // bindDiscovery starts the .internal responder inside a machine's namespace.
@@ -784,6 +808,21 @@ func (m *Manager) machineFCConfig(row *state.Machine, slot *netns.Slot, mac stri
 		cfg.VolumeImage = m.opts.Volumes.ImagePath(row.VolumeID)
 	}
 	return cfg
+}
+
+// volumeGiB is the size the ledger bills for a machine's volume, 0 without
+// one. Best effort: a volume read that fails must not fail the lifecycle
+// operation that triggered it, and under-billing storage for one interval is
+// the right way to be wrong about it.
+func (m *Manager) volumeGiB(ctx context.Context, volumeID string) int {
+	if volumeID == "" {
+		return 0
+	}
+	v, err := m.opts.Store.GetVolume(ctx, volumeID)
+	if err != nil || v == nil {
+		return 0
+	}
+	return v.SizeMiB / 1024
 }
 
 func orDefault(v, def int) int {

@@ -55,6 +55,12 @@ One method per route, grouped by the noun it acts on.
 | `c.Usage.Get(ctx, since, until)` | `GET /v1/usage` |
 | `c.Compose.Plan(ctx, req)` | `POST /v1/compose/plan` |
 
+`Services.Patch` replaces rather than merges: `Env`, `SecretEnv` and
+`Replicas` overwrite what is stored and take effect at the next deploy. Knobs
+are refused there with a 400 naming the field and travel on `Services.Deploy`.
+`Usage.Get` answers for the ONE host it reached, so a fleet is the sum of a
+call to each; a suspended machine bills storage only.
+
 Every wire struct carries the name and the JSON tags of hostd's own, with the
 structs from hostd's compose package under a `Compose` prefix.
 `types_drift_test.go` parses hostd's source on every `go test` and fails naming
