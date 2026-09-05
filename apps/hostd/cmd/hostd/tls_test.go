@@ -8,6 +8,7 @@ import (
 	"github.com/libdns/cloudflare"
 
 	"github.com/vivek7405/pilots/hostd/internal/config"
+	"github.com/vivek7405/pilots/hostd/internal/s3"
 )
 
 // A fleet with no Cloudflare token must advertise NO DNS-01 solver.
@@ -78,5 +79,33 @@ func TestWildcardNamesDoNotRepeatTheApex(t *testing.T) {
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("dashboard %q: managed names %v, want %v", dashboard, got, want)
 		}
+	}
+}
+
+// TLS needs both a place to share certificates from and a contact to register
+// with, and the URL every client is told is rendered from the same predicate.
+// One definition, read twice, so the two can never disagree: a host serving
+// plain HTTP that reports https:// hands out links that do not open.
+func TestTLSEnabledNeedsAStoreAndAContact(t *testing.T) {
+	store := &s3.Client{}
+
+	cases := []struct {
+		name    string
+		objects *s3.Client
+		email   string
+		want    bool
+	}{
+		{"no store, no contact", nil, "", false},
+		{"no store, a contact", nil, "ops@pilots.run", false},
+		{"a store, no contact", store, "", false},
+		{"both", store, "ops@pilots.run", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{ACMEEmail: tc.email}
+			if got := tlsEnabled(cfg, tc.objects); got != tc.want {
+				t.Errorf("tlsEnabled = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

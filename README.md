@@ -17,3 +17,4 @@ Monorepo:
 | `scripts/` | one-shot bash: host bootstrap, golden rootfs, e2e battery |
 
 Architecture: `ARCHITECTURE.md`.
+Run it on one machine: `docs/local.md`.

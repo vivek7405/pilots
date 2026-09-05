@@ -110,6 +110,17 @@ async function reach(id, url, seconds = 5) {
   return { code: code ?? '000', ip: ip ?? '' };
 }
 
+// assertOpenableURL holds the URL a client is told to one it can actually open:
+// its scheme and port are the ones this battery is using to reach the fleet.
+// On a TLS host that is https with no port, which is what this line asserted
+// before; on the rig and on a single box it is http with the listener's port.
+function assertOpenableURL(url, what) {
+  const want = new URL(API);
+  const got = new URL(url);
+  assert(got.protocol === want.protocol && got.port === want.port,
+    `${what} url ${url} does not open the way ${API} does`);
+}
+
 // viaRouter sends a request the way a browser would: to the fleet's API
 // listener, carrying a workload hostname. The listener hands anything with a
 // workload Host to the router, so this is the public wake path rather than an
@@ -233,7 +244,7 @@ async function lifecycleAssertions() {
     });
     assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
     assert(json.id, 'no machine id');
-    assert(json.url?.startsWith('https://'), `unexpected url ${json.url}`);
+    assertOpenableURL(json.url, 'machine');
     assert(json.state === 'running', `state is ${json.state}`);
     // A create from the golden template is a RESTORE, which is what makes it
     // sub-second. Reporting a boot here would mean the template's memory image
@@ -4217,7 +4228,7 @@ async function agentDeployAssertions() {
       service = JSON.parse(toolText(result));
       assert(service.service_id, `no service id: ${toolText(result)}`);
       serviceIDs.push(service.service_id);
-      assert(service.url?.startsWith('https://'), `unexpected url ${service.url}`);
+      assertOpenableURL(service.url, 'service');
       assert(service.release_id, 'the deploy returned no release');
     });
     if (!service) return;

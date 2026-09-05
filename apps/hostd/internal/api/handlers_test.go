@@ -2,10 +2,13 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
 func doJSON(t *testing.T, h http.Handler, method, path string, body any) *httptest.ResponseRecorder {
@@ -199,5 +202,38 @@ func TestLogsReturnPlainText(t *testing.T) {
 	}
 	if rec.Body.String() != "boot log" {
 		t.Errorf("body = %q", rec.Body.String())
+	}
+}
+
+// The URL a client is told has to be one it can open. On a host without TLS
+// -- the local single box, and the three-node rig -- that means the scheme and
+// the port the plain listener is actually bound to.
+func TestCreateMachineURLOnPlainHTTP(t *testing.T) {
+	st, err := state.Open(":memory:")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	seedKey(t, st, testKey, "org_1", "admin")
+
+	fake := newFakeManager()
+	if err := st.PutMachine(context.Background(), fake.machine); err != nil {
+		t.Fatalf("PutMachine: %v", err)
+	}
+	h := Routes(Deps{
+		HostID: "host-test", Store: st, Machines: fake,
+		URL: PublicURLFor(false, ":8080"),
+	})
+
+	rec := doJSON(t, h, "POST", "/v1/machines", CreateMachineRequest{VCPUs: 2, MemMiB: 1024})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("got %d: %s", rec.Code, rec.Body)
+	}
+	var got Machine
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.URL != "http://webapp.pilotrun.app:8080" {
+		t.Errorf("url = %q, want the listener's scheme and port", got.URL)
 	}
 }

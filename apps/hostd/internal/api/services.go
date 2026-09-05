@@ -27,7 +27,7 @@ type Rollout interface {
 // serviceToAPI never returns env or env_sealed. The sealed blob is not a
 // secret to the fleet but it is not the client's either, and the plaintext
 // half has no business on a list endpoint.
-func serviceToAPI(svc state.Service, domain, orgID string) Service {
+func (d Deps) serviceToAPI(svc state.Service, orgID string) Service {
 	out := Service{
 		ID: svc.ID, Name: svc.Name, OrgID: orgID, App: svc.App, ReleaseID: svc.ReleaseID,
 		Replicas: svc.Replicas, CustomDomain: svc.CustomDomain,
@@ -41,7 +41,7 @@ func serviceToAPI(svc state.Service, domain, orgID string) Service {
 		}
 	}
 	if svc.Domain != "" {
-		out.URL = "https://" + svc.Domain + "." + domain
+		out.URL = d.URL.Of(svc.Domain + "." + d.Domain)
 	}
 	return out
 }
@@ -226,7 +226,7 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
-	out := serviceToAPI(*svc, d.Domain, req.OrgID)
+	out := d.serviceToAPI(*svc, req.OrgID)
 	if volume != nil {
 		out.VolumeID = volume.ID
 	}
@@ -258,7 +258,7 @@ func (d Deps) handleListServices(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			continue
 		}
-		row := serviceToAPI(svc, d.Domain, owner)
+		row := d.serviceToAPI(svc, owner)
 		row.VolumeID = mounts[svc.ID]
 		out = append(out, row)
 	}
@@ -276,7 +276,7 @@ func (d Deps) handleGetService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
-	out := serviceToAPI(*svc, d.Domain, owner)
+	out := d.serviceToAPI(*svc, owner)
 	out.VolumeID = volumeID
 	writeJSON(w, http.StatusOK, out)
 }
@@ -333,7 +333,7 @@ func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
-	out := serviceToAPI(*svc, d.Domain, owner)
+	out := d.serviceToAPI(*svc, owner)
 	out.VolumeID = volumeID
 	writeJSON(w, http.StatusOK, out)
 }
@@ -561,7 +561,7 @@ func (d Deps) handlePromote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
-	out := serviceToAPI(*svc, d.Domain, owner)
+	out := d.serviceToAPI(*svc, owner)
 	out.VolumeID = volumeID
 	writeJSON(w, http.StatusOK, out)
 }
