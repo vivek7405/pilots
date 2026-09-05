@@ -139,6 +139,14 @@ back. One compose parser, in Go, beside the daemon.
 
 The interpolation environment is the `.env` file only, never `process.env`, so
 a deploy is reproducible from the checkout. `--env K=V` adds to it for a one-off.
+A `${VAR}` with no default and no value there is refused by name rather than
+deployed blank.
+
+The app name comes from `COMPOSE_PROJECT_NAME`, then a top-level `x-pilots.app`,
+then a top-level `name:`. A file with none of the three is refused rather than
+given a default, because the app is what groups the services that reach each
+other over `<name>.internal`. `--app` renames the plan after it comes back, so a
+nameless file needs `--env COMPOSE_PROJECT_NAME=<name>` instead.
 
 For each step, in dependency order: build the context, create any volumes, run
 `x-pilots.pre_deploy` as a one-shot machine, create or patch the service, deploy,
