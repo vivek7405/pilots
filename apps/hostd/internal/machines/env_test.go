@@ -259,3 +259,34 @@ func TestAServiceWithMachinesLeftIsKept(t *testing.T) {
 		t.Errorf("the service was deleted while %s still uses it: %v", staying.ID, err)
 	}
 }
+
+// A machine built from a Dockerfile is always told to start, even when the
+// deploy gave it nothing.
+//
+// The command is in the IMAGE, not in the create request: the build wrote the
+// Dockerfile's CMD to /etc/pilot-agent/start.json and the agent reads it there.
+// So a service with no `environment:` block used to be created, boot, start
+// nothing at all, and fail its health gate with the cause recorded nowhere --
+// because the create decided there was "nothing deployed to this machine" from
+// an empty environment alone.
+func TestABuiltImageIsAlwaysToldToStart(t *testing.T) {
+	if !needsInit(nil, "", true) {
+		t.Error("a machine built from an image was not poked; its start spec would never be read")
+	}
+	if !needsInit(map[string]string{}, "", true) {
+		t.Error("an empty environment is not the same as nothing to start")
+	}
+
+	// The counterfactual: the golden template carries no spec, so a create
+	// with neither an environment nor a command is a bare sandbox and there is
+	// genuinely nothing to say.
+	if needsInit(nil, "", false) {
+		t.Error("a bare template sandbox was poked to start something nobody named")
+	}
+	if !needsInit(nil, "/usr/bin/server", false) {
+		t.Error("a template create with an explicit command must be poked")
+	}
+	if !needsInit(map[string]string{"PORT": "8080"}, "", false) {
+		t.Error("a template create with an environment must be poked")
+	}
+}

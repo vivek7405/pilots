@@ -184,7 +184,7 @@ func (m *Manager) bootMachine(ctx context.Context, row *state.Machine,
 	// be handed an environment it did not start with. An image built from a
 	// Dockerfile carries no command in the row at all, so appCmd is usually
 	// empty here and the start spec baked into the image supplies it.
-	if err := m.deliverEnv(ctx, row, slot, appCmd); err != nil {
+	if err := m.deliverEnv(ctx, row, slot, appCmd, true); err != nil {
 		m.releaseDiscovery(row.ID)
 		_ = fcm.Kill()
 		m.pool.Return(slot.Idx)

@@ -169,6 +169,25 @@ func (m *Manager) resolveEnv(ctx context.Context, serviceID string) (map[string]
 	return env, nil
 }
 
+// needsInit reports whether a newly created machine has anything to be told.
+//
+// The two kinds of machine answer differently, and reading them the same way
+// was a service that deployed and never ran.
+//
+// From the GOLDEN TEMPLATE, an environment or a command is the only thing
+// there can be: the template carries no start spec, so a poke with neither
+// would ask the agent to start something nobody named. That machine is a bare
+// sandbox and there is nothing to deliver.
+//
+// From a BUILD, the image carries its OWN start spec -- start.json is where a
+// Dockerfile's command lives -- so the agent has something to start even when
+// the deploy supplied no environment and no command. A compose service with no
+// `environment:` block is exactly that, and it used to boot, serve nothing,
+// and fail its health gate with the cause named nowhere.
+func needsInit(env map[string]string, cmd string, fromBuild bool) bool {
+	return fromBuild || len(env) > 0 || cmd != ""
+}
+
 // initPayload is the body of the create-time poke to the guest agent.
 type initPayload struct {
 	TimestampNanos int64             `json:"timestamp_nanos"`
@@ -189,15 +208,13 @@ type initResult struct {
 //
 // CREATE ONLY. See the note at the top of this file.
 func (m *Manager) deliverEnv(ctx context.Context, row *state.Machine,
-	slot *netns.Slot, cmd string) error {
+	slot *netns.Slot, cmd string, fromBuild bool) error {
 
 	env, err := m.resolveEnv(ctx, row.ServiceID)
 	if err != nil {
 		return err
 	}
-	if len(env) == 0 && cmd == "" {
-		// Nothing was deployed to this machine. It is a bare sandbox, and
-		// there is no application for the agent to start.
+	if !needsInit(env, cmd, fromBuild) {
 		return nil
 	}
 
@@ -237,6 +254,13 @@ func (m *Manager) deliverEnv(ctx context.Context, row *state.Machine,
 		return fmt.Errorf("machines: decode init response: %w", err)
 	}
 	if !out.AppStarted && out.AppReason != "" {
+		if out.AppReason == noApplicationCommand {
+			// Not a fault: a bare sandbox has nothing to start, and one can be
+			// created with an environment and an app group and no command at
+			// all. Same reading the cold-boot poke gives it.
+			slog.Debug("a created sandbox has no application to start", "machine", row.ID)
+			return nil
+		}
 		// Loud, because the machine looks entirely healthy either way. The one
 		// reason worth reading twice is "already running", which on a create
 		// means something started the application before its environment
