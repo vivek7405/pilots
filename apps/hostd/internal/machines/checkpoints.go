@@ -195,6 +195,10 @@ func (m *Manager) RestoreCheckpoint(ctx context.Context, checkpointID string) (*
 		stampSlot(row, nil)
 		row.UpdatedAt = time.Now().Unix()
 		_ = m.opts.Store.PutMachine(ctx, row)
+		// The restore left it holding its row and its disk and nothing else,
+		// so wall time and storage keep accruing and compute stops -- the same
+		// rule a failed wake follows.
+		m.opts.Usage.Transition(row.ID, StateError)
 		return row, err
 	}
 	m.put(row.ID, fcm)
@@ -206,6 +210,10 @@ func (m *Manager) RestoreCheckpoint(ctx context.Context, checkpointID string) (*
 	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
 		return row, err
 	}
+	// It is running again. A restore of a SUSPENDED machine would otherwise
+	// keep it metered as suspended for as long as it runs, billing storage for
+	// a guest that holds vCPU and memory.
+	m.opts.Usage.Transition(row.ID, StateRunning)
 	return row, nil
 }
 

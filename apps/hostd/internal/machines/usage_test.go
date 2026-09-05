@@ -29,7 +29,7 @@ func TestEveryLifecycleWriteHasItsLedgerHook(t *testing.T) {
 	got := ledgerHooks(t)
 	want := map[string][]string{
 		"Open":       {"Create", "Rescue"},
-		"Transition": {"Suspend", "Wake", "Wake"},
+		"Transition": {"RestoreCheckpoint", "RestoreCheckpoint", "Suspend", "Wake", "Wake"},
 		"Close":      {"Destroy", "StopLocal"},
 	}
 	for method, wantCallers := range want {
@@ -38,11 +38,12 @@ func TestEveryLifecycleWriteHasItsLedgerHook(t *testing.T) {
 				method, got[method], wantCallers)
 		}
 	}
-	// Wake carries two: running on the restore that worked, error on the one
-	// that did not. A machine left in error still holds its row and its disk,
-	// so wall time and storage keep accruing and compute stops.
-	if len(got["Transition"]) != 3 {
-		t.Errorf("Transition has %d call sites, want three", len(got["Transition"]))
+	// Wake and RestoreCheckpoint carry two each: running on the restore that
+	// worked, error on the one that did not. A machine left in error still
+	// holds its row and its disk, so wall time and storage keep accruing and
+	// compute stops.
+	if len(got["Transition"]) != 5 {
+		t.Errorf("Transition has %d call sites, want five", len(got["Transition"]))
 	}
 }
 
