@@ -31,10 +31,12 @@ somebody opens in six months says which side it took.
 
 Neither mode changes what the replica costs while it is up, but suspension
 does: a suspended machine bills storage only -- wall-clock machine-seconds and
-volume-GiB-seconds accrue, vCPU-seconds and MiB-seconds do not. So pin
-`x-pilots.min_machines_running: 1` on the Postgres service: a database that
-scaled to zero would be cheaper and would also not be there when something
-connected to it.
+volume-GiB-seconds accrue, vCPU-seconds and MiB-seconds do not. A Postgres
+service takes the ordinary floor of zero: an idle replica suspends, its volume
+stays claimed and mounted, and the next connection over `postgres.internal`
+wakes it, because the host counts guest-to-guest traffic and holds a replica
+with an open session. A database that must stay resident sets
+`x-pilots.min_machines_running: 1`, which travels on the deploy.
 
 ## The default: local data directory, WAL shipped to a volume
 
@@ -70,6 +72,12 @@ The archive target is a **pilots volume**, not S3 directly. The stock
 `postgres:17` image carries no S3 tooling and pilots has no bind mounts, but a
 volume is JuiceFS over S3, so a plain `cp` into `/archive` lands in object
 storage with nothing added to the image.
+
+A service that mounts a volume runs one replica, and `pilot deploy` restarts
+that one machine in place on a redeploy. Postgres is down from the moment the
+old process is killed until the new one passes `pg_isready`; a request arriving
+meanwhile waits rather than failing, and a peer's connection is refused until
+then. `/archive` is untouched by the restart.
 
 Two files are generated beside the compose file:
 
@@ -143,6 +151,12 @@ volumes:
 No generated files, no archive, no recovery procedure: the data directory is
 already durable per write, and a host that dies remounts the volume wherever
 the machine is rescued. The price is on every commit.
+
+A service that mounts a volume runs one replica, and `pilot deploy` restarts
+that one machine in place on a redeploy. Postgres is down from the moment the
+old process is killed until the new one passes `pg_isready`; a request arriving
+meanwhile waits rather than failing, and a peer's connection is refused until
+then. The data directory is untouched by the restart.
 
 Worth it for low-write, high-value data. Not worth it for anything with a busy
 write path.
