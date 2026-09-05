@@ -64,12 +64,71 @@ EOF
   exit 1
 fi
 
+# The guest agent, which is a different question from hostd's binary.
+#
+# hostd does not merely RUN the agent, it PACKS it into every image a build
+# produces: internal/build's fixups read PILOT_GUEST_AGENT (default
+# /opt/pilots/bin/guest-agent) and append it to the flattened tarball, because
+# most base images carry no init at all and the agent becomes the image's
+# /sbin/init. Without the file every build fails at "packing rootfs" with
+# `open /opt/pilots/bin/guest-agent: no such file or directory` -- after the
+# whole Dockerfile has been solved, which on a real application is minutes.
+# host-bootstrap.sh installs it from the release tarball; nothing local did.
+#
+# Built rather than fetched, and rebuilt on every run, because the agent is
+# version-tied to hostd: an image packed with a stale agent boots and answers
+# nothing. `install` only when the bytes differ, so a re-run replaces nothing
+# and the go build itself is a cache hit.
+install_guest_agent() {
+  local out="$PREFIX/bin/guest-agent" tmp
+  # -trimpath and the same flags scripts/build-golden-rootfs.sh uses, so the
+  # agent this installs is byte-identical to the one in the golden image and
+  # TestGoldenRootfsCarriesThisAgent compares like with like.
+  local build='CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w"'
+
+  tmp="$(mktemp -t pilots-guest-agent-XXXXXX)"
+  # go is installed per user (mise, asdf, /usr/local/go) far more often than
+  # system-wide, and sudo resets PATH, so root usually cannot see it. Build as
+  # the invoking user when that is the case: building as root with the user's
+  # toolchain would leave root-owned entries in their module cache and break
+  # their next build.
+  if command -v go >/dev/null 2>&1; then
+    ( cd "$REPO/apps/hostd" && eval "$build" -o "$tmp" ./cmd/guest-agent )
+  elif [ -n "${SUDO_USER:-}" ] && runuser -l "$SUDO_USER" -c 'command -v go' >/dev/null 2>&1; then
+    chown "$SUDO_USER" "$tmp"
+    runuser -l "$SUDO_USER" -c \
+      "cd '$REPO/apps/hostd' && $build -o '$tmp' ./cmd/guest-agent"
+  fi
+  if [ ! -s "$tmp" ]; then
+    rm -f "$tmp"
+    cat >&2 <<EOF
+No go toolchain is reachable from here, so $out cannot be built.
+hostd packs this binary into every image a build produces, so without it every
+build fails at "packing rootfs". Build and install it (as your user, then as
+root):
+
+  (cd $REPO/apps/hostd && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o /tmp/pilots-guest-agent ./cmd/guest-agent)
+  sudo install -m0755 /tmp/pilots-guest-agent $out
+EOF
+    exit 1
+  fi
+  if cmp -s "$tmp" "$out"; then
+    echo "==> guest agent already current at $out"
+  else
+    echo "==> installing the guest agent to $out"
+    install -m0755 "$tmp" "$out"
+  fi
+  rm -f "$tmp"
+}
+
 for tool in firecracker jailer; do
   [ -x "$PREFIX/bin/$tool" ] || {
     echo "$PREFIX/bin/$tool is missing; run scripts/fetch-firecracker.sh" >&2; exit 1; }
 done
 [ -f "$KERNEL" ] || {
   echo "$KERNEL is missing; run scripts/fetch-kernel.sh" >&2; exit 1; }
+
+install_guest_agent
 
 install -d -m0755 "$(dirname "$CONFIG")" "$(dirname "$GOLDEN_DST")" \
   "$CHROOT_BASE" /var/lib/pilots/machines /var/cache/pilots
@@ -146,10 +205,45 @@ if [ -f "$REPO/scripts/rootfs/golden.ext4.sha256" ] &&
   echo "      (cd apps/hostd && go test ./internal/build -run TestGoldenRootfsCarriesThisAgent)" >&2
 fi
 
+# The address hostd and buildkitd both reach the object store on.
+#
+# NOT loopback, and that is the whole point. buildkitd runs under
+# `rootlesskit --net=slirp4netns --disable-host-loopback`, so inside it
+# 127.0.0.1 is the daemon's OWN loopback and the host's is unreachable BY
+# DESIGN -- slirp's 10.0.2.2 host alias is exactly what --disable-host-loopback
+# turns off. hostd hands the S3 endpoint to buildkitd for the layer cache, so a
+# loopback endpoint fails every build at `importing cache manifest from s3`
+# with `dial tcp 127.0.0.1:9000: connect: connection refused`, minutes before
+# anything is built. scripts/local-s3.sh listens on 0.0.0.0 precisely so a
+# routable address works.
+#
+# Derived, never hardcoded: the source address the kernel would use to leave
+# this box, then any global address if there is no default route (a laptop
+# offline still has its bridges). A box with neither is told to say so itself
+# rather than given a loopback that would fail later and elsewhere.
+host_s3_address() {
+  local addr
+  addr="$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<NF;i++) if($i=="src") print $(i+1); exit}')"
+  [ -n "$addr" ] || addr="$(ip -4 -o addr show scope global 2>/dev/null |
+    awk 'NR==1{split($4,a,"/"); print a[1]}')"
+  if [ -z "$addr" ]; then
+    echo "cannot work out a routable address for this host, and the object" >&2
+    echo "store must not be reached over loopback (rootless buildkitd runs" >&2
+    echo "with --disable-host-loopback). Set it yourself:" >&2
+    echo "  sudo PILOT_S3_ENDPOINT=http://<this box>:9000 scripts/local-host.sh" >&2
+    exit 1
+  fi
+  printf 'http://%s:9000' "$addr"
+}
+
 if [ -f "$CONFIG" ]; then
   echo "==> keeping the existing $CONFIG"
 else
   echo "==> writing $CONFIG"
+  # Resolved BEFORE the heredoc. Inside it this is a command substitution, and
+  # an `exit 1` there ends the subshell and writes an empty endpoint rather
+  # than stopping the script.
+  s3_endpoint="${PILOT_S3_ENDPOINT:-$(host_s3_address)}"
   umask 077
   cat > "$CONFIG" <<EOF
 # Written by scripts/local-host.sh for a single box. Only what differs from
@@ -158,7 +252,7 @@ else
 # defaults, and are the same values a production host is given explicitly.
 PILOT_STATE_BACKEND=sqlite
 PILOT_WORKLOAD_DOMAIN=${PILOT_WORKLOAD_DOMAIN:-pilots.localhost}
-PILOT_S3_ENDPOINT=${PILOT_S3_ENDPOINT:-http://127.0.0.1:9000}
+PILOT_S3_ENDPOINT=${s3_endpoint}
 PILOT_S3_BUCKET=${PILOT_S3_BUCKET:-pilots}
 PILOT_S3_ACCESS_KEY=${PILOT_S3_ACCESS_KEY:-pilots}
 PILOT_S3_SECRET_KEY=${PILOT_S3_SECRET_KEY:-pilots-secret}
@@ -171,6 +265,11 @@ PILOT_AGENT_TOKEN_SECRET=${PILOT_AGENT_TOKEN_SECRET:-$(head -c 32 /dev/urandom |
 # Full base64, unlike the line above -- it is a 32-byte AES key, not an opaque
 # string, so the padding matters.
 PILOT_FLEET_KEY=${PILOT_FLEET_KEY:-$(head -c 32 /dev/urandom | base64)}
+# The rootless build daemon's socket, under the invoking user's runtime dir --
+# a fleet host runs buildkitd as \`pilot\` and this box runs it as you. hostd
+# refuses builds outright when this is unset, so a laptop without it deploys
+# only stock images. docs/local.md installs the daemon.
+PILOT_BUILDKIT_SOCK=${PILOT_BUILDKIT_SOCK:-unix:///run/user/${SUDO_UID:-$(id -u)}/buildkit/buildkitd.sock}
 EOF
   chmod 0600 "$CONFIG"
   umask 022
