@@ -317,3 +317,37 @@ func TestUpdateServiceRequestKeepsAnExplicitEmptyString(t *testing.T) {
 		t.Errorf("branch = %v, want nil for an absent field", req.Branch)
 	}
 }
+
+// A scale-up is a create of that many machines, and it is the ONLY place the
+// count can grow: the deploy admits one replica's headroom whatever the row
+// says, and the rollout creates its replicas through the manager rather than
+// through this API. Unchecked, an org frozen at one machine patches itself to
+// a hundred and the next deploy boots them.
+func TestAPatchPastTheQuotaIs429AndDoesNotWrite(t *testing.T) {
+	h, st := serviceServer(t, fakeSealer{set: true})
+	if err := st.PutQuota(context.Background(), &state.Quota{
+		OrgID: "org_1", MaxMachines: 1, MaxVCPUs: 10, MaxMemMiB: 8192, MaxVolumeGiB: 10,
+	}); err != nil {
+		t.Fatalf("PutQuota: %v", err)
+	}
+
+	rec := doJSON(t, h, "PATCH", "/v1/services/s_1", map[string]any{"replicas": 5})
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("got %d, want 429: %s", rec.Code, rec.Body)
+	}
+	var body QuotaExceededResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Quota != "machines" || body.Limit != 1 {
+		t.Errorf("refusal body = %+v, want the machines limit named", body)
+	}
+	if got := getService(t, st).Replicas; got != 1 {
+		t.Errorf("a refused patch was written anyway: replicas = %d", got)
+	}
+
+	// Scaling DOWN is never refused: it hands capacity back.
+	if rec := doJSON(t, h, "PATCH", "/v1/services/s_1", map[string]any{"replicas": 0}); rec.Code != http.StatusOK {
+		t.Fatalf("a scale-down was refused: %d %s", rec.Code, rec.Body)
+	}
+}

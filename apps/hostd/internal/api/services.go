@@ -196,9 +196,23 @@ func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
 		return
 	}
+	before := svc.Replicas
 	if err := d.applyServicePatch(svc, req); err != nil {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
 		return
+	}
+	// A replica is a machine, so a scale-up is admitted against the same
+	// limits the create was admitted against. Nothing downstream would catch
+	// it: the deploy admits ONE replica's headroom whatever the count says,
+	// and the rollout creates machines through the manager rather than through
+	// the API, so without this a service created at one replica could be
+	// patched to a hundred and the next deploy would boot all hundred.
+	if grew := svc.Replicas - before; grew > 0 {
+		if !d.checkQuota(w, r, quota.Delta{
+			Machines: grew, VCPUs: grew, MemMiB: grew * 512,
+		}) {
+			return
+		}
 	}
 	if err := d.Store.PutService(r.Context(), svc); err != nil {
 		writeStoreError(w, err)
