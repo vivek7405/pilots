@@ -157,6 +157,70 @@ func TestAVariableWithADefaultOrAValueIsNotRefused(t *testing.T) {
 	}
 }
 
+// An EMPTY modifier is still a modifier: ${TAG:-} is the ordinary way to write
+// "optional, blank when unset", and template.Variable reports it identically to
+// a bare ${TAG} -- both carry DefaultValue "". Refusing it hands the caller a
+// 400 they cannot satisfy, since there is no value to supply.
+func TestAVariableWithAnEmptyModifierPlansAsEmpty(t *testing.T) {
+	for _, tc := range []struct {
+		name, file string
+	}{
+		{"an empty soft default", "name: shop\nservices:\n  web:\n    image: nginx\n    environment:\n      A: \"${TAG:-}\"\n"},
+		{"an empty hard default", "name: shop\nservices:\n  web:\n    image: nginx\n    environment:\n      A: \"${TAG-}\"\n"},
+		{"an empty presence value", "name: shop\nservices:\n  web:\n    image: nginx\n    environment:\n      A: \"${TAG:+}\"\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			plan, planErr, err := Compile(context.Background(), Request{Compose: tc.file})
+			if err != nil || planErr != nil {
+				t.Fatalf("planned with an error: %v %+v", err, planErr)
+			}
+			if got, ok := plan.Steps[0].Env["A"]; !ok || got != "" {
+				t.Errorf("A = %q (present %v), want an empty string", got, ok)
+			}
+		})
+	}
+}
+
+// The half of the rule that must not move: a variable with NO modifier and no
+// entry in the request's env is still a 400 naming it. The mixed case is the
+// one to watch, because template.DefaultPattern's braced group is greedy and
+// swallows "${TAG:-}${MISSING}" as a single match.
+func TestABareVariableIsStillRefusedBesideAnOptionalOne(t *testing.T) {
+	for _, tc := range []struct {
+		name, file, want string
+	}{
+		{"beside an empty default in the same value", "name: shop\nservices:\n  web:\n    image: nginx\n    environment:\n      A: \"${TAG:-}${MISSING}\"\n", "MISSING"},
+		{"beside an empty default elsewhere in the file", "name: shop\nservices:\n  web:\n    image: nginx\n    environment:\n      A: \"${TAG:-}\"\n      B: \"${MISSING}\"\n", "MISSING"},
+		{"an empty required marker", "name: shop\nservices:\n  web:\n    image: nginx\n    environment:\n      A: \"${MISSING:?}\"\n", "MISSING"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := Compile(context.Background(), Request{Compose: tc.file})
+			if err == nil {
+				t.Fatal("an unset variable planned successfully")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not name %s", err, tc.want)
+			}
+			if strings.Contains(err.Error(), "TAG") {
+				t.Errorf("error %q names TAG, which the file made optional", err)
+			}
+		})
+	}
+}
+
+// A modifier's own text is a template too, and a variable nested inside one is
+// as optional as the variable holding it.
+func TestANestedDefaultIsNotRefused(t *testing.T) {
+	const file = "name: shop\nservices:\n  web:\n    image: nginx\n    environment:\n      A: \"${OUTER:-${INNER:-x}}\"\n"
+	plan, planErr, err := Compile(context.Background(), Request{Compose: file})
+	if err != nil || planErr != nil {
+		t.Fatalf("planned with an error: %v %+v", err, planErr)
+	}
+	if got := plan.Steps[0].Env["A"]; got != "x" {
+		t.Errorf("A = %q, want x", got)
+	}
+}
+
 // COMPOSE_PROJECT_NAME beats x-pilots.app beats name:, which is compose's own
 // order: the environment overrides the file.
 func TestTheAppNamePrecedence(t *testing.T) {

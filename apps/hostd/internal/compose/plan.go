@@ -273,16 +273,29 @@ func envFileKeys(dict map[string]any) []Unsupported {
 	return out
 }
 
-// unsetVariables names every ${VAR} with no default, no presence value and no
-// entry in the request's env, sorted.
+// unsetVariables names every ${VAR} the file gives no way to resolve: no
+// modifier, and no entry in the request's env. Sorted.
 //
 // compose-go's own behaviour is a warning and a blank, and a blank
 // DATABASE_URL deployed is worse than a refusal: the app comes up, connects to
 // nothing, and the first anyone hears of it is a 500.
+//
+// What makes a variable optional is the MODIFIER, not the value after it:
+// ${TAG:-} says "blank when unset" as deliberately as ${TAG:-latest} says
+// "latest when unset", and refusing the first would be refusing a compose file
+// the caller has no way to satisfy. template.Variable cannot tell the two
+// apart -- DefaultValue is a plain string, so "no default" and "an empty
+// default" both arrive as "" -- so optionalVariables re-scans the file's text
+// for the modifier itself.
+//
+// ${VAR:?} and ${VAR?} are deliberately NOT optional here. They say the caller
+// must supply a value, which is the refusal this function exists to make.
 func unsetVariables(dict map[string]any, env map[string]string) []string {
+	optional := map[string]bool{}
+	optionalVariables(dict, optional)
 	var out []string
 	for name, v := range template.ExtractVariables(dict, nil) {
-		if v.DefaultValue != "" || v.PresenceValue != "" {
+		if v.DefaultValue != "" || v.PresenceValue != "" || optional[name] {
 			continue
 		}
 		if _, ok := env[name]; ok {
@@ -292,6 +305,111 @@ func unsetVariables(dict map[string]any, env map[string]string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// optionalVariables marks every variable written with a - or + modifier, at
+// any depth, walking the same three node shapes compose-go's own extractor
+// does.
+//
+// A name written both ways in one file -- ${TAG} in one service, ${TAG:-latest}
+// in another -- counts as optional. ExtractVariables already keys by name and
+// keeps whichever occurrence it happened to walk last, so the alternative is
+// not "refuse it" but "refuse it depending on map iteration order".
+func optionalVariables(node any, out map[string]bool) {
+	switch v := node.(type) {
+	case string:
+		scanSubstitutions(v, out)
+	case map[string]any:
+		for _, elem := range v {
+			optionalVariables(elem, out)
+		}
+	case []any:
+		for _, elem := range v {
+			optionalVariables(elem, out)
+		}
+	}
+}
+
+// scanSubstitutions marks the optional variables in one string.
+func scanSubstitutions(s string, out map[string]bool) {
+	for _, match := range template.DefaultPattern.FindAllString(s, -1) {
+		scanSubstitution(match, out)
+	}
+}
+
+// scanSubstitution marks the optional variables in one $-rooted match of
+// template.DefaultPattern.
+//
+// The pattern's braced group is greedy, so "${A:-}${B}" arrives here as ONE
+// match rather than two. compose-go answers that by cutting at the first
+// BALANCED closing brace and re-scanning the tail, and so does this -- the
+// same cut that keeps "${A:-${B}}" from ending at the inner brace.
+func scanSubstitution(match string, out map[string]bool) {
+	if strings.HasPrefix(match, "$$") { // an escaped $, not a variable
+		return
+	}
+	if !strings.HasPrefix(match, "${") { // $NAME cannot carry a modifier
+		return
+	}
+	end := closingBrace(match)
+	if end < 0 {
+		return
+	}
+	body, rest := match[2:end], match[end+1:]
+	name, modifier := splitModifier(body)
+	switch {
+	case name == "":
+	case strings.HasPrefix(modifier, ":-"), strings.HasPrefix(modifier, "-"),
+		strings.HasPrefix(modifier, ":+"), strings.HasPrefix(modifier, "+"):
+		out[name] = true
+	}
+	// A modifier's own text can hold variables (${A:-${B:-x}}), and so can the
+	// tail the greedy match swallowed. Both are strictly shorter than match,
+	// so this terminates.
+	scanSubstitutions(body, out)
+	scanSubstitutions(rest, out)
+}
+
+// closingBrace returns the index of the brace closing s's leading "${", or -1.
+//
+// A transcription of compose-go's getFirstBraceClosingIndex, which is
+// unexported. Kept character for character, including the skip of the byte
+// after an opening brace, because this decides where a substitution ENDS and a
+// version that decided differently would call a variable optional that the
+// loader then treats as bare.
+func closingBrace(s string) int {
+	open := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '}' {
+			open--
+			if open == 0 {
+				return i
+			}
+		}
+		if s[i] == '{' {
+			open++
+			i++
+		}
+	}
+	return -1
+}
+
+// splitModifier cuts a braced body at the first character a variable name
+// cannot hold, which is compose-go's own scan in extractVariable. A body that
+// starts with one is a name of its own, not an empty name with a modifier.
+func splitModifier(body string) (name, modifier string) {
+	i := strings.IndexFunc(body, func(r rune) bool {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9', r == '_':
+			return false
+		}
+		return true
+	})
+	if i <= 0 {
+		return body, ""
+	}
+	return body[:i], body[i:]
 }
 
 // appName resolves the app, in compose's own precedence: environment, then the
