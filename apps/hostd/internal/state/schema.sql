@@ -104,7 +104,8 @@ CREATE TABLE IF NOT EXISTS api_keys (   -- writer: any host, on an admin-scoped 
 
 -- The golden template every machine is created from.
 --
--- FLEET-WIDE, not per host. A machine's memory image is a diff against the
+-- FLEET-WIDE within a vendor pool, not per host: the row id is
+-- `golden-<vendor>`. A machine's memory image is a diff against the
 -- template it was created from, so a host that built its own would be unable
 -- to restore anyone else's machines -- which is the whole of cross-host
 -- rescue. A host that has never built one reads this row and pulls the builds
@@ -120,7 +121,7 @@ CREATE TABLE IF NOT EXISTS api_keys (   -- writer: any host, on an admin-scoped 
 --
 -- One column cannot be merged into a value nobody wrote.
 CREATE TABLE IF NOT EXISTS templates (
-  id          TEXT NOT NULL PRIMARY KEY,   -- "golden"
+  id          TEXT NOT NULL PRIMARY KEY,   -- "golden-<vendor>"
   descriptor  TEXT,                        -- json: {mem_build_id, rootfs_build_id, snap_key}
   created_at  INTEGER
 );
@@ -310,4 +311,32 @@ CREATE TABLE IF NOT EXISTS org_quotas (          -- writer: any host, on an admi
   max_volume_gib INTEGER,
   max_builds     INTEGER,
   updated_at     INTEGER
+);
+
+-- Which CPU vendor a host is, and which vendor photographed a memory image.
+--
+-- Two NEW tables rather than a column on hosts or machines: both carry rows,
+-- and cr-sqlite backfills every row of a table whose columns change (the
+-- storm that took fly down twice for ~11.5h). A new table backfills nothing.
+-- A memory snapshot never restores across the Intel/AMD boundary; the rescue
+-- hash filters survivors by host_cpu, and a host of the other vendor boots
+-- the machine from its disk instead (ARCHITECTURE.md rule 6).
+CREATE TABLE IF NOT EXISTS host_cpu (          -- writer: the host itself
+  host_id      TEXT NOT NULL PRIMARY KEY,
+  vendor       TEXT,     -- /proc/cpuinfo vendor_id: GenuineIntel | AuthenticAMD
+  cpu_template TEXT,     -- PILOT_CPU_TEMPLATE; empty on a dev host
+  updated_at   INTEGER
+);
+
+-- Keyed like tenancy: the id of the object whose memory image this describes.
+-- A release's and a checkpoint's images are as vendor-locked as a machine's.
+-- last_start and last_start_at are written for machines only: the observable
+-- record of a resume that was downgraded to a cold boot.
+CREATE TABLE IF NOT EXISTS machine_cpu (       -- writer: the host that writes the object row it describes
+  id            TEXT NOT NULL PRIMARY KEY,     -- machine, release or checkpoint id
+  kind          TEXT,     -- machine|release|checkpoint
+  vendor        TEXT,
+  last_start    TEXT,     -- restore|boot|cold_boot
+  last_start_at INTEGER,
+  updated_at    INTEGER
 );

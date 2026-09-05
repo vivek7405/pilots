@@ -2,6 +2,7 @@ package corrosion
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -269,8 +270,10 @@ func (s *Store) PutHost(ctx context.Context, h *state.Host) error {
 
 func (s *Store) ListHosts(ctx context.Context) ([]state.Host, error) {
 	rows, err := s.client.Query(ctx,
-		`SELECT id, wg_addr, wg_pubkey, public_ip, cpu_free, mem_free_mib, last_seen
-		 FROM hosts ORDER BY id`)
+		`SELECT h.id, h.wg_addr, h.wg_pubkey, h.public_ip, h.cpu_free, h.mem_free_mib,
+			h.last_seen, COALESCE(c.vendor, '')
+		 FROM hosts h LEFT JOIN host_cpu c ON c.host_id = h.id
+		 ORDER BY h.id`)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +283,7 @@ func (s *Store) ListHosts(ctx context.Context) ([]state.Host, error) {
 	for rows.Next() {
 		var h state.Host
 		if err := rows.Scan(&h.ID, &h.WGAddr, &h.WGPubKey, &h.PublicIP,
-			&h.CPUFree, &h.MemFreeMiB, &h.LastSeen); err != nil {
+			&h.CPUFree, &h.MemFreeMiB, &h.LastSeen, &h.Vendor); err != nil {
 			return nil, err
 		}
 		out = append(out, h)
@@ -683,6 +686,166 @@ func (s *Store) PutVolume(ctx context.Context, v *state.Volume, opts ...state.Wr
 		return fmt.Errorf("state: put volume %q: %w", v.ID, state.ErrNotOwner)
 	}
 	return nil
+}
+
+// PutHostCPU writes what THIS host says about its own CPU, and nothing else.
+// Same rule as PutHost, for the same reason: one writer per row means the
+// merge has nothing to corrupt.
+func (s *Store) PutHostCPU(ctx context.Context, h *state.HostCPU) error {
+	if h.HostID != s.hostID {
+		return fmt.Errorf("state: host %s cannot write host %s's cpu row: %w",
+			s.hostID, h.HostID, state.ErrNotOwner)
+	}
+	_, err := s.client.Exec(ctx, `
+		INSERT INTO host_cpu (host_id, vendor, cpu_template, updated_at)
+		VALUES (?,?,?,?)
+		ON CONFLICT(host_id) DO UPDATE SET
+			vendor=excluded.vendor, cpu_template=excluded.cpu_template,
+			updated_at=excluded.updated_at`,
+		h.HostID, h.Vendor, h.CPUTemplate, h.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put host cpu %q: %w", h.HostID, err)
+	}
+	return nil
+}
+
+func (s *Store) ListHostCPU(ctx context.Context) ([]state.HostCPU, error) {
+	rows, err := s.client.Query(ctx,
+		`SELECT host_id, vendor, cpu_template, updated_at FROM host_cpu ORDER BY host_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []state.HostCPU
+	for rows.Next() {
+		var h state.HostCPU
+		if err := rows.Scan(&h.HostID, &h.Vendor, &h.CPUTemplate, &h.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+// PutMachineCPU records which CPU vendor photographed a memory image.
+//
+// The writer is whoever writes the object row this describes, so the guard is
+// that row's guard: a machine's owner for a machine, the service arbiter for a
+// release, and the owner of a checkpoint's machine for a checkpoint. Anything
+// looser would let two hosts write one row and the merge would silently pick a
+// pool the image is not in -- which is a restore against foreign CPUID, the one
+// failure this whole table exists to prevent.
+func (s *Store) PutMachineCPU(ctx context.Context, c *state.MachineCPU, opts ...state.WriteOption) error {
+	if err := s.assertMachineCPUWriter(ctx, c, state.ResolveAuth(opts)); err != nil {
+		return err
+	}
+	_, err := s.client.Exec(ctx, `
+		INSERT INTO machine_cpu (id, kind, vendor, last_start, last_start_at, updated_at)
+		VALUES (?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET
+			kind=excluded.kind, vendor=excluded.vendor, last_start=excluded.last_start,
+			last_start_at=excluded.last_start_at, updated_at=excluded.updated_at`,
+		c.ID, c.Kind, c.Vendor, c.LastStart, c.LastStartAt, c.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put machine cpu %q: %w", c.ID, err)
+	}
+	return nil
+}
+
+func (s *Store) assertMachineCPUWriter(ctx context.Context, c *state.MachineCPU, auth state.WriteAuth) error {
+	switch c.Kind {
+	case state.KindRelease:
+		rel, err := s.GetRelease(ctx, c.ID)
+		if err != nil {
+			return fmt.Errorf("state: cpu row for release %q: %w", c.ID, err)
+		}
+		return s.assertServiceWriter(ctx, rel.ServiceID)
+	case state.KindCheckpoint:
+		machineID, err := s.checkpointMachine(ctx, c.ID)
+		if err != nil {
+			return fmt.Errorf("state: cpu row for checkpoint %q: %w", c.ID, err)
+		}
+		return s.assertMachineOwner(ctx, machineID, auth)
+	default:
+		return s.assertMachineOwner(ctx, c.ID, auth)
+	}
+}
+
+// assertMachineOwner is PutMachine's guard, read rather than enforced by the
+// UPDATE, because machine_cpu has no host_id column to hang a WHERE on. A
+// machine with no row yet is this host's to describe: it is mid-create here.
+func (s *Store) assertMachineOwner(ctx context.Context, machineID string, auth state.WriteAuth) error {
+	m, err := s.GetMachine(ctx, machineID)
+	if errors.Is(err, state.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if m.HostID == s.hostID {
+		return nil
+	}
+	// A rescue writes the cpu row while the machines row still names the dead
+	// owner, so the same claim that authorises taking the machine authorises
+	// this -- with liveness re-read, as ClaimMachine re-reads it.
+	if auth.DeadOwnerClaim != "" && auth.DeadOwnerClaim == m.HostID {
+		alive, err := s.hostIsLive(ctx, auth.DeadOwnerClaim)
+		if err != nil {
+			return err
+		}
+		if !alive {
+			return nil
+		}
+		return fmt.Errorf("state: refusing the cpu row for %q taken from %s, which is "+
+			"still heartbeating: %w", machineID, auth.DeadOwnerClaim, state.ErrNotOwner)
+	}
+	return fmt.Errorf("state: machine %q is owned by %s, not this host: %w",
+		machineID, m.HostID, state.ErrNotOwner)
+}
+
+// checkpointMachine reads only the column the guard needs; there is no
+// GetCheckpoint on this store and a full row would be a wider read for nothing.
+func (s *Store) checkpointMachine(ctx context.Context, id string) (string, error) {
+	rows, err := s.client.Query(ctx, `SELECT machine_id FROM checkpoints WHERE id = ?`, id)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return "", err
+		}
+		return "", state.ErrNotFound
+	}
+	var machineID string
+	if err := rows.Scan(&machineID); err != nil {
+		return "", err
+	}
+	return machineID, rows.Err()
+}
+
+func (s *Store) GetMachineCPU(ctx context.Context, id string) (*state.MachineCPU, error) {
+	rows, err := s.client.Query(ctx,
+		`SELECT id, kind, vendor, last_start, last_start_at, updated_at
+		 FROM machine_cpu WHERE id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, state.ErrNotFound
+	}
+	var c state.MachineCPU
+	if err := rows.Scan(&c.ID, &c.Kind, &c.Vendor, &c.LastStart, &c.LastStartAt, &c.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &c, rows.Err()
 }
 
 // Close releases the store. The agent is a separate process with its own

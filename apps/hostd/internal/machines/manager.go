@@ -122,6 +122,12 @@ type Options struct {
 	// test manager and on the fake; every method is nil-safe, so no call site
 	// checks.
 	Usage *usage.Ledger
+
+	// Vendor is this host's CPU vendor, from cpuvendor.Detect: the raw
+	// /proc/cpuinfo vendor_id, GenuineIntel or AuthenticAMD. It decides which
+	// golden template pool this host builds into and whether a memory image
+	// can be restored here at all -- see bringUp.
+	Vendor string
 }
 
 // Manager is the per-host machine registry.

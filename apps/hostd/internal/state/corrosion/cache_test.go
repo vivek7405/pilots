@@ -32,19 +32,23 @@ func hostRow(id, addr string, lastSeen int64) string {
 	return fmt.Sprintf(`["%s","%s","pk-%s","203.0.113.1",8,4096,%d]`, id, addr, id, lastSeen)
 }
 
-// cacheServer serves the five subscriptions a Cache opens.
+// cacheServer serves the seven subscriptions a Cache opens.
 type cacheServer struct {
 	machineRows    []string
 	hostRows       []string
 	serviceRows    []string
 	tenancyRows    []string
 	revocationRows []string
+	hostCPURows    []string
+	machineCPURows []string
 
 	machineChanges    chan string
 	hostChanges       chan string
 	serviceChanges    chan string
 	tenancyChanges    chan string
 	revocationChanges chan string
+	hostCPUChanges    chan string
+	machineCPUChanges chan string
 	subscribes        atomic.Int32
 }
 
@@ -66,10 +70,18 @@ func startCache(t *testing.T, s *cacheServer) *Cache {
 	if s.revocationChanges == nil {
 		s.revocationChanges = make(chan string)
 	}
+	if s.hostCPUChanges == nil {
+		s.hostCPUChanges = make(chan string)
+	}
+	if s.machineCPUChanges == nil {
+		s.machineCPUChanges = make(chan string)
+	}
 
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		body := make([]byte, r.ContentLength)
 		_, _ = r.Body.Read(body)
+		isHostCPU := strings.Contains(string(body), "FROM host_cpu")
+		isMachineCPU := strings.Contains(string(body), "FROM machine_cpu")
 		isHosts := strings.Contains(string(body), "FROM hosts")
 		isServices := strings.Contains(string(body), "FROM services")
 		isTenancy := strings.Contains(string(body), "FROM tenancy")
@@ -77,7 +89,17 @@ func startCache(t *testing.T, s *cacheServer) *Cache {
 
 		s.subscribes.Add(1)
 		w.Header().Set("corro-query-id", "sub")
-		if isTenancy {
+		if isHostCPU {
+			flushLine(w, `{"columns":["host_id","vendor"]}`)
+			for _, row := range s.hostCPURows {
+				flushLine(w, `{"row":[1,`+row+`]}`)
+			}
+		} else if isMachineCPU {
+			flushLine(w, `{"columns":["id","kind","vendor","last_start","last_start_at"]}`)
+			for _, row := range s.machineCPURows {
+				flushLine(w, `{"row":[1,`+row+`]}`)
+			}
+		} else if isTenancy {
 			flushLine(w, `{"columns":["id","org_id","kind"]}`)
 			for _, row := range s.tenancyRows {
 				flushLine(w, `{"row":[1,`+row+`]}`)
@@ -107,6 +129,10 @@ func startCache(t *testing.T, s *cacheServer) *Cache {
 
 		ch := s.machineChanges
 		switch {
+		case isHostCPU:
+			ch = s.hostCPUChanges
+		case isMachineCPU:
+			ch = s.machineCPUChanges
 		case isTenancy:
 			ch = s.tenancyChanges
 		case isRevocations:
@@ -306,6 +332,18 @@ func TestCacheRebuildsWhenItsSubscriptionIsGone(t *testing.T) {
 		isHosts := strings.Contains(string(body), "FROM hosts")
 
 		w.Header().Set("corro-query-id", "sub")
+		if strings.Contains(string(body), "FROM host_cpu") {
+			flushLine(w, `{"columns":["host_id","vendor"]}`)
+			flushLine(w, `{"eoq":{"time":0,"change_id":1}}`)
+			<-r.Context().Done()
+			return
+		}
+		if strings.Contains(string(body), "FROM machine_cpu") {
+			flushLine(w, `{"columns":["id","kind","vendor","last_start","last_start_at"]}`)
+			flushLine(w, `{"eoq":{"time":0,"change_id":1}}`)
+			<-r.Context().Done()
+			return
+		}
 		if isHosts {
 			flushLine(w, `{"columns":["id","wg_addr","wg_pubkey","public_ip","cpu_free","mem_free_mib","last_seen"]}`)
 			flushLine(w, `{"eoq":{"time":0,"change_id":1}}`)
@@ -469,4 +507,44 @@ func TestCacheServesTenancyAndRevocations(t *testing.T) {
 	revocations <- `{"change":["insert",1,["beef"],2]}`
 	waitFor(t, func() bool { return cache.Revoked("beef") },
 		"a revocation to reach the cache")
+}
+
+// The rescue ranking reads the vendor off the live host list, and the list is
+// built from the cache. hosts has no vendor column -- adding one to a table
+// with rows is the cr-sqlite backfill hard rule 6 forbids -- so the cache
+// stamps it on from its own host_cpu subscription.
+func TestTheCacheStampsVendorsOntoLiveHosts(t *testing.T) {
+	now := time.Now()
+	cache := startCache(t, &cacheServer{
+		hostRows: []string{
+			hostRow("host-a", "fdcc::1", now.Unix()),
+			hostRow("host-b", "fdcc::2", now.Unix()),
+		},
+		hostCPURows:    []string{`["host-a","AuthenticAMD"]`},
+		machineCPURows: []string{`["m-1","machine","GenuineIntel","cold_boot",42]`},
+	})
+
+	live := cache.LiveHosts(now, 30*time.Second)
+	if len(live) != 2 {
+		t.Fatalf("LiveHosts returned %d hosts", len(live))
+	}
+	if live[0].Vendor != "AuthenticAMD" {
+		t.Errorf("host-a's vendor is %q, want AuthenticAMD", live[0].Vendor)
+	}
+	// A host that has not written its row yet is in no pool, and still live.
+	if live[1].Vendor != "" {
+		t.Errorf("host-b has no cpu row; its vendor is %q, want empty", live[1].Vendor)
+	}
+
+	if got := cache.MachineVendor("m-1"); got != "GenuineIntel" {
+		t.Errorf("MachineVendor = %q, want GenuineIntel", got)
+	}
+	// An unrecorded machine is in no pool, which ranks over the whole fleet.
+	if got := cache.MachineVendor("m-nope"); got != "" {
+		t.Errorf("an unrecorded machine's vendor is %q, want empty", got)
+	}
+	row, ok := cache.MachineCPU("m-1")
+	if !ok || row.LastStart != "cold_boot" || row.LastStartAt != 42 {
+		t.Errorf("MachineCPU = %+v/%v, want the cold_boot row", row, ok)
+	}
 }

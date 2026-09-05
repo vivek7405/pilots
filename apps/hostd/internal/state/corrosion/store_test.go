@@ -675,3 +675,157 @@ func TestStoreVersionErrorsRatherThanGuessingWhenTheTableIsGone(t *testing.T) {
 		t.Errorf("Version = %d alongside an error, want 0", v)
 	}
 }
+
+// A machine's cpu row says which vendor pool its memory image is in, and the
+// rescue ranking reads it to decide whether a restore is even possible. There
+// is no host_id column on machine_cpu to hang a WHERE on, so the guard is a
+// read of the machine it describes -- and without it two hosts could name
+// different pools for one image, which merges into a restore against foreign
+// CPUID: the exact failure the table exists to prevent.
+func TestOnlyTheOwnerWritesAMachinesCPU(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newTestStore(t, "host-a")
+	agent.exec(t, `INSERT INTO machines (id, host_id, state) VALUES ('m-1','host-a','running')`)
+	agent.exec(t, `INSERT INTO machines (id, host_id, state) VALUES ('m-2','host-b','running')`)
+
+	own := &state.MachineCPU{ID: "m-1", Kind: state.KindMachine, Vendor: "AuthenticAMD"}
+	if err := store.PutMachineCPU(ctx, own); err != nil {
+		t.Fatalf("the owner was refused its own machine's cpu row: %v", err)
+	}
+	if got := agent.scalar(t, `SELECT vendor FROM machine_cpu WHERE id='m-1'`); got != "AuthenticAMD" {
+		t.Errorf("the owner's write did not land: vendor=%q", got)
+	}
+
+	foreign := &state.MachineCPU{ID: "m-2", Kind: state.KindMachine, Vendor: "GenuineIntel"}
+	if err := store.PutMachineCPU(ctx, foreign); !errors.Is(err, state.ErrNotOwner) {
+		t.Fatalf("writing another host's machine cpu row returned %v, want ErrNotOwner", err)
+	}
+	if got := agent.scalar(t, `SELECT count(*) FROM machine_cpu WHERE id='m-2'`); got != "0" {
+		t.Errorf("the refused write landed anyway: count=%s", got)
+	}
+}
+
+// A rescue writes the cpu row while the machines row still names the dead
+// owner, so the same claim that authorises taking the machine authorises this.
+// Liveness is re-read, exactly as ClaimMachine re-reads it: the gap between
+// deciding to rescue and writing is where a host comes back.
+func TestARescuerWritesTheCPURowOfADeadHostsMachine(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newTestStore(t, "host-a")
+	agent.exec(t, `INSERT INTO machines (id, host_id, state) VALUES ('m-1','host-dead','suspended')`)
+	agent.exec(t, `INSERT INTO hosts (id, last_seen) VALUES ('host-dead', 1)`)
+
+	row := &state.MachineCPU{ID: "m-1", Kind: state.KindMachine, Vendor: "AuthenticAMD",
+		LastStart: state.StartColdBoot}
+	if err := store.PutMachineCPU(ctx, row, state.WithDeadOwnerClaim("host-dead")); err != nil {
+		t.Fatalf("the rescuer was refused: %v", err)
+	}
+
+	// The same claim against a host that is still heartbeating is refused.
+	agent.exec(t, `UPDATE hosts SET last_seen = `+fmt.Sprint(time.Now().Unix())+` WHERE id='host-dead'`)
+	err := store.PutMachineCPU(ctx, row, state.WithDeadOwnerClaim("host-dead"))
+	if !errors.Is(err, state.ErrNotOwner) {
+		t.Fatalf("claiming from a live host returned %v, want ErrNotOwner", err)
+	}
+}
+
+// A host describes its own CPU and nothing else, for the reason PutHost has
+// the same rule: one writer per row means the merge has nothing to corrupt.
+func TestAHostWritesOnlyItsOwnCPURow(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newTestStore(t, "host-a")
+
+	if err := store.PutHostCPU(ctx, &state.HostCPU{HostID: "host-a", Vendor: "AuthenticAMD",
+		CPUTemplate: "T2A", UpdatedAt: 5}); err != nil {
+		t.Fatalf("a host was refused its own cpu row: %v", err)
+	}
+	if got := agent.scalar(t, `SELECT vendor FROM host_cpu WHERE host_id='host-a'`); got != "AuthenticAMD" {
+		t.Errorf("the write did not land: vendor=%q", got)
+	}
+
+	err := store.PutHostCPU(ctx, &state.HostCPU{HostID: "host-b", Vendor: "GenuineIntel"})
+	if !errors.Is(err, state.ErrNotOwner) {
+		t.Fatalf("writing another host's cpu row returned %v, want ErrNotOwner", err)
+	}
+	if got := agent.scalar(t, `SELECT count(*) FROM host_cpu WHERE host_id='host-b'`); got != "0" {
+		t.Errorf("the refused write landed anyway: count=%s", got)
+	}
+}
+
+// A release's memory image is as vendor-locked as a machine's, and the release
+// row's writer is the service arbiter, so its cpu row's writer is too.
+func TestAReleaseCPURowIsWrittenByTheArbiter(t *testing.T) {
+	ctx := context.Background()
+
+	fleet := []state.Host{{ID: "host-a"}, {ID: "host-b"}, {ID: "host-c"}}
+	var owned, foreign string
+	for _, id := range []string{"svc-1", "svc-2", "svc-3", "svc-4", "svc-5", "svc-6"} {
+		o, _ := state.OwnerFor(id, fleet)
+		if o == "host-a" && owned == "" {
+			owned = id
+		}
+		if o != "host-a" && foreign == "" {
+			foreign = id
+		}
+	}
+	if owned == "" || foreign == "" {
+		t.Fatal("could not find both an owned and a foreign service id")
+	}
+
+	store, agent := newTestStore(t, "host-a")
+	liveFleet(t, agent, "host-a", "host-b", "host-c")
+	agent.exec(t, `INSERT INTO releases (id, service_id) VALUES ('rel-own','`+owned+`')`)
+	agent.exec(t, `INSERT INTO releases (id, service_id) VALUES ('rel-foreign','`+foreign+`')`)
+
+	if err := store.PutMachineCPU(ctx, &state.MachineCPU{
+		ID: "rel-own", Kind: state.KindRelease, Vendor: "AuthenticAMD"}); err != nil {
+		t.Fatalf("the arbiter was refused its own release's cpu row: %v", err)
+	}
+	err := store.PutMachineCPU(ctx, &state.MachineCPU{
+		ID: "rel-foreign", Kind: state.KindRelease, Vendor: "AuthenticAMD"})
+	if !errors.Is(err, state.ErrNotOwner) {
+		t.Fatalf("writing a foreign release's cpu row returned %v, want ErrNotOwner", err)
+	}
+}
+
+// A checkpoint's image belongs to the pool that photographed it, and its
+// writer is the owner of the machine it was taken from.
+func TestACheckpointCPURowIsWrittenByItsMachinesOwner(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newTestStore(t, "host-a")
+	agent.exec(t, `INSERT INTO machines (id, host_id, state) VALUES ('m-1','host-a','running')`)
+	agent.exec(t, `INSERT INTO machines (id, host_id, state) VALUES ('m-2','host-b','running')`)
+	agent.exec(t, `INSERT INTO checkpoints (id, machine_id) VALUES ('ck-1','m-1')`)
+	agent.exec(t, `INSERT INTO checkpoints (id, machine_id) VALUES ('ck-2','m-2')`)
+
+	if err := store.PutMachineCPU(ctx, &state.MachineCPU{
+		ID: "ck-1", Kind: state.KindCheckpoint, Vendor: "AuthenticAMD"}); err != nil {
+		t.Fatalf("the machine's owner was refused its checkpoint's cpu row: %v", err)
+	}
+	err := store.PutMachineCPU(ctx, &state.MachineCPU{
+		ID: "ck-2", Kind: state.KindCheckpoint, Vendor: "AuthenticAMD"})
+	if !errors.Is(err, state.ErrNotOwner) {
+		t.Fatalf("writing a foreign machine's checkpoint cpu row returned %v, want ErrNotOwner", err)
+	}
+}
+
+// The vendor reaches the ranking through ListHosts. A host with no cpu row
+// reads as empty rather than dropping out of the list: it is a host that has
+// not finished starting, and it is still live.
+func TestListHostsJoinsTheVendor(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newTestStore(t, "host-a")
+	liveFleet(t, agent, "host-a", "host-b")
+	agent.exec(t, `INSERT INTO host_cpu (host_id, vendor) VALUES ('host-a','AuthenticAMD')`)
+
+	hosts, err := store.ListHosts(ctx)
+	if err != nil {
+		t.Fatalf("ListHosts: %v", err)
+	}
+	if len(hosts) != 2 {
+		t.Fatalf("ListHosts returned %d hosts", len(hosts))
+	}
+	if hosts[0].Vendor != "AuthenticAMD" || hosts[1].Vendor != "" {
+		t.Errorf("vendors are %q and %q, want AuthenticAMD and empty", hosts[0].Vendor, hosts[1].Vendor)
+	}
+}

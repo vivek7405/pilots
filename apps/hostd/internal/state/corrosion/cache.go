@@ -41,6 +41,13 @@ type Cache struct {
 	// path, and a request path that queries the agent is a request path that
 	// can block on it.
 	tenancy map[string]state.Tenancy
+	// hostCPU and machineCPU answer "which vendor pool is this in" on the
+	// rescue tick and the request path. Subscriptions rather than queries for
+	// the reason given on tenancy: the ranking runs over every orphan on every
+	// tick, and a ranking that queries the agent is a data plane that can block
+	// on it.
+	hostCPU    map[string]state.HostCPU
+	machineCPU map[string]state.MachineCPU
 	// revoked is the set of killed key hashes, checked on every request. Held
 	// as a set because nothing reads the revocation time on this path.
 	revoked map[string]struct{}
@@ -101,6 +108,8 @@ func NewCache(ctx context.Context, client *Client) (*Cache, error) {
 		hosts:        map[string]state.Host{},
 		services:     map[string]state.Service{},
 		tenancy:      map[string]state.Tenancy{},
+		hostCPU:      map[string]state.HostCPU{},
+		machineCPU:   map[string]state.MachineCPU{},
 		revoked:      map[string]struct{}{},
 		heardAt:      map[string]time.Time{},
 		hostsChanged: make(chan struct{}, 1),
@@ -136,6 +145,25 @@ func NewCache(ctx context.Context, client *Client) (*Cache, error) {
 		tenancy.Close()
 		return nil, err
 	}
+	hostCPU, err := c.subscribeHostCPU(ctx)
+	if err != nil {
+		machines.Close()
+		hosts.Close()
+		services.Close()
+		tenancy.Close()
+		revocations.Close()
+		return nil, err
+	}
+	machineCPU, err := c.subscribeMachineCPU(ctx)
+	if err != nil {
+		machines.Close()
+		hosts.Close()
+		services.Close()
+		tenancy.Close()
+		revocations.Close()
+		hostCPU.Close()
+		return nil, err
+	}
 
 	c.mu.Lock()
 	c.ready = true
@@ -146,7 +174,69 @@ func NewCache(ctx context.Context, client *Client) (*Cache, error) {
 	go c.follow(ctx, services, "services", c.subscribeServices)
 	go c.follow(ctx, tenancy, "tenancy", c.subscribeTenancy)
 	go c.follow(ctx, revocations, "api_key_revocations", c.subscribeRevocations)
+	go c.follow(ctx, hostCPU, "host_cpu", c.subscribeHostCPU)
+	go c.follow(ctx, machineCPU, "machine_cpu", c.subscribeMachineCPU)
 	return c, nil
+}
+
+// subscribeHostCPU materializes which vendor pool each host is in.
+//
+// Two columns, not four: the template and the timestamp are diagnostics, read
+// through the store when someone asks, never on the rescue tick.
+func (c *Cache) subscribeHostCPU(ctx context.Context) (*Subscription, error) {
+	sub, err := c.client.Subscribe(ctx, `SELECT host_id, vendor FROM host_cpu`)
+	if err != nil {
+		return nil, err
+	}
+
+	fresh := map[string]state.HostCPU{}
+	rows := sub.Rows()
+	for rows.Next() {
+		var h state.HostCPU
+		if err := rows.Scan(&h.HostID, &h.Vendor); err != nil {
+			sub.Close()
+			return nil, err
+		}
+		fresh[h.HostID] = h
+	}
+	if err := rows.Err(); err != nil {
+		sub.Close()
+		return nil, err
+	}
+
+	c.mu.Lock()
+	c.hostCPU = fresh
+	c.mu.Unlock()
+	return sub, nil
+}
+
+// subscribeMachineCPU materializes which vendor photographed each memory image.
+func (c *Cache) subscribeMachineCPU(ctx context.Context) (*Subscription, error) {
+	sub, err := c.client.Subscribe(ctx,
+		`SELECT id, kind, vendor, last_start, last_start_at FROM machine_cpu`)
+	if err != nil {
+		return nil, err
+	}
+
+	fresh := map[string]state.MachineCPU{}
+	rows := sub.Rows()
+	for rows.Next() {
+		var m state.MachineCPU
+		if err := rows.Scan(&m.ID, &m.Kind, &m.Vendor, &m.LastStart, &m.LastStartAt); err != nil {
+			sub.Close()
+			return nil, err
+		}
+		fresh[m.ID] = m
+	}
+	if err := rows.Err(); err != nil {
+		sub.Close()
+		return nil, err
+	}
+
+	c.mu.Lock()
+	c.machineCPU = fresh
+	c.mu.Unlock()
+	return sub, nil
 }
 
 // subscribeTenancy materializes the owner of every machine, service and volume.
@@ -436,6 +526,30 @@ func (c *Cache) apply(table string, change Change) {
 		}
 		c.tenancy[t.ID] = t
 
+	case "host_cpu":
+		var h state.HostCPU
+		if err := change.Scan(&h.HostID, &h.Vendor); err != nil {
+			slog.Error("cluster cache could not read a host cpu change", "err", err)
+			return
+		}
+		if change.Kind == ChangeDelete {
+			delete(c.hostCPU, h.HostID)
+			return
+		}
+		c.hostCPU[h.HostID] = h
+
+	case "machine_cpu":
+		var m state.MachineCPU
+		if err := change.Scan(&m.ID, &m.Kind, &m.Vendor, &m.LastStart, &m.LastStartAt); err != nil {
+			slog.Error("cluster cache could not read a machine cpu change", "err", err)
+			return
+		}
+		if change.Kind == ChangeDelete {
+			delete(c.machineCPU, m.ID)
+			return
+		}
+		c.machineCPU[m.ID] = m
+
 	case "api_key_revocations":
 		var hash string
 		if err := change.Scan(&hash); err != nil {
@@ -461,6 +575,23 @@ func (c *Cache) OrgOf(id string) (string, bool) {
 		return "", false
 	}
 	return t.OrgID, true
+}
+
+// MachineVendor names the vendor pool a memory image belongs to, or "" when
+// nothing has recorded one. Empty ranks over the whole fleet, which is exactly
+// what a machine that predates this table gets, and what it got before it.
+func (c *Cache) MachineVendor(id string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.machineCPU[id].Vendor
+}
+
+// MachineCPU returns the whole recorded row, for the API's last_start fields.
+func (c *Cache) MachineCPU(id string) (state.MachineCPU, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	m, ok := c.machineCPU[id]
+	return m, ok
 }
 
 // Revoked reports whether a key hash has been killed. Read on every
@@ -559,6 +690,7 @@ func (c *Cache) Hosts() []state.Host {
 
 	out := make([]state.Host, 0, len(c.hosts))
 	for _, h := range c.hosts {
+		h.Vendor = c.hostCPU[h.ID].Vendor
 		out = append(out, h)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -570,6 +702,7 @@ func (c *Cache) Host(id string) (state.Host, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	h, ok := c.hosts[id]
+	h.Vendor = c.hostCPU[id].Vendor
 	return h, ok
 }
 
@@ -587,6 +720,10 @@ func (c *Cache) LiveHosts(now time.Time, deadAfter time.Duration) []state.Host {
 	out := make([]state.Host, 0, len(c.hosts))
 	for _, h := range c.hosts {
 		if heard, ok := c.heardAt[h.ID]; ok && now.Sub(heard) < deadAfter {
+			// Stamped here rather than carried on the hosts row: hosts has no
+			// vendor column, and adding one to a table with rows is the
+			// cr-sqlite backfill hard rule 6 forbids.
+			h.Vendor = c.hostCPU[h.ID].Vendor
 			out = append(out, h)
 		}
 	}

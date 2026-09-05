@@ -280,13 +280,13 @@ func TestTemplateRoundTrip(t *testing.T) {
 	ctx := context.Background()
 
 	want := &Template{
-		ID: GoldenTemplate, MemBuildID: "mem-1", RootfsBuildID: "rootfs-1",
+		ID: GoldenTemplateFor("AuthenticAMD"), MemBuildID: "mem-1", RootfsBuildID: "rootfs-1",
 		SnapKey: "template/abc/snap.bin", CreatedAt: 1234,
 	}
 	if err := s.PutTemplate(ctx, want); err != nil {
 		t.Fatal(err)
 	}
-	got, err := s.GetTemplate(ctx, GoldenTemplate)
+	got, err := s.GetTemplate(ctx, GoldenTemplateFor("AuthenticAMD"))
 	if err != nil {
 		t.Fatal(err)
 	}
