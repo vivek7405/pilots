@@ -91,6 +91,50 @@ func TestAnExplicitCommandBeatsTheBuildSpec(t *testing.T) {
 	}
 }
 
+// An explicit command brings the image's WORKDIR and USER with it: it does not.
+//
+// The spec's directory and user belong to the image's OWN command. A create
+// that names its own command has said what to run, and quietly running it from
+// the image's WORKDIR as the image's USER is a machine doing something nobody
+// asked for -- and it fails silently, as a permission error or a missing
+// relative path, far from the create that caused it. Only a create with no
+// command of its own, and a restart (which carries none either), inherit them.
+func TestAnExplicitCommandDoesNotInheritTheImagesWorkdirOrUser(t *testing.T) {
+	withSpec(t, `{
+	  "cmd": ["from-the-image"],
+	  "workdir": "/app",
+	  "user": "nobody",
+	  "from_dockerfile_only": true
+	}`)
+
+	if _, err := applyInit(initRequest{AppCmd: "from-the-create"}); err != nil {
+		t.Fatal(err)
+	}
+	if appWorkDir != "" {
+		t.Errorf("appWorkDir = %q; an explicitly-commanded app must keep the agent's default", appWorkDir)
+	}
+	if appUser != "" {
+		t.Errorf("appUser = %q; an explicitly-commanded app must keep the agent's default", appUser)
+	}
+
+	// The counterfactual, in the same test: the SAME spec, a create with no
+	// command, and both are inherited. Without this the assertions above would
+	// still pass if the spec had simply failed to parse.
+	withSpec(t, `{
+	  "cmd": ["from-the-image"],
+	  "workdir": "/app",
+	  "user": "nobody",
+	  "from_dockerfile_only": true
+	}`)
+	if _, err := applyInit(initRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if appWorkDir != "/app" || appUser != "nobody" {
+		t.Errorf("a create with no command got workdir %q and user %q, want /app and nobody",
+			appWorkDir, appUser)
+	}
+}
+
 // The create's environment overrides the image's on a collision, for the same
 // reason: it is the later and more specific statement of intent.
 func TestTheCreateEnvironmentOverridesTheImages(t *testing.T) {

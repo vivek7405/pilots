@@ -140,34 +140,42 @@ func applyInit(req initRequest) (initResponse, error) {
 	// which has always been allowed to fall through to the spec.
 	restart := req.StartApp && env == nil && cmd == ""
 
-	if spec, ok := readStartSpec(); ok {
-		// The unit's working directory and user come from the spec either way:
-		// they are properties of the image, not of the deploy, and a restart
-		// starts the same unit a create did.
-		if spec.WorkDir != "" {
-			appWorkDir = spec.WorkDir
-		}
-		if spec.User != "" {
-			appUser = spec.User
-		}
-		// Without this fallback a machine created from a user's Dockerfile has
-		// a start command sitting in /etc/pilot-agent/start.json that nothing
-		// reads, comes up, answers health checks, reports app_started, and runs
-		// no application. See startspec.go.
-		if cmd == "" && !restart {
-			cmd = spec.Command()
-			// The Dockerfile's ENV is the application's baseline. What the
-			// create supplied wins on a collision: a deploy-time value is
-			// meant to override what the image was built with.
-			if len(spec.Env) > 0 {
-				merged := make(map[string]string, len(spec.Env)+len(env))
-				for k, v := range spec.Env {
-					merged[k] = v
+	// Only when the caller named no command. An explicit app_cmd is the
+	// machine's own statement of what to run, and the image's WORKDIR and USER
+	// are part of running the image's command: inheriting them under a command
+	// nobody took from the image would silently run an explicitly-commanded
+	// application in another directory, as another user. A restart carries no
+	// command either, so this still covers it.
+	if cmd == "" {
+		if spec, ok := readStartSpec(); ok {
+			// The unit's working directory and user come from the spec whether
+			// this is a create or a restart: they are properties of the image,
+			// and a restart starts the same unit a create did.
+			if spec.WorkDir != "" {
+				appWorkDir = spec.WorkDir
+			}
+			if spec.User != "" {
+				appUser = spec.User
+			}
+			// Without this fallback a machine created from a user's Dockerfile
+			// has a start command sitting in /etc/pilot-agent/start.json that
+			// nothing reads, comes up, answers health checks, reports
+			// app_started, and runs no application. See startspec.go.
+			if !restart {
+				cmd = spec.Command()
+				// The Dockerfile's ENV is the application's baseline. What the
+				// create supplied wins on a collision: a deploy-time value is
+				// meant to override what the image was built with.
+				if len(spec.Env) > 0 {
+					merged := make(map[string]string, len(spec.Env)+len(env))
+					for k, v := range spec.Env {
+						merged[k] = v
+					}
+					for k, v := range env {
+						merged[k] = v
+					}
+					env = merged
 				}
-				for k, v := range env {
-					merged[k] = v
-				}
-				env = merged
 			}
 		}
 	}
