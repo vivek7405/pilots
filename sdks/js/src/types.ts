@@ -288,9 +288,9 @@ export interface ErrorResponse {
 }
 
 // ---------------------------------------------------------------------------
-// Shapes hostd grows in #30. They are mirrored here now so the client methods
-// that call those routes are written once; the drift test starts checking them
-// the day the structs land in `internal/api`.
+// The data routes: the service patch, the usage ledger and the compose plan.
+// hostd serves all three, and the drift test checks every shape below against
+// `internal/api` and `internal/compose` on each run.
 // ---------------------------------------------------------------------------
 
 export interface UpdateServiceRequest {

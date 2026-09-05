@@ -1875,6 +1875,372 @@ async function replicasOf(serviceID) {
 }
 
 // ---------------------------------------------------------------------------
+// The data routes: the usage ledger, the service patch, the release list, and
+// the compose plan.
+//
+// Run in BOTH modes on purpose. The plan, the patch and the shape of the usage
+// answer need no Firecracker, and holding all four back behind PILOTS_E2E_FULL
+// would mean a laptop run proved nothing about the routes the CLI and the
+// dashboard actually call. The half that needs a machine says so and runs
+// under FULL alone.
+// ---------------------------------------------------------------------------
+
+// The CLI's own compose fixture, inlined so this file needs no path into
+// packages/. packages/cli/test/fixtures/compose-app/compose.yaml.
+const COMPOSE_FIXTURE = `# The shop app: a database, a web service and a worker.
+services:
+  postgres:
+    image: postgres:17
+  web:
+    build: ./web
+    environment:
+      DATABASE_URL: secret://database_url
+    x-pilots:
+      pre_deploy: python manage.py migrate --noinput
+  worker:
+    build: ./worker
+    depends_on:
+      - postgres
+`;
+
+async function dataRouteAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const created = [];
+  let svc = null;
+
+  try {
+    // --- POST /v1/compose/plan ---------------------------------------------
+
+    await step('the compose plan orders the fixture postgres, web, worker', async () => {
+      const { status, json } = await request('/v1/compose/plan', {
+        method: 'POST',
+        body: { compose: COMPOSE_FIXTURE, env: { COMPOSE_PROJECT_NAME: 'shop' } },
+      });
+      assert(status === 200, `expected 200, got ${status}: ${JSON.stringify(json)}`);
+      assert(json.app === 'shop', `app = ${json.app}`);
+      const names = (json.steps ?? []).map((s) => s.name).join(',');
+      assert(names === 'postgres,web,worker', `steps = ${names}`);
+
+      // A secret is NAMED, never carried: the CLI resolves it from the
+      // operator's own store and hostd seals what comes back.
+      const web = json.steps.find((s) => s.name === 'web');
+      assert(web.secret_refs?.DATABASE_URL === 'database_url',
+        `web secret_refs = ${JSON.stringify(web.secret_refs)}`);
+      assert(!JSON.stringify(web.env ?? {}).includes('secret://'),
+        `a secret:// value reached env: ${JSON.stringify(web.env)}`);
+      assert(web.pre_deploy === 'python manage.py migrate --noinput',
+        `web pre_deploy = ${web.pre_deploy}`);
+      // A stock image is a build too: the plan hands back the Dockerfile that
+      // builds it rather than a second code path for "just pull this".
+      const pg = json.steps.find((s) => s.name === 'postgres');
+      assert(pg.dockerfile === 'FROM postgres:17\n', `postgres dockerfile = ${JSON.stringify(pg.dockerfile)}`);
+    });
+
+    await step('the same file plans identically twice', async () => {
+      const body = { compose: COMPOSE_FIXTURE, env: { COMPOSE_PROJECT_NAME: 'shop' } };
+      const a = await request('/v1/compose/plan', { method: 'POST', body });
+      const b = await request('/v1/compose/plan', { method: 'POST', body });
+      assert(JSON.stringify(a.json) === JSON.stringify(b.json),
+        'two plans of one file differ; the order is not a function of the file');
+    });
+
+    await step('x-pilots knobs and a durable_volume key reach the plan', async () => {
+      const compose = [
+        'name: knobs',
+        'services:',
+        '  db:',
+        '    image: postgres:17',
+        '    x-pilots:',
+        '      min_machines_running: 1',
+        '      auto_stop: "off"',
+        '      durable_volume: false',
+        '',
+      ].join('\n');
+      const { status, json } = await request('/v1/compose/plan', {
+        method: 'POST', body: { compose },
+      });
+      assert(status === 200, `expected 200, got ${status}: ${JSON.stringify(json)}`);
+      const knobs = json.steps[0].knobs;
+      assert(knobs?.min_machines_running === 1, `knobs = ${JSON.stringify(knobs)}`);
+      assert(knobs?.auto_stop === 'off', `knobs = ${JSON.stringify(knobs)}`);
+      // The two the file did not name come from the machine defaults, not
+      // from zero: a replica with auto_start false is a dead URL.
+      assert(knobs?.auto_start === true && knobs?.soft_limit === 20,
+        `knobs did not fill from the defaults: ${JSON.stringify(knobs)}`);
+    });
+
+    await step('every unsupported key arrives in one 400', async () => {
+      const compose = COMPOSE_FIXTURE.replace(
+        '  web:\n    build: ./web',
+        '  web:\n    build: ./web\n    privileged: true',
+      );
+      const { status, json } = await request('/v1/compose/plan', {
+        method: 'POST', body: { compose, env: { COMPOSE_PROJECT_NAME: 'shop' } },
+      });
+      assert(status === 400, `expected 400, got ${status}: ${JSON.stringify(json)}`);
+      assert(json.error === 'compose file has unsupported keys', `error = ${json.error}`);
+      assert(json.unsupported?.[0]?.key === 'privileged',
+        `unsupported = ${JSON.stringify(json.unsupported)}`);
+    });
+
+    await step('an unset variable is refused by name', async () => {
+      const { status, json } = await request('/v1/compose/plan', {
+        method: 'POST',
+        body: { compose: 'name: s\nservices:\n  web:\n    image: ${TAG}\n' },
+      });
+      assert(status === 400, `expected 400, got ${status}`);
+      assert((json?.error ?? '').includes('TAG'), `the 400 does not name it: ${json?.error}`);
+    });
+
+    await step('a compose body over 1 MiB is refused', async () => {
+      const compose = 'name: s\nservices:\n  web:\n    image: nginx\n# ' + 'x'.repeat(2 * 1024 * 1024);
+      const { status } = await request('/v1/compose/plan', { method: 'POST', body: { compose } });
+      assert(status === 400, `expected 400, got ${status}`);
+    });
+
+    // --- PATCH /v1/services/{id} and its releases ---------------------------
+
+    await step('a service is created for the patch battery', async () => {
+      const { status, json } = await request('/v1/services', {
+        method: 'POST',
+        body: {
+          name: `patched-${tag}`, app: `e2e-data-${tag}`, replicas: 1,
+          repo: 'vivek7405/shop', branch: 'main',
+        },
+      });
+      assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
+      svc = json;
+    });
+
+    if (svc) {
+      await step('PATCH sets replicas and answers the updated service', async () => {
+        const { status, json } = await request(`/v1/services/${svc.id}`, {
+          method: 'PATCH', body: { replicas: 2 },
+        });
+        assert(status === 200, `expected 200, got ${status}: ${JSON.stringify(json)}`);
+        assert(json.replicas === 2, `replicas = ${json.replicas}`);
+        const read = await request(`/v1/services/${svc.id}`);
+        assert(read.json?.replicas === 2, `the row still says ${read.json?.replicas}`);
+      });
+
+      // Knobs travel on the deploy: a service row has no knobs column, and a
+      // replica row is single-writer to its own host, so the arbiter could not
+      // apply one if it had it. The 400 names the field rather than dropping it.
+      await step('PATCH refuses knobs and names the field', async () => {
+        const { status, json } = await request(`/v1/services/${svc.id}`, {
+          method: 'PATCH', body: { knobs: { auto_stop: 'off' } },
+        });
+        assert(status === 400, `expected 400, got ${status}: ${JSON.stringify(json)}`);
+        assert((json?.error ?? '').includes('knobs'), `the 400 does not name it: ${json?.error}`);
+      });
+
+      // The dashboard disconnects a repo by sending an explicit empty string.
+      await step('PATCH clears a field on an explicit empty value', async () => {
+        const { status, json } = await request(`/v1/services/${svc.id}`, {
+          method: 'PATCH', body: { repo: '' },
+        });
+        assert(status === 200, `expected 200, got ${status}: ${JSON.stringify(json)}`);
+        assert(!json.repo, `repo = ${json.repo}`);
+        assert(json.branch === 'main', `an absent field moved: branch = ${json.branch}`);
+      });
+
+      await step('a service with no releases answers an empty array', async () => {
+        const { status, json } = await request(`/v1/services/${svc.id}/releases`);
+        assert(status === 200, `expected 200, got ${status}`);
+        assert(Array.isArray(json) && json.length === 0,
+          `releases = ${JSON.stringify(json)}, want []`);
+      });
+    }
+
+    // --- GET /v1/usage ------------------------------------------------------
+
+    await step('GET /v1/usage answers host_id, a range and an orgs object', async () => {
+      const { status, json } = await request('/v1/usage');
+      assert(status === 200, `expected 200, got ${status}: ${JSON.stringify(json)}`);
+      assert(typeof json.host_id === 'string' && json.host_id, `host_id = ${json.host_id}`);
+      // The default window, and the range this host actually summed: the
+      // dashboard advances its per-host watermark from the answer.
+      assert(json.until - json.since === 86400, `window = ${json.until - json.since}s`);
+      assert(json.orgs && typeof json.orgs === 'object' && !Array.isArray(json.orgs),
+        `orgs = ${JSON.stringify(json.orgs)}, want an object and never null`);
+    });
+
+    await step('a range the host cannot sum is a 400', async () => {
+      for (const q of ['?since=x', '?since=10&until=5']) {
+        const { status } = await request(`/v1/usage${q}`);
+        assert(status === 400, `GET /v1/usage${q} returned ${status}, want 400`);
+      }
+    });
+
+    // Billing is admin-only. A tenant key reading the fleet's usage would see
+    // every other org's totals on this host.
+    await step('a machines-scoped key cannot read usage', async () => {
+      const mint = await request('/v1/api-keys', {
+        method: 'POST',
+        body: { org_id: `org_usage_scope_${tag}`, scopes: ['machines'] },
+      });
+      assert(mint.status === 201, `minting a key returned ${mint.status}`);
+      const { status, json } = await request('/v1/usage', { key: mint.json.key });
+      assert(status === 403, `expected 403, got ${status}`);
+      assert(json?.error === 'scope admin required', `got ${JSON.stringify(json)}`);
+    });
+
+    if (!FULL) {
+      console.log('  - usage accrual and the replica count skipped ' +
+        '(set PILOTS_E2E_FULL=1 on a Firecracker host)');
+      return;
+    }
+
+    // A machine in an org of its own, so what this battery meters is not
+    // mixed with whatever else the fleet is running for the battery's org.
+    const usageOrg = `org_usage_${tag}`;
+    let orgKey = null;
+    let machine = null;
+
+    await step('a machine is created in an org of its own', async () => {
+      const mint = await request('/v1/api-keys', {
+        method: 'POST', body: { org_id: usageOrg, scopes: ['machines'] },
+      });
+      assert(mint.status === 201, `minting a key returned ${mint.status}`);
+      orgKey = mint.json.key;
+
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST', key: orgKey,
+        body: {
+          name: `e2e-usage-${tag}`, vcpus: 1, mem_mib: 512,
+          knobs: { auto_stop: 'off' },
+        },
+      });
+      assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
+      machine = json;
+      created.push(json.id);
+    });
+
+    if (!machine) return;
+
+    const usageFor = async (since, until) => {
+      const { json } = await request(`/v1/usage?since=${since}&until=${until}`);
+      return json?.orgs?.[usageOrg] ?? {
+        machine_seconds: 0, vcpu_seconds: 0, mib_seconds: 0, volume_gib_seconds: 0,
+      };
+    };
+
+    let suspendedAt = 0;
+
+    await step('a running machine accrues wall time and compute', async () => {
+      const since = Math.floor(Date.now() / 1000) - 5;
+      await sleep(5000);
+      const t = await usageFor(since, Math.floor(Date.now() / 1000) + 1);
+      assert(t.machine_seconds >= 3, `machine_seconds = ${t.machine_seconds}`);
+      assert(t.vcpu_seconds >= 3, `vcpu_seconds = ${t.vcpu_seconds}`);
+      assert(t.mib_seconds >= 3 * 512, `mib_seconds = ${t.mib_seconds}`);
+    });
+
+    // The billing fact, asserted end to end: a suspended machine holds a
+    // snapshot in object storage and no vCPU and no guest memory.
+    await step('a suspended machine bills storage only', async () => {
+      const { status } = await request(`/v1/machines/${machine.id}/suspend`, { method: 'POST' });
+      assert(status === 204, `suspend returned ${status}`);
+      suspendedAt = Math.floor(Date.now() / 1000) + 1;
+      await sleep(6000);
+      const t = await usageFor(suspendedAt, Math.floor(Date.now() / 1000));
+      assert(t.machine_seconds >= 3,
+        `a suspended machine stopped accruing wall time: ${JSON.stringify(t)}`);
+      assert(t.vcpu_seconds === 0 && t.mib_seconds === 0,
+        `a suspended machine billed compute: ${JSON.stringify(t)}`);
+    });
+
+    await step('a woken machine accrues compute again', async () => {
+      const { status } = await request(`/v1/machines/${machine.id}/wake`, { method: 'POST' });
+      assert(status === 204, `wake returned ${status}`);
+      const since = Math.floor(Date.now() / 1000) + 1;
+      await sleep(5000);
+      const t = await usageFor(since, Math.floor(Date.now() / 1000));
+      assert(t.vcpu_seconds >= 2, `vcpu_seconds after a wake = ${t.vcpu_seconds}`);
+    });
+
+    await step('a destroyed machine accrues nothing more', async () => {
+      const { status } = await request(`/v1/machines/${machine.id}`, { method: 'DELETE' });
+      assert(status === 204, `destroy returned ${status}`);
+      const since = Math.floor(Date.now() / 1000) + 1;
+      await sleep(5000);
+      const t = await usageFor(since, Math.floor(Date.now() / 1000));
+      assert(t.machine_seconds === 0,
+        `a destroyed machine kept billing: ${JSON.stringify(t)}`);
+    });
+
+    // --- the patched replica count, applied by the next deploy --------------
+
+    if (!svc) return;
+
+    let build = null;
+    await step('a build produces a rootfs the patched service can deploy', async () => {
+      const res = await postTar('/v1/builds', tarball({
+        'Dockerfile': [
+          'FROM alpine:3.20',
+          `RUN echo ${tag} > /etc/pilots-data-marker`,
+          'CMD ["/bin/sh", "-c", "while true; do sleep 3600; done"]',
+          '',
+        ].join('\n'),
+      }));
+      assert(res.status === 200, `build: HTTP ${res.status}`);
+      const text = await res.text();
+      for (const line of text.trim().split('\n')) {
+        try {
+          const obj = JSON.parse(line);
+          if (obj.result) build = obj.result;
+        } catch {}
+      }
+      assert(build, `the build stream produced no rootfs id:\n${text.slice(-400)}`);
+    });
+
+    if (!build) return;
+
+    // replicas travels on the row and is read by the NEXT rollout, exactly as
+    // env does. That is the whole contract the CLI's second `pilot deploy`
+    // depends on.
+    await step('a deploy after the patch runs the patched replica count', async () => {
+      const patch = await request(`/v1/services/${svc.id}`, {
+        method: 'PATCH',
+        body: {
+          replicas: 2,
+          health: { type: 'cmd', test: ['CMD-SHELL', 'true'], grace: 60, interval: 2, healthy_threshold: 1 },
+        },
+      });
+      assert(patch.status === 200, `patch returned ${patch.status}: ${patch.text}`);
+
+      const { status, json } = await request(`/v1/services/${svc.id}/deploy`, {
+        method: 'POST', body: { build },
+      });
+      assert(status === 200, `deploy returned ${status}: ${JSON.stringify(json)}`);
+
+      const replicas = await replicasOf(svc.id);
+      for (const m of replicas) created.push(m.id);
+      assert(replicas.length === 2,
+        `the service runs ${replicas.length} replicas, want the patched 2`);
+    });
+
+    await step('releases lists the newest first and names the service', async () => {
+      const { status, json } = await request(`/v1/services/${svc.id}/releases`);
+      assert(status === 200, `expected 200, got ${status}`);
+      assert(json.length >= 1, `releases = ${JSON.stringify(json)}`);
+      for (const rel of json) {
+        assert(rel.service_id === svc.id, `release ${rel.id} names ${rel.service_id}`);
+      }
+      const read = await request(`/v1/services/${svc.id}`);
+      assert(json[0].id === read.json?.release_id,
+        `the first release is ${json[0].id}, but the service is on ${read.json?.release_id}`);
+    });
+  } finally {
+    for (const m of svc ? await replicasOf(svc.id) : []) created.push(m.id);
+    for (const id of created) {
+      await request(`/v1/machines/${id}`, { method: 'DELETE' });
+    }
+  }
+}
+
+
+// ---------------------------------------------------------------------------
 // Phase 5's own gate line: a multi-service app, end to end.
 //
 // Every ingredient is proven separately elsewhere -- .internal resolves
@@ -3397,6 +3763,9 @@ async function main() {
 
   await processAssertions();
   await tenancyAssertions();
+  // Before the FULL gate: the compose plan, the service patch and the shape of
+  // the usage answer need no Firecracker, and the half that does says so.
+  await dataRouteAssertions();
   if (FULL) {
     await lifecycleAssertions();
     await timingAssertions();

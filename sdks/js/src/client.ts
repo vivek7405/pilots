@@ -279,9 +279,13 @@ export class Services {
   }
 
   /**
-   * `env` and `secret_env` REPLACE the stored map rather than merging into it,
-   * and take effect at the next deploy. `replicas` is reconciled by the
-   * autoscaler.
+   * `env`, `secret_env` and `replicas` REPLACE the stored values rather than
+   * merging into them, and all three take effect at the next deploy, which is
+   * where a rollout reads them.
+   *
+   * `knobs` are refused here with a 400 naming the field: a service row has no
+   * knobs column and a replica row is single-writer to its own host, so they
+   * travel on `deploy` instead.
    */
   patch(id: string, req: UpdateServiceRequest): Promise<Service> {
     return this.http.json<Service>('PATCH', `/v1/services/${encodeURIComponent(id)}`, { body: req })
