@@ -68,6 +68,7 @@ import (
 	"go.yaml.in/yaml/v3"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/vivek7405/pilots/hostd/internal/netns"
 )
 
 // Defaults for a step the file says nothing about. A replica of a service is a
@@ -108,14 +109,30 @@ type Step struct {
 	Name string `json:"name"`
 	// Build is build: {context, dockerfile}, relative to the compose file.
 	Build *Build `json:"build,omitempty"`
-	// Dockerfile is a generated one, FROM <image> plus any ENTRYPOINT and CMD
-	// the file set, for a step that named an image rather than a context. A
-	// stock image is a build too: hostd turns any Dockerfile into a bootable
-	// rootfs, and a second path for "just pull this" would be a second thing
-	// to keep correct.
+	// Dockerfile is a generated one, FROM <image> plus whatever the file
+	// overrode, for a step that named an image rather than a context. A stock
+	// image is a build too: hostd turns any Dockerfile into a bootable rootfs,
+	// and a second path for "just pull this" would be a second thing to keep
+	// correct.
 	Dockerfile string `json:"dockerfile,omitempty"`
-	// Cmd is command:/entrypoint: on a build: step, shell-quoted per element.
-	Cmd string `json:"cmd,omitempty"`
+	// DockerfileAppend is what the file overrode on a build: step, rendered as
+	// Dockerfile instructions for the CLI to append to the context's own
+	// Dockerfile before it uploads it.
+	//
+	// Dockerfile text rather than the fields themselves, for two reasons. It
+	// is the SAME mechanism an image: step already uses, so command:,
+	// entrypoint:, working_dir: and user: reach the guest down one path
+	// instead of two; and it keeps the CLI free of any opinion about compose
+	// or about Docker's override rules, which is what keeps the one parser in
+	// this file.
+	//
+	// Appending is what makes it correct rather than merely convenient. The
+	// build reads the FINAL stage of the Dockerfile it is handed
+	// (build.ParseStartSpec) and writes what it finds into the image at
+	// /etc/pilot-agent/start.json, which the guest agent execs. So an
+	// instruction appended here lands in the final stage, overrides what that
+	// stage declared, and is delivered by machinery that already exists.
+	DockerfileAppend string `json:"dockerfile_append,omitempty"`
 	// Env never carries a secret:// value; those are named in SecretRefs.
 	Env        map[string]string `json:"env,omitempty"`
 	SecretRefs map[string]string `json:"secret_refs,omitempty"` // env key -> secret name
@@ -264,8 +281,7 @@ func envFileKeys(dict map[string]any) []Unsupported {
 		if _, has := svc["env_file"]; has {
 			out = append(out, Unsupported{
 				Service: name, Key: "env_file",
-				Message: "env_file has no file to read on the server; put the " +
-					"values under environment: or use secret://",
+				Message: msgEnvFile,
 			})
 		}
 	}
@@ -440,25 +456,91 @@ func appName(dict map[string]any, env map[string]string) (string, error) {
 // refuses it with. Collected from what uncloud validates plus what a microVM
 // makes moot.
 //
-// present reports whether the service uses the key at all.
+// present reports whether the service uses the key at all. fields names the
+// types.ServiceConfig fields the rule covers, which is what makes the list
+// AUDITABLE rather than merely long: TestEveryServiceKeyIsClassified reflects
+// over that struct and fails on a field that is neither honoured, refused, nor
+// listed as inert. A compose key that changes behaviour and is silently
+// dropped is the failure mode this list exists to make impossible -- it cost a
+// deploy of a real application, whose command: and working_dir: both went
+// nowhere -- and a compose-go upgrade that adds a key is caught by the same
+// test rather than by the next person to be surprised.
 var unsupportedKeys = []struct {
 	key     string
+	fields  []string
 	message string
 	present func(types.ServiceConfig) bool
 }{
-	{"security_opt", msgUnsupported, func(s types.ServiceConfig) bool { return len(s.SecurityOpt) > 0 }},
-	{"dns", msgUnsupported, func(s types.ServiceConfig) bool { return len(s.DNS) > 0 }},
-	{"dns_search", msgUnsupported, func(s types.ServiceConfig) bool { return len(s.DNSSearch) > 0 }},
-	{"labels", msgUnsupported, func(s types.ServiceConfig) bool { return len(s.Labels) > 0 }},
-	{"links", msgUnsupported, func(s types.ServiceConfig) bool { return len(s.Links) > 0 }},
-	{"mem_swappiness", msgUnsupported, func(s types.ServiceConfig) bool { return s.MemSwappiness != 0 }},
-	{"memswap_limit", msgUnsupported, func(s types.ServiceConfig) bool { return s.MemSwapLimit != 0 }},
-	{"secrets", msgUnsupported, func(s types.ServiceConfig) bool { return len(s.Secrets) > 0 }},
-	{"storage_opt", msgUnsupported, func(s types.ServiceConfig) bool { return len(s.StorageOpt) > 0 }},
+	{"security_opt", []string{"SecurityOpt"}, msgUnsupported, func(s types.ServiceConfig) bool { return len(s.SecurityOpt) > 0 }},
+	{"dns", []string{"DNS"}, msgUnsupported, func(s types.ServiceConfig) bool { return len(s.DNS) > 0 }},
+	{"dns_opt", []string{"DNSOpts"}, msgUnsupported, func(s types.ServiceConfig) bool { return len(s.DNSOpts) > 0 }},
+	{"dns_search", []string{"DNSSearch"}, msgUnsupported, func(s types.ServiceConfig) bool { return len(s.DNSSearch) > 0 }},
+	{"labels", []string{"Labels"}, msgUnsupported, func(s types.ServiceConfig) bool { return len(s.Labels) > 0 }},
+	{"label_file", []string{"LabelFiles"}, msgUnsupported, func(s types.ServiceConfig) bool { return len(s.LabelFiles) > 0 }},
+	{"links", []string{"Links"}, msgUnsupported, func(s types.ServiceConfig) bool { return len(s.Links) > 0 }},
+	{"external_links", []string{"ExternalLinks"}, msgUnsupported, func(s types.ServiceConfig) bool { return len(s.ExternalLinks) > 0 }},
+	{"mem_swappiness", []string{"MemSwappiness"}, msgUnsupported, func(s types.ServiceConfig) bool { return s.MemSwappiness != 0 }},
+	{"memswap_limit", []string{"MemSwapLimit"}, msgUnsupported, func(s types.ServiceConfig) bool { return s.MemSwapLimit != 0 }},
+	{"mem_reservation", []string{"MemReservation"}, msgUnsupported, func(s types.ServiceConfig) bool { return s.MemReservation != 0 }},
+	{"secrets", []string{"Secrets"}, msgUnsupported, func(s types.ServiceConfig) bool { return len(s.Secrets) > 0 }},
+	{"configs", []string{"Configs"}, msgUnsupported, func(s types.ServiceConfig) bool { return len(s.Configs) > 0 }},
+	{"credential_spec", []string{"CredentialSpec"}, msgUnsupported, func(s types.ServiceConfig) bool { return s.CredentialSpec != nil }},
+	{"storage_opt", []string{"StorageOpt"}, msgUnsupported, func(s types.ServiceConfig) bool { return len(s.StorageOpt) > 0 }},
+	{"gpus", []string{"Gpus"}, msgUnsupported, func(s types.ServiceConfig) bool { return len(s.Gpus) > 0 }},
+	{"models", []string{"Models"}, msgUnsupported, func(s types.ServiceConfig) bool { return len(s.Models) > 0 }},
+	{"provider", []string{"Provider"}, msgUnsupported, func(s types.ServiceConfig) bool { return s.Provider != nil }},
+	{"develop", []string{"Develop"}, "develop: drives a local watch loop; there is no local container to sync into",
+		func(s types.ServiceConfig) bool { return s.Develop != nil }},
+	{"extends", []string{"Extends"}, "extends: reads a file the server does not have; flatten it before deploying",
+		func(s types.ServiceConfig) bool { return s.Extends != nil }},
+	{"env_file", []string{"EnvFiles"}, msgEnvFile, func(s types.ServiceConfig) bool { return len(s.EnvFiles) > 0 }},
+	{"profiles", []string{"Profiles"}, "profiles select which services a local `up` starts; a deploy takes every service in the file",
+		func(s types.ServiceConfig) bool { return len(s.Profiles) > 0 }},
+	{"container_name", []string{"ContainerName"}, "a replica is a machine and its name is the service's; see x-pilots.domain for the URL",
+		func(s types.ServiceConfig) bool { return s.ContainerName != "" }},
+	{"hostname", []string{"Hostname"}, msgNaming, func(s types.ServiceConfig) bool { return s.Hostname != "" }},
+	{"domainname", []string{"DomainName"}, msgNaming, func(s types.ServiceConfig) bool { return s.DomainName != "" }},
+	{"extra_hosts", []string{"ExtraHosts"}, "peers resolve by <name>.internal; there is no hosts file to add to",
+		func(s types.ServiceConfig) bool { return len(s.ExtraHosts) > 0 }},
+	{"mac_address", []string{"MacAddress"}, "guest addressing is constant so that a snapshot stays host-agnostic",
+		func(s types.ServiceConfig) bool { return s.MacAddress != "" }},
+	{"net", []string{"Net"}, msgOneNetwork, func(s types.ServiceConfig) bool { return s.Net != "" }},
+	{"network_mode", []string{"NetworkMode"}, msgOneNetwork, func(s types.ServiceConfig) bool { return s.NetworkMode != "" }},
+	{"logging", []string{"Logging", "LogDriver", "LogOpt"},
+		"a machine's output is its journal, read with `pilot logs`",
+		func(s types.ServiceConfig) bool {
+			return s.Logging != nil || s.LogDriver != "" || len(s.LogOpt) > 0
+		}},
+	{"volumes_from", []string{"VolumesFrom"}, "a volume is mounted by exactly one machine",
+		func(s types.ServiceConfig) bool { return len(s.VolumesFrom) > 0 }},
+	{"volume_driver", []string{"VolumeDriver"}, "every volume is JuiceFS over the same bucket",
+		func(s types.ServiceConfig) bool { return s.VolumeDriver != "" }},
+	{"tmpfs", []string{"Tmpfs"}, msgUnsupported, func(s types.ServiceConfig) bool { return len(s.Tmpfs) > 0 }},
+	{"pull_policy", []string{"PullPolicy"}, "every image is built here, and the layer cache decides what is refetched",
+		func(s types.ServiceConfig) bool { return s.PullPolicy != "" }},
+	{"use_api_socket", []string{"UseAPISocket"}, "there is no docker socket to hand a build",
+		func(s types.ServiceConfig) bool { return s.UseAPISocket }},
+	{"post_start", []string{"PostStart"}, msgHooks, func(s types.ServiceConfig) bool { return len(s.PostStart) > 0 }},
+	{"pre_stop", []string{"PreStop"}, msgHooks, func(s types.ServiceConfig) bool { return len(s.PreStop) > 0 }},
+	{"stop_grace_period", []string{"StopGracePeriod"}, msgStop, func(s types.ServiceConfig) bool { return s.StopGracePeriod != nil }},
+	{"stop_signal", []string{"StopSignal"}, msgStop, func(s types.ServiceConfig) bool { return s.StopSignal != "" }},
+
+	// Docker's non-swarm resource knobs. `cpus` and `mem_limit` ARE honoured
+	// (see vcpusOf and memMiBOf); the rest describe CFS bandwidth and CPU
+	// affinity inside a shared kernel, which is not what a machine is given.
+	{"cpu_count", []string{"CPUCount"}, msgWholeVCPUs, func(s types.ServiceConfig) bool { return s.CPUCount != 0 }},
+	{"cpu_percent", []string{"CPUPercent"}, msgWholeVCPUs, func(s types.ServiceConfig) bool { return s.CPUPercent != 0 }},
+	{"cpu_period", []string{"CPUPeriod"}, msgWholeVCPUs, func(s types.ServiceConfig) bool { return s.CPUPeriod != 0 }},
+	{"cpu_quota", []string{"CPUQuota"}, msgWholeVCPUs, func(s types.ServiceConfig) bool { return s.CPUQuota != 0 }},
+	{"cpu_rt_period", []string{"CPURTPeriod"}, msgWholeVCPUs, func(s types.ServiceConfig) bool { return s.CPURTPeriod != 0 }},
+	{"cpu_rt_runtime", []string{"CPURTRuntime"}, msgWholeVCPUs, func(s types.ServiceConfig) bool { return s.CPURTRuntime != 0 }},
+	{"cpu_shares", []string{"CPUShares"}, msgWholeVCPUs, func(s types.ServiceConfig) bool { return s.CPUShares != 0 }},
+	{"cpuset", []string{"CPUSet"}, msgWholeVCPUs, func(s types.ServiceConfig) bool { return s.CPUSet != "" }},
+
 	// The mesh gives every service one flat network and resolves peers by
 	// <name>.internal, so the only network a file may name is the default one
 	// compose normalisation adds by itself.
-	{"networks", msgUnsupported, func(s types.ServiceConfig) bool {
+	{"networks", []string{"Networks"}, msgOneNetwork, func(s types.ServiceConfig) bool {
 		for name := range s.Networks {
 			if name != "default" {
 				return true
@@ -467,26 +549,98 @@ var unsupportedKeys = []struct {
 		return len(s.Networks) > 1
 	}},
 	// The frozen ComposeBuild carries {context, dockerfile} and nothing else.
-	{"build.args", msgUnsupported, func(s types.ServiceConfig) bool {
+	{"build.args", []string{}, msgUnsupported, func(s types.ServiceConfig) bool {
 		return s.Build != nil && len(s.Build.Args) > 0
 	}},
-	{"build.target", msgUnsupported, func(s types.ServiceConfig) bool {
+	{"build.target", []string{}, msgUnsupported, func(s types.ServiceConfig) bool {
 		return s.Build != nil && s.Build.Target != ""
 	}},
+	// The legacy v1 spelling of build.dockerfile. compose-go still decodes it,
+	// and toStep reads build.dockerfile only -- so honouring one and ignoring
+	// the other is exactly the silent drop this list exists to prevent.
+	{"dockerfile", []string{"Dockerfile"}, "put it under build.dockerfile",
+		func(s types.ServiceConfig) bool { return s.Dockerfile != "" }},
 
-	{"deploy.placement", "placement is decided by the fleet", func(s types.ServiceConfig) bool {
+	{"deploy.placement", []string{}, "placement is decided by the fleet", func(s types.ServiceConfig) bool {
 		return s.Deploy != nil && (len(s.Deploy.Placement.Constraints) > 0 ||
 			len(s.Deploy.Placement.Preferences) > 0 || s.Deploy.Placement.MaxReplicas > 0)
 	}},
+	{"deploy.mode", []string{}, "a service runs deploy.replicas machines; there is no global mode",
+		func(s types.ServiceConfig) bool {
+			return s.Deploy != nil && s.Deploy.Mode != "" && s.Deploy.Mode != "replicated"
+		}},
+	{"deploy.endpoint_mode", []string{}, "the router owns how a service is reached",
+		func(s types.ServiceConfig) bool { return s.Deploy != nil && s.Deploy.EndpointMode != "" }},
+	{"deploy.labels", []string{}, msgUnsupported,
+		func(s types.ServiceConfig) bool { return s.Deploy != nil && len(s.Deploy.Labels) > 0 }},
+	{"deploy.update_config", []string{}, msgRollout,
+		func(s types.ServiceConfig) bool { return s.Deploy != nil && s.Deploy.UpdateConfig != nil }},
+	{"deploy.rollback_config", []string{}, msgRollout,
+		func(s types.ServiceConfig) bool { return s.Deploy != nil && s.Deploy.RollbackConfig != nil }},
+	{"deploy.restart_policy", []string{}, msgRestart,
+		func(s types.ServiceConfig) bool { return s.Deploy != nil && s.Deploy.RestartPolicy != nil }},
 
-	{"privileged", msgMoot, func(s types.ServiceConfig) bool { return s.Privileged }},
-	{"cap_add", msgMoot, func(s types.ServiceConfig) bool { return len(s.CapAdd) > 0 }},
-	{"cap_drop", msgMoot, func(s types.ServiceConfig) bool { return len(s.CapDrop) > 0 }},
-	{"userns_mode", msgMoot, func(s types.ServiceConfig) bool { return s.UserNSMode != "" }},
-	{"pid", msgMoot, func(s types.ServiceConfig) bool { return s.Pid != "" }},
-	{"devices", msgMoot, func(s types.ServiceConfig) bool { return len(s.Devices) > 0 }},
+	{"privileged", []string{"Privileged"}, msgMoot, func(s types.ServiceConfig) bool { return s.Privileged }},
+	{"cap_add", []string{"CapAdd"}, msgMoot, func(s types.ServiceConfig) bool { return len(s.CapAdd) > 0 }},
+	{"cap_drop", []string{"CapDrop"}, msgMoot, func(s types.ServiceConfig) bool { return len(s.CapDrop) > 0 }},
+	{"userns_mode", []string{"UserNSMode"}, msgMoot, func(s types.ServiceConfig) bool { return s.UserNSMode != "" }},
+	{"pid", []string{"Pid"}, msgMoot, func(s types.ServiceConfig) bool { return s.Pid != "" }},
+	{"pids_limit", []string{"PidsLimit"}, msgMoot, func(s types.ServiceConfig) bool { return s.PidsLimit != 0 }},
+	{"ipc", []string{"Ipc"}, msgMoot, func(s types.ServiceConfig) bool { return s.Ipc != "" }},
+	{"uts", []string{"Uts"}, msgMoot, func(s types.ServiceConfig) bool { return s.Uts != "" }},
+	{"cgroup", []string{"Cgroup"}, msgMoot, func(s types.ServiceConfig) bool { return s.Cgroup != "" }},
+	{"cgroup_parent", []string{"CgroupParent"}, msgMoot, func(s types.ServiceConfig) bool { return s.CgroupParent != "" }},
+	{"device_cgroup_rules", []string{"DeviceCgroupRules"}, msgMoot, func(s types.ServiceConfig) bool { return len(s.DeviceCgroupRules) > 0 }},
+	{"devices", []string{"Devices"}, msgMoot, func(s types.ServiceConfig) bool { return len(s.Devices) > 0 }},
+	{"blkio_config", []string{"BlkioConfig"}, msgMoot, func(s types.ServiceConfig) bool { return s.BlkioConfig != nil }},
+	{"init", []string{"Init"}, msgMoot, func(s types.ServiceConfig) bool { return s.Init != nil }},
+	{"isolation", []string{"Isolation"}, msgMoot, func(s types.ServiceConfig) bool { return s.Isolation != "" }},
+	{"runtime", []string{"Runtime"}, msgMoot, func(s types.ServiceConfig) bool { return s.Runtime != "" }},
+	{"oom_kill_disable", []string{"OomKillDisable"}, msgMoot, func(s types.ServiceConfig) bool { return s.OomKillDisable }},
+	{"oom_score_adj", []string{"OomScoreAdj"}, msgMoot, func(s types.ServiceConfig) bool { return s.OomScoreAdj != 0 }},
+	{"read_only", []string{"ReadOnly"}, msgMoot, func(s types.ServiceConfig) bool { return s.ReadOnly }},
+	{"shm_size", []string{"ShmSize"}, msgMoot, func(s types.ServiceConfig) bool { return s.ShmSize != 0 }},
+	{"sysctls", []string{"Sysctls"}, "the machine owns its kernel; ship the setting as /etc/sysctl.d in the image",
+		func(s types.ServiceConfig) bool { return len(s.Sysctls) > 0 }},
+	{"ulimits", []string{"Ulimits"}, msgMoot, func(s types.ServiceConfig) bool { return len(s.Ulimits) > 0 }},
+	{"group_add", []string{"GroupAdd"}, msgMoot, func(s types.ServiceConfig) bool { return len(s.GroupAdd) > 0 }},
+	{"stdin_open", []string{"StdinOpen"}, msgMoot, func(s types.ServiceConfig) bool { return s.StdinOpen }},
+	{"tty", []string{"Tty"}, msgMoot, func(s types.ServiceConfig) bool { return s.Tty }},
 
-	{"volumes", "bind mounts have no host to bind to; use a named volume",
+	// restart: is honoured wherever it agrees with what a machine does, which
+	// is restart-always. `no` is the one value that asks for something else,
+	// and a replica that stays dead is exactly what the autoscaler and the
+	// health gate are built to prevent.
+	{"restart", []string{"Restart"}, "a replica is always restarted; `no` cannot be honoured",
+		func(s types.ServiceConfig) bool {
+			return s.Restart == "no" || s.Restart == "none"
+		}},
+	// platform: is honoured when it names what this fleet is.
+	{"platform", []string{"Platform"}, "every host is linux/amd64",
+		func(s types.ServiceConfig) bool {
+			return s.Platform != "" && s.Platform != "linux" && s.Platform != "linux/amd64"
+		}},
+	// A service's own URL and its health gate both dial GuestAppPort, so a
+	// file that publishes ports and none of them is that one describes an
+	// application the router can never reach and the rollout can never gate.
+	// Other ports beside it are fine: they are reachable at
+	// <port>-<name>.<domain>.
+	{"ports", []string{"Ports"}, fmt.Sprintf(
+		"a service is reached on container port %d; publish it, and reach any "+
+			"other port at <port>-<name>.<domain>", netns.GuestAppPort),
+		func(s types.ServiceConfig) bool {
+			if len(s.Ports) == 0 {
+				return false
+			}
+			for _, p := range s.Ports {
+				if int(p.Target) == netns.GuestAppPort {
+					return false
+				}
+			}
+			return true
+		}},
+
+	{"volumes", []string{"Volumes"}, "bind mounts have no host to bind to; use a named volume",
 		func(s types.ServiceConfig) bool {
 			for _, v := range s.Volumes {
 				if v.Type != types.VolumeTypeVolume {
@@ -496,7 +650,7 @@ var unsupportedKeys = []struct {
 			return false
 		}},
 
-	{"depends_on.condition",
+	{"depends_on.condition", []string{},
 		"service_completed_successfully is not supported; use x-pilots.pre_deploy",
 		func(s types.ServiceConfig) bool {
 			for _, dep := range s.DependsOn {
@@ -511,6 +665,33 @@ var unsupportedKeys = []struct {
 const (
 	msgUnsupported = "unsupported in pilots"
 	msgMoot        = "moot in a microVM: the service already owns its kernel"
+	msgNaming      = "a machine's name is its hostname, and its URL is <name>.<domain>"
+	msgOneNetwork  = "every service is on one flat network and resolves peers by <name>.internal"
+	msgHooks       = "use x-pilots.pre_deploy, which runs once per deploy rather than once per replica"
+	msgStop        = "a replica is suspended rather than signalled; see x-pilots.auto_stop"
+	msgRollout     = "the rollout is fixed: boot one, gate it, restore the rest from it, then flip"
+	msgRestart     = "a replica is always restarted; see x-pilots.auto_stop for the idle policy"
+	msgWholeVCPUs  = "a machine is given whole vCPUs; use deploy.resources.limits.cpus or cpus"
+	msgEnvFile     = "env_file has no file to read on the server; put the " +
+		"values under environment: or use secret://"
+)
+
+// honouredFields is every types.ServiceConfig field the planner reads, and
+// inertFields is every field that changes nothing about the process that runs
+// -- in Docker either. Both exist for TestEveryServiceKeyIsClassified; see
+// unsupportedKeys.
+var (
+	honouredFields = []string{
+		"Name", "Build", "Image", "Command", "Entrypoint", "WorkingDir", "User",
+		"Environment", "HealthCheck", "DependsOn", "Deploy", "Scale", "Volumes",
+		"Ports", "MemLimit", "CPUS", "Restart", "Platform", "Extensions",
+	}
+	inertFields = map[string]string{
+		"Annotations":  "metadata Docker attaches to a container and nothing reads at run time",
+		"Attach":       "whether `docker compose up` streams this service's logs",
+		"Expose":       "documentation in Docker too: it opens nothing and publishes nothing",
+		"CustomLabels": "compose-go's own bookkeeping; the schema has no such key",
+	}
 )
 
 // validate collects every unsupported key across every service, sorted by
@@ -568,24 +749,44 @@ func toStep(name string, svc types.ServiceConfig) (Step, error) {
 		// build: wins over image:, which in that case is only the tag the
 		// result would be pushed under.
 		step.Build = &Build{Context: svc.Build.Context, Dockerfile: svc.Build.Dockerfile}
-		step.Cmd = shellCommand(svc.Entrypoint, svc.Command)
+		step.DockerfileAppend = overrides(svc)
 	} else if svc.Image != "" {
-		step.Dockerfile = imageDockerfile(svc)
+		step.Dockerfile = "FROM " + svc.Image + "\n" + overrides(svc)
 	}
 	return step, nil
 }
 
-// imageDockerfile renders a stock image as the one-line Dockerfile that builds
-// it, plus whatever the file overrode.
+// overrides renders what the file said about how to run the service as the
+// Dockerfile instructions that say it.
 //
-// The pair goes in as JSON-array ENTRYPOINT/CMD lines rather than as the step's
-// cmd, so a stock postgres image that sets only command: keeps its OWN
-// entrypoint -- and with it initdb, which is the whole reason that image works
-// without one.
-func imageDockerfile(svc types.ServiceConfig) string {
-	out := "FROM " + svc.Image + "\n"
+// Instructions rather than a rendered command line, because Docker's own
+// override rules are the ones a compose file is written against and only the
+// instructions express them: command: replaces the image's CMD and leaves its
+// ENTRYPOINT alone -- which is the whole reason a stock postgres that sets only
+// command: still runs initdb -- and entrypoint: replaces the ENTRYPOINT and
+// CLEARS the image's CMD, so a stale default argument list cannot be appended
+// to a program that was never meant to take it.
+//
+// The empty CMD is written out rather than left implicit for that last reason:
+// the build reads the final stage and nothing else, so "the file said nothing"
+// and "the file cleared it" have to look different in the text.
+func overrides(svc types.ServiceConfig) string {
+	var out string
+	// WORKDIR first: it is where the command runs, and an instruction that
+	// changes the directory belongs before the one that names the program.
+	// Appended after everything the context's Dockerfile did, so it moves
+	// where the application starts without moving where anything was COPY'd.
+	if svc.WorkingDir != "" {
+		out += "WORKDIR " + strconv.Quote(svc.WorkingDir) + "\n"
+	}
+	if svc.User != "" {
+		out += "USER " + svc.User + "\n"
+	}
 	if len(svc.Entrypoint) > 0 {
 		out += "ENTRYPOINT " + jsonArray(svc.Entrypoint) + "\n"
+		if len(svc.Command) == 0 {
+			out += "CMD []\n"
+		}
 	}
 	if len(svc.Command) > 0 {
 		out += "CMD " + jsonArray(svc.Command) + "\n"
@@ -600,30 +801,6 @@ func jsonArray(argv []string) string {
 		parts = append(parts, strconv.Quote(a))
 	}
 	return "[" + strings.Join(parts, ",") + "]"
-}
-
-// shellCommand joins entrypoint and command into one shell line, quoting each
-// element.
-//
-// Per ELEMENT, not per word: compose's list form already decided where the
-// argument boundaries are, and re-splitting on spaces would turn
-// archive_command=test ! -f x && cp y x into five arguments and a shell
-// operator the guest would then run.
-func shellCommand(entrypoint, command []string) string {
-	argv := append(append([]string{}, entrypoint...), command...)
-	if len(argv) == 0 {
-		return ""
-	}
-	parts := make([]string, 0, len(argv))
-	for _, a := range argv {
-		parts = append(parts, shellQuote(a))
-	}
-	return strings.Join(parts, " ")
-}
-
-// shellQuote wraps one argument in POSIX single quotes.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // envOf splits a service's environment into plain values and secret names.
@@ -710,33 +887,57 @@ func seconds(d *types.Duration) int {
 	return int(math.Ceil(time.Duration(*d).Seconds()))
 }
 
+// replicasOf reads deploy.replicas, then the non-swarm `scale:` that means the
+// same thing. Both, because a file that spells only the second one and is read
+// for only the first deploys ONE machine and says nothing about it.
 func replicasOf(svc types.ServiceConfig) int {
 	if svc.Deploy != nil && svc.Deploy.Replicas != nil {
 		return *svc.Deploy.Replicas
+	}
+	if svc.Scale != nil {
+		return *svc.Scale
 	}
 	return defaultReplicas
 }
 
 // vcpusOf rounds a fractional cpu limit UP: a microVM is given whole vCPUs,
 // and rounding 1.5 down would quietly halve what the file asked for.
+//
+// deploy.resources.limits.cpus first, then the non-swarm `cpus:`. Reading only
+// the first gives a file that spells only the second a one-vCPU machine and no
+// word about why.
 func vcpusOf(svc types.ServiceConfig) int {
-	limits := resourceLimits(svc)
-	if limits == nil || limits.NanoCPUs <= 0 {
+	cpus := 0.0
+	if limits := resourceLimits(svc); limits != nil {
+		cpus = float64(limits.NanoCPUs)
+	}
+	if cpus <= 0 {
+		cpus = float64(svc.CPUS)
+	}
+	if cpus <= 0 {
 		return defaultVCPUs
 	}
-	return int(math.Ceil(float64(limits.NanoCPUs)))
+	return int(math.Ceil(cpus))
 }
 
+// memMiBOf reads deploy.resources.limits.memory, then the non-swarm
+// `mem_limit`, for the reason vcpusOf reads both.
 func memMiBOf(svc types.ServiceConfig) int {
-	limits := resourceLimits(svc)
-	if limits == nil || limits.MemoryBytes <= 0 {
+	var bytes types.UnitBytes
+	if limits := resourceLimits(svc); limits != nil {
+		bytes = limits.MemoryBytes
+	}
+	if bytes <= 0 {
+		bytes = svc.MemLimit
+	}
+	if bytes <= 0 {
 		return defaultMemMiB
 	}
 	// Rounded UP, for the reason vcpusOf rounds up: truncating a limit that is
 	// not a whole number of MiB hands the guest less than the file asked for,
 	// and truncating one under a mebibyte hands it ZERO -- which the machine
 	// layer then silently replaces with its own default.
-	return int(math.Ceil(float64(limits.MemoryBytes) / mib))
+	return int(math.Ceil(float64(bytes) / mib))
 }
 
 // resourceLimits is deploy.resources.limits. Reservations are ignored: a

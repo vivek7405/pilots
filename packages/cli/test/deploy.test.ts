@@ -482,3 +482,59 @@ test('the second run refuses a volume swap rather than sending one', async () =>
     await api.close()
   }
 })
+
+/** The body of one file in a ustar archive, by name. */
+function tarEntry(tar: Buffer, want: string): string | undefined {
+  for (let off = 0; off + 512 <= tar.length; ) {
+    const header = tar.subarray(off, off + 512)
+    const name = header.subarray(0, 100).toString('utf8').replace(/\0.*$/, '')
+    if (name === '') return undefined
+    const size = parseInt(header.subarray(124, 136).toString('utf8').replace(/\0.*$/, '').trim() || '0', 8)
+    const body = tar.subarray(off + 512, off + 512 + size)
+    if (name === want) return body.toString('utf8')
+    off += 512 + Math.ceil(size / 512) * 512
+  }
+  return undefined
+}
+
+/**
+ * The compose file's `command:`, `working_dir:` and `user:` reach the guest.
+ *
+ * They reach it as Dockerfile instructions appended to the context's own
+ * Dockerfile, because hostd reads that file's final stage to learn what the
+ * image starts. Before this, the plan rendered the command into a `cmd` field
+ * that nothing downstream read: the build succeeded, the machine came up, and
+ * it ran the image's own CMD forever.
+ */
+test("a build step's overrides are appended to the context's Dockerfile", async () => {
+  const api = await startFakeAPI()
+  const withAppend = plan()
+  const web = withAppend.steps[1] as Record<string, unknown>
+  web.dockerfile_append = 'WORKDIR "/app/gallery"\nCMD ["bun","/app/node_modules/.bin/webjs","start"]\n'
+  withPlan(api, withAppend)
+  const env = loggedIn(api.url, { shop: { database_url: 'x' } })
+  try {
+    assert.equal((await pilot(env, ['--json', 'deploy'])).code, 0)
+    // The second build is web's; the first is the stock postgres image.
+    const dockerfile = tarEntry(api.all('POST', '/v1/builds')[1]!.raw, 'Dockerfile')
+    assert.equal(
+      dockerfile,
+      'FROM python:3.12-slim\nWORKDIR "/app/gallery"\nCMD ["bun","/app/node_modules/.bin/webjs","start"]\n',
+    )
+  } finally {
+    await api.close()
+  }
+})
+
+/** A step with nothing to override uploads the context's Dockerfile untouched. */
+test('a build step with no overrides sends the context Dockerfile as it is', async () => {
+  const api = await startFakeAPI()
+  withPlan(api, plan())
+  const env = loggedIn(api.url, { shop: { database_url: 'x' } })
+  try {
+    assert.equal((await pilot(env, ['--json', 'deploy'])).code, 0)
+    assert.equal(tarEntry(api.all('POST', '/v1/builds')[1]!.raw, 'Dockerfile'), 'FROM python:3.12-slim\n')
+  } finally {
+    await api.close()
+  }
+})

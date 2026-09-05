@@ -151,3 +151,33 @@ func TestParseStartSpecAcceptsLowercaseInstructions(t *testing.T) {
 		t.Fatalf("cmd is %#v", got.Cmd)
 	}
 }
+
+// The guest agent execs the application with PID 1's environment, and PID 1 in
+// a microVM gets the KERNEL's PATH -- no /usr/local/bin. Every interpreter a
+// base image installs lives there, so without this a correct command and a
+// correct image restart-loop on "node: not found".
+func TestARuntimePathIsSuppliedWhenTheDockerfileSetsNone(t *testing.T) {
+	got := ParseStartSpec("FROM node:24-alpine\nCMD [\"node\",\"server.js\"]\n").WithRuntimeDefaults()
+	if got.Env["PATH"] != dockerDefaultPath {
+		t.Errorf("PATH = %q, want Docker's default %q", got.Env["PATH"], dockerDefaultPath)
+	}
+}
+
+// A Dockerfile that sets its own PATH meant it; the default only fills a blank.
+func TestTheDockerfilesOwnPathWins(t *testing.T) {
+	got := ParseStartSpec("FROM alpine\nENV PATH=/opt/bin\nCMD [\"x\"]\n").WithRuntimeDefaults()
+	if got.Env["PATH"] != "/opt/bin" {
+		t.Errorf("PATH = %q, want the Dockerfile's own", got.Env["PATH"])
+	}
+}
+
+// WithRuntimeDefaults must not write through to the parsed spec's map: the
+// same spec is read more than once, and a method that mutates its receiver's
+// map would make the second read differ from the first.
+func TestRuntimeDefaultsDoNotMutateTheParsedSpec(t *testing.T) {
+	spec := ParseStartSpec("FROM alpine\nENV A=1\nCMD [\"x\"]\n")
+	_ = spec.WithRuntimeDefaults()
+	if _, ok := spec.Env["PATH"]; ok {
+		t.Error("WithRuntimeDefaults wrote PATH into the spec it was called on")
+	}
+}

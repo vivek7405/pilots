@@ -150,10 +150,14 @@ async function buildStep(client: PilotsClient, step: ComposeStep, opts: ExecuteO
   let tar: Buffer
   if (step.build) {
     const context = resolve(opts.dir, step.build.context ?? '.')
-    const dockerfile = step.build.dockerfile
+    const named = step.build.dockerfile
+    // The Dockerfile is rewritten whenever it is not the context's own
+    // `Dockerfile`, and whenever the plan has instructions to append. hostd
+    // builds the `Dockerfile` at the tar's ROOT and reads that same file to
+    // learn what the image starts, so both cases are the same edit.
     const extras =
-      dockerfile && dockerfile !== 'Dockerfile'
-        ? { Dockerfile: readDockerfile(resolve(context, dockerfile)) }
+      (named && named !== 'Dockerfile') || step.dockerfile_append
+        ? { Dockerfile: withOverrides(readDockerfile(resolve(context, named ?? 'Dockerfile')), step) }
         : undefined
     tar = tarDirectory(context, extras ? { extraFiles: extras } : {})
   } else if (step.dockerfile) {
@@ -165,6 +169,24 @@ async function buildStep(client: PilotsClient, step: ComposeStep, opts: ExecuteO
   const stream = await client.builds.create(new Uint8Array(tar))
   for await (const line of stream) opts.onBuildLine?.(step, line)
   return await stream.result()
+}
+
+/**
+ * Appends the plan's override instructions to a Dockerfile.
+ *
+ * Nothing here knows what the instructions mean: the plan rendered them, in
+ * Go, beside the one compose parser. What this knows is where they go - the
+ * END of the file, so they land in the final stage and override what that
+ * stage declared, which is Docker's own rule and is what hostd reads back out
+ * (`build.ParseStartSpec`) to tell the guest agent what to run.
+ *
+ * The newline in front is not cosmetic: a Dockerfile whose last line has no
+ * terminator would otherwise have the first appended instruction glued onto
+ * the end of it.
+ */
+function withOverrides(dockerfile: string, step: ComposeStep): string {
+  if (!step.dockerfile_append) return dockerfile
+  return dockerfile.replace(/\n*$/, '\n') + step.dockerfile_append
 }
 
 function readDockerfile(path: string): string {

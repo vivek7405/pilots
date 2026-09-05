@@ -30,6 +30,10 @@ type fakeMachines struct {
 	// healthyAfterRedeploy is what a redeployed machine's probe answers. False
 	// is how a test drives a failed gate onto the recovery path.
 	healthyAfterRedeploy bool
+	// onCreate runs after each successful create. A test uses it to hang up
+	// the caller at the one moment that matters -- with a machine built and
+	// its gate not yet passed.
+	onCreate func()
 }
 
 func newFakeMachines(store state.Store) *fakeMachines {
@@ -83,12 +87,22 @@ func (f *fakeMachines) Create(ctx context.Context, req api.CreateMachineRequest)
 		return nil, err
 	}
 	f.healthy[id] = true
+	if f.onCreate != nil {
+		f.onCreate()
+	}
 	return row, nil
 }
 
+// Destroy and Exec both honour the context, as the real ones do through the
+// store and the guest agent. That is what makes a cancelled request's cleanup
+// testable: the real Destroy failed with "state: get machine ...: context
+// canceled" and left the machine running.
 func (f *fakeMachines) Destroy(ctx context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f.log("destroy:%s", id)
 	return f.store.DeleteMachine(ctx, id)
 }
@@ -137,6 +151,9 @@ func (f *fakeMachines) Touch(ctx context.Context, id string) {
 func (f *fakeMachines) Exec(ctx context.Context, id string, req api.ExecRequest) (*api.ExecResponse, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if f.healthy[id] {
 		return &api.ExecResponse{ExitCode: 0}, nil
 	}
@@ -1041,5 +1058,56 @@ func TestAReplicaRefusesWhenTheCPUPoolCannotBeRead(t *testing.T) {
 	}
 	if creates := eventsWithPrefix(fm, "create:"); len(creates) != 0 {
 		t.Errorf("a refused replica was created anyway: %v", creates)
+	}
+}
+
+// A caller that hangs up mid-rollout must not leave a machine behind.
+//
+// This is what the SDK's 30-second deadline did to every deploy slower than
+// that. The abort cancelled the request context the rollout was running on,
+// which cancelled the health gate -- and then the cleanup, running on the SAME
+// context, could not destroy anything: every Destroy returned "context
+// canceled" before it did anything. What was left was the worst available
+// shape, and is exactly what a real deploy of a real application produced: a
+// machine still up carrying release rel_..., a service row whose release_id
+// was still "" and which therefore had no URL, and a client told only that
+// its request had timed out.
+func TestACancelledDeployStillCleansUpItsMachine(t *testing.T) {
+	m, fm, store, _ := fixture(t, 1)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// The caller hangs up the moment the replica exists and before its gate
+	// has passed, which is the window the whole failure lives in.
+	fm.onCreate = cancel
+
+	_, err := m.Deploy(ctx, "svc-1", "rootfs-build", nil)
+	if err == nil {
+		t.Fatal("Deploy returned no error after its caller went away")
+	}
+	// Loud, and about the replica. "context canceled" on its own says neither
+	// which machine was being gated nor what it was answering.
+	if !strings.Contains(err.Error(), "m-1") {
+		t.Errorf("error = %v; it must name the replica it was waiting on", err)
+	}
+
+	machines, lerr := store.ListMachines(context.Background())
+	if lerr != nil {
+		t.Fatal(lerr)
+	}
+	for _, mach := range machines {
+		if mach.ServiceID == "svc-1" && mach.State != state.StateDestroyed {
+			t.Fatalf("%s is still here carrying release %q, and the service row "+
+				"never moved to it", mach.ID, mach.ReleaseID)
+		}
+	}
+
+	svc, err := store.GetService(context.Background(), "svc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if svc.ReleaseID != "" {
+		t.Errorf("release_id = %q; a rollout that never gated must not flip the service",
+			svc.ReleaseID)
 	}
 }

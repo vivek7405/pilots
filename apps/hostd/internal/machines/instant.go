@@ -112,7 +112,7 @@ func (m *Manager) createFromTemplate(ctx context.Context, row *state.Machine,
 	// The ONE call site. See the note at the top of env.go: the wake path
 	// resumes a snapshot in which the application is already running, and has
 	// no business delivering an environment to it.
-	if err := m.deliverEnv(ctx, row, slot, appCmd); err != nil {
+	if err := m.deliverEnv(ctx, row, slot, appCmd, false); err != nil {
 		m.releaseDiscovery(row.ID)
 		_ = fcm.Kill()
 		m.pool.Return(slot.Idx)

@@ -238,3 +238,48 @@ test('a long exec timeout extends the client deadline instead of aborting', asyn
     await fake.stop()
   }
 })
+
+test('a rollout is never cut off by the client deadline', async () => {
+  const fake = new FakeHostd()
+  // A rollout boots a replica, gates it for up to the health check's grace
+  // period, snapshots it and restores the rest. It is slower than any deadline
+  // worth setting on an ordinary call.
+  fake.on('POST /v1/services/{id}/deploy', async (_req, res) => {
+    await new Promise((r) => setTimeout(r, 120))
+    json(res, 200, { id: 'rel_1', service_id: 'svc_1', rootfs_build_id: 'bld_1' })
+  })
+  fake.on('POST /v1/machines', async (_req, res) => {
+    await new Promise((r) => setTimeout(r, 120))
+    json(res, 200, { id: 'm-1', name: 'x', state: 'running' })
+  })
+  await fake.start()
+  try {
+    const client = new PilotsClient('pilot_k', { baseURL: fake.baseURL, timeoutMs: 50 })
+
+    // Both would abort at 50 ms if they carried the client's deadline. The
+    // abort was not merely a bad message: it cancelled the request context the
+    // rollout ran on, so the health gate AND the cleanup that follows a failed
+    // gate were cancelled with it, and the machine stayed up carrying a
+    // release the service row never moved to.
+    const release = await client.services.deploy('svc_1', { build: 'bld_1' })
+    assert.equal(release.id, 'rel_1')
+
+    const machine = await client.machines.create({ image: 'bld_1' })
+    assert.equal(machine.id, 'm-1')
+
+    // The counterfactual, in the same test: an ordinary call on the same
+    // client still honours the deadline, so this is not simply a client with
+    // no timeout at all.
+    fake.on('GET /v1/services/{id}', async (_req, res) => {
+      await new Promise((r) => setTimeout(r, 120))
+      json(res, 200, { id: 'svc_1', name: 'web', replicas: 1 })
+    })
+    const err = await client.services.get('svc_1').then(
+      () => null,
+      (e: unknown) => e,
+    )
+    assert.ok(err instanceof PilotsError, `an ordinary call must still time out; got ${String(err)}`)
+  } finally {
+    await fake.stop()
+  }
+})

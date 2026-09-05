@@ -251,7 +251,7 @@ func (b *Builder) Build(ctx context.Context, id string, contextTar io.Reader,
 		record(failure("receiving context", err))
 		return res, err
 	}
-	start := ParseStartSpec(string(dockerfile))
+	start := ParseStartSpec(string(dockerfile)).WithRuntimeDefaults()
 	if start.Empty() {
 		// Not a failure. The Dockerfile may inherit its command from its base
 		// image, which the tar exporter cannot show us -- but a deploy that

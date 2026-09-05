@@ -97,8 +97,14 @@ export class Machines {
     this.WebSocket = ws
   }
 
+  /**
+   * No client deadline. A create from the golden template is sub-second, but a
+   * create from a BUILD is a kernel boot -- twenty seconds and up, and more
+   * with a volume to mount -- and an abort at thirty seconds leaves a machine
+   * running that the caller has no id for. See Services.deploy.
+   */
   create(req: CreateMachineRequest = {}): Promise<Machine> {
-    return this.http.json<Machine>('POST', '/v1/machines', { body: req })
+    return this.http.json<Machine>('POST', '/v1/machines', { body: req, timeoutMs: null })
   }
 
   list(): Promise<Machine[]> {
@@ -270,12 +276,34 @@ export class Services {
     return this.http.json<Service>('GET', `/v1/services/${encodeURIComponent(id)}`)
   }
 
+  /**
+   * NO client deadline, for the reason a build stream has none: a rollout
+   * takes as long as the release takes to prove itself. It boots a replica,
+   * gates it for up to the health check's grace period -- which a compose
+   * `start_period` routinely sets to minutes -- snapshots it, and restores
+   * every other replica from that snapshot.
+   *
+   * The 30-second default aborted every deploy slower than that, and the
+   * abort was not merely a bad message. It cancelled the request context the
+   * rollout was running on, which cancelled the health gate AND the cleanup
+   * that runs when the gate fails, so the machine stayed up carrying the new
+   * release while the service row never moved to it -- a service whose
+   * release_id was "" and which had no URL, and a client told only "The
+   * operation was aborted due to timeout". The server side of that is fixed
+   * too; a client that hangs up mid-rollout must not be the normal case.
+   */
   deploy(id: string, req: DeployRequest = {}): Promise<Release> {
-    return this.http.json<Release>('POST', `/v1/services/${encodeURIComponent(id)}/deploy`, { body: req })
+    return this.http.json<Release>('POST', `/v1/services/${encodeURIComponent(id)}/deploy`, {
+      body: req,
+      timeoutMs: null,
+    })
   }
 
+  /** No client deadline: a rollback is a rollout. See deploy. */
   rollback(id: string): Promise<Release> {
-    return this.http.json<Release>('POST', `/v1/services/${encodeURIComponent(id)}/rollback`)
+    return this.http.json<Release>('POST', `/v1/services/${encodeURIComponent(id)}/rollback`, {
+      timeoutMs: null,
+    })
   }
 
   /**

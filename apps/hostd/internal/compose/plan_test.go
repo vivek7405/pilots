@@ -2,8 +2,11 @@ package compose
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/compose-spec/compose-go/v2/types"
 )
 
 // fixture is packages/cli/test/fixtures/compose-app/compose.yaml, inlined. The
@@ -489,7 +492,12 @@ services:
 // One element stays one argument. Splitting on spaces would turn the WAL
 // archive command into five arguments and a shell operator the guest would
 // then run.
-func TestAListCommandIsQuotedPerElement(t *testing.T) {
+//
+// It reaches the guest as a Dockerfile CMD appended to the context's own
+// Dockerfile, which is the whole of the fix: the plan used to render this as a
+// shell line in a `cmd` field that nothing downstream read, so a build: step's
+// command: was built, deployed, and never run.
+func TestABuildStepsCommandBecomesACmdInstruction(t *testing.T) {
 	const file = `
 name: shop
 services:
@@ -504,23 +512,65 @@ services:
 	if err != nil || planErr != nil {
 		t.Fatalf("err=%v planErr=%+v", err, planErr)
 	}
-	cmd := stepNamed(t, plan, "db").Cmd
-	const want = `'postgres' '-c' 'archive_command=test ! -f /archive/wal/%f && cp %p /archive/wal/%f'`
-	if cmd != want {
-		t.Errorf("cmd = %s\nwant     %s", cmd, want)
+	got := stepNamed(t, plan, "db").DockerfileAppend
+	const want = `CMD ["postgres","-c","archive_command=test ! -f /archive/wal/%f && cp %p /archive/wal/%f"]` + "\n"
+	if got != want {
+		t.Errorf("dockerfile_append = %s\nwant                %s", got, want)
 	}
 }
 
-func TestASingleQuoteInAnArgumentSurvivesQuoting(t *testing.T) {
-	if got := shellQuote(`it's`); got != `'it'\''s'` {
-		t.Errorf("shellQuote = %s", got)
+// working_dir: is where the command runs. It used to be read by nobody: the
+// planner did not carry it and the unsupported list did not name it, so a
+// compose file that set it deployed an application started in the wrong
+// directory with nothing said anywhere.
+func TestWorkingDirBecomesAWorkdirInstruction(t *testing.T) {
+	const file = `
+name: shop
+services:
+  web:
+    build: .
+    working_dir: /app/gallery
+    user: appuser
+    command: [bun, start]
+`
+	plan, planErr, err := Compile(context.Background(), Request{Compose: file})
+	if err != nil || planErr != nil {
+		t.Fatalf("err=%v planErr=%+v", err, planErr)
+	}
+	got := stepNamed(t, plan, "web").DockerfileAppend
+	const want = "WORKDIR \"/app/gallery\"\nUSER appuser\nCMD [\"bun\",\"start\"]\n"
+	if got != want {
+		t.Errorf("dockerfile_append = %q\nwant                %q", got, want)
 	}
 }
 
-// On an image: step the pair becomes Dockerfile lines instead, so a stock
-// postgres that sets only command: keeps its OWN entrypoint -- and with it
-// initdb, which is the only reason that image works without one.
-func TestAnImageStepPutsCommandInTheDockerfileAndLeavesCmdEmpty(t *testing.T) {
+// Docker's rule, and the reason the pair is rendered as instructions rather
+// than as one command line: entrypoint: replaces the image's ENTRYPOINT and
+// CLEARS its CMD, so the image's default arguments are not appended to a
+// program that was never meant to take them.
+func TestAnEntrypointWithNoCommandClearsTheImagesCmd(t *testing.T) {
+	const file = `
+name: shop
+services:
+  web:
+    build: .
+    entrypoint: [/bin/my-server]
+`
+	plan, planErr, err := Compile(context.Background(), Request{Compose: file})
+	if err != nil || planErr != nil {
+		t.Fatalf("err=%v planErr=%+v", err, planErr)
+	}
+	got := stepNamed(t, plan, "web").DockerfileAppend
+	const want = "ENTRYPOINT [\"/bin/my-server\"]\nCMD []\n"
+	if got != want {
+		t.Errorf("dockerfile_append = %q\nwant                %q", got, want)
+	}
+}
+
+// On an image: step the overrides are part of the generated Dockerfile, so a
+// stock postgres that sets only command: keeps its OWN entrypoint -- and with
+// it initdb, which is the only reason that image works without one.
+func TestAnImageStepPutsTheOverridesInItsDockerfile(t *testing.T) {
 	const file = `
 name: shop
 services:
@@ -537,8 +587,9 @@ services:
 	if db.Dockerfile != want {
 		t.Errorf("dockerfile = %q, want %q", db.Dockerfile, want)
 	}
-	if db.Cmd != "" {
-		t.Errorf("cmd = %q, want it empty so the image keeps its entrypoint", db.Cmd)
+	if db.DockerfileAppend != "" {
+		t.Errorf("dockerfile_append = %q, want it empty: there is no context Dockerfile to append to",
+			db.DockerfileAppend)
 	}
 }
 
@@ -654,9 +705,10 @@ services:
   web:
     image: nginx
     restart: always
-    container_name: web-1
+    expose:
+      - "9000"
     ports:
-      - "8080:80"
+      - "80:8080"
     deploy:
       resources:
         reservations:
@@ -669,13 +721,110 @@ services:
 	web := stepNamed(t, plan, "web")
 	// Only the container port. The router owns 443 and there is no host to
 	// publish on.
-	if len(web.Ports) != 1 || web.Ports[0] != 80 {
+	if len(web.Ports) != 1 || web.Ports[0] != 8080 {
 		t.Errorf("ports = %v, want the container port alone", web.Ports)
 	}
 	// A reservation is a scheduling floor for a cluster with contention; a
 	// microVM is given exactly what it is given.
 	if web.VCPUs != 1 {
 		t.Errorf("vcpus = %d, want the default -- a reservation is not a limit", web.VCPUs)
+	}
+}
+
+// The other half of the same rule: a published container port that is not the
+// one a service is reached on is REFUSED, not ignored. Ignored, it built,
+// booted, failed its health gate forty seconds later and named no cause --
+// the router dials 8080 and the application was listening on 80.
+func TestAServiceThatPublishesNoAppPortIsRefused(t *testing.T) {
+	const file = `
+name: shop
+services:
+  web:
+    image: nginx
+    ports:
+      - "8080:80"
+`
+	_, planErr, err := Compile(context.Background(), Request{Compose: file})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if planErr == nil || len(planErr.Unsupported) != 1 || planErr.Unsupported[0].Key != "ports" {
+		t.Fatalf("planErr = %+v, want one naming ports", planErr)
+	}
+	if !strings.Contains(planErr.Unsupported[0].Message, "8080") {
+		t.Errorf("message = %q, want it to name the port a service is reached on",
+			planErr.Unsupported[0].Message)
+	}
+}
+
+// Every field of the compose service schema is classified, so a key cannot be
+// silently dropped and a compose-go upgrade cannot add one that is.
+//
+// This is the test the whole audit exists for. `command:` and `working_dir:`
+// were both dropped in silence -- one built an application that never ran, the
+// other started it in the wrong directory -- and neither was catchable by any
+// test that only checked the keys somebody had already thought of.
+func TestEveryServiceKeyIsClassified(t *testing.T) {
+	classified := map[string]string{}
+	for _, f := range honouredFields {
+		classified[f] = "honoured"
+	}
+	for f := range inertFields {
+		classified[f] = "inert"
+	}
+	for _, rule := range unsupportedKeys {
+		for _, f := range rule.fields {
+			classified[f] = "refused as " + rule.key
+		}
+	}
+
+	typ := reflect.TypeOf(types.ServiceConfig{})
+	var missing []string
+	for i := 0; i < typ.NumField(); i++ {
+		name := typ.Field(i).Name
+		if classified[name] == "" {
+			missing = append(missing, name)
+		}
+	}
+	if len(missing) > 0 {
+		t.Fatalf("compose service fields that are neither honoured, refused nor "+
+			"listed as inert: %s\n\nEach one is a compose key that changes what "+
+			"runs and is dropped in silence. Honour it, add a rule to "+
+			"unsupportedKeys, or -- only if it cannot affect the process that "+
+			"runs -- add it to inertFields with the reason.",
+			strings.Join(missing, ", "))
+	}
+
+	// And the reverse: a rule naming a field that no longer exists refuses
+	// nothing, and would leave the real field unclassified with the test still
+	// green.
+	for name := range classified {
+		if _, ok := typ.FieldByName(name); !ok {
+			t.Errorf("%q is classified (%s) but types.ServiceConfig has no such field",
+				name, classified[name])
+		}
+	}
+}
+
+// Every rule has to be reachable. A rule whose present() never fires for the
+// key it names is a refusal nobody gets, which reads in the source exactly
+// like one that works.
+func TestEveryRefusalNamesADistinctKey(t *testing.T) {
+	seen := map[string]bool{}
+	for _, rule := range unsupportedKeys {
+		if rule.key == "" {
+			t.Errorf("a rule has no key")
+		}
+		if seen[rule.key] {
+			t.Errorf("two rules refuse %q; one of them can never be the reason reported", rule.key)
+		}
+		seen[rule.key] = true
+		if rule.message == "" {
+			t.Errorf("%s refuses with no message", rule.key)
+		}
+		if rule.present(types.ServiceConfig{}) {
+			t.Errorf("%s fires on a service that sets nothing", rule.key)
+		}
 	}
 }
 
