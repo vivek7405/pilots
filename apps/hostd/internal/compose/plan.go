@@ -614,7 +614,11 @@ func memMiBOf(svc types.ServiceConfig) int {
 	if limits == nil || limits.MemoryBytes <= 0 {
 		return defaultMemMiB
 	}
-	return int(limits.MemoryBytes / mib)
+	// Rounded UP, for the reason vcpusOf rounds up: truncating a limit that is
+	// not a whole number of MiB hands the guest less than the file asked for,
+	// and truncating one under a mebibyte hands it ZERO -- which the machine
+	// layer then silently replaces with its own default.
+	return int(math.Ceil(float64(limits.MemoryBytes) / mib))
 }
 
 // resourceLimits is deploy.resources.limits. Reservations are ignored: a

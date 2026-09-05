@@ -557,6 +557,30 @@ services:
 	}
 }
 
+// Memory rounds UP for the same reason, and a limit under a mebibyte is the
+// case that matters: truncated it becomes zero, which the machine layer then
+// silently replaces with its own 512 MiB default -- a file asking for a tiny
+// guest quietly getting the biggest one.
+func TestASubMebibyteMemoryLimitDoesNotRoundToZero(t *testing.T) {
+	const file = `
+name: shop
+services:
+  web:
+    image: nginx
+    deploy:
+      resources:
+        limits:
+          memory: 512k
+`
+	plan, planErr, err := Compile(context.Background(), Request{Compose: file})
+	if err != nil || planErr != nil {
+		t.Fatalf("err=%v planErr=%+v", err, planErr)
+	}
+	if got := stepNamed(t, plan, "web").MemMiB; got != 1 {
+		t.Errorf("mem_mib = %d, want 1", got)
+	}
+}
+
 // A compose file carries these for local docker compose and they have a
 // meaning-preserving reading here, so they are ignored rather than refused.
 func TestKeysThatAreIgnoredRatherThanRefused(t *testing.T) {
