@@ -826,6 +826,40 @@ func (s *Store) checkpointMachine(ctx context.Context, id string) (string, error
 	return machineID, rows.Err()
 }
 
+// DeleteMachineCPU removes the pool record for an object that is going away.
+//
+// A real DELETE rather than DeleteMachine's tombstone, and for DeleteService's
+// reason rather than DeleteMachine's: nothing routes to or reads a cpu row by
+// id once the thing it describes is gone, so the point is that it stops being
+// replicated at all. The resurrection race a tombstone exists to prevent
+// cannot happen here either -- the guard makes the owner of the described
+// object the only writer of this row, and that is the same host doing the
+// delete.
+//
+// The kind is read rather than passed, so a caller cannot delete a checkpoint's
+// row under a machine's guard, and so removing a row needs nothing more than
+// the id the caller already has.
+func (s *Store) DeleteMachineCPU(ctx context.Context, id string) error {
+	c, err := s.GetMachineCPU(ctx, id)
+	if errors.Is(err, state.ErrNotFound) {
+		// Nothing recorded, which is what every object created before this
+		// table looks like. The caller asked for the row to be gone; it is.
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	// The same guard the write runs, which is why this must precede the delete
+	// of the row it resolves through.
+	if err := s.assertMachineCPUWriter(ctx, c, state.WriteAuth{}); err != nil {
+		return err
+	}
+	if _, err := s.client.Exec(ctx, `DELETE FROM machine_cpu WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("state: delete machine cpu %q: %w", id, err)
+	}
+	return nil
+}
+
 func (s *Store) GetMachineCPU(ctx context.Context, id string) (*state.MachineCPU, error) {
 	rows, err := s.client.Query(ctx,
 		`SELECT id, kind, vendor, last_start, last_start_at, updated_at

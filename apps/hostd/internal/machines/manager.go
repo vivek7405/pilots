@@ -459,6 +459,13 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	if err := m.deleteCheckpointRows(ctx, id); err != nil {
 		errs = append(errs, err)
 	}
+	// Before the machines row, not after: a replicated store resolves this
+	// row's writer by reading that row, so the other order cannot authorise
+	// itself. A row left behind is gossiped to every host and cached in each
+	// one's memory forever, for a machine that no longer exists.
+	if err := m.opts.Store.DeleteMachineCPU(ctx, id); err != nil {
+		errs = append(errs, fmt.Errorf("delete cpu row: %w", err))
+	}
 	if err := m.opts.Store.DeleteMachine(ctx, id); err != nil {
 		errs = append(errs, fmt.Errorf("delete row: %w", err))
 	}
@@ -556,6 +563,13 @@ func (m *Manager) deleteCheckpointRows(ctx context.Context, id string) error {
 	}
 	var errs []error
 	for _, c := range cks {
+		// The cpu row FIRST, for the reason Checkpoint writes it last: a
+		// replicated store finds this row's writer through
+		// checkpoints.machine_id, so a row deleted after its checkpoint has
+		// nothing left to prove ownership with and stays forever.
+		if err := m.opts.Store.DeleteMachineCPU(ctx, c.ID); err != nil {
+			errs = append(errs, fmt.Errorf("delete checkpoint %s cpu row: %w", c.ID, err))
+		}
 		if err := m.opts.Store.DeleteCheckpoint(ctx, c.ID); err != nil {
 			errs = append(errs, fmt.Errorf("delete checkpoint %s: %w", c.ID, err))
 		}

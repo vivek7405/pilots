@@ -827,6 +827,75 @@ func TestACheckpointCPURowNeedsItsCheckpointRowFirst(t *testing.T) {
 	}
 }
 
+// A cpu row is deleted under the SAME guard that wrote it, and by nobody else.
+//
+// The row has no host_id to hang a WHERE on, so the guard is a read of the
+// object it describes -- which is why a delete must precede the removal of
+// that object's own row, and why a foreign host cannot delete it.
+func TestDeleteMachineCPUIsGuardedLikeTheWrite(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newTestStore(t, "host-a")
+	liveFleet(t, agent, "host-a", "host-b")
+	agent.exec(t, `INSERT INTO machines (id, host_id, state) VALUES ('m-1','host-a','running')`)
+	agent.exec(t, `INSERT INTO machines (id, host_id, state) VALUES ('m-2','host-b','running')`)
+	agent.exec(t, `INSERT INTO machine_cpu (id, kind, vendor) VALUES ('m-1','machine','AuthenticAMD')`)
+	agent.exec(t, `INSERT INTO machine_cpu (id, kind, vendor) VALUES ('m-2','machine','AuthenticAMD')`)
+
+	// Nothing recorded is not an error.
+	if err := store.DeleteMachineCPU(ctx, "m-absent"); err != nil {
+		t.Fatalf("deleting an unrecorded id = %v, want nil", err)
+	}
+
+	if err := store.DeleteMachineCPU(ctx, "m-1"); err != nil {
+		t.Fatalf("the owner was refused its own machine's cpu row: %v", err)
+	}
+	if got := agent.scalar(t, `SELECT COUNT(*) FROM machine_cpu WHERE id='m-1'`); got != "0" {
+		t.Errorf("the row survived its own owner's delete: count=%q", got)
+	}
+
+	// The counterfactual: the same call for a machine this host does not own
+	// is refused, and leaves the row alone.
+	err := store.DeleteMachineCPU(ctx, "m-2")
+	if !errors.Is(err, state.ErrNotOwner) {
+		t.Fatalf("deleting a foreign machine's cpu row returned %v, want ErrNotOwner", err)
+	}
+	if got := agent.scalar(t, `SELECT COUNT(*) FROM machine_cpu WHERE id='m-2'`); got != "1" {
+		t.Errorf("a refused delete removed the row anyway: count=%q", got)
+	}
+}
+
+// A checkpoint's cpu row resolves its writer through checkpoints.machine_id,
+// so it must be deleted BEFORE the checkpoint row -- the reverse of the write
+// order. Pinned because getting it backwards does not error at the call site:
+// it leaves the row behind forever, on every host.
+func TestACheckpointCPURowMustBeDeletedBeforeItsCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newTestStore(t, "host-a")
+	agent.exec(t, `INSERT INTO machines (id, host_id, state) VALUES ('m-1','host-a','running')`)
+	agent.exec(t, `INSERT INTO checkpoints (id, machine_id) VALUES ('ck-1','m-1')`)
+	agent.exec(t, `INSERT INTO checkpoints (id, machine_id) VALUES ('ck-2','m-1')`)
+	agent.exec(t, `INSERT INTO machine_cpu (id, kind, vendor) VALUES ('ck-1','checkpoint','AuthenticAMD')`)
+	agent.exec(t, `INSERT INTO machine_cpu (id, kind, vendor) VALUES ('ck-2','checkpoint','AuthenticAMD')`)
+
+	if err := store.DeleteMachineCPU(ctx, "ck-1"); err != nil {
+		t.Fatalf("deleting a checkpoint's cpu row while its checkpoint exists: %v", err)
+	}
+	if got := agent.scalar(t, `SELECT COUNT(*) FROM machine_cpu WHERE id='ck-1'`); got != "0" {
+		t.Errorf("the checkpoint's cpu row survived: count=%q", got)
+	}
+
+	// The counterfactual, and the reason machines.deleteCheckpointRows deletes
+	// the cpu row first: with the checkpoint already gone there is no row left
+	// to prove ownership through, and the cpu row is unremovable.
+	if err := store.DeleteCheckpoint(ctx, "ck-2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteMachineCPU(ctx, "ck-2"); err == nil {
+		t.Fatal("a checkpoint's cpu row was deletable after its checkpoint row was gone; " +
+			"if that ever becomes true the ordering comment in deleteCheckpointRows is stale")
+	}
+}
+
 // The vendor reaches the ranking through ListHosts. A host with no cpu row
 // reads as empty rather than dropping out of the list: it is a host that has
 // not finished starting, and it is still live.

@@ -399,6 +399,17 @@ type Store interface {
 	// GetMachineCPU returns ErrNotFound when nothing is recorded, which reads
 	// as "in no pool" and ranks over the whole fleet.
 	GetMachineCPU(ctx context.Context, id string) (*MachineCPU, error)
+	// DeleteMachineCPU drops the pool record for an object that is being
+	// removed. Every site that removes a machine or a checkpoint calls it:
+	// this table is gossiped to the whole fleet AND materialized into a map in
+	// every host's cache, so a row that outlives its object leaks in as many
+	// places as there are hosts. A row that was never recorded is not an
+	// error -- the caller asked for it to be gone and it is.
+	//
+	// It is called BEFORE the row it describes is removed, the reverse of the
+	// write order: a replicated store resolves the writer by reading that row,
+	// so deleting that row first makes this unauthorizable.
+	DeleteMachineCPU(ctx context.Context, id string) error
 
 	PutCheckpoint(ctx context.Context, c *Checkpoint) error
 	ListCheckpoints(ctx context.Context, machineID string) ([]Checkpoint, error)
@@ -860,6 +871,15 @@ func (s *sqliteStore) GetMachineCPU(ctx context.Context, id string) (*MachineCPU
 		return nil, fmt.Errorf("state: get machine cpu %q: %w", id, err)
 	}
 	return &c, nil
+}
+
+// DeleteMachineCPU on a single-host store has no owner to check: this host is
+// the only writer of every row in it.
+func (s *sqliteStore) DeleteMachineCPU(ctx context.Context, id string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM machine_cpu WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("state: delete machine cpu %q: %w", id, err)
+	}
+	return nil
 }
 
 func (s *sqliteStore) PutCheckpoint(ctx context.Context, c *Checkpoint) error {

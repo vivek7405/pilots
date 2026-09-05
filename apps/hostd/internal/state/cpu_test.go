@@ -160,6 +160,42 @@ func TestHostCPUAndMachineCPURoundTrip(t *testing.T) {
 	}
 }
 
+// A cpu row does not outlive the object it describes.
+//
+// The table is gossiped to the whole fleet and materialized into a map in
+// every host's cache, so one row left behind per destroyed machine and per
+// deleted checkpoint is a leak in as many places as there are hosts. An id
+// that was never recorded is not an error: the caller asked for the row to be
+// gone and it is.
+func TestDeleteMachineCPURemovesTheRow(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+
+	if err := s.DeleteMachineCPU(ctx, "m_never_recorded"); err != nil {
+		t.Fatalf("deleting an unrecorded id = %v, want nil", err)
+	}
+
+	for _, id := range []string{"m_1", "m_2"} {
+		if err := s.PutMachineCPU(ctx, &MachineCPU{
+			ID: id, Kind: KindMachine, Vendor: "GenuineIntel", UpdatedAt: 1700000000,
+		}); err != nil {
+			t.Fatalf("PutMachineCPU %s: %v", id, err)
+		}
+	}
+
+	if err := s.DeleteMachineCPU(ctx, "m_1"); err != nil {
+		t.Fatalf("DeleteMachineCPU: %v", err)
+	}
+	if _, err := s.GetMachineCPU(ctx, "m_1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("GetMachineCPU after a delete = %v, want ErrNotFound", err)
+	}
+	// The counterfactual: a delete that took the whole table with it would
+	// pass the assertion above.
+	if _, err := s.GetMachineCPU(ctx, "m_2"); err != nil {
+		t.Fatalf("deleting m_1 took m_2 with it: %v", err)
+	}
+}
+
 // The vendor reaches the ranking through ListHosts, so the join is what makes
 // tier 2 possible at all. A host with no cpu row reads as empty, not as an
 // error: it is a host that has not finished starting.
