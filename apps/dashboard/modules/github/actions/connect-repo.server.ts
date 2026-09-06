@@ -15,6 +15,7 @@ import { fleet } from '#modules/fleet/client.server.ts';
 import { assertOwned } from '#modules/fleet/org-filter.server.ts';
 import { installationFor } from '#modules/github/installations.server.ts';
 import { isRepoSlug } from '#modules/domains/hostname.ts';
+import { backTo } from '#modules/services/utils/back.ts';
 
 export async function connectRepo(formData: FormData) {
   const ctx = await requireOrg();
@@ -53,5 +54,5 @@ export async function connectRepo(formData: FormData) {
       set: { repo, branch, autodeploy, installationId: installation?.id ?? null, updatedAt: new Date() },
     });
 
-  return { success: true, redirect: `/services/${id}?ok=connected` };
+  return { success: true, redirect: backTo(formData, `/services/${id}`, 'connected') };
 }

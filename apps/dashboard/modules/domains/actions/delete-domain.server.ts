@@ -2,6 +2,7 @@
 /** Remove a custom domain, after proving it points at one of this org's services. */
 import { requireOrg } from '#modules/auth/session.server.ts';
 import { fleet, listServices } from '#modules/fleet/client.server.ts';
+import { backTo } from '#modules/services/utils/back.ts';
 
 export async function deleteDomain(formData: FormData) {
   const ctx = await requireOrg();
@@ -16,5 +17,5 @@ export async function deleteDomain(formData: FormData) {
   } catch (err) {
     return { success: false, error: `The fleet refused: ${(err as Error).message}`, status: 502 };
   }
-  return { success: true, redirect: '/domains?ok=destroyed' };
+  return { success: true, redirect: backTo(formData, '/domains', 'destroyed') };
 }

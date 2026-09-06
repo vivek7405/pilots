@@ -12,6 +12,7 @@ import { repoConnections } from '#db/schema.server.ts';
 import { requireOrg } from '#modules/auth/session.server.ts';
 import { fleet } from '#modules/fleet/client.server.ts';
 import { assertOwned } from '#modules/fleet/org-filter.server.ts';
+import { backTo } from '#modules/services/utils/back.ts';
 
 export async function disconnectRepo(formData: FormData) {
   const ctx = await requireOrg();
@@ -28,5 +29,5 @@ export async function disconnectRepo(formData: FormData) {
   }
 
   await db.delete(repoConnections).where(eq(repoConnections.serviceId, id));
-  return { success: true, redirect: `/services/${id}?ok=disconnected` };
+  return { success: true, redirect: backTo(formData, `/services/${id}`, 'disconnected') };
 }

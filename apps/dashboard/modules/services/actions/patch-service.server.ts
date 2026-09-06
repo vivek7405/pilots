@@ -3,6 +3,7 @@
 import { requireOrg } from '#modules/auth/session.server.ts';
 import { fleet } from '#modules/fleet/client.server.ts';
 import { assertOwned } from '#modules/fleet/org-filter.server.ts';
+import { backTo } from '#modules/services/utils/back.ts';
 import type { UpdateServiceRequest } from '@pilots/sdk';
 
 export async function patchService(formData: FormData) {
@@ -31,5 +32,5 @@ export async function patchService(formData: FormData) {
   } catch (err) {
     return { success: false, error: `Update refused: ${(err as Error).message}`, status: 502 };
   }
-  return { success: true, redirect: `/services/${id}?ok=saved` };
+  return { success: true, redirect: backTo(formData, `/services/${id}`, 'saved') };
 }

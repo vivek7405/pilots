@@ -19,8 +19,10 @@ import { fleet, listMachines } from '#modules/fleet/client.server.ts';
 import { assertOwned } from '#modules/fleet/org-filter.server.ts';
 import { requireOrg, signedOut } from '#modules/auth/session.server.ts';
 import type { SignedOut } from '#modules/auth/session.server.ts';
+import { githubAppConfigured } from '#modules/github/app-jwt.server.ts';
+import { installUrl } from '#modules/github/installations.server.ts';
 import type { RepoConnection } from '#db/schema.server.ts';
-import type { Host, Machine, Release, Service } from '@pilots/sdk';
+import type { DomainResponse, Host, Machine, Release, Service } from '@pilots/sdk';
 
 export interface ServiceDetail {
   service: Service;
@@ -31,6 +33,14 @@ export interface ServiceDetail {
   replicas: Machine[];
   /** Every host, so a replica's resume tier can be named without a second read. */
   hosts: Host[];
+  /** The custom domains pointing at this service, for its Settings tab. */
+  domains: DomainResponse[];
+  /**
+   * Whether this fleet has a GitHub App, and where to install it. Read here
+   * because the panel that renders it is a pure fragment and may not touch
+   * the environment itself.
+   */
+  github: { configured: boolean; installUrl: string };
 }
 
 export async function getService(input: { id: string }): Promise<ServiceDetail | null | SignedOut> {
@@ -53,6 +63,18 @@ export async function getService(input: { id: string }): Promise<ServiceDetail |
   const replicas = machines.filter((m) => m.service_id === service.id);
   const hosts = await fleet.hosts.list().catch(() => [] as Host[]);
   const repo = (await db.select().from(repoConnections).where(eq(repoConnections.serviceId, input.id)).get()) ?? null;
+  const domains = (await fleet.domains.list().catch(() => [] as DomainResponse[])).filter(
+    (d) => d.service_id === service.id,
+  );
 
-  return { service, releases, previews, repo, replicas, hosts };
+  return {
+    service,
+    releases,
+    previews,
+    repo,
+    replicas,
+    hosts,
+    domains,
+    github: { configured: githubAppConfigured(), installUrl: installUrl() },
+  };
 }
