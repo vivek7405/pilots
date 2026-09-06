@@ -50,10 +50,22 @@ function notLoggedIn(varName: string): string {
  * Exported so a caller can check before it reads a value: a `set` that
  * validated afterwards would have the user type a whole secret at the prompt
  * and then throw it away.
+ *
+ * An allowed set rather than a banned one. `import` takes whatever key Node's
+ * `.env` parser hands back, and that parser is happy to produce `A B` from a
+ * line that lost its `=` and `"QK"` from a quoted key. Listing the characters
+ * that a `secret://` reference can carry refuses both, where banning spaces
+ * and `=` only refused the first. Every name in this repo's compose files and
+ * docs is inside this set.
  */
+const SECRET_NAME = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/
+
 export function assertSecretName(name: string): void {
-  if (name === '' || /\s|=/.test(name)) {
-    throw new CliError(`a secret name is what secret://<name> carries in the compose file; got ${JSON.stringify(name)}`)
+  if (!SECRET_NAME.test(name)) {
+    throw new CliError(
+      'a secret name is what secret://<name> carries in the compose file, so letters, digits, ' +
+        `underscore, dot and dash; got ${JSON.stringify(name)}`,
+    )
   }
 }
 

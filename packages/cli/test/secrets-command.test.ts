@@ -425,7 +425,11 @@ test('PILOT_API_KEY alone is refused, and the message names the variable to use'
 
 test('an empty or whitespace name is refused', async () => {
   const b = bed()
-  for (const name of ['', 'a b', 'a=b']) {
+  // `"QK"` is what Node's parser returns for a quoted key in a `.env` file, and
+  // no `secret://` reference can address it. Counterfactual: banning spaces and
+  // `=` rather than allowing a character set lets that one through, and `ls`
+  // then shows a name the deploy can never resolve.
+  for (const name of ['', 'a b', 'a=b', '"QK"', '-lead', 'a/b']) {
     const res = await pilot(b, ['secrets', 'set', name, 'v'])
     assert.equal(res.code, 1, `${JSON.stringify(name)} was accepted`)
     assert.match(res.stderr, /secret:\/\/<name>/)
@@ -442,6 +446,20 @@ test('a bad name is refused before the value is read', () => {
   assert.equal(res.code, 1)
   assert.match(res.stderr, /secret:\/\/<name>/)
   assert.equal(res.stderr.includes('never-read'), false)
+  assert.equal(loadCredentials(b.env)!.secrets?.shop, undefined)
+})
+
+test('import refuses a quoted key the same way set does', async () => {
+  const b = bed()
+  const file = join(b.dir, 'quoted.env')
+  writeFileSync(file, '"QK"=v\nGOOD=other\n')
+  const res = await pilot(b, ['secrets', 'import', file])
+  assert.equal(res.code, 1)
+  // The offending key is named, escaped the way JSON.stringify shows it, so
+  // the quotes that caused the problem are visible rather than invisible.
+  assert.match(res.stderr, /QK/)
+  // The whole file is refused, not the good half: a partial import leaves the
+  // caller guessing which names landed.
   assert.equal(loadCredentials(b.env)!.secrets?.shop, undefined)
 })
 
