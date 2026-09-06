@@ -16,7 +16,7 @@ import { after, test } from 'node:test'
 import { promisify } from 'node:util'
 
 import { saveCredentials } from '../src/config.ts'
-import { startFakeAPI, type FakeAPI } from './helpers/fake-api.ts'
+import { fakeService, startFakeAPI, type FakeAPI } from './helpers/fake-api.ts'
 import { json } from './helpers/server.ts'
 
 const exec = promisify(execFile)
@@ -534,6 +534,210 @@ test('a build step with no overrides sends the context Dockerfile as it is', asy
   try {
     assert.equal((await pilot(env, ['--json', 'deploy'])).code, 0)
     assert.equal(tarEntry(api.all('POST', '/v1/builds')[1]!.raw, 'Dockerfile'), 'FROM python:3.12-slim\n')
+  } finally {
+    await api.close()
+  }
+})
+
+/** A build stream with one BuildKit vertex that takes 12.3s, then the host phases. */
+function stagedBuild(api: FakeAPI, extra = ''): void {
+  api.routes.set('POST /v1/builds', (_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/x-ndjson', 'x-pilot-build-id': 'bld_x' })
+    res.write('{"step":"[stage-1 1/2] RUN npm ci","stream":"stdout","line":"added 12 packages","ts":1000}\n')
+    if (extra) res.write(extra + '\n')
+    res.write('{"step":"[stage-1 1/2] RUN npm ci","stream":"status","line":"done","ts":13300}\n')
+    res.write('{"step":"bld_x","stream":"status","line":"packing rootfs","ts":13400}\n')
+    res.write('{"step":"bld_x","stream":"status","line":"build succeeded","ts":14000}\n')
+    res.end('{"result":"bld_x","ts":14000}\n')
+  })
+}
+
+// Counterfactual: printing every line puts the npm output on stderr, which is
+// the firehose this replaces.
+test('the quiet default prints one line per stage with elapsed time', async () => {
+  const api = await startFakeAPI()
+  withPlan(api, plan())
+  stagedBuild(api)
+  const env = loggedIn(api.url, { shop: { database_url: 'x' } })
+  try {
+    const res = await pilot(env, ['deploy'])
+    assert.equal(res.code, 0, res.stderr)
+    assert.match(res.stderr, /web {2}\[stage-1 1\/2\] RUN npm ci {2}done 12\.3s/)
+    assert.doesNotMatch(res.stderr, /added 12 packages/)
+    assert.match(res.stderr, /web {2}packing rootfs/)
+    assert.match(res.stderr, /^plan: 3 services in app shop$/m)
+  } finally {
+    await api.close()
+  }
+})
+
+test('--verbose streams every line, and --ci implies it without colour', async () => {
+  const api = await startFakeAPI()
+  withPlan(api, plan())
+  stagedBuild(api)
+  const env = loggedIn(api.url, { shop: { database_url: 'x' } })
+  try {
+    const verbose = await pilot(env, ['deploy', '--verbose'])
+    assert.equal(verbose.code, 0, verbose.stderr)
+    assert.ok(verbose.stderr.includes('added 12 packages'))
+
+    const ci = await pilot({ ...env, FORCE_COLOR: '1' }, ['deploy', '--ci'])
+    assert.equal(ci.code, 0, ci.stderr)
+    assert.ok(ci.stderr.includes('added 12 packages'))
+    // eslint-disable-next-line no-control-regex
+    assert.doesNotMatch(ci.stderr, /\x1b\[/)
+
+    // railway's own equivalence, and the reason it exists: a build log read
+    // later is not a terminal.
+    const viaEnv = await pilot({ ...env, CI: 'true' }, ['deploy'])
+    assert.equal(viaEnv.code, 0, viaEnv.stderr)
+    assert.ok(viaEnv.stderr.includes('added 12 packages'))
+  } finally {
+    await api.close()
+  }
+})
+
+// Quiet mode hides a step's output right up until that step is the one that
+// failed, which is the only moment anybody wants it.
+test('a failed build prints the failing step output before the error', async () => {
+  const api = await startFakeAPI()
+  withPlan(api, plan())
+  api.routes.set('POST /v1/builds', (_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/x-ndjson', 'x-pilot-build-id': 'bld_x' })
+    res.write('{"step":"[stage-1 1/2] RUN pip install","stream":"stdout","line":"ERROR: no matching distribution","ts":1000}\n')
+    res.end('{"step":"[stage-1 1/2] RUN pip install","error":"exit code: 1","ts":2000}\n')
+  })
+  const env = loggedIn(api.url, { shop: { database_url: 'x' } })
+  try {
+    const res = await pilot(env, ['deploy'])
+    assert.equal(res.code, 1)
+    assert.ok(res.stderr.includes('ERROR: no matching distribution'), res.stderr)
+    const output = res.stderr.indexOf('ERROR: no matching distribution')
+    const error = res.stderr.indexOf('error: build bld_x failed')
+    assert.ok(output < error, 'the output comes before the error line')
+  } finally {
+    await api.close()
+  }
+})
+
+// Counterfactual: computing wait from opts.wait alone ignores --detach, and
+// the run polls GET /v1/services/{id} anyway.
+test('--detach returns after the deploy call and prints the release id', async () => {
+  const api = await startFakeAPI()
+  withPlan(api, plan())
+  stagedBuild(api)
+  const env = loggedIn(api.url, { shop: { database_url: 'x' } })
+  try {
+    const res = await pilot(env, ['deploy', '--detach'])
+    assert.equal(res.code, 0, res.stderr)
+    const header = res.stdout.split('\n')[0]!.trim().split(/ {2,}/)
+    assert.deepEqual(header, ['SERVICE', 'RELEASE', 'URL'])
+    assert.match(res.stderr, /accepted, not waited for/)
+
+    // One GET per service, the read that fills in the URL. Waiting adds the
+    // readiness poll on top of it, so the count is what separates the modes.
+    const gets = (reqs: typeof api.requests): number =>
+      reqs.filter((r) => r.method === 'GET' && /^\/v1\/services\/svc_[^/]+$/.test(r.path)).length
+    assert.equal(gets(api.requests), 3, 'three services, one URL read each, no poll')
+
+    // --no-wait is the same flag under its older name.
+    const waiting = await startFakeAPI()
+    withPlan(waiting, plan())
+    stagedBuild(waiting)
+    const waitingEnv = loggedIn(waiting.url, { shop: { database_url: 'x' } })
+    try {
+      assert.equal((await pilot(waitingEnv, ['deploy'])).code, 0)
+      assert.ok(gets(waiting.requests) > 3, 'waiting polls for the release on top of the URL read')
+    } finally {
+      await waiting.close()
+    }
+  } finally {
+    await api.close()
+  }
+})
+
+// A person reads an empty column as a failed deploy. Both replicas were up the
+// whole time; a service just has no URL until it has a domain.
+test('an empty URL says why, and the JSON keeps the empty string', async () => {
+  const api = await startFakeAPI()
+  // One service, so nothing here depends on the volume echo the default route
+  // does; the point is the URL column, not the walk.
+  withPlan(api, { app: 'shop', steps: [{ name: 'web', build: { context: './web' }, replicas: 1, vcpus: 1, mem_mib: 512 }] })
+  stagedBuild(api)
+  api.routes.set('POST /v1/services', (req, res) => {
+    const body = JSON.parse(req.body || '{}') as { name?: string; app?: string }
+    const svc = fakeService({ name: body.name ?? 'x', ...(body.app ? { app: body.app } : {}), url: '' })
+    api.services.push(svc)
+    return json(res, 201, svc)
+  })
+  const env = loggedIn(api.url)
+  try {
+    const human = await pilot(env, ['deploy'])
+    assert.equal(human.code, 0, human.stderr)
+    assert.match(human.stdout, /\(no domain: set x-pilots\.domain/)
+    assert.match(human.stderr, /pilot machines ls --app shop/)
+
+    const asJSON = await pilot(env, ['--json', 'deploy'])
+    assert.equal(asJSON.code, 0, asJSON.stderr)
+    const result = JSON.parse(asJSON.stdout) as { services: { url: string }[] }
+    assert.equal(result.services[0]!.url, '', 'the explanation is human-only')
+  } finally {
+    await api.close()
+  }
+})
+
+// The [dir] argument names the directory searched for the compose file, but
+// every build context resolves against the compose FILE's directory, so
+// `--file infra/compose.yaml` builds from infra/ and not from [dir].
+test('deploy --help states the build context rule', async () => {
+  const res = await pilot({}, ['deploy', '--help'])
+  assert.match(res.stdout, /compose file's own directory/)
+  assert.match(res.stdout, /-d, --detach/)
+  assert.match(res.stdout, /-c, --ci/)
+})
+
+// The timeout said only that it timed out. Where to look next is the whole
+// question at that moment, and it is a CLI-raised error so the hint is ours.
+test('the readiness timeout carries a hint naming what to run next', async () => {
+  const { PilotsClient } = await import('@pilots/sdk')
+  const { executePlan } = await import('../src/compose/run.ts')
+  const { CliError } = await import('../src/output.ts')
+
+  const api = await startFakeAPI()
+  stagedBuild(api)
+  // A service whose release_id never becomes the one just deployed.
+  api.routes.set('POST /v1/services/svc_stuck/deploy', (_req, res) =>
+    json(res, 201, { id: 'rel_new', service_id: 'svc_stuck', healthy: false, created_at: 1 }),
+  )
+  api.routes.set('GET /v1/services/svc_stuck', (_req, res) =>
+    json(res, 200, fakeService({ id: 'svc_stuck', name: 'web', release_id: 'rel_old' })),
+  )
+  api.routes.set('POST /v1/services', (_req, res) =>
+    json(res, 201, fakeService({ id: 'svc_stuck', name: 'web', release_id: 'rel_old' })),
+  )
+  try {
+    const client = new PilotsClient('pilot_test_key', { baseURL: api.url })
+    let clock = 0
+    await assert.rejects(
+      executePlan(
+        client,
+        { app: 'shop', steps: [{ name: 'web', build: { context: './web' }, replicas: 1, vcpus: 1, mem_mib: 512 }] },
+        {
+          dir: APP_DIR,
+          waitTimeoutMs: 5000,
+          sleep: () => Promise.resolve(),
+          now: () => (clock += 4000),
+        },
+      ),
+      (err: unknown) => {
+        assert.ok(err instanceof CliError)
+        assert.match(err.message, /did not become current within 5s/)
+        assert.ok(err.hint)
+        assert.match(err.hint, /pilot services releases/)
+        assert.match(err.hint, /pilot logs/)
+        return true
+      },
+    )
   } finally {
     await api.close()
   }

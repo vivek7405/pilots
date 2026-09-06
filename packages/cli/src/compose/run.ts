@@ -48,6 +48,15 @@ export interface ExecuteOptions {
   wait?: boolean
   waitTimeoutMs?: number
   onBuildLine?: (step: ComposeStep, line: BuildLogLine) => void
+  /**
+   * Stage boundaries outside the build stream.
+   *
+   * The build reports its own progress line by line; everything around it
+   * (the create, the deploy, the wait for the release to go current) is a
+   * request that either returns or does not, so the only place that can say
+   * one happened is here.
+   */
+  onEvent?: (step: ComposeStep, message: string) => void
   sleep?: (ms: number) => Promise<void>
   now?: () => number
 }
@@ -104,7 +113,9 @@ export async function executePlan(
     const existing = await findService(client, app, step.name)
     await refuseVolumeChange(client, app, step, existing)
 
+    opts.onEvent?.(step, 'building')
     const rootfs = await buildStep(client, step, opts)
+    opts.onEvent?.(step, `built ${rootfs}`)
     const [volume] = await ensureVolumes(client, app, step)
     await runPreDeploy(client, app, step, rootfs, secretEnv)
     const service = await upsertService(client, app, step, rootfs, secretEnv, existing, volume?.id)
@@ -116,14 +127,17 @@ export async function executePlan(
       build: rootfs,
       ...(step.knobs ? { knobs: step.knobs } : {}),
     })
+    opts.onEvent?.(step, `release ${release.id} accepted`)
 
     let releaseId = release.id
     if (opts.wait !== false) {
+      const startedAt = now()
       releaseId = await waitForRelease(client, service.id, release.id, {
         sleep,
         now,
         timeoutMs: opts.waitTimeoutMs ?? DEFAULT_WAIT_MS,
       })
+      opts.onEvent?.(step, `release ${releaseId} is current in ${((now() - startedAt) / 1000).toFixed(1)}s`)
     }
     const current = await client.services.get(service.id)
     deployed.push({
@@ -352,6 +366,11 @@ async function waitForRelease(
     if (opts.now() >= deadline) {
       throw new CliError(
         `release ${releaseId} did not become current within ${Math.round(opts.timeoutMs / 1000)}s`,
+        {
+          hint:
+            'pilot services releases <name> shows whether it went healthy; ' +
+            "pilot logs <name> shows the replicas' output",
+        },
       )
     }
     await opts.sleep(1000)
