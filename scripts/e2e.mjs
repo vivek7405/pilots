@@ -1006,9 +1006,13 @@ async function timingAssertions() {
 
 // postTar uploads a build context. The body is a tar, not JSON, and the
 // response is a stream, so this cannot go through request().
-async function postTar(path, body) {
+async function postTar(path, body, { key } = {}) {
   const headers = { 'Content-Type': 'application/x-tar' };
-  if (KEY) headers.Authorization = `Bearer ${KEY}`;
+  // `key` lets a build speak as a second org, the way request() does. The
+  // battery's own key is admin, and an admin key passes every ownership
+  // check by short-circuit, which is what hid the build-owner bug.
+  const bearer = key ?? KEY;
+  if (bearer) headers.Authorization = `Bearer ${bearer}`;
   return fetch(`${API}${path}`, { method: 'POST', headers, body });
 }
 
@@ -2119,6 +2123,137 @@ async function serviceAssertions() {
   for (const m of await replicasOf(svc.id)) created.push(m.id);
   for (const id of created) {
     await request(`/v1/machines/${id}`, { method: 'DELETE' });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Building and deploying with a SCOPED key.
+//
+// Everything above runs with the battery's admin key, which passes every
+// ownership check by short-circuit. That is exactly how a build came to have
+// its owner recorded against one id and checked against another: the deploy
+// answered 404 for every real user and green for this file. So one section
+// speaks as a `deploy` key, the scope `pilot login` issues and the dashboard
+// mints, and walks the whole path a user walks.
+// ---------------------------------------------------------------------------
+
+async function scopedDeployAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const org = `org_e2e_deploy_${tag}`;
+  const dockerfile = [
+    'FROM alpine:3.20',
+    `RUN echo ${tag} > /etc/pilots-scoped-marker`,
+    'CMD ["/bin/sh", "-c", "while true; do sleep 3600; done"]',
+    '',
+  ].join('\n');
+
+  let key = null;
+  let hash = null;
+  let own = null;
+  let foreign = null;
+  let job = null;
+  let svc = null;
+
+  try {
+    await step('a deploy-scoped key is minted for a fresh org', async () => {
+      const { status, json } = await request('/v1/api-keys', {
+        method: 'POST',
+        body: { org_id: org, scopes: ['deploy'] },
+      });
+      assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
+      assert(typeof json?.key === 'string' && json.key.startsWith('pilot_'),
+        `expected a pilot_ key, got ${JSON.stringify(json)}`);
+      key = json.key;
+      hash = json.hash;
+    });
+
+    await step('the scoped key builds an image and is handed its id', async () => {
+      const res = await postTar('/v1/builds', tarball({ 'Dockerfile': dockerfile }), { key });
+      assert(res.status === 200, `build: HTTP ${res.status}`);
+      job = res.headers.get('X-Pilot-Build-Id');
+      const lines = await readNDJSON(res);
+      const last = lines[lines.length - 1];
+      assert(!last?.error, `the build failed: ${last?.error}`);
+      own = last?.result;
+      assert(own, `the stream ends with no rootfs build id: ${JSON.stringify(last)}`);
+    });
+
+    await step('a second image is built by the admin key, owned by another org', async () => {
+      const res = await postTar('/v1/builds', tarball({ 'Dockerfile': dockerfile }));
+      assert(res.status === 200, `build: HTTP ${res.status}`);
+      const lines = await readNDJSON(res);
+      foreign = lines[lines.length - 1]?.result;
+      assert(foreign, 'the admin build produced no rootfs build id');
+    });
+
+    await step('the scoped key creates a service to deploy to', async () => {
+      const { status, json } = await request('/v1/services', {
+        method: 'POST',
+        key,
+        body: {
+          name: `scoped-${tag}`, app: `e2e-scoped-${tag}`, replicas: 1,
+          health: { type: 'cmd', test: ['CMD-SHELL', 'true'], grace: 60, interval: 2, healthy_threshold: 1 },
+        },
+      });
+      assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
+      svc = json.id;
+    });
+
+    // 404 and never 403: a 403 would confirm the id exists, which is an image
+    // oracle across tenants.
+    await step('another org\'s image cannot be deployed, created from, or restored', async () => {
+      assert(svc && foreign && own, 'the setup steps did not complete');
+
+      const dep = await request(`/v1/services/${svc}/deploy`, {
+        method: 'POST', key, body: { build: foreign },
+      });
+      assert(dep.status === 404, `deploying a foreign image: got ${dep.status}`);
+      assert(dep.json?.error === 'build not found',
+        `the refusal is ${JSON.stringify(dep.json)}`);
+
+      const boot = await request('/v1/machines', {
+        method: 'POST', key, body: { image: foreign, vcpus: 1, mem_mib: 512 },
+      });
+      assert(boot.status === 404, `booting a foreign image: got ${boot.status}`);
+
+      // The build pair restores another org's MEMORY image. No memory build
+      // has an owner row, so a client naming a pair is admin-only.
+      const pair = await request('/v1/machines', {
+        method: 'POST', key,
+        body: { mem_build_id: crypto.randomUUID(), rootfs_build_id: own, vcpus: 1, mem_mib: 512 },
+      });
+      assert(pair.status === 404, `restoring a build pair: got ${pair.status}`);
+      assert(pair.json?.error === 'build not found',
+        `the refusal is ${JSON.stringify(pair.json)}`);
+    });
+
+    // The line this section exists for. On the broken code it was a 404.
+    await step('the scoped key deploys the image it built', async () => {
+      assert(svc && own, 'the setup steps did not complete');
+      const { status, json } = await request(`/v1/services/${svc}/deploy`, {
+        method: 'POST', key, body: { build: own },
+      });
+      assert(status === 200, `expected 200, got ${status}: ${JSON.stringify(json)}`);
+      assert(json?.healthy, `the release never came up healthy: ${JSON.stringify(json)}`);
+    });
+
+    // The job id keeps its own row: it is a different object from the image.
+    await step('the build job\'s log is still readable by the key that built it', async () => {
+      assert(job, 'the build returned no job id header');
+      const { status } = await request(`/v1/builds/${job}/logs`, { key });
+      assert(status === 200, `reading its own build log: got ${status}`);
+    });
+  } finally {
+    if (svc) {
+      try {
+        for (const m of await replicasOf(svc)) {
+          await request(`/v1/machines/${m.id}`, { method: 'DELETE' });
+        }
+      } catch { /* best effort */ }
+    }
+    if (hash) {
+      try { await request(`/v1/api-keys/${hash}/revoke`, { method: 'POST' }); } catch { /* best effort */ }
+    }
   }
 }
 
@@ -4294,6 +4429,7 @@ async function main() {
     await edgeAssertions();
     await envAssertions();
     await serviceAssertions();
+    await scopedDeployAssertions();
     await volumeServiceAssertions();
     await multiServiceAssertions();
     await agentDeployAssertions();
