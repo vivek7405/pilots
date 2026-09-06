@@ -37,9 +37,17 @@ function press(key, opts = {}) {
   document.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true, cancelable: true, ...opts }));
 }
 
-/** Wait until `check()` is true, or give up after two seconds. */
+/**
+ * Wait until `check()` is true, or give up.
+ *
+ * The budget is generous on purpose. Everything polled here is a dynamic
+ * import, a layout measurement or a server round trip, and a cold CI runner is
+ * several times slower than a warm laptop. A budget tuned to the laptop turns
+ * a slow machine into a red build, which is a test reporting on the runner
+ * rather than on the code.
+ */
 async function until(check) {
-  for (let i = 0; i < 200 && !check(); i += 1) await new Promise((r) => setTimeout(r, 10));
+  for (let i = 0; i < 500 && !check(); i += 1) await new Promise((r) => setTimeout(r, 10));
   return check();
 }
 
@@ -84,12 +92,13 @@ suite('command-palette', () => {
 
   test('the arrow keys move the selection and wrap at both ends', async () => {
     const el = await mount();
-    press('k', { ctrlKey: true });
-    await el.updateComplete;
 
-    // The hits are seeded rather than searched for. This harness has no
-    // session, so the real query correctly answers a signed-out caller with
-    // nothing, and what is under test here is the keyboard, not the query.
+    // Opened by setting `open`, NOT by the shortcut. The shortcut path also
+    // fires a search whose result lands on `hits` whenever the round trip
+    // finishes, and a late empty result overwrites the rows seeded below --
+    // a race this test lost on a slow runner and won on a fast one. The
+    // shortcut has three tests of its own; this one is about the keyboard.
+    el.open = true;
     el.hits = [
       { kind: 'service', id: 'svc-web', label: 'web', href: '/services/svc-web' },
       { kind: 'machine', id: 'm-1', label: 'box', href: '/machines/m-1' },

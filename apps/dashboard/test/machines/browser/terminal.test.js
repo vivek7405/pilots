@@ -68,9 +68,17 @@ function base64(text) {
   return btoa(binary);
 }
 
-/** Wait until `check()` is true, or give up after two seconds. */
+/**
+ * Wait until `check()` is true, or give up.
+ *
+ * The budget is generous on purpose. Everything polled here is a dynamic
+ * import, a layout measurement or a server round trip, and a cold CI runner is
+ * several times slower than a warm laptop. A budget tuned to the laptop turns
+ * a slow machine into a red build, which is a test reporting on the runner
+ * rather than on the code.
+ */
 async function until(check) {
-  for (let i = 0; i < 200 && !check(); i += 1) await new Promise((r) => setTimeout(r, 10));
+  for (let i = 0; i < 500 && !check(); i += 1) await new Promise((r) => setTimeout(r, 10));
   return check();
 }
 
