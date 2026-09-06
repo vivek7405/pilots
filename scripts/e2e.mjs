@@ -4512,6 +4512,7 @@ async function agentDeployAssertions(REFLINK) {
   const webjsApp = `gate-webjs-${tag}`;
   const workspaceApp = `gate-ws-${tag}`;
   const brokenApp = `gate-broken-${tag}`;
+  const recoveredApp = `gate-recovered-${tag}`;
   const created = [];
   const serviceIDs = [];
   let client;
@@ -4531,6 +4532,8 @@ async function agentDeployAssertions(REFLINK) {
     let oneCallMS = 0;
     let brokenReplica;
     let unknownDir;
+    let unknownRules;
+    let recoveredService;
     let brokenDir;
 
     await step('`pilot mcp` starts and offers exactly the tools the README lists', async () => {
@@ -4559,7 +4562,9 @@ async function agentDeployAssertions(REFLINK) {
       assert(client, 'the MCP server did not start, so nothing below can run');
       const result = await client.callTool({ name: 'generate_dockerfile', arguments: { dir: DJANGO_FIXTURE } });
       assert(!result.isError, `generate_dockerfile failed: ${toolText(result)}`);
-      const recipe = JSON.parse(toolText(result));
+      const { recipes } = JSON.parse(toolText(result));
+      assert(recipes?.length === 1, `recipes = ${JSON.stringify(recipes)}`);
+      const recipe = recipes[0];
       assert(recipe.framework === 'django', `detected ${recipe.framework}`);
       // The two rules. Either one broken produces a build that SUCCEEDS and a
       // URL that answers 502, with nothing in the log to read.
@@ -4567,6 +4572,11 @@ async function agentDeployAssertions(REFLINK) {
         'the recipe does not bind every interface');
       assert(recipe.dockerfile.includes('${PORT'),
         'the recipe does not read the port from $PORT');
+      // The platform's port, not Django's. A recipe declaring 8000 listens
+      // where the router is not looking.
+      assert(recipe.dockerfile.includes('ENV PORT=8080') || recipe.dockerfile.includes('PORT=8080'),
+        'the recipe does not declare the port the router dials');
+      assert(recipe.port === 8080, `port = ${recipe.port}`);
       dockerfile = recipe.dockerfile;
     });
 
@@ -4619,7 +4629,7 @@ async function agentDeployAssertions(REFLINK) {
           name: `web-${tag}`,
           build,
           app,
-          port: 8000,
+          port: 8080,
           health: { type: 'http', path: '/', grace: 60 },
         },
       });
@@ -4649,7 +4659,7 @@ async function agentDeployAssertions(REFLINK) {
       assert(control.code === '200',
         `the probe cannot reach its own agent (curl said ${control.code || '(nothing)'})`);
 
-      const target = `http://web-${tag}.internal:8000/`;
+      const target = `http://web-${tag}.internal:8080/`;
       let last = { code: '000' };
       await waitFor(async () => {
         last = await reach(probe.id, target, 8);
@@ -4743,6 +4753,54 @@ async function agentDeployAssertions(REFLINK) {
         `rules = ${JSON.stringify(body.details?.rules)}`);
       assert(body.details?.listing?.includes('README.md'),
         `listing = ${JSON.stringify(body.details?.listing)}`);
+      unknownRules = body.details.rules;
+    });
+
+    await step('a Dockerfile written from the refusal alone reaches a URL', async () => {
+      assert(client, 'the MCP server did not start');
+      assert(unknownDir, 'there is no refused directory to recover');
+      assert(unknownRules?.length === 2, 'the refusal carried no rules to obey');
+
+      // Written from `details` and nothing else, which is the whole claim the
+      // structured refusal makes: an agent that never opened the repository
+      // can still produce something that serves. The two rules are read off
+      // the answer rather than hardcoded here.
+      assert(unknownRules.join(' ').includes('0.0.0.0'), 'the bind rule is not in the answer');
+      assert(unknownRules.join(' ').includes('$PORT'), 'the port rule is not in the answer');
+      writeFileSync(join(unknownDir, 'Dockerfile'),
+        'FROM python:3.12-slim\n'
+        + 'ENV PORT=8080\n'
+        + 'EXPOSE 8080\n'
+        + 'WORKDIR /app\n'
+        + 'COPY . .\n'
+        + 'CMD ["sh","-c","python3 -m http.server ${PORT:-8080} --bind 0.0.0.0"]\n');
+
+      const result = await client.callTool({
+        name: 'deploy',
+        arguments: { dir: unknownDir, app: recoveredApp },
+      });
+      assert(!result.isError, `the recovered deploy failed: ${toolText(result).slice(-800)}`);
+      const deployed = JSON.parse(toolText(result));
+      assertOpenableURL(deployed.services[0].url, 'the recovered service');
+      serviceIDs.push(deployed.services[0].id ?? deployed.services[0].service_id);
+      recoveredService = deployed.services[0];
+    });
+
+    await step('the recovered app serves the README it was refused for', async () => {
+      assert(recoveredService, 'nothing was recovered to reach');
+      const { status, json: probe } = await request('/v1/machines', {
+        method: 'POST',
+        body: { app: recoveredApp, vcpus: 1, mem_mib: 512, cmd: 'sleep 86400' },
+      });
+      assert(status === 201, `probe create: ${status} ${JSON.stringify(probe)}`);
+      created.push(probe.id);
+
+      const target = `http://${recoveredService.name}.internal:8080/README.md`;
+      let last = { code: '000' };
+      await waitFor(async () => {
+        last = await reach(probe.id, target, 8);
+        return last.code === '200';
+      }, { timeoutMs: 120_000, what: `${target} to answer 200 (last: ${last.code})` });
     });
 
     await step('a health-gate failure is a 422 with a replica and no host address', async () => {
