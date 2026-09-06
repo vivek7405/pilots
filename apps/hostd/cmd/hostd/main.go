@@ -27,6 +27,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/compose"
 	"github.com/vivek7405/pilots/hostd/internal/config"
 	"github.com/vivek7405/pilots/hostd/internal/cpuvendor"
+	"github.com/vivek7405/pilots/hostd/internal/detect"
 	"github.com/vivek7405/pilots/hostd/internal/dns"
 	"github.com/vivek7405/pilots/hostd/internal/fc"
 	"github.com/vivek7405/pilots/hostd/internal/github"
@@ -486,6 +487,7 @@ func run() error {
 		CPUVendor: vendor, CPUVendorForced: vendorForced,
 		Usage:   ledger,
 		Compose: compose.Handler(),
+		Plan:    detect.Handler(),
 		Lookup:  machineByName(f),
 		GitHub: github.Handler(github.Deps{
 			HostID: cfg.HostID, App: ghApp, Store: store, Builds: builder,

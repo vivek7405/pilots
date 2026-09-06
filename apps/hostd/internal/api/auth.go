@@ -75,6 +75,7 @@ var scopePrefixes = []struct {
 	{"/v1/volumes", ScopeMachines},
 	{"/v1/sprites", ScopeMachines},
 	{"/v1/compose/plan", ScopeMachines},
+	{"/v1/plan", ScopeMachines},
 	{"/v1/hosts", ScopeMachines},
 	{"/v1/builds", ScopeDeploy},
 	{"/v1/services", ScopeDeploy},

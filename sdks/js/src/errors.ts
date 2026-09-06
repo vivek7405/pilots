@@ -12,6 +12,7 @@ import type {
   BuildLogLine,
   ComposeUnsupported,
   ComposePlanError as ComposePlanErrorBody,
+  ComposeUnknownDetails,
   HealthGateDetails,
 } from './types.ts'
 
@@ -145,6 +146,23 @@ export class HealthGateError extends PilotsError {
   constructor(message: string, details: HealthGateDetails, init: PilotsErrorInit = {}) {
     super(message, { status: 422, ...init, details })
     this.name = 'HealthGateError'
+    this.details = details
+  }
+}
+
+/**
+ * 400 `unknown_framework`. The directory has no compose file, no Dockerfile
+ * and no framework the platform recognises.
+ *
+ * `details` carries the listing, the manifests and the two Dockerfile rules,
+ * which is enough to write one without reading the repository again.
+ */
+export class UnknownFrameworkError extends PilotsError {
+  readonly details: ComposeUnknownDetails
+
+  constructor(message: string, details: ComposeUnknownDetails, init: PilotsErrorInit = {}) {
+    super(message, { status: 400, ...init, details })
+    this.name = 'UnknownFrameworkError'
     this.details = details
   }
 }

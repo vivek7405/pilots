@@ -122,3 +122,19 @@ func (e *HealthGateFailed) Error() string {
 }
 
 func (e *HealthGateFailed) Unwrap() error { return e.Err }
+
+// UnknownFramework is a 400 unknown_framework: the directory has no compose
+// file, no Dockerfile and no framework the platform recognises.
+//
+// Details carries the listing, the manifests and the two Dockerfile rules,
+// which is enough to write one without reading the repository again.
+type UnknownFramework struct {
+	Details ComposeUnknownDetails
+	Err     *Error
+}
+
+func (e *UnknownFramework) Error() string {
+	return "pilots: " + e.Err.Message
+}
+
+func (e *UnknownFramework) Unwrap() error { return e.Err }

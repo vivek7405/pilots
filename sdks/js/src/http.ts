@@ -13,9 +13,11 @@ import {
   PilotsError,
   QuotaExceededError,
   HealthGateError,
+  UnknownFrameworkError,
 } from './errors.ts'
 import type {
   ComposePlanError as ComposePlanErrorBody,
+  ComposeUnknownDetails,
   HealthGateDetails,
   QuotaExceededResponse,
 } from './types.ts'
@@ -171,6 +173,9 @@ async function toError(res: Response, method: string, path: string): Promise<Pil
   // answer today, and a later 422 for something else must not land here.
   if (record.code === 'health_gate_failed') {
     return new HealthGateError(message, record.details as HealthGateDetails, init)
+  }
+  if (record.code === 'unknown_framework') {
+    return new UnknownFrameworkError(message, record.details as ComposeUnknownDetails, init)
   }
   return new PilotsError(message, { status: res.status, ...init })
 }

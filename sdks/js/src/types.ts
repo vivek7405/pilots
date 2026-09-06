@@ -499,6 +499,40 @@ export interface ComposePlanError {
   unsupported: ComposeUnsupported[]
 }
 
+/** `POST /v1/plan`'s 200 body: the plan, and how each step was decided. */
+export interface ComposePlanResponse {
+  plan: ComposePlan
+  detected: ComposeDetected[]
+}
+
+/**
+ * Where one step came from. `source` is "compose", "dockerfile" or "recipe";
+ * `framework` and `notes` are set for a recipe only.
+ */
+export interface ComposeDetected {
+  service: string
+  source: string
+  framework?: string
+  dir: string
+  port: number
+  health?: HealthCheck
+  notes?: string[]
+}
+
+/**
+ * The 400 `unknown_framework`'s `details`: everything needed to write the
+ * Dockerfile by hand, so the refusal is a starting point and not a dead end.
+ */
+export interface ComposeUnknownDetails {
+  dir: string
+  looked_for: string[]
+  listing: string[]
+  manifests?: Record<string, string>
+  workspaces?: string[]
+  /** The two lines every Dockerfile must obey. */
+  rules: string[]
+}
+
 // ---------------------------------------------------------------------------
 // Exec stream frame prefixes.
 //

@@ -27,7 +27,6 @@ import {
 
 import { resolveMachine } from '../resolve.ts'
 import { tarDirectory } from '../tar.ts'
-import { generateDockerfile } from './dockerfile.ts'
 
 interface ToolResult {
   content: { type: 'text'; text: string }[]
@@ -319,10 +318,30 @@ export function registerTools(server: McpServer, client: PilotsClient): void {
     },
     (args) =>
       wrap(async () => {
-        const recipe = generateDockerfile(args.dir)
-        if (recipe.framework === 'unknown') {
-          throw new UnknownFrameworkError(recipe.notes.join('\n'))
+        // The host decides, from the same tar a build would upload. An
+        // `unknown_framework` refusal passes through as the tool error, body
+        // and all, so the agent gets the listing and the rules rather than a
+        // sentence saying it failed.
+        const res = await client.plan(new Uint8Array(tarDirectory(args.dir)))
+        const recipes = res.detected
+          .map((d, i) => ({ detected: d, step: res.plan.steps[i] }))
+          .filter(({ detected }) => detected.source === 'recipe')
+          .map(({ detected, step }) => ({
+            service: detected.service,
+            framework: detected.framework,
+            dir: detected.dir,
+            dockerfile: step?.dockerfile ?? '',
+            port: detected.port,
+            health: detected.health,
+            notes: detected.notes ?? [],
+          }))
+        if (recipes.length === 0) {
+          throw new Error(
+            'this directory already has a compose file or a Dockerfile, so the platform ' +
+              'would build that rather than generate one; deploy it with `deploy`',
+          )
         }
+
         if (args.write) {
           const { existsSync, writeFileSync } = await import('node:fs')
           const { join } = await import('node:path')
@@ -333,16 +352,13 @@ export function registerTools(server: McpServer, client: PilotsClient): void {
           // true either way, which would report a recipe as written when the
           // repo's own file is what the build will actually use.
           const existed = existsSync(path)
-          if (!existed) writeFileSync(path, recipe.dockerfile)
-          return { ...recipe, written: !existed, path }
+          if (!existed && recipes.length === 1) writeFileSync(path, recipes[0]!.dockerfile)
+          return { recipes, written: !existed && recipes.length === 1, path }
         }
-        return recipe
+        return { recipes }
       }),
   )
 }
-
-/** Raised when detection found nothing; the notes list every file looked for. */
-class UnknownFrameworkError extends Error {}
 
 /**
  * Runs a handler and shapes the result.

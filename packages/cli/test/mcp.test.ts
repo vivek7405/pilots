@@ -18,7 +18,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 
 import { saveCredentials } from '../src/config.ts'
-import { fakeMachine, startFakeAPI } from './helpers/fake-api.ts'
+import { fakeMachine, startFakeAPI, unknownFrameworkBody } from './helpers/fake-api.ts'
 import { json } from './helpers/server.ts'
 import { startWSServer } from './helpers/ws-server.ts'
 
@@ -207,18 +207,31 @@ test('a successful build returns the rootfs id', async () => {
   }
 })
 
-test('generate_dockerfile detects the bare Django app and answers with a recipe', async () => {
+// The recipes themselves are asserted in Go, where they are now generated
+// (apps/hostd/internal/detect). What this asserts is the tool's half: it tars
+// the directory, posts it to the plan route, and hands back the recipe the
+// host answered with, port and health included.
+test('generate_dockerfile tars the directory and returns the host\'s recipe', async () => {
   const api = await startFakeAPI()
   const dir = join(import.meta.dirname, 'fixtures', 'django-app')
   const { client, close } = await connect(serverEnv(api.url))
   try {
     const result = await client.callTool({ name: 'generate_dockerfile', arguments: { dir } })
     assert.equal(result.isError, undefined)
-    const recipe = JSON.parse(textOf(result)) as { framework: string; dockerfile: string; port: number }
-    assert.equal(recipe.framework, 'django')
-    assert.equal(recipe.port, 8000)
-    assert.match(recipe.dockerfile, /--bind 0\.0\.0\.0:/)
-    assert.match(recipe.dockerfile, /\$\{PORT/)
+    const body = JSON.parse(textOf(result)) as {
+      recipes: { framework: string; dockerfile: string; port: number; health: { path: string } }[]
+    }
+    assert.equal(body.recipes.length, 1)
+    assert.equal(body.recipes[0]!.framework, 'webjs')
+    assert.equal(body.recipes[0]!.port, 8080)
+    assert.equal(body.recipes[0]!.health.path, '/__webjs/ready')
+    assert.match(body.recipes[0]!.dockerfile, /ENV PORT=8080/)
+
+    // The directory went up as a tar, which is what makes the host able to
+    // answer at all: it reads the files, the tool does not.
+    const posted = api.find('POST', '/v1/plan')
+    assert.ok(posted, 'the tool did not post the directory to the plan route')
+    assert.match(posted.raw.toString('latin1'), /manage\.py/)
   } finally {
     await close()
     await api.close()
@@ -229,15 +242,16 @@ test('write reports whether it actually wrote, and never overwrites the repo\'s 
   const api = await startFakeAPI()
   const dir = mkdtempSync(join(tmpdir(), 'pilot-mcp-write-'))
   roots.push(dir)
-  // The smallest tree the detector calls django.
-  writeFileSync(join(dir, 'manage.py'), '')
-  writeFileSync(join(dir, 'requirements.txt'), 'django\n')
+  writeFileSync(join(dir, 'package.json'), '{"dependencies":{"@webjsdev/core":"1"}}')
   const { client, close } = await connect(serverEnv(api.url))
   try {
     const first = await client.callTool({ name: 'generate_dockerfile', arguments: { dir, write: true } })
-    const wrote = JSON.parse(textOf(first)) as { written: boolean; dockerfile: string }
+    const wrote = JSON.parse(textOf(first)) as {
+      written: boolean
+      recipes: { dockerfile: string }[]
+    }
     assert.equal(wrote.written, true)
-    assert.equal(readFileSync(join(dir, 'Dockerfile'), 'utf8'), wrote.dockerfile)
+    assert.equal(readFileSync(join(dir, 'Dockerfile'), 'utf8'), wrote.recipes[0]!.dockerfile)
 
     // The repo's own answer wins, and the flag has to SAY that the recipe did
     // not land: an agent reading `written: true` here would build the wrong
@@ -253,16 +267,27 @@ test('write reports whether it actually wrote, and never overwrites the repo\'s 
   }
 })
 
-test('an undetectable directory is a tool error listing what was looked for', async () => {
+// The refusal reaches the agent as the server wrote it, details and all, so
+// the next call can be a Dockerfile written from `looked_for` and `rules`
+// rather than another round trip to find out what went wrong.
+test('an undetectable directory is a tool error carrying the server\'s details', async () => {
   const api = await startFakeAPI()
   const dir = mkdtempSync(join(tmpdir(), 'pilot-mcp-empty-'))
   roots.push(dir)
+  api.routes.set('POST /v1/plan', (_req, res) => json(res, 400, unknownFrameworkBody()))
   const { client, close } = await connect(serverEnv(api.url))
   try {
     const result = await client.callTool({ name: 'generate_dockerfile', arguments: { dir } })
     assert.equal(result.isError, true)
-    assert.match(textOf(result), /manage\.py/)
-    assert.match(textOf(result), /go\.mod/)
+    const body = JSON.parse(textOf(result)) as {
+      code: string
+      next: string
+      details: { looked_for: string[]; rules: string[] }
+    }
+    assert.equal(body.code, 'unknown_framework')
+    assert.ok(body.next.length > 0)
+    assert.equal(body.details.looked_for.length, 10)
+    assert.equal(body.details.rules.length, 2)
   } finally {
     await close()
     await api.close()

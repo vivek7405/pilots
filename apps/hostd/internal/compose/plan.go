@@ -114,6 +114,10 @@ type Step struct {
 	// image is a build too: hostd turns any Dockerfile into a bootable rootfs,
 	// and a second path for "just pull this" would be a second thing to keep
 	// correct.
+	//
+	// It is also the recipe the detect package generated for a Build context
+	// that has no Dockerfile of its own; a step carrying both uses this text
+	// as the context's Dockerfile.
 	Dockerfile string `json:"dockerfile,omitempty"`
 	// DockerfileAppend is what the file overrode on a build: step, rendered as
 	// Dockerfile instructions for the CLI to append to the context's own
@@ -896,6 +900,15 @@ func seconds(d *types.Duration) int {
 // replicasOf reads deploy.replicas, then the non-swarm `scale:` that means the
 // same thing. Both, because a file that spells only the second one and is read
 // for only the first deploys ONE machine and says nothing about it.
+// DefaultReplicas, DefaultVCPUs and DefaultMemMiB are what a step gets when
+// nothing declared otherwise. Exported so the detect package's generated steps
+// agree with a compose file's by construction rather than by coincidence.
+const (
+	DefaultReplicas = defaultReplicas
+	DefaultVCPUs    = defaultVCPUs
+	DefaultMemMiB   = defaultMemMiB
+)
+
 func replicasOf(svc types.ServiceConfig) int {
 	if svc.Deploy != nil && svc.Deploy.Replicas != nil {
 		return *svc.Deploy.Replicas

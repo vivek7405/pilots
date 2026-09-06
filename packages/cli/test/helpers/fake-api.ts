@@ -104,6 +104,14 @@ export async function startFakeAPI(): Promise<FakeAPI> {
     const scripted = routes.get(`${method} ${path}`)
     if (scripted) return scripted(req, res)
 
+    // The plan route. The real one runs the detector in Go, which is tested
+    // there; what a test in this package cares about is that the CLI tarred
+    // the directory and executed the answer, so the default answer is one
+    // recipe step and a test that wants another scripts the route.
+    if (method === 'POST' && path === '/v1/plan') {
+      return json(res, 200, defaultPlanResponse())
+    }
+
     // Builds. The status is 200 before the outcome is known, so the verdict
     // is the LAST NDJSON line rather than the code.
     if (method === 'POST' && path === '/v1/builds') {
@@ -259,4 +267,70 @@ function matchOne(path: string, prefix: string): string | null {
   const rest = path.slice(prefix.length)
   const id = rest.split('/')[0]
   return id && id.length > 0 ? id : null
+}
+
+/**
+ * One recipe step, the shape `POST /v1/plan` answers for a directory the host
+ * recognised: a build context plus the Dockerfile text the platform generated,
+ * which is the pair the executor has to notice.
+ */
+export function defaultPlanResponse(): unknown {
+  return {
+    plan: {
+      app: 'fx',
+      steps: [
+        {
+          name: 'web',
+          build: { context: '.' },
+          dockerfile: 'FROM node:24-alpine\nENV PORT=8080\nEXPOSE 8080\nCMD ["npm", "start"]\n',
+          env: { PORT: '8080' },
+          ports: [8080],
+          health: { type: 'http', path: '/__webjs/ready', grace: 40 },
+          replicas: 1,
+          vcpus: 1,
+          mem_mib: 512,
+        },
+      ],
+    },
+    detected: [
+      {
+        service: 'web',
+        source: 'recipe',
+        framework: 'webjs',
+        dir: '.',
+        port: 8080,
+        health: { type: 'http', path: '/__webjs/ready', grace: 40 },
+        notes: ['webjs is buildless.'],
+      },
+    ],
+  }
+}
+
+/** The 400 the host answers for a directory it did not recognise. */
+export function unknownFrameworkBody(): unknown {
+  return {
+    error: 'no framework was detected and there is no Dockerfile or compose file',
+    code: 'unknown_framework',
+    next: 'add a Dockerfile, or run pilot mcp and ask your agent to write one from details',
+    details: {
+      dir: '.',
+      looked_for: [
+        'package.json (with a @webjsdev/* dependency)',
+        'next.config.{js,ts,mjs,cjs}',
+        'react-router.config.* or remix.config.*',
+        'vite.config.*',
+        'manage.py with requirements.txt or pyproject.toml',
+        'main.py or app.py importing fastapi',
+        'Gemfile with bin/rails',
+        'go.mod',
+        'Cargo.toml',
+        'composer.json with artisan',
+      ],
+      listing: ['README.md'],
+      rules: [
+        'bind 0.0.0.0, never 127.0.0.1: a service bound to loopback serves only the guest and the router reaches nothing',
+        'read the port from $PORT with 8080 as the fallback; the router dials 8080',
+      ],
+    },
+  }
 }
