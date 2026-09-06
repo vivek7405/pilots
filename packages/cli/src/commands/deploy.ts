@@ -92,12 +92,11 @@ export function createDeployCommand(): Command {
         })
       } catch (err) {
         reporter.clearLive()
-        if (err instanceof BuildFailedError) {
-          // The error names the build; only the buffered output says what the
-          // failing step actually printed before it stopped.
-          const failing = plan.steps.find((s) => s.name) ?? plan.steps[0]
-          if (failing) reporter.failed(failing, err)
-        }
+        // The error names the build; only the buffered output says what the
+        // failing step actually printed before it stopped. Which SERVICE that
+        // was is the reporter's to know: the plan's first step is not the one
+        // that was building when a later service failed.
+        if (err instanceof BuildFailedError) reporter.failed(err)
         throw err
       }
 

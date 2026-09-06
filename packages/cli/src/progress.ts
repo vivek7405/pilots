@@ -28,18 +28,35 @@ export interface ReporterOptions {
 
 export class BuildReporter {
   private readonly opts: ReporterOptions
-  /** step name to the timestamp of the first line seen for it. */
+  /**
+   * service + vertex to the timestamp of the first line seen for it.
+   *
+   * Keyed by BOTH, never by the vertex alone: one reporter sees every service
+   * in the plan, `ts` is absolute wall-clock milliseconds, and two services
+   * built from the same Dockerfile emit the SAME vertex names. Keyed by vertex
+   * alone the second service's `done` is timed from the first service's first
+   * line, which reports a 0.4s stage as the whole run.
+   */
   private readonly first = new Map<string, number>()
-  /** step name to its buffered stdout and stderr, kept for a failure. */
+  /** service + vertex to its buffered stdout and stderr, kept for a failure. */
   private readonly output = new Map<string, string[]>()
   /** The step currently shown on the live line, empty when there is none. */
   private live = ''
+  /**
+   * The service whose lines are arriving now.
+   *
+   * A failure is labelled with this rather than with a step the caller picks:
+   * the caller knows only that the plan failed, and the plan's first step is
+   * not the one that was building.
+   */
+  private current: ComposeStep | undefined
 
   constructor(opts: ReporterOptions) {
     this.opts = opts
   }
 
   line(step: ComposeStep, l: BuildLogLine): void {
+    this.current = step
     if (isJSONMode()) {
       process.stderr.write(JSON.stringify(l) + '\n')
       return
@@ -51,7 +68,8 @@ export class BuildReporter {
     }
 
     const name = l.step ?? ''
-    if (name && !this.first.has(name)) this.first.set(name, l.ts)
+    const key = this.key(step.name, name)
+    if (name && !this.first.has(key)) this.first.set(key, l.ts)
 
     if (l.stream === 'status') {
       this.status(step.name, name, l)
@@ -61,10 +79,10 @@ export class BuildReporter {
     // output of the step that failed, and by then it has already streamed past.
     const text = l.error ?? l.line ?? ''
     if (!text) return
-    const buffered = this.output.get(name) ?? []
+    const buffered = this.output.get(key) ?? []
     buffered.push(text.replace(/\n$/, ''))
     if (buffered.length > FAILURE_TAIL) buffered.splice(0, buffered.length - FAILURE_TAIL)
-    this.output.set(name, buffered)
+    this.output.set(key, buffered)
     this.showLive(step.name, name)
   }
 
@@ -74,14 +92,21 @@ export class BuildReporter {
    * The error itself is rendered by `fail()`, so this adds the context that
    * error cannot carry: what the step actually printed before it stopped.
    */
-  failed(step: ComposeStep, err: BuildFailedError): void {
+  failed(err: BuildFailedError): void {
     if (isJSONMode() || this.opts.verbose) return
     this.clearLive()
+    const step = this.current
+    if (!step) return
     const failing = err.lines.at(-1)?.step ?? ''
-    const buffered = this.output.get(failing)
+    const buffered = this.output.get(this.key(step.name, failing))
     if (!buffered?.length) return
     note(paint('dim', `${step.name}  ${failing}`))
     for (const text of buffered) note(`${step.name}  ${text}`)
+  }
+
+  /** The map key for one vertex of one service. Never the vertex alone. */
+  private key(service: string, name: string): string {
+    return `${service}\u0000${name}`
   }
 
   /** Erases the live line, if any. Called before anything else prints. */
@@ -97,7 +122,7 @@ export class BuildReporter {
     if (!text) return
     // A host phase names the build id as its step, so there is no vertex to
     // time and the phase name is the whole line.
-    const started = this.first.get(name)
+    const started = this.first.get(this.key(service, name))
     const elapsed = started !== undefined && l.ts > started ? ` ${((l.ts - started) / 1000).toFixed(1)}s` : ''
     if (text === 'cached') {
       note(`${service}  ${name}  ${paint('dim', 'cached')}`)

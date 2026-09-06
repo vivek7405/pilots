@@ -742,3 +742,75 @@ test('the readiness timeout carries a hint naming what to run next', async () =>
     await api.close()
   }
 })
+
+/**
+ * The same vertex name in more than one service, with each build's timestamps
+ * where they really are: absolute wall-clock milliseconds, so the second
+ * build's stream starts long after the first one's.
+ */
+function sharedVertexBuilds(api: FakeAPI): void {
+  let call = 0
+  api.routes.set('POST /v1/builds', (_req, res) => {
+    // Every service here is built from the same Dockerfile, so BuildKit names
+    // the vertex identically in all three streams -- the ordinary case for an
+    // app whose services share a base image.
+    const base = call++ * 100_000
+    res.writeHead(200, { 'content-type': 'application/x-ndjson', 'x-pilot-build-id': 'bld_x' })
+    res.write(`{"step":"[stage-1 1/2] RUN npm ci","stream":"stdout","line":"added 12 packages","ts":${base + 1000}}\n`)
+    res.write(`{"step":"[stage-1 1/2] RUN npm ci","stream":"status","line":"done","ts":${base + 13300}}\n`)
+    res.end(`{"result":"bld_x","ts":${base + 14000}}\n`)
+  })
+}
+
+// Counterfactual: keying the elapsed-time map by the vertex name alone makes
+// every service after the first time its stage from the FIRST service's first
+// line, so a 12.3s stage is reported as 112.3s and then 212.3s.
+test('each service times its own stages, even when the vertex names collide', async () => {
+  const api = await startFakeAPI()
+  withPlan(api, plan())
+  sharedVertexBuilds(api)
+  const env = loggedIn(api.url, { shop: { database_url: 'x' } })
+  try {
+    const res = await pilot(env, ['deploy'])
+    assert.equal(res.code, 0, res.stderr)
+    for (const service of ['postgres', 'web', 'worker']) {
+      assert.match(
+        res.stderr,
+        new RegExp(`^${service} {2}\\[stage-1 1/2\\] RUN npm ci {2}done 12\\.3s$`, 'm'),
+        `${service} did not time its own build`,
+      )
+    }
+  } finally {
+    await api.close()
+  }
+})
+
+// Counterfactual: labelling the replay with the plan's first step names a
+// service that built fine, and reading the buffer by vertex name alone replays
+// that service's output instead of the one that actually failed.
+test('a failure in a later service is labelled and replayed as that service', async () => {
+  const api = await startFakeAPI()
+  withPlan(api, plan())
+  let call = 0
+  api.routes.set('POST /v1/builds', (_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/x-ndjson', 'x-pilot-build-id': 'bld_x' })
+    if (call++ === 0) {
+      res.write('{"step":"[stage-1 1/2] RUN npm ci","stream":"stdout","line":"postgres output","ts":1000}\n')
+      res.write('{"step":"[stage-1 1/2] RUN npm ci","stream":"status","line":"done","ts":2000}\n')
+      return res.end('{"result":"bld_x","ts":2000}\n')
+    }
+    res.write('{"step":"[stage-1 1/2] RUN npm ci","stream":"stdout","line":"ERROR: no matching distribution","ts":101000}\n')
+    res.end('{"step":"[stage-1 1/2] RUN npm ci","error":"exit code: 1","ts":102000}\n')
+  })
+  const env = loggedIn(api.url, { shop: { database_url: 'x' } })
+  try {
+    const res = await pilot(env, ['deploy'])
+    assert.equal(res.code, 1)
+    assert.match(res.stderr, /^web {2}ERROR: no matching distribution$/m)
+    assert.doesNotMatch(res.stderr, /^postgres {2}ERROR: no matching distribution$/m)
+    // The step that succeeded is not replayed alongside the one that failed.
+    assert.doesNotMatch(res.stderr, /^web {2}postgres output$/m)
+  } finally {
+    await api.close()
+  }
+})
