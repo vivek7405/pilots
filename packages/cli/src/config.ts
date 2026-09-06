@@ -114,6 +114,8 @@ export function clearCredentials(env: NodeJS.ProcessEnv = process.env): boolean 
 export interface GlobalOptions {
   json?: boolean
   apiUrl?: string
+  /** Answers every confirmation yes. For scripts and agents. */
+  yes?: boolean
 }
 
 /**

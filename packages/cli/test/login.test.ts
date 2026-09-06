@@ -430,3 +430,37 @@ test('`pilot login` drives the whole flow and writes a 0600 file', async () => {
     await dashboard.close()
   }
 })
+
+// With no GitHub App configured but somebody at a terminal, asking beats
+// telling them to rerun with a flag they would then paste into shell history.
+// The non-TTY path is unchanged and still names the headless option.
+test('login with no client id prompts on a terminal and writes the typed key', async () => {
+  const { createLoginCommand } = await import('../src/commands/login.ts')
+  const env = scratch()
+  const previous = { ...process.env }
+  Object.assign(process.env, env, { PILOT_GITHUB_CLIENT_ID: '', PILOT_API_URL: 'https://f' })
+  try {
+    const asked: string[] = []
+    const cmd = createLoginCommand(
+      (message) => {
+        asked.push(message)
+        return Promise.resolve('pilot_typed_key')
+      },
+      () => true,
+    )
+    await cmd.parseAsync(['node', 'login'])
+    assert.deepEqual(asked, ['API key: '])
+    assert.deepEqual(loadCredentials(env), { api_key: 'pilot_typed_key', api_url: 'https://f' })
+  } finally {
+    for (const key of Object.keys(process.env)) delete process.env[key]
+    Object.assign(process.env, previous)
+  }
+})
+
+test('login with no client id and no terminal still names the headless path', async () => {
+  const env = scratch()
+  const res = await pilot({ ...env, PILOT_GITHUB_CLIENT_ID: '' }, ['login'])
+  assert.equal(res.code, 1)
+  assert.match(res.stderr, /PILOT_GITHUB_CLIENT_ID/)
+  assert.match(res.stderr, /pilot login --token/)
+})

@@ -21,6 +21,7 @@ import {
   type GlobalOptions,
 } from '../config.ts'
 import { defaultClientId, deviceFlow, exchangeToken } from '../github.ts'
+import { promptSecret } from '../prompt.ts'
 import { CliError, messageOf, note, printJSON, printTable } from '../output.ts'
 
 /**
@@ -31,7 +32,13 @@ import { CliError, messageOf, note, printJSON, printTable } from '../output.ts'
  */
 const WHOAMI_TIMEOUT_MS = 3000
 
-export function createLoginCommand(): Command {
+/** Injectable so a test can drive the prompt without a terminal. */
+export type SecretPrompt = (message: string, hint: string) => Promise<string>
+
+export function createLoginCommand(
+  prompt: SecretPrompt = promptSecret,
+  stdinIsTTY: () => boolean = () => Boolean(process.stdin.isTTY),
+): Command {
   return new Command('login')
     .description('authenticate with GitHub and store a pilots API key')
     .option('--token <key>', 'skip GitHub and store this API key directly (headless)')
@@ -56,6 +63,23 @@ export function createLoginCommand(): Command {
       }
 
       const clientId = defaultClientId()
+      // No GitHub App configured, but somebody is sitting at a terminal: ask
+      // for the key rather than telling them to rerun with a flag they would
+      // then have to paste into their shell history.
+      if (!clientId && stdinIsTTY()) {
+        const typed = (await prompt('API key: ', 'or run pilot login --token <key>')).trim()
+        if (!typed) {
+          throw new CliError('no API key entered', { hint: 'run pilot login --token <key>' })
+        }
+        const path = saveCredentials({
+          api_key: typed,
+          api_url: apiUrl,
+          ...(loadCredentials()?.secrets ? { secrets: loadCredentials()!.secrets } : {}),
+        })
+        if (opts.json) printJSON({ org_id: null, scopes: [], api_url: apiUrl })
+        else note(`API key stored in ${path}`)
+        return
+      }
       const githubToken = await deviceFlow({ clientId })
       const result = await exchangeToken(githubToken)
 

@@ -31,6 +31,10 @@ pilot logout                      # remove the file
 pilot whoami                      # the org, the fleet, the key prefix, and where each came from
 ```
 
+With no GitHub App configured and a terminal to ask on, `pilot login` prompts
+for an API key and never echoes it. Off a terminal it names the headless path
+instead, since there is nobody to prompt.
+
 **No command validates a cached key.** Once a key is in the file, every command
 talks only to the fleet. That is deliberate: a CLI that checked its credential
 against the dashboard would make every command depend on the dashboard being
@@ -282,7 +286,37 @@ pilot volumes create <name> --size-gib N [--mount-path /data]
 pilot volumes ls
 pilot promote <machine> [--custom-domain --replicas --health-path]
 pilot status
+pilot logs <service> [-f, --follow]
+pilot open <target> [-p, --print]
+pilot completion bash|zsh|fish
 ```
+
+`logs` fans in every replica of a service and prefixes each line with the
+replica's name. `machines logs` is still there for one machine. Under `--json`
+without `--follow` it is one object; with `--follow` it is one object per line,
+so an agent can read it as it arrives.
+
+`open` resolves a service first and a machine second, and spawns the platform
+opener with an argv array, never through a shell. With `-p`, with `--json`, or
+when stdout is not a terminal it prints the URL instead.
+
+### Shell completion
+
+```
+eval "$(pilot completion bash)"      # ~/.bashrc
+pilot completion zsh  > "${fpath[1]}/_pilot"
+pilot completion fish > ~/.config/fish/completions/pilot.fish
+```
+
+The script is generated from the command tree itself, so a new command
+completes without a second list to update.
+
+### Scripts and agents
+
+The global `-y/--yes` answers every confirmation. `machines destroy` and
+`domains rm` ask before acting, but only when there is somebody to answer:
+never under `-y`, never under `--json`, and never when stdin or stderr is not a
+terminal. A script and an agent are therefore never blocked on a question.
 
 `services set --env` merges onto what the service already carries, because the
 underlying `PATCH` replaces the whole map. `--secret-env` replaces the sealed

@@ -25,6 +25,8 @@ interface Machine {
   id: string
   name: string
   host_id: string
+  /** Set on a replica; what `pilot logs <service>` fans in by. */
+  service_id?: string
   state: string
   knobs: { auto_stop: string; auto_start: boolean; min_machines_running: number; soft_limit: number }
   vcpus: number

@@ -13,11 +13,14 @@
 import { Command } from 'commander'
 
 import { createAddCommand } from './commands/add.ts'
+import { createCompletionCommand } from './commands/completion.ts'
 import { createDeployCommand } from './commands/deploy.ts'
 import { createDomainsCommand } from './commands/domains.ts'
 import { createLoginCommand, createLogoutCommand, createWhoamiCommand } from './commands/login.ts'
+import { createLogsCommand } from './commands/logs.ts'
 import { createMachinesCommand } from './commands/machines.ts'
 import { createMcpCommand } from './commands/mcp.ts'
+import { createOpenCommand } from './commands/open.ts'
 import { createPromoteCommand } from './commands/promote.ts'
 import { createSecretsCommand } from './commands/secrets.ts'
 import { createServicesCommand } from './commands/services.ts'
@@ -35,6 +38,7 @@ export function buildProgram(): Command {
     .description('sandboxes and services on one primitive')
     .version(VERSION, '-v, --version', 'print the CLI version')
     .option('--json', 'print the API response as JSON on stdout, errors on stderr')
+    .option('-y, --yes', 'answer yes to every confirmation; for scripts and agents')
     .option('--api-url <url>', 'the fleet to talk to; wins over PILOT_API_URL and the credentials file')
     .showHelpAfterError()
     .hook('preAction', (thisCommand) => {
@@ -54,6 +58,9 @@ export function buildProgram(): Command {
   program.addCommand(createAddCommand())
   program.addCommand(createSecretsCommand())
   program.addCommand(createMcpCommand())
+  program.addCommand(createLogsCommand())
+  program.addCommand(createOpenCommand())
+  program.addCommand(createCompletionCommand(program))
 
   return program
 }

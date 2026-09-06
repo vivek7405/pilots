@@ -11,6 +11,7 @@ import type { CreateMachineRequest, Machine, PilotsClient } from '@pilots/sdk'
 
 import { clientFromEnv, type GlobalOptions } from '../config.ts'
 import { CliError, isJSONMode, note, printJSON, printTable } from '../output.ts'
+import { confirmOrExit } from '../prompt.ts'
 import { collect, parseKeyValues, resolveMachine } from '../resolve.ts'
 
 export function createMachinesCommand(): Command {
@@ -153,6 +154,11 @@ export function createMachinesCommand(): Command {
         const opts = this.optsWithGlobals() as GlobalOptions
         const client = clientFromEnv(opts)
         const found = await resolveMachine(client, machine)
+        // Only destroy asks, and only when there is somebody to answer.
+        // Nothing else here is irreversible.
+        if (verb === 'destroy') {
+          await confirmOrExit(`destroy ${found.name} (${found.id})?`, opts)
+        }
         // `start` and `stop` answer 501 at HEAD. The server's own error is
         // what the user sees: a CLI that hid it behind "not supported yet"
         // would keep saying so for a week after the route landed.
