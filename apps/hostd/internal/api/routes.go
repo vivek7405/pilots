@@ -68,6 +68,15 @@ type Deps struct {
 	// which case the route answers 503 rather than accepting deliveries it
 	// cannot verify.
 	GitHub http.HandlerFunc
+	// Repos turns a named repository into a build context, through the fleet's
+	// GitHub App. Injected for the reason Plan and Compose are: the
+	// implementation lives in internal/github, which imports this package.
+	//
+	// Nil when no app is configured, in which case POST /v1/builds answers
+	// not_configured to a JSON body and goes on taking tars. Keep the nil
+	// VISIBLE at the call site: a nil *github.Stager assigned here is a
+	// non-nil interface, and the 503 branch would never run.
+	Repos RepoStager
 	// Tenancy answers which org owns an object and whether a key has been
 	// revoked, from local state. Nil falls back to the store, which is what a
 	// single box wants; a fleet passes the subscription cache so neither
@@ -279,6 +288,16 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(v)
+}
+
+// RepoStager fetches a repository at a ref and answers with a build context
+// tar, recording anything it refuses under the given build id so a person
+// reads the reason at GET /v1/builds/{id}/logs.
+//
+// The caller closes the reader. A refusal comes back as *Refusal, which is why
+// that type lives in this package.
+type RepoStager interface {
+	Context(ctx context.Context, id, repo, ref, app string) (io.ReadCloser, error)
 }
 
 // Sealer seals a secret environment, and opens one again. Satisfied by

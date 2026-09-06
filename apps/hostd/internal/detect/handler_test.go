@@ -3,7 +3,9 @@ package detect
 import (
 	"archive/tar"
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -106,7 +108,7 @@ func post(t *testing.T, body io.Reader, query string) *httptest.ResponseRecorder
 	req := httptest.NewRequest(http.MethodPost, "/v1/plan"+query, body)
 	req.Header.Set("Content-Type", "application/x-tar")
 	rec := httptest.NewRecorder()
-	Handler(t.TempDir())(rec, req)
+	Handler(t.TempDir(), nil)(rec, req)
 	return rec
 }
 
@@ -206,7 +208,7 @@ func TestTheHandlerStagesUnderTheRootItWasGiven(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		Handler(root)(rec, req)
+		Handler(root, nil)(rec, req)
 	}()
 
 	<-body.started
@@ -249,4 +251,123 @@ func (h *haltingReader) Read(p []byte) (int, error) {
 		<-h.release
 	}
 	return h.inner.Read(p)
+}
+
+// fakeStager copies a fixture into place instead of fetching a repository, so
+// the JSON branch runs with no App and no network.
+type fakeStager struct {
+	dir  string
+	seen []string
+	err  error
+}
+
+func (f *fakeStager) Stage(_ context.Context, repo, ref string) (string, error) {
+	f.seen = append(f.seen, repo+"@"+ref)
+	if f.err != nil {
+		return "", f.err
+	}
+	dst, err := os.MkdirTemp("", "pilot-fake-stage-*")
+	if err != nil {
+		return "", err
+	}
+	if err := os.CopyFS(dst, os.DirFS(f.dir)); err != nil {
+		return "", err
+	}
+	return dst, nil
+}
+
+func postRepoRef(t *testing.T, repos Stager, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/plan?app=fx", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	Handler(t.TempDir(), repos)(rec, req)
+	return rec
+}
+
+// A repository named rather than sent is staged and planned, and the answer is
+// the one a tar of the same tree produces.
+func TestTheHandlerPlansAStagedRepoRef(t *testing.T) {
+	stager := &fakeStager{dir: filepath.Join(fixtures, "webjs")}
+	rec := postRepoRef(t, stager, `{"repo":"o/r","ref":"abc123"}`)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if len(stager.seen) != 1 || stager.seen[0] != "o/r@abc123" {
+		t.Fatalf("the stager saw %v", stager.seen)
+	}
+	var got compose.PlanResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decoding: %v (%s)", err, rec.Body.String())
+	}
+	if got.Plan.App != "fx" {
+		t.Errorf("app = %q, want fx: ?app= is read on this branch too", got.Plan.App)
+	}
+	if len(got.Detected) != 1 || got.Detected[0].Framework != "webjs" {
+		t.Errorf("detected = %+v, want one webjs step", got.Detected)
+	}
+}
+
+// A fleet with no App says so, and names the tar: every client that can plan
+// can send one, so the refusal is actionable with no operator.
+func TestAJSONBodyWithNoStagerIs503(t *testing.T) {
+	rec := postRepoRef(t, nil, `{"repo":"o/r","ref":"main"}`)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"code":"not_configured"`) {
+		t.Errorf("body = %s, want not_configured", body)
+	}
+	if !strings.Contains(body, "tar") {
+		t.Errorf("the next does not name the tar: %s", body)
+	}
+}
+
+// Both fields are required, and an incomplete ref never reaches the fetch.
+func TestAnIncompleteRepoRefIs400(t *testing.T) {
+	stager := &fakeStager{dir: filepath.Join(fixtures, "webjs")}
+	for _, body := range []string{`{"repo":"o/r"}`, `{"ref":"main"}`, `{}`, `not json`} {
+		rec := postRepoRef(t, stager, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: status = %d, want 400 (%s)", body, rec.Code, rec.Body.String())
+		}
+	}
+	if len(stager.seen) != 0 {
+		t.Errorf("an incomplete ref reached the stager: %v", stager.seen)
+	}
+}
+
+// A failed fetch is GitHub's answer, not this host's state: 502, and the next
+// says to check the App rather than to retry.
+func TestAFailedFetchIsA502(t *testing.T) {
+	stager := &fakeStager{err: errors.New("404 Not Found")}
+	rec := postRepoRef(t, stager, `{"repo":"o/r","ref":"main"}`)
+
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"unavailable"`) {
+		t.Errorf("body = %s, want unavailable", rec.Body.String())
+	}
+}
+
+// A tar still plans. The branch is chosen by the media type, so a client that
+// never learned about the JSON body is unaffected.
+func TestATarStillPlansWhenAStagerIsConfigured(t *testing.T) {
+	stager := &fakeStager{dir: filepath.Join(fixtures, "webjs")}
+	req := httptest.NewRequest(http.MethodPost, "/v1/plan?app=fx",
+		tarOf(t, filepath.Join(fixtures, "webjs")))
+	req.Header.Set("Content-Type", "application/x-tar")
+	rec := httptest.NewRecorder()
+	Handler(t.TempDir(), stager)(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if len(stager.seen) != 0 {
+		t.Errorf("a tar upload went through the stager: %v", stager.seen)
+	}
 }

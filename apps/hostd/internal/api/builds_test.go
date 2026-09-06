@@ -760,3 +760,147 @@ func TestASecondOwnerWriteNeverFailsABuildThatSucceeded(t *testing.T) {
 func (x *readingBuilder) RecordRefusal(string, BuildLogLine) {}
 
 func (x *blockingBuilder) RecordRefusal(string, BuildLogLine) {}
+
+// fakeStager stands in for the fetch and plan internal/github does, so the
+// route's branch can be tested with no App, no network and no repository.
+type fakeStager struct {
+	seen []string
+	tar  string
+	err  error
+}
+
+func (f *fakeStager) Context(_ context.Context, id, repo, ref, app string) (io.ReadCloser, error) {
+	f.seen = append(f.seen, id+" "+repo+"@"+ref+" app="+app)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return io.NopCloser(strings.NewReader(f.tar)), nil
+}
+
+// A repository named rather than uploaded reaches the builder through the
+// stager, and the stream is the one an uploaded tar produces.
+func TestABuildFromARepoRefUsesTheStager(t *testing.T) {
+	fb := &fakeBuilder{
+		lines:  []BuildLogLine{{Step: "[1/1] FROM alpine", Stream: "status", Line: "done", TS: 1}},
+		result: "rootfs-1",
+	}
+	stager := &fakeStager{tar: "tar-bytes"}
+	_, st, fake := newTestServerWithManager(t)
+	h := Routes(Deps{HostID: "host-test", Store: st, Machines: fake, Builds: fb, Repos: stager})
+
+	rec := postJSON(t, h, "/v1/builds?app=shop", testKey, `{"repo":"o/r","ref":"abc123"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("X-Pilot-Build-Id") != "bld-test" {
+		t.Errorf("no build id in the header: %v", rec.Header())
+	}
+	if len(stager.seen) != 1 || stager.seen[0] != "bld-test o/r@abc123 app=shop" {
+		t.Fatalf("the stager saw %v", stager.seen)
+	}
+	if fb.started != 1 {
+		t.Errorf("the builder ran %d times, want once", fb.started)
+	}
+	lines := decodeNDJSON(t, rec.Body.String())
+	if len(lines) == 0 || lines[len(lines)-1].Result != "rootfs-1" {
+		t.Errorf("the stream does not end with the image id: %v", lines)
+	}
+	// The job's owner is recorded before the id leaves the handler, or the
+	// log route would 404 to the org that asked for the build.
+	if row, err := st.GetTenancy(context.Background(), "bld-test"); err != nil || row.OrgID != "org_1" {
+		t.Errorf("tenancy = %+v, %v; want org_1", row, err)
+	}
+}
+
+// A fleet with no App says so, and says what to send instead. 503 rather than
+// a 501: the route works on a fleet whose hosts carry an App.
+func TestARepoRefWithNoStagerIs503(t *testing.T) {
+	fb := &fakeBuilder{result: "rootfs-1"}
+	h := newBuildServer(t, fb)
+
+	rec := postJSON(t, h, "/v1/builds", testKey, `{"repo":"o/r","ref":"main"}`)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("got %d, want 503: %s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"code":"not_configured"`) {
+		t.Errorf("body = %s, want not_configured", body)
+	}
+	// The next has to name the tar, or a caller with the bytes in hand is told
+	// only to go and find an operator.
+	if !strings.Contains(body, "tar") {
+		t.Errorf("the next does not name the tar: %s", body)
+	}
+	if fb.started != 0 {
+		t.Errorf("the builder ran on a fleet with no App")
+	}
+}
+
+// A refusal is the planner's verdict on the repository, so it is a 400 with
+// the planner's own code, and the reason is readable at the build's log the
+// way a push's refusal is.
+func TestARefusedRepoRefIsA400AndReadableAtTheLog(t *testing.T) {
+	fb := &fakeBuilder{}
+	stager := &fakeStager{err: &Refusal{
+		BuildID: "bld-test", Code: CodePlanMultiService,
+		Message: "the plan has 2 services; a push deploys one",
+		Next:    "commit a compose file and deploy it with pilot deploy",
+	}}
+	_, st, fake := newTestServerWithManager(t)
+	h := Routes(Deps{HostID: "host-test", Store: st, Machines: fake, Builds: fb, Repos: stager})
+
+	rec := postJSON(t, h, "/v1/builds", testKey, `{"repo":"o/r","ref":"main"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"plan_multi_service"`) {
+		t.Errorf("body = %s, want plan_multi_service", rec.Body.String())
+	}
+	if fb.started != 0 {
+		t.Errorf("a refused plan reached the builder")
+	}
+	// The owner row is written before the fetch, so the refusal the stager
+	// recorded is readable by the org it was for rather than 404.
+	if row, err := st.GetTenancy(context.Background(), "bld-test"); err != nil || row.OrgID != "org_1" {
+		t.Errorf("tenancy = %+v, %v; want org_1", row, err)
+	}
+}
+
+// Both fields are required. An empty ref would fetch the default branch of
+// whatever the repository is now, which is not what any caller means.
+func TestARepoRefWithAnEmptyFieldIs400(t *testing.T) {
+	stager := &fakeStager{tar: "tar-bytes"}
+	_, st, fake := newTestServerWithManager(t)
+	h := Routes(Deps{HostID: "host-test", Store: st, Machines: fake,
+		Builds: &fakeBuilder{result: "r"}, Repos: stager})
+
+	for _, body := range []string{`{"repo":"o/r"}`, `{"ref":"main"}`, `{}`} {
+		rec := postJSON(t, h, "/v1/builds", testKey, body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%s: got %d, want 400 (%s)", body, rec.Code, rec.Body.String())
+		}
+	}
+	if len(stager.seen) != 0 {
+		t.Errorf("an incomplete ref reached the stager: %v", stager.seen)
+	}
+}
+
+// A tar still builds. The branch is chosen by the media type, so a client that
+// never learned about the JSON body is unaffected.
+func TestATarStillBuildsWhenAStagerIsConfigured(t *testing.T) {
+	fb := &fakeBuilder{result: "rootfs-1"}
+	stager := &fakeStager{tar: "never"}
+	_, st, fake := newTestServerWithManager(t)
+	h := Routes(Deps{HostID: "host-test", Store: st, Machines: fake, Builds: fb, Repos: stager})
+
+	rec := postTar(t, h, "/v1/builds", []byte("tar-bytes"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(stager.seen) != 0 {
+		t.Errorf("a tar upload went through the stager: %v", stager.seen)
+	}
+	if fb.started != 1 {
+		t.Errorf("the builder ran %d times, want once", fb.started)
+	}
+}
