@@ -376,10 +376,16 @@ A release that never becomes healthy is **422 `health_gate_failed`**, not a
 
 Every read is scoped to the caller's org. An id another org owns answers
 **404**, never 403: existence must not leak across tenants. An `admin` key
-sees every row and may narrow a list with `?org=`; a non-admin's `?org=` is
-ignored rather than refused. Creates take the org from the authenticated key
-and never from the request body. A create refused by a quota answers **429**
-with `{"error":"quota exceeded","quota","limit","used"}`.
+with no `?org=` sees every row; a non-admin's `?org=` is ignored rather than
+refused. An `admin` key that DOES name `?org=` **acts as that org and is
+narrowed to it**: the rows it creates are owned by that org, the quota it
+consumes is that org's, and every read it makes answers as that org's own key
+would, unowned rows included in neither. That is what lets one operator
+process serve a browser session belonging to somebody else's org without
+holding that org's key, and it is the trust an admin key already carries when
+it mints one. Creates take the org from the authenticated key, or from `?org=`
+on an admin key, and never from the request body. A create refused by a quota
+answers **429** with `{"error":"quota exceeded","quota","limit","used"}`.
 
 A host's own calls to a peer's internal listener — the arbiter waking,
 suspending or redeploying a machine another host holds — carry the fleet peer
@@ -980,6 +986,17 @@ webjs, …) → a running `<name>.pilotrun.app`, in ONE call.
 step out. The CLI, the MCP server, the dashboard and the GitHub push path
 all call it, so there is one copy of the rule and every caller sees it. A
 second copy in the CLI was invisible to three of those four.
+
+`POST /v1/plan` and `POST /v1/builds` also accept an `application/json` body
+of `{repo, ref}` in place of the tar. The host fetches and unpacks the ref
+through the fleet's GitHub App and plans it, using the same `Stage` and
+`ContextOf` in `internal/github` that a push runs, so **no client has to hold
+repository bytes** and there is one copy of the fetch, the root strip and the
+recipe placement. A fleet with no App answers 503 `not_configured` and names
+the tar. `GET /v1/services` derives each service's `depends_on` at read time,
+from the `<name>.internal` addresses in BOTH halves of its environment, and
+stores it nowhere: a name is not a value, and a `depends_on` column would be a
+column added to a populated table.
 
 Resolution order, first hit wins, per directory:
 1. A **compose file** at the root → the compose planner compiles it, with
