@@ -100,9 +100,9 @@ test('services are grouped by the app they resolve each other within', async () 
   assert.ok(!upToDocs.includes('>docs<'), 'and docs is not');
 });
 
-test('a service says how many replicas are up, not just how many exist', async () => {
+test('a service says how many instances are up, not just how many exist', async () => {
   const body = await overview();
-  assert.match(body, /1\/1 replicas healthy/);
+  assert.match(body, /1\/1 instances online/);
 });
 
 test('the sandbox chips count by resume tier, and the replica is not among them', async () => {
@@ -110,10 +110,12 @@ test('the sandbox chips count by resume tier, and the replica is not among them'
   const list = body.slice(body.indexOf('<machine-list'));
 
   // Three sandboxes: the service replica belongs to the Services section.
+  // Each chip carries its own count, so the distribution is legible before
+  // any filter is applied, and each is named in the user's words.
   assert.match(list, /All 3/);
-  assert.match(list, /running 1/);
-  assert.match(list, /warm 1/);
-  assert.match(list, /cold 1/);
+  assert.match(list, /Online 1/);
+  assert.match(list, /Sleeping \(resumes warm\) 1/);
+  assert.match(list, /Sleeping \(starts fresh\) 1/);
 });
 
 test('the four quota bars carry the org ceiling and the current use', async () => {

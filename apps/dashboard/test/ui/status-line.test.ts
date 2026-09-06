@@ -36,7 +36,7 @@ test('a resumed machine says so, and does not mention memory', async () => {
 
 test('a cold boot is always visibly different from a restore', async () => {
   const out = await render({ id: 'm', state: 'running', host_id: 'h1', last_start: 'cold_boot', last_start_at: AT }, [amdUp]);
-  assert.match(out, /Cold-booted/);
+  assert.match(out, /Started fresh/);
   assert.match(out, /memory not restored/);
   // Inside a tooltip, so the sentence explaining what survived is one hover
   // away rather than a paragraph in a table cell.
@@ -44,9 +44,10 @@ test('a cold boot is always visibly different from a restore', async () => {
   assert.match(out, /processes and everything in memory were lost/);
 });
 
-test('a plain boot is a boot', async () => {
+test('a plain boot says it started', async () => {
   const out = await render({ id: 'm', state: 'running', host_id: 'h1', last_start: 'boot', last_start_at: AT }, [amdUp]);
-  assert.match(out, /Booted/);
+  assert.match(out, /Started /);
+  assert.ok(!out.includes('Started fresh'), 'a boot from disk with no memory image to lose is not a cold boot');
 });
 
 test('a sleeping machine says when it will resume warm', async () => {
@@ -59,7 +60,7 @@ test('a sleeping machine says when it will resume warm', async () => {
 
 test('a sleeping machine whose vendor has no live host is labelled before it is woken', async () => {
   const out = await render({ id: 'm', state: 'suspended', host_id: 'h2', last_activity: AT }, [amdDown, intelUp]);
-  assert.match(out, /will cold-boot/);
+  assert.match(out, /starts fresh when woken/);
   // The vendor is named, because "no matching host" tells a reader nothing
   // they can act on and "no AMD host is live" tells them what to add.
   assert.match(out, /No AMD host is live/);

@@ -120,7 +120,7 @@ test('the pills name the failure in words, not only in colour', async () => {
     NOW,
   );
   const out = await renderToString(healthPills(health));
-  assert.match(out, /Replicas failing health checks/);
+  assert.match(out, /Instances failing health checks/);
 });
 
 test('the doctor card names the replicas, the checks and the next command', async () => {

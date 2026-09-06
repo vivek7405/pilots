@@ -17,7 +17,14 @@ import type { TestApp } from '../helpers/app.ts';
 let app: TestApp;
 let cookie = '';
 
-const PAGES = ['/machines', '/services', '/volumes', '/domains', '/usage', '/keys', '/org'] as const;
+const PAGES = ['/sandboxes', '/storage', '/domains', '/usage', '/keys', '/org'] as const;
+
+/** The three that moved. Each answers 308 to its new address, signed in or not. */
+const MOVED: [string, string][] = [
+  ['/machines', '/sandboxes'],
+  ['/services', '/'],
+  ['/volumes', '/storage'],
+];
 
 before(async () => {
   app = await bootApp();
@@ -60,7 +67,7 @@ test('the home page is the overview once signed in, and the sign-in offer before
   const signedIn = await app.handle(new Request('http://localhost/', asUser(cookie)));
   assert.equal(signedIn.status, 200, 'no redirect: this page is the overview');
   const body = await signedIn.text();
-  for (const section of ['Services', 'Sandboxes', 'Quota', 'Fleet']) {
+  for (const section of ['Services', 'Sandboxes', 'Limits', 'Capacity']) {
     assert.ok(body.includes(`>${section}<`), `the overview has a ${section} section`);
   }
 });
@@ -85,4 +92,15 @@ test('the keys page never renders a stored key value', async () => {
   assert.match(body, /page-check/, 'the key is listed');
   assert.equal(body.includes(key), false, 'but its plaintext is not on the page');
   assert.equal(body.includes('sha256:'), false, 'and neither is its hash');
+});
+
+// A URL segment is an address. `/machines` was in the nav, in the command
+// palette and in anyone's bookmarks, so it moves with a permanent redirect
+// rather than a 404, while `/machines/<id>` keeps its path entirely.
+test('the renamed list routes redirect permanently to their new address', async () => {
+  for (const [from, to] of MOVED) {
+    const res = await app.handle(new Request(`http://localhost${from}`, asUser(cookie)));
+    assert.equal(res.status, 308, `${from} redirects permanently`);
+    assert.equal(res.headers.get('location'), to, `${from} points at ${to}`);
+  }
 });

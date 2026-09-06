@@ -35,11 +35,10 @@ let org = '';
 /** The pages that render at least one seeded table row or one form control. */
 const PAGES = [
   '/',
-  '/machines',
-  '/services',
+  '/sandboxes',
   '/services/new',
   '/services/svc-1',
-  '/volumes',
+  '/storage',
   '/domains',
   '/usage',
   '/keys',
@@ -169,7 +168,7 @@ test('every token public/input.css maps into a utility reaches the served page',
   // comments truncates the block and everything after it silently disappears
   // from the page while the file still reads correctly. Asserting on the source
   // would pass through exactly that failure.
-  const body = await render('/machines');
+  const body = await render('/sandboxes');
 
   // Each `--color-x: var(--y)` in an @theme block promises that `--y` has a
   // value somewhere. The layout is the only place this app defines one.
@@ -191,7 +190,7 @@ test('the theme is a real choice, not a light-only page with dark tokens nobody 
 });
 
 test('the app chrome is a fixed header, one toast viewport and the flash reader', async () => {
-  const body = await render('/machines');
+  const body = await render('/sandboxes');
 
   // Fixed, never sticky: sticky flickers its background for one frame on iOS
   // WebKit during a client-router navigation, and every iOS browser is WebKit.
@@ -209,17 +208,19 @@ test('the app chrome is a fixed header, one toast viewport and the flash reader'
 });
 
 test('the identity menu holds the account chores and the nav holds the product', async () => {
-  const body = await render('/machines');
+  const body = await render('/sandboxes');
   const header = body.slice(body.indexOf('<header'), body.indexOf('</header>'));
 
   for (const label of ['Usage', 'Tokens', 'Team', 'Sign out']) {
     assert.ok(header.includes(`>${label}<`), `${label} is in the identity menu`);
   }
-  // The nav is the product's nouns. Volumes and Domains stay routable and are
-  // reached from a service, not from a flat list of seven equal items.
+  // The nav is the product's nouns, in the user's words. Storage and Domains
+  // stay routable and are reached from a service, not from a flat list of
+  // seven equal items.
   const nav = header.slice(header.indexOf('<app-nav'), header.indexOf('</app-nav>'));
-  assert.ok(nav.includes('>Overview<') && nav.includes('>Services<') && nav.includes('>Machines<'));
-  assert.ok(!nav.includes('>Volumes<') && !nav.includes('>Keys<'), 'the chores left the nav');
+  assert.ok(nav.includes('>Apps<') && nav.includes('>Sandboxes<'));
+  assert.ok(!nav.includes('>Storage<') && !nav.includes('>Keys<'), 'the chores left the nav');
+  assert.ok(!nav.includes('>Machines<'), 'and the engine word left with them');
 });
 
 test('no source file paints a raw Tailwind colour', () => {
@@ -260,13 +261,12 @@ test('no source file paints a raw Tailwind colour', () => {
  */
 const PAGE_FILES: Record<string, string> = {
   '/': 'app/page.ts',
-  '/machines': 'app/(app)/machines/page.ts',
+  '/sandboxes': 'app/(app)/sandboxes/page.ts',
   '/machines/m-1': 'app/(app)/machines/[id]/page.ts',
   '/machines/m-1/terminal': 'app/(app)/machines/[id]/terminal/page.ts',
-  '/services': 'app/(app)/services/page.ts',
   '/services/new': 'app/(app)/services/new/page.ts',
   '/services/svc-1': 'app/(app)/services/[id]/page.ts',
-  '/volumes': 'app/(app)/volumes/page.ts',
+  '/storage': 'app/(app)/storage/page.ts',
   '/domains': 'app/(app)/domains/page.ts',
   '/usage': 'app/(app)/usage/page.ts',
   '/keys': 'app/(app)/keys/page.ts',
@@ -360,4 +360,76 @@ test('every custom element a page renders is one that page imports', async () =>
     }
   }
   assert.ok(checked > 40, `expected these pages to render custom elements, found ${checked}`);
+});
+
+/**
+ * Four type steps, and no fifth.
+ *
+ * The app had 19 `text-sm` and 8 `text-xs` against one `text-3xl`, which is
+ * another way of saying nothing on a screen was more important than anything
+ * else. The scale is defined once in `public/input.css`, and a closed set is
+ * only closed if something refuses the next addition.
+ *
+ * `components/ui/` and `lib/utils/cn.ts` are exempt: they are the kit's files,
+ * they carry no product copy, and `cn.ts` holds the class-merge table, which
+ * has to name every size Tailwind ships in order to merge them.
+ */
+test('no page invents a fifth type step', () => {
+  const OTHER = /\btext-(xs|sm|base|lg|xl|2xl|3xl|4xl|5xl)\b/;
+  const offenders: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name);
+      const rel = full.slice(APP_DIR.length + 1).replaceAll('\\', '/');
+      if (entry.isDirectory()) {
+        if (rel === 'components/ui' || rel === 'components/terminal/vendor') continue;
+        walk(full);
+        continue;
+      }
+      if (!entry.name.endsWith('.ts') || rel === 'lib/utils/cn.ts') continue;
+      const source = readFileSync(full, 'utf8');
+      for (const line of source.split('\n')) {
+        const hit = OTHER.exec(line);
+        if (hit) offenders.push(`${rel}: ${hit[0]}`);
+      }
+    }
+  };
+  for (const root of ['app', 'modules', 'components', 'lib']) walk(join(APP_DIR, root));
+  assert.deepEqual(
+    offenders,
+    [],
+    `the scale is text-title, text-heading, text-body and text-meta:\n${offenders.join('\n')}`,
+  );
+});
+
+/**
+ * One primary action per screen.
+ *
+ * The accent is what tells a reader where to go next, and a screen with three
+ * of them has told them nothing. Counted on the SERVED bytes after the header,
+ * because the header carries its own controls on every page and they are not
+ * the page's action.
+ *
+ * Two things wear the accent without being a call to action, and both are
+ * excluded by their own ARIA rather than by a class allow-list:
+ *
+ *  - a toggle that is ON (`aria-pressed="true"`), such as the selected filter
+ *    chip. There the accent means "this is the state", not "do this".
+ *  - a form's own submit. A form whose submit is an outline button reads as
+ *    optional, and a page with three sections legitimately has three forms.
+ *    What this rule guards against is competing page-level calls to action.
+ */
+test('every screen has one primary action at most', async () => {
+  for (const path of PAGES) {
+    const body = await render(path);
+    const main = body.slice(body.indexOf('</header>'));
+    const outsideForms = main.replace(/<form\b[\s\S]*?<\/form\s*>/gi, ' ');
+    const accents = [...outsideForms.matchAll(/<[a-z-]+\b[^>]*bg-primary text-primary-foreground[^>]*>/gi)].filter(
+      (m) => !/aria-pressed="true"/.test(m[0]),
+    );
+    assert.ok(
+      accents.length <= 1,
+      `${path} has ${accents.length} primary actions; a screen may have one:\n${accents.map((m) => m[0].slice(0, 120)).join('\n')}`,
+    );
+  }
 });

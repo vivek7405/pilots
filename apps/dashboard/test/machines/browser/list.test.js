@@ -98,7 +98,7 @@ suite('machine-list', () => {
   test('renders the rows the server already sent, before any socket traffic', async () => {
     const el = await mount([machine('m1', 'running'), machine('m2', 'suspended')]);
     assert.deepEqual(rowIds(el), ['m1', 'm2']);
-    assert.includes(el.textContent, 'suspended');
+    assert.includes(el.textContent, 'Sleeping');
     el.remove();
   });
 
@@ -116,7 +116,7 @@ suite('machine-list', () => {
     await el.updateComplete;
 
     assert.deepEqual(rowIds(el), ['m1'], 'the removed machine is gone');
-    assert.includes(el.textContent, 'suspended', 'and the surviving row shows its new state');
+    assert.includes(el.textContent, 'Sleeping', 'and the surviving row shows its new state');
     assert.excludes(el.textContent, 'm2');
     el.remove();
   });
@@ -150,7 +150,7 @@ suite('machine-list', () => {
 
   test('an empty list says so rather than rendering an empty table', async () => {
     const el = await mount([]);
-    assert.includes(el.textContent, 'No machines yet');
+    assert.includes(el.textContent, 'Nothing here yet');
     assert.equal(el.querySelectorAll('tbody tr').length, 0);
     el.remove();
   });
@@ -201,20 +201,22 @@ suite('machine-list, chips filter and row navigation', () => {
   test('the chips count by resume tier, not by state', async () => {
     const el = await mountTiers();
     // Both sleeping machines are `suspended`; only one of them resumes warm.
+    // Each chip carries its own count, so the distribution is legible before
+    // any filter is applied.
     assert.equal(chip(el, 'All').textContent.trim(), 'All 3');
-    assert.equal(chip(el, 'running').textContent.trim(), 'running 1');
-    assert.equal(chip(el, 'warm').textContent.trim(), 'warm 1');
-    assert.equal(chip(el, 'cold').textContent.trim(), 'cold 1');
+    assert.equal(chip(el, 'Online').textContent.trim(), 'Online 1');
+    assert.equal(chip(el, 'Sleeping (resumes warm)').textContent.trim(), 'Sleeping (resumes warm) 1');
+    assert.equal(chip(el, 'Sleeping (starts fresh)').textContent.trim(), 'Sleeping (starts fresh) 1');
     el.remove();
   });
 
   test('clicking a chip filters the rows and marks itself pressed', async () => {
     const el = await mountTiers();
-    chip(el, 'cold').click();
+    chip(el, 'Sleeping (starts fresh)').click();
     await el.updateComplete;
 
     assert.deepEqual(rowIds(el), ['m-cold']);
-    assert.equal(chip(el, 'cold').getAttribute('aria-pressed'), 'true');
+    assert.equal(chip(el, 'Sleeping (starts fresh)').getAttribute('aria-pressed'), 'true');
     assert.equal(chip(el, 'All').getAttribute('aria-pressed'), 'false');
     el.remove();
   });
@@ -227,7 +229,7 @@ suite('machine-list, chips filter and row navigation', () => {
     await el.updateComplete;
 
     assert.deepEqual(rowIds(el), ['m-warm']);
-    assert.includes(el.textContent, '1 of 3 machines', 'and it says how many it is hiding');
+    assert.includes(el.textContent, '1 of 3', 'and it says how many it is hiding');
     el.remove();
   });
 
@@ -237,7 +239,7 @@ suite('machine-list, chips filter and row navigation', () => {
     const cold = [...el.querySelectorAll('tbody tr')].find((tr) => tr.textContent.includes('m-cold'));
 
     assert.includes(warm.textContent, 'resumes warm');
-    assert.includes(cold.textContent, 'will cold-boot');
+    assert.includes(cold.textContent, 'starts fresh when woken');
     el.remove();
   });
 
@@ -249,8 +251,8 @@ suite('machine-list, chips filter and row navigation', () => {
     // The click handler reads `data-href` off the closest ancestor that has
     // one, and bails when the click landed on a control. Both halves are
     // asserted through the DOM the handler itself queries.
-    const suspend = [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Suspend');
-    assert.ok(suspend, 'the row has a Suspend button inside the click target');
+    const suspend = [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Sleep');
+    assert.ok(suspend, 'the row has a Sleep button inside the click target');
     assert.ok(suspend.closest('a, button, input, select, textarea, label') === suspend,
       'so a click on it is recognised as a control and never navigates');
 
@@ -271,8 +273,8 @@ suite('machine-list, chips filter and row navigation', () => {
     });
     await el.updateComplete;
 
-    assert.equal(chip(el, 'other').textContent.trim(), 'other 1');
-    chip(el, 'other').click();
+    assert.equal(chip(el, 'Other').textContent.trim(), 'Other 1');
+    chip(el, 'Other').click();
     await el.updateComplete;
     assert.deepEqual(rowIds(el), ['m-stopped']);
     el.remove();
@@ -313,5 +315,48 @@ suite('machine-list, chips filter and row navigation', () => {
     await el.updateComplete;
     assert.includes(el.textContent, 'pilot machines create');
     el.remove();
+  });
+
+
+  // Destroy is irreversible and its control sits one row away from Sleep, so
+  // it goes through an alert dialog rather than a window.confirm. The dialog
+  // blocks Escape and demands an explicit choice, which is the whole point;
+  // what this pins is that nothing reaches the API until that choice is made.
+  test('removing a sandbox waits for the dialog action, and does nothing until then', async () => {
+    const realFetch = globalThis.fetch;
+    const calls = [];
+    globalThis.fetch = async (url, init) => {
+      calls.push(`${init?.method ?? 'GET'} ${url}`);
+      return new Response('', { status: 204 });
+    };
+    try {
+      const el = await mountTiers();
+      const row = el.querySelector('tbody tr');
+      const dialog = row.querySelector('ui-alert-dialog');
+      assert.ok(dialog, 'the row confirms through the alert dialog');
+
+      const trigger = dialog.querySelector('button[aria-label^="Remove"]');
+      assert.ok(trigger, 'and its trigger names what is being removed');
+      trigger.click();
+      await el.updateComplete;
+      assert.equal(calls.length, 0, 'opening the dialog destroys nothing');
+
+      // The name is in the title, so a reader is never asked to confirm a
+      // removal without being told which one.
+      assert.includes(dialog.textContent, 'Remove m-run?');
+      assert.includes(dialog.textContent, 'cannot be undone');
+
+      const action = dialog.querySelector('ui-alert-dialog-action');
+      assert.ok(action, 'and there is an explicit destructive action');
+      (action.querySelector('button') ?? action).click();
+      await el.updateComplete;
+      await new Promise((r) => setTimeout(r, 0));
+      assert.equal(calls.length, 1, 'only the action reaches the API');
+      assert.includes(calls[0], 'DELETE');
+      assert.includes(calls[0], '/api/machines/m-run');
+      el.remove();
+    } finally {
+      globalThis.fetch = realFetch;
+    }
   });
 });

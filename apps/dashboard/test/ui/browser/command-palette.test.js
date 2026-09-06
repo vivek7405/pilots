@@ -58,7 +58,7 @@ suite('command-palette', () => {
 
   test('it starts closed, showing the shortcut rather than hiding it', async () => {
     const el = await mount();
-    assert.ok(el.querySelector('button[aria-label="Search this organisation"]'), 'a trigger is rendered');
+    assert.ok(el.querySelector('button[aria-label="Search this team"]'), 'a trigger is rendered');
     assert.includes(el.textContent, 'Ctrl');
     assert.equal(el.querySelector('[role="dialog"]'), null, 'and no dialog yet');
   });
