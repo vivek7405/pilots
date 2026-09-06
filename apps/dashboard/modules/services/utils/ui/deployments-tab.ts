@@ -24,10 +24,12 @@ import { cardBody, dataTable, field, formRowClass, sectionEmpty, sectionGap, sec
 import { cn } from '#lib/utils/cn.ts';
 import { NOUN } from '#lib/vocabulary.ts';
 import '#components/copy-button.ts';
+import '#modules/services/components/build-log.ts';
 import '#components/relative-time.ts';
 
-export function deploymentsTab({ detail, back, errors }: TabProps): TemplateResult {
-  const { service, releases, replicas, previews, repo } = detail;
+export function deploymentsTab({ detail, back, errors, build }: TabProps): TemplateResult {
+  const { service, releases, replicas, previews, repo, builds } = detail;
+  const following = build ? builds.find((b) => b.jobId === build) : undefined;
   const current = releases.find((r) => r.id === service.release_id);
   const rollbackTarget = releases.filter((r) => r.healthy && r.id !== service.release_id)[0];
   const running = replicas.filter((m) => m.state === 'running').length;
@@ -35,6 +37,33 @@ export function deploymentsTab({ detail, back, errors }: TabProps): TemplateResu
 
   return html`
     <div class=${sectionGap()}>
+      ${following
+        ? html`<section>
+            ${sectionHeading(
+              'Building',
+              html`The image is being built from <span class="font-mono">${following.repo}@${following.ref}</span>. When it
+              succeeds it is deployed and this page moves to the new deployment.`,
+            )}
+            <build-log build-id=${following.jobId} service-id=${service.id} autodeploy></build-log>
+            <p class="m-0 mt-2 text-meta text-muted-foreground">
+              With scripting off, the last line of the raw log carries the image id; the Deploy form below takes it.
+            </p>
+          </section>`
+        : builds.length > 0
+          ? html`<section>
+              ${sectionHeading('Builds', 'Images built from this repository, newest first.')}
+              <ul class="m-0 grid list-none gap-1 p-0 text-meta">
+                ${builds.map(
+                  (b) => html`<li class="flex flex-wrap items-center gap-x-3">
+                    <span class="font-mono">${b.repo}@${b.ref}</span>
+                    <relative-time datetime=${String(Math.floor(b.createdAt.getTime() / 1000))}></relative-time>
+                    <a href=${`${back}&build=${encodeURIComponent(b.jobId)}`}>Follow</a>
+                    <a href=${`/api/builds/${encodeURIComponent(b.jobId)}/logs`}>View log</a>
+                  </li>`,
+                )}
+              </ul>
+            </section>`
+          : ''}
       <p class="m-0 flex flex-wrap items-center gap-x-3 text-meta text-muted-foreground">
         <span
           >${answering}/${service.replicas} ${service.replicas === 1 ? 'instance' : 'instances'} online${running <

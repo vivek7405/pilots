@@ -42,6 +42,8 @@ export interface PanelContext {
   errors?: PanelErrors;
   /** The instance the Terminal tab is on, from `?instance=`. */
   instance?: string;
+  /** The build the Deployments tab follows, from `?build=`. */
+  build?: string;
 }
 
 const TAB_RENDER: Record<Tab, (props: TabProps) => TemplateResult> = {
@@ -109,7 +111,7 @@ export function servicePanel(detail: ServiceDetail, tab: Tab, ctx: PanelContext 
       </nav>
 
       ${errors.error ? errorAlert(errors.error) : ''}
-      ${TAB_RENDER[tab]({ detail, back, errors, app: ctx.app, instance: ctx.instance })}
+      ${TAB_RENDER[tab]({ detail, back, errors, app: ctx.app, instance: ctx.instance, build: ctx.build })}
     </div>
   `;
 }

@@ -14,6 +14,7 @@ import { servicePanel } from '#modules/services/utils/ui/service-panel.ts';
 import { tabOf } from '#modules/services/utils/tabs.ts';
 import { serviceHealth } from '#modules/services/utils/health.ts';
 import { doctorCard } from '#modules/services/utils/ui/doctor-card.ts';
+import type { HealthGateDetails } from '@pilots/sdk';
 import type { Machine as BrowserMachine } from '#modules/machines/types.ts';
 
 export async function generateMetadata({ params }: PageProps) {
@@ -26,9 +27,11 @@ export default async function ServicePage({ params, searchParams, actionData }: 
   if (!detail) throw notFound();
   const { service, releases, replicas } = detail;
   const health = serviceHealth(service, replicas as BrowserMachine[], releases);
-  const errors = (actionData as { fieldErrors?: Record<string, string>; error?: string } | undefined) ?? {};
+  const errors =
+    (actionData as { fieldErrors?: Record<string, string>; error?: string; gate?: HealthGateDetails } | undefined) ?? {};
   const tab = tabOf(searchParams.tab);
   const instance = typeof searchParams.instance === 'string' ? searchParams.instance : undefined;
+  const build = typeof searchParams.build === 'string' ? searchParams.build : undefined;
 
   return html`
     ${doctorCard({
@@ -38,7 +41,9 @@ export default async function ServicePage({ params, searchParams, actionData }: 
       // The deploy action's own words when the failure is this fresh, rather
       // than a paraphrase of them.
       ...(errors.error ? { symptom: errors.error } : {}),
+      ...(errors.gate ? { gate: errors.gate } : {}),
+      ...(detail.builds[0] ? { buildLogHref: `/api/builds/${encodeURIComponent(detail.builds[0].jobId)}/logs` } : {}),
     })}
-    <div class="-mx-5 sm:-mx-6">${servicePanel(detail, tab, { errors, instance })}</div>
+    <div class="-mx-5 sm:-mx-6">${servicePanel(detail, tab, { errors, instance, build })}</div>
   `;
 }

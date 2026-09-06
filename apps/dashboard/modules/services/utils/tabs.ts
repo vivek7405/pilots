@@ -38,4 +38,6 @@ export interface TabProps {
   app?: string;
   /** The instance the Terminal tab is on, from `?instance=`. */
   instance?: string;
+  /** The build the Deployments tab follows, from `?build=`. */
+  build?: string;
 }

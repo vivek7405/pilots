@@ -21,8 +21,9 @@ import { requireOrg, signedOut } from '#modules/auth/session.server.ts';
 import type { SignedOut } from '#modules/auth/session.server.ts';
 import { githubAppConfigured } from '#modules/github/app-jwt.server.ts';
 import { installUrl } from '#modules/github/installations.server.ts';
-import type { RepoConnection, ServiceVariable } from '#db/schema.server.ts';
-import { serviceVariables } from '#db/schema.server.ts';
+import type { Build, RepoConnection, ServiceVariable } from '#db/schema.server.ts';
+import { builds, serviceVariables } from '#db/schema.server.ts';
+import { desc } from 'drizzle-orm';
 import type { DomainResponse, Host, Machine, Release, Service } from '@pilots/sdk';
 
 export interface ServiceDetail {
@@ -34,6 +35,8 @@ export interface ServiceDetail {
   replicas: Machine[];
   /** Every host, so a replica's resume tier can be named without a second read. */
   hosts: Host[];
+  /** Builds started from here, newest first, for the Deployments tab and the doctor card. */
+  builds: Build[];
   /** The names of variables set from here, for the Variables tab. Never values. */
   variables: ServiceVariable[];
   /** The custom domains pointing at this service, for its Settings tab. */
@@ -83,8 +86,16 @@ export async function getService(input: { id: string }): Promise<ServiceDetail |
     .where(and(eq(serviceVariables.serviceId, service.id), eq(serviceVariables.orgId, ctx.org.id)))
     .all();
 
+  const buildRows = await db
+    .select()
+    .from(builds)
+    .where(and(eq(builds.serviceId, service.id), eq(builds.orgId, ctx.org.id)))
+    .orderBy(desc(builds.createdAt))
+    .all();
+
   return {
     variables,
+    builds: buildRows,
     service,
     releases,
     previews,

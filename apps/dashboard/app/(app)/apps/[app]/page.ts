@@ -53,6 +53,7 @@ export default async function AppPage({ params, searchParams, actionData }: Page
   const detail = selected ? orUnauthorized(await getService({ id: selected })) : null;
   const errors = (actionData as { fieldErrors?: Record<string, string>; error?: string } | undefined) ?? {};
   const instance = typeof searchParams.instance === 'string' ? searchParams.instance : undefined;
+  const build = typeof searchParams.build === 'string' ? searchParams.build : undefined;
 
   return html`
     <div class="flex flex-wrap items-center gap-3">
@@ -96,7 +97,7 @@ export default async function AppPage({ params, searchParams, actionData }: Page
 
     ${detail
       ? html`<slide-over back=${`/apps/${encodeURIComponent(app)}`}>
-          ${servicePanel(detail, tab, { app, errors, instance })}
+          ${servicePanel(detail, tab, { app, errors, instance, build })}
         </slide-over>`
       : ''}
   `;

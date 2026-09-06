@@ -11,6 +11,7 @@ import { requireOrg } from '#modules/auth/session.server.ts';
 import { fleet } from '#modules/fleet/client.server.ts';
 import { assertOwned } from '#modules/fleet/org-filter.server.ts';
 import { backTo } from '#modules/services/utils/back.ts';
+import { HealthGateError } from '@pilots/sdk';
 import type { DeployRequest } from '@pilots/sdk';
 
 export async function deployService(formData: FormData) {
@@ -31,6 +32,12 @@ export async function deployService(formData: FormData) {
     }
     await fleet.services.deploy(id, body);
   } catch (err) {
+    // The one refusal a person can act on: the deploy ran and the new
+    // instance never answered its health check. Keep the structure so the
+    // doctor card can name the instance and quote its last answer.
+    if (err instanceof HealthGateError) {
+      return { success: false, status: 422, error: err.message, gate: err.details, next: err.next };
+    }
     return { success: false, error: `Deploy refused: ${(err as Error).message}`, status: 502 };
   }
   return { success: true, redirect: backTo(formData, `/services/${id}`, 'deployed') };

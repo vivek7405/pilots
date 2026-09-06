@@ -44,6 +44,15 @@ export interface FleetData {
   apiKeyRows: { hash: string; org_id: string; scopes: string[]; revoked_at?: string }[];
   execFrames: FakeExecFrame[];
   logLines: string[];
+  /** What `planRepo` answers with, or the error it throws. */
+  plan: unknown;
+  /** When set, each `planRepo` call shifts one answer off this first. */
+  planQueue: unknown[];
+  planError: Error | null;
+  /** Thrown by `services.deploy` when set, so a 422 path can be driven. */
+  deployError: Error | null;
+  /** What `builds.logs` yields, one object per line. */
+  buildLines: unknown[];
   /** Records what `execStream` was asked for, so a test can assert stdin=false. */
   lastExec: { id: string; argv: string[]; opts: Record<string, unknown> } | null;
   /** Bytes a caller wrote to the stream's stdin, newest last. */
@@ -92,6 +101,11 @@ export function makeFakeFleet(): FakeFleet {
     execFrames: [],
     logLines: [],
     lastExec: null,
+    plan: null,
+    planQueue: [],
+    planError: null,
+    deployError: null,
+    buildLines: [],
     execStdin: [],
     execResizes: [],
     execHold: false,
@@ -99,6 +113,11 @@ export function makeFakeFleet(): FakeFleet {
 
   const reset = () => {
     calls.length = 0;
+    state.plan = null;
+    state.planQueue.length = 0;
+    state.planError = null;
+    state.deployError = null;
+    state.buildLines.length = 0;
     state.machines.length = 0;
     state.services.length = 0;
     state.volumes.length = 0;
@@ -124,6 +143,36 @@ export function makeFakeFleet(): FakeFleet {
     calls,
     data: state,
     reset,
+
+    /** `fleetAs(org)`: records the org and returns this same fake. */
+    as: (org: string) => {
+      record('as', org);
+      return fleet;
+    },
+    planRepo: async (ref: unknown, opts: unknown) => {
+      record('planRepo', ref, opts);
+      if (state.planError) throw state.planError;
+      if (state.planQueue.length > 0) return state.planQueue.shift();
+      if (!state.plan) throw new Error('fake fleet: set data.plan first');
+      return state.plan;
+    },
+    builds: {
+      createFromRepo: async (ref: unknown, opts: unknown) => {
+        record('builds.createFromRepo', ref, opts);
+        return { buildId: 'bld-fake', close: async () => {}, lines: [] };
+      },
+      logs: async (id: string, opts: unknown) => {
+        record('builds.logs', id, opts);
+        const lines = [...state.buildLines];
+        return {
+          buildId: id,
+          close: async () => {},
+          async *[Symbol.asyncIterator]() {
+            for (const l of lines) yield l;
+          },
+        };
+      },
+    },
 
     // `Http` is reached directly for the two list calls that need `?org=`; see
     // modules/fleet/client.server.ts for why.
@@ -221,6 +270,7 @@ export function makeFakeFleet(): FakeFleet {
       },
       deploy: async (id: string, req: unknown) => {
         record('services.deploy', id, req);
+        if (state.deployError) throw state.deployError;
         return (state.releases[id] ?? [])[0];
       },
       rollback: async (id: string) => {

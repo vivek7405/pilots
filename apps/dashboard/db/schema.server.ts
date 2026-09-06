@@ -147,8 +147,30 @@ export const serviceVariables = table(
   (t) => [unique('service_variables_service_id_name_unique').on(t.serviceId, t.name), index(t.serviceId)],
 );
 
+
+/**
+ * A build started from the dashboard: which job, for which service, from
+ * which repository and ref. Logs are keyed by job id, and a release carries
+ * only the image id, so this is the one place the two are joined.
+ */
+export const builds = table(
+  'builds',
+  {
+    id: uuidPk(),
+    orgId: text().notNull(),
+    serviceId: text().notNull(),
+    jobId: text().notNull().unique(),
+    /** `owner/name`. */
+    repo: text().notNull(),
+    ref: text().notNull(),
+    startedBy: integer().notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [index(t.serviceId), index(t.orgId)],
+);
+
 export const relations = defineRelations(
-  { users, orgs, memberships, apiKeys, usageSamples, repoConnections, serviceVariables },
+  { users, orgs, memberships, apiKeys, usageSamples, repoConnections, serviceVariables, builds },
   (r) => ({
     users: { memberships: r.many.memberships() },
     orgs: {
@@ -167,6 +189,7 @@ export const relations = defineRelations(
     apiKeys: { org: r.one.orgs({ from: r.apiKeys.orgId, to: r.orgs.id }) },
     repoConnections: { org: r.one.orgs({ from: r.repoConnections.orgId, to: r.orgs.id }) },
     serviceVariables: { org: r.one.orgs({ from: r.serviceVariables.orgId, to: r.orgs.id }) },
+    builds: { org: r.one.orgs({ from: r.builds.orgId, to: r.orgs.id }) },
   }),
 );
 
@@ -178,3 +201,4 @@ export type ApiKey = typeof apiKeys.$inferSelect;
 export type UsageSample = typeof usageSamples.$inferSelect;
 export type RepoConnection = typeof repoConnections.$inferSelect;
 export type ServiceVariable = typeof serviceVariables.$inferSelect;
+export type Build = typeof builds.$inferSelect;
