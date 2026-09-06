@@ -646,16 +646,15 @@ func reconcile(cfg *config.Config, mgr *machines.Manager, devices *nbd.DevicePoo
 	}
 
 	var adopted int
+	var dead []fc.State
 	for _, r := range found {
 		if !r.Alive {
 			// The process is gone. A zombie, a Firecracker that died while
 			// hostd was down, or a pid recycled to something else all read the
-			// same here (LiveProcess checks comm and a non-zombie state). If
-			// the row still says this host runs it, that is an exit nobody
-			// handled: react as onExit would, with no process to wait for.
-			// Otherwise the breadcrumbs are simply stale.
-			mgr.ExitedWhileDown(context.Background(), r.State)
-			_ = fc.ClearBreadcrumbs(filepath.Join(cfg.MachineStateRoot(), r.State.MachineID))
+			// same here (LiveProcess checks comm and a non-zombie state).
+			// Collected rather than handled here, for the reason the second
+			// loop gives.
+			dead = append(dead, r.State)
 			continue
 		}
 		m := fc.Adopted(r.State, cfg.MachineStateRoot(), devices)
@@ -664,6 +663,21 @@ func reconcile(cfg *config.Config, mgr *machines.Manager, devices *nbd.DevicePoo
 			continue
 		}
 		adopted++
+	}
+
+	// The dead ones only AFTER every live machine has reserved its slot and
+	// its NBD device. ExitedWhileDown can bring a machine back in place, and a
+	// restart run inside the loop above would take its netns slot from a pool
+	// that does not yet know about the machines further down the list -- so it
+	// can be handed an index a live guest is still serving in, and that
+	// machine's own Adopt then fails outright with "slot already held".
+	//
+	// If the row still says this host runs it, that is an exit nobody handled:
+	// react as onExit would, with no process to wait for. Otherwise the
+	// breadcrumbs are simply stale.
+	for _, st := range dead {
+		mgr.ExitedWhileDown(context.Background(), st)
+		_ = fc.ClearBreadcrumbs(filepath.Join(cfg.MachineStateRoot(), st.MachineID))
 	}
 	return adopted
 }
