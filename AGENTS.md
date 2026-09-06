@@ -69,7 +69,8 @@ Master plan and phase breakdown: issues #1–#7.
 
 ```
 apps/hostd/        Go — the entire per-host data plane (own go.mod)
-apps/dashboard/    webjs — accounts, API keys, usage, GitHub App surface (Phase 6d)
+apps/dashboard/    webjs — the product UI: overview, services, machines, terminal,
+                   usage, tokens, team, GitHub App surface
 packages/cli/      `pilot` CLI (Phase 6)
 sdks/js, sdks/go   typed clients; each carries a drift test against
                    apps/hostd/internal/api

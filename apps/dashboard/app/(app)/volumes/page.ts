@@ -4,6 +4,7 @@ import type { Volume } from '@pilots/sdk';
 import { orUnauthorized, requireOrg } from '#modules/auth/session.server.ts';
 import { listVolumes } from '#modules/volumes/queries/list-volumes.server.ts';
 import { dataTable, emptyState, lede, pageHeading } from '#lib/utils/ui.ts';
+import '#components/copy-button.ts';
 
 export const metadata = { title: 'Volumes' };
 
@@ -14,7 +15,9 @@ export default async function VolumesPage() {
   return html`
     ${pageHeading('Volumes')} ${lede('Created by a deploy from the volumes a compose file names.')}
     ${volumes.length === 0
-      ? emptyState('No volumes.')
+      ? emptyState('No volumes yet. A volume is declared in the compose file and created with the service that mounts it.', {
+          command: 'pilot deploy',
+        })
       : dataTable<Volume>({
           caption: 'Volumes in this organisation',
           rows: volumes,

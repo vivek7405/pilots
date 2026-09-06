@@ -1,8 +1,25 @@
 # apps/dashboard
 
-The pilots dashboard: accounts, orgs, API keys, usage, and the GitHub App's
-product half. A [webjs](https://webjs.dev) app, deployed on `pilots.run` by the
-platform it administers.
+The pilots dashboard: the product's own UI, plus accounts, orgs, tokens, usage
+and the GitHub App's product half. A [webjs](https://webjs.dev) app, deployed
+on `pilots.run` by the platform it administers.
+
+## The screens
+
+| Route | What it is |
+|---|---|
+| `/` | the overview: services grouped by the app they resolve each other within, the sandboxes that belong to no service, four quota bars, the fleet |
+| `/services` | every service with whether it is up, not just how many replicas it declares |
+| `/services/[id]` | one service, its releases, its repo connection, and a diagnosis card when it is not serving |
+| `/services/new` | how a service gets made, and why the browser cannot make one yet |
+| `/machines` | every machine, filtered by resume tier: a suspended machine says whether waking it costs its memory |
+| `/machines/[id]` | one machine's facts, its console and its checkpoints |
+| `/machines/[id]/terminal` | a real shell on a pseudo-terminal, where `tmux` and `vim` work |
+| `/volumes`, `/domains` | attributes of a service, reached from it |
+| `/usage`, `/keys`, `/org` | the account chores, reached from the identity menu |
+
+`Ctrl K` opens a palette that reaches any of them, or any service or machine,
+by name.
 
 ## What it is, and what it is not
 
@@ -142,6 +159,20 @@ registry lacks. Re-running `webjsdev ui add checkbox` overwrites both; run
 The stylesheet is compiled, not generated at runtime. `webjs dev` and
 `webjs start` rebuild it, and `npm run css:build` does it by hand.
 
+Beside the kit, `components/` holds the app's own elements. Most are one small
+behaviour each: `<relative-time>` turns a timestamp into an age and keeps the
+absolute one in its `title`, `<copy-button>` puts an id on the clipboard,
+`<list-filter>` hides rows on a keystroke and takes focus on `/`,
+`<link-rows>` makes a whole table row navigate, `<flash-toast>` turns `?ok=`
+on a redirect into one toast, `<command-palette>` is `Ctrl K`, and
+`<app-nav>` re-derives the active link because the layout survives a soft
+navigation. `<machine-terminal>` is the large one; see
+`components/terminal/vendor/README.md` for the one vendored browser module in
+this app and why it is here.
+
+`apps/dashboard/AGENTS.md` has a Conventions section recording the decisions
+these encode, each with the defect that produced it.
+
 ## Tests
 
 ```sh
@@ -162,7 +193,13 @@ server layer:
   computed colours in both themes, which needs the compiled stylesheet parsed.
 - `test/ui/browser/` runs axe over the served pages and the live components, in
   both themes. Contrast is computed colour, so this is the only layer that can
-  see it.
+  see it. It also drives the keyboard surfaces: the palette's `Ctrl K`, the
+  filter's `/`, and the nav's re-derivation on a router event, none of which
+  leave a trace in the served bytes.
+- `test/machines/browser/terminal.test.js` mounts the real emulator, which
+  dynamically imports 345 KB, measures its container to fit rows and columns,
+  and sends that size in its first message. A server test sees an empty custom
+  element.
 
 Run `npm run css:build` before the browser layer if the stylesheet is stale:
 two of those files fetch `/public/tailwind.css` and assert it is served.

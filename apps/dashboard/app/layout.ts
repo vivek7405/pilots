@@ -28,6 +28,7 @@ import '#components/theme-toggle.ts';
 import '#components/app-nav.ts';
 import '#components/org-switcher.ts';
 import '#components/flash-toast.ts';
+import '#components/command-palette.ts';
 import '#components/ui/dropdown-menu.ts';
 import '#components/ui/sonner.ts';
 
@@ -208,6 +209,7 @@ export default async function RootLayout({ children, url }: LayoutProps) {
               <app-nav current=${path} class="min-w-0 flex-1"></app-nav>
 
               <div class="ml-auto flex items-center gap-2 text-sm">
+                <command-palette></command-palette>
                 <theme-toggle></theme-toggle>
 
                 <org-switcher>

@@ -17,6 +17,7 @@ import { dataTable, emptyState, footnote, pageHeading, sectionHeading } from '#l
 import { cn } from '#lib/utils/cn.ts';
 import '#modules/machines/components/log-pane.ts';
 import '#modules/machines/components/exec-console.ts';
+import '#components/copy-button.ts';
 
 interface Checkpoint {
   id: string;
@@ -68,7 +69,9 @@ export default async function MachinePage({ params }: PageProps) {
     <section class="mt-8">
       ${sectionHeading('Checkpoints')}
       ${checkpoints.length === 0
-        ? emptyState('None yet. A checkpoint is copy-on-write metadata, so taking one costs no data copy.')
+        ? emptyState('None yet. A checkpoint is copy-on-write metadata, so taking one costs no data copy.', {
+            command: `pilot machines checkpoint ${machine.name || machine.id}`,
+          })
         : dataTable<Checkpoint>({
             caption: 'Checkpoints of this machine',
             rows: checkpoints,

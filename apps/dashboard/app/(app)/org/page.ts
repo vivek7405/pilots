@@ -18,6 +18,7 @@ import type { MemberRow } from '#modules/orgs/queries/list-members.server.ts';
 import { inviteMember } from '#modules/orgs/actions/invite-member.server.ts';
 import { removeMember } from '#modules/orgs/actions/remove-member.server.ts';
 import { badgeClass } from '#components/ui/badge.ts';
+import '#components/relative-time.ts';
 import { buttonClass } from '#components/ui/button.ts';
 import { inputClass } from '#components/ui/input.ts';
 import {
@@ -43,6 +44,7 @@ export default async function OrgPage({ actionData }: PageProps) {
 
   return html`
     ${pageHeading(ctx.org.name)}
+    ${ctx.org.personal ? '' : html`<span class="sr-only">Team</span>`}
     ${lede(html`${ctx.org.personal ? 'Your personal org.' : 'A shared org.'} You are
     ${ctx.role === 'owner' ? 'an owner' : 'a member'}.`)}
     ${result.error ? errorAlert(result.error) : ''}
@@ -65,9 +67,17 @@ export default async function OrgPage({ actionData }: PageProps) {
               html`<span class=${badgeClass({ variant: m.role === 'owner' ? 'default' : 'secondary' })}>${m.role}</span>`,
           },
           {
+            // One column with one value today, and that is the point: this app
+            // has exactly one way in, and a reader should not have to guess
+            // whether some other one exists.
+            header: 'Auth',
+            cellClass: 'text-muted-foreground',
+            cell: () => 'GitHub',
+          },
+          {
             header: 'Since',
-            cellClass: 'text-muted-foreground tabular-nums',
-            cell: (m) => m.since.toISOString().slice(0, 10),
+            cellClass: 'text-muted-foreground',
+            cell: (m) => html`<relative-time datetime=${m.since.toISOString()}></relative-time>`,
           },
           {
             header: 'Actions',

@@ -261,7 +261,7 @@ export default async function ServicePage({ params, actionData }: PageProps) {
     <section>
       ${sectionHeading('Pull-request previews')}
       ${previews.length === 0
-        ? emptyState('None open.')
+        ? emptyState('None open. A pull request against the connected branch gets its own machine with its own URL.')
         : dataTable<Machine>({
             caption: 'Machines serving open pull-request previews',
             rows: previews,

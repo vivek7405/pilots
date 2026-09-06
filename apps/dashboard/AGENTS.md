@@ -293,3 +293,22 @@ custom property: it hands back the declaration's own text, which in this app is
 `light-dark(#ffffff, #16181d)`. Any library that takes a concrete colour needs
 the value applied to a real property on a throwaway element and read back from
 there. `machine-terminal.ts` has the pattern.
+
+**A palette shortcut takes a modifier; a filter shortcut checks the target.**
+`Ctrl K` and `Cmd K` open the command palette and a bare `k` does not, or every
+text field in the app becomes unusable. `/` focuses a list filter, and the
+handler bails when the event target is an input, a textarea, a select or
+anything contentEditable, or every input in the app drops a character. Both
+listeners are on `document`, which is the case the skill sanctions: a global
+shortcut has no element to dispatch from, and neither handler reads markup
+another component rendered.
+
+**No control for something the engine does not enforce.** Two absences in this
+app are deliberate and both are recorded where they would otherwise be
+questioned. `/services/new` has no create button, because `POST /v1/services`
+would accept a service with no release and hostd serves no `DELETE` for one, so
+the row could never be removed. `/keys` has no expiry, because nothing in
+hostd's schema or its verification path reads a date, so an expiry stored here
+would be a date nobody enforces and the token would go on working past it. A
+security control that does not control anything is worse than an absent one.
+Before adding a field, check that something reads it.

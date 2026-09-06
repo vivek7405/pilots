@@ -1,9 +1,15 @@
 /**
- * API keys.
+ * Tokens: what the CLI and the SDKs authenticate with.
  *
  * The banner at the top renders the plaintext from `actionData`, which exists
  * for exactly one render. There is no way to see it again because nothing
  * stored it: the row holds the sha256 the fleet returned.
+ *
+ * There is no expiry control, deliberately. hostd has no notion of an expiring
+ * key -- nothing in its schema or its verification path reads a date -- so a
+ * date stored here would be a date nobody enforces and the token would go on
+ * working past it. A security control that does not control anything is worse
+ * than an absent one.
  */
 import { html } from '@webjsdev/core';
 import type { PageProps } from '@webjsdev/core';
@@ -21,19 +27,68 @@ import { inputClass } from '#components/ui/input.ts';
 import { labelClass } from '#components/ui/label.ts';
 import { dataTable, emptyState, errorAlert, field, footnote, formRowClass, lede, pageHeading } from '#lib/utils/ui.ts';
 import { cn } from '#lib/utils/cn.ts';
+import '#components/copy-button.ts';
+import '#components/relative-time.ts';
 
-export const metadata = { title: 'Keys' };
+export const metadata = { title: 'Tokens' };
 
 export default async function KeysPage({ actionData }: PageProps) {
   const ctx = (await requireOrg())!;
   const keys = orUnauthorized(await listKeys());
+  // A revoked token is a record, not a listing: it collapses out of the way so
+  // an org that rotates often still has a readable page.
+  const live = keys.filter((k) => !k.revokedAt);
+  const revoked = keys.filter((k) => k.revokedAt);
+
+  /**
+   * The prefix is masked because it is ALL there is: the plaintext left the
+   * process once and only its hash was stored, so a last-four is impossible.
+   * The prefix is enough to tell two tokens apart and not enough to use.
+   */
+  const tokenTable = (caption: string, rows: KeyRow[]) =>
+    dataTable<KeyRow>({
+      caption,
+      rows,
+      rowClass: (k) => (k.revokedAt ? 'opacity-60' : ''),
+      columns: [
+        { header: 'Name', cell: (k) => k.name },
+        {
+          header: 'Token',
+          cellClass: 'font-mono',
+          cell: (k) => html`<span class="flex items-center gap-1">${k.prefix}<span aria-hidden="true">…</span>
+            <span class="sr-only">, the rest is not stored</span>
+            <copy-button value=${k.prefix} label="token prefix"></copy-button>
+          </span>`,
+        },
+        { header: 'Scopes', cellClass: 'font-mono', cell: (k) => k.scopes.join(' ') },
+        {
+          header: 'Created',
+          cellClass: 'text-muted-foreground',
+          cell: (k) => html`<relative-time datetime=${k.createdAt.toISOString()}></relative-time>`,
+        },
+        {
+          header: 'Actions',
+          headerHidden: true,
+          align: 'right',
+          cell: (k) =>
+            k.revokedAt
+              ? html`<span class=${badgeClass({ variant: 'outline' })}>revoked</span>`
+              : html`
+                  <form action=${revokeKey}>
+                    <input type="hidden" name="id" value=${k.id}>
+                    <button type="submit" class=${buttonClass({ variant: 'outline', size: 'sm' })}>Revoke</button>
+                  </form>
+                `,
+        },
+      ],
+    });
   const result =
     (actionData as
       | { data?: { key: string; name: string }; error?: string; fieldErrors?: Record<string, string> }
       | undefined) ?? {};
 
   return html`
-    ${pageHeading('API keys')}
+    ${pageHeading('Tokens')}
     ${lede('Minted here, verified on every host from its own replica. This dashboard is in no request path.')}
 
     ${result.data
@@ -44,8 +99,17 @@ export default async function KeysPage({ actionData }: PageProps) {
             </svg>
             <div data-slot="alert-title" class=${alertTitleClass()}>Copy this key now. It is shown once.</div>
             <div data-slot="alert-description" class=${alertDescriptionClass()}>
-              <code class="block w-full break-all font-mono text-sm text-foreground">${result.data.key}</code>
+              <span class="flex w-full items-start gap-1">
+                <code class="min-w-0 flex-1 break-all font-mono text-sm text-foreground">${result.data.key}</code>
+                <copy-button value=${result.data.key} label="token"></copy-button>
+              </span>
               <span class="text-xs">Only its hash was stored, so it cannot be shown again.</span>
+              <span class="flex w-full items-start gap-1">
+                <code class="min-w-0 flex-1 break-all font-mono text-xs"
+                  >PILOT_API_KEY=${result.data.key}</code
+                >
+                <copy-button value=${`PILOT_API_KEY=${result.data.key}`} label="environment line"></copy-button>
+              </span>
             </div>
           </div>
         `
@@ -96,38 +160,22 @@ export default async function KeysPage({ actionData }: PageProps) {
     </form>
 
     ${keys.length === 0
-      ? emptyState('No keys yet.')
+      ? emptyState('No tokens yet. One is what the CLI and the SDKs authenticate with.', {
+          command: 'pilot login --token <token>',
+        })
       : html`
-          ${dataTable<KeyRow>({
-            caption: 'API keys for this organisation',
-            rows: keys,
-            rowClass: (k) => (k.revokedAt ? 'opacity-50' : ''),
-            columns: [
-              { header: 'Name', cell: (k) => k.name },
-              { header: 'Prefix', cellClass: 'font-mono', cell: (k) => html`${k.prefix}…` },
-              { header: 'Scopes', cellClass: 'font-mono', cell: (k) => k.scopes.join(' ') },
-              {
-                header: 'Created',
-                cellClass: 'text-muted-foreground tabular-nums',
-                cell: (k) => k.createdAt.toISOString().slice(0, 10),
-              },
-              {
-                header: 'Actions',
-                headerHidden: true,
-                align: 'right',
-                cell: (k) =>
-                  k.revokedAt
-                    ? html`<span class=${badgeClass({ variant: 'outline' })}>revoked</span>`
-                    : html`
-                        <form action=${revokeKey}>
-                          <input type="hidden" name="id" value=${k.id}>
-                          <button type="submit" class=${buttonClass({ variant: 'outline', size: 'sm' })}>Revoke</button>
-                        </form>
-                      `,
-              },
-            ],
-          })}
-          ${footnote('A revoked key keeps its row. Deleting it would erase the record that it ever existed.')}
+          ${tokenTable('Tokens for this organisation', live)}
+          ${revoked.length > 0
+            ? html`
+                <details class="mt-6">
+                  <summary class="cursor-pointer text-sm text-muted-foreground">
+                    ${revoked.length} revoked ${revoked.length === 1 ? 'token' : 'tokens'}
+                  </summary>
+                  <div class="mt-3">${tokenTable('Revoked tokens for this organisation', revoked)}</div>
+                </details>
+              `
+            : ''}
+          ${footnote('A revoked token keeps its row. Deleting it would erase the record that it ever existed.')}
         `}
   `;
 }
