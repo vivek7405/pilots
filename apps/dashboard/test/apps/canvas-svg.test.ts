@@ -56,7 +56,7 @@ test('the thumbnail draws one card per service in the same viewBox and says what
   assert.match(out, /height="96"/);
   assert.match(out, /role="img"/);
   assert.match(out, /aria-label="3 services, 2 connections"/);
-  assert.match(out, /class="fill-card stroke-border"/);
+  assert.match(out, /class="fill-card stroke-border-strong"/);
   // Each rectangle is where the canvas puts that card.
   const db = chain.placed.find((p) => p.id === 'svc-db')!;
   assert.match(out, new RegExp(`<rect x="${db.x}" y="${db.y}" width="${CARD.w}" height="${CARD.h}"`));

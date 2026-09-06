@@ -35,6 +35,8 @@ let org = '';
 /** The pages that render at least one seeded table row or one form control. */
 const PAGES = [
   '/',
+  '/apps/gallery',
+  '/apps/gallery?service=svc-1&tab=settings',
   '/machines',
   '/services',
   '/services/new',
@@ -67,6 +69,7 @@ before(async () => {
     id: 'svc-1',
     name: 'web',
     org_id: org,
+    app: 'gallery',
     replicas: 2,
     url: 'https://web.pilotrun.app',
     release_id: 'rel-2',
@@ -109,8 +112,13 @@ after(() => {
   delete (globalThis as { __pilots_fleet?: unknown }).__pilots_fleet;
 });
 
+/** The usage window every page tolerates, joined the way the path allows. */
+function withWindow(path: string): string {
+  return `${path}${path.includes('?') ? '&' : '?'}since=2026-01-01&until=2026-01-03`;
+}
+
 async function render(path: string): Promise<string> {
-  const res = await app.handle(new Request(`http://localhost${path}?since=2026-01-01&until=2026-01-03`, asUser(cookie)));
+  const res = await app.handle(new Request(`http://localhost${withWindow(path)}`, asUser(cookie)));
   assert.equal(res.status, 200, `${path} renders`);
   return res.text();
 }
@@ -260,6 +268,10 @@ test('no source file paints a raw Tailwind colour', () => {
  */
 const PAGE_FILES: Record<string, string> = {
   '/': 'app/page.ts',
+  '/apps/gallery': 'app/(app)/apps/[app]/page.ts',
+  '/apps/gallery?service=svc-1&tab=settings': 'app/(app)/apps/[app]/page.ts',
+  '/apps/gallery?service=svc-1&tab=terminal': 'app/(app)/apps/[app]/page.ts',
+  '/services/svc-1?tab=terminal': 'app/(app)/services/[id]/page.ts',
   '/machines': 'app/(app)/machines/page.ts',
   '/machines/m-1': 'app/(app)/machines/[id]/page.ts',
   '/machines/m-1/terminal': 'app/(app)/machines/[id]/terminal/page.ts',
@@ -349,8 +361,8 @@ test('every custom element a page renders is one that page imports', async () =>
     ] as const) {
       // A seeded id under an empty org is a 404, which is correct and not
       // what this test is about.
-      if (label === 'empty' && /\/(svc-1|m-1)/.test(path)) continue;
-      const res = await app.handle(new Request(`http://localhost${path}?since=2026-01-01&until=2026-01-03`, asUser(session)));
+      if (label === 'empty' && /\/(svc-1|m-1)|\/apps\//.test(path)) continue;
+      const res = await app.handle(new Request(`http://localhost${withWindow(path)}`, asUser(session)));
       assert.equal(res.status, 200, `${path} renders for the ${label} org`);
 
       for (const tag of elementsIn(await res.text())) {

@@ -74,7 +74,7 @@ export function thumbnailSvg(layout: AppLayout): TemplateResult {
     height="96"
     role="img"
     aria-label=${label}
-    class="mx-auto block stroke-border-strong"
+    class="mx-auto block stroke-muted-foreground"
   >
     ${layout.edges.map((e) => {
       const from = at.get(e.from);
@@ -91,7 +91,7 @@ export function thumbnailSvg(layout: AppLayout): TemplateResult {
         : '';
     })}
     ${layout.placed.map(
-      (p) => html`<rect x=${p.x} y=${p.y} width=${CARD.w} height=${CARD.h} rx="16" stroke-width="4" class="fill-card stroke-border"></rect>`,
+      (p) => html`<rect x=${p.x} y=${p.y} width=${CARD.w} height=${CARD.h} rx="16" stroke-width="6" class="fill-card stroke-border-strong"></rect>`,
     )}
   </svg>`;
 }

@@ -158,7 +158,60 @@ suite('accessibility of the live components', () => {
 
   const machine = (id, state) => ({ id, name: id, state, host_id: 'host-a1', url: `https://${id}.example.com` });
 
+  /**
+   * The service panel inside its slide-over, rendered from the REAL fragment
+   * with a fake service, so the markup under axe is the markup a canvas
+   * click opens. A status is a word with a dot, and the word is asserted
+   * because the dot is decorative: a reader who cannot see the colour must
+   * still be told the state.
+   */
+  async function mountPanel(theme) {
+    setTheme(theme);
+    const [{ servicePanel }, { render }] = await Promise.all([
+      import('../../../modules/services/utils/ui/service-panel.ts'),
+      import('@webjsdev/core'),
+      import('../../../components/slide-over.ts'),
+    ]);
+    const detail = {
+      service: { id: 'svc-1', name: 'web', app: 'gallery', replicas: 2, url: 'https://web.example', release_id: 'rel-2', knobs: {}, autodeploy: false, created_at: 0 },
+      releases: [
+        { id: 'rel-2', service_id: 'svc-1', healthy: true, created_at: 1_700_000_000, rootfs_build_id: 'bld-2' },
+        { id: 'rel-1', service_id: 'svc-1', healthy: false, created_at: 1_699_000_000, rootfs_build_id: 'bld-1' },
+      ],
+      previews: [],
+      repo: null,
+      replicas: [
+        { id: 'm-1', name: 'web-1', state: 'running', service_id: 'svc-1' },
+        { id: 'm-2', name: 'web-2', state: 'suspended', service_id: 'svc-1' },
+      ],
+      hosts: [],
+      domains: [],
+      github: { configured: false, installUrl: 'https://github.com/apps/pilots/installations/new' },
+    };
+    // Rendered first, then handed to the panel as children, the way the
+    // server's markup arrives: the panel projects what it is given.
+    const staging = document.createElement('div');
+    render(servicePanel(detail, 'deployments', { app: 'gallery' }), staging);
+    const el = document.createElement('slide-over');
+    el.setAttribute('back', '/apps/gallery');
+    el.append(...staging.childNodes);
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await new Promise((resolve) => queueMicrotask(resolve));
+    return el;
+  }
+
   for (const theme of ['light', 'dark']) {
+    test(`the service panel in its slide-over is legible in ${theme}`, async () => {
+      const el = await mountPanel(theme);
+      const rows = [...el.querySelectorAll('li')].filter((li) => /web-2/.test(li.textContent));
+      assert.ok(rows.length === 1, 'the sleeping instance renders a row');
+      assert.ok(/Sleeping/.test(rows[0].textContent), 'the state is a word beside the dot, not the dot alone');
+      assert.ok(el.querySelector('[role="dialog"][aria-modal="false"]'), 'the panel is a non-modal dialog');
+      await assertNoA11yViolations(el);
+      el.remove();
+    });
+
     test(`every machine state badge is legible in ${theme}`, async () => {
       setTheme(theme);
       await import('../../../modules/machines/components/machine-list.ts');
