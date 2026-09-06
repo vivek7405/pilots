@@ -897,9 +897,6 @@ func seconds(d *types.Duration) int {
 	return int(math.Ceil(time.Duration(*d).Seconds()))
 }
 
-// replicasOf reads deploy.replicas, then the non-swarm `scale:` that means the
-// same thing. Both, because a file that spells only the second one and is read
-// for only the first deploys ONE machine and says nothing about it.
 // DefaultReplicas, DefaultVCPUs and DefaultMemMiB are what a step gets when
 // nothing declared otherwise. Exported so the detect package's generated steps
 // agree with a compose file's by construction rather than by coincidence.
@@ -909,6 +906,9 @@ const (
 	DefaultMemMiB   = defaultMemMiB
 )
 
+// replicasOf reads deploy.replicas, then the non-swarm `scale:` that means the
+// same thing. Both, because a file that spells only the second one and is read
+// for only the first deploys ONE machine and says nothing about it.
 func replicasOf(svc types.ServiceConfig) int {
 	if svc.Deploy != nil && svc.Deploy.Replicas != nil {
 		return *svc.Deploy.Replicas
