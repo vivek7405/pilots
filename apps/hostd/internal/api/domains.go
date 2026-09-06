@@ -37,20 +37,21 @@ type DomainResponse struct {
 func (d Deps) handleAddDomain(w http.ResponseWriter, r *http.Request) {
 	var req AddDomainRequest
 	if err := decodeBody(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(), NextBadBody, nil)
 		return
 	}
 	host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(req.Hostname), "."))
 	if host == "" || req.ServiceID == "" {
-		writeJSON(w, http.StatusBadRequest,
-			ErrorResponse{Error: "service_id and hostname are required"})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "service_id and hostname are required",
+			"pass service_id and hostname", nil)
 		return
 	}
 	// Our own apex is not a custom domain. Accepting one would let a caller
 	// claim another tenant's workload URL.
 	if strings.HasSuffix(host, "."+d.Domain) || host == d.Domain {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{
-			Error: fmt.Sprintf("%s is already served by this fleet; a custom domain is a name you own", host)})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest,
+			fmt.Sprintf("%s is already served by this fleet; a custom domain is a name you own", host),
+			"use a name you own; <name>.<fleet domain> is minted for you already", nil)
 		return
 	}
 
@@ -69,7 +70,7 @@ func (d Deps) handleAddDomain(w http.ResponseWriter, r *http.Request) {
 
 	svc, err := d.Store.GetService(r.Context(), req.ServiceID)
 	if err != nil {
-		writeStoreError(w, err)
+		writeMapped(w, err)
 		return
 	}
 	target := svc.Domain + "." + d.Domain
@@ -82,7 +83,7 @@ func (d Deps) handleAddDomain(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := d.Store.PutDomain(r.Context(), row); err != nil {
-		writeStoreError(w, err)
+		writeMapped(w, err)
 		return
 	}
 
@@ -103,7 +104,7 @@ func (d Deps) handleAddDomain(w http.ResponseWriter, r *http.Request) {
 func (d Deps) handleListDomains(w http.ResponseWriter, r *http.Request) {
 	rows, err := d.Store.ListDomains(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
+		writeMapped(w, err)
 		return
 	}
 	// A domain carries no tenancy of its own: it belongs to the org that owns
@@ -134,7 +135,7 @@ func (d Deps) handleDeleteDomain(w http.ResponseWriter, r *http.Request) {
 	// with nothing reporting who did it.
 	row, err := d.Store.GetDomain(r.Context(), r.PathValue("hostname"))
 	if err != nil {
-		writeStoreError(w, err)
+		writeMapped(w, err)
 		return
 	}
 	if _, ok := d.ownedService(w, r, row.ServiceID); !ok {
@@ -144,7 +145,7 @@ func (d Deps) handleDeleteDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := d.Store.DeleteDomain(r.Context(), r.PathValue("hostname")); err != nil {
-		writeStoreError(w, err)
+		writeMapped(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

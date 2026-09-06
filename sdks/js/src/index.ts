@@ -39,6 +39,7 @@ export type { ExecStreamInit, ExecStreamOptions, WebSocketCtor } from './stream.
 export {
   BuildFailedError,
   ComposePlanError,
+  HealthGateError,
   NotFoundError,
   PilotsError,
   QuotaExceededError,
@@ -67,6 +68,8 @@ export type {
   ExecRequest,
   ExecResponse,
   HealthCheck,
+  HealthGateDetails,
+  HealthLast,
   HealthResponse,
   Host,
   Knobs,

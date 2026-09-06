@@ -205,8 +205,9 @@ func Routes(d Deps) http.Handler {
 		mux.HandleFunc("POST /v1/compose/plan", d.Compose)
 	} else {
 		mux.HandleFunc("POST /v1/compose/plan", func(w http.ResponseWriter, r *http.Request) {
-			writeJSON(w, http.StatusServiceUnavailable,
-				ErrorResponse{Error: "no compose planner on this host"})
+			WriteError(w, http.StatusServiceUnavailable, CodeNotConfigured,
+				"no compose planner on this host",
+				"this host was built without it; pilot status lists hosts", nil)
 		})
 	}
 
@@ -218,8 +219,9 @@ func Routes(d Deps) http.Handler {
 		mux.HandleFunc("POST /v1/github/webhook", d.GitHub)
 	} else {
 		mux.HandleFunc("POST /v1/github/webhook", func(w http.ResponseWriter, r *http.Request) {
-			writeJSON(w, http.StatusServiceUnavailable,
-				ErrorResponse{Error: "no github app is configured on this fleet"})
+			WriteError(w, http.StatusServiceUnavailable, CodeNotConfigured,
+				"no github app is configured on this fleet",
+				"set PILOT_GITHUB_APP_ID, PILOT_GITHUB_APP_KEY and PILOT_GITHUB_WEBHOOK_SECRET on every host", nil)
 		})
 	}
 
@@ -250,7 +252,8 @@ func Routes(d Deps) http.Handler {
 }
 
 func notImplemented(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusNotImplemented, ErrorResponse{Error: "not implemented"})
+	WriteError(w, http.StatusNotImplemented, CodeNotImplemented, "not implemented",
+		"this route is not built yet; the CLI and the SDKs never call it", nil)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

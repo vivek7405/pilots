@@ -116,7 +116,9 @@ test('create_machine returns the machine and reaches the fleet', async () => {
 
 test('a 429 reaches the agent as the server body, unchanged', async () => {
   const api = await startFakeAPI()
-  const body = '{"error":"quota exceeded","quota":"machines","limit":20,"used":20}'
+  const body =
+    '{"error":"quota exceeded","code":"quota_exceeded",' +
+    '"next":"free a machines, or raise the org\'s limit","quota":"machines","limit":20,"used":20}'
   api.routes.set('POST /v1/machines', (_req, res) => {
     res.writeHead(429, { 'content-type': 'application/json' })
     res.end(body)

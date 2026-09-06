@@ -1,6 +1,7 @@
 package pilots
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -17,6 +18,14 @@ type Error struct {
 	Body string
 	// Message is the body's "error" string when it had one.
 	Message string
+	// Code is the body's stable code. Empty when the server sent none. It is
+	// on the base type rather than only on the typed errors below, so a code
+	// this SDK version has never heard of still reaches the caller.
+	Code string
+	// Next is the body's next step: the command or the call to make now.
+	Next string
+	// Details is the body's details, undecoded. Its shape is fixed by Code.
+	Details json.RawMessage
 }
 
 func (e *Error) Error() string {
@@ -66,6 +75,8 @@ func (e *QuotaExceeded) Unwrap() error { return e.Err }
 // same name.
 type ComposePlanError struct {
 	Message     string               `json:"error"`
+	Code        string               `json:"code"`
+	Next        string               `json:"next"`
 	Unsupported []ComposeUnsupported `json:"unsupported"`
 }
 
@@ -95,3 +106,19 @@ type BuildFailed struct {
 func (e *BuildFailed) Error() string {
 	return fmt.Sprintf("pilots: build %s failed: %s", e.ID, e.Reason)
 }
+
+// HealthGateFailed is a 422 health_gate_failed: the release built and started
+// and never answered its health check inside the grace period.
+//
+// Matched on the code and never on the status alone, so a later 422 for
+// something else does not arrive here typed as this.
+type HealthGateFailed struct {
+	Details HealthGateDetails
+	Err     *Error
+}
+
+func (e *HealthGateFailed) Error() string {
+	return "pilots: " + e.Err.Message
+}
+
+func (e *HealthGateFailed) Unwrap() error { return e.Err }

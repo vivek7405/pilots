@@ -204,6 +204,9 @@ func toError(status int, body []byte) error {
 	base := &Error{StatusCode: status, Body: string(body)}
 	var envelope struct {
 		Error       string               `json:"error"`
+		Code        string               `json:"code"`
+		Next        string               `json:"next"`
+		Details     json.RawMessage      `json:"details"`
 		Quota       string               `json:"quota"`
 		Limit       int64                `json:"limit"`
 		Used        int64                `json:"used"`
@@ -212,6 +215,9 @@ func toError(status int, body []byte) error {
 	}
 	if err := json.Unmarshal(body, &envelope); err == nil {
 		base.Message = envelope.Error
+		base.Code = envelope.Code
+		base.Next = envelope.Next
+		base.Details = envelope.Details
 	}
 
 	switch {
@@ -221,7 +227,14 @@ func toError(status int, body []byte) error {
 			Scope: envelope.Scope, Err: base,
 		}
 	case status == http.StatusBadRequest && len(envelope.Unsupported) > 0:
-		return &ComposePlanError{Message: envelope.Error, Unsupported: envelope.Unsupported}
+		return &ComposePlanError{
+			Message: envelope.Error, Code: envelope.Code, Next: envelope.Next,
+			Unsupported: envelope.Unsupported,
+		}
+	case envelope.Code == "health_gate_failed":
+		var d HealthGateDetails
+		_ = json.Unmarshal(envelope.Details, &d)
+		return &HealthGateFailed{Details: d, Err: base}
 	default:
 		return base
 	}

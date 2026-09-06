@@ -56,15 +56,15 @@ const maxBuildContext = 2 << 30
 
 func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	if d.Builds == nil {
-		writeJSON(w, http.StatusNotImplemented,
-			ErrorResponse{Error: "builds are not configured on this host"})
+		WriteError(w, http.StatusNotImplemented, CodeNotConfigured,
+			"builds are not configured on this host",
+			"deploy from a host that runs BuildKit; pilot status lists hosts", nil)
 		return
 	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		writeJSON(w, http.StatusInternalServerError,
-			ErrorResponse{Error: "the server cannot stream"})
+		WriteError(w, http.StatusInternalServerError, CodeInternal, "the server cannot stream", NextInternal, nil)
 		return
 	}
 
@@ -104,8 +104,8 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	// upload a memory-exhaustion lever.
 	spool, err := os.CreateTemp("", "pilot-build-context-*.tar")
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError,
-			ErrorResponse{Error: "cannot stage the build context: " + err.Error()})
+		WriteError(w, http.StatusInternalServerError, CodeInternal, "cannot stage the build context: "+err.Error(),
+			NextInternal, nil)
 		return
 	}
 	defer func() {
@@ -114,13 +114,13 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	if _, err := io.Copy(spool, http.MaxBytesReader(w, r.Body, maxBuildContext)); err != nil {
-		writeJSON(w, http.StatusBadRequest,
-			ErrorResponse{Error: "reading the build context: " + err.Error()})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "reading the build context: "+err.Error(),
+			"the context is over 2 GiB or the upload was cut; add a .dockerignore", nil)
 		return
 	}
 	if _, err := spool.Seek(0, io.SeekStart); err != nil {
-		writeJSON(w, http.StatusInternalServerError,
-			ErrorResponse{Error: "cannot rewind the build context: " + err.Error()})
+		WriteError(w, http.StatusInternalServerError, CodeInternal, "cannot rewind the build context: "+err.Error(),
+			NextInternal, nil)
 		return
 	}
 
@@ -134,8 +134,8 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	if err := d.Store.PutTenancy(r.Context(), &state.Tenancy{
 		ID: id, OrgID: org, Kind: "build", CreatedAt: time.Now().Unix(),
 	}); err != nil {
-		writeJSON(w, http.StatusInternalServerError,
-			ErrorResponse{Error: "cannot record the build's owner: " + err.Error()})
+		WriteError(w, http.StatusInternalServerError, CodeInternal, "cannot record the build's owner: "+err.Error(),
+			NextInternal, nil)
 		return
 	}
 
@@ -188,6 +188,7 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 				line = BuildLogLine{
 					Step: id, Stream: "status", Line: "build failed",
 					Error: "cannot record the image's owner: " + ownerErr.Error(),
+					Code:  CodeBuildFailed,
 					TS:    time.Now().UnixMilli(),
 				}
 			}
@@ -210,7 +211,7 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 		// verdict rather than having to infer one from the stream stopping.
 		write(BuildLogLine{
 			Step: id, Stream: "status", Line: "build failed",
-			Error: err.Error(), TS: time.Now().UnixMilli(),
+			Error: err.Error(), Code: CodeBuildFailed, TS: time.Now().UnixMilli(),
 		})
 		return
 	}
@@ -226,8 +227,9 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 // connection reattaches to an identical stream rather than a second format.
 func (d Deps) handleBuildLogs(w http.ResponseWriter, r *http.Request) {
 	if d.Builds == nil {
-		writeJSON(w, http.StatusNotImplemented,
-			ErrorResponse{Error: "builds are not configured on this host"})
+		WriteError(w, http.StatusNotImplemented, CodeNotConfigured,
+			"builds are not configured on this host",
+			"deploy from a host that runs BuildKit; pilot status lists hosts", nil)
 		return
 	}
 
@@ -243,7 +245,8 @@ func (d Deps) handleBuildLogs(w http.ResponseWriter, r *http.Request) {
 		// Distinct from an empty log on purpose: a client that cannot tell
 		// "this host does not have that build" from "that build printed
 		// nothing" concludes the wrong thing about both.
-		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "no such build on this host"})
+		WriteError(w, http.StatusNotFound, CodeNotFound, "no such build on this host",
+			NextNotFound, nil)
 		return
 	}
 

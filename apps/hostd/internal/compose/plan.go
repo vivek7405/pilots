@@ -169,7 +169,11 @@ type Unsupported struct {
 // platform does not do. Every offending key is listed, so the file is fixed in
 // one pass rather than one key per failed deploy.
 type PlanError struct {
-	Error       string        `json:"error"`
+	Error string `json:"error"`
+	// Code and Next mirror api.ErrorResponse so a client branching on the
+	// error shape needs one branch, not a second one for this route's body.
+	Code        string        `json:"code"`
+	Next        string        `json:"next"`
 	Unsupported []Unsupported `json:"unsupported"`
 }
 
@@ -217,7 +221,8 @@ func Compile(ctx context.Context, req Request) (*Plan, *PlanError, error) {
 	// while it loads, and a missing one is a load error -- so a check after
 	// loading would never run on the server, where the file is not there.
 	if bad := envFileKeys(dict); len(bad) > 0 {
-		return nil, &PlanError{Error: unsupportedError, Unsupported: bad}, nil
+		return nil, &PlanError{Error: unsupportedError, Code: api.CodePlanUnsupported,
+			Next: "remove or replace each listed key; every one is named", Unsupported: bad}, nil
 	}
 	if missing := unsetVariables(dict, req.Env); len(missing) > 0 {
 		return nil, nil, fmt.Errorf("compose: unset variable %s", strings.Join(missing, ", "))
@@ -251,7 +256,8 @@ func Compile(ctx context.Context, req Request) (*Plan, *PlanError, error) {
 	}
 
 	if bad := validate(project.Services); len(bad) > 0 {
-		return nil, &PlanError{Error: unsupportedError, Unsupported: bad}, nil
+		return nil, &PlanError{Error: unsupportedError, Code: api.CodePlanUnsupported,
+			Next: "remove or replace each listed key; every one is named", Unsupported: bad}, nil
 	}
 
 	steps := make(map[string]Step, len(project.Services))

@@ -3692,8 +3692,8 @@ async function mcpCall(spawnFn, tool, args, env, timeoutMs = 30_000) {
 // HTTP body and a tool result.
 function quotaFields(body) {
   if (!body || typeof body !== 'object') return null;
-  const { error, quota, limit, used } = body;
-  return { error, quota, limit, used };
+  const { error, code, quota, limit, used } = body;
+  return { error, code, quota, limit, used };
 }
 
 async function quotaAssertions() {
@@ -3747,6 +3747,9 @@ async function quotaAssertions() {
 
       viaSDK = quotaFields(json);
       assert(viaSDK?.error === 'quota exceeded', `error = ${JSON.stringify(viaSDK?.error)}`);
+      assert(viaSDK?.code === 'quota_exceeded', `code = ${JSON.stringify(viaSDK?.code)}`);
+      assert(typeof json?.next === 'string' && json.next.length > 0,
+        `the 429 carried no next: ${JSON.stringify(json?.next)}`);
       assert(viaSDK?.quota === 'machines', `quota = ${JSON.stringify(viaSDK?.quota)}`);
       assert(viaSDK?.limit === limit, `limit = ${JSON.stringify(viaSDK?.limit)}, want ${limit}`);
       assert(viaSDK?.used === limit, `used = ${JSON.stringify(viaSDK?.used)}, want ${limit}`);

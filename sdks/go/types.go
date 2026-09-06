@@ -9,6 +9,8 @@ package pilots
 // hostd's Go source on every run and fails naming the struct and the tag when
 // the two sides disagree, in either direction.
 
+import "encoding/json"
+
 // Knobs is the per-machine lifecycle policy. A sandbox and a production
 // service are the same machine with different knobs.
 type Knobs struct {
@@ -162,6 +164,8 @@ type BuildLogLine struct {
 	TS     int64  `json:"ts"`
 	Error  string `json:"error,omitempty"`
 	Result string `json:"result,omitempty"` // rootfs build id on success
+	// Code is the stable code on a terminal failure line, build_failed.
+	Code string `json:"code,omitempty"`
 }
 
 // HealthCheck gates a rollout: a new release takes traffic only once healthy.
@@ -341,6 +345,32 @@ type HealthResponse struct {
 
 type ErrorResponse struct {
 	Error string `json:"error"`
+	// Code is a stable snake_case noun to branch on. See
+	// apps/hostd/internal/api/errors.go for the closed list.
+	Code string `json:"code,omitempty"`
+	// Next is the one thing to do about it, naming the command or the call.
+	Next string `json:"next,omitempty"`
+	// Details is typed per code: HealthGateDetails, ComposeUnknownDetails.
+	Details json.RawMessage `json:"details,omitempty"`
+}
+
+// HealthGateDetails is the 422 health_gate_failed body's details: why a
+// release was refused. It carries no address, because the probe target is the
+// host's own view of the replica and is not reachable from where this is read.
+type HealthGateDetails struct {
+	Service  string     `json:"service"`
+	Replica  string     `json:"replica"`
+	Release  string     `json:"release"`
+	GraceSec int        `json:"grace_sec"`
+	Last     HealthLast `json:"last"`
+}
+
+// HealthLast is the replica's last answer: a status and body when it
+// answered, or a one-line reason when it did not.
+type HealthLast struct {
+	Status int    `json:"status,omitempty"`
+	Body   string `json:"body,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 type AddDomainRequest struct {
@@ -413,6 +443,8 @@ type QuotaResponse struct {
 // host's rather than the org's, which is how builds are limited.
 type QuotaExceededResponse struct {
 	Error string `json:"error"`
+	Code  string `json:"code"`
+	Next  string `json:"next"`
 	Quota string `json:"quota"`
 	Limit int64  `json:"limit"`
 	Used  int64  `json:"used"`
@@ -521,6 +553,8 @@ var wireTypes = []any{
 	Host{},
 	HealthResponse{},
 	ErrorResponse{},
+	HealthGateDetails{},
+	HealthLast{},
 	AddDomainRequest{},
 	DomainResponse{},
 	UpdateServiceRequest{},

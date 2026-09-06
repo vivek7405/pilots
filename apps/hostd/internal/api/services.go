@@ -69,11 +69,11 @@ func (d Deps) volumeOf(ctx context.Context, serviceID string) (string, error) {
 func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	var req CreateServiceRequest
 	if err := decodeBody(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(), NextBadBody, nil)
 		return
 	}
 	if req.Name == "" {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "name is required"})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "name is required", "pass name", nil)
 		return
 	}
 
@@ -83,10 +83,11 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	// zero replicas it would sit there costing nothing and doing nothing, and
 	// become a support ticket six months later.
 	if req.Replicas == 0 && req.Domain == "" && req.App == "" {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "a service with " +
-			"no domain, no app and no running replicas can never be reached or " +
-			"woken: give it a domain to route to, an app so peers can resolve it " +
-			"by name, or at least one replica"})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "a service with "+
+			"no domain, no app and no running replicas can never be reached or "+
+			"woken: give it a domain to route to, an app so peers can resolve it "+
+			"by name, or at least one replica",
+			"give it a domain, an app, or at least one replica", nil)
 		return
 	}
 
@@ -112,26 +113,28 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 			return // 404 on unknown and on foreign alike; existence never leaks
 		}
 		if req.Replicas > 1 {
-			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "a service that " +
-				"mounts a volume runs exactly one replica: a volume is mounted by " +
-				"one machine at a time"})
+			WriteError(w, http.StatusBadRequest, CodeBadRequest, "a service that "+
+				"mounts a volume runs exactly one replica: a volume is mounted by "+
+				"one machine at a time",
+				"a volume-backed service runs one replica; drop replicas or the volume", nil)
 			return
 		}
 		if v.MachineID != "" {
-			writeJSON(w, http.StatusConflict, ErrorResponse{Error: fmt.Sprintf(
+			WriteError(w, http.StatusConflict, CodeVolumeInUse, fmt.Sprintf(
 				"volume %s is attached to machine %s; destroying it releases the volume",
-				v.ID, v.MachineID)})
+				v.ID, v.MachineID), "destroy machine "+v.MachineID, nil)
 			return
 		}
 		bindings, err := d.Store.ListServiceVolumes(r.Context())
 		if err != nil {
-			writeStoreError(w, err)
+			writeMapped(w, err)
 			return
 		}
 		for _, b := range bindings {
 			if b.VolumeID == v.ID {
-				writeJSON(w, http.StatusConflict, ErrorResponse{Error: fmt.Sprintf(
-					"volume %s is already mounted by service %s", v.ID, b.ServiceID)})
+				WriteError(w, http.StatusConflict, CodeVolumeInUse, fmt.Sprintf(
+					"volume %s is already mounted by service %s", v.ID, b.ServiceID),
+					"detach it from service "+b.ServiceID+" first", nil)
 				return
 			}
 		}
@@ -163,7 +166,7 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	if len(req.Env) > 0 {
 		raw, err := json.Marshal(req.Env)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
+			WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(), NextBadBody, nil)
 			return
 		}
 		svc.Env = string(raw)
@@ -180,19 +183,20 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 			// path refuses: writing these in the clear replicates them to
 			// every host and into every backup, and nothing downstream would
 			// report that it had happened.
-			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "this host has " +
-				"no fleet key, so it cannot store secrets; set PILOT_FLEET_KEY"})
+			WriteError(w, http.StatusBadRequest, CodeNotConfigured, "this host has "+
+				"no fleet key, so it cannot store secrets; set PILOT_FLEET_KEY",
+				"set PILOT_FLEET_KEY on every host, or send env instead of secret_env", nil)
 			return
 		}
 		raw, err := json.Marshal(req.SecretEnv)
 		if err != nil {
-			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
+			WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(), NextBadBody, nil)
 			return
 		}
 		sealed, err := d.FleetKey.Seal(raw)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError,
-				ErrorResponse{Error: "sealing the environment: " + err.Error()})
+			WriteError(w, http.StatusInternalServerError, CodeInternal, "sealing the environment: "+err.Error(),
+				NextInternal, nil)
 			return
 		}
 		svc.EnvSealed = sealed
@@ -203,7 +207,7 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	if err := d.Store.PutTenancy(r.Context(), &state.Tenancy{
 		ID: svc.ID, OrgID: req.OrgID, Kind: "service", CreatedAt: svc.CreatedAt,
 	}); err != nil {
-		writeStoreError(w, err)
+		writeMapped(w, err)
 		return
 	}
 	// Before the service row, for the reason tenancy is: a create that dies
@@ -213,7 +217,7 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 		if err := d.Store.PutServiceVolume(r.Context(), &state.ServiceVolume{
 			ServiceID: svc.ID, Ordinal: 1, VolumeID: volume.ID, CreatedAt: svc.CreatedAt,
 		}); err != nil {
-			writeStoreError(w, err)
+			writeMapped(w, err)
 			return
 		}
 	}
@@ -223,7 +227,7 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 			// and leaving it would refuse this volume to every later create.
 			_ = d.Store.DeleteServiceVolumes(r.Context(), svc.ID)
 		}
-		writeStoreError(w, err)
+		writeMapped(w, err)
 		return
 	}
 	out := d.serviceToAPI(*svc, req.OrgID)
@@ -236,14 +240,14 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 func (d Deps) handleListServices(w http.ResponseWriter, r *http.Request) {
 	rows, err := d.Store.ListServices(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
+		writeMapped(w, err)
 		return
 	}
 	// One read of the bindings, joined in memory: a query per row would turn
 	// a list into N of them against the local agent.
 	bindings, err := d.Store.ListServiceVolumes(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
+		writeMapped(w, err)
 		return
 	}
 	mounts := make(map[string]string, len(bindings))
@@ -272,7 +276,7 @@ func (d Deps) handleGetService(w http.ResponseWriter, r *http.Request) {
 	}
 	volumeID, err := d.volumeOf(r.Context(), svc.ID)
 	if err != nil {
-		writeStoreError(w, err)
+		writeMapped(w, err)
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
@@ -302,17 +306,17 @@ func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
 	dec.DisallowUnknownFields()
 	var req UpdateServiceRequest
 	if err := dec.Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(), NextBadBody, nil)
 		return
 	}
 	volumeID, err := d.volumeOf(r.Context(), svc.ID)
 	if err != nil {
-		writeStoreError(w, err)
+		writeMapped(w, err)
 		return
 	}
 	before := svc.Replicas
 	if err := d.applyServicePatch(svc, volumeID, req); err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(), NextBadBody, nil)
 		return
 	}
 	// A replica is a machine, so a scale-up is admitted against the same
@@ -329,7 +333,7 @@ func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := d.Store.PutService(r.Context(), svc); err != nil {
-		writeStoreError(w, err)
+		writeMapped(w, err)
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
@@ -431,7 +435,7 @@ func (d Deps) handleListReleases(w http.ResponseWriter, r *http.Request) {
 	// this from its own replica, which is the whole point of having one.
 	rows, err := d.Store.ReleasesFor(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeStoreError(w, err)
+		writeMapped(w, err)
 		return
 	}
 	out := make([]Release, 0, len(rows))
@@ -452,17 +456,19 @@ func (d Deps) handleDeploy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if d.Rollout == nil {
-		writeJSON(w, http.StatusServiceUnavailable,
-			ErrorResponse{Error: "this host cannot deploy: no object storage is configured"})
+		WriteError(w, http.StatusServiceUnavailable, CodeNotConfigured,
+			"this host cannot deploy: no object storage is configured",
+			"deploy from a host with object storage; pilot status lists hosts", nil)
 		return
 	}
 	var req DeployRequest
 	if err := decodeBody(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(), NextBadBody, nil)
 		return
 	}
 	if req.Build == "" {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "build is required"})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "build is required",
+			"pass build: a rootfs build id from POST /v1/builds or pilot deploy", nil)
 		return
 	}
 	// Validated HERE, because the rollout merges these partially onto what the
@@ -471,7 +477,8 @@ func (d Deps) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	// "one"} is a 200 whose replicas silently keep the old floor -- an
 	// operator asking for a warm replica and being told it worked.
 	if _, err := DecodeKnobs(req.Knobs); err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(),
+			"knobs are auto_stop, auto_start, min_machines_running, soft_limit", nil)
 		return
 	}
 	// The build becomes this service's root filesystem, so it is scoped like
@@ -486,7 +493,7 @@ func (d Deps) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	}
 	rel, err := d.Rollout.Deploy(r.Context(), r.PathValue("id"), req.Build, req.Knobs)
 	if err != nil {
-		writeStoreError(w, err)
+		writeMapped(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, releaseToAPI(*rel))
@@ -501,13 +508,14 @@ func (d Deps) handleRollback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if d.Rollout == nil {
-		writeJSON(w, http.StatusServiceUnavailable,
-			ErrorResponse{Error: "this host cannot roll back: no object storage is configured"})
+		WriteError(w, http.StatusServiceUnavailable, CodeNotConfigured,
+			"this host cannot roll back: no object storage is configured",
+			"roll back from a host with object storage; pilot status lists hosts", nil)
 		return
 	}
 	rel, err := d.Rollout.Rollback(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeStoreError(w, err)
+		writeMapped(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, releaseToAPI(*rel))
@@ -515,8 +523,9 @@ func (d Deps) handleRollback(w http.ResponseWriter, r *http.Request) {
 
 func (d Deps) handlePromote(w http.ResponseWriter, r *http.Request) {
 	if d.Rollout == nil {
-		writeJSON(w, http.StatusServiceUnavailable,
-			ErrorResponse{Error: "this host cannot promote: no object storage is configured"})
+		WriteError(w, http.StatusServiceUnavailable, CodeNotConfigured,
+			"this host cannot promote: no object storage is configured",
+			"promote from a host with object storage; pilot status lists hosts", nil)
 		return
 	}
 	row, ok := d.ownedMachine(w, r, r.PathValue("id"))
@@ -526,16 +535,17 @@ func (d Deps) handlePromote(w http.ResponseWriter, r *http.Request) {
 	var req PromoteRequest
 	if r.ContentLength > 0 {
 		if err := decodeBody(r, &req); err != nil {
-			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: err.Error()})
+			WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(), NextBadBody, nil)
 			return
 		}
 	}
 	if row.VolumeID != "" {
 		if req.Replicas > 1 {
-			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: fmt.Sprintf(
+			WriteError(w, http.StatusBadRequest, CodeBadRequest, fmt.Sprintf(
 				"machine %s mounts volume %s, so the service it becomes runs exactly "+
 					"one replica: a volume is mounted by one machine at a time",
-				row.ID, row.VolumeID)})
+				row.ID, row.VolumeID),
+				"a volume-backed service runs one replica; drop replicas or the volume", nil)
 			return
 		}
 		// A volume-backed service is redeployed and rolled back by BOOTING
@@ -543,21 +553,22 @@ func (d Deps) handlePromote(w http.ResponseWriter, r *http.Request) {
 		// carries the volume drive in its device state. A template sandbox
 		// has no image for that boot to use.
 		if row.ImageRef == "" {
-			writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: fmt.Sprintf(
+			WriteError(w, http.StatusBadRequest, CodeBadRequest, fmt.Sprintf(
 				"machine %s mounts a volume and was created from the template, not "+
 					"from an image; a volume-backed service is redeployed from its "+
-					"image, so create the sandbox with image to promote it", row.ID)})
+					"image, so create the sandbox with image to promote it", row.ID),
+				"create the sandbox with image, then promote it", nil)
 			return
 		}
 	}
 	svc, err := d.Rollout.Promote(r.Context(), r.PathValue("id"), req)
 	if err != nil {
-		writeStoreError(w, err)
+		writeMapped(w, err)
 		return
 	}
 	volumeID, verr := d.volumeOf(r.Context(), svc.ID)
 	if verr != nil {
-		writeStoreError(w, verr)
+		writeMapped(w, verr)
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
@@ -579,21 +590,6 @@ func releaseToAPI(r state.Release) Release {
 	return Release{
 		ID: r.ID, ServiceID: r.ServiceID, RootfsBuildID: r.RootfsBuildID,
 		MemBuildID: r.MemBuildID, Healthy: r.Healthy, CreatedAt: r.CreatedAt,
-	}
-}
-
-// writeStoreError maps the store's sentinels onto status codes, so a caller
-// can tell "you are not the writer" from "it does not exist" from "it broke".
-func writeStoreError(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, state.ErrNotFound):
-		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: err.Error()})
-	case errors.Is(err, state.ErrNotOwner):
-		// 409, not 403: the caller is allowed, it just lost a race or asked
-		// the wrong host. Both are retryable against the right one.
-		writeJSON(w, http.StatusConflict, ErrorResponse{Error: err.Error()})
-	default:
-		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
 	}
 }
 
