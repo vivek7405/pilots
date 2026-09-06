@@ -447,6 +447,13 @@ at `ip netns list` first: on a workstation that also runs the libvirt rig
 (`scripts/cluster/`) or anything else `ip netns`-based, delete the pilots ones
 by name instead.
 
+A laptop suspend kills every running microVM: KVM state does not survive S3
+sleep. Since #78 hostd notices the exit on resume, stops the handlers, and
+brings each machine back from the disk it still held, with
+`last_start = cold_boot`; a service replica is replaced by the autoscaler
+instead. You do not need this section for that case, and
+`journalctl -u hostd | grep 'exited on its own'` shows what happened.
+
 ```sh
 # stop hostd (Ctrl-C in its shell), then
 sudo pkill -9 -x hostd

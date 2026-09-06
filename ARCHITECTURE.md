@@ -794,7 +794,18 @@ atomic `state.json` per machine; on hostd restart re-adopt via
 `/proc/<pid>/comm == "firecracker"` (guards PID recycling), re-reserve slots
 and ports WITHOUT bind-probing (the live proxy holds them). Bounded shutdown
 (≤30s, then leave stragglers to the reaper). A reaper loop kills FC processes
-with no matching machine row (60s age guard). Snapshot a fresh boot only
+with no matching machine row (60s age guard). **Exit handling:** every
+Firecracker is waited on from the moment it starts (a child through `Wait`, a
+re-adopted one through a `pidfd`), so an exit hostd did not ask for is an
+event, never a poll. The machine manager stops the handlers, frees the slot,
+writes the row `error` and stops metering compute; a replica the rollout can
+replace is left to the autoscaler (an `error` replica is absent for the floor),
+everything else is brought back in place once by `Wake`: from the disk the
+block server still held (captured on the way out, `last_start = cold_boot`),
+else from its last suspend pair. A second exit inside a minute is a crash loop
+and stays `error`. `processAlive` reads `/proc/<pid>/stat` and treats a zombie
+as dead, so reconcile never re-adopts a corpse. The router does not take part:
+it reads the row, and a proxy error is not an exit. Snapshot a fresh boot only
 after the guest reaches `system-running` (~20s settle) — earlier captures a
 half-converged guest that can't serve after resume.
 
