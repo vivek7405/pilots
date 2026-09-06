@@ -12,6 +12,7 @@
  */
 
 import type { Machine } from '#modules/machines/types.ts';
+import { epochMs } from '#lib/utils/time.ts';
 
 export interface HealthRelease {
   id: string;
@@ -67,7 +68,11 @@ export function serviceHealth(
   // A release that has not passed its gate is only news once the gate's own
   // window has elapsed. Before that it is a deploy in progress, and calling it
   // a failure would make every deploy flash red on its way up.
-  const past = release?.created_at !== undefined && at - release.created_at > graceSec * 1000;
+  // `created_at` is the engine's own stamp, which is SECONDS; `at` is
+  // milliseconds. Comparing the two raw made the difference about 1.8e12 ms,
+  // so every release was instantly "past its grace" and a deploy still coming
+  // up was reported as a failure the moment a replica was not yet running.
+  const past = release?.created_at !== undefined && at - epochMs(release.created_at) > graceSec * 1000;
   if (release && release.healthy === false && past) {
     const ofRelease = replicas.filter((r) => r.release_id === release.id);
     const notRunning = ofRelease.filter((r) => r.state !== 'running');

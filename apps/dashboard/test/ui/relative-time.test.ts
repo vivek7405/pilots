@@ -25,6 +25,16 @@ test('an epoch stamp is read the same whether it arrives as a number or a string
   assert.equal(absolute(String(AT)), '2026-09-01 10:00 UTC');
 });
 
+test('the engine stamps seconds, and they are not read as 1970', () => {
+  // hostd returns `time.Now().Unix()` everywhere (machine.last_activity,
+  // release.created_at, ...). Read as milliseconds, 1788299400 is
+  // 1970-01-21 and every age on every page said "56 years ago".
+  const seconds = Math.floor(AT / 1000);
+  assert.equal(isoOf(seconds), '2026-09-01T10:00:00.000Z');
+  assert.equal(isoOf(String(seconds)), '2026-09-01T10:00:00.000Z');
+  assert.equal(ago(seconds, AT + 3_600_000), '1 hour ago');
+});
+
 test('an ISO string still works, because that is what a JSON date looks like', () => {
   assert.equal(isoOf('2026-09-01T10:00:00Z'), '2026-09-01T10:00:00.000Z');
 });

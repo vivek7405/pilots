@@ -66,6 +66,19 @@ test('a deploy still inside its grace window is not a failure', () => {
   assert.deepEqual(health.pills, []);
 });
 
+test("a release stamped in the engine's own seconds is inside the same window", () => {
+  // hostd stamps every release with `time.Now().Unix()`. Read as
+  // milliseconds it looks 56 years old, the grace window never applies, and a
+  // deploy twenty seconds in is reported as a failure on its way up.
+  const health = serviceHealth(
+    service,
+    [replica('m-1', 'creating')],
+    [{ id: 'rel-2', healthy: false, created_at: Math.floor((NOW - 20_000) / 1000) }],
+    NOW,
+  );
+  assert.deepEqual(health.pills, []);
+});
+
 test('a replica the engine gave up on is evidence whatever the release says', () => {
   const health = serviceHealth(
     service,

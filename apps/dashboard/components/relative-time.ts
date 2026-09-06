@@ -13,6 +13,7 @@
  */
 
 import { WebComponent, html, prop } from '@webjsdev/core';
+import { epochMs } from '#lib/utils/time.ts';
 
 const TICK_MS = 30_000;
 
@@ -39,16 +40,20 @@ export function isoOf(value: number | string | undefined): string {
 }
 
 /**
- * The engine stamps milliseconds since the epoch, and an attribute carries
- * them as a STRING. `new Date("1788699180000")` is an Invalid Date, because a
- * string goes down the date-string parser and never the timestamp one, so a
- * numeric string is converted before it is handed over. Without this every
- * time on every page read `never`.
+ * An epoch stamp reaches an element as an attribute, which is a STRING.
+ * `new Date("1788699180")` is an Invalid Date, because a string goes down the
+ * date-string parser and never the timestamp one, so a numeric string is
+ * converted before it is handed over. Without this every time on every page
+ * read `never`.
+ *
+ * The unit is then settled by `epochMs`: the engine stamps SECONDS
+ * (`time.Now().Unix()`), and reading those as milliseconds put every timestamp
+ * in January 1970 and made every age read "56 years ago".
  */
 function toDate(value: number | string | undefined): Date | null {
   if (value === undefined || value === null || value === '') return null;
-  const ms = typeof value === 'number' ? value : /^-?\d+$/.test(value.trim()) ? Number(value) : NaN;
-  const date = Number.isNaN(ms) ? new Date(value) : new Date(ms);
+  const raw = typeof value === 'number' ? value : /^-?\d+$/.test(value.trim()) ? Number(value) : NaN;
+  const date = Number.isNaN(raw) ? new Date(value) : new Date(epochMs(raw));
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
