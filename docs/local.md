@@ -384,7 +384,23 @@ dashboard on 3000, its GitHub App callback is
 # CLI. --api-url beats PILOT_API_URL, which beats the config file.
 pilot login --token "$KEY" --api-url http://api.pilots.localhost:8080
 pilot machines ls
+pilot console box                # an interactive shell, on a terminal
 ```
+
+`pilot console` is the dashboard terminal's command-line half and carries the
+same requirement: **the machine needs a golden rootfs built after the `tty`
+exec-stream change**, since the PTY is set up by the guest agent inside it.
+
+An older agent does not refuse the `tty` parameter, it ignores it: it honours
+`stdin=true` and runs the shell on three pipes as usual. So the session
+connects and then hangs with nothing echoed back, because the local terminal is
+in raw mode and sends a carriage return for Enter, which a shell reading a pipe
+never sees as the end of a line. It is the rootfs, not the shell or its
+profile. Rebuild with `scripts/build-golden-rootfs.sh` and create a new
+machine.
+
+`console` also needs a terminal on stdin and stdout, so it refuses under
+`--json` and from a script; `pilot machines exec` is the path there.
 
 `PILOT_GITHUB_URL`, `PILOT_DASHBOARD_URL` and `PILOT_GITHUB_CLIENT_ID` are only
 for the device-flow login and are not needed with `--token`.
