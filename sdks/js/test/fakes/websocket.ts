@@ -12,7 +12,9 @@ export class FakeWebSocket extends EventTarget {
 
   readonly url: string
   readonly protocols: string[]
-  readonly sent: Uint8Array[] = []
+  // A resize control message is TEXT, not a frame, so what a stream sends is
+  // not uniformly bytes.
+  readonly sent: (Uint8Array | string)[] = []
   binaryType = 'blob'
   readyState = 0
   closedWith: number | undefined
@@ -24,8 +26,8 @@ export class FakeWebSocket extends EventTarget {
     FakeWebSocket.last = this
   }
 
-  send(data: Uint8Array): void {
-    this.sent.push(new Uint8Array(data))
+  send(data: Uint8Array | string): void {
+    this.sent.push(typeof data === 'string' ? data : new Uint8Array(data))
   }
 
   close(code?: number): void {

@@ -249,3 +249,86 @@ func TestCloseReturnsWithUnreadOutput(t *testing.T) {
 		t.Fatal("Close blocked on a frame loop parked writing unread output")
 	}
 }
+
+// TTY writes the terminal query names and forces stdin on.
+//
+// Never sent as stdin=false: hostd answers that pair with a 400, so the
+// contradiction is settled in the SDK rather than at the wire.
+func TestExecStreamTTYQuery(t *testing.T) {
+	got := execURL("http://h", "/v1/machines/m-1/exec/stream", []string{"bash", "-l"},
+		ExecStreamOptions{TTY: true, Rows: 40, Cols: 120})
+	q, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("parse %q: %v", got, err)
+	}
+	for key, want := range map[string]string{"tty": "true", "rows": "40", "cols": "120", "stdin": "true"} {
+		if have := q.Query().Get(key); have != want {
+			t.Errorf("%s = %q, want %q", key, have, want)
+		}
+	}
+
+	// Without TTY none of the three appears, so a plain exec's URL is
+	// byte-for-byte what it always was.
+	plain, err := url.Parse(execURL("http://h", "/p", []string{"true"}, ExecStreamOptions{}))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for _, key := range []string{"tty", "rows", "cols"} {
+		if have := plain.Query().Get(key); have != "" {
+			t.Errorf("%s = %q on a non-tty stream, want absent", key, have)
+		}
+	}
+}
+
+// A tty stream opens Stdin without being asked, and Resize is a TEXT control
+// message rather than a frame: it spends no byte id.
+func TestExecStreamTTYResize(t *testing.T) {
+	received := make(chan string, 1)
+	c := wsServer(t, func(t *testing.T, conn *websocket.Conn, _ *http.Request) {
+		ctx := context.Background()
+		typ, data, err := conn.Read(ctx)
+		if err != nil {
+			return
+		}
+		if typ != websocket.MessageText {
+			t.Errorf("resize arrived as a %v message, want text", typ)
+		}
+		received <- string(data)
+		_ = conn.Write(ctx, websocket.MessageBinary, frame(FrameExit, "\x00"))
+		time.Sleep(50 * time.Millisecond)
+	})
+
+	s, err := c.Machines.ExecStream(context.Background(), "m-1",
+		[]string{"bash", "-l"}, ExecStreamOptions{TTY: true})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	// Stdin: true was never passed. A terminal implies it.
+	if s.Stdin == nil {
+		t.Fatal("Stdin is nil on a TTY stream")
+	}
+	if err := s.Resize(100, 30); err != nil {
+		t.Fatalf("resize: %v", err)
+	}
+	if got := <-received; got != `{"type":"resize","cols":100,"rows":30}` {
+		t.Errorf("resize message = %s", got)
+	}
+	if _, err := s.Wait(); err != nil {
+		t.Errorf("wait: %v", err)
+	}
+}
+
+func TestResizeWithoutTTYErrors(t *testing.T) {
+	c := wsServer(t, func(t *testing.T, conn *websocket.Conn, _ *http.Request) {
+		_ = conn.Write(context.Background(), websocket.MessageBinary, frame(FrameExit, "\x00"))
+		time.Sleep(50 * time.Millisecond)
+	})
+	s, err := c.Machines.ExecStream(context.Background(), "m-1", []string{"true"}, ExecStreamOptions{})
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer s.Close()
+	if err := s.Resize(100, 30); err == nil {
+		t.Error("Resize was accepted on a stream opened without TTY")
+	}
+}

@@ -18,6 +18,7 @@ import type { RouteHandlerContext } from '@webjsdev/core';
 import { requireOrg } from '#modules/auth/session.server.ts';
 import { fleet } from '#modules/fleet/client.server.ts';
 import { assertOwned } from '#modules/fleet/org-filter.server.ts';
+import { socketJson } from '#lib/socket-text.server.ts';
 
 /** The socket surface used here; the framework's `ws` satisfies it. */
 export interface ExecSocket {
@@ -88,15 +89,20 @@ async function run(ws: ExecSocket, machineId: string, cmd: string[], dir?: strin
   }
 }
 
-/** Validates the one client message. Anything else is refused, not guessed. */
+/**
+ * Validates the one client message. Anything else is refused, not guessed.
+ *
+ * The decode goes through `socketJson`. It used to branch on
+ * `typeof data === 'string'` and otherwise cast the value straight to this
+ * interface, which is wrong: `ws` delivers a frame as a Buffer, so a
+ * well-formed request became an object with no `cmd` and the console answered
+ * every command with its own usage message. The unit tests passed strings and
+ * stayed green throughout.
+ */
 function parseArgv(data: unknown): { cmd: string[]; dir?: string } | null {
-  let parsed: ExecRequestMessage;
-  try {
-    parsed = typeof data === 'string' ? (JSON.parse(data) as ExecRequestMessage) : (data as ExecRequestMessage);
-  } catch {
-    return null;
-  }
-  const cmd = parsed?.cmd;
+  const parsed = socketJson<ExecRequestMessage>(data);
+  if (!parsed) return null;
+  const cmd = parsed.cmd;
   if (!Array.isArray(cmd) || cmd.length === 0 || cmd.length > 64) return null;
   if (!cmd.every((a) => typeof a === 'string' && a.length <= 4096)) return null;
   const dir = typeof parsed.dir === 'string' && parsed.dir.trim() ? parsed.dir.trim() : undefined;

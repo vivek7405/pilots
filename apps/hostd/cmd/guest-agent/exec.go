@@ -267,7 +267,11 @@ func pump(fw *frameWriter, kind byte, r io.Reader, done func()) {
 			}
 		}
 		if err != nil {
-			if !errors.Is(err, io.EOF) {
+			// EIO is how a PTY master reports that the last process holding
+			// the slave is gone. It is this path's ordinary end-of-stream, so
+			// treating it as an error puts one spurious line in the log for
+			// every terminal session anyone opens.
+			if !errors.Is(err, io.EOF) && !errors.Is(err, syscall.EIO) {
 				log.Printf("guest-agent: exec stream read: %v", err)
 			}
 			return

@@ -53,5 +53,5 @@ export async function connectRepo(formData: FormData) {
       set: { repo, branch, autodeploy, installationId: installation?.id ?? null, updatedAt: new Date() },
     });
 
-  return { success: true, redirect: `/services/${id}` };
+  return { success: true, redirect: `/services/${id}?ok=connected` };
 }

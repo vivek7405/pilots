@@ -81,7 +81,7 @@ export default async function UsagePage({ searchParams }: PageProps) {
          does not disappear when the period is empty. -->
     <div class="mb-8">
       ${rows.length === 0
-        ? emptyState('Nothing recorded for this period.')
+        ? emptyState('Nothing recorded for this period. Usage is metered per hour, so a machine created minutes ago has not been counted yet.')
         : dataTable<UsageSample>({
               caption: 'Usage samples for the selected period',
               rows,

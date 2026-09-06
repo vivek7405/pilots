@@ -2,9 +2,16 @@
  * The root layout: the only file in this app that may write the document
  * shell. It owns the design tokens, the theme, and the app chrome.
  *
- * The nav, the org switcher and the sign-out form are plain markup and plain
- * forms, so they work with scripting off. The theme toggle is the one element
- * here that needs a browser, and it is the only JavaScript any page ships.
+ * Everything the chrome can do works with scripting off. The org switch and
+ * the sign out are real forms, and the identity menu that holds them is an
+ * upgrade rather than the only way in: both forms are also on /org under
+ * Account, and a <noscript> link points there.
+ *
+ * The header is `position: fixed`, never `sticky`. Sticky flickers its
+ * background for one frame on iOS WebKit during a client-router navigation,
+ * and every iOS browser is WebKit. A fixed header leaves normal flow, so its
+ * height is reserved on the body through --header-h, which the pre-paint
+ * script below keeps exact.
  */
 
 import { html, asset, cspNonce } from '@webjsdev/core';
@@ -14,24 +21,21 @@ import { listOrgs } from '#modules/orgs/queries/list-orgs.server.ts';
 import { isSignedOut } from '#modules/auth/session.server.ts';
 import { switchOrg } from '#modules/orgs/actions/switch-org.server.ts';
 import { buttonClass } from '#components/ui/button.ts';
-import { nativeSelectClass, nativeSelectIconClass, nativeSelectWrapperClass } from '#components/ui/native-select.ts';
+import { avatarClass, avatarFallbackClass, avatarImageClass } from '#components/ui/avatar.ts';
+import { initials } from '#lib/utils/ui.ts';
 import { cn } from '#lib/utils/cn.ts';
 import '#components/theme-toggle.ts';
+import '#components/app-nav.ts';
+import '#components/org-switcher.ts';
+import '#components/flash-toast.ts';
+import '#components/command-palette.ts';
+import '#components/ui/dropdown-menu.ts';
+import '#components/ui/sonner.ts';
 
 export const metadata = {
   title: { default: 'pilots', template: '%s · pilots' },
   icons: '/public/favicon.svg',
 };
-
-const NAV = [
-  ['/machines', 'Machines'],
-  ['/services', 'Services'],
-  ['/volumes', 'Volumes'],
-  ['/domains', 'Domains'],
-  ['/usage', 'Usage'],
-  ['/keys', 'Keys'],
-  ['/org', 'Org'],
-] as const;
 
 export default async function RootLayout({ children, url }: LayoutProps) {
   const me = await currentUser();
@@ -63,6 +67,26 @@ export default async function RootLayout({ children, url }: LayoutProps) {
           mq.addEventListener('change', apply);
         } catch (_) {}
       })();
+      // The header is fixed, so it leaves normal flow and its height has to be
+      // reserved on the content below. --header-h carries a sane SSR default
+      // and this keeps it exact as the header reflows: a wrapped nav on a
+      // narrow viewport makes it taller, and the first row of content would
+      // otherwise disappear underneath it.
+      (function () {
+        function measure() {
+          try {
+            var hdr = document.querySelector('header');
+            if (!hdr || getComputedStyle(hdr).position !== 'fixed') return;
+            var apply = function () {
+              document.documentElement.style.setProperty('--header-h', hdr.offsetHeight + 'px');
+            };
+            apply();
+            if (window.ResizeObserver) new ResizeObserver(apply).observe(hdr);
+          } catch (_) {}
+        }
+        if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', measure);
+        else measure();
+      })();
     </script>
     <meta name="color-scheme" content="light dark">
     <link rel="stylesheet" href=${asset('/public/tailwind.css')}>
@@ -87,6 +111,11 @@ export default async function RootLayout({ children, url }: LayoutProps) {
         --font-sans: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', sans-serif;
         --font-serif: ui-serif, Georgia, 'Times New Roman', serif;
         --font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace;
+
+        /* The fixed header's height, reserved on the body below. A plain value
+           so a first paint with no JavaScript is already right; the script
+           above only corrects it when the header wraps. */
+        --header-h: 56px;
 
         color-scheme: light dark;
 
@@ -117,6 +146,13 @@ export default async function RootLayout({ children, url }: LayoutProps) {
            render at all. (No backticks anywhere in this block: it is inside a
            template literal, so one would end it.) */
         --destructive-foreground: light-dark(#ffffff, #12141a);
+        /* Status colours, for a toast and for anything else that reports an
+           outcome. They exist because the kit's sonner shipped raw Tailwind
+           swatches, which are the same in both themes and answer to no palette
+           change. Mapped into utilities in public/input.css. */
+        --success:              light-dark(#137a4a, #4ade80);
+        --warning:              light-dark(#9a5a04, #fbbf24);
+        --info:                 light-dark(#1d6fa5, #67c4f5);
         --border:               light-dark(#e1e4ea, #30353d);
         --border-strong:        light-dark(#c8cdd6, #3f454f);
         --input:                light-dark(#e1e4ea, #30353d);
@@ -133,7 +169,26 @@ export default async function RootLayout({ children, url }: LayoutProps) {
     <style>
       /* Base styles no utility class can reach. */
       html, body { margin: 0; }
+      /* A short page and a tall one otherwise differ by a scrollbar's width,
+         which slides the centred header content sideways on every navigation.
+         The kit's dialog scroll lock defers to this declaration, so the two
+         never double-compensate. */
+      html { scrollbar-gutter: stable; }
+      /* Two custom elements are a run of TEXT inside a sentence, not a block.
+         An element with no display of its own is not reliably inline once the
+         framework has upgraded it, and the visible symptom is small: a status
+         line reading "deployed" and "1 hour ago" on two lines. Declared here
+         because a light-DOM component cannot set the display of its own host,
+         and only the layout may write document-level CSS. */
+      relative-time { display: inline; }
+      copy-button { display: inline-block; vertical-align: middle; }
+      /* A tooltip wraps its trigger, so it has to take the trigger's place in
+         the line: as a block it puts every row action on its own line and
+         breaks a sentence in half around an explained word. The content
+         element is a popover in the top layer and is positioned regardless. */
+      ui-tooltip, ui-tooltip-trigger { display: inline-block; vertical-align: middle; }
       body {
+        padding-top: var(--header-h);
         background: var(--background);
         color: var(--foreground);
         font: 15px/1.6 var(--font-sans);
@@ -144,56 +199,83 @@ export default async function RootLayout({ children, url }: LayoutProps) {
 
     ${me
       ? html`
-          <header class="border-b border-border">
+          <header
+            class="fixed inset-x-0 top-0 z-40 border-b border-border bg-card/85 backdrop-blur"
+            style="border-right: var(--wj-scrollbar-compensation, 0px) solid transparent"
+          >
             <div class="max-w-6xl mx-auto px-6 py-3 flex flex-wrap items-center gap-x-6 gap-y-3">
-              <a href="/machines" class="font-semibold tracking-tight no-underline text-foreground">pilots</a>
+              <a href="/" class="font-semibold tracking-tight no-underline text-foreground shrink-0">pilots</a>
 
-              <nav class="flex items-center gap-4 text-sm" aria-label="Primary">
-                ${NAV.map(
-                  ([href, label]) => html`
-                    <a
-                      href=${href}
-                      class=${cn(
-                        'no-underline transition-colors',
-                        path.startsWith(href) ? 'text-foreground font-medium' : 'text-muted-foreground hover:text-foreground',
-                      )}
-                      aria-current=${path.startsWith(href) ? 'page' : 'false'}
-                      >${label}</a
-                    >
-                  `,
-                )}
-              </nav>
+              <app-nav current=${path} class="min-w-0 flex-1"></app-nav>
 
-              <div class="ml-auto flex items-center gap-3 text-sm">
-                ${orgs.length > 1
-                  ? html`
-                      <form action=${switchOrg} class="flex items-end gap-2">
-                        <input type="hidden" name="back" value=${path}>
-                        <label class="sr-only" for="org-switch">Organisation</label>
-                        <div class=${nativeSelectWrapperClass()}>
-                          <select id="org-switch" name="org" data-size="sm" class=${nativeSelectClass()}>
-                            ${orgs.map(
-                              (o) => html`<option value=${o.id} ?selected=${o.id === me.org.id}>${o.slug}</option>`,
-                            )}
-                          </select>
-                          <svg class=${nativeSelectIconClass()} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
-                        </div>
-                        <button type="submit" class=${buttonClass({ variant: 'outline', size: 'sm' })}>Switch</button>
-                      </form>
-                    `
-                  : html`<span class="text-muted-foreground">${me.org.slug}</span>`}
-
-                <span class="text-muted-foreground">${me.login}</span>
-                <form method="POST" action="/api/auth/signout">
-                  <button type="submit" class=${buttonClass({ variant: 'ghost', size: 'sm' })}>Sign out</button>
-                </form>
+              <div class="ml-auto flex items-center gap-2 text-sm">
+                <command-palette></command-palette>
                 <theme-toggle></theme-toggle>
+
+                <org-switcher>
+                  <ui-dropdown-menu>
+                    <ui-dropdown-menu-trigger>
+                      <button
+                        type="button"
+                        class=${cn(buttonClass({ variant: 'ghost', size: 'sm' }), 'gap-2')}
+                        aria-label=${`Account: ${me.login}`}
+                      >
+                        <span class=${avatarClass({ size: 'sm' })} data-slot="avatar" data-size="sm">
+                          ${me.avatarUrl
+                            ? html`<img class=${avatarImageClass()} src=${me.avatarUrl} alt="">`
+                            : html`<span class=${avatarFallbackClass()}>${initials(me.login)}</span>`}
+                        </span>
+                        <span>${me.login}</span>
+                        ${me.org.personal
+                          ? ''
+                          : html`<span class="text-muted-foreground">${me.org.slug}</span>`}
+                      </button>
+                    </ui-dropdown-menu-trigger>
+                    <ui-dropdown-menu-content align="end">
+                      <ui-dropdown-menu-label>Signed in as ${me.login}</ui-dropdown-menu-label>
+                      <ui-dropdown-menu-separator></ui-dropdown-menu-separator>
+                      ${orgs.length > 1
+                        ? html`
+                            <ui-dropdown-menu-group aria-label="Organisation">
+                              ${orgs.map(
+                                (o) => html`<ui-dropdown-menu-item type="radio" value=${o.id} ?checked=${o.id === me.org.id}
+                                  >${o.slug}</ui-dropdown-menu-item
+                                >`,
+                              )}
+                            </ui-dropdown-menu-group>
+                            <ui-dropdown-menu-separator></ui-dropdown-menu-separator>
+                          `
+                        : ''}
+                      <ui-dropdown-menu-item><a href="/usage" class="no-underline text-foreground">Usage</a></ui-dropdown-menu-item>
+                      <ui-dropdown-menu-item><a href="/keys" class="no-underline text-foreground">Tokens</a></ui-dropdown-menu-item>
+                      <ui-dropdown-menu-item><a href="/org" class="no-underline text-foreground">Team</a></ui-dropdown-menu-item>
+                      <ui-dropdown-menu-separator></ui-dropdown-menu-separator>
+                      <ui-dropdown-menu-item variant="destructive">
+                        <button type="submit" form="signout" class="w-full text-left bg-transparent border-0 p-0 font-inherit text-inherit cursor-pointer">Sign out</button>
+                      </ui-dropdown-menu-item>
+                    </ui-dropdown-menu-content>
+                  </ui-dropdown-menu>
+
+                  <!-- The radio items cannot post anything on their own, so
+                       <org-switcher> fills these in and submits. The same form
+                       is on /org under Account for a visitor with no JS. -->
+                  <form action=${switchOrg} data-org-switch class="hidden">
+                    <input type="hidden" name="org" value=${me.org.id}>
+                    <input type="hidden" name="back" value=${path}>
+                  </form>
+                </org-switcher>
+
+                <form id="signout" method="POST" action="/api/auth/signout" class="hidden"></form>
+                <noscript><a href="/org" class="text-muted-foreground">Account</a></noscript>
               </div>
             </div>
           </header>
         `
       : html`
-          <header class="border-b border-border">
+          <header
+            class="fixed inset-x-0 top-0 z-40 border-b border-border bg-card/85 backdrop-blur"
+            style="border-right: var(--wj-scrollbar-compensation, 0px) solid transparent"
+          >
             <div class="max-w-6xl mx-auto px-6 py-3 flex items-center gap-4">
               <a href="/" class="font-semibold tracking-tight no-underline text-foreground">pilots</a>
               <div class="ml-auto"><theme-toggle></theme-toggle></div>
@@ -202,5 +284,7 @@ export default async function RootLayout({ children, url }: LayoutProps) {
         `}
 
     <main class="max-w-6xl mx-auto px-6 py-8">${children}</main>
+    <ui-sonner position="bottom-right"></ui-sonner>
+    <flash-toast></flash-toast>
   `;
 }

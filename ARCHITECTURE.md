@@ -550,7 +550,13 @@ untruncated (a signal death is -1, which one byte reports as 255); client to
 server **0=stdin 4=stdin_eof**, read only when the
 stream was opened with `stdin=true` (the default is `stdin=false`, the
 agent-runner path, where nothing is read from the socket and a `0` frame sent
-anyway is ignored); single write-mutex · `GET /terminal` WS (pty, JSON frames) ·
+anyway is ignored); single write-mutex; **`tty=true` (+ `rows`, `cols`, each
+1..65535, default 24 by 80) runs the command on a PTY instead**, which merges
+the two output streams so `2` is never sent, implies stdin, turns `4` into an
+EOT byte written to the terminal rather than a close, and accepts a text
+`{"type":"resize","cols":N,"rows":N}`; the exit verdict is unchanged, and hostd
+refuses `tty=true` with `stdin=false` with a 400 before the machine is woken ·
+`GET /terminal` WS (pty, JSON frames) ·
 reverse proxy: any request bearing `X-Pilot-Proxy-Port: <n>` is proxied to
 `127.0.0.1:<n>` (WS included; not auth-gated — the edge enforces). Token at
 `/etc/pilot-agent/token`, constant-time compare, header or `?token=`.

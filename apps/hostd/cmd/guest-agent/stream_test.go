@@ -177,3 +177,179 @@ func TestAStdinFrameIsIgnoredWhenStdinIsOff(t *testing.T) {
 		t.Fatalf("output %q, want got: -- the stdin frame was delivered", got)
 	}
 }
+
+// drainStream reads frames until the exit verdict and returns what each output
+// stream carried. Under a tty the stderr half must stay empty: a PTY merges
+// the two, so a frame 2 would mean the pipe path ran when the terminal one was
+// asked for.
+func drainStream(t *testing.T, ctx context.Context, conn *websocket.Conn) (stdout, stderr string, code int) {
+	t.Helper()
+	var out, errOut strings.Builder
+	code = -999
+	for {
+		typ, data, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if typ == websocket.MessageText {
+			var verdict struct {
+				Type     string `json:"type"`
+				ExitCode int    `json:"exit_code"`
+			}
+			if json.Unmarshal(data, &verdict) == nil && verdict.Type == "exit" {
+				code = verdict.ExitCode
+			}
+			continue
+		}
+		if len(data) == 0 {
+			t.Fatal("an empty binary frame")
+		}
+		switch data[0] {
+		case frameStdout:
+			out.WriteString(string(data[1:]))
+		case frameStderr:
+			errOut.WriteString(string(data[1:]))
+		case frameExit:
+			return out.String(), errOut.String(), code
+		}
+	}
+}
+
+// tty=true puts the command on a real terminal at the size that was asked for.
+//
+// `stty size` reads the window from the kernel, so it can only answer when
+// there IS a terminal. Counterfactual: drop the tty branch and the command
+// runs on pipes, where stty fails with "Inappropriate ioctl for device".
+func TestTTYRunsTheCommandOnAPTYAtTheRequestedSize(t *testing.T) {
+	conn, ctx := dialStream(t, "tty=true&rows=30&cols=100&cmd=sh&cmd=-c&cmd=stty+size")
+
+	stdout, stderr, code := drainStream(t, ctx, conn)
+	if !strings.Contains(stdout, "30 100") {
+		t.Fatalf("stdout %q, want the 30 by 100 window", stdout)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr %q, want nothing: a PTY merges the streams onto frame 1", stderr)
+	}
+	if code != 0 {
+		t.Fatalf("exit %d, want 0", code)
+	}
+}
+
+// A resize control message reaches the terminal.
+//
+// The command waits for a line before reading the size, so the resize is
+// guaranteed to have landed by the time stty runs. Counterfactual: drop the
+// text branch in the read loop and the window stays 30 by 100.
+func TestTTYHonoursAResizeMessage(t *testing.T) {
+	conn, ctx := dialStream(t, "tty=true&rows=30&cols=100&cmd=sh&cmd=-c&cmd=read+x%3B+stty+size")
+
+	if err := conn.Write(ctx, websocket.MessageText, []byte(`{"type":"resize","cols":120,"rows":40}`)); err != nil {
+		t.Fatalf("write resize: %v", err)
+	}
+	if err := conn.Write(ctx, websocket.MessageBinary, append([]byte{frameStdin}, "go\n"...)); err != nil {
+		t.Fatalf("write stdin frame: %v", err)
+	}
+
+	stdout, _, code := drainStream(t, ctx, conn)
+	if !strings.Contains(stdout, "40 120") {
+		t.Fatalf("stdout %q, want the resized 40 by 120 window", stdout)
+	}
+	if code != 0 {
+		t.Fatalf("exit %d, want 0", code)
+	}
+}
+
+// A tty implies stdin even when stdin=true was never passed, and frame 4 is
+// EOT rather than a close: `cat` ends on the EOT the line discipline delivers,
+// and the session was never torn down to make that happen.
+func TestTTYReadsStdinWithoutTheStdinFlagAndEndsOnEOT(t *testing.T) {
+	conn, ctx := dialStream(t, "tty=true&cmd=cat")
+
+	if err := conn.Write(ctx, websocket.MessageBinary, append([]byte{frameStdin}, "hello\n"...)); err != nil {
+		t.Fatalf("write stdin frame: %v", err)
+	}
+	// The terminal echoes what was typed and cat writes it back, so the read
+	// below is looking for the line, not counting occurrences of it.
+	if err := conn.Write(ctx, websocket.MessageBinary, []byte{frameStdinEOF}); err != nil {
+		t.Fatalf("write eof frame: %v", err)
+	}
+
+	stdout, stderr, code := drainStream(t, ctx, conn)
+	if !strings.Contains(stdout, "hello") {
+		t.Fatalf("stdout %q, want the typed line", stdout)
+	}
+	if stderr != "" {
+		t.Fatalf("stderr %q, want nothing under a tty", stderr)
+	}
+	if code != 0 {
+		t.Fatalf("exit %d, want 0", code)
+	}
+}
+
+// A window size that is not 1..65535 is refused at the handshake rather than
+// clamped, so a client that computed it wrongly learns immediately.
+func TestABadWindowSizeClosesTheStream(t *testing.T) {
+	for _, query := range []string{"tty=true&rows=0&cmd=cat", "tty=true&cols=abc&cmd=cat"} {
+		conn, ctx := dialStream(t, query)
+		_, _, err := conn.Read(ctx)
+		status := websocket.CloseStatus(err)
+		if status != websocket.StatusPolicyViolation {
+			t.Fatalf("%s: close status %v (err %v), want 1008", query, status, err)
+		}
+	}
+}
+
+// trackedPIDs is the set of processes the handlers currently own. A handler
+// untracks its own on the way out, so this is also how a test sees that one
+// returned.
+func trackedPIDs() map[int]bool {
+	out := map[int]bool{}
+	ownedPIDs.Range(func(key, _ any) bool {
+		if pid, ok := key.(int); ok {
+			out[pid] = true
+		}
+		return true
+	})
+	return out
+}
+
+// A client that goes away takes its terminal with it.
+//
+// A pipe stream ends itself: the deferred stdin close delivers EOF and the
+// command exits. A terminal has no such end, and a shell waiting for input
+// writes nothing, so without an explicit cancel the output pump parks on the
+// PTY master forever -- and with it the handler, the connection and the shell,
+// one set per closed browser tab.
+//
+// Counterfactual: drop the cancel in the read loop and this test fails on the
+// poll below, because the handler never returns and never untracks its PID.
+func TestClosingATTYStreamEndsTheShell(t *testing.T) {
+	before := trackedPIDs()
+	conn, _ := dialStream(t, "tty=true&cmd=sh&cmd=-c&cmd=read+x")
+
+	var pid int
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		for candidate := range trackedPIDs() {
+			if !before[candidate] {
+				pid = candidate
+			}
+		}
+		if pid != 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if pid == 0 {
+		t.Fatal("the shell never started")
+	}
+
+	conn.CloseNow()
+
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		if !trackedPIDs()[pid] {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("the handler never returned: the shell outlived the client that asked for it")
+}

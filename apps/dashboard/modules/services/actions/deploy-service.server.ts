@@ -24,5 +24,5 @@ export async function deployService(formData: FormData) {
   } catch (err) {
     return { success: false, error: `Deploy refused: ${(err as Error).message}`, status: 502 };
   }
-  return { success: true, redirect: `/services/${id}` };
+  return { success: true, redirect: `/services/${id}?ok=deployed` };
 }

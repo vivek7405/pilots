@@ -50,14 +50,19 @@ test('every signed-in page renders once signed in', async () => {
   }
 });
 
-test('the home page sends a signed-in visitor to the machines list', async () => {
+test('the home page is the overview once signed in, and the sign-in offer before', async () => {
   const anon = await app.handle(new Request('http://localhost/'));
   assert.equal(anon.status, 200, 'signed out, it offers the sign-in link');
   assert.match(await anon.text(), /Sign in with GitHub/);
 
+  // It used to redirect to /machines, which made the product's first screen a
+  // table of rows with no state on them.
   const signedIn = await app.handle(new Request('http://localhost/', asUser(cookie)));
-  assert.equal(signedIn.status, 302);
-  assert.equal(signedIn.headers.get('location'), '/machines');
+  assert.equal(signedIn.status, 200, 'no redirect: this page is the overview');
+  const body = await signedIn.text();
+  for (const section of ['Services', 'Sandboxes', 'Quota', 'Fleet']) {
+    assert.ok(body.includes(`>${section}<`), `the overview has a ${section} section`);
+  }
 });
 
 test('the login page shows a failed sign-in rather than swallowing it', async () => {

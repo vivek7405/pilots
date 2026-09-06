@@ -30,5 +30,5 @@ export async function removeMember(formData: FormData) {
   if (!row) return { success: false, error: 'No such member.', status: 404 };
 
   await db.delete(memberships).where(eq(memberships.id, row.id));
-  return { success: true, redirect: '/org' };
+  return { success: true, redirect: '/org?ok=removed' };
 }

@@ -89,7 +89,10 @@ test('submitting the rollback form calls the engine and returns to the service',
   });
 
   assert.equal(res.status, 303, 'a successful action redirects rather than re-rendering');
-  assert.equal(res.headers.get('location'), '/services/svc-1');
+  // ?ok= is what the redirect carries the outcome in: the app runs no session
+  // middleware, so there is no flash bag, and <flash-toast> reads this and
+  // strips it. Without it a rollback would look like a page that did nothing.
+  assert.equal(res.headers.get('location'), '/services/svc-1?ok=rolled-back');
   assert.deepEqual(
     app.fleet.calls.find((c) => c.method === 'services.rollback')!.args,
     ['svc-1'],

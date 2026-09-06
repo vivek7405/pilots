@@ -41,7 +41,7 @@ export default async function DomainsPage({ actionData }: PageProps) {
          not disappear when the list is empty. -->
     <div class="mb-8">
       ${rows.length === 0
-        ? emptyState('No custom domains.')
+        ? emptyState('No custom domains. A service is reachable on its own URL until one is added here.')
         : html`
             ${dataTable<DomainRow>({
               caption: 'Custom domains in this organisation',

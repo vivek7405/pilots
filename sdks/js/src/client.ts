@@ -163,6 +163,9 @@ export class Machines {
   /**
    * Streams a command's output frame by frame. `stdin` is false by default;
    * see ExecStream before turning it on.
+   *
+   * `tty: true` runs the command on a pseudo-terminal, which is what an
+   * interactive shell needs; it implies `stdin` and merges stderr into stdout.
    */
   execStream(id: string, argv: string[], opts: ExecStreamOptions = {}): ExecStream {
     const url = buildExecURL(
@@ -172,7 +175,10 @@ export class Machines {
       opts,
     )
     return new ExecStream(url, this.http.apiKey, {
-      stdin: opts.stdin ?? false,
+      // A tty implies stdin, so the pair is settled here rather than left to
+      // each caller: hostd refuses tty=true with stdin=false outright.
+      stdin: opts.tty ? true : (opts.stdin ?? false),
+      tty: opts.tty ?? false,
       ...(opts.WebSocket ?? this.WebSocket ? { WebSocket: opts.WebSocket ?? this.WebSocket! } : {}),
     })
   }

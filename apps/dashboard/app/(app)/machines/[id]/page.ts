@@ -11,11 +11,13 @@ import { orUnauthorized, requireOrg } from '#modules/auth/session.server.ts';
 import { getMachine } from '#modules/machines/queries/get-machine.server.ts';
 import { stateBadge } from '#modules/machines/utils/ui/state.ts';
 import { badgeClass } from '#components/ui/badge.ts';
+import { buttonClass } from '#components/ui/button.ts';
 import { cardClass, cardContentClass } from '#components/ui/card.ts';
 import { dataTable, emptyState, footnote, pageHeading, sectionHeading } from '#lib/utils/ui.ts';
 import { cn } from '#lib/utils/cn.ts';
 import '#modules/machines/components/log-pane.ts';
 import '#modules/machines/components/exec-console.ts';
+import '#components/copy-button.ts';
 
 interface Checkpoint {
   id: string;
@@ -36,6 +38,9 @@ export default async function MachinePage({ params }: PageProps) {
   return html`
     <div class="flex flex-wrap items-center gap-3">
       ${pageHeading(machine.name || machine.id)} ${stateBadge(machine.state)}
+      <a href=${`/machines/${machine.id}/terminal`} class=${cn(buttonClass({ size: 'sm' }), 'ml-auto')}
+        >Open a terminal</a
+      >
     </div>
 
     <div class=${cn(cardClass({ size: 'sm' }), 'mt-4')} data-slot="card" data-size="sm">
@@ -51,7 +56,7 @@ export default async function MachinePage({ params }: PageProps) {
       </div>
     </div>
 
-    <section class="mt-8">
+    <section id="console" class="mt-8">
       ${sectionHeading('Console')}
       <log-pane machine-id=${machine.id}></log-pane>
     </section>
@@ -64,7 +69,9 @@ export default async function MachinePage({ params }: PageProps) {
     <section class="mt-8">
       ${sectionHeading('Checkpoints')}
       ${checkpoints.length === 0
-        ? emptyState('None yet. A checkpoint is copy-on-write metadata, so taking one costs no data copy.')
+        ? emptyState('None yet. A checkpoint is copy-on-write metadata, so taking one costs no data copy.', {
+            command: `pilot machines checkpoint ${machine.name || machine.id}`,
+          })
         : dataTable<Checkpoint>({
             caption: 'Checkpoints of this machine',
             rows: checkpoints,

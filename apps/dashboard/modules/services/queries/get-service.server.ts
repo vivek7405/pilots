@@ -20,13 +20,17 @@ import { assertOwned } from '#modules/fleet/org-filter.server.ts';
 import { requireOrg, signedOut } from '#modules/auth/session.server.ts';
 import type { SignedOut } from '#modules/auth/session.server.ts';
 import type { RepoConnection } from '#db/schema.server.ts';
-import type { Machine, Release, Service } from '@pilots/sdk';
+import type { Host, Machine, Release, Service } from '@pilots/sdk';
 
 export interface ServiceDetail {
   service: Service;
   releases: Release[];
   previews: Machine[];
   repo: RepoConnection | null;
+  /** The machines running this service, which is what its health is about. */
+  replicas: Machine[];
+  /** Every host, so a replica's resume tier can be named without a second read. */
+  hosts: Host[];
 }
 
 export async function getService(input: { id: string }): Promise<ServiceDetail | null | SignedOut> {
@@ -46,7 +50,9 @@ export async function getService(input: { id: string }): Promise<ServiceDetail |
   // convention; there is no separate previews route to ask.
   const app = service.app ?? service.name;
   const previews = machines.filter((m) => (m.name ?? '').startsWith('pr-') && (m.name ?? '').endsWith(`-${app}`));
+  const replicas = machines.filter((m) => m.service_id === service.id);
+  const hosts = await fleet.hosts.list().catch(() => [] as Host[]);
   const repo = (await db.select().from(repoConnections).where(eq(repoConnections.serviceId, input.id)).get()) ?? null;
 
-  return { service, releases, previews, repo };
+  return { service, releases, previews, repo, replicas, hosts };
 }
