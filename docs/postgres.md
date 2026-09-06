@@ -199,6 +199,13 @@ export PILOT_SECRET_POSTGRES_PASSWORD=...
 export PILOT_SECRET_DATABASE_URL=postgres://postgres:...@postgres.internal:5432/postgres
 ```
 
+Or store them once and deploy with nothing exported:
+
+```
+pilot secrets set postgres_password --app shop
+pilot secrets set database_url --app shop
+```
+
 ## One thing to carry into operations
 
 **A rescued database has a different RTO from every other machine.** Everything
