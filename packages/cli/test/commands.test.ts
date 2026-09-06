@@ -82,7 +82,11 @@ test('machines ls --app filters, and the human form is a table', async () => {
     assert.deepEqual(list.map((m) => m.name), ['a'])
 
     const human = await pilot(env, ['machines', 'ls'])
-    assert.match(human.stdout, /^ID {2}/m)
+    // Name first, id last. The name is what a person types into every other
+    // command; the id is a 42-character string that pushed URL off the edge.
+    const header = human.stdout.split('\n')[0]!.trim().split(/ {2,}/)
+    assert.equal(header[0], 'NAME')
+    assert.equal(header.at(-1), 'ID')
     assert.match(human.stdout, /\ba\b/)
     assert.match(human.stdout, /\bb\b/)
   } finally {
@@ -416,6 +420,50 @@ test('whoami with an admin key prints (admin key, no org)', async () => {
     assert.equal(res.code, 0, res.stderr)
     assert.match(res.stdout, /^ORG {2,}\(admin key, no org\) +from fleet$/m)
     assert.match(res.stdout, /^SCOPES {2,}admin +from fleet$/m)
+  } finally {
+    await api.close()
+  }
+})
+
+// Every table a person reads leads with the name and ends with the id.
+// Counterfactual: a row function reordered without its header lands the values
+// in the wrong columns, which this reads column by column to catch.
+test('services and volumes tables lead with the name and end with the id', async () => {
+  const api = await startFakeAPI()
+  api.machines.push(fakeMachine({ id: 'm_1', name: 'api' }))
+  api.services.push({
+    id: 'svc_1',
+    name: 'web',
+    app: 'shop',
+    replicas: 2,
+    knobs: { auto_stop: 'off', auto_start: false, min_machines_running: 1, soft_limit: 20 },
+    url: 'https://web.pilotrun.app',
+    release_id: 'rel_1',
+    autodeploy: false,
+    created_at: 1,
+  })
+  const env = loggedIn(api.url)
+  try {
+    const columns = (out: string): string[] => out.split('\n')[0]!.trim().split(/ {2,}/)
+
+    const services = await pilot(env, ['services', 'ls'])
+    assert.deepEqual(columns(services.stdout), ['NAME', 'APP', 'REPLICAS', 'URL', 'ID'])
+    assert.match(services.stdout.split('\n')[1]!, /^web {2,}shop {2,}2 {2,}https:\/\/web\.pilotrun\.app {2,}svc_1$/)
+
+    // The release id has no everyday use, so `ls` hides it behind --wide.
+    const wide = await pilot(env, ['services', 'ls', '--wide'])
+    assert.deepEqual(columns(wide.stdout), ['NAME', 'APP', 'REPLICAS', 'URL', 'RELEASE', 'ID'])
+
+    // `info` shows one service someone is already looking closely at, so it
+    // always carries the release.
+    const info = await pilot(env, ['services', 'info', 'web'])
+    assert.deepEqual(columns(info.stdout), ['NAME', 'APP', 'REPLICAS', 'URL', 'RELEASE', 'ID'])
+
+    const volumes = await pilot(env, ['volumes', 'create', 'data', '--size-gib', '5'])
+    assert.deepEqual(columns(volumes.stdout), ['NAME', 'GIB', 'MOUNT', 'MACHINE', 'ID'])
+
+    const promoted = await pilot(env, ['promote', 'api'])
+    assert.deepEqual(columns(promoted.stdout), ['NAME', 'REPLICAS', 'URL', 'ID'])
   } finally {
     await api.close()
   }

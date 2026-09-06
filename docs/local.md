@@ -389,6 +389,33 @@ pilot machines ls
 `PILOT_GITHUB_URL`, `PILOT_DASHBOARD_URL` and `PILOT_GITHUB_CLIENT_ID` are only
 for the device-flow login and are not needed with `--token`.
 
+`pilot status` lists the box itself, because every hostd writes its own `hosts`
+row whether or not it is in a fleet:
+
+```
+HOST    ALIVE  CPU FREE  MEM FREE MIB
+host-a  true   16        48211
+
+STATE      MACHINES
+creating   0
+running    1
+...
+```
+
+An empty host table there means hostd has not finished starting or its state
+store is unwritable, and `pilot status` says so on stderr.
+
+`pilot whoami` shows which credentials every other command is using and where
+each came from, which is what to run first when a stale `PILOT_API_KEY` is in
+the shell:
+
+```
+ORG     org_1                             from fleet
+FLEET   http://api.pilots.localhost:8080  from PILOT_API_URL
+KEY     pilot_e2e_ab...                   from PILOT_API_KEY
+SCOPES  machines,deploy,admin             from fleet
+```
+
 ```js
 // @pilots/sdk
 new PilotsClient(key, { baseURL: 'http://api.pilots.localhost:8080' })

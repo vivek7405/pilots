@@ -28,7 +28,7 @@ grant designed for a client that cannot keep one.
 pilot login                       # the device flow
 pilot login --token pilot_xxx     # headless: no GitHub, no dashboard
 pilot logout                      # remove the file
-pilot whoami                      # the org, the fleet and the key's prefix
+pilot whoami                      # the org, the fleet, the key prefix, and where each came from
 ```
 
 **No command validates a cached key.** Once a key is in the file, every command
@@ -44,6 +44,12 @@ up, which is the central dependency this platform is built without.
 | | the credentials file | `PILOT_API_URL` |
 | | | the credentials file |
 | lowest | | `https://api.pilotrun.app` |
+
+`pilot whoami` prints the source that won for each row, so a file holding one
+key while `PILOT_API_KEY` holds another is visible rather than guessed at. It
+asks the fleet for the org and scopes, since the file records only what `login`
+stored and says nothing about a key from the environment. When the fleet does
+not answer it says so on stderr, falls back to the file, and still exits `0`.
 
 Other variables the CLI reads:
 
@@ -96,6 +102,21 @@ $ pilot machines create
 error: quota exceeded: machines (limit 20, used 20)
 ```
 
+An error the CLI raises itself carries the next step on a second line:
+
+```
+$ pilot machines ls
+error: no API key
+→ run pilot login, or set PILOT_API_KEY
+```
+
+Hints are stderr prose. They never appear under `--json`, where stderr carries
+the server's body and nothing else, and they are never folded into the message,
+so the sentence and the fix stay separately readable and separately testable.
+
+Colour, where there is any, is stderr only and on a terminal only. `NO_COLOR`
+turns it off, and so does `--json`.
+
 ## Commands
 
 ### Machines
@@ -123,6 +144,10 @@ to stderr, and exits with the remote status. **stdin is off unless you pass
 
 `restore` is in place. The machine keeps its id, its URL and its agent token, so
 every link to it still works.
+
+Every table a person reads leads with the **name** and ends with the **id**.
+The name is what goes into the next command; the id is 42 characters and, in
+column one, pushed the URL off the right edge of a normal terminal.
 
 `start` and `stop` answer `501` on the current server. The CLI passes the
 server's error through rather than hiding it.
@@ -225,7 +250,8 @@ overrides a stored value without editing anything.
 ### Services, domains, volumes
 
 ```
-pilot services ls|info <service>|releases <service>|rollback <service>
+pilot services ls [--app <name>] [--wide]
+pilot services info <service>|releases <service>|rollback <service>
 pilot services set <service> [--replicas --env K=V --unset-env KEY
                               --secret-env K=V --repo --branch --autodeploy]
 pilot domains add <hostname> --service <id|name>
@@ -241,6 +267,10 @@ pilot status
 underlying `PATCH` replaces the whole map. `--secret-env` replaces the sealed
 map outright: a sealed value cannot be read back, so there is nothing to merge
 with.
+
+`services ls --wide` adds the current release id, the one column with no
+everyday use. `services info` always carries it, since it shows a single service
+someone is already looking closely at.
 
 `promote` turns a sandbox into a durable service **without changing its URL**.
 

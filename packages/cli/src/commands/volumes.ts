@@ -48,9 +48,9 @@ export function createVolumesCommand(): Command {
 }
 
 function volumeHeader(): string[] {
-  return ['ID', 'NAME', 'GIB', 'MOUNT', 'MACHINE']
+  return ['NAME', 'GIB', 'MOUNT', 'MACHINE', 'ID']
 }
 
 function volumeRow(v: { id: string; name: string; size_gib: number; mount_path: string; machine_id?: string }): string[] {
-  return [v.id, v.name, String(v.size_gib), v.mount_path, v.machine_id ?? '']
+  return [v.name, String(v.size_gib), v.mount_path, v.machine_id ?? '', v.id]
 }

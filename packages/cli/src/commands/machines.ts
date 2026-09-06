@@ -264,12 +264,15 @@ async function execStream(
   }
 }
 
+// Name first, id last, in every table here. The name is what a person types
+// into every other command, and a 42-character id in column one pushes the URL
+// off the right edge of a normal terminal.
 function machineHeader(): string[] {
-  return ['ID', 'NAME', 'STATE', 'HOST', 'URL']
+  return ['NAME', 'STATE', 'HOST', 'URL', 'ID']
 }
 
 function machineRow(m: Machine): string[] {
-  return [m.id, m.name, m.state, m.host_id, m.custom_domain || m.url]
+  return [m.name, m.state, m.host_id, m.custom_domain || m.url, m.id]
 }
 
 function pick(source: Record<string, unknown>, keys: string[]): Record<string, string> {

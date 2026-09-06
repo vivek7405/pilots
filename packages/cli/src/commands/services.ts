@@ -22,13 +22,17 @@ export function createServicesCommand(): Command {
     .alias('list')
     .description('list services')
     .option('--app <name>', 'only services in this app')
+    .option('--wide', 'also show the current release id')
     .action(async function (this: Command) {
-      const opts = this.optsWithGlobals() as GlobalOptions & { app?: string }
+      const opts = this.optsWithGlobals() as GlobalOptions & { app?: string; wide?: boolean }
       const client = clientFromEnv(opts)
       const all = await client.services.list()
       const list = opts.app ? all.filter((s) => s.app === opts.app) : all
       if (isJSONMode()) printJSON(list)
-      else printTable([serviceHeader(), ...list.map(serviceRow)])
+      else {
+        const wide = Boolean(opts.wide)
+        printTable([serviceHeader(wide), ...list.map((s) => serviceRow(s, wide))])
+      }
     })
 
   services
@@ -39,7 +43,7 @@ export function createServicesCommand(): Command {
       const client = clientFromEnv(opts)
       const found = await resolveService(client, service)
       if (isJSONMode()) printJSON(found)
-      else printTable([serviceHeader(), serviceRow(found)])
+      else printTable([serviceHeader(true), serviceRow(found, true)])
     })
 
   services
@@ -118,23 +122,24 @@ export function createServicesCommand(): Command {
 
       const updated = await client.services.patch(found.id, req)
       if (isJSONMode()) printJSON(updated)
-      else printTable([serviceHeader(), serviceRow(updated)])
+      else printTable([serviceHeader(true), serviceRow(updated, true)])
     })
 
   return services
 }
 
-function serviceHeader(): string[] {
-  return ['ID', 'NAME', 'APP', 'REPLICAS', 'RELEASE', 'URL']
+/**
+ * Name first, id last. The release id is the one column with no everyday use,
+ * so `ls` hides it behind `--wide` while `info` and `set`, which show a single
+ * service someone is already looking closely at, always carry it.
+ */
+function serviceHeader(wide: boolean): string[] {
+  return wide ? ['NAME', 'APP', 'REPLICAS', 'URL', 'RELEASE', 'ID'] : ['NAME', 'APP', 'REPLICAS', 'URL', 'ID']
 }
 
-function serviceRow(s: Service): string[] {
-  return [
-    s.id,
-    s.name,
-    s.app ?? '',
-    String(s.replicas),
-    s.release_id ?? '',
-    s.custom_domain || s.url || '',
-  ]
+function serviceRow(s: Service, wide: boolean): string[] {
+  const url = s.custom_domain || s.url || ''
+  return wide
+    ? [s.name, s.app ?? '', String(s.replicas), url, s.release_id ?? '', s.id]
+    : [s.name, s.app ?? '', String(s.replicas), url, s.id]
 }
