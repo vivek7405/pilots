@@ -19,7 +19,7 @@ import { envVarFor } from '../compose/secrets.ts'
 import { credentialsPath, type GlobalOptions } from '../config.ts'
 import { CliError, isJSONMode, note, printJSON, printTable } from '../output.ts'
 import { promptSecret } from '../prompt.ts'
-import { importSecrets, listSecretNames, setSecret } from '../secrets/store.ts'
+import { assertSecretName, importSecrets, listSecretNames, setSecret } from '../secrets/store.ts'
 
 interface ScopeOptions {
   app?: string
@@ -41,6 +41,10 @@ export function createSecretsCommand(): Command {
     .action(async function (this: Command, name: string, value: string | undefined) {
       const opts = this.optsWithGlobals() as GlobalOptions & ScopeOptions
       const app = appFor(opts)
+      // Before the value: a name the store would refuse is worth refusing
+      // while the secret is still in the user's clipboard rather than after
+      // they have typed it at the prompt.
+      assertSecretName(name)
       const stored = value ?? (await readValue(name, app))
       setSecret(app, name, stored)
       if (isJSONMode()) printJSON({ app, name })
@@ -76,7 +80,7 @@ function appFor(opts: ScopeOptions): string {
   const file = findComposeFile(resolve(opts.dir))
   if (!file) {
     throw new CliError(
-      `no compose file in ${resolve(opts.dir)} to take the app from: pass --app, or looked for ${COMPOSE_NAMES.join(', ')}`,
+      `no compose file in ${resolve(opts.dir)} to take the app from (looked for ${COMPOSE_NAMES.join(', ')}): pass --app`,
     )
   }
   return composeAppName(file)

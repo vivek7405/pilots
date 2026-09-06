@@ -345,6 +345,32 @@ test('an empty or whitespace name is refused', async () => {
   assert.equal(loadCredentials(b.env)!.secrets?.shop, undefined)
 })
 
+test('a bad name is refused before the value is read', () => {
+  // Counterfactual: validating inside the store, after `readValue`, makes the
+  // user type the whole secret at the prompt (or hands the piped one to a
+  // process that discards it) and only then refuses.
+  const b = bed()
+  const res = pilotWithStdin(b, ['secrets', 'set', 'a b'], 'never-read\n')
+  assert.equal(res.code, 1)
+  assert.match(res.stderr, /secret:\/\/<name>/)
+  assert.equal(res.stderr.includes('never-read'), false)
+  assert.equal(loadCredentials(b.env)!.secrets?.shop, undefined)
+})
+
+test('import refuses a key `set` would refuse, and stores nothing', async () => {
+  // `parseEnv` hands back `A B` for a line whose key holds a space. A name
+  // like that is one no secret:// reference can address and one `ls` renders
+  // across two columns, so it is refused by the same rule `set` applies.
+  const b = bed()
+  const file = join(b.dir, 'bad.env')
+  writeFileSync(file, 'GOOD=one\nA B=two\n')
+  const res = await pilot(b, ['secrets', 'import', file])
+  assert.equal(res.code, 1)
+  assert.match(res.stderr, /secret:\/\/<name>/)
+  assert.equal(res.stderr.includes('two'), false)
+  assert.equal(loadCredentials(b.env)!.secrets?.shop, undefined)
+})
+
 test('promptSecret refuses without a TTY', async () => {
   // Under `node --test` stdin is never a terminal, so this is the branch a
   // script hits. The TTY branch is verified by hand on a pty; see the PR.

@@ -25,10 +25,21 @@ export interface SecretName {
 
 const NOT_LOGGED_IN = 'not logged in: run `pilot login` first; secrets are stored beside the API key'
 
-export function setSecret(app: string, name: string, value: string, env: NodeJS.ProcessEnv = process.env): void {
+/**
+ * Refuses a name no `secret://` reference could carry.
+ *
+ * Exported so a caller can check before it reads a value: a `set` that
+ * validated afterwards would have the user type a whole secret at the prompt
+ * and then throw it away.
+ */
+export function assertSecretName(name: string): void {
   if (name === '' || /\s|=/.test(name)) {
     throw new CliError(`a secret name is what secret://<name> carries in the compose file; got ${JSON.stringify(name)}`)
   }
+}
+
+export function setSecret(app: string, name: string, value: string, env: NodeJS.ProcessEnv = process.env): void {
+  assertSecretName(name)
   const creds = requireCredentials(env)
   saveCredentials(withSecrets(creds, app, { [name]: value }), env)
 }
@@ -44,6 +55,11 @@ export function importSecrets(app: string, file: string, env: NodeJS.ProcessEnv 
   const pairs = parseDotEnv(text)
   const names = Object.keys(pairs).sort()
   if (names.length === 0) throw new CliError(`${file === '-' ? 'stdin' : file} holds no KEY=value lines`)
+  // The same rule `set` applies, because there is one answer to what a secret
+  // name is. `parseEnv` will hand back `A B` for a line that lost its `=`, and
+  // a name with a space in it is one no `secret://` reference can address and
+  // one `ls` renders across two columns.
+  for (const name of names) assertSecretName(name)
   const creds = requireCredentials(env)
   saveCredentials(withSecrets(creds, app, pairs), env)
   return names
