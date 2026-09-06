@@ -192,6 +192,14 @@ func (m *Manager) put(id string, fcm *fc.Machine) {
 	m.running[id] = fcm
 	m.mu.Unlock()
 
+	// No process handle, no exit to react to. A handle built for a teardown
+	// path holds only what Cleanup needs, and reading "no pid" as "the pid is
+	// gone" would tear the machine out of the registry underneath the caller
+	// that just put it there.
+	if fcm.Cmd == nil || fcm.Cmd.Process == nil {
+		return
+	}
+
 	exited := fcm.Exited()
 	go func() {
 		<-exited

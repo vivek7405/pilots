@@ -516,3 +516,30 @@ func TestExitedWhileDownReactsWhenTheRowIsOurs(t *testing.T) {
 		t.Error("a foreign machine was left in this host's registry")
 	}
 }
+
+// A registry entry with no process behind it is not an exit.
+//
+// StopLocal and the volume teardown both build a handle that carries only what
+// Cleanup needs, with no Cmd at all. Reading that as "the process is gone"
+// dropped the machine out of the registry underneath the caller that had just
+// put it there, and the volume was then never released -- a mount left holding
+// the metadata database of a machine another host now owns.
+func TestAMachineWithNoProcessIsNotAnExit(t *testing.T) {
+	m, rec, _ := newExitManager(t)
+	ctx := context.Background()
+
+	if err := m.opts.Store.PutMachine(ctx, runningRow("m-handle")); err != nil {
+		t.Fatal(err)
+	}
+	rec.calls = nil
+
+	m.put("m-handle", &fc.Machine{ID: "m-handle"})
+
+	time.Sleep(500 * time.Millisecond)
+	if _, ok := m.get("m-handle"); !ok {
+		t.Fatal("a handle with no process was dropped from the registry as if it had exited")
+	}
+	if w := writesOnly(rec.order()); len(w) != 0 {
+		t.Errorf("a handle with no process wrote %v", w)
+	}
+}
