@@ -16,7 +16,7 @@ import { after, test } from 'node:test'
 import { promisify } from 'node:util'
 
 import { saveCredentials } from '../src/config.ts'
-import { fakeService, startFakeAPI, type FakeAPI } from './helpers/fake-api.ts'
+import { fakeService, startFakeAPI, unknownFrameworkBody, type FakeAPI } from './helpers/fake-api.ts'
 import { json } from './helpers/server.ts'
 
 const exec = promisify(execFile)
@@ -402,17 +402,56 @@ test('a PlanError prints one line per rejected key and exits 1', async () => {
   }
 })
 
-test('no compose file names all four filenames it looked for', async () => {
+// A directory with no compose file is no longer an error the CLI raises: it
+// is a question for the host, which is what makes a repo with only a
+// Dockerfile, or with neither, deployable at all. What the CLI owns is the
+// tar it sends and the plan it executes.
+test('a directory with no compose file is planned by the host and deployed', async () => {
+  const api = await startFakeAPI()
+  const dir = join(import.meta.dirname, 'fixtures', 'webjs-app')
+  const env = loggedIn(api.url)
+  try {
+    const res = await pilot(env, ['--json', 'deploy'], dir)
+    assert.equal(res.code, 0, res.stderr)
+
+    // The whole directory went up as a tar. The host reads the files; the
+    // CLI does not look at them at all.
+    const planned = api.find('POST', '/v1/plan')
+    assert.ok(planned, 'the CLI never asked the host what the directory was')
+    const posted = planned.raw.toString('latin1')
+    assert.ok(posted.includes('package.json'), 'the tar is missing package.json')
+    assert.ok(posted.includes('app/page.ts'), 'the tar is missing the app directory')
+
+    // The plan carried a build context AND generated Dockerfile text, so the
+    // build has to upload the text as the context's own Dockerfile.
+    const built = api.find('POST', '/v1/builds')!.raw.toString('latin1')
+    assert.ok(built.includes('ENV PORT=8080'), "the plan's Dockerfile did not reach the build")
+
+    // And the health the plan named reached the service, so the gate polls
+    // the readiness path rather than the default.
+    const created = JSON.parse(api.find('POST', '/v1/services')!.body) as {
+      health?: { path?: string }
+    }
+    assert.equal(created.health?.path, '/__webjs/ready')
+  } finally {
+    await api.close()
+  }
+})
+
+// The refusal is printed with the server's own next step under it, because
+// that line is the whole difference between "it did not work" and "here is
+// what to do".
+test('a directory the host cannot place prints the refusal and its next step', async () => {
   const api = await startFakeAPI()
   const empty = mkdtempSync(join(tmpdir(), 'pilot-empty-'))
   roots.push(empty)
+  api.routes.set('POST /v1/plan', (_req, res) => json(res, 400, unknownFrameworkBody()))
   const env = loggedIn(api.url)
   try {
     const res = await pilot(env, ['deploy'], empty)
     assert.equal(res.code, 1)
-    for (const name of ['compose.yaml', 'compose.yml', 'docker-compose.yml', 'docker-compose.yaml']) {
-      assert.ok(res.stderr.includes(name), `${name} is not in the message`)
-    }
+    assert.match(res.stderr, /no framework was detected/)
+    assert.match(res.stderr, /\u2192 add a Dockerfile/)
   } finally {
     await api.close()
   }
@@ -810,6 +849,77 @@ test('a failure in a later service is labelled and replayed as that service', as
     assert.doesNotMatch(res.stderr, /^postgres {2}ERROR: no matching distribution$/m)
     // The step that succeeded is not replayed alongside the one that failed.
     assert.doesNotMatch(res.stderr, /^web {2}postgres output$/m)
+  } finally {
+    await api.close()
+  }
+})
+
+// `--env` is the interpolation environment for a compose file. On a directory
+// that has none it has nothing to interpolate, and a flag that is parsed and
+// then ignored deploys something other than what was asked for while
+// reporting success.
+test('--env on a directory with no compose file is refused, not dropped', async () => {
+  const api = await startFakeAPI()
+  const dir = join(import.meta.dirname, 'fixtures', 'webjs-app')
+  const env = loggedIn(api.url)
+  try {
+    const res = await pilot(env, ['deploy', '--env', 'DATABASE_URL=postgres://x'], dir)
+    assert.equal(res.code, 1)
+    assert.match(res.stderr, /--env is the interpolation environment/)
+    assert.equal(api.all('POST', '/v1/plan').length, 0, 'it planned before refusing')
+    assert.equal(api.all('POST', '/v1/builds').length, 0, 'it built before refusing')
+  } finally {
+    await api.close()
+  }
+})
+
+// The two halves of this PR had to meet here: the host-planned path is a
+// deploy like any other, so it gets the staged output rather than the
+// firehose, and its stderr under --json stays NDJSON only.
+test('a host-planned directory gets the quiet output, and --json keeps stderr clean', async () => {
+  const api = await startFakeAPI()
+  stagedBuild(api)
+  const dir = join(import.meta.dirname, 'fixtures', 'webjs-app')
+  const env = loggedIn(api.url)
+  try {
+    const human = await pilot(env, ['deploy'], dir)
+    assert.equal(human.code, 0, human.stderr)
+    // One line per stage with its own elapsed time, not every npm line.
+    assert.match(human.stderr, /\[stage-1 1\/2\] RUN npm ci {2}done 12\.3s/)
+    assert.doesNotMatch(human.stderr, /added 12 packages/)
+    // The host's own detection still reaches a person.
+    assert.match(human.stderr, /in \./)
+
+    const asJSON = await pilot(env, ['--json', 'deploy'], dir)
+    assert.equal(asJSON.code, 0, asJSON.stderr)
+    // Counterfactual: leaving the detection lines unguarded puts prose on the
+    // one stderr that promises NDJSON and nothing else.
+    for (const line of asJSON.stderr.split('\n').filter(Boolean)) {
+      assert.doesNotThrow(() => JSON.parse(line), `stderr carried prose under --json: ${line}`)
+    }
+  } finally {
+    await api.close()
+  }
+})
+
+// Without a compose file there is no compose file to put x-pilots.domain in,
+// so the empty-URL explanation names only the command that actually applies.
+test('the empty-URL advice matches the path the deploy took', async () => {
+  const api = await startFakeAPI()
+  stagedBuild(api)
+  api.routes.set('POST /v1/services', (req, res) => {
+    const body = JSON.parse(req.body || '{}') as { name?: string; app?: string }
+    const svc = fakeService({ name: body.name ?? 'x', ...(body.app ? { app: body.app } : {}), url: '' })
+    api.services.push(svc)
+    return json(res, 201, svc)
+  })
+  const dir = join(import.meta.dirname, 'fixtures', 'webjs-app')
+  const env = loggedIn(api.url)
+  try {
+    const res = await pilot(env, ['deploy'], dir)
+    assert.equal(res.code, 0, res.stderr)
+    assert.match(res.stdout, /\(no domain: pilot domains add <host> --service /)
+    assert.doesNotMatch(res.stdout, /x-pilots\.domain/)
   } finally {
     await api.close()
   }

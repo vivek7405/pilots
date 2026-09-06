@@ -70,14 +70,14 @@ func (d Deps) mayAccess(r *http.Request, id string) bool {
 // the caller the id exists, which is a machine-name and service-name oracle
 // across tenants. "It is not there" is the only answer that leaks nothing.
 func notFound(w http.ResponseWriter, what string) {
-	writeJSON(w, http.StatusNotFound, ErrorResponse{Error: what + " not found"})
+	WriteError(w, http.StatusNotFound, CodeNotFound, what+" not found", NextNotFound, nil)
 }
 
 // ownedMachine resolves a machine the caller is allowed to act on.
 func (d Deps) ownedMachine(w http.ResponseWriter, r *http.Request, id string) (*state.Machine, bool) {
 	row, err := d.Store.GetMachine(r.Context(), id)
 	if err != nil {
-		writeErr(w, err)
+		writeMapped(w, err)
 		return nil, false
 	}
 	if !d.mayAccess(r, id) {
@@ -91,7 +91,7 @@ func (d Deps) ownedMachine(w http.ResponseWriter, r *http.Request, id string) (*
 func (d Deps) ownedService(w http.ResponseWriter, r *http.Request, id string) (*state.Service, bool) {
 	svc, err := d.Store.GetService(r.Context(), id)
 	if err != nil {
-		writeStoreError(w, err)
+		writeMapped(w, err)
 		return nil, false
 	}
 	if !d.mayAccess(r, id) {
@@ -105,7 +105,7 @@ func (d Deps) ownedService(w http.ResponseWriter, r *http.Request, id string) (*
 func (d Deps) ownedVolume(w http.ResponseWriter, r *http.Request, id string) (*state.Volume, bool) {
 	v, err := d.Store.GetVolume(r.Context(), id)
 	if err != nil {
-		writeErr(w, err)
+		writeMapped(w, err)
 		return nil, false
 	}
 	if !d.mayAccess(r, id) {

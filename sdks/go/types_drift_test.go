@@ -81,8 +81,9 @@ func goStructs(t *testing.T, dir, prefix string) map[string][]string {
 func hostdWireStructs(t *testing.T) map[string][]string {
 	t.Helper()
 	all := goStructs(t, apiDir, "")
-	// internal/compose arrives with #30. Until then there is nothing to walk;
-	// the day it lands its structs are checked without touching this file.
+	// internal/compose carries the plan, detect and error shapes, all under a
+	// Compose prefix. Walked here so a shape added to the front door cannot
+	// land unmirrored.
 	if _, err := os.Stat(composeDir); err == nil {
 		for name, tags := range goStructs(t, composeDir, composePrefix) {
 			all[name] = tags

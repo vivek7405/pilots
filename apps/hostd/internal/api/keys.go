@@ -39,15 +39,15 @@ func MintKey(r io.Reader) (key, hash string, err error) {
 func (d Deps) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	var req CreateAPIKeyRequest
 	if err := decodeBody(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad request body"})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "bad request body", NextBadBody, nil)
 		return
 	}
 	if req.OrgID == "" {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "org_id is required"})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "org_id is required", "pass org_id and scopes", nil)
 		return
 	}
 	if len(req.Scopes) == 0 {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "scopes is required"})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "scopes is required", "pass org_id and scopes", nil)
 		return
 	}
 	for _, s := range req.Scopes {
@@ -55,16 +55,16 @@ func (d Deps) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 			// Refused rather than stored: a key carrying a scope nothing
 			// recognises reaches no route at all, and the caller would find
 			// out only when every call came back 403.
-			writeJSON(w, http.StatusBadRequest, ErrorResponse{
-				Error: "unknown scope " + s + "; valid scopes are machines, deploy, admin"})
+			WriteError(w, http.StatusBadRequest, CodeBadRequest,
+				"unknown scope "+s+"; valid scopes are machines, deploy, admin",
+				"valid scopes are machines, deploy, admin", nil)
 			return
 		}
 	}
 
 	key, hash, err := MintKey(d.keySource())
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError,
-			ErrorResponse{Error: "could not mint a key: " + err.Error()})
+		WriteError(w, http.StatusInternalServerError, CodeInternal, "could not mint a key: "+err.Error(), NextInternal, nil)
 		return
 	}
 
@@ -73,10 +73,11 @@ func (d Deps) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	// and a mint that reused one would produce a key that authenticates
 	// nowhere while looking perfectly valid.
 	if revoked, err := d.tenancy().Revoked(r.Context(), hash); err != nil {
-		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
+		writeMapped(w, err)
 		return
 	} else if revoked {
-		writeJSON(w, http.StatusConflict, ErrorResponse{Error: "that key hash is revoked"})
+		WriteError(w, http.StatusConflict, CodeConflict, "that key hash is revoked",
+			"mint a new key; a revoked hash is never reused", nil)
 		return
 	}
 
@@ -86,7 +87,7 @@ func (d Deps) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		CreatedAt: time.Now().Unix(),
 	}
 	if err := d.Store.PutAPIKey(r.Context(), rec); err != nil {
-		writeStoreError(w, err)
+		writeMapped(w, err)
 		return
 	}
 
@@ -106,12 +107,12 @@ func (d Deps) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 func (d Deps) handleRevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 	hash := r.PathValue("hash")
 	if hash == "" {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "hash is required"})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "hash is required", "pass hash", nil)
 		return
 	}
 	now := time.Now().Unix()
 	if err := d.Store.PutRevocation(r.Context(), &state.Revocation{Hash: hash, RevokedAt: now}); err != nil {
-		writeStoreError(w, err)
+		writeMapped(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, RevokeResponse{Hash: hash, RevokedAt: now})
@@ -120,12 +121,12 @@ func (d Deps) handleRevokeAPIKey(w http.ResponseWriter, r *http.Request) {
 func (d Deps) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
 	org := r.URL.Query().Get("org")
 	if org == "" {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "org is required"})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "org is required", "pass org", nil)
 		return
 	}
 	rows, err := d.Store.ListAPIKeys(r.Context(), org)
 	if err != nil {
-		writeStoreError(w, err)
+		writeMapped(w, err)
 		return
 	}
 	out := make([]APIKeyResponse, 0, len(rows))
@@ -138,7 +139,7 @@ func (d Deps) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
 		// this org" needs to see that a key was killed, not to find it gone.
 		rv, err := d.Store.GetRevocation(r.Context(), k.Hash)
 		if err != nil && !errors.Is(err, state.ErrNotFound) {
-			writeStoreError(w, err)
+			writeMapped(w, err)
 			return
 		}
 		if rv != nil {

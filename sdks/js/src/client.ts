@@ -17,6 +17,7 @@ import type {
   Checkpoint,
   CheckpointRequest,
   ComposePlan,
+  ComposePlanResponse,
   ComposeRequest,
   CreateAPIKeyRequest,
   CreateMachineRequest,
@@ -91,6 +92,26 @@ export class PilotsClient {
   /** The org, scopes and host this client's key resolves to. */
   whoami(): Promise<WhoamiResponse> {
     return this.http.json<WhoamiResponse>('GET', '/v1/whoami')
+  }
+
+  /**
+   * Asks the host what a directory is, from a tar of it.
+   *
+   * On the client rather than under `compose` or `services`, because it is
+   * the front door: it is what a caller reaches for before it knows whether
+   * the directory is a compose project, a Dockerfile or a framework the
+   * platform recognises.
+   *
+   * No client deadline, like a build: the upload is a whole source tree.
+   */
+  async plan(tar: BodyInit, opts: { app?: string } = {}): Promise<ComposePlanResponse> {
+    const res = await this.http.send('POST', '/v1/plan', {
+      raw: tar,
+      contentType: 'application/x-tar',
+      ...(opts.app ? { query: { app: opts.app } } : {}),
+      timeoutMs: null,
+    })
+    return (await res.json()) as ComposePlanResponse
   }
 }
 

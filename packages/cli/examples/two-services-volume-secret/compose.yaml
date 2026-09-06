@@ -1,0 +1,23 @@
+name: shop
+
+services:
+  web:
+    build: .
+    environment:
+      # A reference, never a value. `pilot secrets set database_url` stores it
+      # locally and the deploy sends it sealed; the file is safe to commit.
+      DATABASE_URL: secret://database_url
+    depends_on: [postgres]
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_PASSWORD: secret://postgres_password
+    volumes:
+      # The rootfs is replaced by the next release. This is not.
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:
+    driver_opts:
+      size: 10G

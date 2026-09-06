@@ -10,6 +10,8 @@
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
 
+import { PilotsError } from '@pilots/sdk'
+
 import { CliError, hintOf, isPlain, paint, renderError, setJSONMode, setPlain } from '../src/output.ts'
 
 function withOutputState(fn: () => void): void {
@@ -64,5 +66,39 @@ test('a hint renders on its own line under the message, and never under --json',
 
     setJSONMode(true)
     assert.equal(renderError(err), '{"error":"no API key"}')
+  })
+})
+
+// The merge seam between the server's `next` and the CLI's `hint`. Both are
+// rendered on the same fall-through and both are a "-> do this" line, so the
+// thing worth pinning is that exactly one appears, whichever sources exist.
+test('exactly one next-step line renders, whichever source supplied it', () => {
+  withOutputState(() => {
+    const arrows = (text: string): number => text.split('\n').filter((l) => l.startsWith('→')).length
+
+    // Server only: hostd answers a 401 with its own next step.
+    const fromServer = new PilotsError('unauthorized', {
+      status: 401,
+      next: 'pass an API key: pilot login, or set PILOT_API_KEY',
+    })
+    assert.equal(arrows(renderError(fromServer)), 1)
+    assert.match(renderError(fromServer), /→ pass an API key/)
+
+    // Client only: a CliError never carries a server next.
+    assert.equal(arrows(renderError(new CliError('no API key', { hint: 'run pilot login' }))), 1)
+
+    // Both: the client's wins, because it says the same thing with the fleet
+    // and the key source in it. Printing both is the same sentence twice.
+    const both = new PilotsError('unauthorized', {
+      status: 401,
+      next: 'pass an API key: pilot login, or set PILOT_API_KEY',
+    })
+    ;(both as { hint?: string }).hint = 'http://f rejected the key from PILOT_API_KEY; run pilot login'
+    assert.equal(arrows(renderError(both)), 1, 'a 401 with both sources printed two arrow lines')
+    assert.match(renderError(both), /rejected the key from PILOT_API_KEY/)
+    assert.doesNotMatch(renderError(both), /pass an API key/)
+
+    // Neither: no arrow line at all.
+    assert.equal(arrows(renderError(new PilotsError('boom', { status: 500 }))), 0)
   })
 })

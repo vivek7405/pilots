@@ -18,7 +18,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 
 import { saveCredentials } from '../src/config.ts'
-import { fakeMachine, startFakeAPI } from './helpers/fake-api.ts'
+import { defaultPlanResponse, fakeMachine, startFakeAPI, unknownFrameworkBody } from './helpers/fake-api.ts'
 import { json } from './helpers/server.ts'
 import { startWSServer } from './helpers/ws-server.ts'
 
@@ -32,18 +32,29 @@ after(() => {
 
 const TOOLS = [
   'build',
+  'build_logs',
   'checkpoint',
   'create_machine',
   'deploy',
   'destroy_machine',
+  'diagnose',
+  'docs',
+  'domains',
   'exec',
   'exec_stream',
   'generate_dockerfile',
+  'init',
   'list_machines',
+  'list_services',
   'logs',
+  'plan',
   'promote',
+  'releases',
   'restore',
+  'rollback',
+  'service',
   'status',
+  'volumes',
 ]
 
 function serverEnv(apiUrl: string): NodeJS.ProcessEnv {
@@ -76,13 +87,13 @@ function textOf(result: unknown): string {
   return content.map((c) => c.text).join('')
 }
 
-test('the server registers exactly the thirteen tools', async () => {
+test('the server registers exactly the tools the README lists', async () => {
   const api = await startFakeAPI()
   const { client, close } = await connect(serverEnv(api.url))
   try {
     const { tools } = await client.listTools()
     assert.deepEqual(tools.map((t) => t.name).sort(), TOOLS)
-    assert.equal(tools.length, 13)
+    assert.equal(tools.length, TOOLS.length)
     for (const tool of tools) {
       assert.ok(tool.description && tool.description.length > 20, `${tool.name} has no useful description`)
     }
@@ -116,7 +127,9 @@ test('create_machine returns the machine and reaches the fleet', async () => {
 
 test('a 429 reaches the agent as the server body, unchanged', async () => {
   const api = await startFakeAPI()
-  const body = '{"error":"quota exceeded","quota":"machines","limit":20,"used":20}'
+  const body =
+    '{"error":"quota exceeded","code":"quota_exceeded",' +
+    '"next":"free a machines, or raise the org\'s limit","quota":"machines","limit":20,"used":20}'
   api.routes.set('POST /v1/machines', (_req, res) => {
     res.writeHead(429, { 'content-type': 'application/json' })
     res.end(body)
@@ -205,18 +218,31 @@ test('a successful build returns the rootfs id', async () => {
   }
 })
 
-test('generate_dockerfile detects the bare Django app and answers with a recipe', async () => {
+// The recipes themselves are asserted in Go, where they are now generated
+// (apps/hostd/internal/detect). What this asserts is the tool's half: it tars
+// the directory, posts it to the plan route, and hands back the recipe the
+// host answered with, port and health included.
+test('generate_dockerfile tars the directory and returns the host\'s recipe', async () => {
   const api = await startFakeAPI()
   const dir = join(import.meta.dirname, 'fixtures', 'django-app')
   const { client, close } = await connect(serverEnv(api.url))
   try {
     const result = await client.callTool({ name: 'generate_dockerfile', arguments: { dir } })
     assert.equal(result.isError, undefined)
-    const recipe = JSON.parse(textOf(result)) as { framework: string; dockerfile: string; port: number }
-    assert.equal(recipe.framework, 'django')
-    assert.equal(recipe.port, 8000)
-    assert.match(recipe.dockerfile, /--bind 0\.0\.0\.0:/)
-    assert.match(recipe.dockerfile, /\$\{PORT/)
+    const body = JSON.parse(textOf(result)) as {
+      recipes: { framework: string; dockerfile: string; port: number; health: { path: string } }[]
+    }
+    assert.equal(body.recipes.length, 1)
+    assert.equal(body.recipes[0]!.framework, 'webjs')
+    assert.equal(body.recipes[0]!.port, 8080)
+    assert.equal(body.recipes[0]!.health.path, '/__webjs/ready')
+    assert.match(body.recipes[0]!.dockerfile, /ENV PORT=8080/)
+
+    // The directory went up as a tar, which is what makes the host able to
+    // answer at all: it reads the files, the tool does not.
+    const posted = api.find('POST', '/v1/plan')
+    assert.ok(posted, 'the tool did not post the directory to the plan route')
+    assert.match(posted.raw.toString('latin1'), /manage\.py/)
   } finally {
     await close()
     await api.close()
@@ -227,15 +253,16 @@ test('write reports whether it actually wrote, and never overwrites the repo\'s 
   const api = await startFakeAPI()
   const dir = mkdtempSync(join(tmpdir(), 'pilot-mcp-write-'))
   roots.push(dir)
-  // The smallest tree the detector calls django.
-  writeFileSync(join(dir, 'manage.py'), '')
-  writeFileSync(join(dir, 'requirements.txt'), 'django\n')
+  writeFileSync(join(dir, 'package.json'), '{"dependencies":{"@webjsdev/core":"1"}}')
   const { client, close } = await connect(serverEnv(api.url))
   try {
     const first = await client.callTool({ name: 'generate_dockerfile', arguments: { dir, write: true } })
-    const wrote = JSON.parse(textOf(first)) as { written: boolean; dockerfile: string }
+    const wrote = JSON.parse(textOf(first)) as {
+      written: boolean
+      recipes: { dockerfile: string }[]
+    }
     assert.equal(wrote.written, true)
-    assert.equal(readFileSync(join(dir, 'Dockerfile'), 'utf8'), wrote.dockerfile)
+    assert.equal(readFileSync(join(dir, 'Dockerfile'), 'utf8'), wrote.recipes[0]!.dockerfile)
 
     // The repo's own answer wins, and the flag has to SAY that the recipe did
     // not land: an agent reading `written: true` here would build the wrong
@@ -251,16 +278,27 @@ test('write reports whether it actually wrote, and never overwrites the repo\'s 
   }
 })
 
-test('an undetectable directory is a tool error listing what was looked for', async () => {
+// The refusal reaches the agent as the server wrote it, details and all, so
+// the next call can be a Dockerfile written from `looked_for` and `rules`
+// rather than another round trip to find out what went wrong.
+test('an undetectable directory is a tool error carrying the server\'s details', async () => {
   const api = await startFakeAPI()
   const dir = mkdtempSync(join(tmpdir(), 'pilot-mcp-empty-'))
   roots.push(dir)
+  api.routes.set('POST /v1/plan', (_req, res) => json(res, 400, unknownFrameworkBody()))
   const { client, close } = await connect(serverEnv(api.url))
   try {
     const result = await client.callTool({ name: 'generate_dockerfile', arguments: { dir } })
     assert.equal(result.isError, true)
-    assert.match(textOf(result), /manage\.py/)
-    assert.match(textOf(result), /go\.mod/)
+    const body = JSON.parse(textOf(result)) as {
+      code: string
+      next: string
+      details: { looked_for: string[]; rules: string[] }
+    }
+    assert.equal(body.code, 'unknown_framework')
+    assert.ok(body.next.length > 0)
+    assert.equal(body.details.looked_for.length, 10)
+    assert.equal(body.details.rules.length, 2)
   } finally {
     await close()
     await api.close()
@@ -408,6 +446,160 @@ test('status without a machine reports hosts and a count by state', async () => 
     }
     assert.equal(parsed.hosts.length, 1)
     assert.deepEqual(parsed.machines_by_state, { running: 1, suspended: 1 })
+  } finally {
+    await close()
+    await api.close()
+  }
+})
+
+// The tool list lives in five places: the registrations, this file, the e2e
+// battery, the README and ARCHITECTURE.md. This holds two of them together,
+// which is the pair that actually rots: a tool added without a README line is
+// a tool nobody driving the server by hand knows exists.
+test('the README lists exactly the tools the server registers', () => {
+  const readme = readFileSync(join(import.meta.dirname, '..', 'README.md'), 'utf8')
+  const section = readme.slice(readme.indexOf('## `pilot mcp`'))
+  const listed = section.slice(0, section.indexOf('\n\n', section.indexOf('tools:')))
+  const names = [...listed.matchAll(/`([a-z_]+)`/g)].map((m) => m[1]!).sort()
+  assert.deepEqual([...new Set(names)], TOOLS)
+})
+
+test('init is under sixty lines and names deploy in its first ten', async () => {
+  const api = await startFakeAPI()
+  const { client, close } = await connect(serverEnv(api.url))
+  try {
+    const result = await client.callTool({ name: 'init', arguments: {} })
+    const { primer, topics } = JSON.parse(textOf(result)) as { primer: string; topics: string[] }
+    const lines = primer.trimEnd().split('\n')
+    // A budget, not an aspiration: this is the first thing a small model
+    // reads and it competes with the task for the same context.
+    assert.ok(lines.length < 60, `the primer is ${lines.length} lines`)
+    assert.ok(lines.slice(0, 10).join('\n').includes('deploy'), 'the one call is not in the first ten lines')
+    assert.ok(topics.includes('deploy') && topics.includes('errors'))
+  } finally {
+    await close()
+    await api.close()
+  }
+})
+
+test('docs returns one reference, searches them, and lists the topics', async () => {
+  const api = await startFakeAPI()
+  const { client, close } = await connect(serverEnv(api.url))
+  try {
+    const one = await client.callTool({ name: 'docs', arguments: { topic: 'deploy' } })
+    const { text } = JSON.parse(textOf(one)) as { text: string }
+    assert.match(text, /# Deploy/)
+    assert.match(text, /unknown_framework/)
+
+    const listed = await client.callTool({ name: 'docs', arguments: {} })
+    assert.equal((JSON.parse(textOf(listed)) as { topics: string[] }).topics.length, 9)
+
+    const found = await client.callTool({ name: 'docs', arguments: { query: 'health_gate_failed' } })
+    const { matches } = JSON.parse(textOf(found)) as { matches: { topic: string }[] }
+    assert.ok(matches.length > 0, 'searching for a code found no page')
+
+    const missing = await client.callTool({ name: 'docs', arguments: { topic: 'nope' } })
+    assert.equal(missing.isError, true)
+  } finally {
+    await close()
+    await api.close()
+  }
+})
+
+test('the skill is served as pilots-docs resources', async () => {
+  const api = await startFakeAPI()
+  const { client, close } = await connect(serverEnv(api.url))
+  try {
+    const { resources } = await client.listResources()
+    const uris = resources.map((r) => r.uri).sort()
+    // SKILL.md plus one page per topic. A resource browser and the docs tool
+    // have to see the same corpus, or a fix lands in one and misses the other.
+    assert.equal(uris.length, 10)
+    assert.ok(uris.includes('pilots-docs://SKILL.md'))
+    assert.ok(uris.includes('pilots-docs://references/errors.md'))
+
+    const read = await client.readResource({ uri: 'pilots-docs://SKILL.md' })
+    assert.match(String((read.contents[0] as { text: string }).text), /^---\nname: pilots/)
+  } finally {
+    await close()
+    await api.close()
+  }
+})
+
+test('every result carries next, and a read-only one carries the empty string', async () => {
+  const api = await startFakeAPI()
+  const { client, close } = await connect(serverEnv(api.url))
+  try {
+    const created = await client.callTool({ name: 'create_machine', arguments: { name: 'nexty' } })
+    assert.equal((JSON.parse(textOf(created)) as { next: string }).next, 'exec on the returned id')
+
+    const listed = await client.callTool({ name: 'list_machines', arguments: {} })
+    // An array result is wrapped so `next` has somewhere to live; the rows
+    // are still the whole answer.
+    const body = JSON.parse(textOf(listed)) as { result: unknown[]; next: string }
+    assert.equal(body.next, '')
+    assert.ok(Array.isArray(body.result))
+  } finally {
+    await close()
+    await api.close()
+  }
+})
+
+// A health check passed alongside `dir` and then quietly dropped is the worst
+// outcome available: the deploy succeeds, the gate polls something else, and
+// nothing says the argument was ignored.
+test('deploy with dir applies the overrides it was given', async () => {
+  const api = await startFakeAPI()
+  const { client, close } = await connect(serverEnv(api.url))
+  try {
+    const result = await client.callTool({
+      name: 'deploy',
+      arguments: {
+        dir: join(import.meta.dirname, 'fixtures', 'webjs-app'),
+        health: { type: 'http', path: '/ready', grace: 20 },
+        replicas: 2,
+        env: { LOG_LEVEL: 'debug' },
+      },
+    })
+    assert.equal(result.isError, undefined, textOf(result))
+
+    const created = JSON.parse(api.find('POST', '/v1/services')!.body) as {
+      health?: { path?: string; grace?: number }
+      replicas?: number
+      env?: Record<string, string>
+    }
+    assert.equal(created.health?.path, '/ready')
+    assert.equal(created.health?.grace, 20)
+    assert.equal(created.replicas, 2)
+    assert.equal(created.env?.LOG_LEVEL, 'debug')
+    // The plan's own PORT survives an env merge rather than being replaced.
+    assert.equal(created.env?.PORT, '8080')
+  } finally {
+    await close()
+    await api.close()
+  }
+})
+
+// Where an override cannot be applied to one service, it is refused rather
+// than applied to all of them or dropped.
+test('deploy with dir refuses an override it cannot place on a monorepo', async () => {
+  const api = await startFakeAPI()
+  api.routes.set('POST /v1/plan', (_req, res) => {
+    const one = defaultPlanResponse() as { plan: { steps: unknown[] }; detected: unknown[] }
+    json(res, 200, {
+      plan: { app: 'shop', steps: [one.plan.steps[0], { ...(one.plan.steps[0] as object), name: 'admin' }] },
+      detected: [one.detected[0], one.detected[0]],
+    })
+  })
+  const { client, close } = await connect(serverEnv(api.url))
+  try {
+    const result = await client.callTool({
+      name: 'deploy',
+      arguments: { dir: join(import.meta.dirname, 'fixtures', 'workspace-app'), replicas: 2 },
+    })
+    assert.equal(result.isError, true)
+    assert.match(textOf(result), /plans 2 services/)
+    assert.equal(api.all('POST', '/v1/builds').length, 0, 'it built before refusing')
   } finally {
     await close()
     await api.close()

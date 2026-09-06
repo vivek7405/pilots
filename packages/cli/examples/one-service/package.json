@@ -1,0 +1,12 @@
+{
+  "name": "webjs-app",
+  "private": true,
+  "type": "module",
+  "imports": { "#*": "./*" },
+  "scripts": { "start": "webjs start" },
+  "dependencies": {
+    "@webjsdev/cli": "latest",
+    "@webjsdev/core": "latest",
+    "@webjsdev/server": "latest"
+  }
+}

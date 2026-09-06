@@ -134,6 +134,8 @@ export interface BuildLogLine {
   error?: string
   /** The rootfs build id, on the last line of a successful build. */
   result?: string
+  /** The stable code on a terminal failure line, `build_failed`. */
+  code?: string
 }
 
 export interface HealthCheck {
@@ -341,6 +343,32 @@ export interface HealthResponse {
 
 export interface ErrorResponse {
   error: string
+  /** A stable snake_case noun to branch on. See `internal/api/errors.go`. */
+  code?: string
+  /** The one thing to do about it, naming the command or the call. */
+  next?: string
+  /** Typed per code: `HealthGateDetails`, `ComposeUnknownDetails`. */
+  details?: unknown
+}
+
+/**
+ * The 422 `health_gate_failed` body's `details`, and the reason a release was
+ * refused. It carries no address on purpose: the probe target is the host's
+ * own view of the replica and is not reachable from where this is read.
+ */
+export interface HealthGateDetails {
+  service: string
+  replica: string
+  release: string
+  grace_sec: number
+  last: HealthLast
+}
+
+/** The replica's last answer: a status and body, or why it said nothing. */
+export interface HealthLast {
+  status?: number
+  body?: string
+  error?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -391,6 +419,8 @@ export interface QuotaResponse {
 
 export interface QuotaExceededResponse {
   error: string
+  code: string
+  next: string
   quota: string
   limit: number
   used: number
@@ -477,7 +507,43 @@ export interface ComposeUnsupported {
 
 export interface ComposePlanError {
   error: string
+  code: string
+  next: string
   unsupported: ComposeUnsupported[]
+}
+
+/** `POST /v1/plan`'s 200 body: the plan, and how each step was decided. */
+export interface ComposePlanResponse {
+  plan: ComposePlan
+  detected: ComposeDetected[]
+}
+
+/**
+ * Where one step came from. `source` is "compose", "dockerfile" or "recipe";
+ * `framework` and `notes` are set for a recipe only.
+ */
+export interface ComposeDetected {
+  service: string
+  source: string
+  framework?: string
+  dir: string
+  port: number
+  health?: HealthCheck
+  notes?: string[]
+}
+
+/**
+ * The 400 `unknown_framework`'s `details`: everything needed to write the
+ * Dockerfile by hand, so the refusal is a starting point and not a dead end.
+ */
+export interface ComposeUnknownDetails {
+  dir: string
+  looked_for: string[]
+  listing: string[]
+  manifests?: Record<string, string>
+  workspaces?: string[]
+  /** The two lines every Dockerfile must obey. */
+  rules: string[]
 }
 
 // ---------------------------------------------------------------------------

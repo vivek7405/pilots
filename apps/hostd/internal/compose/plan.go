@@ -114,6 +114,10 @@ type Step struct {
 	// image is a build too: hostd turns any Dockerfile into a bootable rootfs,
 	// and a second path for "just pull this" would be a second thing to keep
 	// correct.
+	//
+	// It is also the recipe the detect package generated for a Build context
+	// that has no Dockerfile of its own; a step carrying both uses this text
+	// as the context's Dockerfile.
 	Dockerfile string `json:"dockerfile,omitempty"`
 	// DockerfileAppend is what the file overrode on a build: step, rendered as
 	// Dockerfile instructions for the CLI to append to the context's own
@@ -169,7 +173,11 @@ type Unsupported struct {
 // platform does not do. Every offending key is listed, so the file is fixed in
 // one pass rather than one key per failed deploy.
 type PlanError struct {
-	Error       string        `json:"error"`
+	Error string `json:"error"`
+	// Code and Next mirror api.ErrorResponse so a client branching on the
+	// error shape needs one branch, not a second one for this route's body.
+	Code        string        `json:"code"`
+	Next        string        `json:"next"`
 	Unsupported []Unsupported `json:"unsupported"`
 }
 
@@ -217,7 +225,8 @@ func Compile(ctx context.Context, req Request) (*Plan, *PlanError, error) {
 	// while it loads, and a missing one is a load error -- so a check after
 	// loading would never run on the server, where the file is not there.
 	if bad := envFileKeys(dict); len(bad) > 0 {
-		return nil, &PlanError{Error: unsupportedError, Unsupported: bad}, nil
+		return nil, &PlanError{Error: unsupportedError, Code: api.CodePlanUnsupported,
+			Next: "remove or replace each listed key; every one is named", Unsupported: bad}, nil
 	}
 	if missing := unsetVariables(dict, req.Env); len(missing) > 0 {
 		return nil, nil, fmt.Errorf("compose: unset variable %s", strings.Join(missing, ", "))
@@ -251,7 +260,8 @@ func Compile(ctx context.Context, req Request) (*Plan, *PlanError, error) {
 	}
 
 	if bad := validate(project.Services); len(bad) > 0 {
-		return nil, &PlanError{Error: unsupportedError, Unsupported: bad}, nil
+		return nil, &PlanError{Error: unsupportedError, Code: api.CodePlanUnsupported,
+			Next: "remove or replace each listed key; every one is named", Unsupported: bad}, nil
 	}
 
 	steps := make(map[string]Step, len(project.Services))
@@ -886,6 +896,15 @@ func seconds(d *types.Duration) int {
 	}
 	return int(math.Ceil(time.Duration(*d).Seconds()))
 }
+
+// DefaultReplicas, DefaultVCPUs and DefaultMemMiB are what a step gets when
+// nothing declared otherwise. Exported so the detect package's generated steps
+// agree with a compose file's by construction rather than by coincidence.
+const (
+	DefaultReplicas = defaultReplicas
+	DefaultVCPUs    = defaultVCPUs
+	DefaultMemMiB   = defaultMemMiB
+)
 
 // replicasOf reads deploy.replicas, then the non-swarm `scale:` that means the
 // same thing. Both, because a file that spells only the second one and is read

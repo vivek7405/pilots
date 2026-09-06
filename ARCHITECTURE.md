@@ -318,8 +318,18 @@ GET    /v1/usage?since=&until=       admin: what THIS host metered, in unix
 POST   /v1/compose/plan              {compose, env} -> {app, steps[]} in Kahn order
                                      over depends_on; `machines` scope. Every
                                      unsupported key in the file comes back in ONE
-                                     400 as {error, unsupported:[{service, key,
-                                     message}]}
+                                     400 as {error, code, next, unsupported:
+                                     [{service, key, message}]}
+POST   /v1/plan?app=                 {a tar of a directory, 2 GiB cap} ->
+                                     {plan, detected[]}; `machines` scope. The
+                                     front door: the host decides what the
+                                     directory is, in the order compose file,
+                                     Dockerfile, recipe, unknown. Each detected
+                                     entry is {service, source, framework?, dir,
+                                     port, health?, notes?}. A directory nothing
+                                     places is a 400 unknown_framework whose
+                                     details carry the listing, the manifests,
+                                     the workspaces and the two Dockerfile rules
 GET    /v1/health                    liveness (unauthenticated); carries
                                      store_version, the sum of this replica's
                                      version vector (0 on SQLite)
@@ -335,6 +345,34 @@ GET    /metrics                      Prometheus (unauthenticated)
                                      pilots_router_inflight, pilots_slots_free,
                                      pilots_quota_refusals_total{quota}
 ```
+
+**Every non-2xx body is `{error, code, next, details}`.** `error` is a sentence
+for a person; `code` is a stable snake_case noun a client branches on; `next`
+is the one thing to do about it, naming the command or the call; `details` is
+typed per code and absent otherwise. Three fields rather than one sentence
+because the consumer is as often an agent as a person, and a parser written
+against prose breaks the first time the prose is improved.
+
+The codes are a **closed list** in `internal/api/errors.go`: `bad_request`,
+`unauthorized`, `scope_required`, `not_found`, `conflict`, `volume_in_use`,
+`quota_exceeded`, `not_configured`, `not_implemented`, `unavailable`,
+`internal`, `plan_unsupported`, `compose_invalid`, `unknown_framework`,
+`plan_multi_service`, `build_failed`, `health_gate_failed`. A test walks every
+`WriteError` call under `internal/` with `go/ast` and refuses one that is not
+listed, because otherwise the list is a suggestion and a code invented at a
+call site reaches no SDK and no docs page.
+
+Two things never reach a body. The store's own sentinel text ("state: not
+found") names an internal row and reads as a bug in the caller; on a 500 it
+goes to `details.cause` and nowhere else. And **no host-internal address**: the
+health gate's probe target is one host's view of a replica inside a network
+namespace, and printing it only ever sent people to debug something they cannot
+reach from where they are reading the error.
+
+A release that never becomes healthy is **422 `health_gate_failed`**, not a
+500. A 500 says the platform broke, so nobody looks at their own app. Its
+`details` are `{service, replica, release, grace_sec, last}`, where `last` is
+`{status, body}` when the replica answered and `{error}` when it did not.
 
 Every read is scoped to the caller's org. An id another org owns answers
 **404**, never 403: existence must not leak across tenants. An `admin` key
@@ -929,15 +967,40 @@ instant restore.
 
 **Prompt-to-URL deploy (the AI-agent front door):** the headline UX is
 "deploy this app" pointed at ANY codebase (Django, Rails, Next.js, Remix,
-webjs, …) → a running `<name>.pilotrun.app`. Resolution order, all
-agent-drivable via MCP:
-1. Repo has a Dockerfile → build it.
-2. No Dockerfile → **the driving agent generates one** (the pilots MCP
-   server ships a `generate_dockerfile` prompt/tool with per-framework
-   recipes: detect via lockfiles/manage.py/Gemfile/next.config/etc., pick
-   base image, ports, start command).
-3. Build fails → the agent reads the structured NDJSON error, patches the
-   Dockerfile, retries — the loop the structured logs exist for.
+webjs, …) → a running `<name>.pilotrun.app`, in ONE call.
+
+**Detection runs on the host**, in `internal/detect`, behind
+`POST /v1/plan`: a tar in, a `compose.Plan` plus one `detected` entry per
+step out. The CLI, the MCP server, the dashboard and the GitHub push path
+all call it, so there is one copy of the rule and every caller sees it. A
+second copy in the CLI was invisible to three of those four.
+
+Resolution order, first hit wins, per directory:
+1. A **compose file** at the root → the compose planner compiles it, with
+   the tar's own `.env` as the interpolation map.
+2. A **Dockerfile** at the root → one service, built as it is, health left
+   to the rollout's defaults. A file the repo wrote beats a file the
+   platform would write, always.
+3. A **recipe** → one service per detected app, with a generated Dockerfile
+   carried on the step. A root declaring npm `workspaces` is not itself an
+   app: each workspace becomes a service named after its directory, built
+   from the root with `WORKDIR /app/<dir>`.
+4. **`unknown_framework`**, a 400 whose `details` carry the listing, the
+   manifests, the workspaces and the two Dockerfile rules — everything an
+   agent needs to write one itself without reading the repo again.
+
+Every recipe declares `PORT=8080`, `EXPOSE 8080` and `${PORT:-8080}`: the
+platform's port, never the framework's, because the router dials 8080 and an
+image listening on 3000 builds cleanly and answers 502.
+
+**There is no buildpack.** Railpack and its relatives were evaluated and
+rejected: a frontend image, a binary on every host, a second base image and a
+second start-spec path, to cover a long tail a good refusal already covers.
+The long tail is the agent's, against the structured `unknown` answer.
+
+A build that fails still carries every NDJSON line: the agent reads the
+failing step, patches the Dockerfile, retries — the loop the structured logs
+exist for.
 
 The fleet-wide layer cache is keyed **server-side on the Dockerfile's content
 hash**, so a client passes no cache name at all — and every app built from the
@@ -959,11 +1022,28 @@ a new webjs app is already warm on any host.
 The agent flow composes: after a prompt-to-URL deploy the agent offers to
 connect the repo for continuous deploys.
 
-The MCP toolset makes the whole journey agent-executable end-to-end:
-`create_machine, exec, checkpoint, restore, build, deploy, promote, logs,
-status` — so "deploy this app on pilots" is one agent conversation with a
-URL at the end. This flow IS the product demo and gets its own e2e: point
-an agent at a bare Django app with no Dockerfile → live URL, no human.
+The MCP toolset makes the whole journey agent-executable end-to-end, in
+twenty-four tools: `build, build_logs, checkpoint, create_machine, deploy,
+destroy_machine, diagnose, docs, domains, exec, exec_stream,
+generate_dockerfile, init, list_machines, list_services, logs, plan, promote,
+releases, restore, rollback, service, status, volumes` — so "deploy this app
+on pilots" is one agent conversation with a URL at the end, and usually one
+tool call. Every result carries `next`; every error carries `code`, `next`
+and `details`.
+
+The server also ships the **skill** as `pilots-docs://` resources, so a
+client that browses resources and one that calls `init` and `docs` read one
+corpus. `pilot init` copies it into a repository and registers the server;
+`pilot skill install` links it for every project at once.
+
+The bar for all of it is a **small local model**: every tool description says
+when to call it and what to call next, every result and error names the next
+step, inputs have defaults and the fewest required fields, the routing table
+fits on a page, nothing in the happy path reads source, and a destructive
+tool says so first.
+
+This flow IS the product demo and gets its own e2e: point an agent at a bare
+Django app with no Dockerfile → live URL, no human.
 
 **Volumes:** one JuiceFS filesystem per volume, holding a single raw ext4
 image handed to the guest as a **second virtio-blk drive**. Not virtio-fs:
@@ -1119,6 +1199,8 @@ pilots/
     hostd/                # Go, own go.mod — the entire data plane
       cmd/hostd/  cmd/guest-agent/  cmd/chunkify/
       internal/{fc,block,uffd,nbd,ctlsock,netns,router,state,s3,build,volumes,selfheal}/
+      internal/detect/    # what a directory is: recipes, npm workspaces,
+                          #   the resolution ladder behind POST /v1/plan
       systemd/            # hostd.service, corrosion.service
     dashboard/            # webjs full-stack app (scaffolded `npm create webjs`);
                           #   deployed by `pilot deploy` from apps/dashboard/,
@@ -1126,6 +1208,10 @@ pilots/
                           #   custom domain, one replica
   packages/cli/           # `pilot` CLI + its MCP server (TS, no build step:
     bin/  src/{commands,compose,mcp}/   #   Node strips the types at run time)
+    skill/pilots/         # the agent skill: SKILL.md + nine reference pages,
+                          #   copied by `pilot init`, linked by `pilot skill
+                          #   install`, served as pilots-docs:// resources
+    examples/             # one-service, and two-services-volume-secret
   sdks/js/                # @pilots/sdk — typed client + sprites-compat adapter
   sdks/go/                # github.com/vivek7405/pilots/sdks/go
                           #   both hand-written; both carry a drift test that
@@ -1195,7 +1281,20 @@ unsupported key), the service patch and its release list, and the usage ledger
 across a create, a suspend, a wake and a destroy — asserting there that a
 suspended machine kept accruing wall time and stopped accruing compute; `gate.sh`
 section 3 adds a service patch sent to a host that does not arbitrate it, and 3b
-that every host answers `/v1/usage` with its own `host_id`. `go test ./...` for netns/block/header/state/s3
+that every host answers `/v1/usage` with its own `host_id`. The same section
+drives `POST /v1/plan` with no Firecracker at all: the resolution ladder rung
+by rung, each proved by removing the winner and asserting the next one takes
+over, the workspace split, and the `unknown_framework` refusal with its rules
+and its ten looked-for signals. Its agent section takes a webjs app with no
+Dockerfile and no compose file to a 200 on `/__webjs/ready` through the router
+in ONE `deploy` call under an `enforce()` budget, deploys a two-workspace
+monorepo as two services, reads a `health_gate_failed` back through `diagnose`
+and asserts no body carries a `10.x` address, and holds the `init` primer under
+sixty lines. `gate.sh` section 21 covers the push path against a GitHub
+stand-in: a repository with no Dockerfile deploys, exactly one host plans it,
+the plan's health lands on the service, and a two-app repository is refused
+with `plan_multi_service` where a person can read it at
+`GET /v1/builds/{id}/logs`. `go test ./...` for netns/block/header/state/s3
 (block-layer round-trip + diff-chain tests are mandatory). Drift tests in
 both SDKs parse `internal/api` on every
 `npm test`. Dashboard: `webjs check` / `doctor --json` / `typecheck` /

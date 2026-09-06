@@ -126,6 +126,37 @@ func (c *Client) Whoami(ctx context.Context) (*WhoamiResponse, error) {
 	return &out, c.do(ctx, http.MethodGet, "/v1/whoami", nil, &out)
 }
 
+// Plan asks the host what a directory is, from a tar of it.
+//
+// A method on Client rather than under Compose or Services, because it is the
+// front door: it is what a caller reaches for before it knows whether the
+// directory is a compose project, a Dockerfile or a framework the platform
+// recognises. app names the app; empty falls back to package.json's name and
+// then to "app".
+func (c *Client) Plan(ctx context.Context, contextTar io.Reader, app string) (*ComposePlanResponse, error) {
+	path := "/v1/plan"
+	if app != "" {
+		path = query(path, [2]string{"app", app})
+	}
+	req, err := c.request(ctx, http.MethodPost, path, contextTar)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/x-tar")
+	req.Header.Set("Accept", "application/json")
+
+	res, err := c.send(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	var out ComposePlanResponse
+	if err := json.NewDecoder(res.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("pilots: decoding the plan: %w", err)
+	}
+	return &out, nil
+}
+
 // request builds an authenticated request. body may be nil.
 func (c *Client) request(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
@@ -211,6 +242,9 @@ func toError(status int, body []byte) error {
 	base := &Error{StatusCode: status, Body: string(body)}
 	var envelope struct {
 		Error       string               `json:"error"`
+		Code        string               `json:"code"`
+		Next        string               `json:"next"`
+		Details     json.RawMessage      `json:"details"`
 		Quota       string               `json:"quota"`
 		Limit       int64                `json:"limit"`
 		Used        int64                `json:"used"`
@@ -219,6 +253,9 @@ func toError(status int, body []byte) error {
 	}
 	if err := json.Unmarshal(body, &envelope); err == nil {
 		base.Message = envelope.Error
+		base.Code = envelope.Code
+		base.Next = envelope.Next
+		base.Details = envelope.Details
 	}
 
 	switch {
@@ -228,7 +265,18 @@ func toError(status int, body []byte) error {
 			Scope: envelope.Scope, Err: base,
 		}
 	case status == http.StatusBadRequest && len(envelope.Unsupported) > 0:
-		return &ComposePlanError{Message: envelope.Error, Unsupported: envelope.Unsupported}
+		return &ComposePlanError{
+			Message: envelope.Error, Code: envelope.Code, Next: envelope.Next,
+			Unsupported: envelope.Unsupported,
+		}
+	case envelope.Code == "health_gate_failed":
+		var d HealthGateDetails
+		_ = json.Unmarshal(envelope.Details, &d)
+		return &HealthGateFailed{Details: d, Err: base}
+	case envelope.Code == "unknown_framework":
+		var d ComposeUnknownDetails
+		_ = json.Unmarshal(envelope.Details, &d)
+		return &UnknownFramework{Details: d, Err: base}
 	default:
 		return base
 	}

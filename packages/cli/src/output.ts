@@ -158,8 +158,19 @@ export function renderError(err: unknown): string {
     const last = err.lines[err.lines.length - 1]
     return `error: build ${err.buildId} failed: ${last?.error ?? err.message}`
   }
-  const hint = hintOf(err)
-  return hint ? `error: ${messageOf(err)}\n${paint('dim', '→')} ${hint}` : `error: ${messageOf(err)}`
+  // One next-step line, never two. There are two sources for it and they are
+  // both right: the server's `next` is on every 4xx, so no command has to know
+  // its own remedies, and the CLI's `hint` carries the two things only the
+  // client holds -- the fleet URL it resolved, and which source supplied a key
+  // the fleet rejected.
+  //
+  // The CLI's wins where both exist, because where both exist they say the
+  // same thing and the client's says it with the specifics. A 401 answers
+  // `next: "pass an API key: pilot login, or set PILOT_API_KEY"`; the hint
+  // beside it names the fleet and the source that was actually sent. Printing
+  // both would be the same sentence twice.
+  const step = hintOf(err) ?? (err instanceof PilotsError && err.next ? err.next : '')
+  return step ? `error: ${messageOf(err)}\n${paint('dim', '→')} ${step}` : `error: ${messageOf(err)}`
 }
 
 export function messageOf(err: unknown): string {

@@ -16,6 +16,7 @@ import { createAddCommand } from './commands/add.ts'
 import { createCompletionCommand } from './commands/completion.ts'
 import { createDeployCommand } from './commands/deploy.ts'
 import { createDomainsCommand } from './commands/domains.ts'
+import { createInitCommand } from './commands/init.ts'
 import { createLoginCommand, createLogoutCommand, createWhoamiCommand } from './commands/login.ts'
 import { createLogsCommand } from './commands/logs.ts'
 import { createMachinesCommand } from './commands/machines.ts'
@@ -24,6 +25,7 @@ import { createOpenCommand } from './commands/open.ts'
 import { createPromoteCommand } from './commands/promote.ts'
 import { createSecretsCommand } from './commands/secrets.ts'
 import { createServicesCommand } from './commands/services.ts'
+import { createSkillCommand } from './commands/skill.ts'
 import { createStatusCommand } from './commands/status.ts'
 import { createVolumesCommand } from './commands/volumes.ts'
 import { attachHint, type GlobalOptions } from './config.ts'
@@ -60,6 +62,9 @@ export function buildProgram(): Command {
   program.addCommand(createMcpCommand())
   program.addCommand(createLogsCommand())
   program.addCommand(createOpenCommand())
+  program.addCommand(createInitCommand())
+  program.addCommand(createSkillCommand())
+  // Last, so the generated script sees every command above it.
   program.addCommand(createCompletionCommand(program))
 
   return program

@@ -94,6 +94,21 @@ not started since the field existed reports neither.
 from, and `Hosts` carries each host's, so the fleet's split is visible without
 a shell on every box.
 
+## The front door
+
+```go
+res, err := c.Plan(ctx, tarOfMyDirectory, "shop")
+for _, d := range res.Detected {
+	log.Println(d.Service, d.Source, d.Framework, d.Port)
+}
+```
+
+`Plan` posts a tar of a directory and answers with the plan an executor runs
+plus one `Detected` entry per step saying where it came from: a compose file, a
+`Dockerfile`, or a framework recipe. It is a method on `Client` rather than on
+`Compose` or `Services` because it is what a caller reaches for before it knows
+which of those a directory is.
+
 ## Errors
 
 ```go
@@ -116,14 +131,30 @@ if errors.As(err, &failed) {
 
 | Type | When | Carries |
 | --- | --- | --- |
-| `*Error` | any non-2xx | `StatusCode`, `Body`, `Message` |
+| `*Error` | any non-2xx | `StatusCode`, `Body`, `Message`, `Code`, `Next`, `Details` |
 | `ErrNotFound` | 404 | wrapped by `*Error`, so `errors.Is` matches |
 | `*QuotaExceeded` | 429 | `Quota`, `Limit`, `Used`, `Scope` |
 | `*ComposePlanError` | a compose plan hostd will not accept | `Unsupported` |
 | `*BuildFailed` | a build that failed | `ID`, `Reason`, `Lines` |
+| `*HealthGateFailed` | 422, a release that never became healthy | `Details` |
+| `*UnknownFramework` | 400, a directory the platform cannot place | `Details` |
+
+`Code`, `Next` and `Details` are on `*Error` and therefore on every failure.
+`Code` is a stable snake_case noun to branch on, from the closed list in
+`apps/hostd/internal/api/errors.go`; `Next` is the one thing to do about it;
+`Details` is the body's `details`, undecoded, whose shape is fixed by `Code`.
+They are on the base type so a code this version has never heard of still
+reaches the caller with its next step attached.
+
+The last two are matched on the body's `Code` and never on the status alone: a
+later 422 for something other than the health gate must not arrive typed as
+this one.
 
 `Scope` is `"host"` when the ceiling is the host's rather than the org's, which
 is how builds are limited.
+
+`HealthGateFailed.Details` carries NO address: the probe target is the host's
+own view of the replica and is not reachable from wherever this is read.
 
 ## Streaming exec
 

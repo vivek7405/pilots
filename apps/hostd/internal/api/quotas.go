@@ -26,7 +26,7 @@ func quotaToAPI(q state.Quota) QuotaResponse {
 func (d Deps) handleGetQuota(w http.ResponseWriter, r *http.Request) {
 	org := r.PathValue("org")
 	if org == "" {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "org is required"})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "org is required", "pass org", nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, quotaToAPI(quota.For(r.Context(), d.Store, org)))
@@ -35,12 +35,12 @@ func (d Deps) handleGetQuota(w http.ResponseWriter, r *http.Request) {
 func (d Deps) handlePutQuota(w http.ResponseWriter, r *http.Request) {
 	org := r.PathValue("org")
 	if org == "" {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "org is required"})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "org is required", "pass org", nil)
 		return
 	}
 	var req QuotaResponse
 	if err := decodeBody(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad request body"})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "bad request body", NextBadBody, nil)
 		return
 	}
 	// Zero is legal and means "hold none of these", which is how an org is
@@ -49,8 +49,8 @@ func (d Deps) handlePutQuota(w http.ResponseWriter, r *http.Request) {
 	for _, v := range []int{req.MaxMachines, req.MaxVCPUs, req.MaxMemMiB,
 		req.MaxVolumeGiB, req.MaxBuilds} {
 		if v < 0 {
-			writeJSON(w, http.StatusBadRequest,
-				ErrorResponse{Error: "a quota cannot be negative"})
+			WriteError(w, http.StatusBadRequest, CodeBadRequest, "a quota cannot be negative",
+				"every limit is zero or more", nil)
 			return
 		}
 	}
@@ -61,7 +61,7 @@ func (d Deps) handlePutQuota(w http.ResponseWriter, r *http.Request) {
 		MaxBuilds: req.MaxBuilds, UpdatedAt: time.Now().Unix(),
 	}
 	if err := d.Store.PutQuota(r.Context(), row); err != nil {
-		writeStoreError(w, err)
+		writeMapped(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, quotaToAPI(*row))
@@ -81,7 +81,9 @@ func writeQuotaError(w http.ResponseWriter, err error) bool {
 	// what tells a real capacity problem from a runaway client.
 	metrics.QuotaRefusals.With(ex.Quota).Inc()
 	writeJSON(w, http.StatusTooManyRequests, QuotaExceededResponse{
-		Error: "quota exceeded", Quota: ex.Quota,
+		Error: "quota exceeded", Code: CodeQuotaExceeded,
+		Next:  "free a " + ex.Quota + ", or raise the org's limit: PUT /v1/quotas/<org> with an admin key",
+		Quota: ex.Quota,
 		Limit: ex.Limit, Used: ex.Used, Scope: ex.Scope,
 	})
 	return true
@@ -96,6 +98,6 @@ func (d Deps) checkQuota(w http.ResponseWriter, r *http.Request, delta quota.Del
 	if writeQuotaError(w, err) {
 		return false
 	}
-	writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
+	writeMapped(w, err)
 	return false
 }

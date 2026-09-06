@@ -9,6 +9,8 @@ package pilots
 // hostd's Go source on every run and fails naming the struct and the tag when
 // the two sides disagree, in either direction.
 
+import "encoding/json"
+
 // Knobs is the per-machine lifecycle policy. A sandbox and a production
 // service are the same machine with different knobs.
 type Knobs struct {
@@ -162,6 +164,8 @@ type BuildLogLine struct {
 	TS     int64  `json:"ts"`
 	Error  string `json:"error,omitempty"`
 	Result string `json:"result,omitempty"` // rootfs build id on success
+	// Code is the stable code on a terminal failure line, build_failed.
+	Code string `json:"code,omitempty"`
 }
 
 // HealthCheck gates a rollout: a new release takes traffic only once healthy.
@@ -350,6 +354,32 @@ type WhoamiResponse struct {
 
 type ErrorResponse struct {
 	Error string `json:"error"`
+	// Code is a stable snake_case noun to branch on. See
+	// apps/hostd/internal/api/errors.go for the closed list.
+	Code string `json:"code,omitempty"`
+	// Next is the one thing to do about it, naming the command or the call.
+	Next string `json:"next,omitempty"`
+	// Details is typed per code: HealthGateDetails, ComposeUnknownDetails.
+	Details json.RawMessage `json:"details,omitempty"`
+}
+
+// HealthGateDetails is the 422 health_gate_failed body's details: why a
+// release was refused. It carries no address, because the probe target is the
+// host's own view of the replica and is not reachable from where this is read.
+type HealthGateDetails struct {
+	Service  string     `json:"service"`
+	Replica  string     `json:"replica"`
+	Release  string     `json:"release"`
+	GraceSec int        `json:"grace_sec"`
+	Last     HealthLast `json:"last"`
+}
+
+// HealthLast is the replica's last answer: a status and body when it
+// answered, or a one-line reason when it did not.
+type HealthLast struct {
+	Status int    `json:"status,omitempty"`
+	Body   string `json:"body,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 type AddDomainRequest struct {
@@ -422,6 +452,8 @@ type QuotaResponse struct {
 // host's rather than the org's, which is how builds are limited.
 type QuotaExceededResponse struct {
 	Error string `json:"error"`
+	Code  string `json:"code"`
+	Next  string `json:"next"`
 	Quota string `json:"quota"`
 	Limit int64  `json:"limit"`
 	Used  int64  `json:"used"`
@@ -501,6 +533,38 @@ type ComposeUnsupported struct {
 	Message string `json:"message"`
 }
 
+// ComposePlanResponse is POST /v1/plan's 200 body: the plan, and how each
+// step was decided.
+type ComposePlanResponse struct {
+	Plan     ComposePlan       `json:"plan"`
+	Detected []ComposeDetected `json:"detected"`
+}
+
+// ComposeDetected says where one step came from. Source is "compose",
+// "dockerfile" or "recipe"; Framework and Notes are set for a recipe only.
+type ComposeDetected struct {
+	Service   string       `json:"service"`
+	Source    string       `json:"source"`
+	Framework string       `json:"framework,omitempty"`
+	Dir       string       `json:"dir"`
+	Port      int          `json:"port"`
+	Health    *HealthCheck `json:"health,omitempty"`
+	Notes     []string     `json:"notes,omitempty"`
+}
+
+// ComposeUnknownDetails is the 400 unknown_framework's details: everything
+// needed to write the Dockerfile by hand, so the refusal is a starting point
+// and not a dead end.
+type ComposeUnknownDetails struct {
+	Dir        string            `json:"dir"`
+	LookedFor  []string          `json:"looked_for"`
+	Listing    []string          `json:"listing"`
+	Manifests  map[string]string `json:"manifests,omitempty"`
+	Workspaces []string          `json:"workspaces,omitempty"`
+	// Rules are the two lines every Dockerfile must obey.
+	Rules []string `json:"rules"`
+}
+
 // wireTypes is every struct above, once. The drift test reflects over it, and
 // fails when hostd carries a tagged struct nobody listed here -- so a new wire
 // shape cannot land unmirrored.
@@ -531,6 +595,8 @@ var wireTypes = []any{
 	HealthResponse{},
 	WhoamiResponse{},
 	ErrorResponse{},
+	HealthGateDetails{},
+	HealthLast{},
 	AddDomainRequest{},
 	DomainResponse{},
 	UpdateServiceRequest{},
@@ -548,4 +614,7 @@ var wireTypes = []any{
 	ComposePlan{},
 	ComposeUnsupported{},
 	ComposePlanError{},
+	ComposePlanResponse{},
+	ComposeDetected{},
+	ComposeUnknownDetails{},
 }

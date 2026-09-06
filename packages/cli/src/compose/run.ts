@@ -169,10 +169,16 @@ async function buildStep(client: PilotsClient, step: ComposeStep, opts: ExecuteO
     // `Dockerfile`, and whenever the plan has instructions to append. hostd
     // builds the `Dockerfile` at the tar's ROOT and reads that same file to
     // learn what the image starts, so both cases are the same edit.
+    // A step carrying BOTH a build context and Dockerfile text is a recipe
+    // the planner generated: the context has no Dockerfile of its own, so the
+    // plan's text becomes the one at the tar's root.
+    const generated = step.dockerfile ? withOverrides(step.dockerfile, step) : undefined
     const extras =
-      (named && named !== 'Dockerfile') || step.dockerfile_append
-        ? { Dockerfile: withOverrides(readDockerfile(resolve(context, named ?? 'Dockerfile')), step) }
-        : undefined
+      generated !== undefined
+        ? { Dockerfile: generated }
+        : (named && named !== 'Dockerfile') || step.dockerfile_append
+          ? { Dockerfile: withOverrides(readDockerfile(resolve(context, named ?? 'Dockerfile')), step) }
+          : undefined
     tar = tarDirectory(context, extras ? { extraFiles: extras } : {})
   } else if (step.dockerfile) {
     tar = tarFiles({ Dockerfile: step.dockerfile })

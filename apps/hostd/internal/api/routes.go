@@ -59,6 +59,11 @@ type Deps struct {
 	// in tests, where the route answers 503 rather than vanishing from the
 	// table -- a route that disappears in tests is a route nothing checks.
 	Compose http.HandlerFunc
+	// Plan decides what a directory is and answers with a compose plan.
+	// Injected for the same reason Compose is: internal/detect imports this
+	// package for the wire structs, so the import cannot go both ways. Nil
+	// only in tests, where the route answers 503 rather than vanishing.
+	Plan http.HandlerFunc
 	// GitHub handles webhook deliveries. Nil when no app is configured, in
 	// which case the route answers 503 rather than accepting deliveries it
 	// cannot verify.
@@ -205,8 +210,22 @@ func Routes(d Deps) http.Handler {
 		mux.HandleFunc("POST /v1/compose/plan", d.Compose)
 	} else {
 		mux.HandleFunc("POST /v1/compose/plan", func(w http.ResponseWriter, r *http.Request) {
-			writeJSON(w, http.StatusServiceUnavailable,
-				ErrorResponse{Error: "no compose planner on this host"})
+			WriteError(w, http.StatusServiceUnavailable, CodeNotConfigured,
+				"no compose planner on this host",
+				"this host was built without it; pilot status lists hosts", nil)
+		})
+	}
+
+	// The front door: a tar in, a plan out. Injected for the same reason the
+	// compose plan is, and the two are separate routes because one takes a
+	// file's text and the other takes a whole directory.
+	if d.Plan != nil {
+		mux.HandleFunc("POST /v1/plan", d.Plan)
+	} else {
+		mux.HandleFunc("POST /v1/plan", func(w http.ResponseWriter, r *http.Request) {
+			WriteError(w, http.StatusServiceUnavailable, CodeNotConfigured,
+				"no planner on this host",
+				"this host was built without it; pilot status lists hosts", nil)
 		})
 	}
 
@@ -218,8 +237,9 @@ func Routes(d Deps) http.Handler {
 		mux.HandleFunc("POST /v1/github/webhook", d.GitHub)
 	} else {
 		mux.HandleFunc("POST /v1/github/webhook", func(w http.ResponseWriter, r *http.Request) {
-			writeJSON(w, http.StatusServiceUnavailable,
-				ErrorResponse{Error: "no github app is configured on this fleet"})
+			WriteError(w, http.StatusServiceUnavailable, CodeNotConfigured,
+				"no github app is configured on this fleet",
+				"set PILOT_GITHUB_APP_ID, PILOT_GITHUB_APP_KEY and PILOT_GITHUB_WEBHOOK_SECRET on every host", nil)
 		})
 	}
 
@@ -251,7 +271,8 @@ func Routes(d Deps) http.Handler {
 }
 
 func notImplemented(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusNotImplemented, ErrorResponse{Error: "not implemented"})
+	WriteError(w, http.StatusNotImplemented, CodeNotImplemented, "not implemented",
+		"this route is not built yet; the CLI and the SDKs never call it", nil)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {

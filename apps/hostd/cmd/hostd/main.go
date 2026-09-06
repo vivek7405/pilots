@@ -27,6 +27,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/compose"
 	"github.com/vivek7405/pilots/hostd/internal/config"
 	"github.com/vivek7405/pilots/hostd/internal/cpuvendor"
+	"github.com/vivek7405/pilots/hostd/internal/detect"
 	"github.com/vivek7405/pilots/hostd/internal/dns"
 	"github.com/vivek7405/pilots/hostd/internal/fc"
 	"github.com/vivek7405/pilots/hostd/internal/github"
@@ -455,7 +456,8 @@ func run() error {
 
 	// Push-to-deploy and pull-request previews. The webhook is an ordinary
 	// route on every host; exactly one acts on any delivery.
-	ghApp, err := github.LoadApp(cfg.GitHubAppID, cfg.GitHubKeyPath, cfg.GitHubWebhookKey)
+	ghApp, err := github.LoadApp(cfg.GitHubAppID, cfg.GitHubKeyPath, cfg.GitHubWebhookKey,
+		cfg.GitHubAPIURL)
 	if err != nil {
 		return err
 	}
@@ -493,10 +495,12 @@ func run() error {
 		CPUVendor: vendor, CPUVendorForced: vendorForced,
 		Usage:   ledger,
 		Compose: compose.Handler(),
+		Plan:    detect.Handler(filepath.Join(cfg.CacheRoot(), "plan-work")),
 		Lookup:  machineByName(f),
 		GitHub: github.Handler(github.Deps{
 			HostID: cfg.HostID, App: ghApp, Store: store, Builds: builder,
 			Rollout: rollout, Machines: mgr, Domain: cfg.WorkloadDomain,
+			WorkRoot: filepath.Join(cfg.CacheRoot(), "push-work"),
 			// The same value the API handlers render URLs with, so the link
 			// on a pull request opens the way the one from POST /v1/machines
 			// does. Without it a single box tells a developer https://<name>

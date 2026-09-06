@@ -101,21 +101,51 @@ not started since the field existed reports neither.
 images from, and `hosts()` carries each host's, so the fleet's split is visible
 without a shell on every box.
 
+## The front door
+
+```ts
+const { plan, detected } = await client.plan(tarOfMyDirectory, { app: 'shop' })
+```
+
+`plan()` posts a tar of a directory and answers with the plan an executor runs
+plus one `detected` entry per step saying where it came from: a compose file, a
+`Dockerfile`, or a framework recipe. It is on the client rather than under
+`compose` or `services` because it is what a caller reaches for before it knows
+which of those a directory is.
+
 ## Errors
 
 Every non-2xx throws. The subclass tells you what to do about it.
 
 | Class | When | Carries |
 | --- | --- | --- |
-| `PilotsError` | any failure | `status`, `body`, `message` (the body's `error`) |
+| `PilotsError` | any failure | `status`, `body`, `message`, `code`, `next`, `details` |
 | `NotFoundError` | 404 | as above |
 | `QuotaExceededError` | 429 | `quota`, `limit`, `used`, `scope` |
 | `ComposePlanError` | a compose plan hostd will not accept | `unsupported: [{service, key, message}]` |
 | `BuildFailedError` | a build that failed | `buildId`, `lines` |
+| `HealthGateError` | 422, a release that never became healthy | `details: {service, replica, release, grace_sec, last}` |
+| `UnknownFrameworkError` | 400, a directory the platform cannot place | `details: {dir, looked_for, listing, manifests, workspaces, rules}` |
+
+Three fields are on the base class and therefore on every error. `code` is a
+stable snake_case noun to branch on, from the closed list in
+`apps/hostd/internal/api/errors.go`. `next` is the one thing to do about it,
+naming the command or the call. `details` is typed per code. They are on the
+base rather than only on the subclasses so that a code this version has never
+heard of still reaches the caller with its next step attached, instead of being
+dropped on the way through.
+
+The last two are matched on `code` and never on the status alone: 422 is the
+shape of the health gate's answer today, and a later 422 for something else
+must not arrive typed as this one.
 
 `quota` names which ceiling was hit, so a caller raises the right one rather
 than guessing from a sentence. `scope` is `"host"` when the limit is the
 host's rather than the org's, which is how builds are limited.
+
+`HealthGateError`'s `details` carry NO address. The probe target is the host's
+own view of the replica, inside a network namespace, and it is not reachable
+from wherever the error is being read.
 
 ## Streaming exec
 

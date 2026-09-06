@@ -23,11 +23,13 @@ func Handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		var req Request
 		if err := json.NewDecoder(io.LimitReader(r.Body, maxBody)).Decode(&req); err != nil {
-			writeJSON(w, http.StatusBadRequest, api.ErrorResponse{Error: err.Error()})
+			api.WriteError(w, http.StatusBadRequest, api.CodeBadRequest, err.Error(),
+				"pass compose: the file's text", nil)
 			return
 		}
 		if req.Compose == "" {
-			writeJSON(w, http.StatusBadRequest, api.ErrorResponse{Error: "compose is required"})
+			api.WriteError(w, http.StatusBadRequest, api.CodeBadRequest, "compose is required",
+				"pass compose: the file's text", nil)
 			return
 		}
 
@@ -35,20 +37,16 @@ func Handler() http.HandlerFunc {
 		switch {
 		case planErr != nil:
 			// The whole list, in one answer: a caller fixes their file once
-			// rather than one key per failed deploy.
-			writeJSON(w, http.StatusBadRequest, planErr)
+			// rather than one key per failed deploy. Its own body shape, not
+			// an ErrorResponse, so it goes out through WriteJSON.
+			api.WriteJSON(w, http.StatusBadRequest, planErr)
 		case err != nil:
 			// A file that does not parse, an unset variable, a cycle. All the
 			// caller's, all fixable, so all 400.
-			writeJSON(w, http.StatusBadRequest, api.ErrorResponse{Error: err.Error()})
+			api.WriteError(w, http.StatusBadRequest, api.CodeComposeInvalid, err.Error(),
+				"fix the file named in error", nil)
 		default:
-			writeJSON(w, http.StatusOK, plan)
+			api.WriteJSON(w, http.StatusOK, plan)
 		}
 	}
-}
-
-func writeJSON(w http.ResponseWriter, code int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	_ = json.NewEncoder(w).Encode(v)
 }

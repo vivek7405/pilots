@@ -59,6 +59,11 @@ func (f *fakeBuilder) BuildLog(_ context.Context, id string, follow bool) (
 	return f.log, nil, true
 }
 
+func (f *fakeBuilder) RecordRefusal(_ string, line BuildLogLine) {
+	f.log = append(f.log, line)
+	f.hasLog = true
+}
+
 // newBuildServer wires the routes with a builder attached. The helper it
 // calls seeds the store and the API key.
 func newBuildServer(t *testing.T, b BuildRunner) http.Handler {
@@ -290,6 +295,8 @@ func (c *cancelProbeBuilder) BuildLog(context.Context, string, bool) (
 	[]BuildLogLine, <-chan BuildLogLine, bool) {
 	return nil, nil, false
 }
+
+func (c *cancelProbeBuilder) RecordRefusal(string, BuildLogLine) {}
 
 // The build must be able to read its context after the stream has started.
 //
@@ -749,3 +756,7 @@ func TestASecondOwnerWriteNeverFailsABuildThatSucceeded(t *testing.T) {
 			boot.Code, boot.Body.String())
 	}
 }
+
+func (x *readingBuilder) RecordRefusal(string, BuildLogLine) {}
+
+func (x *blockingBuilder) RecordRefusal(string, BuildLogLine) {}

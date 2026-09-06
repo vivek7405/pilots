@@ -99,25 +99,10 @@ func decodeBody(r *http.Request, v any) error {
 // machines imports this package, not the other way round.
 var ErrConflict = errors.New("conflict")
 
-// writeErr maps a lifecycle error to a status. A missing machine is a 404
-// rather than a 500 so a client can tell "gone" from "broken".
-func writeErr(w http.ResponseWriter, err error) {
-	switch {
-	case errors.Is(err, state.ErrNotFound):
-		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: err.Error()})
-	case errors.Is(err, ErrConflict):
-		// 409, not 400: nothing about the request is wrong. The machine is in
-		// a state that forbids it, and the same request works once it is not.
-		writeJSON(w, http.StatusConflict, ErrorResponse{Error: err.Error()})
-	default:
-		writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
-	}
-}
-
 func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 	var req CreateMachineRequest
 	if err := decodeBody(r, &req); err != nil && !errors.Is(err, io.EOF) {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad request body"})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "bad request body", NextBadBody, nil)
 		return
 	}
 	// The org comes from the authenticated key and overwrites whatever the
@@ -183,7 +168,7 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 			notFound(w, "release")
 			return
 		case err != nil:
-			writeStoreError(w, err)
+			writeMapped(w, err)
 			return
 		case rel.ServiceID != req.Service:
 			// The same answer as "no such release", deliberately: telling the
@@ -203,7 +188,7 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 
 	row, err := d.Machines.Create(r.Context(), req)
 	if err != nil {
-		writeErr(w, err)
+		writeMapped(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, d.toAPI(*row, req.OrgID, d.startOf(r.Context(), row.ID)))
@@ -222,7 +207,7 @@ func orDefault(v, fallback int) int {
 func (d Deps) handleListMachines(w http.ResponseWriter, r *http.Request) {
 	rows, err := d.Store.ListMachines(r.Context())
 	if err != nil {
-		writeErr(w, err)
+		writeMapped(w, err)
 		return
 	}
 	org, narrow := listOrg(r)
@@ -254,7 +239,7 @@ func (d Deps) handleDestroyMachine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := d.Machines.Destroy(r.Context(), r.PathValue("id")); err != nil {
-		writeErr(w, err)
+		writeMapped(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -263,11 +248,11 @@ func (d Deps) handleDestroyMachine(w http.ResponseWriter, r *http.Request) {
 func (d Deps) handleExec(w http.ResponseWriter, r *http.Request) {
 	var req ExecRequest
 	if err := decodeBody(r, &req); err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad request body"})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "bad request body", NextBadBody, nil)
 		return
 	}
 	if req.Cmd == "" {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "cmd is required"})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "cmd is required", "pass cmd", nil)
 		return
 	}
 	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
@@ -275,7 +260,7 @@ func (d Deps) handleExec(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := d.Machines.Exec(r.Context(), r.PathValue("id"), req)
 	if err != nil {
-		writeErr(w, err)
+		writeMapped(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -312,11 +297,11 @@ func (d Deps) handleSpriteExec(w http.ResponseWriter, r *http.Request) {
 // formed.
 func (d Deps) execStream(w http.ResponseWriter, r *http.Request, id string) {
 	if len(r.URL.Query()["cmd"]) == 0 {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "cmd is required"})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "cmd is required", "pass cmd", nil)
 		return
 	}
 	if err := d.Machines.ExecStream(w, r, id); err != nil {
-		writeErr(w, err)
+		writeMapped(w, err)
 	}
 }
 
@@ -368,7 +353,7 @@ func (d Deps) handleSuspend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := d.Machines.Suspend(r.Context(), r.PathValue("id")); err != nil {
-		writeErr(w, err)
+		writeMapped(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -379,7 +364,7 @@ func (d Deps) handleWake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := d.Machines.Wake(r.Context(), r.PathValue("id")); err != nil {
-		writeErr(w, err)
+		writeMapped(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -397,11 +382,12 @@ func (d Deps) handleRedeploy(w http.ResponseWriter, r *http.Request) {
 	}
 	var req RedeployRequest
 	if err := decodeBody(r, &req); err != nil && !errors.Is(err, io.EOF) {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad request body"})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "bad request body", NextBadBody, nil)
 		return
 	}
 	if req.Image == "" {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "image is required"})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "image is required",
+			"pass image: a rootfs build id from pilot deploy or POST /v1/builds", nil)
 		return
 	}
 	// The build becomes this machine's root filesystem, which is the same
@@ -411,7 +397,7 @@ func (d Deps) handleRedeploy(w http.ResponseWriter, r *http.Request) {
 	}
 	row, err := d.Machines.Redeploy(r.Context(), r.PathValue("id"), req)
 	if err != nil {
-		writeErr(w, err)
+		writeMapped(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, d.toAPI(*row, OrgID(r.Context()), d.startOf(r.Context(), row.ID)))
@@ -420,7 +406,7 @@ func (d Deps) handleRedeploy(w http.ResponseWriter, r *http.Request) {
 func (d Deps) handleCreateCheckpoint(w http.ResponseWriter, r *http.Request) {
 	var req CheckpointRequest
 	if err := decodeBody(r, &req); err != nil && !errors.Is(err, io.EOF) {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad request body"})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "bad request body", NextBadBody, nil)
 		return
 	}
 	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
@@ -428,7 +414,7 @@ func (d Deps) handleCreateCheckpoint(w http.ResponseWriter, r *http.Request) {
 	}
 	ckpt, err := d.Machines.Checkpoint(r.Context(), r.PathValue("id"), req.Comment)
 	if err != nil {
-		writeErr(w, err)
+		writeMapped(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, toAPICheckpoint(*ckpt))
@@ -440,7 +426,7 @@ func (d Deps) handleListCheckpoints(w http.ResponseWriter, r *http.Request) {
 	}
 	cks, err := d.Machines.ListCheckpoints(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeErr(w, err)
+		writeMapped(w, err)
 		return
 	}
 	out := make([]Checkpoint, 0, len(cks))
@@ -459,7 +445,7 @@ func (d Deps) handleListCheckpoints(w http.ResponseWriter, r *http.Request) {
 func (d Deps) handleRestoreCheckpoint(w http.ResponseWriter, r *http.Request) {
 	ck, err := d.Machines.GetCheckpoint(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeErr(w, err)
+		writeMapped(w, err)
 		return
 	}
 	if _, ok := d.ownedMachine(w, r, ck.MachineID); !ok {
@@ -467,7 +453,7 @@ func (d Deps) handleRestoreCheckpoint(w http.ResponseWriter, r *http.Request) {
 	}
 	row, err := d.Machines.RestoreCheckpoint(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeErr(w, err)
+		writeMapped(w, err)
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), row.ID)
@@ -482,7 +468,7 @@ func (d Deps) handleRestoreCheckpoint(w http.ResponseWriter, r *http.Request) {
 func (d Deps) handleCheckpointStatus(w http.ResponseWriter, r *http.Request) {
 	ck, err := d.Machines.GetCheckpoint(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeErr(w, err)
+		writeMapped(w, err)
 		return
 	}
 	if _, ok := d.ownedMachine(w, r, ck.MachineID); !ok {
@@ -533,7 +519,7 @@ func (d Deps) handleLogs(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	logs, err := d.Machines.Logs(r.Context(), id)
 	if err != nil {
-		writeErr(w, err)
+		writeMapped(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -635,11 +621,11 @@ func toAPIVolume(v state.Volume, orgID string) Volume {
 func (d Deps) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
 	var req CreateVolumeRequest
 	if err := decodeBody(r, &req); err != nil && !errors.Is(err, io.EOF) {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "bad request body"})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "bad request body", NextBadBody, nil)
 		return
 	}
 	if req.SizeGiB <= 0 {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "size_gib is required"})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "size_gib is required", "pass size_gib", nil)
 		return
 	}
 	req.OrgID = OrgID(r.Context())
@@ -648,7 +634,7 @@ func (d Deps) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
 	}
 	v, err := d.Machines.CreateVolume(r.Context(), req)
 	if err != nil {
-		writeErr(w, err)
+		writeMapped(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, toAPIVolume(*v, req.OrgID))
@@ -657,7 +643,7 @@ func (d Deps) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
 func (d Deps) handleListVolumes(w http.ResponseWriter, r *http.Request) {
 	rows, err := d.Machines.ListVolumes(r.Context())
 	if err != nil {
-		writeErr(w, err)
+		writeMapped(w, err)
 		return
 	}
 	org, narrow := listOrg(r)
@@ -679,7 +665,7 @@ func (d Deps) handleMachineVolume(w http.ResponseWriter, r *http.Request) {
 	}
 	v, err := d.Machines.MachineVolume(r.Context(), r.PathValue("id"))
 	if err != nil {
-		writeErr(w, err)
+		writeMapped(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, v)
@@ -703,7 +689,7 @@ func (d Deps) handleWhoami(w http.ResponseWriter, r *http.Request) {
 func (d Deps) handleListHosts(w http.ResponseWriter, r *http.Request) {
 	hosts, err := d.Store.ListHosts(r.Context())
 	if err != nil {
-		writeErr(w, err)
+		writeMapped(w, err)
 		return
 	}
 	const aliveWindow = 30 * time.Second

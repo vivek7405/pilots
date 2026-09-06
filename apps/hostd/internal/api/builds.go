@@ -32,6 +32,11 @@ type BuildRunner interface {
 	// BuildLog returns what was recorded and, when following, a channel of
 	// what comes next. The bool reports whether this host has the build at all.
 	BuildLog(ctx context.Context, id string, follow bool) ([]BuildLogLine, <-chan BuildLogLine, bool)
+	// RecordRefusal writes a failed build log with no build run, so a push
+	// the planner refused reads back at GET /v1/builds/{id}/logs the way a
+	// failed build does. On this interface rather than only on the GitHub
+	// one, because the route that serves those logs is here.
+	RecordRefusal(id string, line BuildLogLine)
 }
 
 // ndjson is the media type of the build log stream: one JSON object per line,
@@ -47,24 +52,25 @@ const ndjson = "application/x-ndjson"
 // code is decided before the outcome is known, so it is always 200 and the
 // LAST line of the stream is what says whether the build worked. A line
 // carrying `result` is a success; one carrying `error` is not.
-// maxBuildContext bounds an upload.
+// MaxBuildContext bounds an upload. Exported because internal/detect serves
+// POST /v1/plan under the same ceiling, from the same tar.
 //
 // A build runs an arbitrary user Dockerfile on a host that also runs other
 // tenants' machines, so every input it takes needs a ceiling. 2 GiB is far
 // past any reasonable source tree and far short of filling a host's disk.
-const maxBuildContext = 2 << 30
+const MaxBuildContext = 2 << 30
 
 func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	if d.Builds == nil {
-		writeJSON(w, http.StatusNotImplemented,
-			ErrorResponse{Error: "builds are not configured on this host"})
+		WriteError(w, http.StatusNotImplemented, CodeNotConfigured,
+			"builds are not configured on this host",
+			"deploy from a host that runs BuildKit; pilot status lists hosts", nil)
 		return
 	}
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		writeJSON(w, http.StatusInternalServerError,
-			ErrorResponse{Error: "the server cannot stream"})
+		WriteError(w, http.StatusInternalServerError, CodeInternal, "the server cannot stream", NextInternal, nil)
 		return
 	}
 
@@ -104,8 +110,8 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	// upload a memory-exhaustion lever.
 	spool, err := os.CreateTemp("", "pilot-build-context-*.tar")
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError,
-			ErrorResponse{Error: "cannot stage the build context: " + err.Error()})
+		WriteError(w, http.StatusInternalServerError, CodeInternal, "cannot stage the build context: "+err.Error(),
+			NextInternal, nil)
 		return
 	}
 	defer func() {
@@ -113,14 +119,14 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 		os.Remove(spool.Name())
 	}()
 
-	if _, err := io.Copy(spool, http.MaxBytesReader(w, r.Body, maxBuildContext)); err != nil {
-		writeJSON(w, http.StatusBadRequest,
-			ErrorResponse{Error: "reading the build context: " + err.Error()})
+	if _, err := io.Copy(spool, http.MaxBytesReader(w, r.Body, MaxBuildContext)); err != nil {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "reading the build context: "+err.Error(),
+			"the context is over 2 GiB or the upload was cut; add a .dockerignore", nil)
 		return
 	}
 	if _, err := spool.Seek(0, io.SeekStart); err != nil {
-		writeJSON(w, http.StatusInternalServerError,
-			ErrorResponse{Error: "cannot rewind the build context: " + err.Error()})
+		WriteError(w, http.StatusInternalServerError, CodeInternal, "cannot rewind the build context: "+err.Error(),
+			NextInternal, nil)
 		return
 	}
 
@@ -134,8 +140,8 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	if err := d.Store.PutTenancy(r.Context(), &state.Tenancy{
 		ID: id, OrgID: org, Kind: "build", CreatedAt: time.Now().Unix(),
 	}); err != nil {
-		writeJSON(w, http.StatusInternalServerError,
-			ErrorResponse{Error: "cannot record the build's owner: " + err.Error()})
+		WriteError(w, http.StatusInternalServerError, CodeInternal, "cannot record the build's owner: "+err.Error(),
+			NextInternal, nil)
 		return
 	}
 
@@ -188,6 +194,7 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 				line = BuildLogLine{
 					Step: id, Stream: "status", Line: "build failed",
 					Error: "cannot record the image's owner: " + ownerErr.Error(),
+					Code:  CodeBuildFailed,
 					TS:    time.Now().UnixMilli(),
 				}
 			}
@@ -210,7 +217,7 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 		// verdict rather than having to infer one from the stream stopping.
 		write(BuildLogLine{
 			Step: id, Stream: "status", Line: "build failed",
-			Error: err.Error(), TS: time.Now().UnixMilli(),
+			Error: err.Error(), Code: CodeBuildFailed, TS: time.Now().UnixMilli(),
 		})
 		return
 	}
@@ -226,8 +233,9 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 // connection reattaches to an identical stream rather than a second format.
 func (d Deps) handleBuildLogs(w http.ResponseWriter, r *http.Request) {
 	if d.Builds == nil {
-		writeJSON(w, http.StatusNotImplemented,
-			ErrorResponse{Error: "builds are not configured on this host"})
+		WriteError(w, http.StatusNotImplemented, CodeNotConfigured,
+			"builds are not configured on this host",
+			"deploy from a host that runs BuildKit; pilot status lists hosts", nil)
 		return
 	}
 
@@ -243,7 +251,8 @@ func (d Deps) handleBuildLogs(w http.ResponseWriter, r *http.Request) {
 		// Distinct from an empty log on purpose: a client that cannot tell
 		// "this host does not have that build" from "that build printed
 		// nothing" concludes the wrong thing about both.
-		writeJSON(w, http.StatusNotFound, ErrorResponse{Error: "no such build on this host"})
+		WriteError(w, http.StatusNotFound, CodeNotFound, "no such build on this host",
+			NextNotFound, nil)
 		return
 	}
 

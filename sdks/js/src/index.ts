@@ -39,9 +39,11 @@ export type { ExecStreamInit, ExecStreamOptions, WebSocketCtor } from './stream.
 export {
   BuildFailedError,
   ComposePlanError,
+  HealthGateError,
   NotFoundError,
   PilotsError,
   QuotaExceededError,
+  UnknownFrameworkError,
 } from './errors.ts'
 export type { PilotsErrorInit } from './errors.ts'
 
@@ -52,9 +54,12 @@ export type {
   Checkpoint,
   CheckpointRequest,
   ComposeBuild,
+  ComposeDetected,
   ComposePlan,
+  ComposePlanResponse,
   ComposeRequest,
   ComposeStep,
+  ComposeUnknownDetails,
   ComposeUnsupported,
   ComposeVolume,
   CreateAPIKeyRequest,
@@ -67,6 +72,8 @@ export type {
   ExecRequest,
   ExecResponse,
   HealthCheck,
+  HealthGateDetails,
+  HealthLast,
   HealthResponse,
   Host,
   Knobs,
