@@ -138,7 +138,7 @@ func (d Deps) onPush(ctx context.Context, ev Event) error {
 		return nil
 	}
 
-	build, step, err := d.buildRef(ctx, ev, ev.After, svc.App)
+	build, step, err := d.buildRef(ctx, ev, ev.After, svc.App, d.orgOf(ctx, svc.ID))
 	if err != nil {
 		return err
 	}
@@ -189,7 +189,9 @@ func (d Deps) onPullRequest(ctx context.Context, ev Event) error {
 		return nil
 	}
 
-	build, _, err := d.buildRef(ctx, ev, ev.PullRequest.Head.SHA, svc.App)
+	previewOrg := d.orgOf(ctx, svc.ID)
+
+	build, _, err := d.buildRef(ctx, ev, ev.PullRequest.Head.SHA, svc.App, previewOrg)
 	if err != nil {
 		// A pull request's one surface is its comment, so a refusal says so
 		// there. Otherwise the author sees a preview that never appeared and
@@ -206,14 +208,6 @@ func (d Deps) onPullRequest(ctx context.Context, ev Event) error {
 	// Replace rather than update: a preview is disposable and rebuilding it
 	// from the new commit is simpler than reasoning about what changed.
 	_ = d.destroyPreview(ctx, name, ev)
-
-	// The preview belongs to the org that owns the service it previews. There
-	// is no authenticated caller on a webhook delivery -- GitHub is the
-	// principal -- so the org is read from the service rather than a request.
-	previewOrg := ""
-	if t, err := d.Store.GetTenancy(ctx, svc.ID); err == nil {
-		previewOrg = t.OrgID
-	}
 
 	mach, err := d.Machines.Create(ctx, api.CreateMachineRequest{
 		Name:  name,
@@ -298,7 +292,7 @@ func refusalOf(err error) *Refusal {
 //
 // The build id is minted BEFORE the plan, so a refusal has a log a person can
 // read at the same route a failed build's is at.
-func (d Deps) buildRef(ctx context.Context, ev Event, ref, app string) (string, *compose.Step, error) {
+func (d Deps) buildRef(ctx context.Context, ev Event, ref, app, org string) (string, *compose.Step, error) {
 	token, err := d.App.InstallationToken(ctx, ev.Installation.ID)
 	if err != nil {
 		return "", nil, err
@@ -318,6 +312,18 @@ func (d Deps) buildRef(ctx context.Context, ev Event, ref, app string) (string, 
 	}
 
 	id := d.Builds.NewBuildID()
+	// The build's owner, recorded BEFORE anything is written under the id.
+	// GET /v1/builds/{id}/logs is scoped by tenancy, so without this row the
+	// refusal below -- and the log of a build that did run -- answers 404 to
+	// every key but an admin one, which is to say it is readable by nobody the
+	// push was for.
+	if org != "" {
+		if err := d.Store.PutTenancy(ctx, &state.Tenancy{
+			ID: id, OrgID: org, Kind: "build", CreatedAt: time.Now().Unix(),
+		}); err != nil {
+			return "", nil, fmt.Errorf("github: recording build %s's owner: %w", id, err)
+		}
+	}
 	res, planErr, unknown, err := detect.Plan(ctx, dir, detect.Options{App: app})
 	switch {
 	case planErr != nil:
@@ -356,6 +362,17 @@ func (d Deps) buildRef(ctx context.Context, ev Event, ref, app string) (string, 
 	// client on the other end of a webhook.
 	rootfs, err := d.Builds.StartBuild(ctx, id, tar, func(api.BuildLogLine) {})
 	return rootfs, &step, err
+}
+
+// orgOf is the org that owns a service, which is the org a push's build
+// belongs to. There is no authenticated caller on a webhook delivery -- GitHub
+// is the principal -- so ownership is read from the service rather than from a
+// request. Empty when the service predates tenancy.
+func (d Deps) orgOf(ctx context.Context, serviceID string) string {
+	if t, err := d.Store.GetTenancy(ctx, serviceID); err == nil && t != nil {
+		return t.OrgID
+	}
+	return ""
 }
 
 // refuse records a refusal where a person can read it and returns it as an

@@ -9,6 +9,7 @@ import (
 	"crypto/rsa"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -30,7 +31,7 @@ func TestAPushToARepoWithNoDockerfileIsPlannedAndBuilt(t *testing.T) {
 	builds := &recordingBuilds{}
 	d := pushDeps(t, tarballOf(t, "webjs"), builds)
 
-	rootfs, step, err := d.buildRef(context.Background(), pushEvent(), "abc1234", "shop")
+	rootfs, step, err := d.buildRef(context.Background(), pushEvent(), "abc1234", "shop", "org_1")
 	if err != nil {
 		t.Fatalf("buildRef: %v", err)
 	}
@@ -61,7 +62,7 @@ func TestAPushToARepoWithADockerfileBuildsItUnchanged(t *testing.T) {
 	builds := &recordingBuilds{}
 	d := pushDeps(t, gzipTarball(t, dir), builds)
 
-	if _, _, err := d.buildRef(context.Background(), pushEvent(), "abc1234", "shop"); err != nil {
+	if _, _, err := d.buildRef(context.Background(), pushEvent(), "abc1234", "shop", "org_1"); err != nil {
 		t.Fatalf("buildRef: %v", err)
 	}
 	if !strings.Contains(builds.context, dockerfile) {
@@ -79,7 +80,7 @@ func TestAMultiServicePushIsRefusedAndRecorded(t *testing.T) {
 	builds := &recordingBuilds{}
 	d := pushDeps(t, tarballOf(t, "..", "workspace-app"), builds)
 
-	_, _, err := d.buildRef(context.Background(), pushEvent(), "abc1234", "shop")
+	_, _, err := d.buildRef(context.Background(), pushEvent(), "abc1234", "shop", "org_1")
 	if err == nil {
 		t.Fatal("a two-service repository was built by a push")
 	}
@@ -119,7 +120,7 @@ func TestAnUnrecognisedPushIsRefusedWithUnknownFramework(t *testing.T) {
 	builds := &recordingBuilds{}
 	d := pushDeps(t, gzipTarball(t, dir), builds)
 
-	_, _, err := d.buildRef(context.Background(), pushEvent(), "abc1234", "shop")
+	_, _, err := d.buildRef(context.Background(), pushEvent(), "abc1234", "shop", "org_1")
 	var refusal *Refusal
 	if !errors.As(err, &refusal) {
 		t.Fatalf("err = %T (%v), want a *Refusal", err, err)
@@ -152,6 +153,7 @@ func TestARefusedPreviewCommentNamesTheReasonAndTheNextStep(t *testing.T) {
 
 // recordingBuilds captures what the builder was handed instead of running one.
 type recordingBuilds struct {
+	lastID   string
 	started  bool
 	context  string
 	refusals []api.BuildLogLine
@@ -160,7 +162,8 @@ type recordingBuilds struct {
 
 func (r *recordingBuilds) NewBuildID() string {
 	r.n++
-	return "bld_1"
+	r.lastID = fmt.Sprintf("bld_%d", r.n)
+	return r.lastID
 }
 
 func (r *recordingBuilds) StartBuild(_ context.Context, _ string, contextTar io.Reader,
@@ -338,4 +341,65 @@ func (noopRollout) Deploy(_ context.Context, serviceID, _ string,
 	_ json.RawMessage) (*state.Release, error) {
 
 	return &state.Release{ID: "rel_1", ServiceID: serviceID}, nil
+}
+
+// The build a push made, and the refusal a push recorded, both belong to the
+// org that owns the service.
+//
+// GET /v1/builds/{id}/logs is scoped by the tenancy row, so without one the
+// route answers 404 to every key except an admin one. The refusal would then
+// be readable by nobody the push was for, which is the whole outcome the
+// refusal exists to produce; the battery and the fleet gate would not have
+// noticed, because both drive the API with the bootstrap admin key.
+func TestAPushRecordsTheBuildsOwnerForBothOutcomes(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fixture []string
+		refused bool
+	}{
+		{"a build that ran", []string{"webjs"}, false},
+		{"a refusal", []string{"..", "workspace-app"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			builds := &recordingBuilds{}
+			d := pushDeps(t, tarballOf(t, tc.fixture...), builds)
+			ctx := context.Background()
+
+			_, _, err := d.buildRef(ctx, pushEvent(), "abc1234", "shop", "org_7")
+			if tc.refused {
+				var refusal *Refusal
+				if !errors.As(err, &refusal) {
+					t.Fatalf("err = %T (%v), want a *Refusal", err, err)
+				}
+			} else if err != nil {
+				t.Fatalf("buildRef: %v", err)
+			}
+
+			row, err := d.Store.GetTenancy(ctx, builds.lastID)
+			if err != nil {
+				t.Fatalf("no tenancy row for build %s: %v", builds.lastID, err)
+			}
+			if row.OrgID != "org_7" {
+				t.Errorf("build %s belongs to %q, want org_7", builds.lastID, row.OrgID)
+			}
+			if row.Kind != "build" {
+				t.Errorf("kind = %q, want build", row.Kind)
+			}
+		})
+	}
+}
+
+// A service with no tenancy row predates tenancy. The push still deploys; it
+// simply has no owner to record, and inventing one would give the build to an
+// org that never asked for it.
+func TestAPushWithNoOwningOrgStillBuilds(t *testing.T) {
+	builds := &recordingBuilds{}
+	d := pushDeps(t, tarballOf(t, "webjs"), builds)
+
+	if _, _, err := d.buildRef(context.Background(), pushEvent(), "abc1234", "shop", ""); err != nil {
+		t.Fatalf("buildRef: %v", err)
+	}
+	if !builds.started {
+		t.Error("the build did not run")
+	}
 }
