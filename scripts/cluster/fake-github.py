@@ -21,7 +21,8 @@ the repository.
 Run it on the operator machine, where the hosts can reach it:
 
     python3 scripts/cluster/fake-github.py --port 9418 \\
-        --tar /tmp/webjs-app.tar.gz --tar-multi /tmp/workspace-app.tar.gz
+        --repo webjs-app=/tmp/webjs-app.tar.gz \\
+        --repo workspace-app=/tmp/workspace-app.tar.gz
 """
 
 import argparse
