@@ -34,14 +34,14 @@ export function serviceStatusLine(
 
   const count =
     health.pills.includes('failing') || running < wanted
-      ? html`<span class="text-destructive">${running}/${wanted} running</span>`
-      : html`${running}/${wanted} replicas healthy`;
+      ? html`<span class="text-destructive">${running}/${wanted} instances online</span>`
+      : html`${running}/${wanted} instances online`;
 
   const asleep = health.pills.includes('suspended');
 
   // Each phrase is nowrap so a narrow column breaks between them rather than
   // through `1 hour ago`.
-  return html`<span class="flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+  return html`<span class="flex flex-wrap items-center gap-x-2 gap-y-1 text-meta">
     <span class="whitespace-nowrap">${count}</span>
     ${asleep
       ? html`<span class=${cn(badgeClass({ variant: 'secondary' }), 'whitespace-nowrap')}

@@ -24,6 +24,7 @@ import { cardClass } from '#components/ui/card.ts';
 import { progressClass } from '#components/ui/progress.ts';
 import { dataTable, emptyState, lede, pageHeading, sectionHeading } from '#lib/utils/ui.ts';
 import { cn } from '#lib/utils/cn.ts';
+import { NOUN, SLEEP_SENTENCE } from '#lib/vocabulary.ts';
 import type { Machine, Release, Service } from '@pilots/sdk';
 import type { Machine as BrowserMachine } from '#modules/machines/types.ts';
 import type { Host as BrowserHost, Quota } from '#modules/fleet/types.ts';
@@ -47,7 +48,7 @@ export default async function Home() {
     return html`
       <div class="max-w-md mx-auto py-24 flex flex-col items-center gap-6 text-center">
         <span class=${badgeClass({ variant: 'outline' })}>Firecracker microVMs</span>
-        <h1 class="text-3xl font-semibold tracking-tight m-0">pilots</h1>
+        <h1 class="text-title font-semibold tracking-tight m-0">pilots</h1>
         <p class="text-muted-foreground m-0">Sandboxes and production services on one primitive.</p>
         ${signInLink()}
       </div>
@@ -95,7 +96,7 @@ export default async function Home() {
       different lifecycle knobs.`,
     )}
 
-    ${sectionHeading('Services')}
+    ${sectionHeading(NOUN.Services, 'A service runs one or more instances behind a permanent URL and redeploys when you push.')}
     ${services.length === 0
       ? emptyState('No services yet. A service is created by a deploy from a repository with a compose file.', {
           command: 'pilot deploy',
@@ -106,10 +107,10 @@ export default async function Home() {
           ${ordered.map(
             ([app, list]) => html`
               <div class=${cardClass()}>
-                <h3 class="m-0 text-base font-medium">
+                <h3 class="m-0 text-heading font-medium">
                   ${app || 'Ungrouped'}
                   ${app
-                    ? html`<span class="ml-2 font-normal text-xs text-muted-foreground"
+                    ? html`<span class="ml-2 font-normal text-meta text-muted-foreground"
                         >services here reach each other at &lt;name&gt;.internal</span
                       >`
                     : ''}
@@ -140,7 +141,7 @@ export default async function Home() {
           )}
         </div>`}
 
-    ${sectionHeading('Sandboxes')}
+    ${sectionHeading(NOUN.Sandboxes, `A sandbox belongs to no service: yours to open a terminal on and turn into a service later. ${SLEEP_SENTENCE}`)}
     <div class="mb-8">
       <machine-list
         .initial=${sandboxes}
@@ -149,12 +150,12 @@ export default async function Home() {
       ></machine-list>
     </div>
 
-    ${sectionHeading('Quota')}
+    ${sectionHeading('Limits', 'What this team may run at once. A create past a ceiling is refused rather than queued.')}
     <div class="grid gap-3 sm:grid-cols-2 mb-8">
       ${bars.map((bar) => quotaBar(bar))}
     </div>
 
-    ${sectionHeading('Fleet')}
+    ${sectionHeading('Capacity', 'The machines pilots itself runs on. Nothing here is yours to change.')}
     <hosts-strip .initial=${hosts}></hosts-strip>
   `;
 }
@@ -171,14 +172,14 @@ function quotaBar(bar: Bar) {
   const label = `${bar.label}: ${bar.used}${bar.limit === undefined ? '' : ` of ${bar.limit}`}${bar.unit ? ` ${bar.unit}` : ''}`;
   return html`
     <div class="grid gap-1">
-      <div class="flex items-baseline justify-between text-sm">
+      <div class="flex items-baseline justify-between text-meta">
         <span>${bar.label}</span>
         <span class="tabular-nums text-muted-foreground">
           ${bar.used}${bar.limit === undefined ? '' : html` / ${bar.limit}`}${bar.unit ? html` ${bar.unit}` : ''}
         </span>
       </div>
       ${bar.limit === undefined
-        ? html`<p class="m-0 text-xs text-muted-foreground">No ceiling reported for this org.</p>`
+        ? html`<p class="m-0 text-meta text-muted-foreground">No ceiling reported for this org.</p>`
         : html`<progress class=${progressClass()} value=${bar.used} max=${bar.limit} aria-label=${label}></progress>`}
     </div>
   `;

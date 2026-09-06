@@ -14,8 +14,9 @@ import { html } from '@webjsdev/core';
 import type { TemplateResult } from '@webjsdev/core';
 import type { Machine } from '#modules/machines/types.ts';
 import type { Host } from '#modules/fleet/types.ts';
+import { startLabel } from '#lib/vocabulary.ts';
 import { imageVendor, resumeTier, vendorName } from '#modules/machines/utils/resume.ts';
-import { stateBadge } from '#modules/machines/utils/ui/state.ts';
+import { statusDot } from '#modules/machines/utils/ui/state.ts';
 // The fragment declares its OWN dependency. A page that renders this and did
 // not import the tooltip gets an element that never upgrades, and an
 // un-upgraded <ui-tooltip-content> is not hidden: its whole explanation
@@ -40,7 +41,7 @@ const COLD_BOOT_NOTE =
 export function statusPhrase(machine: Machine, hosts: Host[]): TemplateResult | string {
   if (machine.state === 'running') {
     if (machine.last_start === 'cold_boot') {
-      return html`Cold-booted ${when(machine.last_start_at)}
+      return html`${startLabel('cold_boot')} ${when(machine.last_start_at)}
         <ui-tooltip>
           <ui-tooltip-trigger>
             <span tabindex="0" class="underline decoration-dotted">memory not restored</span>
@@ -48,8 +49,8 @@ export function statusPhrase(machine: Machine, hosts: Host[]): TemplateResult | 
           <ui-tooltip-content side="top">${COLD_BOOT_NOTE}</ui-tooltip-content>
         </ui-tooltip>`;
     }
-    if (machine.last_start === 'restore') return html`Resumed ${when(machine.last_start_at)}`;
-    if (machine.last_start === 'boot') return html`Booted ${when(machine.last_start_at)}`;
+    if (machine.last_start === 'restore') return html`${startLabel('restore')} ${when(machine.last_start_at)}`;
+    if (machine.last_start === 'boot') return html`${startLabel('boot')} ${when(machine.last_start_at)}`;
     return html`Running since ${when(machine.last_start_at ?? machine.created_at)}`;
   }
 
@@ -64,7 +65,7 @@ export function statusPhrase(machine: Machine, hosts: Host[]): TemplateResult | 
         ? html`<span>resumes warm</span>`
         : html`<ui-tooltip>
             <ui-tooltip-trigger>
-              <span tabindex="0" class="underline decoration-dotted">will cold-boot</span>
+              <span tabindex="0" class="underline decoration-dotted">starts fresh when woken</span>
             </ui-tooltip-trigger>
             <ui-tooltip-content side="top">
               No ${vendor} host is live, and a memory image is never restored across the CPU vendor boundary. Waking
@@ -89,7 +90,7 @@ export function statusPhrase(machine: Machine, hosts: Host[]): TemplateResult | 
  */
 export function statusLine(machine: Machine, hosts: Host[]): TemplateResult {
   return html`<span class="flex flex-wrap items-center gap-x-2 gap-y-1">
-    ${stateBadge(machine.state)}
+    ${statusDot(machine.state)}
     <span class="text-muted-foreground whitespace-nowrap">${statusPhrase(machine, hosts)}</span>
   </span>`;
 }

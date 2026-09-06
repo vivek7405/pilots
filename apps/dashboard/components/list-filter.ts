@@ -86,7 +86,7 @@ export class ListFilter extends WebComponent({
           @input=${this.#onInput}
         >
         <kbd class=${kbdClass()} aria-hidden="true">/</kbd>
-        <span data-filter-status class="text-xs text-muted-foreground" role="status" aria-live="polite"></span>
+        <span data-filter-status class="text-meta text-muted-foreground" role="status" aria-live="polite"></span>
       </div>
     `;
   }

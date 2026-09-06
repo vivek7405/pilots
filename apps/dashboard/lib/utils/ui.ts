@@ -30,7 +30,7 @@ import {
 
 /** The `<h1>` every page opens with. */
 export function pageHeading(title: unknown): TemplateResult {
-  return html`<h1 class="text-2xl font-semibold tracking-tight m-0">${title}</h1>`;
+  return html`<h1 class="text-title font-semibold tracking-tight m-0">${title}</h1>`;
 }
 
 /**
@@ -52,9 +52,42 @@ export function lede(content: unknown): TemplateResult {
   return html`<p class="text-muted-foreground mt-1 mb-6">${content}</p>`;
 }
 
-/** The `<h2>` that opens a section within a page. */
-export function sectionHeading(title: unknown): TemplateResult {
-  return html`<h2 class="text-lg font-medium m-0 mb-2">${title}</h2>`;
+/**
+ * The `<h2>` that opens a section within a page, and the one sentence saying
+ * what the section is.
+ *
+ * The explanation is a REQUIRED argument, not an optional one. Every section
+ * in this app used to be a bare noun over a table, which reads as a product
+ * that assumes you already know what it does. Making the sentence part of the
+ * signature turns a missing one into a type error rather than into a screen
+ * nobody notices is unexplained.
+ */
+export function sectionHeading(title: unknown, explanation: unknown): TemplateResult {
+  return html`
+    <div class="mb-3">
+      <h2 class="text-heading font-medium m-0">${title}</h2>
+      <p class="text-meta text-muted-foreground m-0 mt-0.5">${explanation}</p>
+    </div>
+  `;
+}
+
+/**
+ * What a SECTION renders instead of itself when it has nothing in it.
+ *
+ * Distinct from `emptyState`, which is the page-level one: this is the dashed
+ * box that sits where a table would be, carrying a bold line and the one thing
+ * to do about it inline. A section that renders nothing at all reads as a
+ * screen that failed to load.
+ */
+export function sectionEmpty(headline: unknown, fix: { text: unknown; href: string }): TemplateResult {
+  return html`
+    <div class="rounded-lg border border-dashed border-border px-6 py-10 text-center">
+      <p class="m-0 text-body font-medium">${headline}</p>
+      <p class="m-0 mt-1 text-meta text-muted-foreground">
+        <a href=${fix.href}>${fix.text}</a>
+      </p>
+    </div>
+  `;
 }
 
 /**
@@ -74,7 +107,7 @@ export function emptyState(
       <p class="m-0 text-muted-foreground">${message}</p>
       ${next.command
         ? html`<span class="flex items-center gap-1">
-            <code class="font-mono text-sm bg-muted rounded-md px-3 py-2">${next.command}</code>
+            <code class="font-mono text-meta bg-muted rounded-md px-3 py-2">${next.command}</code>
             <copy-button value=${next.command} label="command"></copy-button>
           </span>`
         : ''}
@@ -87,7 +120,7 @@ export function emptyState(
 
 /** The small print under a table or a form, explaining a rule the UI implies. */
 export function footnote(content: unknown): TemplateResult {
-  return html`<p class="mt-3 text-xs text-muted-foreground">${content}</p>`;
+  return html`<p class="mt-3 text-meta text-muted-foreground">${content}</p>`;
 }
 
 /** Horizontal row of form fields ending in a submit button. */
@@ -129,10 +162,10 @@ export function field(opts: {
 }): TemplateResult {
   return html`
     <div class="grid gap-1.5">
-      <label class="text-sm leading-none font-medium text-muted-foreground" for=${opts.id}>${opts.label}</label>
+      <label class="text-meta leading-none font-medium text-muted-foreground" for=${opts.id}>${opts.label}</label>
       ${opts.control}
-      ${opts.hint ? html`<p class="m-0 text-xs text-muted-foreground">${opts.hint}</p>` : ''}
-      ${opts.error ? html`<p class="m-0 text-sm text-destructive">${opts.error}</p>` : ''}
+      ${opts.hint ? html`<p class="m-0 text-meta text-muted-foreground">${opts.hint}</p>` : ''}
+      ${opts.error ? html`<p class="m-0 text-meta text-destructive">${opts.error}</p>` : ''}
     </div>
   `;
 }

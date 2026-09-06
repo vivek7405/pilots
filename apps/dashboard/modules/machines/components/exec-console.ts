@@ -17,7 +17,7 @@ import { inputClass } from '#components/ui/input.ts';
 import { cn } from '#lib/utils/cn.ts';
 
 /** Same surface as the log pane above it, so the two read as one console. */
-const OUTPUT = 'mt-2 h-56 overflow-auto rounded-md border border-border bg-muted p-3 text-xs font-mono whitespace-pre-wrap';
+const OUTPUT = 'mt-2 h-56 overflow-auto rounded-md border border-border bg-muted p-3 text-meta font-mono whitespace-pre-wrap';
 
 interface Frame {
   type: 'stdout' | 'stderr' | 'exit' | 'error';
@@ -128,7 +128,7 @@ class ExecConsole extends WebComponent({
         </button>
       </form>
       <pre ${ref(this.out)} class=${cn(OUTPUT)} aria-live="polite" aria-label="Command output"></pre>
-      <p class="text-xs text-muted-foreground">
+      <p class="text-meta text-muted-foreground">
         One command per run, as <code class="font-mono">sprite</code>, with stdin closed.
         ${this.lastExit ? html` Last exit code ${this.lastExit}.` : ''}
       </p>

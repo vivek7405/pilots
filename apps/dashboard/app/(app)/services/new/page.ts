@@ -31,7 +31,7 @@ const COMPOSE = `services:
 
 function command(text: string) {
   return html`<span class="flex items-center gap-1">
-    <code class="font-mono text-sm bg-muted rounded-md px-3 py-2">${text}</code>
+    <code class="font-mono text-meta bg-muted rounded-md px-3 py-2">${text}</code>
     <copy-button value=${text} label="command"></copy-button>
   </span>`;
 }
@@ -45,32 +45,32 @@ export default async function NewServicePage() {
     lands in <strong>${ctx.org.slug}</strong>.`)}
 
     <div class=${cardClass()}>
-      <h2 class="m-0 text-base font-medium">From a repository</h2>
-      <p class="m-0 text-sm text-muted-foreground">
-        Run this in a checkout that has a compose file. It builds the image, creates the service, deploys a release and
+      <h2 class="m-0 text-heading font-medium">From a repository</h2>
+      <p class="m-0 text-meta text-muted-foreground">
+        Run this in a checkout that has a compose file. It builds the image, creates the service, deploys it and
         waits for the health gate to pass.
       </p>
       ${command('pilot deploy')}
     </div>
 
     <div class=${cardClass()}>
-      <h2 class="m-0 text-base font-medium">The compose file</h2>
-      <p class="m-0 text-sm text-muted-foreground">
+      <h2 class="m-0 text-heading font-medium">The compose file</h2>
+      <p class="m-0 text-meta text-muted-foreground">
         <code class="font-mono">compose.pilots.yaml</code> in the repository root. Three things in it decide what runs.
       </p>
-      <pre class="m-0 overflow-x-auto rounded-md bg-muted px-3 py-2 text-sm font-mono">${COMPOSE}</pre>
-      <ul class="m-0 pl-5 list-disc text-sm text-muted-foreground">
+      <pre class="m-0 overflow-x-auto rounded-md bg-muted px-3 py-2 text-meta font-mono">${COMPOSE}</pre>
+      <ul class="m-0 pl-5 list-disc text-meta text-muted-foreground">
         <li>Each key under <code class="font-mono">services:</code> becomes one service, and they reach each other at
           <code class="font-mono">&lt;name&gt;.internal</code> inside the app group.</li>
-        <li>The app must listen on <code class="font-mono">8080</code>. That is the port the router dials, and it is
-          set as <code class="font-mono">PORT</code> in every machine.</li>
+        <li>The app must listen on <code class="font-mono">8080</code>. That is the port pilots dials, and it is
+          set as <code class="font-mono">PORT</code> in every copy that runs.</li>
         <li>A <code class="font-mono">secret://</code> value is read at deploy from the secrets store, never from this
           file and never from the image.</li>
       </ul>
     </div>
 
-    ${sectionHeading('Already have a service?')}
-    <p class="text-sm text-muted-foreground">
+    ${sectionHeading('Already have a service?', 'Deploy again from the service itself rather than from here.')}
+    <p class="text-meta text-muted-foreground">
       Connect a repository from that service's own page and every push to its branch deploys it. A sandbox can also be
       promoted into a service, which keeps its URL.
     </p>

@@ -17,7 +17,7 @@ import { connectRepo } from '#modules/github/actions/connect-repo.server.ts';
 import { disconnectRepo } from '#modules/github/actions/disconnect-repo.server.ts';
 import { githubAppConfigured } from '#modules/github/app-jwt.server.ts';
 import { installUrl } from '#modules/github/installations.server.ts';
-import { stateBadge } from '#modules/machines/utils/ui/state.ts';
+import { statusDot } from '#modules/machines/utils/ui/state.ts';
 import { statusLine } from '#modules/machines/utils/ui/status-line.ts';
 import { serviceHealth } from '#modules/services/utils/health.ts';
 import { healthPills } from '#modules/services/utils/ui/health-pills.ts';
@@ -29,6 +29,7 @@ import { inputClass } from '#components/ui/input.ts';
 import { labelClass } from '#components/ui/label.ts';
 import { dataTable, emptyState, errorAlert, field, formRowClass, pageHeading, sectionHeading } from '#lib/utils/ui.ts';
 import { cn } from '#lib/utils/cn.ts';
+import { NOUN, SLEEP_SENTENCE } from '#lib/vocabulary.ts';
 import type { Machine as BrowserMachine } from '#modules/machines/types.ts';
 import '#components/copy-button.ts';
 
@@ -53,14 +54,14 @@ export default async function ServicePage({ params, actionData }: PageProps) {
     <div class="flex flex-wrap items-center gap-3">
       ${pageHeading(service.name)} ${healthPills(health)}
     </div>
-    <div class="mt-2 mb-6 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-muted-foreground">
+    <div class="mt-2 mb-6 flex flex-wrap items-center gap-x-6 gap-y-2 text-meta text-muted-foreground">
       ${service.url
         ? html`<span class="flex items-center gap-1">
             <a href=${service.url} rel="noopener">${service.url}</a>
             <copy-button value=${service.url} label="URL"></copy-button>
           </span>`
         : 'No URL yet'}
-      <span>${replicas.filter((m) => m.state === 'running').length}/${service.replicas} replicas</span>
+      <span>${replicas.filter((m) => m.state === 'running').length}/${service.replicas} ${NOUN.Instances.toLowerCase()} online</span>
       ${service.app ? html`<span>app ${service.app}</span>` : ''}
       ${service.release_id
         ? html`<span class="flex items-center gap-1"
@@ -87,7 +88,7 @@ export default async function ServicePage({ params, actionData }: PageProps) {
 
     ${replicas.length > 0
       ? html`<section class="mb-8">
-          ${sectionHeading('Replicas')}
+          ${sectionHeading(NOUN.Instances, 'Every copy of this service that is running right now.')}
           ${dataTable<Machine>({
             caption: 'Machines running this service',
             rows: replicas,
@@ -109,12 +110,12 @@ export default async function ServicePage({ params, actionData }: PageProps) {
       : ''}
 
     <section class="mb-8">
-      ${sectionHeading('Scale')}
+      ${sectionHeading(NOUN.Instances, 'How many copies run. A service that mounts storage runs exactly one.')}
       <form action=${patchService} class=${formRowClass()}>
         <input type="hidden" name="service" value=${service.id}>
         ${field({
           id: 'replicas',
-          label: 'Replicas',
+          label: NOUN.Instances,
           error: errors.fieldErrors?.replicas,
           control: html`<input
             id="replicas"
@@ -132,7 +133,7 @@ export default async function ServicePage({ params, actionData }: PageProps) {
     </section>
 
     <section class="mb-8">
-      ${sectionHeading('Releases')}
+      ${sectionHeading(NOUN.Deployments, 'Every deployment, newest first. Only the newest healthy one before the current can be rolled back to.')}
       ${releases.length === 0
         ? emptyState("No releases recorded. The engine's release history route is not serving yet.")
         : dataTable<Release>({
@@ -181,7 +182,7 @@ export default async function ServicePage({ params, actionData }: PageProps) {
     </section>
 
     <section class="mb-8">
-      ${sectionHeading('Deploy')}
+      ${sectionHeading('Deploy an image', `Deploy an ${NOUN.Image.toLowerCase()} built by pilot deploy or by a push.`)}
       <form action=${deployService} class=${formRowClass()}>
         <input type="hidden" name="service" value=${service.id}>
         ${field({
@@ -199,10 +200,10 @@ export default async function ServicePage({ params, actionData }: PageProps) {
     </section>
 
     <section class="mb-8">
-      ${sectionHeading('Repository')}
+      ${sectionHeading('Repository', `Every push to the branch deploys it. The pilots app must be installed on the repository's owner.`)}
       ${repo
         ? html`
-            <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1 text-sm mb-3">
+            <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1 text-meta mb-3">
               <dt class="text-muted-foreground">Repo</dt>
               <dd class="m-0"><a href=${`https://github.com/${repo.repo}`} rel="noopener">${repo.repo}</a></dd>
               <dt class="text-muted-foreground">Branch</dt>
@@ -259,9 +260,9 @@ export default async function ServicePage({ params, actionData }: PageProps) {
     </section>
 
     <section>
-      ${sectionHeading('Pull-request previews')}
+      ${sectionHeading('Pull request previews', `A sandbox per open pull request, built from its head commit. ${SLEEP_SENTENCE}`)}
       ${previews.length === 0
-        ? emptyState('None open. A pull request against the connected branch gets its own machine with its own URL.')
+        ? emptyState('None open. A pull request against the connected branch gets a sandbox of its own, with its own URL.')
         : dataTable<Machine>({
             caption: 'Machines serving open pull-request previews',
             rows: previews,
@@ -270,7 +271,7 @@ export default async function ServicePage({ params, actionData }: PageProps) {
                 header: 'Preview',
                 cell: (m) => html`<a href=${`/machines/${m.id}`} class="text-foreground">${m.name}</a>`,
               },
-              { header: 'State', cell: (m) => stateBadge(m.state) },
+              { header: 'State', cell: (m) => statusDot(m.state) },
               { header: 'URL', cell: (m) => (m.url ? html`<a href=${m.url} rel="noopener">${m.url}</a>` : '') },
             ],
           })}
