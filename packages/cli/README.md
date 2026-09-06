@@ -188,11 +188,12 @@ stdin is not a terminal it reads stdin to EOF instead, so
 `printf '%s' "$V" | pilot secrets set n` works in a script. One trailing newline
 is stripped, since that one belongs to `echo` rather than to the secret.
 
-A value passed as the argument has to come after `--` when it starts with a
-dash — `pilot secrets set tok -- -sk-live-...` — because the parser reads a
-leading dash as an option and reports the unknown option by quoting it, which
-puts the value in the scrollback this command exists to keep it out of. The
-prompt and the piped forms have no such case.
+A value that starts with a dash is stored as a value, not read as an option, so
+`pilot secrets set tok -sk-live-...` and `pilot secrets set tok -- -sk-live-...`
+both work. The cost of accepting an unknown option there is that a mistyped flag
+becomes an argument instead: `set` takes at most two, so `--ap x` is refused for
+arity rather than named. That refusal counts the arguments and never lists them,
+because one of them is the secret.
 
 `import` takes a `.env` file, or `-` for stdin, and stores every pair in it in
 one command. It is parsed by Node's own `.env` parser, the same one `deploy`

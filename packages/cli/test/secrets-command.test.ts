@@ -192,6 +192,40 @@ test('no compose file at all names --app and the four filenames', async () => {
   assert.match(res.stderr, /compose\.yaml, compose\.yml, docker-compose\.yml, docker-compose\.yaml/)
 })
 
+test('a value that starts with a dash is stored, not read as an option', async () => {
+  const b = bed()
+  const secret = '-sk-live-abc123'
+  const res = await pilot(b, ['secrets', 'set', 'tok', secret])
+  assert.equal(res.code, 0, res.stderr)
+  assert.equal(loadCredentials(b.env)!.secrets?.shop?.tok, secret)
+  // Counterfactual: strict option parsing refuses this and quotes the token
+  // back, which puts a live API key in the scrollback and in the CI log.
+  assert.equal(res.stderr.includes(secret), false, res.stderr)
+  assert.equal(res.stdout, '')
+})
+
+test('a mistyped flag is still refused, and the refusal lists no arguments', async () => {
+  const b = bed()
+  const secret = '-sk-live-abc123'
+  const res = await pilot(b, ['secrets', 'set', 'tok', secret, '--ap', 'x'])
+  // Accepting unknown options must not mean accepting a typo silently: the
+  // extra operands trip the arity check instead.
+  assert.equal(res.code, 1)
+  assert.match(res.stderr, /too many arguments for 'set'/)
+  assert.match(res.stderr, /check the flag names/)
+  // Counterfactual: commander ends that message with the argument list, and
+  // one of those arguments is the secret.
+  assert.equal(res.stderr.includes(secret), false, res.stderr)
+  assert.equal(res.stderr.includes('--ap'), false, res.stderr)
+  assert.equal(loadCredentials(b.env)!.secrets?.shop, undefined)
+})
+
+test('-- still works for a dash value, as the README says', async () => {
+  const b = bed()
+  assert.equal((await pilot(b, ['secrets', 'set', 'tok', '--', '-----BEGIN KEY-----'])).code, 0)
+  assert.equal(loadCredentials(b.env)!.secrets?.shop?.tok, '-----BEGIN KEY-----')
+})
+
 test('no value is echoed by set or import', async () => {
   const b = bed()
   const set = await pilot(b, ['secrets', 'set', 'auth_secret', 's3cret'])

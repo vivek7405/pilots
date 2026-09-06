@@ -47,6 +47,19 @@ export function createSecretsCommand(): Command {
 
   scoped(secrets.command('set <name> [value]'))
     .description('store one secret; prompts for the value when it is omitted')
+    // A secret that starts with a dash is a real shape (`sk-...` keys,
+    // anything base64url, a PEM block), and the parser reads it as an option
+    // and quotes the token back in its refusal, which puts the value in the
+    // scrollback this command exists to keep it out of. Accepting an unknown
+    // option makes it an operand, so the value stores instead of leaking.
+    //
+    // A mistyped flag is still refused: it becomes an operand too, and `set`
+    // takes at most two, so `--ap x` trips the arity check. That message
+    // counts arguments and never quotes one.
+    .allowUnknownOption()
+    .configureOutput({
+      outputError: (str, write) => write(redactExcessArguments(str)),
+    })
     .action(async function (this: Command, name: string, value: string | undefined) {
       const opts = this.optsWithGlobals() as GlobalOptions & ScopeOptions
       const app = appFor(opts)
@@ -101,6 +114,27 @@ function appFor(opts: ScopeOptions): string {
     )
   }
   return composeAppName(file, parseKeyValues(opts.env))
+}
+
+/**
+ * Rewrites the arity refusal so it carries counts and not arguments.
+ *
+ * commander ends "too many arguments" with the argument list, and on `set` one
+ * of those arguments is the secret, so the message is rebuilt from the two
+ * numbers and nothing else. Only digits are taken from the original; a shape
+ * this does not recognise is replaced wholesale rather than passed through,
+ * because passing through is what prints the value.
+ */
+function redactExcessArguments(str: string): string {
+  if (!str.includes('too many arguments')) return str
+  const counts = /Expected (\d+) arguments? but got (\d+)/.exec(str)
+  const got = counts ? ` Expected ${counts[1]} arguments but got ${counts[2]}.` : ''
+  return (
+    `error: too many arguments for 'set'.${got}\n` +
+    '`set` takes a name and an optional value. An option it does not know is read\n' +
+    'as one of them, so check the flag names. The arguments are not listed here\n' +
+    'because one of them is the secret.\n'
+  )
 }
 
 /**
