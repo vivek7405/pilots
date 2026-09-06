@@ -69,7 +69,11 @@ export async function resolveTarget(
     const service = await resolveService(client, idOrName)
     return { name: service.name, url: service.custom_domain || service.url || '', kind: 'service' }
   } catch (err) {
-    if (!(err instanceof CliError)) throw err
+    // Only "there is no such service" falls through to a machine. An AMBIGUOUS
+    // name is a real answer with the ids in it, and swallowing it here reports
+    // "no machine with id or name x" for something that exists twice.
+    const notFound = `no service with id or name ${idOrName}`
+    if (!(err instanceof CliError) || err.message !== notFound) throw err
   }
   const machine = await resolveMachine(client, idOrName)
   return { name: machine.name, url: machine.custom_domain || machine.url || '', kind: 'machine' }

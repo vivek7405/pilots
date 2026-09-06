@@ -236,3 +236,25 @@ test('CliError from a cancelled confirmation is a plain refusal', () => {
   assert.equal(err.message, 'cancelled')
   assert.equal(err.hint, undefined)
 })
+
+// Two services can share a name across apps, and `resolveService` answers that
+// with the ids. Counterfactual: swallowing every CliError on the way to the
+// machine fallback reports "no machine with id or name web" for a name that
+// exists twice.
+test('an ambiguous service name keeps its own error rather than becoming not-found', async () => {
+  const api = await startFakeAPI()
+  api.services.push(
+    fakeService({ id: 'svc_a', name: 'web', app: 'shop', url: 'https://a' }),
+    fakeService({ id: 'svc_b', name: 'web', app: 'blog', url: 'https://b' }),
+  )
+  const env = loggedIn(api.url)
+  try {
+    const res = await pilot(env, ['open', 'web'])
+    assert.equal(res.code, 1)
+    assert.match(res.stderr, /2 services are named web/)
+    assert.match(res.stderr, /svc_a, svc_b/)
+    assert.doesNotMatch(res.stderr, /no machine with id or name/)
+  } finally {
+    await api.close()
+  }
+})
