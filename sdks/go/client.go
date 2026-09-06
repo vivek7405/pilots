@@ -119,6 +119,13 @@ func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
 	return &out, c.do(ctx, http.MethodGet, "/v1/health", nil, &out)
 }
 
+// Whoami is the org, scopes and host this client's key resolves to. The one
+// route a key can call to learn about itself.
+func (c *Client) Whoami(ctx context.Context) (*WhoamiResponse, error) {
+	var out WhoamiResponse
+	return &out, c.do(ctx, http.MethodGet, "/v1/whoami", nil, &out)
+}
+
 // request builds an authenticated request. body may be nil.
 func (c *Client) request(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)

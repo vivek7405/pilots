@@ -303,6 +303,7 @@ POST   /v1/machines/:id/promote      {domain?} → service
 POST   /v1/volumes                   create JuiceFS volume
 GET    /v1/volumes                   list
 GET    /v1/hosts                     fleet view
+GET    /v1/whoami                    the caller's own org, scopes and host
 POST   /v1/api-keys                  admin: mint {org_id, scopes[]} → the plaintext key, ONCE
 POST   /v1/api-keys/:hash/revoke     admin: tombstone a key; no row is deleted
 GET    /v1/api-keys?org=             admin: list an org's keys, revoked ones included
@@ -1063,8 +1064,8 @@ snapshot; a database restores and then replays WAL.
   scopes on the key bound what it can do, stored comma-separated and sent as
   a JSON array. They nest — `machines` ⊂ `deploy` ⊂ `admin`:
   `machines` covers `/v1/machines`, `/v1/checkpoints`, `/v1/volumes`,
-  `/v1/sprites` and `/v1/hosts`; `deploy` adds `/v1/builds`, `/v1/services`
-  and `/v1/domains`; `admin` adds `/v1/api-keys`, `/v1/quotas` and
+  `/v1/sprites`, `/v1/hosts` and `/v1/whoami`; `deploy` adds `/v1/builds`,
+  `/v1/services` and `/v1/domains`; `admin` adds `/v1/api-keys`, `/v1/quotas` and
   `/v1/usage`. An unknown path or an unknown scope name fails closed, and a
   refusal is `403 {"error":"scope <s> required"}`. The MCP server reads the
   same credentials file/env.

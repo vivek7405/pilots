@@ -235,6 +235,7 @@ func Routes(d Deps) http.Handler {
 	// guarantee that fails silently.
 	mux.HandleFunc("GET /v1/machines/{id}/volume", d.handleMachineVolume)
 	mux.HandleFunc("GET /v1/hosts", d.handleListHosts)
+	mux.HandleFunc("GET /v1/whoami", d.handleWhoami)
 
 	// Tenancy administration. Admin-scoped, and served by every host from its
 	// own replica: the dashboard is a guest on the platform and cannot reach

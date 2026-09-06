@@ -339,6 +339,15 @@ type HealthResponse struct {
 	CPUVendorForced bool `json:"cpu_vendor_forced,omitempty"`
 }
 
+// WhoamiResponse is what the caller's key resolves to on the host that
+// answered. OrgID is empty for a key that belongs to no org, which is the
+// bootstrap admin key's case.
+type WhoamiResponse struct {
+	OrgID  string   `json:"org_id"`
+	Scopes []string `json:"scopes"`
+	HostID string   `json:"host_id"`
+}
+
 type ErrorResponse struct {
 	Error string `json:"error"`
 }
@@ -520,6 +529,7 @@ var wireTypes = []any{
 	CreateVolumeRequest{},
 	Host{},
 	HealthResponse{},
+	WhoamiResponse{},
 	ErrorResponse{},
 	AddDomainRequest{},
 	DomainResponse{},

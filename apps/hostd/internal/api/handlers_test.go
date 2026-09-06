@@ -3,6 +3,8 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -275,5 +277,56 @@ func TestListHostsReportsAliveFromLastSeen(t *testing.T) {
 	}
 	if alive["host-stale"] {
 		t.Error("a host last seen 31s ago is listed alive; the window is 30s")
+	}
+}
+
+// The route a key uses to learn what it is. Each key sees its own org and its
+// own scopes, never another key's.
+//
+// The machines-scoped case is the assertion that matters most: a path with no
+// line in scopePrefixes needs admin, so a route added without one is a 403 for
+// every key the CLI actually carries.
+func TestWhoamiEchoesThePrincipal(t *testing.T) {
+	h, st := newTestServer(t)
+	ctx := context.Background()
+
+	rec := do(t, h, "GET", "/v1/whoami", testKey)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin key: got %d: %s", rec.Code, rec.Body)
+	}
+	var got WhoamiResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.OrgID != "org_1" {
+		t.Errorf("org_id = %q, want org_1", got.OrgID)
+	}
+	if got.HostID != "host-test" {
+		t.Errorf("host_id = %q, want host-test", got.HostID)
+	}
+	if len(got.Scopes) != 1 || got.Scopes[0] != "admin" {
+		t.Errorf("scopes = %v, want [admin]", got.Scopes)
+	}
+
+	// A machines-scoped key in another org.
+	const narrow = "pilot_narrowkey"
+	sum := sha256.Sum256([]byte(narrow))
+	if err := st.PutAPIKey(ctx, &state.APIKey{
+		Hash: hex.EncodeToString(sum[:]), OrgID: "org_2", Scopes: "machines",
+	}); err != nil {
+		t.Fatalf("PutAPIKey: %v", err)
+	}
+	rec = do(t, h, "GET", "/v1/whoami", narrow)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("machines-scoped key: got %d, want 200 (is /v1/whoami in scopePrefixes?): %s", rec.Code, rec.Body)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.OrgID != "org_2" {
+		t.Errorf("org_id = %q, want org_2", got.OrgID)
+	}
+	if len(got.Scopes) != 1 || got.Scopes[0] != "machines" {
+		t.Errorf("scopes = %v, want [machines]", got.Scopes)
 	}
 }

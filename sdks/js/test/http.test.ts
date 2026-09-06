@@ -107,6 +107,23 @@ test('a build 429 carries the host scope', async () => {
   )
 })
 
+// The route a key uses to learn what it is: it goes out with the key attached
+// and comes back with the org and scopes that key resolved to on the host.
+test('whoami sends the key and returns the org and scopes', async () => {
+  await withFake(
+    (f) =>
+      f.on('GET /v1/whoami', (_req, res) =>
+        json(res, 200, { org_id: 'org_1', scopes: ['machines', 'deploy'], host_id: 'host-a' }),
+      ),
+    async (client) => {
+      const me = await client.whoami()
+      assert.equal(me.org_id, 'org_1')
+      assert.equal(me.host_id, 'host-a')
+      assert.deepEqual(me.scopes, ['machines', 'deploy'])
+    },
+  )
+})
+
 test('a 500 is a PilotsError whose message is the body s error', async () => {
   await withFake(
     (f) => f.on('GET /v1/hosts', (_req, res) => json(res, 500, { error: 'corrosion is unreachable' })),

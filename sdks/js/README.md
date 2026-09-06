@@ -42,6 +42,7 @@ One method per route, grouped by the noun it acts on.
 | Call | Route |
 | --- | --- |
 | `health()` | `GET /v1/health` |
+| `whoami()` | `GET /v1/whoami` |
 | `machines.create(req)` `.list()` `.get(id)` `.destroy(id)` | `/v1/machines` |
 | `machines.exec(id, req)` | `POST /v1/machines/{id}/exec` |
 | `machines.execStream(id, argv, opts)` | `GET /v1/machines/{id}/exec/stream` (WebSocket) |
