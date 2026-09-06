@@ -103,7 +103,9 @@ test('&tab=settings renders the Instances form, and its forms return to the canv
   const { body } = await page('/apps/gallery?service=svc-web&tab=settings');
   assert.match(body, /href="\/apps\/gallery\?service=svc-web&amp;tab=settings"[^>]*aria-current="page"/);
   assert.match(body, /name="replicas"/);
-  assert.match(body, /name="back" value="\/apps\/gallery\?service=svc-web&amp;tab=settings"/);
+  // The Instances form itself, not any form on the page, carries the return.
+  const instancesForm = body.slice(body.lastIndexOf('<form', body.indexOf('name="replicas"')), body.indexOf('</form>', body.indexOf('name="replicas"')));
+  assert.match(instancesForm, /name="back" value="\/apps\/gallery\?service=svc-web&amp;tab=settings"/);
   assert.ok(!body.includes('data-current-deployment'), 'only the selected tab renders');
 
   app.fleet.calls.length = 0;

@@ -75,7 +75,8 @@ test('the default tab is Deployments, showing what is live and what can be rolle
   assert.match(body, /data-current-deployment/);
   assert.match(body, /rel-w/);
   assert.equal((body.match(/Roll back to this/g) ?? []).length, 1, 'the older healthy deployment is the one target');
-  assert.match(body, /name="back" value="\/services\/svc-web\?tab=deployments"/);
+  const deployForm = body.slice(body.lastIndexOf('<form', body.indexOf('name="release"')), body.indexOf('</form>', body.indexOf('name="release"')));
+  assert.match(deployForm, /name="back" value="\/services\/svc-web\?tab=deployments"/, 'the deploy form carries its return');
   assert.ok(!body.includes('<slide-over'), 'full width, no panel chrome');
   assert.ok(!body.includes('aria-label="Close"'), 'nothing to close');
 });
