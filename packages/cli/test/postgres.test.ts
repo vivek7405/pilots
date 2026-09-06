@@ -37,6 +37,11 @@ function bed(): Bed {
   const dir = mkdtempSync(join(tmpdir(), 'pilot-pg-'))
   roots.push(dir)
   cpSync(join(FIXTURES, 'compose.yaml'), join(dir, 'compose.yaml'))
+  // The fixture has no `name:`, which is how a real tree names its app when
+  // the directory is not the app: the derived name has to come from here, not
+  // from `basename(dir)`, or the deploy looks the secrets up under the wrong
+  // key.
+  writeFileSync(join(dir, '.env'), 'COMPOSE_PROJECT_NAME=shop\n')
   const cfg = mkdtempSync(join(tmpdir(), 'pilot-pg-cfg-'))
   roots.push(cfg)
   const env = { XDG_CONFIG_HOME: cfg }
@@ -121,7 +126,7 @@ test('the password is 32 base64url characters, printed once, and stored under th
   assert.equal(occurrences, 2, 'the password and the URL that embeds it, and nothing more')
 
   const creds = loadCredentials(b.env)!
-  const app = b.dir.split('/').pop()!
+  const app = 'shop'
   assert.equal(creds.secrets?.[app]?.postgres_password, password)
   assert.equal(
     creds.secrets?.[app]?.database_url,
@@ -170,7 +175,7 @@ test('a docker-compose.yml is found when there is no compose.yaml', async () => 
   roots.push(dir)
   const cfg = mkdtempSync(join(tmpdir(), 'pilot-pg-cfg3-'))
   roots.push(cfg)
-  writeFileSync(join(dir, 'docker-compose.yml'), 'services:\n  web:\n    build: .\n')
+  writeFileSync(join(dir, 'docker-compose.yml'), 'name: legacy\nservices:\n  web:\n    build: .\n')
   const res = await add({ dir, env: { XDG_CONFIG_HOME: cfg } })
   assert.equal(res.code, 0, res.stderr)
   assert.match(readFileSync(join(dir, 'docker-compose.yml'), 'utf8'), /^ {2}postgres:$/m)
@@ -192,4 +197,25 @@ test('the fragment shape is the two documented modes and nothing else', () => {
     databaseURL('pw'),
     'postgres://postgres:pw@postgres.internal:5432/postgres',
   )
+})
+
+test('a compose file with no name and no --app is refused before anything is written', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'pilot-pg-noname-'))
+  roots.push(dir)
+  cpSync(join(FIXTURES, 'compose.yaml'), join(dir, 'compose.yaml'))
+  const cfg = mkdtempSync(join(tmpdir(), 'pilot-pg-cfg4-'))
+  roots.push(cfg)
+
+  const res = await add({ dir, env: { XDG_CONFIG_HOME: cfg } })
+  assert.equal(res.code, 1)
+  assert.match(res.stderr, /top-level name:.*COMPOSE_PROJECT_NAME.*--app/)
+  // The refusal comes from the derivation, before the document is parsed and
+  // before anything is written. Counterfactual: a derivation that fell back to
+  // the directory name would have written a full fragment under a key the
+  // deploy never reads.
+  assert.equal(
+    readFileSync(join(dir, 'compose.yaml'), 'utf8'),
+    readFileSync(join(FIXTURES, 'compose.yaml'), 'utf8'),
+  )
+  assert.equal(existsSync(join(dir, '.pilots')), false)
 })

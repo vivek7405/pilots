@@ -15,7 +15,7 @@ import { parseDocument, YAMLMap, YAMLSeq } from 'yaml'
 
 import { loadCredentials, saveCredentials, type GlobalOptions } from '../config.ts'
 import { CliError, isJSONMode, note, printJSON } from '../output.ts'
-import { COMPOSE_NAMES, findComposeFile } from '../compose/find.ts'
+import { COMPOSE_NAMES, composeAppName, findComposeFile } from '../compose/find.ts'
 import { databaseURL, generatePassword, postgresFragment } from '../compose/postgres.ts'
 
 export function createAddCommand(): Command {
@@ -26,7 +26,7 @@ export function createAddCommand(): Command {
     .description('add a Postgres service, a durability mode and a generated password')
     .option('--durable-volume', 'put the data directory on a volume (RPO 0, slower commits)', false)
     .option('--name <name>', 'the service name to add', 'postgres')
-    .option('--app <name>', 'the app the generated secrets belong to')
+    .option('--app <name>', 'the app the generated secrets belong to (default: the compose file\'s app)')
     .option('--dir <path>', 'the directory holding the compose file', '.')
     .action(async function (this: Command) {
       const opts = this.optsWithGlobals() as GlobalOptions & {
@@ -40,7 +40,7 @@ export function createAddCommand(): Command {
         throw new CliError(`no compose file in ${opts.dir}: looked for ${COMPOSE_NAMES.join(', ')}`)
       }
       const composeDir = dirname(file)
-      const app = opts.app ?? basename(composeDir)
+      const app = opts.app ?? composeAppName(file)
 
       const doc = parseDocument(readFileSync(file, 'utf8'))
       const services = doc.get('services')
