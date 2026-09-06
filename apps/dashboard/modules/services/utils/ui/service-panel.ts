@@ -80,7 +80,7 @@ export function servicePanel(detail: ServiceDetail, tab: Tab, ctx: PanelContext 
           : ''}
       </div>
 
-      <nav aria-label="Service sections" class="-mx-5 flex gap-1 overflow-x-auto border-b border-border px-5 sm:-mx-6 sm:px-6">
+      <nav aria-label="Service sections" class="-mx-5 flex gap-1 overflow-x-auto overflow-y-hidden border-b border-border px-5 sm:-mx-6 sm:px-6">
         ${TABS.map(
           (t) => html`<a
             href=${tabHref(detail, t, ctx.app)}
