@@ -218,7 +218,7 @@ CREATE TABLE service_volumes (id TEXT PRIMARY KEY, service_id TEXT,
 -- ANY host may write it: two writers cannot disagree about a value written
 -- once, which is what makes "any host" legal under last-write-wins.
 CREATE TABLE tenancy (id TEXT PRIMARY KEY, org_id TEXT,
-                       kind TEXT,        -- machine|service|volume
+                       kind TEXT,        -- machine|service|volume|build
                        created_at INTEGER);
                        -- writer: the host writing the object row (write-once)
 

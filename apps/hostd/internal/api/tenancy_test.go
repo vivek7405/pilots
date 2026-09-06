@@ -239,6 +239,139 @@ func TestACreateCannotBootAForeignImage(t *testing.T) {
 	}
 }
 
+// A release's build pair RESTORES another org's memory image, and both fields
+// decode from a request body even though only the rollout is meant to set
+// them. The rollout never comes through this handler -- it creates in-process
+// -- so a pair named HERE is a client naming one, and it gets the check the
+// image field already gets.
+//
+// No memory build ever has an owner row, which makes a pair admin-only on the
+// API by construction. Left unchecked, a scoped key naming another org's
+// release pair reached the boot path and left a machine in the caller's org.
+func TestACreateCannotRestoreAForeignBuildPair(t *testing.T) {
+	h, _, fake := twoTenants(t)
+
+	const pair = `{"vcpus":1,"mem_mib":512,"mem_build_id":"mem_1","rootfs_build_id":"bld_1"}`
+	rec := postJSON(t, h, "/v1/machines", "pilot_org2", pair)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("restoring a foreign build pair: got %d, want 404 (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "build not found") {
+		t.Errorf("the refusal names something other than the build: %s", rec.Body.String())
+	}
+	if fake.created != 0 {
+		t.Errorf("the create reached the manager anyway (%d creates)", fake.created)
+	}
+
+	// An admin key still names a pair: that is a peer host's forwarded create
+	// and the battery's release-restore timing step.
+	if ok := doJSON(t, h, "POST", "/v1/machines", map[string]any{
+		"vcpus": 1, "mem_mib": 512, "mem_build_id": "mem_1", "rootfs_build_id": "bld_1",
+	}); ok.Code != http.StatusCreated {
+		t.Errorf("an admin create from a build pair: got %d, want 201 (%s)", ok.Code, ok.Body.String())
+	}
+}
+
+// The same door once more, and this one hands over SECRETS rather than an
+// image. A create naming a service joins that service's row instead of minting
+// one, and a machine reads its service's sealed environment back out at boot.
+// Unchecked, a key naming another org's service id got a machine of its own --
+// one it can exec into -- with that service's decrypted secrets inside it, and
+// a foreign replica in the victim's release set as well.
+func TestACreateCannotJoinAForeignService(t *testing.T) {
+	h, st, fake := twoTenants(t)
+	ctx := context.Background()
+
+	if err := st.PutService(ctx, &state.Service{
+		ID: "svc_org1", Name: "svc-org1", Replicas: 1,
+	}); err != nil {
+		t.Fatalf("PutService: %v", err)
+	}
+	if err := st.PutTenancy(ctx, &state.Tenancy{
+		ID: "svc_org1", OrgID: "org_1", Kind: "service",
+	}); err != nil {
+		t.Fatalf("PutTenancy: %v", err)
+	}
+
+	rec := postJSON(t, h, "/v1/machines", "pilot_org2",
+		`{"vcpus":1,"mem_mib":512,"service":"svc_org1"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("joining a foreign service: got %d, want 404 (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "service not found") {
+		t.Errorf("the refusal names something other than the service: %s", rec.Body.String())
+	}
+	if fake.created != 0 {
+		t.Errorf("the create reached the manager anyway (%d creates)", fake.created)
+	}
+
+	// Its own service still joins, which is what a second replica of a
+	// standalone machine's service is.
+	if ok := postJSON(t, h, "/v1/machines", "pilot_org1",
+		`{"vcpus":1,"mem_mib":512,"service":"svc_org1"}`); ok.Code != http.StatusCreated {
+		t.Errorf("joining its own service: got %d, want 201 (%s)", ok.Code, ok.Body.String())
+	}
+}
+
+// A release rides beside the service on a create and has no tenancy row of its
+// own, because it is owned THROUGH its service. So the check is that the two
+// agree: a rollout counts its replicas by service AND release together, and a
+// machine carrying a release its service never issued is a replica counted
+// into a rollout that never placed it.
+func TestACreateCannotNameAReleaseOfAnotherService(t *testing.T) {
+	h, st, fake := twoTenants(t)
+	ctx := context.Background()
+
+	for _, s := range []struct{ id, org string }{{"svc_mine", "org_1"}, {"svc_theirs", "org_2"}} {
+		if err := st.PutService(ctx, &state.Service{ID: s.id, Name: s.id, Replicas: 1}); err != nil {
+			t.Fatalf("PutService: %v", err)
+		}
+		if err := st.PutTenancy(ctx, &state.Tenancy{ID: s.id, OrgID: s.org, Kind: "service"}); err != nil {
+			t.Fatalf("PutTenancy: %v", err)
+		}
+	}
+	for _, rel := range []struct{ id, svc string }{{"rel_mine", "svc_mine"}, {"rel_theirs", "svc_theirs"}} {
+		if err := st.PutRelease(ctx, &state.Release{ID: rel.id, ServiceID: rel.svc}); err != nil {
+			t.Fatalf("PutRelease: %v", err)
+		}
+	}
+
+	// Another service's release, named beside a service the caller does own.
+	rec := postJSON(t, h, "/v1/machines", "pilot_org1",
+		`{"vcpus":1,"mem_mib":512,"service":"svc_mine","release":"rel_theirs"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("naming another service's release: got %d, want 404 (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "release not found") {
+		t.Errorf("the refusal names something other than the release: %s", rec.Body.String())
+	}
+	if fake.created != 0 {
+		t.Errorf("the create reached the manager anyway (%d creates)", fake.created)
+	}
+
+	// A release that does not exist is refused with the SAME body: telling
+	// the two apart would be a release-id oracle across tenants.
+	missing := postJSON(t, h, "/v1/machines", "pilot_org1",
+		`{"vcpus":1,"mem_mib":512,"service":"svc_mine","release":"rel_nope"}`)
+	if missing.Code != http.StatusNotFound || !strings.Contains(missing.Body.String(), "release not found") {
+		t.Errorf("an unknown release: got %d (%s), want 404 release not found",
+			missing.Code, missing.Body.String())
+	}
+
+	// A release with no service beside it names nothing that can be checked.
+	if orphan := postJSON(t, h, "/v1/machines", "pilot_org1",
+		`{"vcpus":1,"mem_mib":512,"release":"rel_mine"}`); orphan.Code != http.StatusNotFound {
+		t.Errorf("a release with no service: got %d, want 404 (%s)", orphan.Code, orphan.Body.String())
+	}
+
+	// The pair its own service issued still creates, which is the rollout's
+	// own shape when it comes through this handler at all.
+	if ok := postJSON(t, h, "/v1/machines", "pilot_org1",
+		`{"vcpus":1,"mem_mib":512,"service":"svc_mine","release":"rel_mine"}`); ok.Code != http.StatusCreated {
+		t.Errorf("its own service's release: got %d, want 201 (%s)", ok.Code, ok.Body.String())
+	}
+}
+
 // The build log is the build's own output -- Dockerfile lines, registry URLs,
 // whatever the build echoed -- so it is scoped like the build it belongs to.
 // The key here carries `deploy`, so the scope gate lets it through and the

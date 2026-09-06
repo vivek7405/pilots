@@ -279,10 +279,12 @@ CREATE TABLE IF NOT EXISTS services (  -- writer: host_id of the owning machines
 -- row naming an object that never appeared -- harmless, invisible, collected
 -- with nothing -- rather than an object no org owns, which would be visible to
 -- admin alone and to the tenant who created it not at all.
+-- A build carries TWO rows: its job id (bld-...) scopes the log route, and
+-- the rootfs build id it produces is what a deploy or a create names.
 CREATE TABLE IF NOT EXISTS tenancy (   -- writer: the host writing the object row (write-once)
-  id         TEXT NOT NULL PRIMARY KEY, -- machine, service or volume id
+  id         TEXT NOT NULL PRIMARY KEY, -- machine, service, volume or build id
   org_id     TEXT,
-  kind       TEXT,                      -- machine|service|volume
+  kind       TEXT,                      -- machine|service|volume|build
   created_at INTEGER
 );
 

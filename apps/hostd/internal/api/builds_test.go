@@ -28,6 +28,11 @@ type fakeBuilder struct {
 	log     []BuildLogLine
 	hasLog  bool
 	started int
+
+	// recordEmitted mirrors the real builder, which appends a line to its log
+	// store before it emits. Opt-in, so the tests that hand BuildLog a fixed
+	// log keep getting exactly that log.
+	recordEmitted bool
 }
 
 func (f *fakeBuilder) NewBuildID() string { return "bld-test" }
@@ -37,6 +42,10 @@ func (f *fakeBuilder) StartBuild(_ context.Context, id string, r io.Reader,
 	f.started++
 	_, _ = io.Copy(io.Discard, r)
 	for _, l := range f.lines {
+		if f.recordEmitted {
+			f.log = append(f.log, l)
+			f.hasLog = true
+		}
 		emit(l)
 	}
 	return f.result, f.err
@@ -60,8 +69,16 @@ func newBuildServer(t *testing.T, b BuildRunner) http.Handler {
 
 func postTar(t *testing.T, h http.Handler, path string, body []byte) *httptest.ResponseRecorder {
 	t.Helper()
+	return postTarAs(t, h, path, testKey, body)
+}
+
+// postTarAs builds as a named key. The admin key passes every ownership check
+// by short-circuit, so a test about who owns an image has to speak as a
+// scoped key or it asserts nothing.
+func postTarAs(t *testing.T, h http.Handler, path, key string, body []byte) *httptest.ResponseRecorder {
+	t.Helper()
 	req := httptest.NewRequest("POST", path, bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+testKey)
+	req.Header.Set("Authorization", "Bearer "+key)
 	req.Header.Set("Content-Type", "application/x-tar")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -418,4 +435,317 @@ func waitUntil(t *testing.T, cond func() bool, what string) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatalf("timed out waiting for %s", what)
+}
+
+// A build has two ids and they are different objects. The job id rides in
+// X-Pilot-Build-Id and scopes the log route; the ROOTFS build id, minted
+// inside the builder, is the one a deploy and a create name, and it is the
+// one every consumer of the stream carries forward. If only the job id gets
+// an owner row, a key that is not admin can build and can never deploy: the
+// ownership check on the id it was handed finds nothing and answers 404.
+//
+// So this is the whole path a real user walks, spoken by a `deploy` key
+// rather than the bootstrap admin one, which passes every check by
+// short-circuit and is what hid this.
+func TestAScopedKeyDeploysTheImageItBuilt(t *testing.T) {
+	const image = "9d1729d5-bd7a-441b-8107-b5db4947c762"
+	_, st, fake := newTestServerWithManager(t)
+	ctx := context.Background()
+
+	for _, s := range []struct{ id, org string }{{"svc_1", "org_1"}, {"svc_2", "org_2"}} {
+		if err := st.PutService(ctx, &state.Service{
+			ID: s.id, Name: s.id, Replicas: 1, ReleaseID: "rel_0",
+		}); err != nil {
+			t.Fatalf("PutService: %v", err)
+		}
+		if err := st.PutTenancy(ctx, &state.Tenancy{ID: s.id, OrgID: s.org, Kind: "service"}); err != nil {
+			t.Fatalf("PutTenancy: %v", err)
+		}
+	}
+	seedKey(t, st, "pilot_org1_deploy", "org_1", "deploy")
+	seedKey(t, st, "pilot_org2_deploy", "org_2", "deploy")
+
+	// The real builder emits the rootfs id on its own "build complete" line
+	// before StartBuild returns, so the fake does too. The owner has to be
+	// recorded before THAT line is encoded, not after the call comes back.
+	fb := &fakeBuilder{
+		lines: []BuildLogLine{
+			{Step: "[1/1] FROM alpine", Stream: "status", Line: "done", TS: 1},
+			{Step: "build complete", Stream: "status", Line: "done", Result: image, TS: 2},
+		},
+		result: image,
+	}
+	roll := &recordingRollout{}
+	h := Routes(Deps{HostID: "host-test", Store: st, Machines: fake, Builds: fb, Rollout: roll})
+
+	rec := postTarAs(t, h, "/v1/builds", "pilot_org1_deploy", []byte("tar-bytes"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("build: got %d (%s)", rec.Code, rec.Body.String())
+	}
+	lines := decodeNDJSON(t, rec.Body.String())
+	if len(lines) == 0 {
+		t.Fatal("the build streamed nothing")
+	}
+	if last := lines[len(lines)-1]; last.Result != image {
+		t.Fatalf("the stream does not end with the rootfs build id: %+v", last)
+	}
+	for _, l := range lines {
+		if l.Error != "" {
+			t.Fatalf("a successful build reported an error: %+v", l)
+		}
+	}
+
+	// The image's own owner row. This is what a deploy and a create check.
+	own, err := st.GetTenancy(ctx, image)
+	if err != nil {
+		t.Fatalf("the rootfs build id has no owner row: %v", err)
+	}
+	if own.OrgID != "org_1" || own.Kind != "build" {
+		t.Errorf("the image's owner row = %+v, want org_1 / build", own)
+	}
+	// And the job's row survives untouched. It scopes the log route, and the
+	// two ids are different objects with different lifetimes.
+	job, err := st.GetTenancy(ctx, "bld-test")
+	if err != nil || job.OrgID != "org_1" {
+		t.Errorf("the build job's own row was lost: %+v (%v)", job, err)
+	}
+
+	if dep := postJSON(t, h, "/v1/services/svc_1/deploy", "pilot_org1_deploy",
+		`{"build":"`+image+`"}`); dep.Code != http.StatusOK {
+		t.Fatalf("deploying the image it just built: got %d, want 200 (%s)",
+			dep.Code, dep.Body.String())
+	}
+	if roll.deploys != 1 {
+		t.Fatalf("the deploy did not reach the rollout (%d deploys)", roll.deploys)
+	}
+	if mac := postJSON(t, h, "/v1/machines", "pilot_org1_deploy",
+		`{"vcpus":1,"mem_mib":512,"image":"`+image+`"}`); mac.Code != http.StatusCreated {
+		t.Errorf("booting the image it just built: got %d, want 201 (%s)",
+			mac.Code, mac.Body.String())
+	}
+
+	// The other half of the row: the image belongs to ONE org.
+	created := fake.created
+	foreign := postJSON(t, h, "/v1/services/svc_2/deploy", "pilot_org2_deploy",
+		`{"build":"`+image+`"}`)
+	if foreign.Code != http.StatusNotFound ||
+		!strings.Contains(foreign.Body.String(), "build not found") {
+		t.Errorf("deploying another org's image: got %d (%s), want 404 build not found",
+			foreign.Code, foreign.Body.String())
+	}
+	if roll.deploys != 1 {
+		t.Errorf("a foreign image reached the rollout (%d deploys)", roll.deploys)
+	}
+	if boot := postJSON(t, h, "/v1/machines", "pilot_org2_deploy",
+		`{"vcpus":1,"mem_mib":512,"image":"`+image+`"}`); boot.Code != http.StatusNotFound {
+		t.Errorf("booting another org's image: got %d, want 404 (%s)",
+			boot.Code, boot.Body.String())
+	}
+	if fake.created != created {
+		t.Errorf("the foreign create reached the manager anyway")
+	}
+}
+
+// tenancyFailingStore refuses the owner row for one id and delegates every
+// other write, so the build job's row still lands and only the image's fails.
+type tenancyFailingStore struct {
+	state.Store
+	failFor string
+}
+
+func (s *tenancyFailingStore) PutTenancy(ctx context.Context, row *state.Tenancy) error {
+	if row.ID == s.failFor {
+		return errors.New("the store is unreachable")
+	}
+	return s.Store.PutTenancy(ctx, row)
+}
+
+// An id that escapes before its owner is written is an id anyone may boot, so
+// if the row cannot be written the id must not leave the handler at all. The
+// build still ran and the image sits orphaned in object storage, which is
+// exactly what a failed upload leaves behind; what must not happen is a
+// client being handed an image nobody owns.
+func TestAnImageWhoseOwnerCannotBeRecordedIsNeverHandedOut(t *testing.T) {
+	const image = "9d1729d5-bd7a-441b-8107-b5db4947c762"
+	_, st, fake := newTestServerWithManager(t)
+	ctx := context.Background()
+	seedKey(t, st, "pilot_org1_deploy", "org_1", "deploy")
+
+	fb := &fakeBuilder{
+		lines: []BuildLogLine{
+			{Step: "build complete", Stream: "status", Line: "done", Result: image, TS: 1},
+		},
+		result: image,
+	}
+	broken := &tenancyFailingStore{Store: st, failFor: image}
+	h := Routes(Deps{HostID: "host-test", Store: broken, Machines: fake, Builds: fb})
+
+	rec := postTarAs(t, h, "/v1/builds", "pilot_org1_deploy", []byte("tar-bytes"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("build: got %d (%s)", rec.Code, rec.Body.String())
+	}
+	lines := decodeNDJSON(t, rec.Body.String())
+	if len(lines) == 0 {
+		t.Fatal("the build streamed nothing")
+	}
+	for _, l := range lines {
+		if l.Result != "" {
+			t.Fatalf("an ownerless id reached the client: %+v", l)
+		}
+	}
+	last := lines[len(lines)-1]
+	if last.Error == "" || !strings.Contains(last.Error, "owner") {
+		t.Errorf("the stream did not end on the owner failure: %+v", last)
+	}
+	if last.Line != "build failed" {
+		t.Errorf("the verdict is %q, want build failed", last.Line)
+	}
+	if _, err := st.GetTenancy(ctx, image); !errors.Is(err, state.ErrNotFound) {
+		t.Errorf("a row was written after all: %v", err)
+	}
+}
+
+// The stream's verdict and the RECORDED log's verdict are not the same thing
+// when the owner row cannot be written, and the difference is worth pinning
+// rather than leaving to be discovered.
+//
+// The builder appends every line to its log store before it emits, so the
+// closure above rewrites only the streamed copy. A later GET on the log
+// replays a run ending on the builder's own "build complete" line, carrying
+// the id, with no failure line in it.
+//
+// That is safe, and it is not tidy. The log route is scoped by the job's own
+// tenancy row to the org that built it, so the id reaches nobody who was not
+// going to own it; and with no owner row, that org cannot use it either. The
+// last assertion here is the one that matters: the id is unusable rather than
+// ownerless.
+func TestTheRecordedLogKeepsTheLineTheStreamRewrote(t *testing.T) {
+	const image = "9d1729d5-bd7a-441b-8107-b5db4947c762"
+	_, st, fake := newTestServerWithManager(t)
+	seedKey(t, st, "pilot_org1_deploy", "org_1", "deploy")
+
+	fb := &fakeBuilder{
+		recordEmitted: true,
+		lines: []BuildLogLine{
+			{Step: "build complete", Stream: "status", Line: "done", Result: image, TS: 1},
+		},
+		result: image,
+	}
+	broken := &tenancyFailingStore{Store: st, failFor: image}
+	h := Routes(Deps{HostID: "host-test", Store: broken, Machines: fake, Builds: fb})
+
+	rec := postTarAs(t, h, "/v1/builds", "pilot_org1_deploy", []byte("tar-bytes"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("build: got %d (%s)", rec.Code, rec.Body.String())
+	}
+	for _, l := range decodeNDJSON(t, rec.Body.String()) {
+		if l.Result != "" {
+			t.Fatalf("the STREAM handed out an ownerless id: %+v", l)
+		}
+	}
+
+	// The recorded copy still carries it. This is the divergence, asserted so
+	// that the comment above the closure stays honest.
+	replay := do(t, h, "GET", "/v1/builds/bld-test/logs", "pilot_org1_deploy")
+	if replay.Code != http.StatusOK {
+		t.Fatalf("replaying the log: got %d (%s)", replay.Code, replay.Body.String())
+	}
+	var carried bool
+	for _, l := range decodeNDJSON(t, replay.Body.String()) {
+		if l.Result == image {
+			carried = true
+		}
+	}
+	if !carried {
+		t.Fatalf("the recorded log no longer carries the id; the comment on "+
+			"the write closure needs updating: %s", replay.Body.String())
+	}
+
+	// And the assertion the narrowed claim rests on: reading it changes
+	// nothing, because without an owner row it boots nowhere.
+	if boot := postJSON(t, h, "/v1/machines", "pilot_org1_deploy",
+		`{"vcpus":1,"mem_mib":512,"image":"`+image+`"}`); boot.Code != http.StatusNotFound {
+		t.Errorf("an id with no owner row was bootable by the org that built "+
+			"it: got %d (%s)", boot.Code, boot.Body.String())
+	}
+}
+
+// flakyTenancyStore lets the first owner write for an id land and fails every
+// one after it. That is the shape of a store blip between the builder's own
+// completion line and the handler's terminal line, both of which carry the id.
+type flakyTenancyStore struct {
+	state.Store
+	forID string
+	calls int
+}
+
+func (s *flakyTenancyStore) PutTenancy(ctx context.Context, row *state.Tenancy) error {
+	if row.ID == s.forID {
+		s.calls++
+		if s.calls > 1 {
+			return errors.New("the store is unreachable")
+		}
+	}
+	return s.Store.PutTenancy(ctx, row)
+}
+
+// Two lines carry the rootfs build id, so the owner row must be written on the
+// first and not attempted again on the second.
+//
+// The store is write-once, so a second call could not corrupt anything, but it
+// is a round trip that can fail on its own. Tracking "has not failed yet"
+// rather than "has already succeeded" meant a blip on that second call turned
+// a build that had SUCCEEDED, whose image was published and whose owner row
+// was already correct, into a reported failure the client throws away.
+func TestASecondOwnerWriteNeverFailsABuildThatSucceeded(t *testing.T) {
+	const image = "9d1729d5-bd7a-441b-8107-b5db4947c762"
+	_, st, fake := newTestServerWithManager(t)
+	ctx := context.Background()
+	seedKey(t, st, "pilot_org1_deploy", "org_1", "deploy")
+
+	fb := &fakeBuilder{
+		lines: []BuildLogLine{
+			{Step: "build complete", Stream: "status", Line: "done", Result: image, TS: 1},
+		},
+		result: image,
+	}
+	flaky := &flakyTenancyStore{Store: st, forID: image}
+	h := Routes(Deps{HostID: "host-test", Store: flaky, Machines: fake, Builds: fb})
+
+	rec := postTarAs(t, h, "/v1/builds", "pilot_org1_deploy", []byte("tar-bytes"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("build: got %d (%s)", rec.Code, rec.Body.String())
+	}
+	lines := decodeNDJSON(t, rec.Body.String())
+	if len(lines) == 0 {
+		t.Fatal("the build streamed nothing")
+	}
+	last := lines[len(lines)-1]
+	if last.Error != "" {
+		t.Fatalf("a build that succeeded was reported as failed: %+v", last)
+	}
+	if last.Result != image {
+		t.Fatalf("the stream does not end with the rootfs build id: %+v", last)
+	}
+
+	// The direct statement of it: one line wrote the row, the other did not
+	// try. This is what fails if the flag goes back to reading "not yet
+	// failed" instead of "already succeeded".
+	if flaky.calls != 1 {
+		t.Errorf("the owner row was written %d times, want exactly 1", flaky.calls)
+	}
+
+	own, err := st.GetTenancy(ctx, image)
+	if err != nil {
+		t.Fatalf("the rootfs build id has no owner row: %v", err)
+	}
+	if own.OrgID != "org_1" {
+		t.Errorf("the image's owner row = %+v, want org_1", own)
+	}
+	// And the image the client was handed actually works.
+	if boot := postJSON(t, h, "/v1/machines", "pilot_org1_deploy",
+		`{"vcpus":1,"mem_mib":512,"image":"`+image+`"}`); boot.Code != http.StatusCreated {
+		t.Errorf("booting the image it built: got %d, want 201 (%s)",
+			boot.Code, boot.Body.String())
+	}
 }

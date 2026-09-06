@@ -143,6 +143,56 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The same door a third time. A release's build pair RESTORES another
+	// org's memory image, and the fields decode from a body even though only
+	// the rollout is meant to set them (see CreateMachineRequest). The
+	// rollout never comes through this handler; it creates in-process. So a
+	// pair named here is held to the check image gets: no memory build ever
+	// has an owner row, which makes the pair admin-only, and a tenant naming
+	// one is told the build is not there.
+	for _, b := range []string{req.MemBuildID, req.RootfsBuildID} {
+		if b != "" && !d.ownedBuild(w, r, b) {
+			return
+		}
+	}
+
+	// And a fourth time, for the door that hands over SECRETS rather than an
+	// image. A create naming a service JOINS that service's row rather than
+	// minting one (machines.Create), and a machine reads its service's sealed
+	// environment back out at boot (machines.resolveEnv). Unchecked, a key
+	// naming another org's service id got a machine of its own -- one it can
+	// exec into -- with that service's decrypted secrets delivered inside it,
+	// and a foreign replica in the victim's release set as well.
+	if req.Service != "" {
+		if _, ok := d.ownedService(w, r, req.Service); !ok {
+			return
+		}
+	}
+
+	// And the release id that travels beside it. A release has no tenancy row
+	// of its own because it is owned THROUGH its service, so the check is that
+	// the two agree. Every consumer matches the pair together -- a rollout
+	// counts its replicas by service and release, and the idle sweep compares
+	// a machine's release against its service's current one -- so a release
+	// that does not belong to the service named here is at best inert and at
+	// worst a replica counted into a rollout that never placed it.
+	if req.Release != "" {
+		rel, err := d.Store.GetRelease(r.Context(), req.Release)
+		switch {
+		case errors.Is(err, state.ErrNotFound):
+			notFound(w, "release")
+			return
+		case err != nil:
+			writeStoreError(w, err)
+			return
+		case rel.ServiceID != req.Service:
+			// The same answer as "no such release", deliberately: telling the
+			// two apart would be a release-id oracle across tenants.
+			notFound(w, "release")
+			return
+		}
+	}
+
 	if !d.checkQuota(w, r, quota.Delta{
 		Machines: 1,
 		VCPUs:    orDefault(req.VCPUs, 1),
