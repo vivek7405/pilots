@@ -174,18 +174,22 @@ func (m *Manager) captureDiskAfterExit(ctx context.Context, row *state.Machine,
 			"machine", row.ID, "err", err)
 		return false, discard
 	}
-	if rootfs != uuid.Nil {
-		if err := m.uploadBuild(ctx, rootfs); err != nil {
-			slog.Warn("an exited machine's captured disk was not uploaded; it comes back from its last durable image",
-				"machine", row.ID, "err", err)
-			return false, discard
-		}
+	if rootfs == uuid.Nil {
+		// The block server answered, and its bitmap is empty: this machine
+		// wrote nothing since it came up, so there is no newer disk than the
+		// one the row already names. Touching the row here would trade a
+		// working durable image for nothing -- clearing RootfsBuildID and
+		// dropping the memory image leaves a row with no image at all, and
+		// every later Wake fails on "no usable memory build" forever.
+		return false, discard
+	}
+	if err := m.uploadBuild(ctx, rootfs); err != nil {
+		slog.Warn("an exited machine's captured disk was not uploaded; it comes back from its last durable image",
+			"machine", row.ID, "err", err)
+		return false, discard
 	}
 	superseded := []string{row.RootfsBuildID}
-	row.RootfsBuildID = ""
-	if rootfs != uuid.Nil {
-		row.RootfsBuildID = rootfs.String()
-	}
+	row.RootfsBuildID = rootfs.String()
 	dropMem := m.discardMemoryImage(ctx, row)
 	return true, func() {
 		m.discardBuilds(ctx, superseded...)
