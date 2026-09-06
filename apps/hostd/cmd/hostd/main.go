@@ -644,6 +644,16 @@ func reconcile(cfg *config.Config, mgr *machines.Manager, devices *nbd.DevicePoo
 		slog.Error("reconcile failed", "err", err)
 		return 0
 	}
+	return settleReconciled(found, cfg.MachineStateRoot(), mgr, devices)
+}
+
+// settleReconciled adopts what is still running and settles what is not.
+//
+// Split from reconcile so the ordering below can be tested against a scan this
+// host did not perform: the real one reads the live machine state root, which
+// a test must never touch.
+func settleReconciled(found []fc.Reconciled, root string, mgr *machines.Manager,
+	devices *nbd.DevicePool) int {
 
 	var adopted int
 	var dead []fc.State
@@ -657,7 +667,7 @@ func reconcile(cfg *config.Config, mgr *machines.Manager, devices *nbd.DevicePoo
 			dead = append(dead, r.State)
 			continue
 		}
-		m := fc.Adopted(r.State, cfg.MachineStateRoot(), devices)
+		m := fc.Adopted(r.State, root, devices)
 		if err := mgr.Adopt(r.State.MachineID, m, r.State.SlotIdx); err != nil {
 			slog.Error("could not adopt machine", "machine", r.State.MachineID, "err", err)
 			continue
@@ -677,7 +687,7 @@ func reconcile(cfg *config.Config, mgr *machines.Manager, devices *nbd.DevicePoo
 	// breadcrumbs are simply stale.
 	for _, st := range dead {
 		mgr.ExitedWhileDown(context.Background(), st)
-		_ = fc.ClearBreadcrumbs(filepath.Join(cfg.MachineStateRoot(), st.MachineID))
+		_ = fc.ClearBreadcrumbs(filepath.Join(root, st.MachineID))
 	}
 	return adopted
 }
