@@ -4513,6 +4513,7 @@ async function agentDeployAssertions(REFLINK) {
   const workspaceApp = `gate-ws-${tag}`;
   const brokenApp = `gate-broken-${tag}`;
   const recoveredApp = `gate-recovered-${tag}`;
+  const exampleApp = `gate-example-${tag}`;
   const created = [];
   const serviceIDs = [];
   let client;
@@ -4846,6 +4847,48 @@ async function agentDeployAssertions(REFLINK) {
       assert(typeof body.tail === 'string', 'diagnose returned no console');
       assert(body.checks?.length >= 3, 'diagnose suggested nothing to check');
       assert(body.next && body.next.length > 0, 'diagnose said nothing about what to do');
+    });
+
+    await step('the two-service example deploys with a volume and a sealed secret', async () => {
+      // Through the CLI, not the MCP: `secret://` references are resolved
+      // client-side from the operator's own store, and the MCP deploy refuses
+      // raw values on the directory path for exactly that reason. The store
+      // here is the environment override, which is what a CI runner uses.
+      const { execFile } = await import('node:child_process');
+      const run = (args, env) => new Promise((resolve) => {
+        execFile(process.execPath, [CLI_BIN, ...args],
+          { env, timeout: 900_000, maxBuffer: 16 * 1024 * 1024 },
+          (error, stdout, stderr) => resolve({ code: error?.code ?? (error ? 1 : 0), stdout, stderr }));
+      });
+
+      const res = await run(['--json', 'deploy', EXAMPLE_TWO_SERVICE, '--app', exampleApp], {
+        ...process.env,
+        PILOT_API: API,
+        PILOT_API_KEY: KEY,
+        PILOT_SECRET_POSTGRES_PASSWORD: `pw-${tag}`,
+        PILOT_SECRET_DATABASE_URL: `postgres://postgres:pw-${tag}@postgres.internal:5432/postgres`,
+      });
+      assert(res.code === 0, `the example deploy failed: ${res.stderr.slice(-800)}`);
+      const out = JSON.parse(res.stdout);
+      assert(out.services?.length === 2, `services = ${JSON.stringify(out.services)}`);
+      for (const svc of out.services) serviceIDs.push(svc.id);
+
+      // The volume the compose file declared exists and is attached, which is
+      // the whole difference between this example and the one-service one.
+      const listed = await client.callTool({ name: 'volumes', arguments: {} });
+      assert(!listed.isError, `volumes failed: ${toolText(listed)}`);
+      const volumes = JSON.parse(toolText(listed)).result ?? [];
+      const mine = volumes.filter((v) => String(v.name).startsWith(`${exampleApp}-`));
+      assert(mine.length === 1, `volumes for ${exampleApp} = ${JSON.stringify(mine)}`);
+      assert(mine[0].machine_id, `${mine[0].name} is attached to nothing`);
+
+      // The sealed value never comes back. `service` returns env KEYS only,
+      // and a secret that could be read back would not be one. By id, because
+      // the monorepo above also deployed a service called `web`.
+      const webID = out.services.find((x) => x.name === 'web').id;
+      const svc = await client.callTool({ name: 'service', arguments: { service: webID } });
+      assert(!svc.isError, `service failed: ${toolText(svc)}`);
+      assert(!toolText(svc).includes(`pw-${tag}`), 'the sealed secret was readable from the API');
     });
 
     await step('init is short, and docs answers with a reference', async () => {
