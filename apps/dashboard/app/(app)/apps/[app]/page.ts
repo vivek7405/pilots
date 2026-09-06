@@ -66,12 +66,17 @@ export default async function AppPage({ params, searchParams, actionData }: Page
       points at the service the other one dials.`,
     )}
 
-    <app-canvas class="block">
+    <app-canvas
+      class=${cn(
+        stageClass(),
+        'block w-full overflow-x-auto p-4 sm:flex sm:min-h-[26rem] sm:items-center sm:justify-center sm:p-8',
+      )}
+    >
       <div
         data-canvas-stage
         data-width=${String(layout.width)}
         data-height=${String(layout.height)}
-        class=${cn(stageClass(), 'relative grid gap-4 p-4 sm:block sm:h-[var(--stage-h)] sm:w-[var(--stage-w)] sm:p-0')}
+        class="relative grid w-full gap-4 sm:block sm:h-[var(--stage-h)] sm:w-[var(--stage-w)] sm:shrink-0"
         style=${`--stage-w:${layout.width}px;--stage-h:${layout.height}px`}
       >
         <div class="pointer-events-none absolute inset-0 hidden sm:block" aria-hidden="true">${edgesSvg(layout)}</div>
