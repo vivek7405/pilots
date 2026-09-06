@@ -669,3 +669,83 @@ func TestTheRecordedLogKeepsTheLineTheStreamRewrote(t *testing.T) {
 			"it: got %d (%s)", boot.Code, boot.Body.String())
 	}
 }
+
+// flakyTenancyStore lets the first owner write for an id land and fails every
+// one after it. That is the shape of a store blip between the builder's own
+// completion line and the handler's terminal line, both of which carry the id.
+type flakyTenancyStore struct {
+	state.Store
+	forID string
+	calls int
+}
+
+func (s *flakyTenancyStore) PutTenancy(ctx context.Context, row *state.Tenancy) error {
+	if row.ID == s.forID {
+		s.calls++
+		if s.calls > 1 {
+			return errors.New("the store is unreachable")
+		}
+	}
+	return s.Store.PutTenancy(ctx, row)
+}
+
+// Two lines carry the rootfs build id, so the owner row must be written on the
+// first and not attempted again on the second.
+//
+// The store is write-once, so a second call could not corrupt anything, but it
+// is a round trip that can fail on its own. Tracking "has not failed yet"
+// rather than "has already succeeded" meant a blip on that second call turned
+// a build that had SUCCEEDED, whose image was published and whose owner row
+// was already correct, into a reported failure the client throws away.
+func TestASecondOwnerWriteNeverFailsABuildThatSucceeded(t *testing.T) {
+	const image = "9d1729d5-bd7a-441b-8107-b5db4947c762"
+	_, st, fake := newTestServerWithManager(t)
+	ctx := context.Background()
+	seedKey(t, st, "pilot_org1_deploy", "org_1", "deploy")
+
+	fb := &fakeBuilder{
+		lines: []BuildLogLine{
+			{Step: "build complete", Stream: "status", Line: "done", Result: image, TS: 1},
+		},
+		result: image,
+	}
+	flaky := &flakyTenancyStore{Store: st, forID: image}
+	h := Routes(Deps{HostID: "host-test", Store: flaky, Machines: fake, Builds: fb})
+
+	rec := postTarAs(t, h, "/v1/builds", "pilot_org1_deploy", []byte("tar-bytes"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("build: got %d (%s)", rec.Code, rec.Body.String())
+	}
+	lines := decodeNDJSON(t, rec.Body.String())
+	if len(lines) == 0 {
+		t.Fatal("the build streamed nothing")
+	}
+	last := lines[len(lines)-1]
+	if last.Error != "" {
+		t.Fatalf("a build that succeeded was reported as failed: %+v", last)
+	}
+	if last.Result != image {
+		t.Fatalf("the stream does not end with the rootfs build id: %+v", last)
+	}
+
+	// The direct statement of it: one line wrote the row, the other did not
+	// try. This is what fails if the flag goes back to reading "not yet
+	// failed" instead of "already succeeded".
+	if flaky.calls != 1 {
+		t.Errorf("the owner row was written %d times, want exactly 1", flaky.calls)
+	}
+
+	own, err := st.GetTenancy(ctx, image)
+	if err != nil {
+		t.Fatalf("the rootfs build id has no owner row: %v", err)
+	}
+	if own.OrgID != "org_1" {
+		t.Errorf("the image's owner row = %+v, want org_1", own)
+	}
+	// And the image the client was handed actually works.
+	if boot := postJSON(t, h, "/v1/machines", "pilot_org1_deploy",
+		`{"vcpus":1,"mem_mib":512,"image":"`+image+`"}`); boot.Code != http.StatusCreated {
+		t.Errorf("booting the image it built: got %d, want 201 (%s)",
+			boot.Code, boot.Body.String())
+	}
+}
