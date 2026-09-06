@@ -12,15 +12,17 @@
  * offers. A service whose releases the engine cannot serve degrades to an
  * empty list rather than taking the page down.
  */
-import { listMachines, listServices, fleet } from '#modules/fleet/client.server.ts';
+import { listMachines, listServices, listVolumes, fleet } from '#modules/fleet/client.server.ts';
 import { requireOrg, signedOut } from '#modules/auth/session.server.ts';
 import type { SignedOut } from '#modules/auth/session.server.ts';
-import type { Host, Machine, Release, Service } from '@pilots/sdk';
+import type { Host, Machine, Release, Service, Volume } from '@pilots/sdk';
 
 export interface FleetStatus {
   services: Service[];
   machines: Machine[];
   hosts: Host[];
+  /** The org's volumes, so a canvas can hang storage off the service that mounts it. */
+  volumes: Volume[];
   /** Keyed by service id. A service with no releases has an empty array. */
   releases: Record<string, Release[]>;
 }
@@ -29,10 +31,11 @@ export async function listServicesWithStatus(): Promise<FleetStatus | SignedOut>
   const ctx = await requireOrg();
   if (!ctx) return signedOut();
 
-  const [services, machines, hosts] = await Promise.all([
+  const [services, machines, hosts, volumes] = await Promise.all([
     listServices(ctx.org.id).catch(() => [] as Service[]),
     listMachines(ctx.org.id).catch(() => [] as Machine[]),
     fleet.hosts.list().catch(() => [] as Host[]),
+    listVolumes(ctx.org.id).catch(() => [] as Volume[]),
   ]);
 
   const lists = await Promise.all(
@@ -43,5 +46,5 @@ export async function listServicesWithStatus(): Promise<FleetStatus | SignedOut>
     releases[s.id] = lists[i] ?? [];
   });
 
-  return { services, machines, hosts, releases };
+  return { services, machines, hosts, volumes, releases };
 }

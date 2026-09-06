@@ -1,35 +1,51 @@
 /**
- * The overview: what an org has and whether it is working.
+ * The list of your apps: the first of the three steps a person takes
+ * through this product (an app, its canvas, one service on it).
  *
- * Signed in, this used to redirect straight to the machines list, which meant
- * the product's first screen was a table of rows with no state on them and no
- * sense of the shape above them. A pilots org has a shape: services grouped by
- * the app they resolve each other within, sandboxes that are not part of any
- * service, and four ceilings that decide when the next create fails.
+ * One card per app, carrying its name, how many of its services are online,
+ * when it last deployed, and a thumbnail of its own canvas in the positions
+ * the canvas draws, so the list and the canvas read as one object at two
+ * zoom levels. Search, sort and the grid or list toggle all work with
+ * scripting off: the filter is an island over server-rendered rows, the sort
+ * is a GET form, the toggle is two links.
+ *
+ * A service with no app is listed below the grid under its own name. It is
+ * not hidden, because it exists and costs money, and it is not promoted to a
+ * card, because a card is a canvas and a canvas needs an app.
  *
  * Every read here degrades on its own. A fleet that cannot answer for quotas
- * should cost the reader the quota bars, not the page.
+ * should cost the reader the limits, not the page.
  */
 import { html } from '@webjsdev/core';
+import type { PageProps } from '@webjsdev/core';
 import { currentUser } from '#modules/auth/queries/current-user.server.ts';
 import { listServicesWithStatus } from '#modules/services/queries/list-services-with-status.server.ts';
-import { listVolumes } from '#modules/volumes/queries/list-volumes.server.ts';
 import { getQuota } from '#modules/fleet/queries/get-quota.server.ts';
 import { isSignedOut } from '#modules/auth/session.server.ts';
 import { signInLink } from '#modules/auth/sign-in-link.ts';
 import { serviceStatusLine } from '#modules/services/utils/ui/status-line.ts';
+import { appTone, groupApps, sortApps, sortKey } from '#modules/apps/utils/apps.ts';
+import type { AppGroup } from '#modules/apps/utils/apps.ts';
+import { layoutApp } from '#modules/apps/utils/layout.ts';
+import { thumbnailSvg } from '#modules/apps/utils/ui/canvas-svg.ts';
+import { stageClass } from '#modules/apps/utils/ui/stage.ts';
+import { toneDot } from '#modules/machines/utils/ui/state.ts';
+import { NOUN } from '#lib/vocabulary.ts';
 import { badgeClass } from '#components/ui/badge.ts';
 import { buttonClass } from '#components/ui/button.ts';
 import { cardClass } from '#components/ui/card.ts';
 import { progressClass } from '#components/ui/progress.ts';
-import { dataTable, emptyState, lede, pageHeading, sectionHeading } from '#lib/utils/ui.ts';
+import { nativeSelectClass, nativeSelectIconClass, nativeSelectWrapperClass } from '#components/ui/native-select.ts';
+import { cardBody, dataTable, emptyState, lede, pageHeading, sectionGap, sectionHeading } from '#lib/utils/ui.ts';
 import { cn } from '#lib/utils/cn.ts';
-import type { Machine, Release, Service } from '@pilots/sdk';
+import type { Machine, Release, Service, Volume } from '@pilots/sdk';
 import type { Machine as BrowserMachine } from '#modules/machines/types.ts';
-import type { Host as BrowserHost, Quota } from '#modules/fleet/types.ts';
+import type { Quota } from '#modules/fleet/types.ts';
+import '#components/auto-submit.ts';
+import '#components/copy-button.ts';
 import '#components/link-rows.ts';
+import '#components/list-filter.ts';
 import '#components/relative-time.ts';
-import '#modules/machines/components/machine-list.ts';
 import '#modules/usage/components/hosts-strip.ts';
 
 export const metadata = { title: 'pilots' };
@@ -41,13 +57,19 @@ interface Bar {
   unit?: string;
 }
 
-export default async function Home() {
+const SORTS: { value: 'activity' | 'created' | 'name'; label: string }[] = [
+  { value: 'activity', label: 'Recent activity' },
+  { value: 'created', label: 'Newest first' },
+  { value: 'name', label: 'Name' },
+];
+
+export default async function Home({ searchParams }: PageProps) {
   const me = await currentUser();
   if (!me) {
     return html`
       <div class="max-w-md mx-auto py-24 flex flex-col items-center gap-6 text-center">
         <span class=${badgeClass({ variant: 'outline' })}>Firecracker microVMs</span>
-        <h1 class="text-3xl font-semibold tracking-tight m-0">pilots</h1>
+        <h1 class="text-title font-semibold tracking-tight m-0">pilots</h1>
         <p class="text-muted-foreground m-0">Sandboxes and production services on one primitive.</p>
         ${signInLink()}
       </div>
@@ -55,107 +77,189 @@ export default async function Home() {
   }
 
   const status = await listServicesWithStatus();
-  const { services, machines, hosts, releases } = isSignedOut(status)
-    ? { services: [] as Service[], machines: [] as Machine[], hosts: [], releases: {} as Record<string, Release[]> }
+  const { services, machines, hosts, releases, volumes } = isSignedOut(status)
+    ? {
+        services: [] as Service[],
+        machines: [] as Machine[],
+        hosts: [],
+        releases: {} as Record<string, Release[]>,
+        volumes: [] as Volume[],
+      }
     : status;
-  const volumesRead = await listVolumes().catch(() => []);
-  const volumes = isSignedOut(volumesRead) ? [] : volumesRead;
   const quotaRead = await getQuota().catch((): Quota => ({}));
   const quota: Quota = isSignedOut(quotaRead) ? {} : quotaRead;
 
+  const sort = sortKey(searchParams.sort);
+  const view = searchParams.view === 'list' ? 'list' : 'grid';
+  const grouped = groupApps(services, machines as BrowserMachine[], releases);
+  const apps = sortApps(grouped.apps, sort);
+  const loose = grouped.loose;
   const replicasOf = (id: string) => machines.filter((m) => m.service_id === id) as BrowserMachine[];
-  const sandboxes = machines.filter((m) => !m.service_id) as BrowserMachine[];
+
   // Every machine the API returns counts against the ceiling: a destroyed one
   // is removed from the list rather than reported in a terminal state.
-  const live = machines;
-
-  // Ungrouped last: a service with no app is a service that has not been given
-  // a place yet, and sorting it first would bury the ones that have.
-  const groups = new Map<string, Service[]>();
-  for (const service of services) {
-    const key = service.app ?? '';
-    groups.set(key, [...(groups.get(key) ?? []), service]);
-  }
-  const ordered = [...groups.entries()].sort(([a], [b]) => (a === '' ? 1 : b === '' ? -1 : a.localeCompare(b)));
-
   const bars: Bar[] = [
-    { label: 'Machines', used: live.length, limit: quota.max_machines },
-    { label: 'vCPUs', used: sum(live, (m) => m.vcpus), limit: quota.max_vcpus },
-    { label: 'Memory', used: sum(live, (m) => m.mem_mib), limit: quota.max_mem_mib, unit: 'MiB' },
-    { label: 'Volumes', used: sum(volumes, (v) => v.size_gib), limit: quota.max_volume_gib, unit: 'GiB' },
+    { label: NOUN.Instances, used: machines.length, limit: quota.max_machines },
+    { label: 'vCPUs', used: sum(machines, (m) => m.vcpus), limit: quota.max_vcpus },
+    { label: 'Memory', used: sum(machines, (m) => m.mem_mib), limit: quota.max_mem_mib, unit: 'MiB' },
+    { label: NOUN.Storage, used: sum(volumes, (v) => v.size_gib), limit: quota.max_volume_gib, unit: 'GiB' },
   ];
+
+  const viewHref = (v: 'grid' | 'list') => `/?sort=${sort}&view=${v}`;
 
   return html`
     <div class="flex flex-wrap items-center gap-3">
-      ${pageHeading(me.org.name)}
-      <a href="/services/new" class=${cn(buttonClass({ size: 'sm' }), 'ml-auto')}>New service</a>
+      ${pageHeading(NOUN.Apps)}
+      <a href="/services/new" class=${cn(buttonClass({ size: 'sm' }), 'ml-auto')}>New app</a>
     </div>
     ${lede(
-      html`Services and sandboxes in <strong>${me.org.slug}</strong>. A sandbox and a service are the same machine with
-      different lifecycle knobs.`,
+      html`An app is a group of services that reach each other by name. Open one to see what talks to what, in
+      <strong>${me.org.slug}</strong>.`,
     )}
 
-    ${sectionHeading('Services')}
-    ${services.length === 0
-      ? emptyState('No services yet. A service is created by a deploy from a repository with a compose file.', {
-          command: 'pilot deploy',
-          href: '/services/new',
-          label: 'How to deploy',
-        })
-      : html`<div class="grid gap-4 mb-8">
-          ${ordered.map(
-            ([app, list]) => html`
-              <div class=${cardClass()}>
-                <h3 class="m-0 text-base font-medium">
-                  ${app || 'Ungrouped'}
-                  ${app
-                    ? html`<span class="ml-2 font-normal text-xs text-muted-foreground"
-                        >services here reach each other at &lt;name&gt;.internal</span
-                      >`
-                    : ''}
-                </h3>
-                <link-rows>
-                  ${dataTable<Service>({
-                    caption: `Services in ${app || 'no app group'}`,
-                    rows: list,
-                    rowHref: (s) => `/services/${s.id}`,
-                    columns: [
-                      {
-                        header: 'Name',
-                        cell: (s) => html`<a href=${`/services/${s.id}`} class="text-foreground">${s.name}</a>`,
-                      },
-                      {
-                        header: 'Status',
-                        cell: (s) => serviceStatusLine(s, replicasOf(s.id), releases[s.id] ?? []),
-                      },
-                      {
-                        header: 'URL',
-                        cell: (s) => (s.url ? html`<a href=${s.url} rel="noopener">${s.url}</a>` : ''),
-                      },
-                    ],
-                  })}
-                </link-rows>
+    <div class=${sectionGap()}>
+      <section>
+        <div class="mb-4 flex flex-wrap items-center gap-x-4 gap-y-3">
+          <list-filter for="apps" placeholder="Search apps"></list-filter>
+          <span class="text-meta text-muted-foreground">${apps.length} ${apps.length === 1 ? 'app' : 'apps'}</span>
+          <auto-submit class="contents">
+            <form method="get" action="/" class="flex items-center gap-2">
+              <input type="hidden" name="view" value=${view}>
+              <label for="sort" class="text-meta text-muted-foreground">Sort by</label>
+              <div class=${nativeSelectWrapperClass()}>
+                <select id="sort" name="sort" data-size="sm" class=${nativeSelectClass()}>
+                  ${SORTS.map((s) => html`<option value=${s.value} ?selected=${s.value === sort}>${s.label}</option>`)}
+                </select>
+                <svg class=${nativeSelectIconClass()} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
               </div>
-            `,
-          )}
-        </div>`}
+              <button type="submit" data-auto-submit-button class=${buttonClass({ variant: 'outline', size: 'sm' })}>Apply</button>
+            </form>
+          </auto-submit>
+          <nav aria-label="View" class="ml-auto flex items-center gap-1">
+            ${viewLink('grid', 'Grid', view, viewHref('grid'))} ${viewLink('list', 'List', view, viewHref('list'))}
+          </nav>
+        </div>
 
-    ${sectionHeading('Sandboxes')}
-    <div class="mb-8">
-      <machine-list
-        .initial=${sandboxes}
-        .hosts=${hosts as unknown as BrowserHost[]}
-        sandboxes
-      ></machine-list>
+        ${apps.length === 0 && loose.length === 0
+          ? emptyState(
+              'No apps yet. Deploy a repository and its services appear here as one app you can open, watch and change.',
+              { command: 'pilot deploy', href: '/services/new', label: 'Deploy an app' },
+            )
+          : html`<div id="apps">
+              ${view === 'grid'
+                ? html`<link-rows>
+                    <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">${apps.map((app) => appCard(app))}</div>
+                  </link-rows>`
+                : html`<link-rows>
+                    ${dataTable<AppGroup<Service>>({
+                      caption: 'Your apps',
+                      rows: apps,
+                      rowHref: (app) => `/apps/${encodeURIComponent(app.name)}`,
+                      columns: [
+                        {
+                          header: NOUN.App,
+                          cell: (app) =>
+                            html`<a href=${`/apps/${encodeURIComponent(app.name)}`} class="text-foreground font-medium"
+                              >${app.name}</a
+                            >`,
+                        },
+                        { header: NOUN.Services, cell: (app) => onlineLine(app) },
+                        { header: 'Deployed', cell: (app) => deployedAt(app) },
+                      ],
+                    })}
+                  </link-rows>`}
+            </div>`}
+      </section>
+
+      ${loose.length > 0
+        ? html`<section>
+            ${sectionHeading(
+              'Not in an app',
+              'A service outside an app cannot be reached by name from other services. An app is set when the service is created, by the compose file or the name given at deploy.',
+            )}
+            <link-rows>
+              ${dataTable<Service>({
+                caption: 'Services that belong to no app',
+                rows: loose,
+                rowHref: (s) => `/services/${s.id}`,
+                columns: [
+                  {
+                    header: 'Name',
+                    cell: (s) => html`<a href=${`/services/${s.id}`} class="text-foreground">${s.name}</a>`,
+                  },
+                  {
+                    header: 'Status',
+                    cell: (s) => serviceStatusLine(s, replicasOf(s.id), releases[s.id] ?? []),
+                  },
+                  {
+                    header: 'URL',
+                    cell: (s) => (s.url ? html`<a href=${s.url} rel="noopener">${s.url}</a>` : ''),
+                  },
+                ],
+              })}
+            </link-rows>
+          </section>`
+        : ''}
+
+      <section>
+        ${sectionHeading('Limits', 'What this team may run at once. A create that would cross a line is refused.')}
+        <div class="grid gap-3 sm:grid-cols-2">${bars.map((bar) => quotaBar(bar))}</div>
+      </section>
+
+      <section>
+        ${sectionHeading('Capacity', 'Where your services run right now, and how much room is left there.')}
+        <hosts-strip .initial=${hosts}></hosts-strip>
+      </section>
     </div>
+  `;
+}
 
-    ${sectionHeading('Quota')}
-    <div class="grid gap-3 sm:grid-cols-2 mb-8">
-      ${bars.map((bar) => quotaBar(bar))}
+function viewLink(value: 'grid' | 'list', label: string, current: string, href: string) {
+  const on = value === current;
+  return html`<a
+    href=${href}
+    aria-current=${on ? 'true' : 'false'}
+    class=${cn(buttonClass({ variant: on ? 'secondary' : 'ghost', size: 'sm' }), 'no-underline')}
+    >${label}</a
+  >`;
+}
+
+function onlineLine(app: AppGroup<Service>) {
+  const total = app.services.length;
+  return html`<span class="inline-flex items-center gap-1.5 whitespace-nowrap">
+    ${toneDot(appTone(app))} ${app.online}/${total} ${total === 1 ? 'service' : 'services'} online
+  </span>`;
+}
+
+function deployedAt(app: AppGroup<Service>) {
+  return app.lastDeploy === undefined
+    ? html`<span class="text-muted-foreground">never</span>`
+    : html`<relative-time datetime=${String(app.lastDeploy)}></relative-time>`;
+}
+
+/**
+ * One app. The name is the link and the whole card navigates through
+ * `<link-rows>`, so a middle click and a copied address both still work and
+ * a screen reader gets one link named after the app rather than the whole
+ * card's text.
+ */
+function appCard(app: AppGroup<Service>) {
+  const href = `/apps/${encodeURIComponent(app.name)}`;
+  const layout = layoutApp(app.services.map((s) => ({ id: s.id, name: s.name, dependsOn: s.depends_on ?? [] })));
+  return html`
+    <div class=${cn(cardClass(), 'gap-0 py-0 cursor-pointer transition-colors hover:border-border-strong')} data-filter-row data-href=${href}>
+      <div class=${cardBody()}>
+        <h2 class="m-0 text-body font-semibold"><a href=${href} class="text-foreground no-underline">${app.name}</a></h2>
+        <div class=${cn(stageClass(), 'mt-3 py-4')}>${thumbnailSvg(layout)}</div>
+        <p class="m-0 mt-3 flex flex-wrap items-center gap-x-2 text-meta text-muted-foreground">
+          ${onlineLine(app)}
+          ${app.lastDeploy === undefined
+            ? ''
+            : html`<span aria-hidden="true">·</span
+              ><span class="whitespace-nowrap">deployed ${deployedAt(app)}</span>`}
+        </p>
+      </div>
     </div>
-
-    ${sectionHeading('Fleet')}
-    <hosts-strip .initial=${hosts}></hosts-strip>
   `;
 }
 
@@ -171,14 +275,14 @@ function quotaBar(bar: Bar) {
   const label = `${bar.label}: ${bar.used}${bar.limit === undefined ? '' : ` of ${bar.limit}`}${bar.unit ? ` ${bar.unit}` : ''}`;
   return html`
     <div class="grid gap-1">
-      <div class="flex items-baseline justify-between text-sm">
+      <div class="flex items-baseline justify-between text-body">
         <span>${bar.label}</span>
         <span class="tabular-nums text-muted-foreground">
           ${bar.used}${bar.limit === undefined ? '' : html` / ${bar.limit}`}${bar.unit ? html` ${bar.unit}` : ''}
         </span>
       </div>
       ${bar.limit === undefined
-        ? html`<p class="m-0 text-xs text-muted-foreground">No ceiling reported for this org.</p>`
+        ? html`<p class="m-0 text-meta text-muted-foreground">No ceiling reported for this team.</p>`
         : html`<progress class=${progressClass()} value=${bar.used} max=${bar.limit} aria-label=${label}></progress>`}
     </div>
   `;

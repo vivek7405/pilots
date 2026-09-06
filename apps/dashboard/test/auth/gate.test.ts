@@ -56,12 +56,12 @@ test('the home page is the overview once signed in, and the sign-in offer before
   assert.match(await anon.text(), /Sign in with GitHub/);
 
   // It used to redirect to /machines, which made the product's first screen a
-  // table of rows with no state on them.
+  // table of rows with no state on them. Now it is the list of apps.
   const signedIn = await app.handle(new Request('http://localhost/', asUser(cookie)));
-  assert.equal(signedIn.status, 200, 'no redirect: this page is the overview');
+  assert.equal(signedIn.status, 200, 'no redirect: this page is the app list');
   const body = await signedIn.text();
-  for (const section of ['Services', 'Sandboxes', 'Quota', 'Fleet']) {
-    assert.ok(body.includes(`>${section}<`), `the overview has a ${section} section`);
+  for (const section of ['Apps', 'Limits', 'Capacity']) {
+    assert.ok(body.includes(`>${section}<`), `the app list has a ${section} section`);
   }
 });
 

@@ -1,6 +1,9 @@
 /**
  * <list-filter for="<table id>">: hides rows that do not match what is typed.
  *
+ * A row is a `tbody tr` of the element `for` names, or any element inside it
+ * carrying `data-filter-row`, which is how a grid of cards filters too.
+ *
  * Client-side and text-only on purpose. These lists are an org's machines and
  * services, which is tens of rows, so a round trip per keystroke would be
  * slower and would take the list away while it loaded.
@@ -63,7 +66,9 @@ export class ListFilter extends WebComponent({
     if (!table) return;
     const needle = this.query.trim().toLowerCase();
     let shown = 0;
-    for (const row of table.querySelectorAll<HTMLElement>('tbody tr')) {
+    // A table's rows, or anything that declares itself a row: the app list
+    // is a grid of cards, and a card is a row for this purpose.
+    for (const row of table.querySelectorAll<HTMLElement>('tbody tr, [data-filter-row]')) {
       const hit = needle === '' || (row.textContent ?? '').toLowerCase().includes(needle);
       row.hidden = !hit;
       if (hit) shown += 1;

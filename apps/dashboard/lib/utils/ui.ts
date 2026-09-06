@@ -30,7 +30,7 @@ import {
 
 /** The `<h1>` every page opens with. */
 export function pageHeading(title: unknown): TemplateResult {
-  return html`<h1 class="text-2xl font-semibold tracking-tight m-0">${title}</h1>`;
+  return html`<h1 class="text-title font-semibold tracking-tight m-0">${title}</h1>`;
 }
 
 /**
@@ -52,10 +52,48 @@ export function lede(content: unknown): TemplateResult {
   return html`<p class="text-muted-foreground mt-1 mb-6">${content}</p>`;
 }
 
-/** The `<h2>` that opens a section within a page. */
-export function sectionHeading(title: unknown): TemplateResult {
-  return html`<h2 class="text-lg font-medium m-0 mb-2">${title}</h2>`;
+/**
+ * The `<h2>` that opens a section within a page, with the one sentence that
+ * says what the section is.
+ *
+ * The sentence is the point (#85, D4): a heading on its own names a thing,
+ * and a reader who has never read this repo needs to be told what the thing
+ * is for. The explanation is optional here only until every call site
+ * carries one; a section written after this landed passes it.
+ */
+export function sectionHeading(title: unknown, explanation?: unknown): TemplateResult {
+  return html`<div class="mb-3">
+    <h2 class="text-heading font-medium m-0">${title}</h2>
+    ${explanation ? html`<p class="text-meta text-muted-foreground m-0 mt-0.5">${explanation}</p>` : ''}
+  </div>`;
 }
+
+/**
+ * A section with nothing in it yet: a dashed box with a headline and the
+ * one inline fix that ends the emptiness.
+ *
+ * Section-level, as opposed to `emptyState`, which is the page-level version
+ * naming a command. A section inside a panel does not need a card and a
+ * copy button; it needs a line and a link.
+ */
+export function sectionEmpty(headline: unknown, fix: { text: unknown; href: string }): TemplateResult {
+  return html`<div class="rounded-lg border border-dashed border-border px-6 py-10 text-center">
+    <p class="m-0 text-body font-medium">${headline}</p>
+    <p class="m-0 mt-1 text-meta text-muted-foreground"><a href=${fix.href}>${fix.text}</a></p>
+  </div>`;
+}
+
+/**
+ * The interior padding every card body carries.
+ *
+ * Spacing is a rule, not a per-page choice: cards and sections used to sit
+ * flush with no interior padding on some pages and generous padding on
+ * others. One helper, one value.
+ */
+export const cardBody = (): string => 'p-5 sm:p-6';
+
+/** The vertical rhythm between a page's sections. */
+export const sectionGap = (): string => 'space-y-8';
 
 /**
  * What a list renders instead of itself when it has nothing in it.
@@ -87,7 +125,7 @@ export function emptyState(
 
 /** The small print under a table or a form, explaining a rule the UI implies. */
 export function footnote(content: unknown): TemplateResult {
-  return html`<p class="mt-3 text-xs text-muted-foreground">${content}</p>`;
+  return html`<p class="mt-3 text-meta text-muted-foreground">${content}</p>`;
 }
 
 /** Horizontal row of form fields ending in a submit button. */
