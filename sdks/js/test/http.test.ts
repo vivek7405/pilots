@@ -300,3 +300,58 @@ test('a rollout is never cut off by the client deadline', async () => {
     await fake.stop()
   }
 })
+
+test('the org option narrows every request, GET and POST alike', async () => {
+  const fake = new FakeHostd()
+  fake.on('GET /v1/services', (_req, res) => json(res, 200, []))
+  fake.on('POST /v1/services', (_req, res) => json(res, 201, { id: 'svc-1', name: 'web' }))
+  fake.on('POST /v1/plan', (_req, res) => json(res, 200, { plan: { steps: [] }, detected: [] }))
+  await fake.start()
+  try {
+    const client = new PilotsClient('pilot_admin', { baseURL: fake.baseURL, org: 'org_2' })
+    await client.services.list()
+    await client.services.create({ name: 'web', app: 'shop' })
+    await client.planRepo({ repo: 'o/r', ref: 'main' }, { app: 'shop' })
+
+    assert.equal(fake.requests.length, 3)
+    for (const req of fake.requests) {
+      assert.equal(req.query.get('org'), 'org_2', `${req.method} ${req.url} carries no org`)
+    }
+    // The plan already carried ?app=, so the org merges rather than replaces.
+    assert.equal(fake.requests[2]!.query.get('app'), 'shop')
+  } finally {
+    await fake.stop()
+  }
+})
+
+test('a client with no org sends none, so a tenant key is unchanged', async () => {
+  await withFake(
+    (f) => f.on('GET /v1/services', (_req, res) => json(res, 200, [])),
+    async (client, fake) => {
+      await client.services.list()
+      assert.equal(fake.only.query.has('org'), false)
+    },
+  )
+})
+
+test('createFromRepo posts the ref as JSON and reads the build id from the header', async () => {
+  const fake = new FakeHostd()
+  fake.on('POST /v1/builds', (_req, res) => {
+    res.writeHead(200, { 'content-type': 'application/x-ndjson', 'x-pilot-build-id': 'bld-9' })
+    res.end(JSON.stringify({ step: 'bld-9', stream: 'status', line: 'ok', result: 'rootfs-1' }) + '\n')
+  })
+  await fake.start()
+  try {
+    const client = new PilotsClient('pilot_deadbeef', { baseURL: fake.baseURL })
+    const build = await client.builds.createFromRepo({ repo: 'o/r', ref: 'abc123' }, { app: 'shop' })
+    assert.equal(build.buildId, 'bld-9')
+    assert.equal(await build.result(), 'rootfs-1')
+
+    const req = fake.only
+    assert.equal(req.headers['content-type'], 'application/json')
+    assert.deepEqual(req.json, { repo: 'o/r', ref: 'abc123' })
+    assert.equal(req.query.get('app'), 'shop')
+  } finally {
+    await fake.stop()
+  }
+})

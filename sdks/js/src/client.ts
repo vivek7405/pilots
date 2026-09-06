@@ -34,6 +34,7 @@ import type {
   PromoteRequest,
   QuotaResponse,
   Release,
+  RepoRef,
   RevokeResponse,
   Service,
   UpdateServiceRequest,
@@ -108,6 +109,24 @@ export class PilotsClient {
     const res = await this.http.send('POST', '/v1/plan', {
       raw: tar,
       contentType: 'application/x-tar',
+      ...(opts.app ? { query: { app: opts.app } } : {}),
+      timeoutMs: null,
+    })
+    return (await res.json()) as ComposePlanResponse
+  }
+
+  /**
+   * Asks the host what a REPOSITORY is, naming it rather than sending it. The
+   * host fetches the ref through the fleet's GitHub App, the same path a push
+   * takes.
+   *
+   * For a caller that holds no repository bytes: a browser session holds an
+   * App JWT and nothing else. A fleet with no App configured answers
+   * `not_configured` and says to send a tar instead.
+   */
+  async planRepo(ref: RepoRef, opts: { app?: string } = {}): Promise<ComposePlanResponse> {
+    const res = await this.http.send('POST', '/v1/plan', {
+      body: ref,
       ...(opts.app ? { query: { app: opts.app } } : {}),
       timeoutMs: null,
     })
@@ -275,6 +294,24 @@ export class Builds {
     const res = await this.http.send('POST', '/v1/builds', {
       raw: tar,
       contentType: 'application/x-tar',
+      timeoutMs: null,
+    })
+    return new BuildStream(res)
+  }
+
+  /**
+   * Builds a REPOSITORY, naming it rather than uploading it. The host fetches
+   * the ref through the fleet's GitHub App, plans it, and builds the one step
+   * a plan may produce, which is the path a push already takes.
+   *
+   * The stream is the one `create` returns, so a caller reads the verdict the
+   * same way. A plan with more than one step is refused with
+   * `plan_multi_service`, readable at the build's own log.
+   */
+  async createFromRepo(ref: RepoRef, opts: { app?: string } = {}): Promise<BuildStream> {
+    const res = await this.http.send('POST', '/v1/builds', {
+      body: ref,
+      ...(opts.app ? { query: { app: opts.app } } : {}),
       timeoutMs: null,
     })
     return new BuildStream(res)

@@ -125,3 +125,36 @@ test('the upload is sent as a tar, and logs asks to follow', async () => {
     },
   )
 })
+
+test('close releases a stream nobody read, and result then throws', async () => {
+  await withFake(
+    // The stream WOULD end in a success line. A closed stream must not reach
+    // it: a caller that walked away has no verdict, and an abandoned build
+    // must never read as a successful one.
+    (res) => drip(res, [accepted, running, ok], 0),
+    async (client) => {
+      const build = await client.builds.create('a-tar')
+      await build.close()
+
+      await assert.rejects(build.result(), BuildFailedError)
+      assert.deepEqual(build.lines, [])
+    },
+  )
+})
+
+test('close after reading part of a stream is equally final', async () => {
+  await withFake(
+    (res) => drip(res, [accepted, running, ok]),
+    async (client) => {
+      const build = await client.builds.create('a-tar')
+      for await (const line of build) {
+        assert.equal(line.line, 'build accepted')
+        break
+      }
+      await build.close()
+
+      await assert.rejects(build.result(), BuildFailedError)
+      assert.equal(build.lines.length, 1)
+    },
+  )
+})

@@ -185,10 +185,15 @@ type Service struct {
 	// OrgID is the org that owns this object. Set when the caller is an admin
 	// key, which is the only caller that sees objects across orgs; a
 	// tenant-scoped key only ever sees its own.
-	OrgID        string       `json:"org_id,omitempty"`
-	ID           string       `json:"id"`
-	Name         string       `json:"name"`
-	App          string       `json:"app,omitempty"`
+	OrgID string `json:"org_id,omitempty"`
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	App   string `json:"app,omitempty"`
+	// DependsOn names the sibling services in this app whose <name>.internal
+	// address this service's environment references. Derived by hostd on
+	// every read from both halves of the environment and stored nowhere, so
+	// it reflects what the service is configured to dial right now.
+	DependsOn    []string     `json:"depends_on,omitempty"`
 	Replicas     int          `json:"replicas"`
 	Knobs        Knobs        `json:"knobs"`
 	Health       *HealthCheck `json:"health,omitempty"`
@@ -565,6 +570,15 @@ type ComposeUnknownDetails struct {
 	Rules []string `json:"rules"`
 }
 
+// RepoRef is the body POST /v1/plan and POST /v1/builds accept in place of a
+// tar: a repository the fleet's GitHub App is installed on, at a ref. The host
+// fetches the bytes itself, through the path a push takes, so no client has to
+// hold them.
+type RepoRef struct {
+	Repo string `json:"repo"` // owner/name
+	Ref  string `json:"ref"`  // branch, tag or sha
+}
+
 // wireTypes is every struct above, once. The drift test reflects over it, and
 // fails when hostd carries a tagged struct nobody listed here -- so a new wire
 // shape cannot land unmirrored.
@@ -583,6 +597,7 @@ var wireTypes = []any{
 	BuildLogLine{},
 	HealthCheck{},
 	Service{},
+	RepoRef{},
 	CreateServiceRequest{},
 	DeployRequest{},
 	PromoteRequest{},

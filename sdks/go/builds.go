@@ -2,6 +2,7 @@ package pilots
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -37,6 +38,34 @@ func (b *Builds) Create(ctx context.Context, contextTar io.Reader) (*BuildStream
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/x-tar")
+	res, err := b.c.send(req)
+	if err != nil {
+		return nil, err
+	}
+	return newBuildStream(res, res.Header.Get("X-Pilot-Build-Id")), nil
+}
+
+// CreateFromRepo builds a REPOSITORY, naming it rather than uploading it. The
+// host fetches the ref through the fleet's GitHub App, plans it, and builds
+// the one step a plan may produce, which is the path a push already takes.
+//
+// The stream is the one Create returns, so a caller reads the verdict the same
+// way. A plan with more than one step is refused with plan_multi_service and
+// the refusal is readable at the build's log, exactly as a push's is.
+func (b *Builds) CreateFromRepo(ctx context.Context, ref RepoRef, app string) (*BuildStream, error) {
+	path := "/v1/builds"
+	if app != "" {
+		path = query(path, [2]string{"app", app})
+	}
+	body, err := json.Marshal(ref)
+	if err != nil {
+		return nil, fmt.Errorf("pilots: encoding the repository: %w", err)
+	}
+	req, err := b.c.request(ctx, http.MethodPost, path, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
 	res, err := b.c.send(req)
 	if err != nil {
 		return nil, err

@@ -85,6 +85,7 @@ export type {
   QuotaExceededResponse,
   QuotaResponse,
   Release,
+  RepoRef,
   RevokeResponse,
   Service,
   UpdateServiceRequest,

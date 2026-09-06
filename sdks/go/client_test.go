@@ -277,3 +277,94 @@ func TestFollowLogsYieldsLines(t *testing.T) {
 		t.Errorf("lines = %v", got)
 	}
 }
+
+// WithOrg reaches every route, GET and POST alike, and merges with a query the
+// route already carries. A route that forgot it would create a row the same
+// client's reads cannot see.
+func TestWithOrgNarrowsEveryRequest(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.URL.RequestURI())
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(r.URL.Path, "/v1/services") && r.Method == http.MethodGet {
+			_, _ = w.Write([]byte(`[]`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(Service{ID: "svc_1", Name: "web"})
+	}))
+	t.Cleanup(srv.Close)
+	c := New("pilot_admin", WithBaseURL(srv.URL), WithOrg("org_2"))
+
+	ctx := context.Background()
+	if _, err := c.Services.List(ctx); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if _, err := c.Services.Create(ctx, CreateServiceRequest{Name: "web", App: "shop"}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err := c.PlanRepo(ctx, RepoRef{Repo: "o/r", Ref: "main"}, "shop"); err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+
+	for _, got := range seen {
+		if !strings.Contains(got, "org=org_2") {
+			t.Errorf("%s carries no org", got)
+		}
+	}
+	if len(seen) != 3 {
+		t.Fatalf("saw %v, want three requests", seen)
+	}
+	// The plan already carried ?app=, so the org has to merge rather than
+	// replace: a second "?" would make the whole query unreadable.
+	if !strings.Contains(seen[2], "app=shop") || strings.Count(seen[2], "?") != 1 {
+		t.Errorf("the plan's query lost a parameter: %s", seen[2])
+	}
+	// A client with no org sends none, so nothing changes for a tenant key.
+	plain := New("pilot_x", WithBaseURL(srv.URL))
+	seen = nil
+	if _, err := plain.Services.List(ctx); err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if strings.Contains(seen[0], "org=") {
+		t.Errorf("a client with no org still sent one: %s", seen[0])
+	}
+}
+
+// CreateFromRepo posts the repository as JSON and reads the build id out of
+// the header, exactly as an uploaded context does.
+func TestCreateFromRepoPostsTheRefAsJSON(t *testing.T) {
+	var body []byte
+	var ctype, uri string
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		ctype = r.Header.Get("Content-Type")
+		uri = r.URL.RequestURI()
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		w.Header().Set("X-Pilot-Build-Id", "bld_1")
+		_, _ = w.Write([]byte(`{"step":"bld_1","stream":"status","line":"build succeeded","result":"rootfs_1"}` + "\n"))
+	})
+
+	bs, err := c.Builds.CreateFromRepo(context.Background(), RepoRef{Repo: "o/r", Ref: "abc123"}, "shop")
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if bs.ID != "bld_1" {
+		t.Errorf("id = %q, want bld_1", bs.ID)
+	}
+	if ctype != "application/json" {
+		t.Errorf("content-type = %q", ctype)
+	}
+	if string(body) != `{"repo":"o/r","ref":"abc123"}` {
+		t.Errorf("body = %q", body)
+	}
+	if uri != "/v1/builds?app=shop" {
+		t.Errorf("uri = %q", uri)
+	}
+	got, err := bs.Result()
+	if err != nil {
+		t.Fatalf("result: %v", err)
+	}
+	if got != "rootfs_1" {
+		t.Errorf("result = %q, want rootfs_1", got)
+	}
+}
