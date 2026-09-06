@@ -27,6 +27,7 @@ import {
   BuildFailedError,
   PilotsError,
   type BuildLogLine,
+  type ComposePlan,
   type CreateServiceRequest,
   type HealthCheck,
   type PilotsClient,
@@ -290,6 +291,7 @@ export function registerTools(server: McpServer, client: PilotsClient): void {
         if (args.dir) {
           const plan = (await client.plan(new Uint8Array(tarDirectory(args.dir)), { app: basename(args.dir) })).plan
           if (args.app) plan.app = args.app
+          applyOverrides(plan, args)
           // A failed build throws a BuildFailedError carrying every NDJSON
           // line, and errorText below returns them verbatim, so nothing here
           // has to collect them a second time.
@@ -604,6 +606,52 @@ export function registerTools(server: McpServer, client: PilotsClient): void {
         return { topic: args.topic, text }
       }, ''),
   )
+}
+
+/**
+ * Applies a caller's per-service overrides onto a planned step.
+ *
+ * A `health` or a `replicas` passed alongside `dir` and then quietly dropped
+ * is the worst outcome available: the deploy succeeds, the gate polls
+ * something else, and nothing anywhere says the argument was ignored. So it is
+ * applied, and where it CANNOT be applied unambiguously -- a monorepo, where
+ * "the service" is two of them -- it is refused with a message naming the fix.
+ */
+function applyOverrides(plan: ComposePlan, args: DeployOverrides): void {
+  const overrides = ['port', 'health', 'env', 'secret_env', 'replicas', 'domain', 'custom_domain'] as const
+  const given = overrides.filter((key) => args[key] !== undefined)
+  if (given.length === 0) return
+  if (plan.steps.length !== 1) {
+    throw new Error(
+      `this directory plans ${plan.steps.length} services, so ${given.join(', ')} ` +
+        'cannot be applied to one of them; put them in a compose file',
+    )
+  }
+  const step = plan.steps[0]!
+  if (args.port !== undefined) step.env = { ...step.env, PORT: String(args.port) }
+  if (args.env) step.env = { ...step.env, ...args.env }
+  if (args.health) step.health = args.health
+  if (args.replicas !== undefined) step.replicas = args.replicas
+  if (args.domain) step.domain = args.domain
+  if (args.custom_domain) step.custom_domain = args.custom_domain
+  if (args.secret_env) {
+    // A value, not a reference: the compose path resolves `secret://` names
+    // from the local store, and this one already has the values in hand.
+    throw new Error(
+      'secret_env with dir is not supported: put secret:// references in a compose file, ' +
+        'or deploy with name and build',
+    )
+  }
+}
+
+interface DeployOverrides {
+  port?: number | undefined
+  health?: HealthCheck | undefined
+  env?: Record<string, string> | undefined
+  secret_env?: Record<string, string> | undefined
+  replicas?: number | undefined
+  domain?: string | undefined
+  custom_domain?: string | undefined
 }
 
 /** A service by id or name, so every tool takes whichever the agent has. */

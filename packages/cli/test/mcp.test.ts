@@ -18,7 +18,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 
 import { saveCredentials } from '../src/config.ts'
-import { fakeMachine, startFakeAPI, unknownFrameworkBody } from './helpers/fake-api.ts'
+import { defaultPlanResponse, fakeMachine, startFakeAPI, unknownFrameworkBody } from './helpers/fake-api.ts'
 import { json } from './helpers/server.ts'
 import { startWSServer } from './helpers/ws-server.ts'
 
@@ -539,6 +539,67 @@ test('every result carries next, and a read-only one carries the empty string', 
     const body = JSON.parse(textOf(listed)) as { result: unknown[]; next: string }
     assert.equal(body.next, '')
     assert.ok(Array.isArray(body.result))
+  } finally {
+    await close()
+    await api.close()
+  }
+})
+
+// A health check passed alongside `dir` and then quietly dropped is the worst
+// outcome available: the deploy succeeds, the gate polls something else, and
+// nothing says the argument was ignored.
+test('deploy with dir applies the overrides it was given', async () => {
+  const api = await startFakeAPI()
+  const { client, close } = await connect(serverEnv(api.url))
+  try {
+    const result = await client.callTool({
+      name: 'deploy',
+      arguments: {
+        dir: join(import.meta.dirname, 'fixtures', 'webjs-app'),
+        health: { type: 'http', path: '/ready', grace: 20 },
+        replicas: 2,
+        env: { LOG_LEVEL: 'debug' },
+      },
+    })
+    assert.equal(result.isError, undefined, textOf(result))
+
+    const created = JSON.parse(api.find('POST', '/v1/services')!.body) as {
+      health?: { path?: string; grace?: number }
+      replicas?: number
+      env?: Record<string, string>
+    }
+    assert.equal(created.health?.path, '/ready')
+    assert.equal(created.health?.grace, 20)
+    assert.equal(created.replicas, 2)
+    assert.equal(created.env?.LOG_LEVEL, 'debug')
+    // The plan's own PORT survives an env merge rather than being replaced.
+    assert.equal(created.env?.PORT, '8080')
+  } finally {
+    await close()
+    await api.close()
+  }
+})
+
+// Where an override cannot be applied to one service, it is refused rather
+// than applied to all of them or dropped.
+test('deploy with dir refuses an override it cannot place on a monorepo', async () => {
+  const api = await startFakeAPI()
+  api.routes.set('POST /v1/plan', (_req, res) => {
+    const one = defaultPlanResponse() as { plan: { steps: unknown[] }; detected: unknown[] }
+    json(res, 200, {
+      plan: { app: 'shop', steps: [one.plan.steps[0], { ...(one.plan.steps[0] as object), name: 'admin' }] },
+      detected: [one.detected[0], one.detected[0]],
+    })
+  })
+  const { client, close } = await connect(serverEnv(api.url))
+  try {
+    const result = await client.callTool({
+      name: 'deploy',
+      arguments: { dir: join(import.meta.dirname, 'fixtures', 'workspace-app'), replicas: 2 },
+    })
+    assert.equal(result.isError, true)
+    assert.match(textOf(result), /plans 2 services/)
+    assert.equal(api.all('POST', '/v1/builds').length, 0, 'it built before refusing')
   } finally {
     await close()
     await api.close()

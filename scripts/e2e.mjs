@@ -4655,7 +4655,6 @@ async function agentDeployAssertions(REFLINK) {
         last = await reach(probe.id, target, 8);
         return last.code === '200';
       }, { timeoutMs: 90_000, what: `${target} to answer 200 (last: ${last.code})` });
-      probeID = probe.id;
     });
 
     // --- The one call ------------------------------------------------------
@@ -4685,7 +4684,16 @@ async function agentDeployAssertions(REFLINK) {
 
     await step('the webjs app answers 200 on /__webjs/ready inside the fleet', async () => {
       assert(webjsService, 'the one-call deploy produced no service');
-      assert(probeID, 'there is no probe to reach it from');
+      // A probe INSIDE the webjs app: <name>.internal resolves within an app,
+      // so the Django probe above cannot see this service at all.
+      const { status, json: probe } = await request('/v1/machines', {
+        method: 'POST',
+        body: { app: webjsApp, vcpus: 1, mem_mib: 512, cmd: 'sleep 86400' },
+      });
+      assert(status === 201, `probe create: ${status} ${JSON.stringify(probe)}`);
+      created.push(probe.id);
+      probeID = probe.id;
+
       const target = `http://${webjsService.name}.internal:8080/__webjs/ready`;
       let last = { code: '000' };
       await waitFor(async () => {
