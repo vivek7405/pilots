@@ -211,3 +211,54 @@ Keep server-only code (database drivers, secrets, `node:*` builtins) in
 Use the wired-up database (Drizzle) for every piece of data the app stores;
 the playbook above has the modeling step. Never store app data in a JSON file,
 an in-memory array, or localStorage.
+
+## Conventions this app has settled
+
+These are decisions, not preferences. Each one exists because the alternative
+was tried and produced a specific defect.
+
+**The header is `position: fixed`, never `sticky`.** Sticky flickers its
+background for one frame on iOS WebKit during a client-router navigation, and
+every iOS browser is WebKit. A fixed header leaves normal flow, so `--header-h`
+reserves its height on the body, and a small script in the layout keeps that
+token exact with a `ResizeObserver` for the viewports where the nav wraps. The
+header also carries
+`border-right: var(--wj-scrollbar-compensation, 0px) solid transparent`, which
+is what the kit's dialog scroll lock needs from a fixed element: without it the
+header widens with the viewport when a modal hides the scrollbar and its
+contents slide sideways.
+
+**The primary nav holds product nouns; the identity menu holds account
+chores.** Overview, Services and Machines are the nav. Usage, Tokens, Team and
+Sign out are in the account menu. Volumes and Domains stay routable and are
+reached from the service they belong to. A flat list of seven equal items said
+nothing about what the product is for.
+
+**The active nav link is computed in the browser, not on the server.** The root
+layout is preserved across a client-router navigation, so a server-rendered
+highlight freezes on whichever page loaded first. `<app-nav>` re-derives it from
+`webjs:navigate`, and its `current` attribute seeds the first paint.
+
+**Every chrome action works with scripting off.** The account menu is a
+`<ui-dropdown-menu>`, whose panel is a `popover="manual"` element and is
+therefore invisible without JavaScript. The same org switch and sign out are
+real forms in the Account section of `/org`, and a `<noscript>` link in the
+header points there. Apply the same rule to anything new: if the only way to
+reach an action is inside an overlay, it needs a plain page that carries it too.
+
+**Toasts ride `?ok=` / `?err=` on an action's redirect.** The app deliberately
+runs no session middleware, so there is no flash bag. An action returns
+`redirect: '/services/x?ok=deployed'`, `<flash-toast>` in the layout reads the
+parameter once, publishes one toast, and strips it with `history.replaceState`
+so a reload does not repeat it. The keys are a CLOSED SET in
+`components/flash-toast.ts`: a message interpolated from the URL is a message
+an attacker writes into a surface the visitor trusts. Add a key there rather
+than putting prose in the query string.
+
+**Colours are tokens, with no exception for a file the kit wrote.** The kit's
+`sonner.ts` shipped `text-emerald-500`, `text-sky-500` and `text-amber-500`;
+`--success`, `--warning` and `--info` exist in `app/layout.ts` and are mapped in
+`public/input.css` so that file speaks in tokens like every other surface. We
+own every file under `components/ui/`, so a raw swatch arriving with a kit
+primitive is ours to fix. `test/ui/design-system.test.ts` fails on any that
+survive.

@@ -21,7 +21,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { APP_DIR, asUser, bootApp, signInAs } from '../helpers/app.ts';
@@ -177,4 +177,65 @@ test('the theme is a real choice, not a light-only page with dark tokens nobody 
   assert.match(layout, /light-dark\(/, 'the palette carries both halves of every colour');
   assert.match(layout, /\[data-theme='dark'\]\s*\{\s*color-scheme:\s*dark/, 'and an explicit dark forces the scheme');
   assert.match(layout, /classList\.toggle\('dark'/, "and syncs the class the kit's dark: variants key on");
+});
+
+test('the app chrome is a fixed header, one toast viewport and the flash reader', async () => {
+  const body = await render('/machines');
+
+  // Fixed, never sticky: sticky flickers its background for one frame on iOS
+  // WebKit during a client-router navigation, and every iOS browser is WebKit.
+  assert.match(body, /<header\s+class="fixed /, 'the header is position: fixed');
+  assert.ok(!/class="[^"]*sticky top-0/.test(body), 'and never sticky');
+  // A fixed header leaves normal flow, so the body has to reserve its height
+  // or the first row of every page hides underneath it.
+  assert.match(body, /--header-h: 56px;/);
+  assert.match(body, /padding-top: var\(--header-h\);/);
+
+  // Exactly one toast viewport in the document. Two would each take a copy of
+  // the bus and only the last-mounted one would receive anything.
+  assert.equal(body.match(/<ui-sonner\b/g)?.length, 1, 'one toast viewport');
+  assert.equal(body.match(/<flash-toast\b/g)?.length, 1, 'one flash reader');
+});
+
+test('the identity menu holds the account chores and the nav holds the product', async () => {
+  const body = await render('/machines');
+  const header = body.slice(body.indexOf('<header'), body.indexOf('</header>'));
+
+  for (const label of ['Usage', 'Tokens', 'Team', 'Sign out']) {
+    assert.ok(header.includes(`>${label}<`), `${label} is in the identity menu`);
+  }
+  // The nav is the product's nouns. Volumes and Domains stay routable and are
+  // reached from a service, not from a flat list of seven equal items.
+  const nav = header.slice(header.indexOf('<app-nav'), header.indexOf('</app-nav>'));
+  assert.ok(nav.includes('>Overview<') && nav.includes('>Services<') && nav.includes('>Machines<'));
+  assert.ok(!nav.includes('>Volumes<') && !nav.includes('>Keys<'), 'the chores left the nav');
+});
+
+test('no source file paints a raw Tailwind colour', () => {
+  // A raw swatch is the same in both themes and answers to no palette change,
+  // which is the one styling rule this app states without exception. The kit's
+  // sonner shipped three, and they are tokens here because we own the copy.
+  const offenders: string[] = [];
+  const dirs = ['app', 'components', 'modules', 'lib'];
+  const walk = (dir: string): string[] => {
+    const out: string[] = [];
+    for (const entry of readdirSync(join(APP_DIR, dir), { withFileTypes: true })) {
+      const rel = `${dir}/${entry.name}`;
+      if (entry.isDirectory()) out.push(...walk(rel));
+      else if (/\.(ts|js)$/.test(entry.name)) out.push(rel);
+    }
+    return out;
+  };
+  for (const file of dirs.flatMap(walk)) {
+    const source = readFileSync(join(APP_DIR, file), 'utf8');
+    for (const line of source.split('\n')) {
+      // `cn.ts` documents the conflict-resolution rules by naming utilities in
+      // prose; a comment paints nothing.
+      if (/^\s*(\*|\/\/)/.test(line)) continue;
+      if (/-(red|blue|gray|green|zinc|slate|amber|yellow|emerald|sky|rose|violet|orange)-[0-9]/.test(line)) {
+        offenders.push(`${file}: ${line.trim()}`);
+      }
+    }
+  }
+  assert.deepEqual(offenders, [], `raw Tailwind colours: ${offenders.join(' | ')}`);
 });

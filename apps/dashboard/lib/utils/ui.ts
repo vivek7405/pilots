@@ -31,6 +31,20 @@ export function pageHeading(title: unknown): TemplateResult {
   return html`<h1 class="text-2xl font-semibold tracking-tight m-0">${title}</h1>`;
 }
 
+/**
+ * The one or two letters an avatar falls back to when there is no image.
+ *
+ * A GitHub login is one word far more often than not, so a two-word split
+ * would leave most accounts with a single letter. Splitting on the separators
+ * a login may legally carry gives `vivek7405` a V and `ada-lovelace` an AL.
+ */
+export function initials(name: string): string {
+  const parts = name.split(/[-_. ]+/).filter(Boolean);
+  if (parts.length === 0) return '?';
+  const letters = parts.length === 1 ? [parts[0]![0]] : [parts[0]![0], parts[parts.length - 1]![0]];
+  return letters.join('').toUpperCase();
+}
+
 /** The muted paragraph under a page heading. Takes a string or an `html` fragment. */
 export function lede(content: unknown): TemplateResult {
   return html`<p class="text-muted-foreground mt-1 mb-6">${content}</p>`;
