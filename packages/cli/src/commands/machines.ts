@@ -218,6 +218,7 @@ function descriptionFor(verb: string): string {
 export interface Terminal {
   stdin: Readable & { isTTY?: boolean; setRawMode?: (mode: boolean) => void }
   stdout: Writable & { isTTY?: boolean; columns?: number; rows?: number }
+  stderr: Writable
   signals: EventEmitter
   exit: (code: number) => void
 }
@@ -225,6 +226,7 @@ export interface Terminal {
 export const processTerminal: Terminal = {
   stdin: process.stdin,
   stdout: process.stdout,
+  stderr: process.stderr,
   signals: process,
   exit: (code) => process.exit(code),
 }
@@ -267,10 +269,14 @@ export async function execStream(
     ...(tty ? { tty: true, cols: colsOf(term), rows: rowsOf(term) } : {}),
   })
   stream.stdout.pipe(term.stdout)
-  // Under a PTY frame 2 never arrives, so there is nothing to wire it to. A
-  // byte on stderr there would mean the pipe path ran when a terminal was
-  // asked for, and it is better seen than quietly forwarded.
-  if (!tty) stream.stderr.pipe(process.stderr)
+  // Always, terminal or not. A PTY merges the two devices so frame 2 never
+  // arrives under `tty`, which makes this free on the happy path, and the one
+  // case where it does arrive is the case that most needs reading: a guest
+  // whose agent predates the terminal mode ignores the flag, takes the
+  // three-pipe branch, and puts its complaint on frame 2. Leaving that in a
+  // PassThrough nobody reads means the console shows nothing at all and the
+  // reader has no thread to pull.
+  stream.stderr.pipe(term.stderr)
 
   // Raw mode is the one piece of global state this command owns, and a
   // terminal left in it is unusable afterwards: no echo, no line editing, no

@@ -75,6 +75,8 @@ interface Fake {
   stdout: PassThrough & { columns?: number; rows?: number }
   signals: EventEmitter
   printed: () => string
+  /** Frame 2, which a real PTY never sends and an older guest agent does. */
+  diagnostics: () => string
 }
 
 function fakeTerminal(columns = 100, rows = 30): Fake {
@@ -85,6 +87,9 @@ function fakeTerminal(columns = 100, rows = 30): Fake {
   const stdout = Object.assign(new PassThrough(), { isTTY: true, columns, rows })
   const chunks: Buffer[] = []
   stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
+  const stderr = new PassThrough()
+  const errs: Buffer[] = []
+  stderr.on('data', (chunk: Buffer) => errs.push(chunk))
   const term: Terminal = {
     stdin: Object.assign(stdin, {
       isTTY: true,
@@ -94,6 +99,7 @@ function fakeTerminal(columns = 100, rows = 30): Fake {
       },
     }),
     stdout,
+    stderr,
     signals,
     // Never the real one: the signal path exits, and a test that took that
     // path for real would report as the whole file vanishing.
@@ -101,7 +107,16 @@ function fakeTerminal(columns = 100, rows = 30): Fake {
       events.push(`exit ${code}`)
     },
   }
-  return { term, raw, events, stdin, stdout, signals, printed: () => Buffer.concat(chunks).toString() }
+  return {
+    term,
+    raw,
+    events,
+    stdin,
+    stdout,
+    signals,
+    printed: () => Buffer.concat(chunks).toString(),
+    diagnostics: () => Buffer.concat(errs).toString(),
+  }
 }
 
 /**
@@ -264,6 +279,27 @@ test('the terminal is untouched until the socket is up', async () => {
     assert.deepEqual(never.raw, [], 'a session that never opened still changed the terminal')
   } finally {
     await api.close()
+  }
+})
+
+test('a guest that answers on frame 2 is heard, not swallowed', async () => {
+  // A real PTY merges the devices and never sends frame 2. A guest whose agent
+  // predates the terminal mode ignores the flag, runs the three-pipe branch,
+  // and complains there. Buffering that in a PassThrough nobody reads is a
+  // console that shows nothing at all, which is the hardest version of this
+  // failure to debug and the one this box would hit today.
+  const ws = await fleet((conn) => {
+    conn.frame(2, 'sh: cannot set terminal process group\n')
+    conn.frame(3, new Uint8Array([1]))
+  })
+  const fake = fakeTerminal()
+  try {
+    const res = await runConsole(loggedIn(ws.url), ['box'], fake.term)
+    assert.equal(res.err, null)
+    assert.equal(fake.diagnostics(), 'sh: cannot set terminal process group\n')
+    assert.equal(res.code, 1)
+  } finally {
+    await ws.close()
   }
 })
 
