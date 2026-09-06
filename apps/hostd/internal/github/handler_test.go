@@ -403,3 +403,51 @@ func TestAPushWithNoOwningOrgStillBuilds(t *testing.T) {
 		t.Error("the build did not run")
 	}
 }
+
+// A push unpacks and repacks a repository under the work root, not /tmp.
+//
+// /tmp on a systemd host is very commonly tmpfs, and this path holds a whole
+// repository twice over. Doing that in the RAM of a host that is also running
+// other tenants' microVMs is not something a push should be able to ask for.
+func TestAPushStagesUnderTheWorkRoot(t *testing.T) {
+	builds := &recordingBuilds{}
+	d := pushDeps(t, tarballOf(t, "webjs"), builds)
+	root := filepath.Join(t.TempDir(), "push-work")
+	d.WorkRoot = root
+
+	seen := make(chan string, 1)
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			if entries, _ := os.ReadDir(root); len(entries) > 0 {
+				select {
+				case seen <- entries[0].Name():
+				default:
+				}
+				return
+			}
+		}
+	}()
+
+	if _, _, err := d.buildRef(context.Background(), pushEvent(), "abc1234", "shop", "org_1"); err != nil {
+		t.Fatalf("buildRef: %v", err)
+	}
+	close(done)
+
+	select {
+	case name := <-seen:
+		if !strings.HasPrefix(name, "pilot-push-") {
+			t.Errorf("staged %q under the work root, want a pilot-push-* directory", name)
+		}
+	default:
+		t.Fatal("nothing was staged under the work root; the repository went to the process temp dir")
+	}
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+		t.Errorf("the work root still holds %v after the push", entries)
+	}
+}

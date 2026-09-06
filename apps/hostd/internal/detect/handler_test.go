@@ -106,7 +106,7 @@ func post(t *testing.T, body io.Reader, query string) *httptest.ResponseRecorder
 	req := httptest.NewRequest(http.MethodPost, "/v1/plan"+query, body)
 	req.Header.Set("Content-Type", "application/x-tar")
 	rec := httptest.NewRecorder()
-	Handler()(rec, req)
+	Handler(t.TempDir())(rec, req)
 	return rec
 }
 
@@ -176,5 +176,65 @@ func extractInto(r io.Reader, dir string) error {
 			return err
 		}
 		f.Close()
+	}
+}
+
+// The context is unpacked under the root it was given, not under the process
+// temp dir.
+//
+// os.MkdirTemp("") resolves to /tmp, which on a systemd host is very commonly
+// tmpfs, so the difference is whether an authenticated caller can extract
+// 2 GiB into the RAM of a host that is also running other tenants' microVMs.
+// Asserted by handing the handler a root and watching a staging directory
+// appear inside it, because nothing about the answer says where it staged.
+func TestTheHandlerStagesUnderTheRootItWasGiven(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "plan-work")
+
+	staged := make(chan []string, 1)
+	done := make(chan struct{})
+	go func() {
+		// Sampled while the handler runs: the directory is removed on return,
+		// so a look afterwards finds nothing either way.
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			if entries, err := os.ReadDir(root); err == nil && len(entries) > 0 {
+				names := make([]string, 0, len(entries))
+				for _, e := range entries {
+					names = append(names, e.Name())
+				}
+				select {
+				case staged <- names:
+				default:
+				}
+				return
+			}
+		}
+	}()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/plan", tarOf(t, filepath.Join(fixtures, "webjs")))
+	rec := httptest.NewRecorder()
+	Handler(root)(rec, req)
+	close(done)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	select {
+	case names := <-staged:
+		if len(names) != 1 || !strings.HasPrefix(names[0], "pilot-plan-") {
+			t.Errorf("staged %v under the root, want one pilot-plan-* directory", names)
+		}
+	default:
+		t.Fatal("nothing was staged under the root; the context went to the process temp dir")
+	}
+
+	// And it cleans up after itself: a plan route that left every context
+	// behind would fill the cache root instead of tmpfs, which is not better.
+	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
+		t.Errorf("the root still holds %v after the handler returned", entries)
 	}
 }

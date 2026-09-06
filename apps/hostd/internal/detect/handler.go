@@ -19,9 +19,24 @@ import (
 // The body is a tar of the directory, the same shape and the same 2 GiB
 // ceiling POST /v1/builds takes, so a caller that can build can plan with the
 // bytes it already has.
-func Handler() http.HandlerFunc {
+//
+// root is where that tar is unpacked, and it is a parameter rather than the
+// process temp dir on purpose. os.MkdirTemp("") resolves to /tmp, which on a
+// systemd host is very commonly tmpfs: an authenticated caller with the
+// machines scope could then extract 2 GiB into the RAM of a host that is also
+// running other tenants' microVMs. The builder stages under the cache root for
+// exactly this reason, and the plan route stages beside it. Empty falls back
+// to the process temp dir, which is what a test wants.
+func Handler(root string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		dir, err := os.MkdirTemp("", "pilot-plan-*")
+		if root != "" {
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				api.WriteError(w, http.StatusInternalServerError, api.CodeInternal,
+					"cannot stage the context: "+err.Error(), api.NextInternal, nil)
+				return
+			}
+		}
+		dir, err := os.MkdirTemp(root, "pilot-plan-*")
 		if err != nil {
 			api.WriteError(w, http.StatusInternalServerError, api.CodeInternal,
 				"cannot stage the context: "+err.Error(), api.NextInternal, nil)

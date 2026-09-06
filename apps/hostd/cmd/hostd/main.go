@@ -488,11 +488,12 @@ func run() error {
 		CPUVendor: vendor, CPUVendorForced: vendorForced,
 		Usage:   ledger,
 		Compose: compose.Handler(),
-		Plan:    detect.Handler(),
+		Plan:    detect.Handler(filepath.Join(cfg.CacheRoot(), "plan-work")),
 		Lookup:  machineByName(f),
 		GitHub: github.Handler(github.Deps{
 			HostID: cfg.HostID, App: ghApp, Store: store, Builds: builder,
 			Rollout: rollout, Machines: mgr, Domain: cfg.WorkloadDomain,
+			WorkRoot: filepath.Join(cfg.CacheRoot(), "push-work"),
 			// The same value the API handlers render URLs with, so the link
 			// on a pull request opens the way the one from POST /v1/machines
 			// does. Without it a single box tells a developer https://<name>

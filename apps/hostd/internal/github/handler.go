@@ -33,6 +33,11 @@ type Deps struct {
 	Rollout  Rollout
 	Machines MachineManager
 	Domain   string
+	// WorkRoot is where a push unpacks and repacks a repository. Empty falls
+	// back to the process temp dir, which is what a test wants; a real host
+	// passes the same cache root the builder stages under, so a large
+	// repository never lands in tmpfs.
+	WorkRoot string
 	// URL renders a machine's hostname the way a client can open it, decided
 	// once at startup exactly as it is for the API handlers (see
 	// api.PublicURL). The zero value is the production shape -- https, no
@@ -302,7 +307,16 @@ func (d Deps) buildRef(ctx context.Context, ev Event, ref, app, org string) (str
 		return "", nil, err
 	}
 
-	dir, err := os.MkdirTemp("", "pilot-push-*")
+	// Under the work root, not /tmp: a repository is unpacked here and then
+	// repacked, and /tmp on a systemd host is very commonly tmpfs. Two copies
+	// of a large repo in the RAM of a host running other tenants' microVMs is
+	// not something a push should be able to ask for.
+	if d.WorkRoot != "" {
+		if err := os.MkdirAll(d.WorkRoot, 0o755); err != nil {
+			return "", nil, fmt.Errorf("github: staging %s: %w", d.WorkRoot, err)
+		}
+	}
+	dir, err := os.MkdirTemp(d.WorkRoot, "pilot-push-*")
 	if err != nil {
 		return "", nil, err
 	}
