@@ -155,9 +155,19 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 
 	enc := json.NewEncoder(w)
 	// ownerErr is set if the rootfs build id's owner could not be recorded.
-	// From then on no line carrying the id reaches the client and the build
-	// is reported as failed: the image is orphaned in object storage exactly
-	// as a failed upload's is, rather than handed out ownerless.
+	// The build is then reported as failed, and the image is orphaned in
+	// object storage exactly as a failed upload's is.
+	//
+	// Scoped precisely, because the guarantee is narrower than it first
+	// reads: this rewrites the STREAM. The builder appends every line to its
+	// own log store BEFORE it emits, so the recorded copy still ends on the
+	// builder's "build complete" line carrying the id, and a later GET on the
+	// log replays that with no failure line in it. What is guaranteed is that
+	// the id is never handed out USABLE, not that no copy of it is readable.
+	// It holds because the log route is scoped by the job's own tenancy row
+	// to the org that built it, so the id reaches nobody who was not going to
+	// own it, and with no owner row every deploy, create and redeploy refuses
+	// it. Unusable rather than ownerless.
 	var ownerErr error
 	ownerDone := false
 	write := func(line BuildLogLine) {

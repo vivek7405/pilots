@@ -28,6 +28,11 @@ type fakeBuilder struct {
 	log     []BuildLogLine
 	hasLog  bool
 	started int
+
+	// recordEmitted mirrors the real builder, which appends a line to its log
+	// store before it emits. Opt-in, so the tests that hand BuildLog a fixed
+	// log keep getting exactly that log.
+	recordEmitted bool
 }
 
 func (f *fakeBuilder) NewBuildID() string { return "bld-test" }
@@ -37,6 +42,10 @@ func (f *fakeBuilder) StartBuild(_ context.Context, id string, r io.Reader,
 	f.started++
 	_, _ = io.Copy(io.Discard, r)
 	for _, l := range f.lines {
+		if f.recordEmitted {
+			f.log = append(f.log, l)
+			f.hasLog = true
+		}
 		emit(l)
 	}
 	return f.result, f.err
@@ -593,5 +602,70 @@ func TestAnImageWhoseOwnerCannotBeRecordedIsNeverHandedOut(t *testing.T) {
 	}
 	if _, err := st.GetTenancy(ctx, image); !errors.Is(err, state.ErrNotFound) {
 		t.Errorf("a row was written after all: %v", err)
+	}
+}
+
+// The stream's verdict and the RECORDED log's verdict are not the same thing
+// when the owner row cannot be written, and the difference is worth pinning
+// rather than leaving to be discovered.
+//
+// The builder appends every line to its log store before it emits, so the
+// closure above rewrites only the streamed copy. A later GET on the log
+// replays a run ending on the builder's own "build complete" line, carrying
+// the id, with no failure line in it.
+//
+// That is safe, and it is not tidy. The log route is scoped by the job's own
+// tenancy row to the org that built it, so the id reaches nobody who was not
+// going to own it; and with no owner row, that org cannot use it either. The
+// last assertion here is the one that matters: the id is unusable rather than
+// ownerless.
+func TestTheRecordedLogKeepsTheLineTheStreamRewrote(t *testing.T) {
+	const image = "9d1729d5-bd7a-441b-8107-b5db4947c762"
+	_, st, fake := newTestServerWithManager(t)
+	seedKey(t, st, "pilot_org1_deploy", "org_1", "deploy")
+
+	fb := &fakeBuilder{
+		recordEmitted: true,
+		lines: []BuildLogLine{
+			{Step: "build complete", Stream: "status", Line: "done", Result: image, TS: 1},
+		},
+		result: image,
+	}
+	broken := &tenancyFailingStore{Store: st, failFor: image}
+	h := Routes(Deps{HostID: "host-test", Store: broken, Machines: fake, Builds: fb})
+
+	rec := postTarAs(t, h, "/v1/builds", "pilot_org1_deploy", []byte("tar-bytes"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("build: got %d (%s)", rec.Code, rec.Body.String())
+	}
+	for _, l := range decodeNDJSON(t, rec.Body.String()) {
+		if l.Result != "" {
+			t.Fatalf("the STREAM handed out an ownerless id: %+v", l)
+		}
+	}
+
+	// The recorded copy still carries it. This is the divergence, asserted so
+	// that the comment above the closure stays honest.
+	replay := do(t, h, "GET", "/v1/builds/bld-test/logs", "pilot_org1_deploy")
+	if replay.Code != http.StatusOK {
+		t.Fatalf("replaying the log: got %d (%s)", replay.Code, replay.Body.String())
+	}
+	var carried bool
+	for _, l := range decodeNDJSON(t, replay.Body.String()) {
+		if l.Result == image {
+			carried = true
+		}
+	}
+	if !carried {
+		t.Fatalf("the recorded log no longer carries the id; the comment on "+
+			"the write closure needs updating: %s", replay.Body.String())
+	}
+
+	// And the assertion the narrowed claim rests on: reading it changes
+	// nothing, because without an owner row it boots nowhere.
+	if boot := postJSON(t, h, "/v1/machines", "pilot_org1_deploy",
+		`{"vcpus":1,"mem_mib":512,"image":"`+image+`"}`); boot.Code != http.StatusNotFound {
+		t.Errorf("an id with no owner row was bootable by the org that built "+
+			"it: got %d (%s)", boot.Code, boot.Body.String())
 	}
 }
