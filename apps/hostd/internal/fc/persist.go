@@ -262,11 +262,53 @@ func Adopted(st State, stateRoot string, pool *nbd.DevicePool) *Machine {
 // AdoptedDead rebuilds the handle for a machine whose breadcrumbs name a
 // process that is gone: the state is what Cleanup needs (handlers, chroot,
 // state dir) and Cmd is nil, so nothing can signal a recycled pid.
+//
+// The handler pids get the same treatment, and they need it more. These
+// breadcrumbs survive a REBOOT -- that is why they are on disk rather than in
+// /var/run -- so after one they name pid numbers the kernel has since handed
+// to whatever started early on the new boot. Cleanup kills a handler's pid AND
+// its process group, so re-attaching a recycled one would SIGKILL an unrelated
+// service. A handler is only picked back up when its cmdline still shows the
+// hostd subcommand serving THIS machine's socket.
 func AdoptedDead(st State, stateRoot string, pool *nbd.DevicePool) *Machine {
+	if !handlerIs(st.NBDPid, nbd.SubcommandName, st.NBDControl) {
+		st.NBDPid = 0
+	}
+	if !handlerIs(st.UffdPid, uffd.SubcommandName, st.UffdControl, st.UffdSocket) {
+		st.UffdPid = 0
+	}
 	m := Adopted(st, stateRoot, pool)
 	if m == nil {
 		return nil
 	}
 	m.Cmd = nil
 	return m
+}
+
+// handlerIs reports whether pid is still the hostd handler the breadcrumbs
+// recorded: the right subcommand, carrying a path only that machine's handler
+// carries. The pid alone proves nothing across a reboot.
+func handlerIs(pid int, subcommand string, paths ...string) bool {
+	if pid <= 0 {
+		return false
+	}
+	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cmdline"))
+	if err != nil {
+		return false
+	}
+	args := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
+	if len(args) < 2 || args[1] != subcommand {
+		return false
+	}
+	for _, want := range paths {
+		if want == "" {
+			continue
+		}
+		for _, arg := range args {
+			if arg == want {
+				return true
+			}
+		}
+	}
+	return false
 }
