@@ -648,8 +648,13 @@ func reconcile(cfg *config.Config, mgr *machines.Manager, devices *nbd.DevicePoo
 	var adopted int
 	for _, r := range found {
 		if !r.Alive {
-			// The process is gone; clear the breadcrumbs so the next start
-			// does not keep trying to adopt a machine that no longer exists.
+			// The process is gone. A zombie, a Firecracker that died while
+			// hostd was down, or a pid recycled to something else all read the
+			// same here (LiveProcess checks comm and a non-zombie state). If
+			// the row still says this host runs it, that is an exit nobody
+			// handled: react as onExit would, with no process to wait for.
+			// Otherwise the breadcrumbs are simply stale.
+			mgr.ExitedWhileDown(context.Background(), r.State)
 			_ = fc.ClearBreadcrumbs(filepath.Join(cfg.MachineStateRoot(), r.State.MachineID))
 			continue
 		}

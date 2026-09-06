@@ -1111,3 +1111,44 @@ func TestACancelledDeployStillCleansUpItsMachine(t *testing.T) {
 			svc.ReleaseID)
 	}
 }
+
+// An error replica does not accumulate.
+//
+// The exit path leaves a replica whose Firecracker died in error, and nothing
+// wakes it again: the autoscaler replaces it from the release instead. What
+// bounds how many pile up is the prune every deploy already runs, which keeps
+// the current release and one rollback target and destroys the rest. So the
+// second deploy after the exit is what clears it, and that is asserted here
+// rather than assumed.
+func TestAnErrorReplicaIsPrunedByTheSecondDeployAfterIt(t *testing.T) {
+	ctx := context.Background()
+	m, fm, store, _ := fixture(t, 1)
+
+	if _, err := m.Deploy(ctx, "svc-1", "rootfs-1", nil); err != nil {
+		t.Fatal(err)
+	}
+	// The replica of the first release dies the way the incident's did.
+	row, err := store.GetMachine(ctx, "m-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	row.State = "error"
+	if err := store.PutMachine(ctx, row); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := m.Deploy(ctx, "svc-1", "rootfs-2", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := eventsWithPrefix(fm, "destroy:m-1"); len(got) != 0 {
+		t.Fatalf("the rollback target was destroyed by the first deploy after the exit: %v", got)
+	}
+
+	fm.events = nil
+	if _, err := m.Deploy(ctx, "svc-1", "rootfs-3", nil); err != nil {
+		t.Fatal(err)
+	}
+	if got := eventsWithPrefix(fm, "destroy:m-1"); len(got) == 0 {
+		t.Errorf("the error replica survived the second deploy after it: %v", fm.events)
+	}
+}

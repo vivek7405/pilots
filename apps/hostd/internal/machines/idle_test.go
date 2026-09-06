@@ -298,3 +298,41 @@ func putService(t *testing.T, st state.Store, id, releaseID string) {
 		t.Fatalf("PutService: %v", err)
 	}
 }
+
+// A machine in error is not a suspend candidate.
+//
+// This is the loop the incident spun in: the machine's Firecracker was gone,
+// the row still said running, and every ten seconds for two hours the monitor
+// took the lock and tried to snapshot a corpse. The exit now moves the row to
+// error, and the state check at the top of the sweep is what makes that stop
+// -- so the check is asserted rather than assumed.
+func TestAnErrorMachineIsNeverAnIdleCandidate(t *testing.T) {
+	m, rec, _ := newExitManager(t)
+	ctx := context.Background()
+
+	row := runningRow("m-dead")
+	row.State = StateError
+	row.LastActivity = time.Now().Add(-2 * DefaultIdleTimeout).Unix()
+	raw, err := marshalKnobs(api.Knobs{AutoStop: "suspend", AutoStart: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row.KindKnobs = raw
+	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
+		t.Fatal(err)
+	}
+	rec.calls = nil
+
+	m.suspendIdleMachines(ctx)
+
+	if w := writesOnly(rec.order()); len(w) != 0 {
+		t.Errorf("the idle monitor wrote %v for a machine in error", w)
+	}
+	got, err := m.opts.Store.GetMachine(ctx, "m-dead")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != StateError {
+		t.Errorf("the row moved to %q; the monitor acted on a machine that is down", got.State)
+	}
+}

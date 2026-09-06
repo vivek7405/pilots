@@ -148,6 +148,12 @@ type Manager struct {
 	// retired keeps the engine counters monotonic across a machine going
 	// away. See retiredUffd.
 	retired retiredUffd
+
+	// exits is the wall time of the last exit nobody asked for, per machine.
+	// In memory on purpose: its one reader is the crash-loop guard in
+	// settleExit, and a gossiped row for a per-process policy would be a
+	// second copy of a contract. Destroy forgets the entry.
+	exits sync.Map // machine id -> time.Time
 }
 
 func New(opts Options) *Manager {
@@ -176,10 +182,23 @@ func (m *Manager) get(id string) (*fc.Machine, bool) {
 	return fcm, ok
 }
 
+// put registers a live process and starts watching it.
+//
+// The ONE place a machine enters the registry, so it is the one place its exit
+// is subscribed to: create, wake, rescue, redeploy, checkpoint restore and
+// adoption all land here.
 func (m *Manager) put(id string, fcm *fc.Machine) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.running[id] = fcm
+	m.mu.Unlock()
+
+	exited := fcm.Exited()
+	go func() {
+		<-exited
+		if info := fcm.Exit(); !info.Expected {
+			m.onExit(context.Background(), id, fcm, info)
+		}
+	}()
 }
 
 func (m *Manager) drop(id string) {
@@ -460,6 +479,7 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 		errs = append(errs, fmt.Errorf("remove cache: %w", err))
 	}
 	m.forgetToken(id)
+	m.exits.Delete(id)
 
 	if err := m.deleteRemoteState(ctx, id); err != nil {
 		errs = append(errs, err)

@@ -43,6 +43,15 @@ const noApplicationCommand = "this image carries no application command"
 // allows, and says which it took. The ONE place the vendor decision is made.
 func (m *Manager) bringUp(ctx context.Context, row *state.Machine) (*fc.Machine, string, error) {
 	if row.MemBuildID == "" {
+		if row.RootfsBuildID != "" {
+			// A disk with no memory to go with it: the machine's Firecracker
+			// exited on its own and the block server's dirty bitmap was
+			// captured on the way out (settleExit), or it cold-booted once and
+			// its host then died. Either way the disk is the freshest durable
+			// state there is, and booting it is tier 3 in place.
+			fcm, err := m.bootFromDisk(ctx, row, fc.Backends{}, row.RootfsBuildID)
+			return fcm, state.StartColdBoot, err
+		}
 		// Never snapshotted, so there is no disk in object storage to boot
 		// from either. The same message wakeFromSuspend produces, because the
 		// caller's handling is the same.
@@ -326,6 +335,16 @@ func (m *Manager) recordStart(ctx context.Context, row *state.Machine, kind stri
 	if kind != state.StartColdBoot {
 		return func() {}
 	}
+	return m.discardMemoryImage(ctx, row)
+}
+
+// discardMemoryImage forgets the row's memory build and returns the closure
+// that removes it, its vmstate and its fault order from object storage.
+//
+// The closure runs AFTER the row write, so nothing can read a row naming a
+// build that is already gone. Shared by a cold boot and by an exit whose disk
+// was captured: in both the disk has moved past the image.
+func (m *Manager) discardMemoryImage(ctx context.Context, row *state.Machine) func() {
 	superseded := row.MemBuildID
 	row.MemBuildID = ""
 	return func() {
