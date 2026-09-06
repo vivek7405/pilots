@@ -1,0 +1,6 @@
+{
+  "name": "admin",
+  "private": true,
+  "scripts": { "build": "vite build" },
+  "devDependencies": { "vite": "6" }
+}

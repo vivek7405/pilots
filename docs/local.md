@@ -425,7 +425,15 @@ PILOTS_E2E=1 PILOTS_E2E_FULL=1 \
 ```
 
 Without `PILOTS_E2E_FULL=1` it runs the process-only half and skips everything
-that boots a machine, which on a Firecracker host is most of what you want.
+that boots a machine, which on a Firecracker host is most of what you want. The
+`POST /v1/plan` cases are in that half: a tar in, a plan out, no Firecracker
+needed, so the whole resolution ladder is asserted on any machine.
+
+**The agent gate needs npm registry egress FROM THE GUEST.** Under
+`PILOTS_E2E_FULL=1` it builds the webjs fixture for real, which runs
+`npm install` inside the build. A host that does not forward guest traffic
+fails that case while every other guest-network assertion passes; see the
+egress note below, which is the same cause.
 
 **Guest egress to the public internet needs a host that forwards.** A guest is
 SNAT'd inside its namespace and the host has to route the packet out from

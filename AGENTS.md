@@ -156,8 +156,16 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
 - Its API key comes from `hostd bootstrap-key` and must carry `admin`: the
   battery drives routes from every scope, and a narrower key turns real
   assertions into 403s.
+- The **agent gate** inside it takes a webjs app with no Dockerfile and no
+  compose file to a 200 on `/__webjs/ready` through the router in ONE `deploy`
+  call, and drives the `unknown` loop: a directory nothing recognises answers
+  with what an agent needs to write a Dockerfile, and the run writes one. That
+  is bar 4 as a test rather than a claim.
 - `scripts/cluster/gate.sh` is the fleet battery, a numbered `say` section per
   property, run against the local multi-node rig. It grows monotonically too.
+  Section 21 covers the push path against `scripts/cluster/fake-github.py`,
+  because a delivery has no client on the other end and nothing about it is
+  observable from the public API alone.
 
 **Where a new test belongs** — the split is what can *observe* the assertion:
 

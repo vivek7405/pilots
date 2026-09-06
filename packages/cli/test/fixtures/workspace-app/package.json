@@ -1,0 +1,11 @@
+{
+  "name": "workspace-app",
+  "private": true,
+  "type": "module",
+  "workspaces": ["web", "admin"],
+  "dependencies": {
+    "@webjsdev/cli": "latest",
+    "@webjsdev/core": "latest",
+    "@webjsdev/server": "latest"
+  }
+}

@@ -75,6 +75,7 @@ var scopePrefixes = []struct {
 	{"/v1/volumes", ScopeMachines},
 	{"/v1/sprites", ScopeMachines},
 	{"/v1/compose/plan", ScopeMachines},
+	{"/v1/plan", ScopeMachines},
 	{"/v1/hosts", ScopeMachines},
 	{"/v1/builds", ScopeDeploy},
 	{"/v1/services", ScopeDeploy},
@@ -179,7 +180,8 @@ func WithAuth(d Deps, next http.Handler) http.Handler {
 		rec, err := d.Store.GetAPIKeyByHash(r.Context(), hash)
 		if err != nil {
 			if !errors.Is(err, state.ErrNotFound) {
-				writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "auth lookup failed"})
+				WriteError(w, http.StatusInternalServerError, CodeInternal,
+					"auth lookup failed", NextInternal, nil)
 				return
 			}
 			unauthorized(w)
@@ -198,7 +200,8 @@ func WithAuth(d Deps, next http.Handler) http.Handler {
 		// latency, with no host having to be reachable for the check.
 		revoked, err := d.tenancy().Revoked(r.Context(), hash)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: "auth lookup failed"})
+			WriteError(w, http.StatusInternalServerError, CodeInternal,
+				"auth lookup failed", NextInternal, nil)
 			return
 		}
 		if revoked {
@@ -207,8 +210,9 @@ func WithAuth(d Deps, next http.Handler) http.Handler {
 		}
 
 		if need, ok := scopeAllows(rec.Scopes, r.URL.Path); !ok {
-			writeJSON(w, http.StatusForbidden,
-				ErrorResponse{Error: "scope " + need + " required"})
+			WriteError(w, http.StatusForbidden, CodeScopeRequired,
+				"scope "+need+" required",
+				"mint a key with scope "+need+": POST /v1/api-keys with an admin key", nil)
 			return
 		}
 
@@ -299,5 +303,6 @@ func OfferedSubprotocol(r *http.Request) string {
 
 func unauthorized(w http.ResponseWriter) {
 	w.Header().Set("WWW-Authenticate", `Bearer realm="pilots"`)
-	writeJSON(w, http.StatusUnauthorized, ErrorResponse{Error: "unauthorized"})
+	WriteError(w, http.StatusUnauthorized, CodeUnauthorized, "unauthorized",
+		"pass an API key: pilot login, or set PILOT_API_KEY", nil)
 }

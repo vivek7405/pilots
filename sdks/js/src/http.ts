@@ -12,8 +12,15 @@ import {
   NotFoundError,
   PilotsError,
   QuotaExceededError,
+  HealthGateError,
+  UnknownFrameworkError,
 } from './errors.ts'
-import type { ComposePlanError as ComposePlanErrorBody, QuotaExceededResponse } from './types.ts'
+import type {
+  ComposePlanError as ComposePlanErrorBody,
+  ComposeUnknownDetails,
+  HealthGateDetails,
+  QuotaExceededResponse,
+} from './types.ts'
 
 export type FetchLike = typeof globalThis.fetch
 
@@ -141,20 +148,36 @@ async function toError(res: Response, method: string, path: string): Promise<Pil
   }
   const record = (parsed ?? {}) as Record<string, unknown>
   const message = typeof record.error === 'string' && record.error ? record.error : `${method} ${path} failed with ${res.status}`
+  // Carried on every class below, so a code this SDK version does not know
+  // still reaches the caller with its next step attached.
+  const init = {
+    body,
+    ...(typeof record.code === 'string' ? { code: record.code } : {}),
+    ...(typeof record.next === 'string' ? { next: record.next } : {}),
+    ...(record.details !== undefined ? { details: record.details } : {}),
+  }
 
-  if (res.status === 404) return new NotFoundError(message, { body })
+  if (res.status === 404) return new NotFoundError(message, init)
   if (res.status === 429 && typeof record.quota === 'string') {
     const q = record as unknown as QuotaExceededResponse
     return new QuotaExceededError(
       message,
       { quota: q.quota, limit: q.limit, used: q.used, ...(q.scope !== undefined ? { scope: q.scope } : {}) },
-      { body },
+      init,
     )
   }
   if (res.status === 400 && Array.isArray(record.unsupported)) {
-    return new ComposePlanError(parsed as ComposePlanErrorBody, { body })
+    return new ComposePlanError(parsed as ComposePlanErrorBody, init)
   }
-  return new PilotsError(message, { status: res.status, body })
+  // Matched on the code and never on the status: 422 is the shape of this one
+  // answer today, and a later 422 for something else must not land here.
+  if (record.code === 'health_gate_failed') {
+    return new HealthGateError(message, record.details as HealthGateDetails, init)
+  }
+  if (record.code === 'unknown_framework') {
+    return new UnknownFrameworkError(message, record.details as ComposeUnknownDetails, init)
+  }
+  return new PilotsError(message, { status: res.status, ...init })
 }
 
 /**

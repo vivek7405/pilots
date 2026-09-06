@@ -50,6 +50,9 @@ func TestScopesAreEnforced(t *testing.T) {
 		// The stub's 503 is the proof the scope let it through: a 403 would
 		// name the scope instead, and a 404 would mean the route was gone.
 		{"machines key on the compose plan", machinesKey, "POST", "/v1/compose/plan", http.StatusServiceUnavailable, ""},
+		// A route with no line in scopePrefixes silently requires admin, so a
+		// machines-scoped key reaching the front door is the assertion.
+		{"machines key on the plan route", machinesKey, "POST", "/v1/plan", http.StatusServiceUnavailable, ""},
 		{"deploy key on services", deployKey, "GET", "/v1/services", http.StatusOK, ""},
 		{"deploy key on machines", deployKey, "GET", "/v1/machines", http.StatusOK, ""},
 		{"deploy key on quotas", deployKey, "GET", "/v1/quotas/org_1", http.StatusForbidden, "scope admin required"},

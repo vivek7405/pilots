@@ -8,26 +8,51 @@
  * body string to find out what happened.
  */
 
-import type { BuildLogLine, ComposeUnsupported, ComposePlanError as ComposePlanErrorBody } from './types.ts'
+import type {
+  BuildLogLine,
+  ComposeUnsupported,
+  ComposePlanError as ComposePlanErrorBody,
+  ComposeUnknownDetails,
+  HealthGateDetails,
+} from './types.ts'
 
 export interface PilotsErrorInit {
   /** HTTP status, or 0 for an error raised before a request was made. */
   status?: number
   /** The response body, verbatim, for anything the fields did not capture. */
   body?: string
+  /** The body's stable `code`. Empty when the server sent none. */
+  code?: string
+  /** The body's `next`: the one thing to do about it. */
+  next?: string
+  /** The body's `details`, typed per code. */
+  details?: unknown
   cause?: unknown
 }
 
-/** Base class for everything this SDK throws. */
+/**
+ * Base class for everything this SDK throws.
+ *
+ * `code`, `next` and `details` are on the base rather than only on the
+ * subclasses, because a caller that does not branch still wants to print the
+ * next step, and a code this SDK version has never heard of must still reach
+ * it rather than be dropped on the way through.
+ */
 export class PilotsError extends Error {
   readonly status: number
   readonly body: string
+  readonly code: string
+  readonly next: string
+  readonly details: unknown
 
   constructor(message: string, init: PilotsErrorInit = {}) {
     super(message, init.cause !== undefined ? { cause: init.cause } : undefined)
     this.name = 'PilotsError'
     this.status = init.status ?? 0
     this.body = init.body ?? ''
+    this.code = init.code ?? ''
+    this.next = init.next ?? ''
+    this.details = init.details
   }
 }
 
@@ -105,5 +130,39 @@ export class BuildFailedError extends PilotsError {
     this.name = 'BuildFailedError'
     this.buildId = buildId
     this.lines = lines
+  }
+}
+
+/**
+ * 422 `health_gate_failed`. The release built and started, and never answered
+ * its health check inside the grace period.
+ *
+ * Matched by `code` and never by status alone: 422 is the shape of this one
+ * answer, and a future 422 for something else must not be caught here.
+ */
+export class HealthGateError extends PilotsError {
+  readonly details: HealthGateDetails
+
+  constructor(message: string, details: HealthGateDetails, init: PilotsErrorInit = {}) {
+    super(message, { status: 422, ...init, details })
+    this.name = 'HealthGateError'
+    this.details = details
+  }
+}
+
+/**
+ * 400 `unknown_framework`. The directory has no compose file, no Dockerfile
+ * and no framework the platform recognises.
+ *
+ * `details` carries the listing, the manifests and the two Dockerfile rules,
+ * which is enough to write one without reading the repository again.
+ */
+export class UnknownFrameworkError extends PilotsError {
+  readonly details: ComposeUnknownDetails
+
+  constructor(message: string, details: ComposeUnknownDetails, init: PilotsErrorInit = {}) {
+    super(message, { status: 400, ...init, details })
+    this.name = 'UnknownFrameworkError'
+    this.details = details
   }
 }

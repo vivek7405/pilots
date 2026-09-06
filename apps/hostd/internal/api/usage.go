@@ -28,17 +28,19 @@ func (d Deps) handleUsage(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	until, err := unixParam(q.Get("until"), time.Now().Unix())
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "until: " + err.Error()})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "until: "+err.Error(),
+			"since and until are unix seconds, since before until", nil)
 		return
 	}
 	since, err := unixParam(q.Get("since"), until-defaultUsageWindow)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "since: " + err.Error()})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "since: "+err.Error(),
+			"since and until are unix seconds, since before until", nil)
 		return
 	}
 	if since >= until {
-		writeJSON(w, http.StatusBadRequest,
-			ErrorResponse{Error: "since must be before until"})
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "since must be before until",
+			"since and until are unix seconds, since before until", nil)
 		return
 	}
 
@@ -52,7 +54,7 @@ func (d Deps) handleUsage(w http.ResponseWriter, r *http.Request) {
 	if d.Usage != nil {
 		totals, err := d.Usage.Sum(since, until)
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, ErrorResponse{Error: err.Error()})
+			writeMapped(w, err)
 			return
 		}
 		for org, t := range totals {

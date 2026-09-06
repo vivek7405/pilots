@@ -5,9 +5,12 @@ package services
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
@@ -106,10 +109,25 @@ func (m *Manager) probe(ctx context.Context, machineID string, h HealthSpec) err
 	}
 }
 
+// probeFailure is one failed probe with no address in it.
+//
+// The probe target is this host's view of the replica, a 10.x address inside
+// a network namespace. Printing it sent people to debug a host they cannot
+// reach from where they are reading the error, so it is not in the answer at
+// all; what is in the answer is what the replica said, or why it said nothing.
+type probeFailure struct{ last api.HealthLast }
+
+func (p *probeFailure) Error() string {
+	if p.last.Error != "" {
+		return p.last.Error
+	}
+	return fmt.Sprintf("last answer was %d %s", p.last.Status, p.last.Body)
+}
+
 func (m *Manager) probeHTTP(ctx context.Context, machineID string, h HealthSpec) error {
 	addr, ok := m.opts.Machines.AppAddr(machineID)
 	if !ok {
-		return fmt.Errorf("machine %s has no address yet", machineID)
+		return &probeFailure{api.HealthLast{Error: "the replica has no address yet"}}
 	}
 	url := "http://" + addr + h.Path
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -118,14 +136,28 @@ func (m *Manager) probeHTTP(ctx context.Context, machineID string, h HealthSpec)
 	}
 	resp, err := (&http.Client{}).Do(req)
 	if err != nil {
-		return fmt.Errorf("GET %s: %w", url, err)
+		return &probeFailure{api.HealthLast{Error: describeDial(err, addr)}}
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode/100 != 2 {
-		return fmt.Errorf("GET %s: %s: %s", url, resp.Status, readBody(resp))
+		return &probeFailure{api.HealthLast{
+			Status: resp.StatusCode, Body: readBody(resp)}}
 	}
 	return nil
+}
+
+// describeDial names the failure without the address. Connection refused is
+// the one that matters and it has exactly two causes worth naming: an app on
+// the wrong port, or an app bound to 127.0.0.1 inside the guest.
+func describeDial(err error, addr string) string {
+	switch {
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "connection refused on port 8080: the app is not listening on 0.0.0.0:$PORT"
+	case errors.Is(err, context.DeadlineExceeded), os.IsTimeout(err):
+		return "no answer on port 8080 within the timeout"
+	}
+	return strings.ReplaceAll(err.Error(), addr, "the replica")
 }
 
 func (m *Manager) probeCmd(ctx context.Context, machineID string, h HealthSpec) error {
@@ -137,11 +169,13 @@ func (m *Manager) probeCmd(ctx context.Context, machineID string, h HealthSpec) 
 	// run: the check is about the process's own view, not the host's.
 	res, err := m.opts.Machines.Exec(ctx, machineID, api.ExecRequest{Cmd: cmd, User: "root"})
 	if err != nil {
-		return fmt.Errorf("exec %q: %w", cmd, err)
+		return &probeFailure{api.HealthLast{
+			Error: fmt.Sprintf("exec %q: %v", cmd, err)}}
 	}
 	if res.ExitCode != 0 {
-		return fmt.Errorf("exec %q exited %d: %s", cmd, res.ExitCode,
-			strings.TrimSpace(res.Stdout+res.Stderr))
+		return &probeFailure{api.HealthLast{
+			Error: fmt.Sprintf("exec %q exited %d: %s", cmd, res.ExitCode,
+				strings.TrimSpace(res.Stdout+res.Stderr))}}
 	}
 	return nil
 }
@@ -216,12 +250,13 @@ func (m *Manager) waitHealthy(ctx context.Context, machineID string, h HealthSpe
 			}
 		}
 		if time.Now().After(deadline) {
-			if last == nil {
-				last = fmt.Errorf("only %d of %d consecutive checks passed",
-					consecutive, h.HealthyThreshold)
+			// Typed, not a sentence: the handler turns this into the 422 and
+			// the SDKs branch on it, so the replica, the grace and the last
+			// answer have to survive as fields rather than as prose.
+			return &api.HealthGateDetails{
+				Replica: machineID, GraceSec: h.GraceSec,
+				Last: lastOf(last, consecutive, h.HealthyThreshold),
 			}
-			return fmt.Errorf("machine %s did not become healthy within %ds: %w",
-				machineID, h.GraceSec, last)
 		}
 		select {
 		case <-ctx.Done():
@@ -241,4 +276,30 @@ func (m *Manager) waitHealthy(ctx context.Context, machineID string, h HealthSpe
 		case <-time.After(interval):
 		}
 	}
+}
+
+// lastOf reads the replica's last answer off the last probe failure. A nil
+// last means every probe passed but never enough of them in a row, which is
+// its own answer and not a failure to report.
+func lastOf(last error, consecutive, threshold int) api.HealthLast {
+	var p *probeFailure
+	if errors.As(last, &p) {
+		return p.last
+	}
+	if last != nil {
+		return api.HealthLast{Error: last.Error()}
+	}
+	return api.HealthLast{Error: fmt.Sprintf(
+		"only %d of %d consecutive checks passed", consecutive, threshold)}
+}
+
+// withRelease names the service and release on a gate failure; any other
+// error passes through untouched. One helper because six call sites in
+// manager.go would otherwise each carry their own copy of the same two lines.
+func withRelease(err error, serviceID, releaseID string) error {
+	var gate *api.HealthGateDetails
+	if errors.As(err, &gate) {
+		gate.Service, gate.Release = serviceID, releaseID
+	}
+	return err
 }

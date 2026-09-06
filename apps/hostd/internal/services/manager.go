@@ -238,7 +238,7 @@ func (m *Manager) rollOut(ctx context.Context, svc *state.Service, rel *state.Re
 	}
 	created = append(created, first.ID)
 
-	if err := m.waitHealthy(ctx, first.ID, health); err != nil {
+	if err := withRelease(m.waitHealthy(ctx, first.ID, health), svc.ID, rel.ID); err != nil {
 		return created, err
 	}
 
@@ -262,7 +262,7 @@ func (m *Manager) rollOut(ctx context.Context, svc *state.Service, rel *state.Re
 			return created, fmt.Errorf("services: replica %d of %s: %w", i+1, rel.ID, err)
 		}
 		created = append(created, r.ID)
-		if err := m.waitHealthy(ctx, r.ID, health); err != nil {
+		if err := withRelease(m.waitHealthy(ctx, r.ID, health), svc.ID, rel.ID); err != nil {
 			return created, err
 		}
 	}
@@ -338,14 +338,14 @@ func (m *Manager) rollOutOnVolume(ctx context.Context, svc *state.Service, rel *
 		if err != nil {
 			return fmt.Errorf("services: first replica of %s: %w", rel.ID, err)
 		}
-		if err := m.waitHealthy(ctx, created.ID, health); err != nil {
+		if err := withRelease(m.waitHealthy(ctx, created.ID, health), svc.ID, rel.ID); err != nil {
 			return err
 		}
 	} else {
 		if err := m.redeploy(ctx, mach, rel); err != nil {
 			return fmt.Errorf("services: redeploying %s onto %s: %w", mach.ID, rel.ID, err)
 		}
-		if err := m.waitHealthy(ctx, mach.ID, health); err != nil {
+		if err := withRelease(m.waitHealthy(ctx, mach.ID, health), svc.ID, rel.ID); err != nil {
 			prev, perr := m.opts.Store.GetRelease(ctx, svc.ReleaseID)
 			if perr != nil {
 				return errors.Join(err, perr)
@@ -353,7 +353,7 @@ func (m *Manager) rollOutOnVolume(ctx context.Context, svc *state.Service, rel *
 			if rerr := m.redeploy(ctx, mach, prev); rerr != nil {
 				return errors.Join(err, rerr)
 			}
-			return errors.Join(err, m.waitHealthy(ctx, mach.ID, health))
+			return errors.Join(err, withRelease(m.waitHealthy(ctx, mach.ID, health), svc.ID, prev.ID))
 		}
 	}
 	rel.Healthy = true
@@ -558,7 +558,7 @@ func (m *Manager) Rollback(ctx context.Context, serviceID string) (*state.Releas
 			}
 		}
 		for _, mach := range machines {
-			if err := m.waitHealthy(ctx, mach.ID, health); err != nil {
+			if err := withRelease(m.waitHealthy(ctx, mach.ID, health), svc.ID, target.ID); err != nil {
 				return nil, err
 			}
 		}

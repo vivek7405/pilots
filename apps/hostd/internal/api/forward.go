@@ -65,8 +65,9 @@ func (d Deps) forwardToArbiter(w http.ResponseWriter, r *http.Request, serviceID
 		out.Header.Set(forwardedHeader, d.HostID)
 	}
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
-		writeJSON(w, http.StatusServiceUnavailable, ErrorResponse{
-			Error: "the host that writes this service is unreachable: " + err.Error()})
+		WriteError(w, http.StatusServiceUnavailable, CodeUnavailable,
+			"the host that writes this service is unreachable: "+err.Error(),
+			"retry in a minute; self-heal moves the service if its host stays down", nil)
 	}
 	proxy.ServeHTTP(w, r)
 	return true

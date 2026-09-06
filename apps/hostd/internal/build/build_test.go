@@ -50,7 +50,7 @@ func TestExtractContextRefusesPathsOutsideItself(t *testing.T) {
 		"nested/../ok.txt":  "fine",
 	}, nil)
 
-	err := extractContext(r, dir, 1<<20)
+	err := ExtractContext(r, dir, 1<<20)
 	if err == nil || !strings.Contains(err.Error(), "outside") {
 		t.Fatalf("got %v, want a refusal naming the escaping path", err)
 	}
@@ -64,8 +64,8 @@ func TestExtractContextDropsSymlinks(t *testing.T) {
 	r := contextTar(t, map[string]string{"Dockerfile": "FROM scratch\n"},
 		[]tar.Header{{Name: "escape", Typeflag: tar.TypeSymlink, Linkname: "/etc", Mode: 0o777}})
 
-	if err := extractContext(r, dir, 1<<20); err != nil {
-		t.Fatalf("extractContext: %v", err)
+	if err := ExtractContext(r, dir, 1<<20); err != nil {
+		t.Fatalf("ExtractContext: %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(dir, "escape")); err == nil {
 		t.Fatal("a symlink from the context archive was recreated on disk")
@@ -80,7 +80,7 @@ func TestExtractContextEnforcesTheSizeLimit(t *testing.T) {
 		"big.bin":    strings.Repeat("x", 4096),
 	}, nil)
 
-	err := extractContext(r, dir, 1024)
+	err := ExtractContext(r, dir, 1024)
 	if err == nil || !strings.Contains(err.Error(), "larger than") {
 		t.Fatalf("got %v, want a refusal naming the limit", err)
 	}
@@ -92,8 +92,8 @@ func TestExtractContextWritesTheFiles(t *testing.T) {
 		"Dockerfile": "FROM alpine\n", "src/app.js": "console.log(1)\n",
 	}, nil)
 
-	if err := extractContext(r, dir, 1<<20); err != nil {
-		t.Fatalf("extractContext: %v", err)
+	if err := ExtractContext(r, dir, 1<<20); err != nil {
+		t.Fatalf("ExtractContext: %v", err)
 	}
 	got, err := os.ReadFile(filepath.Join(dir, "src", "app.js"))
 	if err != nil || string(got) != "console.log(1)\n" {

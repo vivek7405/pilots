@@ -1,7 +1,13 @@
 /**
- * The thirteen tools.
+ * The tools.
  *
- * Two rules run through all of them. First, a result is JSON text, so an agent
+ * Three rules run through all of them. Every result carries `next`: the call
+ * to make now, or the empty string when the loop is done. It is on the result
+ * rather than only in the description because a small model that has stopped
+ * reading descriptions is still reading results, and the one thing it needs at
+ * that moment is what to do next.
+ *
+ * The other two. First, a result is JSON text, so an agent
  * parses it rather than reads it. Second, an error carries the SERVER'S body
  * verbatim: a 429 reaches the agent exactly as hostd wrote it, and a failed
  * build carries every NDJSON line, because reading the failing step and
@@ -12,12 +18,16 @@
  * `grep` that found nothing look like a broken tool.
  */
 
+import { basename } from 'node:path'
+
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 
 import {
   BuildFailedError,
   PilotsError,
+  type BuildLogLine,
+  type ComposePlan,
   type CreateServiceRequest,
   type HealthCheck,
   type PilotsClient,
@@ -25,9 +35,12 @@ import {
   type UpdateServiceRequest,
 } from '@pilots/sdk'
 
+import { loadCredentials } from '../config.ts'
+import { executePlan } from '../compose/run.ts'
 import { resolveMachine } from '../resolve.ts'
 import { tarDirectory } from '../tar.ts'
-import { generateDockerfile } from './dockerfile.ts'
+import { PRIMER } from './primer.ts'
+import { readTopic, searchTopics, topics } from './skill.ts'
 
 interface ToolResult {
   content: { type: 'text'; text: string }[]
@@ -61,7 +74,7 @@ export function registerTools(server: McpServer, client: PilotsClient): void {
         env: z.record(z.string(), z.string()).optional(),
       },
     },
-    (args) => wrap(() => client.machines.create(args)),
+    (args) => wrap(() => client.machines.create(args), 'exec on the returned id'),
   )
 
   server.registerTool(
@@ -75,7 +88,7 @@ export function registerTools(server: McpServer, client: PilotsClient): void {
       wrap(async () => {
         const all = await client.machines.list()
         return args.app ? all.filter((m) => m.app === args.app) : all
-      }),
+      }, ''),
   )
 
   server.registerTool(
@@ -94,7 +107,7 @@ export function registerTools(server: McpServer, client: PilotsClient): void {
         const byState: Record<string, number> = {}
         for (const machine of machines) byState[machine.state] = (byState[machine.state] ?? 0) + 1
         return { hosts, machines_by_state: byState, machines_total: machines.length }
-      }),
+      }, ''),
   )
 
   server.registerTool(
@@ -124,7 +137,7 @@ export function registerTools(server: McpServer, client: PilotsClient): void {
           ...(args.user ? { user: args.user } : {}),
           ...(args.timeout_ms ? { timeout_ms: args.timeout_ms } : {}),
         })
-      }),
+      }, ''),
   )
 
   server.registerTool(
@@ -162,7 +175,7 @@ export function registerTools(server: McpServer, client: PilotsClient): void {
           stderr: Buffer.concat(err).toString('utf8'),
           exit_code: exitCode,
         }
-      }),
+      }, ''),
   )
 
   server.registerTool(
@@ -179,7 +192,7 @@ export function registerTools(server: McpServer, client: PilotsClient): void {
         if (!args.tail) return { logs: text }
         const lines = text.split('\n')
         return { logs: lines.slice(Math.max(0, lines.length - args.tail)).join('\n') }
-      }),
+      }, ''),
   )
 
   server.registerTool(
@@ -195,7 +208,7 @@ export function registerTools(server: McpServer, client: PilotsClient): void {
       wrap(async () => {
         const machine = await resolveMachine(client, args.machine)
         return await client.machines.checkpoint(machine.id, args.comment ? { comment: args.comment } : {})
-      }),
+      }, (r: { id: string }) => `restore with checkpoint=${r.id}`),
   )
 
   server.registerTool(
@@ -207,7 +220,7 @@ export function registerTools(server: McpServer, client: PilotsClient): void {
         'nothing new is created, so every link to it still works.',
       inputSchema: { checkpoint: z.string().describe('a checkpoint id') },
     },
-    (args) => wrap(() => client.checkpoints.restore(args.checkpoint)),
+    (args) => wrap(() => client.checkpoints.restore(args.checkpoint), 'status on the machine'),
   )
 
   server.registerTool(
@@ -233,19 +246,25 @@ export function registerTools(server: McpServer, client: PilotsClient): void {
         const stream = await client.builds.create(new Uint8Array(tar))
         const rootfs = await stream.result()
         return { rootfs_build_id: rootfs, build_id: stream.buildId, steps: stream.lines.length }
-      }),
+      }, (r: { rootfs_build_id: string }) => `deploy with name and build=${r.rootfs_build_id}`),
   )
 
   server.registerTool(
     'deploy',
     {
-      title: 'Deploy a service',
+      title: 'Deploy',
       description:
-        'Create or update one service from a rootfs build id and wait for the new release to become current. ' +
-        'This is the single-service primitive; a whole compose file is `pilot deploy` on the command line.',
+        'Deploy a directory to a URL in one call: plans it on the host, builds each service, deploys, ' +
+        'waits for the health gate, and returns { app, services: [{ name, url }], next }. ' +
+        'Call this FIRST for any "deploy this" request, with `dir` and nothing else unless the user gave more. ' +
+        'No directory and no repository in the conversation: ask, never invent a path. ' +
+        'Also accepts `name` + `build` for a rootfs you built yourself. ' +
+        'On unknown_framework read `details` and call `build` with a Dockerfile you write; ' +
+        'on health_gate_failed call `diagnose` with `details.replica`.',
       inputSchema: {
-        name: z.string(),
-        build: z.string().describe('a rootfs build id from the build tool'),
+        dir: z.string().optional().describe('the directory to deploy; the host decides what it is'),
+        name: z.string().optional().describe('the service name, for the name + build form'),
+        build: z.string().optional().describe('a rootfs build id, for the name + build form'),
         app: z.string().optional(),
         port: z.number().int().optional().describe('sets PORT in the service environment'),
         domain: z.string().optional(),
@@ -263,7 +282,33 @@ export function registerTools(server: McpServer, client: PilotsClient): void {
         replicas: z.number().int().positive().optional(),
       },
     },
-    (args) => wrap(() => deployService(client, args)),
+    (args) =>
+      wrap(async () => {
+        // The directory form is the front door and runs exactly what
+        // `pilot deploy` runs: the same plan route, the same executor. A
+        // second implementation here would drift from the CLI on the day it
+        // mattered, and the drift would only show up on a real deploy.
+        if (args.dir) {
+          const plan = (await client.plan(new Uint8Array(tarDirectory(args.dir)), { app: basename(args.dir) })).plan
+          if (args.app) plan.app = args.app
+          applyOverrides(plan, args)
+          // A failed build throws a BuildFailedError carrying every NDJSON
+          // line, and errorText below returns them verbatim, so nothing here
+          // has to collect them a second time.
+          const result = await executePlan(client, plan, {
+            dir: args.dir,
+            credentials: loadCredentials(),
+            wait: true,
+          })
+          return { app: result.app, services: result.services }
+        }
+        if (!args.name || !args.build) {
+          throw new Error(
+            'pass dir to deploy a directory, or name and build to deploy a rootfs you already built',
+          )
+        }
+        return await deployService(client, { ...args, name: args.name, build: args.build })
+      }, 'report the URL; the deploy is done'),
   )
 
   server.registerTool(
@@ -286,7 +331,7 @@ export function registerTools(server: McpServer, client: PilotsClient): void {
           ...(args.custom_domain ? { custom_domain: args.custom_domain } : {}),
           ...(args.replicas ? { replicas: args.replicas } : {}),
         })
-      }),
+      }, (r: { id: string }) => `service with service=${r.id}`),
   )
 
   server.registerTool(
@@ -319,10 +364,30 @@ export function registerTools(server: McpServer, client: PilotsClient): void {
     },
     (args) =>
       wrap(async () => {
-        const recipe = generateDockerfile(args.dir)
-        if (recipe.framework === 'unknown') {
-          throw new UnknownFrameworkError(recipe.notes.join('\n'))
+        // The host decides, from the same tar a build would upload. An
+        // `unknown_framework` refusal passes through as the tool error, body
+        // and all, so the agent gets the listing and the rules rather than a
+        // sentence saying it failed.
+        const res = await client.plan(new Uint8Array(tarDirectory(args.dir)))
+        const recipes = res.detected
+          .map((d, i) => ({ detected: d, step: res.plan.steps[i] }))
+          .filter(({ detected }) => detected.source === 'recipe')
+          .map(({ detected, step }) => ({
+            service: detected.service,
+            framework: detected.framework,
+            dir: detected.dir,
+            dockerfile: step?.dockerfile ?? '',
+            port: detected.port,
+            health: detected.health,
+            notes: detected.notes ?? [],
+          }))
+        if (recipes.length === 0) {
+          throw new Error(
+            'this directory already has a compose file or a Dockerfile, so the platform ' +
+              'would build that rather than generate one; deploy it with `deploy`',
+          )
         }
+
         if (args.write) {
           const { existsSync, writeFileSync } = await import('node:fs')
           const { join } = await import('node:path')
@@ -333,28 +398,296 @@ export function registerTools(server: McpServer, client: PilotsClient): void {
           // true either way, which would report a recipe as written when the
           // repo's own file is what the build will actually use.
           const existed = existsSync(path)
-          if (!existed) writeFileSync(path, recipe.dockerfile)
-          return { ...recipe, written: !existed, path }
+          if (!existed && recipes.length === 1) writeFileSync(path, recipes[0]!.dockerfile)
+          return { recipes, written: !existed && recipes.length === 1, path }
         }
-        return recipe
-      }),
+        return { recipes }
+      }, 'deploy with the same dir'),
+  )
+
+  server.registerTool(
+    'plan',
+    {
+      title: 'Plan a directory',
+      description:
+        'Show what `deploy` would do without building anything: the services, the source of each ' +
+        '(compose, dockerfile, recipe), the ports, the health checks, and any generated Dockerfile. ' +
+        'Call it when asked what will happen, or to check how a monorepo splits before a build. ' +
+        'Next: deploy with the same dir.',
+      inputSchema: {
+        dir: z.string().describe('the directory to plan'),
+        app: z.string().optional(),
+      },
+    },
+    (args) =>
+      wrap(
+        () => client.plan(new Uint8Array(tarDirectory(args.dir)), { app: args.app ?? basename(args.dir) }),
+        `deploy with dir=${args.dir}`,
+      ),
+  )
+
+  server.registerTool(
+    'build_logs',
+    {
+      title: 'Replay a build log',
+      description:
+        "Replay a build's log by build_id, the id a failed deploy or build named. " +
+        'Call it when a result says a build failed and you did not see the lines. Read-only.',
+      inputSchema: { build_id: z.string() },
+    },
+    (args) =>
+      wrap(async () => {
+        const stream = await client.builds.logs(args.build_id)
+        const lines: BuildLogLine[] = []
+        for await (const line of stream) lines.push(line)
+        return { build_id: args.build_id, lines }
+      }, 'fix what the line carrying error names, then build again'),
+  )
+
+  server.registerTool(
+    'list_services',
+    {
+      title: 'List services',
+      description:
+        'Every service this key can see, with url, release_id and replicas. ' +
+        'Call it to find a name before service, releases or logs. Read-only.',
+      inputSchema: {},
+    },
+    () => wrap(() => client.services.list(), 'service with one of these names'),
+  )
+
+  server.registerTool(
+    'service',
+    {
+      title: 'One service',
+      description:
+        'One service by name or id: its health check, its env KEYS (never the values), its domain, ' +
+        'its current release and its replica ids. Read-only. ' +
+        'Next: releases for history, logs on a replica.',
+      inputSchema: { service: z.string().describe('a service id or name') },
+    },
+    (args) =>
+      wrap(async () => {
+        const svc = await resolveService(client, args.service)
+        const machines = await client.machines.list()
+        return {
+          ...svc,
+          replica_ids: machines.filter((m) => m.app === svc.app && m.name.startsWith(svc.name)).map((m) => m.id),
+        }
+      }, 'releases for history, or logs on a replica id'),
+  )
+
+  server.registerTool(
+    'releases',
+    {
+      title: 'A service\'s releases',
+      description:
+        "A service's releases, newest first, with healthy and the build each came from. " +
+        'Call it before rollback. Read-only.',
+      inputSchema: { service: z.string() },
+    },
+    (args) =>
+      wrap(async () => {
+        const svc = await resolveService(client, args.service)
+        return await client.services.releases(svc.id)
+      }, 'rollback only if the user agrees to change what is serving'),
+  )
+
+  server.registerTool(
+    'rollback',
+    {
+      title: 'Roll a service back',
+      description:
+        'Roll a service back to its previous healthy release. ' +
+        'This CHANGES WHAT IS SERVING: say so and get agreement before calling it. ' +
+        'Next: service, to confirm release_id moved.',
+      inputSchema: { service: z.string() },
+    },
+    (args) =>
+      wrap(async () => {
+        const svc = await resolveService(client, args.service)
+        return await client.services.rollback(svc.id)
+      }, 'service, to confirm release_id moved'),
+  )
+
+  server.registerTool(
+    'domains',
+    {
+      title: 'List custom domains',
+      description:
+        'Every custom domain on this key\'s services, with whether each is verified. Read-only: ' +
+        'adding one is `pilot domains add`, because it needs a DNS record the user creates.',
+      inputSchema: {},
+    },
+    () => wrap(() => client.domains.list(), ''),
+  )
+
+  server.registerTool(
+    'volumes',
+    {
+      title: 'List volumes',
+      description:
+        'Every volume, with the machine each is attached to. Read-only: a volume is declared in a ' +
+        'compose file, not created by hand.',
+      inputSchema: {},
+    },
+    () => wrap(() => client.volumes.list(), ''),
+  )
+
+  server.registerTool(
+    'diagnose',
+    {
+      title: 'Diagnose a failed deploy',
+      description:
+        "Explain a failed deploy: the replica's last console lines and what it is doing. " +
+        'Call it right after health_gate_failed with details.replica. ' +
+        'Deterministic, no model. Next: fix the app and deploy again, or rollback.',
+      inputSchema: {
+        replica: machineArg.describe('the replica id from a health_gate_failed error'),
+        tail: z.number().int().positive().default(80),
+      },
+    },
+    (args) =>
+      wrap(async () => {
+        const machine = await resolveMachine(client, args.replica)
+        const text = await client.machines.logs(machine.id)
+        const lines = text.split('\n')
+        return {
+          replica: machine.id,
+          state: machine.state,
+          url: machine.url,
+          // The console is what a health gate failure is actually about: the
+          // app either did not start, or started on the wrong address. Both
+          // say so here and nowhere else the platform can see.
+          tail: lines.slice(Math.max(0, lines.length - (args.tail ?? 80))).join('\n'),
+          checks: [
+            'is the app listening on 0.0.0.0 rather than 127.0.0.1?',
+            'does it read $PORT, with 8080 as the fallback?',
+            'did it exit before it bound anything? the last lines say so',
+          ],
+        }
+      }, 'fix the app and deploy again, or rollback'),
+  )
+
+  server.registerTool(
+    'init',
+    {
+      title: 'Read this first',
+      description:
+        'READ THIS FIRST. The pilots mental model in under sixty lines: one primitive, the one-call ' +
+        'deploy, what every result and error carries, and the doc index. ' +
+        'Call it once at the start of any pilots task. Read-only.',
+      inputSchema: {},
+    },
+    () => wrap(() => ({ primer: PRIMER, topics: topics() }), 'deploy with dir, once you know the directory'),
+  )
+
+  server.registerTool(
+    'docs',
+    {
+      title: 'Read a reference',
+      description:
+        'Read one pilots reference by topic (deploy, sandboxes, services, secrets, volumes, domains, ' +
+        'promote, errors, compose), or search them with query. No arguments lists the topics. ' +
+        'Load one. Two at most. Read-only.',
+      inputSchema: {
+        topic: z.string().optional(),
+        query: z.string().optional().describe('search every reference instead of naming one'),
+      },
+    },
+    (args) =>
+      wrap(() => {
+        if (args.query) return { query: args.query, matches: searchTopics(args.query) }
+        if (!args.topic) return { topics: topics() }
+        const text = readTopic(args.topic)
+        if (text === null) {
+          throw new Error(`no such topic ${args.topic}; the topics are ${topics().join(', ')}`)
+        }
+        return { topic: args.topic, text }
+      }, ''),
   )
 }
 
-/** Raised when detection found nothing; the notes list every file looked for. */
-class UnknownFrameworkError extends Error {}
+/**
+ * Applies a caller's per-service overrides onto a planned step.
+ *
+ * A `health` or a `replicas` passed alongside `dir` and then quietly dropped
+ * is the worst outcome available: the deploy succeeds, the gate polls
+ * something else, and nothing anywhere says the argument was ignored. So it is
+ * applied, and where it CANNOT be applied unambiguously -- a monorepo, where
+ * "the service" is two of them -- it is refused with a message naming the fix.
+ */
+function applyOverrides(plan: ComposePlan, args: DeployOverrides): void {
+  const overrides = ['port', 'health', 'env', 'secret_env', 'replicas', 'domain', 'custom_domain'] as const
+  const given = overrides.filter((key) => args[key] !== undefined)
+  if (given.length === 0) return
+  if (plan.steps.length !== 1) {
+    throw new Error(
+      `this directory plans ${plan.steps.length} services, so ${given.join(', ')} ` +
+        'cannot be applied to one of them; put them in a compose file',
+    )
+  }
+  const step = plan.steps[0]!
+  if (args.port !== undefined) step.env = { ...step.env, PORT: String(args.port) }
+  if (args.env) step.env = { ...step.env, ...args.env }
+  if (args.health) step.health = args.health
+  if (args.replicas !== undefined) step.replicas = args.replicas
+  if (args.domain) step.domain = args.domain
+  if (args.custom_domain) step.custom_domain = args.custom_domain
+  if (args.secret_env) {
+    // A value, not a reference: the compose path resolves `secret://` names
+    // from the local store, and this one already has the values in hand.
+    throw new Error(
+      'secret_env with dir is not supported: put secret:// references in a compose file, ' +
+        'or deploy with name and build',
+    )
+  }
+}
+
+interface DeployOverrides {
+  port?: number | undefined
+  health?: HealthCheck | undefined
+  env?: Record<string, string> | undefined
+  secret_env?: Record<string, string> | undefined
+  replicas?: number | undefined
+  domain?: string | undefined
+  custom_domain?: string | undefined
+}
+
+/** A service by id or name, so every tool takes whichever the agent has. */
+async function resolveService(client: PilotsClient, ref: string): Promise<Service> {
+  const services = await client.services.list()
+  const found = services.find((s) => s.id === ref || s.name === ref)
+  if (!found) {
+    throw new Error(`no service ${ref}; list_services shows what this key can see`)
+  }
+  return found
+}
 
 /**
  * Runs a handler and shapes the result.
  *
+ * `next` is folded into the result object here rather than by each handler, so
+ * a tool cannot ship without one. It is a function of the result where the
+ * next step depends on what came back, and a constant otherwise.
+ *
  * Every failure becomes `isError: true` with the most actionable text
  * available: the server's own body for an API error, every NDJSON line for a
- * failed build, and the message otherwise.
+ * failed build, and the message otherwise. The server's body already carries
+ * its own `code`, `next` and `details`, so nothing is added on that path.
  */
-async function wrap(fn: () => unknown | Promise<unknown>): Promise<ToolResult> {
+async function wrap(
+  fn: () => unknown | Promise<unknown>,
+  next: string | ((result: never) => string) = '',
+): Promise<ToolResult> {
   try {
     const result = await fn()
-    return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] }
+    const step = typeof next === 'function' ? next(result as never) : next
+    const body =
+      result !== null && typeof result === 'object' && !Array.isArray(result)
+        ? { ...(result as object), next: step }
+        : { result, next: step }
+    return { content: [{ type: 'text', text: JSON.stringify(body, null, 2) }] }
   } catch (err) {
     return { content: [{ type: 'text', text: errorText(err) }], isError: true }
   }
