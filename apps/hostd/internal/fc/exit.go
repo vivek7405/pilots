@@ -2,6 +2,7 @@ package fc
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"syscall"
 	"time"
@@ -38,10 +39,23 @@ func (e ExitInfo) String() string {
 		e.At.UTC().Format(time.RFC3339), e.Pid, how)
 }
 
-// exitPollInterval is the fallback cadence for a kernel without pidfd_open
-// (older than 5.3). The reaper's cadence, for the reaper's reason: nothing in
-// production reaches this branch, and a timer is never the primitive.
-const exitPollInterval = 5 * time.Minute
+// The two fallback cadences for a machine whose exit no pidfd can report.
+//
+// A poll is always the wrong primitive here: every second it is late is a
+// second the row says running, the router answers 502 and the idle monitor
+// retries a suspend against a corpse, which is the whole of the incident this
+// file exists to end. So the slow cadence is reserved for the ONE case that is
+// genuinely a property of the host and not a fault: a kernel older than 5.3,
+// which has no pidfd_open at all and which no fleet host runs.
+//
+// Anything else -- EPERM, EMFILE, ENFILE -- is a transient or a limit on a
+// host that CAN report exits, so it gets a cadence that keeps the damage to
+// seconds. One /proc read per machine per second, on a path nothing should
+// ever take.
+const (
+	exitPollNoPidfd    = 5 * time.Minute
+	exitPollUnexpected = time.Second
+)
 
 // watchExit starts the goroutine that observes the process's exit, once.
 //
@@ -76,8 +90,14 @@ func (m *Machine) waitForExit(p *os.Process) {
 	case nil, unix.ESRCH:
 		m.markExited(info)
 	default:
+		every := exitPollFor(err)
+		if every != exitPollNoPidfd {
+			slog.Warn("could not watch a machine's exit through a pidfd; falling "+
+				"back to polling its pid", "machine", m.ID, "pid", p.Pid,
+				"every", every, "err", err)
+		}
 		for processAlive(p.Pid) {
-			time.Sleep(exitPollInterval)
+			time.Sleep(every)
 		}
 		m.markExited(info)
 	}
@@ -128,4 +148,17 @@ func (m *Machine) Exit() ExitInfo {
 		return ExitInfo{}
 	}
 	return *m.exitInfo
+}
+
+// exitPollFor picks the cadence to fall back to when pidfd_open failed.
+//
+// Only a kernel with no pidfd_open earns the slow one. Every other failure --
+// EPERM, EMFILE, ENFILE -- is on a host that CAN report exits, so being
+// minutes late there would be a choice rather than a limit, and those minutes
+// are exactly the window this whole file exists to close.
+func exitPollFor(err error) time.Duration {
+	if err == unix.ENOSYS {
+		return exitPollNoPidfd
+	}
+	return exitPollUnexpected
 }
