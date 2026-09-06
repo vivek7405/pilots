@@ -118,14 +118,21 @@ func prepareCommand(cmd *exec.Cmd, username, cwd string, env map[string]string) 
 	// escalated away from.
 	if username == "" {
 		if _, err := user.Lookup(defaultGuestUser); err != nil {
-			// The image has no unprivileged default account, so run as
-			// whatever the agent is -- but STILL apply the caller's cwd and
-			// env below. Returning here dropped both, so an exec asking for a
-			// working directory or an environment silently got neither.
-			if err := applyImageDefaultUser(cmd); err != nil {
-				return err
+			// The image has no unprivileged default account. Prefer the USER
+			// its own Dockerfile declared, which the build recorded in the
+			// start spec and which is what `docker run` would use; only when
+			// there is none run as whatever the agent is -- but STILL apply
+			// the caller's cwd and env below. Returning here dropped both, so
+			// an exec asking for a working directory or an environment
+			// silently got neither.
+			if imageUser := imageDefaultUser(); imageUser != "" {
+				username = imageUser
+			} else {
+				if err := applyImageDefaultUser(cmd); err != nil {
+					return err
+				}
+				username = ""
 			}
-			username = ""
 		} else {
 			username = defaultGuestUser
 		}
@@ -142,6 +149,21 @@ func prepareCommand(cmd *exec.Cmd, username, cwd string, env map[string]string) 
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
 	return nil
+}
+
+// imageDefaultUser is the USER the image's Dockerfile declared, from the start
+// spec the build recorded, when it names an account that exists here. A USER
+// the image declared but does not carry is not an error at exec time (it was
+// already reported at boot) and simply yields nothing.
+func imageDefaultUser() string {
+	spec, ok := readStartSpec()
+	if !ok || spec.User == "" {
+		return ""
+	}
+	if _, err := user.Lookup(spec.User); err != nil {
+		return ""
+	}
+	return spec.User
 }
 
 // applyImageDefaultUser leaves the command with the credentials the agent

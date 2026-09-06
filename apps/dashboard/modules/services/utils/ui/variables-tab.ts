@@ -32,7 +32,8 @@ const PROVIDED: { name: string; what: string }[] = [
 ];
 
 export function variablesTab({ detail, back, errors }: TabProps): TemplateResult {
-  const { service, variables } = detail;
+  const { service } = detail;
+  const variables = detail.variables ?? [];
   const fieldErrors = errors.fieldErrors ?? {};
 
   return html`

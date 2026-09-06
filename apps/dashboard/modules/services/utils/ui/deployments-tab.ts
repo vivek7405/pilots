@@ -28,7 +28,8 @@ import '#modules/services/components/build-log.ts';
 import '#components/relative-time.ts';
 
 export function deploymentsTab({ detail, back, errors, build }: TabProps): TemplateResult {
-  const { service, releases, replicas, previews, repo, builds } = detail;
+  const { service, releases, replicas, previews, repo } = detail;
+  const builds = detail.builds ?? [];
   const following = build ? builds.find((b) => b.jobId === build) : undefined;
   const current = releases.find((r) => r.id === service.release_id);
   const rollbackTarget = releases.filter((r) => r.healthy && r.id !== service.release_id)[0];

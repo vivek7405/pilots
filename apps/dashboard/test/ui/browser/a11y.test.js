@@ -184,7 +184,7 @@ suite('accessibility of the live components', () => {
         { id: 'm-1', name: 'web-1', state: 'running', service_id: 'svc-1' },
         { id: 'm-2', name: 'web-2', state: 'suspended', service_id: 'svc-1' },
       ],
-      hosts: [],
+      hosts: [], builds: [], variables: [],
       domains: [],
       github: { configured: false, installUrl: 'https://github.com/apps/pilots/installations/new' },
     };

@@ -19,6 +19,8 @@ import { html } from '@webjsdev/core';
 import { orUnauthorized, requireOrg } from '#modules/auth/session.server.ts';
 import { listServicesWithStatus } from '#modules/services/queries/list-services-with-status.server.ts';
 import { lede, pageHeading } from '#lib/utils/ui.ts';
+import { buttonClass } from '#components/ui/button.ts';
+import { cn } from '#lib/utils/cn.ts';
 import { NOUN, SLEEP_SENTENCE } from '#lib/vocabulary.ts';
 import '#modules/machines/components/machine-list.ts';
 
@@ -29,7 +31,10 @@ export default async function SandboxesPage() {
   const { machines, hosts, services } = orUnauthorized(await listServicesWithStatus());
 
   return html`
-    ${pageHeading(NOUN.Sandboxes)}
+    <div class="flex flex-wrap items-center gap-3">
+      ${pageHeading(NOUN.Sandboxes)}
+      <a href="/sandboxes/playground" class=${cn(buttonClass({ size: 'sm' }), 'ml-auto no-underline')}>Open a sandbox</a>
+    </div>
     ${lede(
       html`A sandbox is a machine that belongs to no service: yours to open a terminal on, snapshot and turn into a
         service later. ${SLEEP_SENTENCE} These are the ones in <strong>${ctx.org.slug}</strong>.`,

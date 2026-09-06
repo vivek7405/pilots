@@ -51,7 +51,7 @@ export default async function TerminalPage({ params }: PageProps) {
     <div class="fixed inset-x-0 bottom-0 flex" style="top: var(--header-h)">
       <div class="flex min-w-0 flex-1 flex-col border-r border-border">
         <div class="flex flex-wrap items-center gap-3 border-b border-border px-4 py-2">
-          <a href=${`/machines/${machine.id}`} class="text-body">${name}</a>
+          <a href=${`/machines/${machine.id}`} class="text-body">&larr; Back to ${name}</a>
           ${statusLine(machine as BrowserMachine, hosts)}
         </div>
         <machine-terminal machine-id=${machine.id} class="min-h-0 flex-1"></machine-terminal>

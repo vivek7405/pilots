@@ -17,7 +17,7 @@ import { dataTable, emptyState, footnote, pageHeading, sectionHeading } from '#l
 import { cn } from '#lib/utils/cn.ts';
 import { NOUN } from '#lib/vocabulary.ts';
 import '#modules/logs/components/log-stream.ts';
-import '#modules/machines/components/exec-console.ts';
+import '#components/terminal/machine-terminal.ts';
 import '#components/copy-button.ts';
 
 interface Checkpoint {
@@ -61,8 +61,13 @@ export default async function MachinePage({ params }: PageProps) {
     </section>
 
     <section class="mt-8">
-      ${sectionHeading(NOUN.Terminal, 'A shell inside this machine, as if you had opened one on the box it runs on.')}
-      <exec-console machine-id=${machine.id}></exec-console>
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        ${sectionHeading(NOUN.Terminal, 'A shell inside this machine, as if you had opened one on the box it runs on.')}
+        <a href=${`/machines/${machine.id}/terminal`} class="text-meta">Full screen</a>
+      </div>
+      <div class="h-[24rem] overflow-hidden rounded-md border border-border">
+        <machine-terminal machine-id=${machine.id} class="flex h-full min-h-0 flex-col"></machine-terminal>
+      </div>
     </section>
 
     <section class="mt-8">

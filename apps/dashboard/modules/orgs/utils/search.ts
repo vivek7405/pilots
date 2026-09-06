@@ -42,6 +42,7 @@ export const PAGES: SearchHit[] = [
   { kind: 'page', id: 'domains', label: NOUN.Domains, href: '/domains' },
   { kind: 'page', id: 'usage', label: NOUN.Usage, href: '/usage' },
   { kind: 'page', id: 'logs', label: NOUN.Logs, href: '/logs' },
+  { kind: 'page', id: 'playground', label: 'Playground', href: '/sandboxes/playground' },
   { kind: 'page', id: 'keys', label: NOUN.Tokens, href: '/keys' },
   { kind: 'page', id: 'org', label: NOUN.Team, href: '/org' },
 ];

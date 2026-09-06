@@ -85,6 +85,7 @@ beforeEach(() => {
   app.fleet.reset();
   app.fleet.data.execHold = true;
   app.fleet.data.machines.push({ id: 'm-1', name: 'box', state: 'running', org_id: orgA } as unknown as Machine);
+  app.fleet.data.machines.push({ id: 'm-r', name: 'web-1', state: 'running', org_id: orgA, service_id: 'svc-w' } as unknown as Machine);
 });
 
 test('a signed-out socket is closed 4401 and never reaches the fleet', async () => {
@@ -116,6 +117,15 @@ test('nothing opens until the client says how big its window is', async () => {
   const opened = app.fleet.data.lastExec!;
   assert.equal(opened.id, 'm-1');
   assert.deepEqual(opened.opts, { user: 'sprite', tty: true, rows: 40, cols: 120 });
+});
+
+test('a service replica asks for no user, so the guest runs the image\'s own', async () => {
+  const ws = fakeSocket();
+  await WS(ws, request(cookieA), routeCtx({ id: 'm-r' }));
+  ws.emit('message', JSON.stringify({ type: 'open', rows: 24, cols: 80 }));
+  const opened = app.fleet.data.lastExec!;
+  assert.equal(opened.id, 'm-r');
+  assert.deepEqual(opened.opts, { tty: true, rows: 24, cols: 80 }, 'no user: a Dockerfile image rarely has sprite');
 });
 
 test('the shell is chosen in the guest, so an image without bash still gets one', async () => {

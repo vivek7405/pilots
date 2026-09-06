@@ -191,6 +191,14 @@ export function makeFakeFleet(): FakeFleet {
     },
 
     machines: {
+      /** A fresh sandbox, as `POST /v1/machines` answers: named, creating, owned. */
+      create: async (req: unknown) => {
+        record('machines.create', req);
+        const id = `m-new-${state.machines.length + 1}`;
+        const row = { id, name: `fresh-box-${state.machines.length + 1}`, state: 'creating', org_id: '', url: '' } as unknown as Machine;
+        state.machines.push(row);
+        return row;
+      },
       list: async () => {
         record('machines.list');
         return state.machines;

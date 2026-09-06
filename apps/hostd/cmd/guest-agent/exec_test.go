@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -329,5 +330,46 @@ func TestGuestShellFallsBackWhenBashIsAbsent(t *testing.T) {
 	}
 	if strings.TrimSpace(string(out)) != "ok" {
 		t.Errorf("%s produced %q", sh, out)
+	}
+}
+
+// An image with no `sprite` account runs an exec as the USER its own
+// Dockerfile declared, which the build records in the start spec, before it
+// falls back to the agent's own credentials. A declared USER the image does
+// not actually carry yields nothing rather than an error: that was reported
+// at boot, and an exec is not the place to fail on it.
+func TestTheImageDefaultUserComesFromTheStartSpec(t *testing.T) {
+	me, err := user.Current()
+	if err != nil {
+		t.Skip("no current user to name")
+	}
+	dir := t.TempDir()
+	orig := startSpecPath
+	startSpecPath = filepath.Join(dir, "start.json")
+	t.Cleanup(func() { startSpecPath = orig })
+
+	write := func(spec string) {
+		if err := os.WriteFile(startSpecPath, []byte(spec), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	write(`{"cmd":["true"],"user":"` + me.Username + `"}`)
+	if got := imageDefaultUser(); got != me.Username {
+		t.Errorf("an existing declared USER: got %q, want %q", got, me.Username)
+	}
+	write(`{"cmd":["true"],"user":"definitely-not-a-real-account"}`)
+	if got := imageDefaultUser(); got != "" {
+		t.Errorf("a declared USER the image does not carry: got %q, want empty", got)
+	}
+	write(`{"cmd":["true"]}`)
+	if got := imageDefaultUser(); got != "" {
+		t.Errorf("no declared USER: got %q, want empty", got)
+	}
+	if err := os.Remove(startSpecPath); err != nil {
+		t.Fatal(err)
+	}
+	if got := imageDefaultUser(); got != "" {
+		t.Errorf("no start spec at all: got %q, want empty", got)
 	}
 }
