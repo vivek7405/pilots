@@ -1950,7 +1950,10 @@ if [ -n "$H_IP" ]; then
   # The incident's signature, in the journal: 82 frozen-guest lines and not one
   # word about an exit.
   EX_FROZEN=$($SSH "root@$H_IP" "journalctl -u hostd --since '${EX_SINCE}' --no-pager 2>/dev/null | grep -c 'could not be resumed; it is frozen'" | tr -d '[:space:]')
-  EX_EXITS=$($SSH "root@$H_IP" "journalctl -u hostd --since '${EX_SINCE}' --no-pager 2>/dev/null | grep -c 'exited on its own'" | tr -d '[:space:]')
+  # The settleExit line specifically: onExit's success line ("a machine that
+  # exited on its own is running again") carries the same phrase, so a bare
+  # grep for it counts two per exit and never equals one.
+  EX_EXITS=$($SSH "root@$H_IP" "journalctl -u hostd --since '${EX_SINCE}' --no-pager 2>/dev/null | grep -c \"a machine's firecracker exited on its own\"" | tr -d '[:space:]')
   [ "${EX_FROZEN:-1}" = 0 ] && [ "${EX_EXITS:-0}" = 1 ] \
     && ok "the journal has one exit line and no frozen-guest retries" \
     || bad "journal: ${EX_EXITS} exit line(s), ${EX_FROZEN} frozen-guest line(s)"
