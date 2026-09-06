@@ -543,3 +543,62 @@ func TestAMachineWithNoProcessIsNotAnExit(t *testing.T) {
 		t.Errorf("a handle with no process wrote %v", w)
 	}
 }
+
+// An empty dirty bitmap must not cost the machine its last durable image.
+//
+// The block server answering with an empty bitmap means the guest wrote
+// NOTHING since it came up, not that a newer disk exists. Clearing the row's
+// build ids on that reading leaves a machine naming no memory image and no
+// disk, and every later Wake fails on "no usable memory build" while the pair
+// that would have restored it has already been deleted from object storage.
+//
+// The path is ordinary: a machine whose previous suspend wrote no disk blocks
+// records an empty RootfsBuildID on purpose, wakes with nothing rehydrated,
+// and its guest panics before touching a block.
+func TestAnEmptyBitmapKeepsTheDurablePair(t *testing.T) {
+	m, rec, up := newExitManager(t)
+	ctx := context.Background()
+
+	tpl := stageTemplate(t, m)
+	memOld, rootfsOld := uuid.NewString(), uuid.NewString()
+
+	row := runningRow("m-nowrite")
+	row.MemBuildID, row.RootfsBuildID = memOld, rootfsOld
+	row.TemplateMemBuildID = tpl.MemBuildID.String()
+	row.TemplateRootfsBuildID = tpl.RootfsBuildID.String()
+	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
+		t.Fatal(err)
+	}
+	rec.calls = nil
+
+	fcm := exitMachine(t, m, "m-nowrite")
+	// A jail with no disk file in it: ChunkifyDisk finds nothing to capture and
+	// answers uuid.Nil, exactly as an empty bitmap does.
+	fcm.ChrootDir = t.TempDir()
+
+	m.put("m-nowrite", fcm)
+	if err := syscall.Kill(fcm.Cmd.Process.Pid, syscall.SIGKILL); err != nil {
+		t.Fatal(err)
+	}
+	waitForWrites(t, rec, 1)
+
+	got, err := m.opts.Store.GetMachine(ctx, "m-nowrite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.State != StateError {
+		t.Errorf("the row says %q, want error", got.State)
+	}
+	if got.MemBuildID != memOld {
+		t.Errorf("the memory image is %q, want %q kept: nothing newer was captured",
+			got.MemBuildID, memOld)
+	}
+	if got.RootfsBuildID != rootfsOld {
+		t.Errorf("the disk build is %q, want %q kept: the guest wrote nothing",
+			got.RootfsBuildID, rootfsOld)
+	}
+	if deleted := up.keys(); len(deleted) != 0 {
+		t.Errorf("an exit that captured nothing deleted %v from object storage; "+
+			"that is the image the machine comes back from", deleted)
+	}
+}
