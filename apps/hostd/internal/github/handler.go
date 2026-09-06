@@ -371,6 +371,7 @@ func (d Deps) buildRef(ctx context.Context, ev Event, ref, app, org string) (str
 	if err != nil {
 		return "", nil, err
 	}
+	defer tar.Close()
 	// Logs are recorded by the builder and readable at
 	// GET /v1/builds/{id}/logs. Nothing is emitted inline here: there is no
 	// client on the other end of a webhook.
