@@ -178,6 +178,39 @@ test('the handshake asks for a terminal, and carries the window this one has', a
   }
 })
 
+test('a terminal that does not know its size sends the default, never a zero', async () => {
+  // Found on a real pty: a window that was never set reports 0, not undefined,
+  // and hostd refuses a size outside 1..65535 by CLOSING the socket. A zero on
+  // the wire is a console that cannot connect at all.
+  const ws = await fleet((conn) => conn.frame(3, new Uint8Array([0])))
+  try {
+    await runConsole(loggedIn(ws.url), ['box'], fakeTerminal(0, 0).term)
+    assert.equal(ws.connections[0]!.query.get('cols'), '80')
+    assert.equal(ws.connections[0]!.query.get('rows'), '24')
+  } finally {
+    await ws.close()
+  }
+
+  // And a window change to a size the protocol cannot carry says the same
+  // thing rather than passing it on.
+  const live = await fleet()
+  const fake = fakeTerminal(100, 30)
+  try {
+    const pending = runConsole(loggedIn(live.url), ['box'], fake.term)
+    await waitFor('the socket', () => live.connections.length > 0)
+    const conn = live.connections[0]!
+    fake.stdout.columns = 0
+    fake.stdout.rows = 0
+    fake.signals.emit('SIGWINCH')
+    await waitFor('the resize', () => conn.text.length > 0)
+    assert.deepEqual(JSON.parse(conn.text[0]!), { type: 'resize', cols: 80, rows: 24 })
+    conn.frame(3, new Uint8Array([0]))
+    await pending
+  } finally {
+    await live.close()
+  }
+})
+
 test('raw mode goes on, comes off, and the exit code is the shell\'s', async () => {
   const ws = await fleet((conn) => {
     conn.frame(1, 'hello from the guest\n')

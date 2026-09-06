@@ -366,13 +366,29 @@ export async function execStream(
   }
 }
 
-/** The window, with the protocol's own defaults when the terminal has none. */
+/**
+ * The window, with the protocol's own defaults when the terminal has no usable
+ * one.
+ *
+ * A terminal that does not know its size reports 0, not undefined, and that is
+ * not a rare shape: a pty whose window was never set, anything wrapped in
+ * `script`, a serial console. hostd refuses a size outside 1..65535 by closing
+ * the socket rather than clamping it, deliberately, so 0 on the wire is a
+ * console that cannot connect at all. A size that is not a size means the
+ * window is unknown, which is what the default is for.
+ */
+function windowOf(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 1 && value <= 65535
+    ? value
+    : fallback
+}
+
 function colsOf(term: Terminal): number {
-  return term.stdout.columns ?? 80
+  return windowOf(term.stdout.columns, 80)
 }
 
 function rowsOf(term: Terminal): number {
-  return term.stdout.rows ?? 24
+  return windowOf(term.stdout.rows, 24)
 }
 
 // Name first, id last, in every table here. The name is what a person types
