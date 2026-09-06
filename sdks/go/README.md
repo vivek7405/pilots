@@ -201,6 +201,39 @@ The key travels in the `Authorization` header, since Go can set handshake
 headers. hostd also accepts it as the `authorization.bearer.<key>` subprotocol,
 which is how the browser-facing JS client dials.
 
+### An interactive terminal
+
+`TTY` runs the command on a pseudo-terminal, which is what an interactive
+shell, `tmux` and `vim` need and what three pipes cannot give them.
+
+```go
+s, err := c.Machines.ExecStream(ctx, m.ID, []string{"bash", "-l"},
+	pilots.ExecStreamOptions{TTY: true, Rows: 40, Cols: 120})
+if err != nil {
+	log.Fatal(err)
+}
+go io.Copy(os.Stdout, s.Stdout)
+s.Stdin.Write([]byte("ls\n"))
+s.Resize(100, 30)
+```
+
+It is a mode on the same stream, not a second protocol: the frames, the ids and
+the exit verdict are identical. Four things change, and only under `TTY`.
+
+- A PTY has one device, so everything the command writes arrives on `Stdout`
+  and `Stderr` never produces a byte. It still has to be drained.
+- `Stdin` is implied and always opened. `TTY` with an explicit `Stdin: false`
+  contradicts itself, so the option is forced on rather than sent; hostd
+  answers `tty=true&stdin=false` with a 400 before the machine is woken.
+- `Stdin.Close` sends EOT (`0x04`) to the terminal instead of closing an input,
+  because a terminal has no separate write end to close. The session stays
+  open: what EOT means is the shell's decision.
+- `Resize(cols, rows)` sends `{"type":"resize","cols":N,"rows":N}`. It errors on
+  a stream opened without `TTY`.
+
+`Rows` and `Cols` set the initial window, default 24 by 80, each 1..65535. A
+value outside that closes the socket with 1008 rather than being clamped.
+
 ## Builds
 
 ```go

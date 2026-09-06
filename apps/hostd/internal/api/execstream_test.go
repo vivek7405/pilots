@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -29,6 +30,50 @@ func TestExecStreamRequiresCmd(t *testing.T) {
 	}
 	if got := fake.streamedMachines(); len(got) != 0 {
 		t.Errorf("the manager was called anyway: %v", got)
+	}
+}
+
+// tty=true with stdin=false contradicts itself: a terminal with no way to type
+// into it. Refused here, before the manager, because reaching the guest agent
+// means waking the machine first, and a suspended sandbox should not pay a
+// wake to learn its query was malformed.
+func TestExecStreamRefusesATTYWithoutStdin(t *testing.T) {
+	h, _, fake := newTestServerWithManager(t)
+
+	rec := do(t, h, "GET", "/v1/machines/m_1/exec/stream?cmd=sh&tty=true&stdin=false", testKey)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", rec.Code)
+	}
+	// The whole shape, not just the sentence: a caller branches on `code`, and
+	// `next` is the half that says what to send instead.
+	var body ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode %q: %v", rec.Body.String(), err)
+	}
+	if body.Code != CodeBadRequest {
+		t.Errorf("code = %q, want %q", body.Code, CodeBadRequest)
+	}
+	if !strings.Contains(body.Error, "stdin=false") {
+		t.Errorf("error = %q, want it to name the parameter that contradicts", body.Error)
+	}
+	if !strings.Contains(body.Next, "drop stdin=false") {
+		t.Errorf("next = %q, want it to say what to send instead", body.Next)
+	}
+	if got := fake.streamedMachines(); len(got) != 0 {
+		t.Errorf("the manager was called anyway: %v", got)
+	}
+}
+
+// tty=true on its own is forwarded: stdin is implied by the terminal, so the
+// query does not have to say so and the guest agent reads the socket anyway.
+func TestExecStreamForwardsATTY(t *testing.T) {
+	h, _, fake := newTestServerWithManager(t)
+
+	if rec := do(t, h, "GET", "/v1/machines/m_1/exec/stream?cmd=sh&tty=true", testKey); rec.Code != http.StatusOK {
+		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := fake.streamedMachines(); len(got) != 1 || got[0] != "m_1" {
+		t.Errorf("streamed %v, want [m_1]", got)
 	}
 }
 

@@ -1,3 +1,9 @@
+/* xterm.css, vendored beside this file. It is the terminal emulator's own
+   stylesheet and it has to be in the ONE compiled bundle: a component may not
+   write <head>, and the doctor's UNMARKED_ASSET_LINKS check refuses an
+   unversioned <link>. See components/terminal/vendor/README for the pinned
+   version and how to update it. */
+@import "./xterm.css";
 @import "tailwindcss";
 
 /* Scan app sources so their utility classes make it into the compiled bundle.
@@ -219,6 +225,13 @@
 @theme inline {
   --color-border-strong: var(--border-strong);
   --color-primary-tint: var(--primary-tint);
+  /* Status colours. The kit's sonner ships raw Tailwind swatches for these
+     three, which is the one thing this app forbids outright. Mapping them here
+     is what lets that file speak in tokens like every other surface, and what
+     makes a toast follow the theme instead of staying the same green in both. */
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-info: var(--info);
   --font-sans:  var(--font-sans);
   --font-serif: var(--font-serif);
   --font-mono:  var(--font-mono);

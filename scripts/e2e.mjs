@@ -3969,6 +3969,17 @@ const WS_API = API.replace(/^http/, 'ws');
 // firstVerdict is load-bearing: both SDKs act on whichever verdict arrives
 // first and then close the socket, so the one that goes out second is a frame
 // no client can receive.
+// stdinFrame wraps a chunk in frame 0, which is what the client-to-server half
+// of the byte protocol expects: raw bytes would deliver the id byte to the
+// process.
+function stdinFrame(text) {
+  const bytes = new TextEncoder().encode(text);
+  const frame = new Uint8Array(bytes.length + 1);
+  frame[0] = 0;
+  frame.set(bytes, 1);
+  return frame;
+}
+
 function openStream(path, { onOpen } = {}) {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(WS_API + path, [`authorization.bearer.${KEY}`]);
@@ -4115,17 +4126,61 @@ async function execStreamAssertions() {
     await step('stdin frames reach the command and frame 4 ends it', async () => {
       const out = await openStream(`/v1/machines/${id}/exec/stream?cmd=cat&stdin=true`, {
         onOpen(ws) {
-          const bytes = new TextEncoder().encode('abc');
-          const frame = new Uint8Array(bytes.length + 1);
-          frame[0] = 0;
-          frame.set(bytes, 1);
-          ws.send(frame);
+          ws.send(stdinFrame('abc'));
           setTimeout(() => ws.send(new Uint8Array([4])), 500);
         },
       });
       assert(out.stdout === 'abc', `stdout = ${JSON.stringify(out.stdout)}`);
       assert(out.code === 0, `exit = ${out.code}`);
       assert(out.textCode === 0, `text verdict = ${out.textCode}`);
+    });
+
+    // A terminal, not three pipes. `stty size` can only answer when there IS
+    // one, `$TERM` proves the terminal environment reached the command, and an
+    // empty stderr proves the PTY merged the streams rather than the pipe path
+    // running under a tty query.
+    await step('a tty stream runs on a PTY, resizes, and echoes what is typed', async () => {
+      const script = 'read go; stty size; printf "%s;" "$TERM"; read x; echo "got:$x"';
+      const out = await openStream(
+        `/v1/machines/${id}/exec/stream?cmd=sh&cmd=-c&cmd=${encodeURIComponent(script)}` +
+          '&tty=true&rows=30&cols=100',
+        {
+          onOpen(ws) {
+            ws.send(JSON.stringify({ type: 'resize', cols: 120, rows: 40 }));
+            // Both writes wait on a `read`, so each lands after the step
+            // before it: the resize cannot race the stty.
+            setTimeout(() => ws.send(stdinFrame('go\n')), 300);
+            setTimeout(() => ws.send(stdinFrame('hello\n')), 900);
+          },
+        },
+      );
+      assert(/(^|\D)40 120(\D|$)/.test(out.stdout),
+        `stty size never reported the resized window: ${JSON.stringify(out.stdout)}`);
+      assert(out.stdout.includes('xterm-256color'),
+        `TERM was not a terminal: ${JSON.stringify(out.stdout)}`);
+      assert(out.stdout.includes('got:hello'),
+        `the typed line never came back: ${JSON.stringify(out.stdout)}`);
+      assert(out.stderr === '',
+        `stderr carried ${JSON.stringify(out.stderr)}; a PTY merges the streams onto frame 1`);
+      assert(out.code === 0, `exit = ${out.code}`);
+    });
+
+    // The contradiction is refused BEFORE the machine is touched: a terminal
+    // with no way to type into it is not a stream worth waking a sandbox for.
+    await step('tty=true with stdin=false is refused before the wake', async () => {
+      const before = await request(`/v1/machines/${id}`);
+      const { status, json } = await request(
+        `/v1/machines/${id}/exec/stream?cmd=sh&tty=true&stdin=false`,
+      );
+      assert(status === 400, `expected 400, got ${status}: ${JSON.stringify(json)}`);
+      assert(json?.code === 'bad_request', `code = ${JSON.stringify(json?.code)}`);
+      assert(String(json?.error).includes('stdin=false'),
+        `the error does not name the parameter that contradicts: ${JSON.stringify(json?.error)}`);
+      assert(String(json?.next).includes('drop stdin=false'),
+        `the refusal says nothing about what to send instead: ${JSON.stringify(json?.next)}`);
+      const after = await request(`/v1/machines/${id}`);
+      assert(after.json?.state === before.json?.state,
+        `state moved from ${before.json?.state} to ${after.json?.state} on a refused query`);
     });
 
     await step('an exec with no user runs as sprite in /home/sprite with Node 24', async () => {

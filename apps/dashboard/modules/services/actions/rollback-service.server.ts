@@ -22,5 +22,5 @@ export async function rollbackService(formData: FormData) {
   } catch (err) {
     return { success: false, error: `Rollback refused: ${(err as Error).message}`, status: 502 };
   }
-  return { success: true, redirect: `/services/${id}` };
+  return { success: true, redirect: `/services/${id}?ok=rolled-back` };
 }

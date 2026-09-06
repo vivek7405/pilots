@@ -179,6 +179,38 @@ for a client that reads only binary frames.
 account at uid 1000 with home `/home/sprite` and Node 24 on `PATH`, so a
 command needs neither a `user` nor a `cwd` to land where these examples assume.
 
+### An interactive terminal
+
+`tty: true` runs the command on a pseudo-terminal, which is what an interactive
+shell, `tmux` and `vim` need and what three pipes cannot give them.
+
+```ts
+const term = pilots.machines.execStream('m-…', ['bash', '-l'], {
+  tty: true,
+  rows: 40,
+  cols: 120,
+})
+term.stdout.pipe(process.stdout)
+term.writeStdin('ls\n')
+term.resize(100, 30)
+```
+
+It is a mode on the same stream, not a second protocol: the frames, the ids and
+the exit verdict are identical. Four things change, and only under `tty`.
+
+- A PTY has one device, so everything the command writes arrives on `stdout`
+  and `stderr` never produces a byte.
+- `stdin` is implied and forced on. `{tty: true, stdin: false}` contradicts
+  itself and hostd answers it with a 400 before the machine is even woken.
+- `endStdin()` sends EOT (`0x04`) to the terminal instead of closing an input,
+  because a terminal has no separate write end to close. The session stays
+  open: what EOT means is the shell's decision.
+- `resize(cols, rows)` sends `{"type":"resize","cols":N,"rows":N}`. It throws
+  on a stream opened without `tty`.
+
+`rows` and `cols` set the initial window, default 24 by 80, each 1..65535. A
+value outside that closes the socket with 1008 rather than being clamped.
+
 **A close with no exit frame is an error.** `wait()` rejects rather than
 resolving 0. The guest agent drains both output pumps before writing the exit
 frame and websocket frames are ordered, so an exit frame means every byte that

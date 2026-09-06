@@ -15,6 +15,8 @@ import { html } from '@webjsdev/core';
 import type { TemplateResult } from '@webjsdev/core';
 import { cn } from '#lib/utils/cn.ts';
 import { alertClass, alertDescriptionClass } from '#components/ui/alert.ts';
+import { buttonClass } from '#components/ui/button.ts';
+import { cardClass } from '#components/ui/card.ts';
 import {
   tableBodyClass,
   tableCaptionClass,
@@ -31,6 +33,20 @@ export function pageHeading(title: unknown): TemplateResult {
   return html`<h1 class="text-2xl font-semibold tracking-tight m-0">${title}</h1>`;
 }
 
+/**
+ * The one or two letters an avatar falls back to when there is no image.
+ *
+ * A GitHub login is one word far more often than not, so a two-word split
+ * would leave most accounts with a single letter. Splitting on the separators
+ * a login may legally carry gives `vivek7405` a V and `ada-lovelace` an AL.
+ */
+export function initials(name: string): string {
+  const parts = name.split(/[-_. ]+/).filter(Boolean);
+  if (parts.length === 0) return '?';
+  const letters = parts.length === 1 ? [parts[0]![0]] : [parts[0]![0], parts[parts.length - 1]![0]];
+  return letters.join('').toUpperCase();
+}
+
 /** The muted paragraph under a page heading. Takes a string or an `html` fragment. */
 export function lede(content: unknown): TemplateResult {
   return html`<p class="text-muted-foreground mt-1 mb-6">${content}</p>`;
@@ -41,9 +57,32 @@ export function sectionHeading(title: unknown): TemplateResult {
   return html`<h2 class="text-lg font-medium m-0 mb-2">${title}</h2>`;
 }
 
-/** What a list renders instead of itself when it has nothing in it. */
-export function emptyState(message: unknown): TemplateResult {
-  return html`<p class="text-muted-foreground">${message}</p>`;
+/**
+ * What a list renders instead of itself when it has nothing in it.
+ *
+ * An empty state is the first screen a new user sees, and `No services.` tells
+ * them nothing about how to stop it being true. Every call site passes the
+ * next step: the command to run, a link, or both.
+ */
+export function emptyState(
+  message: unknown,
+  next?: { command?: string; href?: string; label?: string },
+): TemplateResult {
+  if (!next) return html`<p class="text-muted-foreground">${message}</p>`;
+  return html`
+    <div class=${cn(cardClass(), 'items-start')}>
+      <p class="m-0 text-muted-foreground">${message}</p>
+      ${next.command
+        ? html`<span class="flex items-center gap-1">
+            <code class="font-mono text-sm bg-muted rounded-md px-3 py-2">${next.command}</code>
+            <copy-button value=${next.command} label="command"></copy-button>
+          </span>`
+        : ''}
+      ${next.href
+        ? html`<a href=${next.href} class=${buttonClass({ variant: 'outline', size: 'sm' })}>${next.label ?? 'Start'}</a>`
+        : ''}
+    </div>
+  `;
 }
 
 /** The small print under a table or a form, explaining a rule the UI implies. */
@@ -126,11 +165,20 @@ export function dataTable<Row>(opts: {
   rows: readonly Row[];
   /** Extra classes for one row, e.g. dimming a revoked key. */
   rowClass?: (row: Row) => string;
+  /**
+   * Where a row navigates when clicked anywhere but on a control. It emits
+   * `data-href`, which `<link-rows>` acts on; the table itself stays inert, so
+   * a page that forgets the wrapper simply has non-clickable rows rather than
+   * rows that look clickable and are not.
+   */
+  rowHref?: (row: Row) => string | undefined;
+  /** An id, so a `<list-filter for=...>` can find this table's rows. */
+  id?: string;
 }): TemplateResult {
   const align = (c: Column<Row>) => (c.align === 'right' ? 'text-right' : '');
   return html`
     <div class=${tableContainerClass()}>
-      <table class=${tableClass()}>
+      <table id=${opts.id ?? ''} class=${tableClass()}>
         <caption class=${cn(tableCaptionClass(), 'sr-only')}>${opts.caption}</caption>
         <thead class=${tableHeaderClass()}>
           <tr class=${tableRowClass()}>
@@ -146,7 +194,10 @@ export function dataTable<Row>(opts: {
         <tbody class=${tableBodyClass()}>
           ${opts.rows.map(
             (row) => html`
-              <tr class=${cn(tableRowClass(), opts.rowClass?.(row))}>
+              <tr
+                data-href=${opts.rowHref?.(row) ?? ''}
+                class=${cn(tableRowClass(), opts.rowHref?.(row) ? 'cursor-pointer' : '', opts.rowClass?.(row))}
+              >
                 ${opts.columns.map(
                   (c) => html`<td class=${cn(tableCellClass(), align(c), c.cellClass)}>${c.cell(row)}</td>`,
                 )}

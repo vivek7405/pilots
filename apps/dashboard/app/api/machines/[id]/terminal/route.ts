@@ -1,0 +1,168 @@
+/**
+ * An interactive terminal, over the exec stream's tty mode.
+ *
+ * The exec console beside this one is a different thing and stays: it runs one
+ * command per socket with stdin off, which is what an agent's one-shot needs.
+ * This one holds a shell open on a pseudo-terminal, which is what `tmux`,
+ * `vim` and a person need and what three pipes cannot give.
+ *
+ * Nothing new is routed to get here. hostd's exec stream grew `tty`, `rows`
+ * and `cols`, so this is the SAME endpoint the console uses with a different
+ * query. The guest agent's own `/terminal` handler is not involved.
+ *
+ * The JSON vocabulary is deliberately the guest agent's own terminal frame
+ * shape (`{type, data, cols, rows, code}`), so a reader following this path
+ * from the browser to the guest meets one message format rather than two.
+ *
+ * A `WS` export gets no middleware -- the framework runs none for an upgrade --
+ * so this authenticates itself and closes 4401 when it cannot.
+ */
+
+import type { RouteHandlerContext } from '@webjsdev/core';
+import { requireOrg } from '#modules/auth/session.server.ts';
+import { fleet } from '#modules/fleet/client.server.ts';
+import { assertOwned } from '#modules/fleet/org-filter.server.ts';
+import { socketJson } from '#lib/socket-text.server.ts';
+
+/** The socket surface used here; the framework's `ws` satisfies it. */
+export interface TerminalSocket {
+  send(data: string): void;
+  close(code?: number, reason?: string): void;
+  on(event: string, fn: (data?: unknown) => void): void;
+}
+
+/** What the client sends. `open` must come first and may come only once. */
+interface ClientMessage {
+  type?: unknown;
+  data?: unknown;
+  cols?: unknown;
+  rows?: unknown;
+}
+
+/**
+ * The login shell, chosen in the guest rather than here.
+ *
+ * `bash -l` where it exists and `sh -l` otherwise: a built image may be alpine
+ * or distroless, and asking for a shell that is not there would end the
+ * session with a start failure instead of a prompt.
+ */
+const SHELL = ['sh', '-c', 'command -v bash >/dev/null 2>&1 && exec bash -l || exec sh -l'];
+
+/** A window size the guest will accept. Out of range closes the stream. */
+function dimension(value: unknown, fallback: number): number {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isInteger(n) || n < 1 || n > 65_535) return fallback;
+  return n;
+}
+
+export async function WS(ws: TerminalSocket, req: Request, { params }: RouteHandlerContext): Promise<void> {
+  const ctx = await requireOrg(req);
+  if (!ctx) {
+    ws.close(4401, 'unauthorized');
+    return;
+  }
+
+  try {
+    if (!assertOwned(ctx.org.id, await fleet.machines.get(params.id))) {
+      ws.close(4404, 'not found');
+      return;
+    }
+  } catch {
+    ws.close(1011, 'fleet unavailable');
+    return;
+  }
+
+  // The stream is not opened until the client has said how big its window is.
+  // A shell reads its window size at startup, so opening one at 24 by 80 and
+  // resizing a moment later makes the first prompt redraw visibly.
+  let stream: ReturnType<typeof fleet.machines.execStream> | null = null;
+
+  ws.on('message', (data) => {
+    const message = parse(data);
+    if (!message) return;
+
+    if (message.type === 'open') {
+      if (stream) return; // `open` is once; a second one is ignored, not obeyed
+      stream = start(ws, params.id, dimension(message.rows, 24), dimension(message.cols, 80));
+      return;
+    }
+    if (!stream) return;
+
+    if (message.type === 'data' && typeof message.data === 'string') {
+      try {
+        stream.writeStdin(Buffer.from(message.data, 'base64'));
+      } catch {
+        // A stream that has already exited is not an error worth closing over;
+        // the exit frame has already told the client what happened.
+      }
+      return;
+    }
+    if (message.type === 'resize') {
+      try {
+        stream.resize(dimension(message.cols, 80), dimension(message.rows, 24));
+      } catch {
+        // Same: a resize after the shell exited changes nothing.
+      }
+    }
+  });
+
+  ws.on('close', () => {
+    // Killing the stream closes the socket to the guest, whose context cancel
+    // kills the shell. Without this a closed browser tab leaves a shell
+    // running and a machine that never goes idle.
+    stream?.kill();
+    stream = null;
+  });
+}
+
+function start(ws: TerminalSocket, machineId: string, rows: number, cols: number) {
+  const stream = fleet.machines.execStream(machineId, SHELL, {
+    user: 'sprite',
+    tty: true,
+    rows,
+    cols,
+  });
+
+  // A PTY merges the two output streams, so everything arrives on stdout and
+  // stderr never produces a byte. It is still drained, because an unread
+  // stream on this SDK grows without limit.
+  stream.stdout.on('data', (chunk: Buffer) => {
+    ws.send(JSON.stringify({ type: 'data', data: chunk.toString('base64') }));
+  });
+  stream.stderr.resume();
+
+  stream.on('error', (err: Error) => {
+    ws.send(JSON.stringify({ type: 'error', message: err.message }));
+  });
+
+  void stream
+    .wait()
+    .then((code) => {
+      ws.send(JSON.stringify({ type: 'exit', code }));
+      ws.close(1000, 'shell exited');
+    })
+    .catch((err: Error) => {
+      ws.send(JSON.stringify({ type: 'error', message: err.message }));
+      ws.close(1011, 'stream failed');
+    });
+
+  ws.send(JSON.stringify({ type: 'session' }));
+  return stream;
+}
+
+/**
+ * Validates a client message. Anything else is dropped, never guessed at.
+ *
+ * The decode is `socketJson`, not a `typeof data === 'string'` branch: `ws`
+ * delivers a frame as a Buffer, so treating the non-string case as an
+ * already-parsed object gives an object with no `type` and drops every message
+ * on the floor.
+ */
+function parse(data: unknown): ClientMessage | null {
+  const parsed = socketJson<ClientMessage>(data);
+  if (!parsed || typeof parsed.type !== 'string') return null;
+  // A single frame is one keystroke or one paste. The ceiling is generous for
+  // a paste and small enough that a socket cannot be used as a buffer.
+  if (typeof parsed.data === 'string' && parsed.data.length > 1 << 20) return null;
+  return parsed;
+}

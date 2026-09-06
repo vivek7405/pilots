@@ -21,7 +21,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { APP_DIR, asUser, bootApp, signInAs } from '../helpers/app.ts';
@@ -33,7 +33,18 @@ let cookie = '';
 let org = '';
 
 /** The pages that render at least one seeded table row or one form control. */
-const PAGES = ['/machines', '/services', '/services/svc-1', '/volumes', '/domains', '/usage', '/keys', '/org'] as const;
+const PAGES = [
+  '/',
+  '/machines',
+  '/services',
+  '/services/new',
+  '/services/svc-1',
+  '/volumes',
+  '/domains',
+  '/usage',
+  '/keys',
+  '/org',
+] as const;
 
 before(async () => {
   app = await bootApp();
@@ -177,4 +188,176 @@ test('the theme is a real choice, not a light-only page with dark tokens nobody 
   assert.match(layout, /light-dark\(/, 'the palette carries both halves of every colour');
   assert.match(layout, /\[data-theme='dark'\]\s*\{\s*color-scheme:\s*dark/, 'and an explicit dark forces the scheme');
   assert.match(layout, /classList\.toggle\('dark'/, "and syncs the class the kit's dark: variants key on");
+});
+
+test('the app chrome is a fixed header, one toast viewport and the flash reader', async () => {
+  const body = await render('/machines');
+
+  // Fixed, never sticky: sticky flickers its background for one frame on iOS
+  // WebKit during a client-router navigation, and every iOS browser is WebKit.
+  assert.match(body, /<header\s+class="fixed /, 'the header is position: fixed');
+  assert.ok(!/class="[^"]*sticky top-0/.test(body), 'and never sticky');
+  // A fixed header leaves normal flow, so the body has to reserve its height
+  // or the first row of every page hides underneath it.
+  assert.match(body, /--header-h: 56px;/);
+  assert.match(body, /padding-top: var\(--header-h\);/);
+
+  // Exactly one toast viewport in the document. Two would each take a copy of
+  // the bus and only the last-mounted one would receive anything.
+  assert.equal(body.match(/<ui-sonner\b/g)?.length, 1, 'one toast viewport');
+  assert.equal(body.match(/<flash-toast\b/g)?.length, 1, 'one flash reader');
+});
+
+test('the identity menu holds the account chores and the nav holds the product', async () => {
+  const body = await render('/machines');
+  const header = body.slice(body.indexOf('<header'), body.indexOf('</header>'));
+
+  for (const label of ['Usage', 'Tokens', 'Team', 'Sign out']) {
+    assert.ok(header.includes(`>${label}<`), `${label} is in the identity menu`);
+  }
+  // The nav is the product's nouns. Volumes and Domains stay routable and are
+  // reached from a service, not from a flat list of seven equal items.
+  const nav = header.slice(header.indexOf('<app-nav'), header.indexOf('</app-nav>'));
+  assert.ok(nav.includes('>Overview<') && nav.includes('>Services<') && nav.includes('>Machines<'));
+  assert.ok(!nav.includes('>Volumes<') && !nav.includes('>Keys<'), 'the chores left the nav');
+});
+
+test('no source file paints a raw Tailwind colour', () => {
+  // A raw swatch is the same in both themes and answers to no palette change,
+  // which is the one styling rule this app states without exception. The kit's
+  // sonner shipped three, and they are tokens here because we own the copy.
+  const offenders: string[] = [];
+  const dirs = ['app', 'components', 'modules', 'lib'];
+  const walk = (dir: string): string[] => {
+    const out: string[] = [];
+    for (const entry of readdirSync(join(APP_DIR, dir), { withFileTypes: true })) {
+      const rel = `${dir}/${entry.name}`;
+      if (entry.isDirectory()) out.push(...walk(rel));
+      else if (/\.(ts|js)$/.test(entry.name)) out.push(rel);
+    }
+    return out;
+  };
+  for (const file of dirs.flatMap(walk)) {
+    const source = readFileSync(join(APP_DIR, file), 'utf8');
+    for (const line of source.split('\n')) {
+      // `cn.ts` documents the conflict-resolution rules by naming utilities in
+      // prose; a comment paints nothing.
+      if (/^\s*(\*|\/\/)/.test(line)) continue;
+      if (/-(red|blue|gray|green|zinc|slate|amber|yellow|emerald|sky|rose|violet|orange)-[0-9]/.test(line)) {
+        offenders.push(`${file}: ${line.trim()}`);
+      }
+    }
+  }
+  assert.deepEqual(offenders, [], `raw Tailwind colours: ${offenders.join(' | ')}`);
+});
+
+/**
+ * Which page file serves each url in `PAGES`.
+ *
+ * Written out rather than derived, because a route group and a dynamic
+ * segment do not fall out of the url, and a wrong guess here would make the
+ * test below pass by reading the wrong file. A stale entry throws on the read.
+ */
+const PAGE_FILES: Record<string, string> = {
+  '/': 'app/page.ts',
+  '/machines': 'app/(app)/machines/page.ts',
+  '/machines/m-1': 'app/(app)/machines/[id]/page.ts',
+  '/machines/m-1/terminal': 'app/(app)/machines/[id]/terminal/page.ts',
+  '/services': 'app/(app)/services/page.ts',
+  '/services/new': 'app/(app)/services/new/page.ts',
+  '/services/svc-1': 'app/(app)/services/[id]/page.ts',
+  '/volumes': 'app/(app)/volumes/page.ts',
+  '/domains': 'app/(app)/domains/page.ts',
+  '/usage': 'app/(app)/usage/page.ts',
+  '/keys': 'app/(app)/keys/page.ts',
+  '/org': 'app/(app)/org/page.ts',
+};
+
+/** Every `#`-aliased specifier a file imports, as a repo-relative path. */
+function importsOf(source: string): string[] {
+  const out: string[] = [];
+  for (const m of source.matchAll(/from\s+'(#[^']+)'|^\s*import\s+'(#[^']+)'/gm)) {
+    const spec = m[1] ?? m[2];
+    if (spec) out.push(spec.slice(1));
+  }
+  return out;
+}
+
+/**
+ * The custom-element tags a file's module graph registers.
+ *
+ * The SERVED MARKUP cannot answer this. A custom element is registered
+ * process-wide the first time any module defines it, and the test process
+ * renders many pages, so a page that forgot its import still renders an
+ * upgraded element as long as some other page in the same run imported it.
+ * That is exactly why the missing import on the services page reached a
+ * browser: nothing server-side could see it.
+ */
+function registeredBy(entry: string): Set<string> {
+  const tags = new Set<string>();
+  const seen = new Set<string>();
+  const walk = (rel: string) => {
+    if (seen.has(rel)) return;
+    seen.add(rel);
+    let source: string;
+    try {
+      source = readFileSync(join(APP_DIR, rel), 'utf8');
+    } catch {
+      return; // a type-only or generated specifier; it registers nothing
+    }
+    for (const m of source.matchAll(/\.register\(\s*'([a-z][a-z0-9-]*)'/g)) tags.add(m[1]!);
+    for (const spec of importsOf(source)) walk(spec);
+  };
+  walk(entry);
+  return tags;
+}
+
+/** The custom-element tags in a page's markup, comments stripped. */
+function elementsIn(body: string): string[] {
+  const markup = body.replace(/<!--[\s\S]*?-->/g, '');
+  return [...new Set([...markup.matchAll(/<([a-z][a-z0-9]*-[a-z0-9-]+)[\s>]/g)].map((m) => m[1]!))];
+}
+
+/**
+ * A page that renders a custom element must import it.
+ *
+ * An un-imported custom element is not an error anywhere: it renders as an
+ * inert tag. A `<copy-button>` looks like a button and does nothing when
+ * clicked, and a `<ui-tooltip-content>` is not hidden, so it prints its whole
+ * explanation as body text. Both shipped once each and neither was visible to
+ * any other check, including a sweep of the served bytes.
+ *
+ * The empty-org render matters as much as the seeded one: an empty state is
+ * the branch that introduces a control the populated page has no use for, and
+ * it is where the services page's missing copy button lived.
+ *
+ * Counterfactual: drop `import '#components/copy-button.ts'` from
+ * `app/(app)/services/page.ts` and this fails on `/services` for the empty org.
+ */
+test('every custom element a page renders is one that page imports', async () => {
+  // The layout is on every page, so what it registers counts as available.
+  const fromLayout = registeredBy('app/layout.ts');
+  const empty = await signInAs(app.handle, { id: 7011, login: 'newcomer' });
+  let checked = 0;
+
+  for (const [path, file] of Object.entries(PAGE_FILES)) {
+    const available = new Set([...fromLayout, ...registeredBy(file)]);
+
+    for (const [label, session] of [
+      ['seeded', cookie],
+      ['empty', empty],
+    ] as const) {
+      // A seeded id under an empty org is a 404, which is correct and not
+      // what this test is about.
+      if (label === 'empty' && /\/(svc-1|m-1)/.test(path)) continue;
+      const res = await app.handle(new Request(`http://localhost${path}?since=2026-01-01&until=2026-01-03`, asUser(session)));
+      assert.equal(res.status, 200, `${path} renders for the ${label} org`);
+
+      for (const tag of elementsIn(await res.text())) {
+        checked += 1;
+        assert.ok(available.has(tag), `<${tag}> is rendered by ${file} on the ${label} org but never imported there`);
+      }
+    }
+  }
+  assert.ok(checked > 40, `expected these pages to render custom elements, found ${checked}`);
 });

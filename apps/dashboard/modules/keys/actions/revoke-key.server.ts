@@ -26,5 +26,5 @@ export async function revokeKey(formData: FormData) {
 
   // The row stays. A delete would erase the record that the key existed.
   await db.update(apiKeys).set({ revokedAt: new Date() }).where(eq(apiKeys.id, id));
-  return { success: true, redirect: '/keys' };
+  return { success: true, redirect: '/keys?ok=key-revoked' };
 }

@@ -16,6 +16,12 @@
  *     websocket frames are ordered, so an exit frame means the output that
  *     preceded it has already arrived. A socket that dropped instead means
  *     nobody knows what the command did.
+ *
+ * `tty` is a mode on this same stream, not a second protocol: the frames, the
+ * ids and the exit verdict are identical. What changes is that a PTY merges
+ * the two output streams onto `stdout` (nothing ever arrives on `stderr`),
+ * stdin is always read, `endStdin()` sends EOT rather than closing anything,
+ * and `resize(cols, rows)` becomes callable.
  */
 
 import { EventEmitter } from 'node:events'
@@ -32,6 +38,17 @@ export interface ExecStreamOptions {
   user?: string
   /** Off by default; see the note above before turning it on. */
   stdin?: boolean
+  /**
+   * Runs the command on a pseudo-terminal instead of three pipes, which is
+   * what an interactive shell, tmux and vim need. It implies `stdin`, merges
+   * stderr into `stdout` (a PTY has one device), and turns `endStdin()` into
+   * an EOT character rather than a close. `resize()` becomes callable.
+   */
+  tty?: boolean
+  /** Initial terminal rows, 1..65535. Default 24. Only meaningful with `tty`. */
+  rows?: number
+  /** Initial terminal columns, 1..65535. Default 80. Only meaningful with `tty`. */
+  cols?: number
   /** Overrides `globalThis.WebSocket`. The seam the tests dial through. */
   WebSocket?: WebSocketCtor
 }
@@ -57,13 +74,20 @@ export function buildExecURL(
   }
   if (opts.user) url.searchParams.set('user', opts.user)
   // Always present, never inferred: the default is the thing most likely to be
-  // wrong by omission.
-  url.searchParams.set('stdin', opts.stdin ? 'true' : 'false')
+  // wrong by omission. A tty forces it on rather than letting the pair
+  // contradict itself: hostd answers tty=true&stdin=false with a 400.
+  url.searchParams.set('stdin', opts.tty || opts.stdin ? 'true' : 'false')
+  if (opts.tty) {
+    url.searchParams.set('tty', 'true')
+    if (opts.rows !== undefined) url.searchParams.set('rows', String(opts.rows))
+    if (opts.cols !== undefined) url.searchParams.set('cols', String(opts.cols))
+  }
   return url
 }
 
 export interface ExecStreamInit {
   stdin: boolean
+  tty: boolean
   WebSocket?: WebSocketCtor
 }
 
@@ -84,14 +108,19 @@ export class ExecStream extends EventEmitter {
   private settled = false
   private opened = false
   private readonly stdinEnabled: boolean
-  private readonly pending: Uint8Array[] = []
+  private readonly ttyEnabled: boolean
+  // Widened for the resize control message, which is text: it is not a frame,
+  // so it spends no byte id, but it queues behind the same open() the binary
+  // frames do.
+  private readonly pending: (Uint8Array | string)[] = []
   private readonly done: Promise<number>
   private resolveDone!: (code: number) => void
   private rejectDone!: (err: Error) => void
 
   constructor(url: URL, apiKey: string, init: ExecStreamInit) {
     super()
-    this.stdinEnabled = init.stdin
+    this.stdinEnabled = init.stdin || init.tty
+    this.ttyEnabled = init.tty
     this.done = new Promise<number>((resolve, reject) => {
       this.resolveDone = resolve
       this.rejectDone = reject
@@ -152,7 +181,13 @@ export class ExecStream extends EventEmitter {
     this.send(frame)
   }
 
-  /** Closes the process's stdin (frame 4). */
+  /**
+   * Closes the process's stdin (frame 4).
+   *
+   * Under `tty` there is no separate input to close, so this sends EOT to the
+   * terminal instead and the session stays open: what EOT means there is the
+   * shell's decision.
+   */
   endStdin(): void {
     if (!this.stdinEnabled) {
       throw new PilotsError('this stream was opened with stdin: false')
@@ -160,12 +195,20 @@ export class ExecStream extends EventEmitter {
     this.send(new Uint8Array([FrameStdinEOF]))
   }
 
+  /** Resizes the terminal. Throws unless the stream was opened with `tty`. */
+  resize(cols: number, rows: number): void {
+    if (!this.ttyEnabled) {
+      throw new PilotsError('this stream was opened without tty')
+    }
+    this.send(JSON.stringify({ type: 'resize', cols, rows }))
+  }
+
   /** Closes the socket. The agent's context cancel kills the process. */
   kill(): void {
     this.ws.close(1000)
   }
 
-  private send(frame: Uint8Array): void {
+  private send(frame: Uint8Array | string): void {
     if (this.opened) this.ws.send(frame)
     else this.pending.push(frame)
   }

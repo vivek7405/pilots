@@ -179,6 +179,39 @@ test('with stdin off, both stdin calls throw', () => {
   assert.throws(() => stream.endStdin(), PilotsError)
 })
 
+test('tty writes the terminal query names and forces stdin on', () => {
+  const { ws } = open(['bash', '-l'], { tty: true, rows: 40, cols: 120 })
+  const url = new URL(ws.url)
+
+  assert.equal(url.searchParams.get('tty'), 'true')
+  assert.equal(url.searchParams.get('rows'), '40')
+  assert.equal(url.searchParams.get('cols'), '120')
+  // Never sent as false: hostd answers tty=true with stdin=false with a 400,
+  // so the pair is settled here rather than left to contradict itself.
+  assert.equal(url.searchParams.get('stdin'), 'true')
+})
+
+test('a tty stream takes stdin without asking for it, and resize is a text message', async () => {
+  const { stream, ws } = open(['bash', '-l'], { tty: true })
+
+  // stdin: true was never passed. Under a tty it is implied, so neither of
+  // these throws.
+  stream.writeStdin('x')
+  stream.resize(100, 30)
+
+  assert.deepEqual(ws.sent, [
+    new Uint8Array([0, 120]),
+    JSON.stringify({ type: 'resize', cols: 100, rows: 30 }),
+  ])
+  ws.frame(3, new Uint8Array([0]))
+  assert.equal(await stream.wait(), 0)
+})
+
+test('resize on a stream opened without tty throws', () => {
+  const { stream } = open(['bash'], { stdin: true })
+  assert.throws(() => stream.resize(100, 30), PilotsError)
+})
+
 test('kill closes the socket with 1000', () => {
   const { stream, ws } = open(['bash'])
   stream.kill()

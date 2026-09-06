@@ -211,3 +211,104 @@ Keep server-only code (database drivers, secrets, `node:*` builtins) in
 Use the wired-up database (Drizzle) for every piece of data the app stores;
 the playbook above has the modeling step. Never store app data in a JSON file,
 an in-memory array, or localStorage.
+
+## Conventions this app has settled
+
+These are decisions, not preferences. Each one exists because the alternative
+was tried and produced a specific defect.
+
+**The header is `position: fixed`, never `sticky`.** Sticky flickers its
+background for one frame on iOS WebKit during a client-router navigation, and
+every iOS browser is WebKit. A fixed header leaves normal flow, so `--header-h`
+reserves its height on the body, and a small script in the layout keeps that
+token exact with a `ResizeObserver` for the viewports where the nav wraps. The
+header also carries
+`border-right: var(--wj-scrollbar-compensation, 0px) solid transparent`, which
+is what the kit's dialog scroll lock needs from a fixed element: without it the
+header widens with the viewport when a modal hides the scrollbar and its
+contents slide sideways.
+
+**The primary nav holds product nouns; the identity menu holds account
+chores.** Overview, Services and Machines are the nav. Usage, Tokens, Team and
+Sign out are in the account menu. Volumes and Domains stay routable and are
+reached from the service they belong to. A flat list of seven equal items said
+nothing about what the product is for.
+
+**The active nav link is computed in the browser, not on the server.** The root
+layout is preserved across a client-router navigation, so a server-rendered
+highlight freezes on whichever page loaded first. `<app-nav>` re-derives it from
+`webjs:navigate`, and its `current` attribute seeds the first paint.
+
+**Every chrome action works with scripting off.** The account menu is a
+`<ui-dropdown-menu>`, whose panel is a `popover="manual"` element and is
+therefore invisible without JavaScript. The same org switch and sign out are
+real forms in the Account section of `/org`, and a `<noscript>` link in the
+header points there. Apply the same rule to anything new: if the only way to
+reach an action is inside an overlay, it needs a plain page that carries it too.
+
+**Toasts ride `?ok=` / `?err=` on an action's redirect.** The app deliberately
+runs no session middleware, so there is no flash bag. An action returns
+`redirect: '/services/x?ok=deployed'`, `<flash-toast>` in the layout reads the
+parameter once, publishes one toast, and strips it with `history.replaceState`
+so a reload does not repeat it. The keys are a CLOSED SET in
+`components/flash-toast.ts`: a message interpolated from the URL is a message
+an attacker writes into a surface the visitor trusts. Add a key there rather
+than putting prose in the query string.
+
+**Colours are tokens, with no exception for a file the kit wrote.** The kit's
+`sonner.ts` shipped `text-emerald-500`, `text-sky-500` and `text-amber-500`;
+`--success`, `--warning` and `--info` exist in `app/layout.ts` and are mapped in
+`public/input.css` so that file speaks in tokens like every other surface. We
+own every file under `components/ui/`, so a raw swatch arriving with a kit
+primitive is ours to fix. `test/ui/design-system.test.ts` fails on any that
+survive.
+
+**A `WS` handler receives Buffers, not strings.** The framework hands a `WS`
+export the raw `ws` socket, and `ws` delivers a message as a Buffer with the
+decoding left to the handler. A handler that branches on
+`typeof data === 'string'` and treats everything else as an already-parsed
+object gets an object with none of its own fields, so every message is dropped
+and the socket looks connected and dead. The exec console shipped with exactly
+that bug and its Run button did nothing in a browser while its unit tests, which
+pass strings, stayed green. Decode through `socketJson` in
+`lib/socket-text.server.ts`, and make at least one test send a real Buffer.
+
+**One vendored browser module, and it is xterm.js.** It lives in
+`components/terminal/vendor/`, is copied byte for byte with recorded checksums,
+and ships only to `/machines/[id]/terminal` through a dynamic import.
+`vendor/README.md` carries the versions and the update procedure. A terminal
+emulator is not a framework, a bundler or a UI kit, so it does not cross this
+repo's one-framework rule; anything else third-party in the browser does.
+
+**A `utils/ui/` fragment imports the components it renders.** A fragment that
+emits `<ui-tooltip>` must `import '#components/ui/tooltip.ts'` itself, because a
+page that renders the fragment and forgot the import gets an element that never
+upgrades, and an un-upgraded `<ui-tooltip-content>` is not hidden: its whole
+explanation renders inline as body text. Declaring the dependency where it is
+used is the only version of this that cannot be forgotten.
+
+**xterm's colours come from a probe element, not from a token read.**
+`getComputedStyle(root).getPropertyValue('--background')` does not resolve a
+custom property: it hands back the declaration's own text, which in this app is
+`light-dark(#ffffff, #16181d)`. Any library that takes a concrete colour needs
+the value applied to a real property on a throwaway element and read back from
+there. `machine-terminal.ts` has the pattern.
+
+**A palette shortcut takes a modifier; a filter shortcut checks the target.**
+`Ctrl K` and `Cmd K` open the command palette and a bare `k` does not, or every
+text field in the app becomes unusable. `/` focuses a list filter, and the
+handler bails when the event target is an input, a textarea, a select or
+anything contentEditable, or every input in the app drops a character. Both
+listeners are on `document`, which is the case the skill sanctions: a global
+shortcut has no element to dispatch from, and neither handler reads markup
+another component rendered.
+
+**No control for something the engine does not enforce.** Two absences in this
+app are deliberate and both are recorded where they would otherwise be
+questioned. `/services/new` has no create button, because `POST /v1/services`
+would accept a service with no release and hostd serves no `DELETE` for one, so
+the row could never be removed. `/keys` has no expiry, because nothing in
+hostd's schema or its verification path reads a date, so an expiry stored here
+would be a date nobody enforces and the token would go on working past it. A
+security control that does not control anything is worse than an absent one.
+Before adding a field, check that something reads it.

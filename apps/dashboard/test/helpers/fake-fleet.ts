@@ -14,7 +14,7 @@
 
 import { PassThrough } from 'node:stream';
 
-import type { Host, Machine, Release, Service, Volume } from '@pilots/sdk';
+import type { Host, Machine, QuotaResponse, Release, Service, Volume } from '@pilots/sdk';
 
 export interface FleetCall {
   method: string;
@@ -39,11 +39,24 @@ export interface FleetData {
   volumes: Volume[];
   hosts: Host[];
   releases: Record<string, Release[]>;
+  /** What `quotas.get` answers with. The overview draws its bars from this. */
+  quotas: QuotaResponse;
   apiKeyRows: { hash: string; org_id: string; scopes: string[]; revoked_at?: string }[];
   execFrames: FakeExecFrame[];
   logLines: string[];
   /** Records what `execStream` was asked for, so a test can assert stdin=false. */
   lastExec: { id: string; argv: string[]; opts: Record<string, unknown> } | null;
+  /** Bytes a caller wrote to the stream's stdin, newest last. */
+  execStdin: Buffer[];
+  /** Resize control messages a caller sent, newest last. */
+  execResizes: { cols: number; rows: number }[];
+  /**
+   * Hold the stream open instead of exiting once the frames are drained.
+   *
+   * A terminal is a session, not a command: a fake that resolves immediately
+   * would close the socket before a test could type into it.
+   */
+  execHold: boolean;
 }
 
 export interface FakeFleet {
@@ -67,10 +80,21 @@ export function makeFakeFleet(): FakeFleet {
     volumes: [],
     hosts: [],
     releases: {},
+    quotas: {
+      org_id: '',
+      max_machines: 20,
+      max_vcpus: 32,
+      max_mem_mib: 65_536,
+      max_volume_gib: 500,
+      max_builds: 4,
+    } as QuotaResponse,
     apiKeyRows: [],
     execFrames: [],
     logLines: [],
     lastExec: null,
+    execStdin: [],
+    execResizes: [],
+    execHold: false,
   };
 
   const reset = () => {
@@ -84,6 +108,9 @@ export function makeFakeFleet(): FakeFleet {
     state.execFrames.length = 0;
     state.logLines.length = 0;
     state.lastExec = null;
+    state.execStdin.length = 0;
+    state.execResizes.length = 0;
+    state.execHold = false;
   };
 
   const notFound = (what: string) => {
@@ -158,7 +185,7 @@ export function makeFakeFleet(): FakeFleet {
       execStream: (id: string, argv: string[], opts: Record<string, unknown> = {}) => {
         record('machines.execStream', id, argv, opts);
         state.lastExec = { id, argv, opts };
-        return makeFakeExecStream(state.execFrames);
+        return makeFakeExecStream(state);
       },
     },
 
@@ -229,6 +256,13 @@ export function makeFakeFleet(): FakeFleet {
       },
     },
 
+    quotas: {
+      get: async (org: string) => {
+        record('quotas.get', org);
+        return { ...state.quotas, org_id: org };
+      },
+    },
+
     apiKeys: {
       create: async (req: { org_id?: string; scopes?: string[] }) => {
         record('apiKeys.create', req);
@@ -270,18 +304,24 @@ export function makeFakeFleet(): FakeFleet {
  * BEFORE the exit resolves -- because the route relies on it to send every
  * output frame ahead of the exit message.
  */
-function makeFakeExecStream(frames: FakeExecFrame[]) {
+function makeFakeExecStream(state: FleetData) {
   const stdout = new PassThrough();
   const stderr = new PassThrough();
+  const listeners: Record<string, ((arg?: unknown) => void)[]> = {};
   let code = 0;
+  let settle: (code: number) => void = () => {};
 
   const done = new Promise<number>((resolve) => {
+    settle = resolve;
     setImmediate(() => {
-      for (const f of frames) {
+      for (const f of state.execFrames) {
         if (f.frame === 1) stdout.write(f.data);
         else if (f.frame === 2) stderr.write(f.data);
         else if (f.frame === 3) code = Number(f.data);
       }
+      // A terminal holds its stream open until something ends it, which is
+      // what `kill` is for; a command's stream ends when the command does.
+      if (state.execHold) return;
       stdout.end();
       stderr.end();
       resolve(code);
@@ -292,9 +332,23 @@ function makeFakeExecStream(frames: FakeExecFrame[]) {
     stdout,
     stderr,
     wait: () => done,
+    writeStdin: (chunk: Uint8Array | string) => {
+      state.execStdin.push(Buffer.from(chunk as Uint8Array));
+    },
+    resize: (cols: number, rows: number) => {
+      state.execResizes.push({ cols, rows });
+    },
+    on: (event: string, fn: (arg?: unknown) => void) => {
+      (listeners[event] ??= []).push(fn);
+    },
+    /** Test-only: raise an `error` the way the real stream does. */
+    emit: (event: string, arg?: unknown) => {
+      for (const fn of listeners[event] ?? []) fn(arg);
+    },
     kill: () => {
       stdout.end();
       stderr.end();
+      settle(code);
     },
     get exitCode() {
       return code;

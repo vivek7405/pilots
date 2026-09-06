@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"sync"
 
@@ -45,7 +46,9 @@ func handleTerminal(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ptmx, err := pty.Start(cmd)
+	// 0, 0 keeps the kernel's default window until the client sends its first
+	// resize, which is what this handler has always done.
+	ptmx, err := startPTY(cmd, 0, 0)
 	if err != nil {
 		tw.send(terminalFrame{Type: "error", Data: err.Error()})
 		_ = conn.Close(websocket.StatusInternalError, "pty start failed")
@@ -99,7 +102,7 @@ func handleTerminal(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case "resize":
-			_ = pty.Setsize(ptmx, &pty.Winsize{Cols: frame.Cols, Rows: frame.Rows})
+			resizePTY(ptmx, frame.Cols, frame.Rows)
 		}
 	}
 }
@@ -122,4 +125,32 @@ func (tw *termWriter) send(f terminalFrame) {
 	tw.mu.Lock()
 	defer tw.mu.Unlock()
 	_ = tw.conn.Write(tw.ctx, websocket.MessageText, payload)
+}
+
+// startPTY runs cmd on a new pseudo-terminal and returns the master side.
+//
+// Shared with the exec stream's tty mode so one place knows how a PTY is
+// opened: the size is applied BEFORE the command starts, because a shell reads
+// its window size at startup and a resize that lands after it has already
+// drawn a prompt is a redraw the caller can see. rows or cols of 0 leaves the
+// kernel default in place.
+func startPTY(cmd *exec.Cmd, rows, cols uint16) (*os.File, error) {
+	if rows == 0 || cols == 0 {
+		return pty.Start(cmd)
+	}
+	return pty.StartWithSize(cmd, &pty.Winsize{Rows: rows, Cols: cols})
+}
+
+// resizePTY applies a window size to an open PTY.
+//
+// A failure is deliberately not fatal and not reported: the only ways this
+// fails are a PTY the process already closed and a size the kernel refuses,
+// and neither is worth ending a live session over. A nil master (the exec
+// stream without tty) is a no-op, which is what lets the read loop forward a
+// resize message unconditionally.
+func resizePTY(ptmx *os.File, cols, rows uint16) {
+	if ptmx == nil || cols == 0 || rows == 0 {
+		return
+	}
+	_ = pty.Setsize(ptmx, &pty.Winsize{Cols: cols, Rows: rows})
 }

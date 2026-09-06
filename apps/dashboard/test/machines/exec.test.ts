@@ -156,3 +156,22 @@ test('a malformed command is refused rather than guessed at', async () => {
   assert.equal(app.fleet.data.lastExec, null, 'nothing ran');
   assert.equal(ws.closed, null, 'the socket stays open so the viewer can retry');
 });
+
+test('a command arrives as a Buffer, which is what the socket library delivers', async () => {
+  app.fleet.data.execFrames.push({ frame: 3, data: '0' });
+  const ws = fakeSocket();
+  await WS(ws, request(cookieA), routeCtx({ id: 'm-alice' }));
+
+  // The bug this guards shipped: `ws` delivers a frame as raw bytes, and the
+  // handler cast the non-string case straight to its message interface, so
+  // every well-formed command became an object with no `cmd` and the console
+  // answered its own usage string. Every test here passed strings.
+  ws.emit('message', Buffer.from(JSON.stringify({ cmd: ['sh', '-c', 'echo hi'] })));
+  await ws.whenClosed;
+
+  assert.equal(app.fleet.data.lastExec?.argv[2], 'echo hi');
+  assert.ok(
+    !ws.sent.some((m) => m.type === 'error'),
+    `the console refused a valid command: ${JSON.stringify(ws.sent)}`,
+  );
+});
