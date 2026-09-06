@@ -212,7 +212,12 @@ export function makeFakeFleet(): FakeFleet {
       patch: async (id: string, req: unknown) => {
         record('services.patch', id, req);
         const s = state.services.find((x) => x.id === id) ?? notFound('service');
-        return Object.assign(s as Service, req);
+        // hostd accepts env and secret_env on a patch and returns NEITHER on
+        // any read (serviceToAPI drops both halves), so the fake must not
+        // echo them either, or a page that serialises a service leaks a value
+        // the real API would never have sent.
+        const { env: _env, secret_env: _secret, ...rest } = (req ?? {}) as Record<string, unknown>;
+        return Object.assign(s as Service, rest);
       },
       deploy: async (id: string, req: unknown) => {
         record('services.deploy', id, req);

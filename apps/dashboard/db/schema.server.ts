@@ -126,8 +126,29 @@ export const repoConnections = table(
   (t) => [index(t.orgId), index(t.repo)],
 );
 
+
+/**
+ * The NAMES of a service's variables set from the dashboard, and whether each
+ * is a secret. Names only, ever: the value goes to hostd, which seals a secret
+ * with the fleet key, and no API returns it to any client. This table exists
+ * because nothing else can tell the Variables tab what was set.
+ */
+export const serviceVariables = table(
+  'service_variables',
+  {
+    id: uuidPk(),
+    orgId: text().notNull(),
+    serviceId: text().notNull(),
+    name: text().notNull(),
+    secret: bool().notNull().default(false),
+    updatedBy: integer().notNull(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [unique('service_variables_service_id_name_unique').on(t.serviceId, t.name), index(t.serviceId)],
+);
+
 export const relations = defineRelations(
-  { users, orgs, memberships, apiKeys, usageSamples, repoConnections },
+  { users, orgs, memberships, apiKeys, usageSamples, repoConnections, serviceVariables },
   (r) => ({
     users: { memberships: r.many.memberships() },
     orgs: {
@@ -145,6 +166,7 @@ export const relations = defineRelations(
     // takes `webjs db generate` and every boot with it.
     apiKeys: { org: r.one.orgs({ from: r.apiKeys.orgId, to: r.orgs.id }) },
     repoConnections: { org: r.one.orgs({ from: r.repoConnections.orgId, to: r.orgs.id }) },
+    serviceVariables: { org: r.one.orgs({ from: r.serviceVariables.orgId, to: r.orgs.id }) },
   }),
 );
 
@@ -155,3 +177,4 @@ export type Membership = typeof memberships.$inferSelect;
 export type ApiKey = typeof apiKeys.$inferSelect;
 export type UsageSample = typeof usageSamples.$inferSelect;
 export type RepoConnection = typeof repoConnections.$inferSelect;
+export type ServiceVariable = typeof serviceVariables.$inferSelect;

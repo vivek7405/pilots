@@ -7,7 +7,7 @@
 import type { ServiceDetail } from '#modules/services/queries/get-service.server.ts';
 
 /** The tabs this stage renders, in the order the strip shows them. */
-export const TABS = ['deployments', 'terminal', 'settings'] as const;
+export const TABS = ['deployments', 'variables', 'metrics', 'terminal', 'settings'] as const;
 export type Tab = (typeof TABS)[number];
 
 export function tabOf(raw: unknown): Tab {

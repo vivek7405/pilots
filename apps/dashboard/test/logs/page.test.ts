@@ -4,7 +4,7 @@
  * when nothing is up.
  */
 import assert from 'node:assert/strict';
-import { after, before, test } from 'node:test';
+import { before, test } from 'node:test';
 import { asUser, bootApp, signInAs } from '../helpers/app.ts';
 import type { TestApp } from '../helpers/app.ts';
 import type { Machine, Service } from '@pilots/sdk';
@@ -27,9 +27,6 @@ before(async () => {
       { id: 'm-other', name: 'other-1', state: 'running', org_id: 'someone-else' },
     ] as unknown as Machine[]),
   );
-});
-after(async () => {
-  await app.close?.();
 });
 
 async function logs(ck = cookie): Promise<string> {

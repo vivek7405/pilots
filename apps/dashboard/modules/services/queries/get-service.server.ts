@@ -12,7 +12,7 @@
  * The org the service is checked against is the SESSION's, so a caller cannot
  * pass the org id that would make the tenancy check pass.
  */
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { db } from '#db/connection.server.ts';
 import { repoConnections } from '#db/schema.server.ts';
 import { fleet, listMachines } from '#modules/fleet/client.server.ts';
@@ -21,7 +21,8 @@ import { requireOrg, signedOut } from '#modules/auth/session.server.ts';
 import type { SignedOut } from '#modules/auth/session.server.ts';
 import { githubAppConfigured } from '#modules/github/app-jwt.server.ts';
 import { installUrl } from '#modules/github/installations.server.ts';
-import type { RepoConnection } from '#db/schema.server.ts';
+import type { RepoConnection, ServiceVariable } from '#db/schema.server.ts';
+import { serviceVariables } from '#db/schema.server.ts';
 import type { DomainResponse, Host, Machine, Release, Service } from '@pilots/sdk';
 
 export interface ServiceDetail {
@@ -33,6 +34,8 @@ export interface ServiceDetail {
   replicas: Machine[];
   /** Every host, so a replica's resume tier can be named without a second read. */
   hosts: Host[];
+  /** The names of variables set from here, for the Variables tab. Never values. */
+  variables: ServiceVariable[];
   /** The custom domains pointing at this service, for its Settings tab. */
   domains: DomainResponse[];
   /**
@@ -67,7 +70,21 @@ export async function getService(input: { id: string }): Promise<ServiceDetail |
     (d) => d.service_id === service.id,
   );
 
+  // Defense in depth. hostd never returns an environment, but a service that
+  // reaches a page is serialised for hydration, so strip both halves here in
+  // case a future API or a fixture ever includes them. A value must never be
+  // in a page.
+  const { env: _env, secret_env: _secret, ...publicService } = service as Service & { env?: unknown; secret_env?: unknown };
+  service = publicService as Service;
+
+  const variables = await db
+    .select()
+    .from(serviceVariables)
+    .where(and(eq(serviceVariables.serviceId, service.id), eq(serviceVariables.orgId, ctx.org.id)))
+    .all();
+
   return {
+    variables,
     service,
     releases,
     previews,

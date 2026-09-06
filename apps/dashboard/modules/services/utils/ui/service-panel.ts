@@ -17,6 +17,8 @@ import { TABS, tabHref } from '#modules/services/utils/tabs.ts';
 import type { PanelErrors, Tab, TabProps } from '#modules/services/utils/tabs.ts';
 import { healthPills } from '#modules/services/utils/ui/health-pills.ts';
 import { deploymentsTab } from '#modules/services/utils/ui/deployments-tab.ts';
+import { variablesTab } from '#modules/services/utils/ui/variables-tab.ts';
+import { metricsTab } from '#modules/services/utils/ui/metrics-tab.ts';
 import { settingsTab } from '#modules/services/utils/ui/settings-tab.ts';
 import { terminalTab } from '#modules/services/utils/ui/terminal-tab.ts';
 import { buttonClass } from '#components/ui/button.ts';
@@ -28,6 +30,8 @@ import '#components/copy-button.ts';
 
 const LABEL: Record<Tab, string> = {
   deployments: NOUN.Deployments,
+  variables: 'Variables',
+  metrics: 'Metrics',
   terminal: NOUN.Terminal,
   settings: 'Settings',
 };
@@ -42,6 +46,8 @@ export interface PanelContext {
 
 const TAB_RENDER: Record<Tab, (props: TabProps) => TemplateResult> = {
   deployments: deploymentsTab,
+  variables: variablesTab,
+  metrics: metricsTab,
   terminal: terminalTab,
   settings: settingsTab,
 };

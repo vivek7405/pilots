@@ -5,7 +5,7 @@
  * a `<tbody>` that is rendered ONCE. A component that re-rendered its rows on
  * every line would wipe what it had already streamed, so the rows are DOM the
  * framework preserves across a toolbar re-render (the `ref`'d tbody survives,
- * the way `log-pane` relied on before this replaced it), and `render()` never
+ * the way the old per-machine pane relied on), and `render()` never
  * reads the row data.
  *
  * The toolbar (a filter box, service and instance chips, a follow toggle) is
