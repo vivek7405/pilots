@@ -198,6 +198,32 @@ const (
 	FrameExit   byte = 3
 )
 
+// The tty contract on the exec stream.
+//
+// tty=true runs the command on a pseudo-terminal, which is what an interactive
+// shell, tmux and vim need and what three pipes cannot give them. It is a mode
+// on this stream rather than a second route on purpose: one protocol, one set
+// of frames, one exit verdict.
+//
+// Query: tty=true, plus rows and cols for the initial window (24 by 80 by
+// default, each 1..65535; anything else closes the socket with 1008). tty=true
+// with stdin=false is a 400 here, before the machine is woken.
+//
+// Under tty, and only under tty:
+//
+//   - a PTY merges the two output streams, so everything arrives as FrameStdout
+//     and FrameStderr is NEVER sent;
+//   - client frames are read whether or not stdin=true was passed, because a
+//     terminal implies stdin;
+//   - FrameStdinEOF writes EOT (0x04) to the terminal instead of closing an
+//     input, because a terminal has no separate write end to close, and the
+//     session stays open;
+//   - a TEXT message {"type":"resize","cols":N,"rows":N} resizes the window.
+//     It is a control message, not a frame: no byte id is spent on it.
+//
+// Everything else is unchanged, the exit verdict included, so a client that
+// only reads frames needs no tty-specific code to learn how a command ended.
+
 // CheckpointRequest names a restorable point. Checkpoints chain: restoring an
 // older one discards writes made after it.
 type CheckpointRequest struct {

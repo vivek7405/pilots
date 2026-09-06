@@ -311,8 +311,16 @@ func (d Deps) handleSpriteExec(w http.ResponseWriter, r *http.Request) {
 // caller, so a foreign machine is a 404 whether or not the query is well
 // formed.
 func (d Deps) execStream(w http.ResponseWriter, r *http.Request, id string) {
-	if len(r.URL.Query()["cmd"]) == 0 {
+	q := r.URL.Query()
+	if len(q["cmd"]) == 0 {
 		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "cmd is required"})
+		return
+	}
+	// Refused here rather than in the guest, because reaching the guest means
+	// waking the machine first: a client that asked for a terminal it cannot
+	// type into would pay a wake to be told so.
+	if q.Get("tty") == "true" && q.Get("stdin") == "false" {
+		writeJSON(w, http.StatusBadRequest, ErrorResponse{Error: "tty=true needs stdin; drop stdin=false"})
 		return
 	}
 	if err := d.Machines.ExecStream(w, r, id); err != nil {

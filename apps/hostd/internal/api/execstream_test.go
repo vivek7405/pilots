@@ -32,6 +32,38 @@ func TestExecStreamRequiresCmd(t *testing.T) {
 	}
 }
 
+// tty=true with stdin=false contradicts itself: a terminal with no way to type
+// into it. Refused here, before the manager, because reaching the guest agent
+// means waking the machine first, and a suspended sandbox should not pay a
+// wake to learn its query was malformed.
+func TestExecStreamRefusesATTYWithoutStdin(t *testing.T) {
+	h, _, fake := newTestServerWithManager(t)
+
+	rec := do(t, h, "GET", "/v1/machines/m_1/exec/stream?cmd=sh&tty=true&stdin=false", testKey)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("got %d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "needs stdin") {
+		t.Errorf("body = %q", rec.Body.String())
+	}
+	if got := fake.streamedMachines(); len(got) != 0 {
+		t.Errorf("the manager was called anyway: %v", got)
+	}
+}
+
+// tty=true on its own is forwarded: stdin is implied by the terminal, so the
+// query does not have to say so and the guest agent reads the socket anyway.
+func TestExecStreamForwardsATTY(t *testing.T) {
+	h, _, fake := newTestServerWithManager(t)
+
+	if rec := do(t, h, "GET", "/v1/machines/m_1/exec/stream?cmd=sh&tty=true", testKey); rec.Code != http.StatusOK {
+		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
+	}
+	if got := fake.streamedMachines(); len(got) != 1 || got[0] != "m_1" {
+		t.Errorf("streamed %v, want [m_1]", got)
+	}
+}
+
 func TestExecStreamReachesTheManager(t *testing.T) {
 	h, _, fake := newTestServerWithManager(t)
 
