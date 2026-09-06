@@ -6,6 +6,9 @@
  * command tree for "sandboxes".
  */
 
+import type { EventEmitter } from 'node:events'
+import type { Readable, Writable } from 'node:stream'
+
 import { Command } from 'commander'
 import type { CreateMachineRequest, Machine, PilotsClient } from '@pilots/sdk'
 
@@ -202,33 +205,112 @@ function descriptionFor(verb: string): string {
 }
 
 /**
+ * The local end of a stream: the two standard streams, the signals around them
+ * and the way out.
+ *
+ * Injectable because everything `pilot console` promises is made HERE and not
+ * on the wire -- raw mode goes on and comes off again, a window change becomes
+ * a resize, an interrupt still leaves a usable terminal behind -- and none of
+ * it is observable from a spawned process whose stdin is a pipe. There is no
+ * pseudo-terminal in Node without a native module, and this package adds no
+ * dependency, so the seam is the terminal.
+ */
+export interface Terminal {
+  stdin: Readable & { isTTY?: boolean; setRawMode?: (mode: boolean) => void }
+  stdout: Writable & { isTTY?: boolean; columns?: number; rows?: number }
+  signals: EventEmitter
+  exit: (code: number) => void
+}
+
+export const processTerminal: Terminal = {
+  stdin: process.stdin,
+  stdout: process.stdout,
+  signals: process,
+  exit: (code) => process.exit(code),
+}
+
+/** The signals that end a session, with the code a shell reports for each. */
+const TEARDOWN_SIGNALS: [NodeJS.Signals, number][] = [
+  ['SIGINT', 130],
+  ['SIGTERM', 143],
+  ['SIGHUP', 129],
+]
+
+/**
  * Streams an exec, wiring frame 1 to stdout and frame 2 to stderr.
  *
  * `stdin` is opt-in. A guest process holding an open stdin it never reads
  * hangs, and the reference workload -- an agent session -- is exactly such a
  * process, so the default has to be off rather than convenient.
+ *
+ * `opts.tty` is the same stream in terminal mode, which is what `pilot console`
+ * runs on: stdin is forced on, the local terminal goes into raw mode so every
+ * keystroke reaches the shell as a byte rather than a line, a window change
+ * becomes a resize, and nothing is expected on frame 2 because a PTY has one
+ * device. Closing the socket kills the remote shell, so every exit path here
+ * ends the session rather than leaving one behind.
  */
-async function execStream(
+export async function execStream(
   client: PilotsClient,
   id: string,
   argv: string[],
   opts: Record<string, unknown>,
+  term: Terminal = processTerminal,
 ): Promise<number> {
+  const tty = Boolean(opts.tty)
+  const wantsStdin = tty || Boolean(opts.stdin)
   const stream = client.machines.execStream(id, argv, {
     ...(opts.cwd ? { cwd: opts.cwd as string } : {}),
     ...(opts.env ? { env: parseKeyValues(opts.env as string[]) } : {}),
     ...(opts.user ? { user: opts.user as string } : {}),
-    stdin: Boolean(opts.stdin),
+    stdin: wantsStdin,
+    ...(tty ? { tty: true, cols: colsOf(term), rows: rowsOf(term) } : {}),
   })
-  stream.stdout.pipe(process.stdout)
-  stream.stderr.pipe(process.stderr)
+  stream.stdout.pipe(term.stdout)
+  // Under a PTY frame 2 never arrives, so there is nothing to wire it to. A
+  // byte on stderr there would mean the pipe path ran when a terminal was
+  // asked for, and it is better seen than quietly forwarded.
+  if (!tty) stream.stderr.pipe(process.stderr)
 
-  const onStdin = (chunk: Buffer) => stream.writeStdin(chunk)
-  const onStdinEnd = () => stream.endStdin()
-  if (opts.stdin) {
-    process.stdin.on('data', onStdin)
-    process.stdin.on('end', onStdinEnd)
+  // Raw mode is the one piece of global state this command owns, and a
+  // terminal left in it is unusable afterwards: no echo, no line editing, no
+  // ctrl-c. It is tracked rather than toggled blind so every exit path can put
+  // it back exactly once.
+  let raw = false
+  const setRaw = (on: boolean) => {
+    if (!tty || raw === on || typeof term.stdin.setRawMode !== 'function') return
+    term.stdin.setRawMode(on)
+    raw = on
   }
+
+  const onStdin = (chunk: Buffer) => {
+    try {
+      stream.writeStdin(chunk)
+    } catch (err) {
+      // A keystroke can land between the shell exiting and this listener being
+      // removed. Under a terminal that race is ordinary and a closed socket is
+      // the answer to it; off a terminal a failed write is news.
+      if (!tty) throw err
+    }
+  }
+  // A terminal has no separate write end to close, so an EOF on the local one
+  // is a hangup: end the session rather than send an EOT the shell may ignore.
+  const onStdinEnd = () => (tty ? stream.kill() : stream.endStdin())
+  if (wantsStdin) {
+    setRaw(true)
+    term.stdin.on('data', onStdin)
+    term.stdin.on('end', onStdinEnd)
+  }
+  const onResize = () => {
+    try {
+      stream.resize(colsOf(term), rowsOf(term))
+    } catch {
+      // The window can change while the socket is on its way down. A resize
+      // nobody can deliver is not a failure of the session that just ended.
+    }
+  }
+  if (tty) term.signals.on('SIGWINCH', onResize)
+
   // The deadline is enforced here rather than on the wire: the streaming exec
   // takes no timeout, unlike the buffered one. Closing the socket cancels the
   // guest's context, which is the same thing SIGINT does below.
@@ -241,13 +323,24 @@ async function execStream(
           stream.kill()
         }, timeoutMs)
       : undefined
-  // SIGINT closes the socket, which cancels the guest's context and kills the
-  // command; 130 is what a shell reports for the same interruption.
-  const onSigint = () => {
-    stream.kill()
-    process.exit(130)
+  // A signal closes the socket, which cancels the guest's context and kills the
+  // command; 128 plus the signal number is what a shell reports for the same
+  // interruption. The exit skips the `finally` below, so raw mode comes off
+  // here: this is the path where a terminal is most likely to be abandoned in
+  // it, since the user is already reaching for the keyboard in frustration.
+  const handlers: [NodeJS.Signals, () => void][] = []
+  for (const [signal, code] of TEARDOWN_SIGNALS) {
+    // Off a terminal only SIGINT is ours. Taking SIGTERM there would change
+    // what `pilot machines exec` does under a `kill` for no gain.
+    if (!tty && signal !== 'SIGINT') continue
+    const handler = () => {
+      setRaw(false)
+      stream.kill()
+      term.exit(code)
+    }
+    handlers.push([signal, handler])
+    term.signals.once(signal, handler)
   }
-  process.once('SIGINT', onSigint)
   try {
     return await stream.wait()
   } catch (err) {
@@ -256,18 +349,30 @@ async function execStream(
     if (timedOut) throw new CliError(`timed out after ${timeoutMs}ms: the command was killed`)
     throw err
   } finally {
+    // First, before anything below it can throw and strand the terminal.
+    setRaw(false)
     if (timer) clearTimeout(timer)
-    process.off('SIGINT', onSigint)
-    if (opts.stdin) {
+    for (const [signal, handler] of handlers) term.signals.off(signal, handler)
+    if (tty) term.signals.off('SIGWINCH', onResize)
+    if (wantsStdin) {
       // Reading stdin keeps the handle referenced, so without this the CLI
       // outlives the command it ran: `pilot machines exec --stdin` would sit
       // there after the guest had already exited, waiting on a terminal
       // nobody is typing into.
-      process.stdin.off('data', onStdin)
-      process.stdin.off('end', onStdinEnd)
-      process.stdin.pause()
+      term.stdin.off('data', onStdin)
+      term.stdin.off('end', onStdinEnd)
+      term.stdin.pause()
     }
   }
+}
+
+/** The window, with the protocol's own defaults when the terminal has none. */
+function colsOf(term: Terminal): number {
+  return term.stdout.columns ?? 80
+}
+
+function rowsOf(term: Terminal): number {
+  return term.stdout.rows ?? 24
 }
 
 // Name first, id last, in every table here. The name is what a person types

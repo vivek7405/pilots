@@ -14,6 +14,7 @@ import { Command } from 'commander'
 
 import { createAddCommand } from './commands/add.ts'
 import { createCompletionCommand } from './commands/completion.ts'
+import { createConsoleCommand } from './commands/console.ts'
 import { createDeployCommand } from './commands/deploy.ts'
 import { createDomainsCommand } from './commands/domains.ts'
 import { createInitCommand } from './commands/init.ts'
@@ -62,6 +63,7 @@ export function buildProgram(): Command {
   program.addCommand(createMcpCommand())
   program.addCommand(createLogsCommand())
   program.addCommand(createOpenCommand())
+  program.addCommand(createConsoleCommand())
   program.addCommand(createInitCommand())
   program.addCommand(createSkillCommand())
   // Last, so the generated script sees every command above it.
