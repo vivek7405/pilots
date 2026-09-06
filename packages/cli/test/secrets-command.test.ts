@@ -400,10 +400,27 @@ test('set and import refuse when not logged in, naming pilot login', async () =>
     const res = await pilot(b, args)
     assert.equal(res.code, 1, res.stdout)
     assert.match(res.stderr, /pilot login/)
+    // The refusal has to say why and name the variable that works instead.
+    // Counterfactual: "not logged in: run `pilot login`" alone is unfollowable
+    // on a CI runner, where the device flow cannot be completed.
+    assert.match(res.stderr, /a secret is stored in the file rather than sent/)
+    assert.match(res.stderr, /PILOT_SECRET_[AK]/)
   }
   // Nothing was created: a secrets-only file has no API key, and the next
   // command would crash dereferencing it.
   assert.equal(existsSync(credentialsPath(b.env)), false)
+})
+
+test('PILOT_API_KEY alone is refused, and the message names the variable to use', async () => {
+  const b = bed()
+  b.env = { XDG_CONFIG_HOME: tmp('pilot-secrets-envkey-') }
+  const res = await pilot(b, ['secrets', 'set', 'auth_secret', 'v'], { PILOT_API_KEY: 'pilot_x' })
+  assert.equal(res.code, 1)
+  // The key that authenticates a deploy does not make a store, and the reader
+  // needs the exact variable for THIS secret, not the generic shape.
+  assert.match(res.stderr, /PILOT_SECRET_AUTH_SECRET/)
+  assert.equal(res.stderr.includes('pilot login'), true)
+  assert.equal(existsSync(credentialsPath(b.env)), false, 'no half-formed file is written')
 })
 
 test('an empty or whitespace name is refused', async () => {

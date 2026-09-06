@@ -209,8 +209,14 @@ failure.
 
 None of the three talks to the fleet. A value has to be storable on a laptop
 with no host in reach, so every subcommand is local file manipulation against
-the `0600` credentials file, and `set` and `import` refuse when there is no
-file to write into, naming `pilot login`.
+the `0600` credentials file.
+
+`set` and `import` therefore need that file, and `PILOT_API_KEY` on its own is
+not enough: it signs requests, and a secret is written rather than sent. Writing
+the file from the variable would persist a key nobody asked to persist, or leave
+one with no `api_key` in it. So they refuse and name `pilot login` for a laptop
+and `PILOT_SECRET_<NAME>` for a CI runner, which is the right answer there
+anyway, since a file the job throws away stores nothing.
 
 `PILOT_SECRET_<NAME>` still wins over the file at deploy time, so a CI job
 overrides a stored value without editing anything.

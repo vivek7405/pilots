@@ -13,6 +13,7 @@
 import { createHash } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 
+import { envVarFor } from '../compose/secrets.ts'
 import { loadCredentials, saveCredentials, type Credentials } from '../config.ts'
 import { parseDotEnv } from '../env.ts'
 import { CliError } from '../output.ts'
@@ -23,7 +24,25 @@ export interface SecretName {
   digest: string
 }
 
-const NOT_LOGGED_IN = 'not logged in: run `pilot login` first; secrets are stored beside the API key'
+/**
+ * Why the refusal, rather than writing a file anyway.
+ *
+ * `PILOT_API_KEY` authenticates a request and this command makes none: a
+ * secret is written to the credentials file, never sent. Writing that file
+ * from the variable would either persist an API key nobody asked to persist,
+ * or leave a file with no `api_key` in it, which `whoami` dereferences.
+ *
+ * So the message names the two things that do work on a machine with no file:
+ * `pilot login` on a laptop, and the environment variable on a CI runner,
+ * where storing a secret in a file the job throws away buys nothing anyway.
+ */
+function notLoggedIn(varName: string): string {
+  return (
+    'no credentials file to store a secret in: run `pilot login` first. ' +
+    'PILOT_API_KEY signs requests but a secret is stored in the file rather than sent, ' +
+    `so on a machine with no file export ${varName} for the deploy instead`
+  )
+}
 
 /**
  * Refuses a name no `secret://` reference could carry.
@@ -40,7 +59,7 @@ export function assertSecretName(name: string): void {
 
 export function setSecret(app: string, name: string, value: string, env: NodeJS.ProcessEnv = process.env): void {
   assertSecretName(name)
-  const creds = requireCredentials(env)
+  const creds = requireCredentials(env, envVarFor(name))
   saveCredentials(withSecrets(creds, app, { [name]: value }), env)
 }
 
@@ -60,7 +79,7 @@ export function importSecrets(app: string, file: string, env: NodeJS.ProcessEnv 
   // a name with a space in it is one no `secret://` reference can address and
   // one `ls` renders across two columns.
   for (const name of names) assertSecretName(name)
-  const creds = requireCredentials(env)
+  const creds = requireCredentials(env, names.map(envVarFor).join(', '))
   saveCredentials(withSecrets(creds, app, pairs), env)
   return names
 }
@@ -77,9 +96,9 @@ export function digestOf(value: string): string {
   return createHash('sha256').update(value).digest('hex').slice(0, 8)
 }
 
-function requireCredentials(env: NodeJS.ProcessEnv): Credentials {
+function requireCredentials(env: NodeJS.ProcessEnv, varName: string): Credentials {
   const creds = loadCredentials(env)
-  if (!creds) throw new CliError(NOT_LOGGED_IN)
+  if (!creds) throw new CliError(notLoggedIn(varName))
   return creds
 }
 
