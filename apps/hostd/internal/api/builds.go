@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -124,9 +125,12 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Recorded BEFORE the id leaves this handler, in the header below and in
-	// the stream. A build id names an image the create path will mount as a
-	// root filesystem, so an id that escapes before its owner is written is an
-	// id anyone may boot.
+	// the stream. This is the JOB id, which scopes the log route. The image
+	// the build produces has a second id, the rootfs build id, minted inside
+	// the builder; that one is what a deploy and a create name, and its owner
+	// is recorded in write below, on the first line that carries it, for the
+	// same reason: an id that escapes before its owner is written is an id
+	// anyone may boot.
 	if err := d.Store.PutTenancy(r.Context(), &state.Tenancy{
 		ID: id, OrgID: org, Kind: "build", CreatedAt: time.Now().Unix(),
 	}); err != nil {
@@ -141,8 +145,39 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Pilot-Build-Id", id)
 	w.WriteHeader(http.StatusOK)
 
+	// Deliberately NOT the request context, for the build and for the owner
+	// row alike. A build outlives the connection that started it: a client
+	// that disconnects mid-build can reattach to the log, and killing a
+	// ten-minute build because a laptop closed its lid is not what anyone
+	// means by cancelling. The row is written minutes in, and a client that
+	// has gone must not turn a finished image into one nobody owns.
+	bctx := context.WithoutCancel(r.Context())
+
 	enc := json.NewEncoder(w)
+	// ownerErr is set if the rootfs build id's owner could not be recorded.
+	// From then on no line carrying the id reaches the client and the build
+	// is reported as failed: the image is orphaned in object storage exactly
+	// as a failed upload's is, rather than handed out ownerless.
+	var ownerErr error
 	write := func(line BuildLogLine) {
+		if line.Result != "" {
+			// The rootfs build id is first seen here, on the builder's own
+			// "build complete" line, and again on the terminal line below.
+			// Written before either is encoded. Write-once, so the second
+			// call is a no-op.
+			if ownerErr == nil {
+				ownerErr = d.Store.PutTenancy(bctx, &state.Tenancy{
+					ID: line.Result, OrgID: org, Kind: "build", CreatedAt: time.Now().Unix(),
+				})
+			}
+			if ownerErr != nil {
+				line = BuildLogLine{
+					Step: id, Stream: "status", Line: "build failed",
+					Error: "cannot record the image's owner: " + ownerErr.Error(),
+					TS:    time.Now().UnixMilli(),
+				}
+			}
+		}
 		_ = enc.Encode(line)
 		flusher.Flush()
 	}
@@ -151,11 +186,10 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 		TS: time.Now().UnixMilli(),
 	})
 
-	// Deliberately NOT the request context. A build outlives the connection
-	// that started it: a client that disconnects mid-build can reattach to the
-	// log, and killing a ten-minute build because a laptop closed its lid is
-	// not what anyone means by cancelling.
-	buildID, err := d.Builds.StartBuild(context.WithoutCancel(r.Context()), id, spool, write)
+	buildID, err := d.Builds.StartBuild(bctx, id, spool, write)
+	if err == nil && ownerErr != nil {
+		err = fmt.Errorf("cannot record the image's owner: %w", ownerErr)
+	}
 	if err != nil {
 		// The failing step was already emitted by the builder. This is the
 		// terminal line, so that a consumer reading to the end always has a
