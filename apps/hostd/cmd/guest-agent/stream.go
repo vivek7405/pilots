@@ -164,6 +164,16 @@ func handleExecStream(w http.ResponseWriter, r *http.Request) {
 			for {
 				typ, data, err := conn.Read(ctx)
 				if err != nil {
+					// A pipe stream ends itself: the deferred stdin.Close
+					// delivers EOF to the process. A terminal has no such end,
+					// and an interactive shell writes nothing while it waits
+					// for input, so the output pump would park on the master
+					// forever and the handler with it -- one orphaned shell,
+					// two goroutines and a PTY per closed browser tab. The
+					// cancel is what the /terminal handler has always done.
+					if ptmx != nil {
+						cancel()
+					}
 					return
 				}
 				// Text frames carry control messages. Only resize is

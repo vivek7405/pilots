@@ -298,3 +298,58 @@ func TestABadWindowSizeClosesTheStream(t *testing.T) {
 		}
 	}
 }
+
+// trackedPIDs is the set of processes the handlers currently own. A handler
+// untracks its own on the way out, so this is also how a test sees that one
+// returned.
+func trackedPIDs() map[int]bool {
+	out := map[int]bool{}
+	ownedPIDs.Range(func(key, _ any) bool {
+		if pid, ok := key.(int); ok {
+			out[pid] = true
+		}
+		return true
+	})
+	return out
+}
+
+// A client that goes away takes its terminal with it.
+//
+// A pipe stream ends itself: the deferred stdin close delivers EOF and the
+// command exits. A terminal has no such end, and a shell waiting for input
+// writes nothing, so without an explicit cancel the output pump parks on the
+// PTY master forever -- and with it the handler, the connection and the shell,
+// one set per closed browser tab.
+//
+// Counterfactual: drop the cancel in the read loop and this test fails on the
+// poll below, because the handler never returns and never untracks its PID.
+func TestClosingATTYStreamEndsTheShell(t *testing.T) {
+	before := trackedPIDs()
+	conn, _ := dialStream(t, "tty=true&cmd=sh&cmd=-c&cmd=read+x")
+
+	var pid int
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		for candidate := range trackedPIDs() {
+			if !before[candidate] {
+				pid = candidate
+			}
+		}
+		if pid != 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if pid == 0 {
+		t.Fatal("the shell never started")
+	}
+
+	conn.CloseNow()
+
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		if !trackedPIDs()[pid] {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("the handler never returned: the shell outlived the client that asked for it")
+}
