@@ -7,7 +7,7 @@
  * so nothing here goes near a shell.
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcess } from 'node:child_process'
 import { platform } from 'node:os'
 
 import { Command } from 'commander'
@@ -28,12 +28,17 @@ export type Spawn = (file: string, args: string[]) => void
  * long as the browser runs -- so `pilot open` would not return until the user
  * quit their browser. `stdio: 'ignore'` is what makes the command return.
  */
-const defaultSpawn: Spawn = (file, args) => {
+export function launch(file: string, args: string[]): ChildProcess {
   const child = spawn(file, args, { detached: true, stdio: 'ignore', shell: false })
   // A missing opener emits `error`; with no listener that is an uncaught
   // exception rather than a URL the reader can still copy off the screen.
   child.on('error', (err) => note(`could not run ${file}: ${err.message}`))
   child.unref()
+  return child
+}
+
+const defaultSpawn: Spawn = (file, args) => {
+  launch(file, args)
 }
 
 /** Injectable beside the spawn seam, so a test can read stdout without owning it. */

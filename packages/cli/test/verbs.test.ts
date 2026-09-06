@@ -16,7 +16,7 @@ import { PassThrough } from 'node:stream'
 import { after, test } from 'node:test'
 import { promisify } from 'node:util'
 
-import { createOpenCommand, openerFor } from '../src/commands/open.ts'
+import { createOpenCommand, launch, openerFor } from '../src/commands/open.ts'
 import { saveCredentials } from '../src/config.ts'
 import { CliError, setJSONMode } from '../src/output.ts'
 import { confirm, shouldAsk } from '../src/prompt.ts'
@@ -257,4 +257,39 @@ test('an ambiguous service name keeps its own error rather than becoming not-fou
   } finally {
     await api.close()
   }
+})
+
+// The bug: execFile gives the child piped stdio, and unref() releases the
+// process handle but never those pipes. xdg-open execs the browser, the
+// browser inherits fd 1 and 2, and node waits on a pipe that stays open for
+// the browser's whole lifetime, so `pilot open` did not return until the user
+// quit it. stdio: 'ignore' is what makes the command return, and it is
+// observable: an ignored stdio leaves the child's streams null.
+test('the opener is launched detached, with no pipes to wait on', async () => {
+  const child = launch(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'])
+  try {
+    assert.equal(child.stdout, null, 'the child has a stdout pipe the CLI must drain')
+    assert.equal(child.stderr, null, 'the child has a stderr pipe the CLI must drain')
+    assert.equal(child.stdin, null, 'the child has a stdin pipe')
+
+    // Detached means its own process group, so a signal to the CLI's group
+    // does not reach the browser.
+    assert.ok(typeof child.pid === 'number')
+    const group = await new Promise<number>((resolve, reject) => {
+      execFile('ps', ['-o', 'pgid=', '-p', String(child.pid)], (err, stdout) =>
+        err ? reject(err) : resolve(Number(stdout.trim())),
+      )
+    })
+    assert.notEqual(group, process.pid, 'the child shares the CLI process group')
+  } finally {
+    if (child.pid) process.kill(child.pid)
+  }
+})
+
+// A missing opener is an `error` event. With no listener that is an uncaught
+// exception, which would crash the CLI after it had already resolved the URL.
+test('a missing opener is reported rather than thrown', async () => {
+  const child = launch('pilot-no-such-opener-exists', ['https://x'])
+  const err = await new Promise<Error>((resolve) => child.on('error', resolve))
+  assert.match(err.message, /ENOENT/)
 })
