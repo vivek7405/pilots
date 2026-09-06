@@ -62,7 +62,15 @@ interface Fake {
   term: Terminal
   /** Every `setRawMode` argument, in order. The whole assertion in three tests. */
   raw: boolean[]
-  exits: number[]
+  /**
+   * Raw-mode changes AND exits, interleaved.
+   *
+   * The signal case needs the order and not just the set: a restore that runs
+   * only in the command's `finally` looks identical in `raw`, and is wrong,
+   * because the real `process.exit` never comes back and that `finally` never
+   * runs.
+   */
+  events: string[]
   stdin: PassThrough
   stdout: PassThrough & { columns?: number; rows?: number }
   signals: EventEmitter
@@ -71,7 +79,7 @@ interface Fake {
 
 function fakeTerminal(columns = 100, rows = 30): Fake {
   const raw: boolean[] = []
-  const exits: number[] = []
+  const events: string[] = []
   const signals = new EventEmitter()
   const stdin = new PassThrough()
   const stdout = Object.assign(new PassThrough(), { isTTY: true, columns, rows })
@@ -82,6 +90,7 @@ function fakeTerminal(columns = 100, rows = 30): Fake {
       isTTY: true,
       setRawMode: (on: boolean) => {
         raw.push(on)
+        events.push(`raw ${on}`)
       },
     }),
     stdout,
@@ -89,10 +98,10 @@ function fakeTerminal(columns = 100, rows = 30): Fake {
     // Never the real one: the signal path exits, and a test that took that
     // path for real would report as the whole file vanishing.
     exit: (code: number) => {
-      exits.push(code)
+      events.push(`exit ${code}`)
     },
   }
-  return { term, raw, exits, stdin, stdout, signals, printed: () => Buffer.concat(chunks).toString() }
+  return { term, raw, events, stdin, stdout, signals, printed: () => Buffer.concat(chunks).toString() }
 }
 
 /**
@@ -220,9 +229,11 @@ test('a signal restores the terminal, kills the shell, and exits 128 plus the si
     fake.signals.emit('SIGINT')
 
     const res = await pending
-    assert.deepEqual(fake.exits, [130])
-    // The exit skips the `finally`, so the handler has to do this itself.
-    assert.deepEqual(fake.raw, [true, false])
+    // In that order, and the order is the assertion. The real `process.exit`
+    // never returns, so a restore that happens only in the command's teardown
+    // never happens at all on this path: the terminal the user gets back is
+    // one with no echo and no line editing.
+    assert.deepEqual(fake.events, ['raw true', 'raw false', 'exit 130'])
     // Closing the socket is what ends the remote shell: the guest cancels its
     // context on that path, so an interrupted console leaves nothing running.
     await ws.connections[0]!.closed
