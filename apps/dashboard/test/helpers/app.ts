@@ -61,14 +61,6 @@ export type Handle = (req: Request) => Response | Promise<Response>;
 export interface TestApp {
   handle: Handle;
   fleet: FakeFleet;
-  /**
-   * The whole request handler, not just its `handle`.
-   *
-   * `attachWebSocket` needs the handler object to dispatch a `WS` export, and
-   * a local preview server is the only place that upgrade path can be driven
-   * outside `webjs dev`.
-   */
-  app: Awaited<ReturnType<typeof createRequestHandler>>;
 }
 
 /**
@@ -84,7 +76,7 @@ export async function bootApp(overrides: Record<string, string> = {}): Promise<T
   (globalThis as { __pilots_fleet?: unknown }).__pilots_fleet = fleet;
   await migrate();
   const app = await createRequestHandler({ appDir: APP_DIR, dev: true });
-  return { handle: app.handle, fleet, app };
+  return { handle: app.handle, fleet };
 }
 
 /**
