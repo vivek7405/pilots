@@ -16,7 +16,6 @@
     "bin",
     "src",
     "skill",
-    "resources",
     "examples",
     "README.md"
   ],
@@ -25,9 +24,7 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsc --noEmit && node --test 'test/**/*.test.ts'",
-    "prepack": "node scripts/copy-skill.mjs",
-    "postpack": "node scripts/clean-skill.mjs"
+    "test": "tsc --noEmit && node --test 'test/**/*.test.ts'"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",

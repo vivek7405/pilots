@@ -38,10 +38,13 @@ the push path, and moving it is what #77 was.
 
 ## The skill
 
-`skill/pilots/` is the source. `resources/pilots/` is the `prepack` copy that
-ships, with a `corpus.json` naming the version. `src/mcp/skill.ts` resolves an
-app's own `.agents/skills/pilots/` first, then the packaged copy, then the
-source.
+`skill/pilots/` is the source and is what ships; there is no build step and no
+second copy. `src/mcp/skill.ts` resolves an app's own `.agents/skills/pilots/`
+first, then the packaged one.
+
+There used to be a `prepack` hook copying it to `resources/`, with both in
+`files`. It shipped the corpus twice and, under a publish with
+`--ignore-scripts`, shipped none of it.
 
 The tool list lives in five places: the registrations in `src/mcp/tools.ts`,
 `TOOLS` in `test/mcp.test.ts`, `MCP_TOOLS` in `scripts/e2e.mjs`, the README and

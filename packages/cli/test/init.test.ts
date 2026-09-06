@@ -13,7 +13,10 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { after, test } from 'node:test'
+
 import { promisify } from 'node:util'
+
+import { skillPages, skillRoot } from '../src/mcp/skill.ts'
 
 const exec = promisify(execFile)
 const BIN = join(import.meta.dirname, '..', 'bin', 'pilot.js')
@@ -132,4 +135,33 @@ test('skill install refuses a real directory rather than deleting it', async () 
   assert.match(stderr, /is a directory, not a link/)
   // Still there, with its edits.
   assert.match(readFileSync(join(target, 'SKILL.md'), 'utf8'), /somebody edited this/)
+})
+
+// What `npm pack` would ship: the skill, exactly once, with no lifecycle hook
+// standing between the source and the tarball.
+//
+// The published package used to list both `skill` and `resources` in `files`,
+// so the corpus went out twice and the two could drift; and because
+// `resources` only existed if `prepack` ran, a publish with `--ignore-scripts`
+// shipped no skill at all, which breaks `pilot init` and every
+// `pilots-docs://` resource for everyone who installed it.
+test('the package ships exactly one copy of the skill, with no pack hooks', () => {
+  const pkg = JSON.parse(
+    readFileSync(join(import.meta.dirname, '..', 'package.json'), 'utf8'),
+  ) as { files: string[]; scripts: Record<string, string> }
+
+  assert.ok(pkg.files.includes('skill'), 'the skill is not in files')
+  assert.ok(!pkg.files.includes('resources'), 'the skill ships twice')
+  for (const hook of ['prepack', 'postpack', 'prepare']) {
+    assert.equal(pkg.scripts[hook], undefined, `${hook} would decide whether the skill ships`)
+  }
+})
+
+test('the skill resolves from the package with no working-directory copy', () => {
+  // Resolved from a directory that has no `.agents` tree, which is what a
+  // globally installed CLI sees on a machine that never ran `pilot init`.
+  const root = skillRoot(mkdtempSync(join(tmpdir(), 'pilot-nocwd-')))
+  assert.ok(root, 'the packaged skill is unreachable')
+  assert.ok(existsSync(join(root!, 'SKILL.md')))
+  assert.equal(skillPages(root!).length >= 10, true)
 })

@@ -11,9 +11,14 @@
  *   1. `.agents/skills/pilots/` under the working directory, which is what
  *      `pilot init` writes. An app's own copy wins, because a team that edited
  *      it meant to.
- *   2. `<package>/resources/pilots/`, the copy `prepack` makes. This is what
- *      ships in the npm tarball.
- *   3. `<package>/skill/pilots/`, the source. Only a dev checkout has it.
+ *   2. `<package>/skill/pilots/`, which is both the source in a dev checkout
+ *      and what ships in the npm tarball.
+ *
+ * One packaged path, not two. A `prepack` hook used to copy the source to
+ * `resources/` and the tarball shipped both, which is a corpus that can go
+ * stale against itself; worse, a publish with `--ignore-scripts` skipped the
+ * hook and shipped no skill at all, so `pilot init` and the `pilots-docs://`
+ * resources would have been empty for everyone who installed it.
  *
  * A directory counts only when it holds a `SKILL.md`, so a half-created
  * `.agents` tree does not shadow the packaged copy.
@@ -34,7 +39,6 @@ export interface SkillPage {
 export function skillRoot(cwd: string = process.cwd()): string | null {
   const candidates = [
     join(cwd, '.agents', 'skills', 'pilots'),
-    join(packageRoot, 'resources', 'pilots'),
     join(packageRoot, 'skill', 'pilots'),
   ]
   for (const dir of candidates) {
