@@ -133,10 +133,21 @@ func TestBothHalvesAreReadAndTheAnswerIsSorted(t *testing.T) {
 	}
 }
 
-// A suffix is not a name. Without the bounding character class in the pattern,
-// mydb.internal would draw an edge to db, which nothing is dialling.
+// A suffix is not a name: mydb.internal is its own hostname and draws no edge
+// to db. The greedy capture is what makes this hold, so it has no one-line
+// counterfactual, but it is the case a reader will worry about and it is
+// pinned here.
 func TestASuffixIsNotAnEdge(t *testing.T) {
 	h := dependsServer(t, fakeSealer{set: true}, `{"UPSTREAM":"http://mydb.internal:5432"}`, "")
+	got, _ := readWeb(t, h, "/v1/services/s_web")
+	wantEdges(t, got, nil)
+}
+
+// Nor is a longer suffix on the other side. Without the trailing character
+// class, db.internalfoo would draw an edge to db, and that is a hostname
+// nothing on this fleet resolves.
+func TestATrailingSuffixIsNotAnEdge(t *testing.T) {
+	h := dependsServer(t, fakeSealer{set: true}, `{"UPSTREAM":"http://db.internalfoo/x"}`, "")
 	got, _ := readWeb(t, h, "/v1/services/s_web")
 	wantEdges(t, got, nil)
 }

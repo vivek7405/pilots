@@ -13,11 +13,15 @@ import (
 
 // internalRef matches a <name>.internal address inside an environment value.
 //
-// The bounding character classes are what stop a suffix from matching: with a
-// bare (?:^|\.) prefix, "mydb.internal" would report a dependency on "db" and
-// draw an edge to a service nothing is dialling. The label rules are DNS's
-// own, the ones the resolver enforces, so a value the resolver could never
-// answer for cannot produce an edge here either.
+// The label rules are DNS's own, the ones the resolver enforces, so a value
+// the resolver could never answer for cannot produce an edge here either.
+//
+// The TRAILING class is the one that carries weight: without it,
+// "db.internalfoo" reports a dependency on db, and that is a hostname nothing
+// on this fleet resolves. The leading class keeps a hyphenated label whole.
+// Neither is what stops a suffix like "mydb.internal" from reading as "db" --
+// the greedy capture already does that, since Go's regexp takes the leftmost
+// match and the label class consumes "mydb" before ".internal" is required.
 var internalRef = regexp.MustCompile(`(?i)(?:^|[^a-z0-9-])([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.internal(?:[^a-z0-9-]|$)`)
 
 // dependsOn is the sorted set of siblings this service's environment dials.
