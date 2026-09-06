@@ -178,17 +178,28 @@ The app is `--app`, or the compose file's app by the same rule `deploy` uses:
 `COMPOSE_PROJECT_NAME` from the directory's `.env`, then a top-level
 `x-pilots.app`, then a top-level `name:`. A file with none of the three is
 refused rather than given a default, because a value stored under the wrong name
-is a value the deploy will not find.
+is a value the deploy will not find. `deploy` also takes the app from
+`--app` and from `--env COMPOSE_PROJECT_NAME=...`, which `secrets` has no
+equivalent of: a deploy that overrides the name that way needs the same
+`--app` here.
 
 `set` with no value prompts on a terminal and never echoes what is typed. When
 stdin is not a terminal it reads stdin to EOF instead, so
 `printf '%s' "$V" | pilot secrets set n` works in a script. One trailing newline
 is stripped, since that one belongs to `echo` rather than to the secret.
 
+A value passed as the argument has to come after `--` when it starts with a
+dash — `pilot secrets set tok -- -sk-live-...` — because the parser reads a
+leading dash as an option and reports the unknown option by quoting it, which
+puts the value in the scrollback this command exists to keep it out of. The
+prompt and the piped forms have no such case.
+
 `import` takes a `.env` file, or `-` for stdin, and stores every pair in it in
 one command. It is parsed by Node's own `.env` parser, the same one `deploy`
 uses for interpolation, so a value that quotes correctly for one quotes
-correctly for the other.
+correctly for the other. The key is the secret name, matched exactly: a file
+that says `DATABASE_URL=` stores `DATABASE_URL`, which `secret://database_url`
+does not resolve to.
 
 `ls` prints each name and the first eight hex characters of the SHA-256 of its
 value. That is enough to tell two machines hold the same secret and not enough
