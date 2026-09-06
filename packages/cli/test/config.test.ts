@@ -63,6 +63,8 @@ test('loadCredentials refuses a file other users can read', () => {
     assert.ok(err instanceof CliError)
     assert.match(err.message, /readable by other users/)
     assert.match(err.message, /pilots\/credentials/)
+    assert.ok(err.hint)
+    assert.match(err.hint, /^chmod 600 /)
     return true
   })
 })
@@ -94,12 +96,17 @@ test('--api-url wins over PILOT_API_URL, which wins over the file', () => {
   )
 })
 
+// The fix is a hint, not part of the message. A reader skimming stderr finds
+// the sentence and the next step on separate lines, and this test breaks the
+// moment the two are folded back together.
 test('with no key from any source, clientFromEnv names `pilot login`', () => {
   const env = scratch()
   assert.throws(() => clientFromEnv({}, env), (err: unknown) => {
     assert.ok(err instanceof CliError)
-    assert.match(err.message, /pilot login/)
-    assert.match(err.message, /PILOT_API_KEY/)
+    assert.equal(err.message, 'no API key')
+    assert.ok(err.hint)
+    assert.match(err.hint, /pilot login/)
+    assert.match(err.hint, /PILOT_API_KEY/)
     return true
   })
 })

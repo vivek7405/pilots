@@ -8,16 +8,28 @@
 
 import { Command } from 'commander'
 
+import { PilotsClient } from '@pilots/sdk'
+
 import {
   clearCredentials,
   credentialsPath,
   DEFAULT_API_URL,
   loadCredentials,
+  resolveApiKeySource,
+  resolveApiUrlSource,
   saveCredentials,
   type GlobalOptions,
 } from '../config.ts'
 import { defaultClientId, deviceFlow, exchangeToken } from '../github.ts'
-import { CliError, note, printJSON, printTable } from '../output.ts'
+import { CliError, messageOf, note, printJSON, printTable } from '../output.ts'
+
+/**
+ * How long `whoami` waits for the fleet.
+ *
+ * Short on purpose. The command's job is to show configuration, and the
+ * situation people run it in most is one where the fleet is not answering.
+ */
+const WHOAMI_TIMEOUT_MS = 3000
 
 export function createLoginCommand(): Command {
   return new Command('login')
@@ -75,25 +87,73 @@ export function createLogoutCommand(): Command {
     })
 }
 
+/**
+ * `pilot whoami`: which credentials every other command is using, and why.
+ *
+ * The precedence is real and it is invisible everywhere else: PILOT_API_KEY
+ * beats the file, and --api-url beats PILOT_API_URL beats the file beats the
+ * default. A file holding one key while the environment holds another is a
+ * normal state to be in and an unreadable one to debug, so this command names
+ * the source that won for every value it prints.
+ *
+ * The org comes from the fleet when the fleet answers, because the file
+ * records only what login happened to store and says nothing at all about a
+ * key that came from the environment.
+ */
 export function createWhoamiCommand(): Command {
   return new Command('whoami')
-    .description('print the stored org, fleet and key prefix (reads the file only)')
-    .action(function (this: Command) {
+    .description('which key, fleet and org every other command uses, and where each came from')
+    .action(async function (this: Command) {
       const opts = this.optsWithGlobals() as GlobalOptions
-      const creds = loadCredentials()
-      if (!creds) throw new CliError('not logged in: run `pilot login` or set PILOT_API_KEY')
+      const key = resolveApiKeySource()
+      if (!key) throw new CliError('not logged in', { hint: 'run pilot login, or set PILOT_API_KEY' })
+      const fleet = resolveApiUrlSource(opts)
+      const file = loadCredentials()
+      if (key.source === 'PILOT_API_KEY' && file?.api_key && file.api_key !== key.key) {
+        note(`${credentialsPath()} also holds a key; PILOT_API_KEY wins`)
+      }
+
+      let org: string | null = file?.org_id ?? null
+      let orgSource: string | null = org ? credentialsPath() : null
+      let scopes: string[] | null = null
+      try {
+        const me = await new PilotsClient(key.key, {
+          baseURL: fleet.url,
+          timeoutMs: WHOAMI_TIMEOUT_MS,
+        }).whoami()
+        org = me.org_id || null
+        orgSource = 'fleet'
+        scopes = me.scopes
+      } catch (err) {
+        // Exit 0 anyway. A command that fails when the fleet is down is
+        // useless in the one situation people reach for it.
+        note(`the fleet at ${fleet.url} did not answer (${messageOf(err)}); org is from the file`)
+      }
+
       // The prefix, never the key. `whoami` is the command someone runs while
       // screen-sharing to work out which fleet they are on.
-      const prefix = creds.api_key.slice(0, 12)
-      const apiUrl = opts.apiUrl || process.env.PILOT_API_URL || creds.api_url || DEFAULT_API_URL
+      const prefix = key.key.slice(0, 12)
       if (opts.json) {
-        printJSON({ org_id: creds.org_id ?? null, api_url: apiUrl, key_prefix: prefix })
-      } else {
-        printTable([
-          ['ORG', creds.org_id ?? '(unknown)'],
-          ['FLEET', apiUrl],
-          ['KEY', `${prefix}...`],
-        ])
+        printJSON({
+          org_id: org,
+          org_source: orgSource,
+          api_url: fleet.url,
+          api_url_source: fleet.source,
+          key_prefix: prefix,
+          key_source: key.source,
+          scopes,
+        })
+        return
       }
+      printTable([
+        [
+          'ORG',
+          org ?? (orgSource === 'fleet' ? '(admin key, no org)' : '(unknown)'),
+          orgSource ? `from ${orgSource}` : 'not recorded',
+        ],
+        ['FLEET', fleet.url, `from ${fleet.source}`],
+        ['KEY', `${prefix}...`, `from ${key.source}`],
+        ['SCOPES', scopes ? scopes.join(',') : '(fleet unreachable)', scopes ? 'from fleet' : ''],
+      ])
     })
 }

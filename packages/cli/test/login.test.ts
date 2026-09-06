@@ -189,7 +189,15 @@ test('an expired code is retried once, and a second expiry stops', async () => {
 
   const always = await fakeGitHub({ tokens: [{ error: 'expired_token' }] })
   try {
-    await assert.rejects(deviceFlow(flowOptions(always, [])), /expired twice/)
+    // The next step is a hint on its own line, not a clause inside the
+    // sentence. Folding it back into the message fails the hint assertion.
+    await assert.rejects(deviceFlow(flowOptions(always, [])), (err: unknown) => {
+      assert.ok(err instanceof CliError)
+      assert.equal(err.message, 'the device code expired twice')
+      assert.ok(err.hint)
+      assert.match(err.hint, /^run pilot login again/)
+      return true
+    })
     assert.equal(always.codesIssued, 2, 'exactly two codes, never a third')
   } finally {
     await always.close()
@@ -318,21 +326,46 @@ test('`pilot login --token` writes the file and never calls GitHub', async () =>
   }
 })
 
-test('`pilot whoami` prints the key prefix and never the key', async () => {
-  const env = scratch()
-  saveCredentials({ api_key: 'pilot_secret_abcdefghijklmnop', org_id: 'org_3', api_url: 'https://f' }, env)
+const BIN = join(import.meta.dirname, '..', 'bin', 'pilot.js')
+
+async function pilot(env: NodeJS.ProcessEnv, args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
   const { execFile } = await import('node:child_process')
   const { promisify } = await import('node:util')
   const run = promisify(execFile)
-  const BIN = join(import.meta.dirname, '..', 'bin', 'pilot.js')
-  const { stdout } = await run(process.execPath, [BIN, '--json', 'whoami'], {
-    env: { ...env, PATH: process.env.PATH },
-  })
-  const parsed = JSON.parse(stdout) as { key_prefix: string; org_id: string; api_url: string }
+  try {
+    const { stdout, stderr } = await run(process.execPath, [BIN, ...args], {
+      env: { ...env, PATH: process.env.PATH },
+    })
+    return { stdout, stderr, code: 0 }
+  } catch (err) {
+    const e = err as { stdout?: string; stderr?: string; code?: number }
+    return { stdout: e.stdout ?? '', stderr: e.stderr ?? '', code: e.code ?? 1 }
+  }
+}
+
+// The fleet at https://f does not exist, so this is also the unreachable case:
+// the request fails inside the 3s deadline, the note goes to stderr, the org
+// falls back to the file, and the exit code is 0 because the command's job is
+// to show configuration and the fleet being down is when people run it.
+test('`pilot whoami` prints the key prefix and never the key', async () => {
+  const env = scratch()
+  saveCredentials({ api_key: 'pilot_secret_abcdefghijklmnop', org_id: 'org_3', api_url: 'https://f' }, env)
+  const res = await pilot(env, ['--json', 'whoami'])
+  assert.equal(res.code, 0, res.stderr)
+  const parsed = JSON.parse(res.stdout) as {
+    key_prefix: string
+    org_id: string
+    api_url: string
+    org_source: string
+    scopes: string[] | null
+  }
   assert.equal(parsed.org_id, 'org_3')
   assert.equal(parsed.api_url, 'https://f')
   assert.equal(parsed.key_prefix, 'pilot_secret')
-  assert.equal(stdout.includes('abcdefghijklmnop'), false, 'the key itself never reaches stdout')
+  assert.match(parsed.org_source, /credentials$/)
+  assert.equal(parsed.scopes, null)
+  assert.match(res.stderr, /did not answer/)
+  assert.equal(res.stdout.includes('abcdefghijklmnop'), false, 'the key itself never reaches stdout')
 })
 
 test('`pilot login` drives the whole flow and writes a 0600 file', async () => {

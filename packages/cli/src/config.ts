@@ -18,10 +18,10 @@ import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, write
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-import { PilotsClient } from '@pilots/sdk'
+import { PilotsClient, PilotsError } from '@pilots/sdk'
 import type { ClientOptions } from '@pilots/sdk'
 
-import { CliError } from './output.ts'
+import { CliError, hintOf } from './output.ts'
 
 /** The SDK's own default, repeated here so `pilot login` can record it. */
 export const DEFAULT_API_URL = 'https://api.pilotrun.app'
@@ -57,21 +57,22 @@ export function loadCredentials(env: NodeJS.ProcessEnv = process.env): Credentia
   try {
     const st = statSync(path)
     if ((st.mode & 0o077) !== 0) {
-      throw new CliError(
-        `${path} is readable by other users (mode ${(st.mode & 0o777).toString(8)}); ` +
-          'run `chmod 600` on it or `pilot login` again',
-      )
+      throw new CliError(`${path} is readable by other users (mode ${(st.mode & 0o777).toString(8)})`, {
+        hint: `chmod 600 ${path}, or run pilot login again to rewrite it`,
+      })
     }
     raw = readFileSync(path, 'utf8')
   } catch (err) {
     if (err instanceof CliError) throw err
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') return null
-    throw new CliError(`cannot read ${path}: ${(err as Error).message}`)
+    throw new CliError(`cannot read ${path}: ${(err as Error).message}`, {
+      hint: "check the file's owner and mode",
+    })
   }
   try {
     return JSON.parse(raw) as Credentials
   } catch {
-    throw new CliError(`${path} is not valid JSON; run \`pilot login\` again`)
+    throw new CliError(`${path} is not valid JSON`, { hint: 'run pilot login again to rewrite it' })
   }
 }
 
@@ -115,15 +116,42 @@ export interface GlobalOptions {
   apiUrl?: string
 }
 
+/**
+ * The API key and the name of what supplied it.
+ *
+ * The source is half the answer whenever the key is the problem. A file
+ * holding one key and PILOT_API_KEY holding another is a normal state to be in
+ * and an unreadable one to debug, because every command sends the env key and
+ * nothing said so.
+ */
+export function resolveApiKeySource(
+  env: NodeJS.ProcessEnv = process.env,
+): { key: string; source: string } | null {
+  if (env.PILOT_API_KEY) return { key: env.PILOT_API_KEY, source: 'PILOT_API_KEY' }
+  const key = loadCredentials(env)?.api_key
+  return key ? { key, source: credentialsPath(env) } : null
+}
+
 /** The API key, from the environment first and the file second. */
 export function resolveApiKey(env: NodeJS.ProcessEnv = process.env): string | null {
-  if (env.PILOT_API_KEY) return env.PILOT_API_KEY
-  return loadCredentials(env)?.api_key ?? null
+  return resolveApiKeySource(env)?.key ?? null
+}
+
+/** The fleet and the name of what supplied it. */
+export function resolveApiUrlSource(
+  opts: GlobalOptions = {},
+  env: NodeJS.ProcessEnv = process.env,
+): { url: string; source: string } {
+  if (opts.apiUrl) return { url: opts.apiUrl, source: '--api-url' }
+  if (env.PILOT_API_URL) return { url: env.PILOT_API_URL, source: 'PILOT_API_URL' }
+  const url = loadCredentials(env)?.api_url
+  if (url) return { url, source: credentialsPath(env) }
+  return { url: DEFAULT_API_URL, source: 'the default' }
 }
 
 /** The fleet, from `--api-url`, then `PILOT_API_URL`, then the file, then the default. */
 export function resolveApiUrl(opts: GlobalOptions = {}, env: NodeJS.ProcessEnv = process.env): string {
-  return opts.apiUrl || env.PILOT_API_URL || loadCredentials(env)?.api_url || DEFAULT_API_URL
+  return resolveApiUrlSource(opts, env).url
 }
 
 /**
@@ -137,7 +165,49 @@ export function clientFromEnv(
 ): PilotsClient {
   const key = resolveApiKey(env)
   if (!key) {
-    throw new CliError('no API key: run `pilot login` or set PILOT_API_KEY')
+    throw new CliError('no API key', { hint: 'run pilot login, or set PILOT_API_KEY' })
   }
   return new PilotsClient(key, { baseURL: resolveApiUrl(opts, env), ...clientOpts })
+}
+
+/**
+ * Explains the two failures only the client can explain.
+ *
+ * The fleet cannot tell a caller that it was unreachable, and it cannot tell a
+ * caller where the key it rejected came from. Both facts live here, so both
+ * are attached here rather than guessed at by hostd. Anything else the server
+ * refuses is the server's own to explain in the response.
+ *
+ * An error that already carries a hint keeps it: the more specific one wins.
+ */
+export function attachHint(
+  err: unknown,
+  opts: GlobalOptions = {},
+  env: NodeJS.ProcessEnv = process.env,
+): unknown {
+  if (!(err instanceof PilotsError) || hintOf(err)) return err
+  // Resolving the URL reads the credentials file, which can itself throw on a
+  // bad mode. Rendering the original error beats replacing it with that one.
+  let where: { url: string; source: string }
+  try {
+    where = resolveApiUrlSource(opts, env)
+  } catch {
+    return err
+  }
+  // status 0 with an empty body is the SDK's transport failure: fetch never
+  // reached anything, so there is no response to quote.
+  if (err.status === 0 && err.body === '') {
+    ;(err as { hint?: string }).hint =
+      `cannot reach ${where.url} (from ${where.source}); is hostd running there?`
+  } else if (err.status === 401) {
+    let from = 'nowhere'
+    try {
+      from = resolveApiKeySource(env)?.source ?? 'nowhere'
+    } catch {
+      from = 'a credentials file that could not be read'
+    }
+    ;(err as { hint?: string }).hint =
+      `${where.url} rejected the key from ${from}; run pilot login, or set PILOT_API_KEY`
+  }
+  return err
 }

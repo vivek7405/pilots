@@ -23,6 +23,7 @@ import { createSecretsCommand } from './commands/secrets.ts'
 import { createServicesCommand } from './commands/services.ts'
 import { createStatusCommand } from './commands/status.ts'
 import { createVolumesCommand } from './commands/volumes.ts'
+import { attachHint, type GlobalOptions } from './config.ts'
 import { fail, setJSONMode } from './output.ts'
 import { VERSION } from './version.ts'
 
@@ -62,10 +63,14 @@ export async function run(argv: string[] = process.argv): Promise<void> {
   // and an error can happen during parsing itself. Reading argv directly is
   // the only thing available that early.
   setJSONMode(argv.includes('--json'))
+  const program = buildProgram()
   try {
-    await buildProgram().parseAsync(argv)
+    await program.parseAsync(argv)
   } catch (err) {
-    fail(err)
+    // program.opts() is populated even when the action threw, which is what
+    // makes the resolved fleet URL available here without threading it
+    // through every command.
+    fail(attachHint(err, program.opts() as GlobalOptions))
   }
 }
 

@@ -148,7 +148,9 @@ export async function deviceFlow(opts: DeviceFlowOptions): Promise<string> {
     }
   }
 
-  throw new CliError('the device code expired twice; run `pilot login` again')
+  throw new CliError('the device code expired twice', {
+    hint: 'run pilot login again and enter the code within the time GitHub shows',
+  })
 }
 
 async function requestDeviceCode(
