@@ -3,7 +3,7 @@
  * same fleet the apps list does and each degrades on its own.
  */
 import assert from 'node:assert/strict';
-import { after, before, test } from 'node:test';
+import { before, test } from 'node:test';
 import { asUser, bootApp, signInAs } from '../helpers/app.ts';
 import type { TestApp } from '../helpers/app.ts';
 
@@ -12,9 +12,6 @@ let cookie: string;
 before(async () => {
   app = await bootApp();
   cookie = await signInAs(app.handle, { id: 7401, login: 'usage-pilot' });
-});
-after(async () => {
-  await app.close?.();
 });
 
 test('the usage page carries the four limit bars and the capacity strip', async () => {

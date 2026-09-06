@@ -280,7 +280,7 @@ export default async function RootLayout({ children, url }: LayoutProps) {
             class="fixed inset-x-0 top-0 z-30 border-b border-border bg-card/85 backdrop-blur md:left-[var(--sidebar-w)]"
             style="border-right: var(--wj-scrollbar-compensation, 0px) solid transparent"
           >
-            <div class="flex h-[var(--header-h)] items-center gap-4 px-4 sm:px-6">
+            <div class="flex min-h-[3.5rem] items-center gap-4 px-4 py-2 sm:px-6">
               <a href="/" class="font-semibold tracking-tight no-underline text-foreground md:hidden">pilots</a>
               <nav aria-label="Breadcrumb" class="min-w-0">
                 <ol class="flex items-center gap-1.5 list-none m-0 p-0 text-meta">
