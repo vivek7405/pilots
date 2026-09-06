@@ -272,6 +272,47 @@ func TestACreateCannotRestoreAForeignBuildPair(t *testing.T) {
 	}
 }
 
+// The same door once more, and this one hands over SECRETS rather than an
+// image. A create naming a service joins that service's row instead of minting
+// one, and a machine reads its service's sealed environment back out at boot.
+// Unchecked, a key naming another org's service id got a machine of its own --
+// one it can exec into -- with that service's decrypted secrets inside it, and
+// a foreign replica in the victim's release set as well.
+func TestACreateCannotJoinAForeignService(t *testing.T) {
+	h, st, fake := twoTenants(t)
+	ctx := context.Background()
+
+	if err := st.PutService(ctx, &state.Service{
+		ID: "svc_org1", Name: "svc-org1", Replicas: 1,
+	}); err != nil {
+		t.Fatalf("PutService: %v", err)
+	}
+	if err := st.PutTenancy(ctx, &state.Tenancy{
+		ID: "svc_org1", OrgID: "org_1", Kind: "service",
+	}); err != nil {
+		t.Fatalf("PutTenancy: %v", err)
+	}
+
+	rec := postJSON(t, h, "/v1/machines", "pilot_org2",
+		`{"vcpus":1,"mem_mib":512,"service":"svc_org1"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("joining a foreign service: got %d, want 404 (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "service not found") {
+		t.Errorf("the refusal names something other than the service: %s", rec.Body.String())
+	}
+	if fake.created != 0 {
+		t.Errorf("the create reached the manager anyway (%d creates)", fake.created)
+	}
+
+	// Its own service still joins, which is what a second replica of a
+	// standalone machine's service is.
+	if ok := postJSON(t, h, "/v1/machines", "pilot_org1",
+		`{"vcpus":1,"mem_mib":512,"service":"svc_org1"}`); ok.Code != http.StatusCreated {
+		t.Errorf("joining its own service: got %d, want 201 (%s)", ok.Code, ok.Body.String())
+	}
+}
+
 // The build log is the build's own output -- Dockerfile lines, registry URLs,
 // whatever the build echoed -- so it is scoped like the build it belongs to.
 // The key here carries `deploy`, so the scope gate lets it through and the

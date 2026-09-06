@@ -2227,6 +2227,26 @@ async function scopedDeployAssertions() {
         `the refusal is ${JSON.stringify(pair.json)}`);
     });
 
+    // The door next to the image: a create naming a SERVICE joins that
+    // service's row, and a machine reads its service's sealed environment
+    // back out at boot. A foreign one would hand another tenant's secrets to
+    // a guest this key can exec into.
+    await step('another org\'s service cannot be joined by a create', async () => {
+      const owner = await request('/v1/services', {
+        method: 'POST',
+        body: { name: `scoped-victim-${tag}`, app: `e2e-victim-${tag}`, replicas: 0 },
+      });
+      assert(owner.status === 201,
+        `creating the admin-owned service: got ${owner.status} ${JSON.stringify(owner.json)}`);
+      const join = await request('/v1/machines', {
+        method: 'POST', key,
+        body: { vcpus: 1, mem_mib: 512, service: owner.json.id },
+      });
+      assert(join.status === 404, `joining a foreign service: got ${join.status}`);
+      assert(join.json?.error === 'service not found',
+        `the refusal is ${JSON.stringify(join.json)}`);
+    });
+
     // The line this section exists for. On the broken code it was a 404.
     await step('the scoped key deploys the image it built', async () => {
       assert(svc && own, 'the setup steps did not complete');

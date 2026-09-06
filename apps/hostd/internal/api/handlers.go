@@ -156,6 +156,19 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// And a fourth time, for the door that hands over SECRETS rather than an
+	// image. A create naming a service JOINS that service's row rather than
+	// minting one (machines.Create), and a machine reads its service's sealed
+	// environment back out at boot (machines.resolveEnv). Unchecked, a key
+	// naming another org's service id got a machine of its own -- one it can
+	// exec into -- with that service's decrypted secrets delivered inside it,
+	// and a foreign replica in the victim's release set as well.
+	if req.Service != "" {
+		if _, ok := d.ownedService(w, r, req.Service); !ok {
+			return
+		}
+	}
+
 	if !d.checkQuota(w, r, quota.Delta{
 		Machines: 1,
 		VCPUs:    orDefault(req.VCPUs, 1),
