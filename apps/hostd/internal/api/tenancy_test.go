@@ -313,6 +313,65 @@ func TestACreateCannotJoinAForeignService(t *testing.T) {
 	}
 }
 
+// A release rides beside the service on a create and has no tenancy row of its
+// own, because it is owned THROUGH its service. So the check is that the two
+// agree: a rollout counts its replicas by service AND release together, and a
+// machine carrying a release its service never issued is a replica counted
+// into a rollout that never placed it.
+func TestACreateCannotNameAReleaseOfAnotherService(t *testing.T) {
+	h, st, fake := twoTenants(t)
+	ctx := context.Background()
+
+	for _, s := range []struct{ id, org string }{{"svc_mine", "org_1"}, {"svc_theirs", "org_2"}} {
+		if err := st.PutService(ctx, &state.Service{ID: s.id, Name: s.id, Replicas: 1}); err != nil {
+			t.Fatalf("PutService: %v", err)
+		}
+		if err := st.PutTenancy(ctx, &state.Tenancy{ID: s.id, OrgID: s.org, Kind: "service"}); err != nil {
+			t.Fatalf("PutTenancy: %v", err)
+		}
+	}
+	for _, rel := range []struct{ id, svc string }{{"rel_mine", "svc_mine"}, {"rel_theirs", "svc_theirs"}} {
+		if err := st.PutRelease(ctx, &state.Release{ID: rel.id, ServiceID: rel.svc}); err != nil {
+			t.Fatalf("PutRelease: %v", err)
+		}
+	}
+
+	// Another service's release, named beside a service the caller does own.
+	rec := postJSON(t, h, "/v1/machines", "pilot_org1",
+		`{"vcpus":1,"mem_mib":512,"service":"svc_mine","release":"rel_theirs"}`)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("naming another service's release: got %d, want 404 (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "release not found") {
+		t.Errorf("the refusal names something other than the release: %s", rec.Body.String())
+	}
+	if fake.created != 0 {
+		t.Errorf("the create reached the manager anyway (%d creates)", fake.created)
+	}
+
+	// A release that does not exist is refused with the SAME body: telling
+	// the two apart would be a release-id oracle across tenants.
+	missing := postJSON(t, h, "/v1/machines", "pilot_org1",
+		`{"vcpus":1,"mem_mib":512,"service":"svc_mine","release":"rel_nope"}`)
+	if missing.Code != http.StatusNotFound || !strings.Contains(missing.Body.String(), "release not found") {
+		t.Errorf("an unknown release: got %d (%s), want 404 release not found",
+			missing.Code, missing.Body.String())
+	}
+
+	// A release with no service beside it names nothing that can be checked.
+	if orphan := postJSON(t, h, "/v1/machines", "pilot_org1",
+		`{"vcpus":1,"mem_mib":512,"release":"rel_mine"}`); orphan.Code != http.StatusNotFound {
+		t.Errorf("a release with no service: got %d, want 404 (%s)", orphan.Code, orphan.Body.String())
+	}
+
+	// The pair its own service issued still creates, which is the rollout's
+	// own shape when it comes through this handler at all.
+	if ok := postJSON(t, h, "/v1/machines", "pilot_org1",
+		`{"vcpus":1,"mem_mib":512,"service":"svc_mine","release":"rel_mine"}`); ok.Code != http.StatusCreated {
+		t.Errorf("its own service's release: got %d, want 201 (%s)", ok.Code, ok.Body.String())
+	}
+}
+
 // The build log is the build's own output -- Dockerfile lines, registry URLs,
 // whatever the build echoed -- so it is scoped like the build it belongs to.
 // The key here carries `deploy`, so the scope gate lets it through and the

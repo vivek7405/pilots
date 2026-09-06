@@ -169,6 +169,30 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// And the release id that travels beside it. A release has no tenancy row
+	// of its own because it is owned THROUGH its service, so the check is that
+	// the two agree. Every consumer matches the pair together -- a rollout
+	// counts its replicas by service and release, and the idle sweep compares
+	// a machine's release against its service's current one -- so a release
+	// that does not belong to the service named here is at best inert and at
+	// worst a replica counted into a rollout that never placed it.
+	if req.Release != "" {
+		rel, err := d.Store.GetRelease(r.Context(), req.Release)
+		switch {
+		case errors.Is(err, state.ErrNotFound):
+			notFound(w, "release")
+			return
+		case err != nil:
+			writeStoreError(w, err)
+			return
+		case rel.ServiceID != req.Service:
+			// The same answer as "no such release", deliberately: telling the
+			// two apart would be a release-id oracle across tenants.
+			notFound(w, "release")
+			return
+		}
+	}
+
 	if !d.checkQuota(w, r, quota.Delta{
 		Machines: 1,
 		VCPUs:    orDefault(req.VCPUs, 1),
