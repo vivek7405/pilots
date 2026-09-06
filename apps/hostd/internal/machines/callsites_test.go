@@ -251,11 +251,14 @@ func TestNoRestoreSkipsTheVendorCheck(t *testing.T) {
 		},
 		{
 			callee: "bootFromDisk",
-			want:   []string{"bringUp", "restoreFromCheckpoint"},
-			why: "the cold-boot path is entered from the vendor decision and " +
-				"from a rollback whose CHECKPOINT is foreign, and from nowhere " +
-				"else -- a caller that reached it directly would discard a " +
-				"resumable memory image for no reason",
+			want:   []string{"bringUp", "bringUp", "restoreFromCheckpoint"},
+			why: "the cold-boot path is entered from the vendor decision, from " +
+				"a row that has a disk and no memory image at all, and from a " +
+				"rollback whose CHECKPOINT is foreign, and from nowhere else -- " +
+				"a caller that reached it directly would discard a resumable " +
+				"memory image for no reason. Both bringUp entries are the same " +
+				"decision: bringUp is the ONE place a memory image is weighed " +
+				"against the disk beside it",
 		},
 		{
 			callee: "restoreInstantImmutable",

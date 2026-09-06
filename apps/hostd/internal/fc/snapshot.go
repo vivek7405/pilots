@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/metrics"
@@ -123,13 +124,48 @@ func (UnconfiguredStore) GetToFile(context.Context, string, string) error {
 	return errors.New("fc: no object storage is configured")
 }
 
+// ErrGuestGone reports that the Firecracker process is no longer running. The
+// exit watcher delivers the exit itself; this only stops a caller retrying.
+var ErrGuestGone = errors.New("fc: the firecracker process is gone")
+
 // resumeAfterFailure puts a guest back to running after a snapshot attempt
-// failed partway. Best effort: if even this fails there is nothing left to try
-// but say so loudly, because the machine is now frozen and unreachable.
-func (m *Machine) resumeAfterFailure(ctx context.Context, cause error) {
-	if rerr := m.Client.Resume(context.WithoutCancel(ctx)); rerr != nil {
-		slog.Error("snapshot failed and the guest could not be resumed; it is "+
-			"frozen and will not answer",
-			"machine", m.ID, "cause", cause, "err", rerr)
+// failed partway, and reports whether the process turned out to be gone.
+//
+// Gone is a connection-level failure on the API socket (nobody listening, or
+// no socket at all) AND a pid that is not running. A live process whose socket
+// refuses is left alone: its guest may still be serving, and killing on a
+// guess is worse than the frozen state this logs. The machine manager hears
+// about a gone process from the exit watcher, not from here.
+func (m *Machine) resumeAfterFailure(ctx context.Context, cause error) (gone bool) {
+	rerr := m.Client.Resume(context.WithoutCancel(ctx))
+	if rerr == nil {
+		return false
 	}
+	if isSocketGone(rerr) && !m.processRunning() {
+		slog.Error("snapshot failed because the firecracker process is gone; "+
+			"its exit is handled by the exit watcher",
+			"machine", m.ID, "cause", cause, "err", rerr)
+		return true
+	}
+	slog.Error("snapshot failed and the guest could not be resumed; it is "+
+		"frozen and will not answer",
+		"machine", m.ID, "cause", cause, "err", rerr)
+	return false
+}
+
+// isSocketGone reports a dial that found nobody listening, or no socket at all.
+//
+// Client.do wraps the transport error with %w, and the dial error chain is
+// *url.Error, *net.OpError, *os.SyscallError, syscall.Errno, so errors.Is
+// reaches the errno.
+func isSocketGone(err error) bool {
+	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ENOENT)
+}
+
+// processRunning is processAlive on this machine's pid, false with no pid.
+func (m *Machine) processRunning() bool {
+	if m.Cmd == nil || m.Cmd.Process == nil {
+		return false
+	}
+	return processAlive(m.Cmd.Process.Pid)
 }

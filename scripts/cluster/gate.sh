@@ -1882,6 +1882,138 @@ else
   fi
 fi
 
+say "21. A Firecracker killed on the host is reaped and its machine comes back"
+# The exit nobody asked for: a guest panic, an OOM in the jail, a stray kill -9,
+# a laptop resume. Before #78 hostd never waited on the process it spawned, so
+# the row said running forever, the router answered 502 on every request, and
+# the idle monitor retried a suspend against the corpse every ten seconds until
+# somebody deleted the machine by hand.
+#
+# Three halves, because the exit arrives three different ways: as our own
+# child's wait, as an adopted process's pidfd after a hostd restart, and as a
+# dead pid found by reconcile when the process died while hostd was down.
+if [ -n "$H_IP" ]; then
+  EX_BASE=$(host_counts "$H_IP")
+  EX_ROW=$(api "$H_IP" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
+  EX_ID=$(echo "$EX_ROW" | jf id); EX_URL=$(echo "$EX_ROW" | jf url)
+  api "$H_IP" POST "/v1/machines/${EX_ID}/exec" \
+    '{"cmd":"echo exit-marker > /var/tmp/marker-exit && sync","user":"root"}' >/dev/null 2>&1
+
+  # The pid by --id in cmdline and comm, the way reaper.go's
+  # firecrackerProcesses finds one: the pid file alone can name a recycled pid.
+  fc_pid_of() { $SSH "root@$1" "for p in /proc/[0-9]*; do [ \"\$(cat \$p/comm 2>/dev/null)\" = firecracker ] || continue; tr '\\0' ' ' < \$p/cmdline | grep -q -- '--id $2 ' && basename \$p; done" 2>/dev/null | head -1 | tr -d '[:space:]'; }
+  state_field() { $SSH "root@$1" "python3 -c \"import json;print(json.load(open('/var/lib/pilots/machines/$2/state.json')).get('$3',0))\"" 2>/dev/null | tr -d '[:space:]'; }
+
+  EX_PID=$(fc_pid_of "$H_IP" "$EX_ID")
+  EX_NBD=$(state_field "$H_IP" "$EX_ID" nbd_pid)
+  EX_UFFD=$(state_field "$H_IP" "$EX_ID" uffd_pid)
+  EX_SINCE=$($SSH "root@$H_IP" "date '+%Y-%m-%d %H:%M:%S'" 2>/dev/null | tr -d '\n')
+  [ -n "$EX_PID" ] \
+    && ok "found ${EX_ID}'s firecracker at pid ${EX_PID}" \
+    || bad "no firecracker carries --id ${EX_ID}"
+  # Read, not assumed. An empty or zero pid makes the handler check below pass
+  # without testing anything, and `kill -0 0` asks about our own process group.
+  [ "${EX_NBD:-0}" -gt 0 ] 2>/dev/null && [ "${EX_UFFD:-0}" -gt 0 ] 2>/dev/null \
+    && ok "${EX_ID} records its handlers (nbd ${EX_NBD}, uffd ${EX_UFFD})" \
+    || bad "could not read ${EX_ID}'s handler pids from its state.json (nbd '${EX_NBD}', uffd '${EX_UFFD}')"
+
+  $SSH "root@$H_IP" "kill -9 ${EX_PID}" >/dev/null 2>&1
+  sleep 5
+  # A zombie is the whole bug: kill(pid, 0) succeeds on one, so before #78 the
+  # corpse stayed <defunct> under hostd and every check called it alive.
+  EX_STAT=$($SSH "root@$H_IP" "ps -o stat= -p ${EX_PID} 2>/dev/null" | tr -d '[:space:]')
+  [ -z "$EX_STAT" ] \
+    && ok "pid ${EX_PID} is reaped within 5s (no <defunct>)" \
+    || bad "pid ${EX_PID} is still present as '${EX_STAT}'"
+  $SSH "root@$H_IP" "kill -0 ${EX_NBD:-0} 2>/dev/null || kill -0 ${EX_UFFD:-0} 2>/dev/null" >/dev/null 2>&1 \
+    && bad "a handler of ${EX_ID} (nbd ${EX_NBD}, uffd ${EX_UFFD}) outlived its firecracker" \
+    || ok "both handlers of ${EX_ID} are gone within 5s"
+
+  # EX_OK carries the verdict and EX_UP only the duration. A recovery that
+  # lands inside the same second measures zero, and reading zero as "it never
+  # came back" would fail this on the FASTEST possible run.
+  EX_OK=0; EX_UP=0; EX_T0=$SECONDS; EX_NOW=""
+  while [ $((SECONDS - EX_T0)) -lt 60 ]; do
+    EX_NOW=$(api "$H_IP" GET "/v1/machines/${EX_ID}")
+    [ "$(echo "$EX_NOW" | jf state)" = running ] \
+      && [ "$(echo "$EX_NOW" | jf last_start)" = cold_boot ] \
+      && { EX_OK=1; EX_UP=$((SECONDS - EX_T0)); break; }
+    sleep 1
+  done
+  [ "$EX_OK" = 1 ] \
+    && ok "${EX_ID} is running again after ${EX_UP}s with last_start=cold_boot" \
+    || bad "${EX_ID} did not come back within 60s"
+  [ "$(echo "$EX_NOW" | jf url)" = "$EX_URL" ] \
+    && ok "the URL did not move" \
+    || bad "the URL moved to $(echo "$EX_NOW" | jf url)"
+  EX_PID2=$(fc_pid_of "$H_IP" "$EX_ID")
+  [ -n "$EX_PID2" ] && [ "$EX_PID2" != "$EX_PID" ] \
+    && ok "a new firecracker (pid ${EX_PID2}) serves ${EX_ID}" \
+    || bad "no new firecracker for ${EX_ID}"
+  EX_MARK=$(api "$H_IP" POST "/v1/machines/${EX_ID}/exec" \
+    '{"cmd":"cat /var/tmp/marker-exit","user":"root"}' 2>/dev/null | jf stdout | tr -d '[:space:]')
+  [ "$EX_MARK" = "exit-marker" ] \
+    && ok "the disk written before the kill survived" \
+    || bad "the disk did not survive: '${EX_MARK}'"
+  # The incident's signature, in the journal: 82 frozen-guest lines and not one
+  # word about an exit.
+  EX_FROZEN=$($SSH "root@$H_IP" "journalctl -u hostd --since '${EX_SINCE}' --no-pager 2>/dev/null | grep -c 'could not be resumed; it is frozen'" | tr -d '[:space:]')
+  # The settleExit line specifically: onExit's success line ("a machine that
+  # exited on its own is running again") carries the same phrase, so a bare
+  # grep for it counts two per exit and never equals one.
+  EX_EXITS=$($SSH "root@$H_IP" "journalctl -u hostd --since '${EX_SINCE}' --no-pager 2>/dev/null | grep -c \"a machine's firecracker exited on its own\"" | tr -d '[:space:]')
+  [ "${EX_FROZEN:-1}" = 0 ] && [ "${EX_EXITS:-0}" = 1 ] \
+    && ok "the journal has one exit line and no frozen-guest retries" \
+    || bad "journal: ${EX_EXITS} exit line(s), ${EX_FROZEN} frozen-guest line(s)"
+
+  # The adopted path: hostd restarts (KillMode=process keeps the guest), so the
+  # machine is no longer its child and only a pidfd reports its exit.
+  $SSH "root@$H_IP" "systemctl restart hostd" >/dev/null 2>&1
+  wait_serving "$H_IP" 120 || bad "hostd did not come back for the adoption half"
+  EX_PID3=$(fc_pid_of "$H_IP" "$EX_ID")
+  $SSH "root@$H_IP" "kill -9 ${EX_PID3}" >/dev/null 2>&1
+  # The pid has to be read BEFORE the kill and has to be real, or the loop
+  # below compares against an empty string and passes on the machine that was
+  # never killed at all.
+  [ -n "$EX_PID3" ] \
+    && ok "found the adopted firecracker at pid ${EX_PID3}" \
+    || bad "no firecracker carries --id ${EX_ID} after the hostd restart"
+  EX_OK=0; EX_UP=0; EX_T0=$SECONDS
+  while [ $((SECONDS - EX_T0)) -lt 60 ]; do
+    EX_PID4=$(fc_pid_of "$H_IP" "$EX_ID")
+    [ "$(api "$H_IP" GET "/v1/machines/${EX_ID}" | jf state)" = running ] \
+      && [ -n "$EX_PID4" ] && [ "$EX_PID4" != "$EX_PID3" ] \
+      && { EX_OK=1; EX_UP=$((SECONDS - EX_T0)); break; }
+    sleep 1
+  done
+  [ "$EX_OK" = 1 ] \
+    && ok "an ADOPTED firecracker's exit is seen through the pidfd and the machine is back after ${EX_UP}s" \
+    || bad "the adopted machine did not come back"
+
+  # The while-down path: the process dies with hostd stopped, so no watcher of
+  # any kind saw it. Reconcile finds breadcrumbs for a dead pid and a row that
+  # still says running, and reacts.
+  $SSH "root@$H_IP" "systemctl stop hostd; kill -9 \$(for p in /proc/[0-9]*; do [ \"\$(cat \$p/comm 2>/dev/null)\" = firecracker ] && tr '\\0' ' ' < \$p/cmdline | grep -q -- '--id ${EX_ID} ' && basename \$p; done) 2>/dev/null; systemctl start hostd" >/dev/null 2>&1
+  wait_serving "$H_IP" 120 || bad "hostd did not come back for the while-down half"
+  EX_OK=0; EX_UP=0; EX_T0=$SECONDS
+  while [ $((SECONDS - EX_T0)) -lt 90 ]; do
+    [ "$(api "$H_IP" GET "/v1/machines/${EX_ID}" | jf state)" = running ] \
+      && [ -n "$(fc_pid_of "$H_IP" "$EX_ID")" ] \
+      && { EX_OK=1; EX_UP=$((SECONDS - EX_T0)); break; }
+    sleep 1
+  done
+  [ "$EX_OK" = 1 ] \
+    && ok "a firecracker that died while hostd was down is handled at reconcile; back after ${EX_UP}s" \
+    || bad "the machine that died while hostd was down stayed down"
+
+  api "$H_IP" DELETE "/v1/machines/${EX_ID}" >/dev/null 2>&1
+  sleep 3
+  EX_AFTER=$(host_counts "$H_IP")
+  [ "$EX_AFTER" = "$EX_BASE" ] \
+    && ok "namespaces, veths and NBD devices are back to the baseline (${EX_BASE})" \
+    || bad "host counts went ${EX_BASE} -> ${EX_AFTER}; the exit path leaked"
+fi
+
 say "Result"
 echo "  ${PASS} passed, ${FAIL} failed"
 echo

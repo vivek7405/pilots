@@ -3829,10 +3829,10 @@ async function quotaAssertions() {
   }
 }
 
-// hostilityAssertions runs the API-visible half of H1-H8 in the order that
+// hostilityAssertions runs the API-visible half of H1-H9 in the order that
 // leaves the host least disturbed for whatever runs after it: the churn loop
 // first, egress next, then the two that deliberately push the host to a
-// ceiling. Each sub-battery owns its own cleanup in a finally, so one that
+// ceiling, and last the one that kills a guest outright. Each sub-battery owns its own cleanup in a finally, so one that
 // fails halfway leaves nothing for the next to trip over.
 // ---------------------------------------------------------------------------
 // Phase 6a-2: the exec stream, the sprites alias, and the guest contract.
@@ -4116,12 +4116,124 @@ async function execStreamAssertions() {
   }
 }
 
+// H9 -- an exit hostd did not ask for.
+//
+// A guest that panics, an OOM in the jail's cgroup, a stray kill of the wrong
+// pid, a host that comes back from sleep: every one of them ends with a
+// Firecracker that exited on its own. Before #78 hostd never found out. The
+// row said running forever, the router answered 502 on every request, and the
+// idle monitor retried a suspend against the corpse every ten seconds until an
+// operator deleted the machine by hand.
+//
+// The trigger here is a guest kernel panic, fired through sysrq from inside
+// the guest. The boot arguments carry panic=1 reboot=k, so the panic is a
+// reboot and the reboot is a Firecracker exit -- the same event as every other
+// cause, reached the only way a test can reach it through the public API.
+async function exitAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const reflink = await hostSharesExtents();
+  let id = null;
+  let url = null;
+  let host = null;
+  let startsBefore = 0;
+  let exitsBefore = 0;
+  let errorsBefore = 0;
+
+  try {
+    await step('a guest kernel panic is a Firecracker exit hostd recovers from', async () => {
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST',
+        body: { name: `e2e-exit-${tag}`, vcpus: 1, mem_mib: 512, knobs: { auto_stop: 'off' } },
+      });
+      assert(status === 201, `create returned HTTP ${status} ${JSON.stringify(json)}`);
+      id = json.id;
+      url = json.url;
+      host = new URL(json.url).hostname;
+
+      // Written and synced before the kill, so "the disk survived" is a claim
+      // about the guest's own writes rather than about the template.
+      await exec(id, 'echo exit-marker > /var/tmp/marker-exit && sync');
+
+      // A FAILURE, never a skip: a kernel with no CONFIG_MAGIC_SYSRQ cannot
+      // panic on demand, and quietly returning here would retire every
+      // assertion below it at runtime.
+      const { status: sysrq, json: probe } = await request(`/v1/machines/${id}/exec`, {
+        method: 'POST', body: { cmd: 'test -w /proc/sysrq-trigger', user: 'root' },
+      });
+      assert(sysrq === 200 && probe.exit_code === 0,
+        'the guest has no writable /proc/sysrq-trigger, so this kernel cannot be ' +
+        'panicked on demand; rebuild it with CONFIG_MAGIC_SYSRQ=y');
+
+      startsBefore = (await scrapeMetric('pilots_machine_starts_total{kind="cold_boot"}')) ?? 0;
+      exitsBefore = (await scrapeMetric('pilots_machine_exits_total')) ?? 0;
+      errorsBefore = (await scrapeMetric('pilots_machines{state="error"}')) ?? 0;
+
+      // The guest dies mid-command, so this request never answers. Racing it
+      // against a timer is the point: what it returns is meaningless and what
+      // follows it is the assertion.
+      await Promise.race([
+        request(`/v1/machines/${id}/exec`, {
+          method: 'POST', body: { cmd: 'echo c > /proc/sysrq-trigger', user: 'root' },
+        }).catch(() => null),
+        sleep(15_000),
+      ]);
+
+      const { ms } = await timed(() => waitFor(async () => {
+        const { json: now } = await request(`/v1/machines/${id}`);
+        return now?.state === 'running' && now?.last_start === 'cold_boot';
+      }, { timeoutMs: 90_000, everyMs: 1000, what: 'the panicked machine to come back' }));
+      enforce(reflink, ms, 30_000, 60_000, 30_000, 'exit recovery');
+    });
+
+    await step('the recovered machine keeps its URL, its disk and its logs', async () => {
+      const { json: now } = await request(`/v1/machines/${id}`);
+      assert(now.url === url, `the URL moved from ${url} to ${now.url}`);
+
+      const marker = await exec(id, 'cat /var/tmp/marker-exit');
+      assert(marker === 'exit-marker',
+        `the disk written before the panic did not survive: ${JSON.stringify(marker)}`);
+
+      // Answered rather than hung. A bare sandbox serves nothing on its app
+      // port, so a 502 here is honest and is NOT the discriminator: what says
+      // the machine is genuinely reachable again is the exec above, which
+      // travels the same namespace and slot address the router uses to reach
+      // the guest agent. A machine whose namespace or slot was lost on the way
+      // out cannot answer that at all.
+      const { status: served } = await viaRouter(host, '/', 30_000);
+      assert(served !== 0,
+        'the router did not answer at all for a machine it just brought back');
+
+      const { status: logStatus, text: logs } = await request(`/v1/machines/${id}/logs`, { raw: true });
+      assert(logStatus === 200, `GET /v1/machines/${id}/logs returned HTTP ${logStatus}`);
+      assert(logs.includes('exited on its own'),
+        'the machine log does not record the exit, so nothing explains why the guest died');
+
+      const exitsAfter = (await scrapeMetric('pilots_machine_exits_total')) ?? 0;
+      assert(exitsAfter === exitsBefore + 1,
+        `pilots_machine_exits_total went ${exitsBefore} -> ${exitsAfter}, want exactly one more`);
+      const startsAfter = (await scrapeMetric('pilots_machine_starts_total{kind="cold_boot"}')) ?? 0;
+      assert(startsAfter === startsBefore + 1,
+        `cold_boot starts went ${startsBefore} -> ${startsAfter}, want exactly one more`);
+      // The gauge is published from the idle monitor's tick rather than from
+      // the scrape, so it lags the recovery by up to one sweep. Waited for
+      // rather than sampled, because sampling it would be a race that passes
+      // on a slow host and fails on a fast one.
+      await waitFor(async () =>
+        ((await scrapeMetric('pilots_machines{state="error"}')) ?? 0) <= errorsBefore,
+      { timeoutMs: 60_000, everyMs: 1000, what: 'the error gauge to fall back to its baseline' });
+    });
+  } finally {
+    if (id) await destroy(id);
+  }
+}
+
 async function hostilityAssertions() {
   console.log('\n-- hostility (Phase 6e)');
   await churnAssertions();
   await egressAssertions();
   await capacityAssertions();
   await quotaAssertions();
+  await exitAssertions();
 }
 
 // ---------------------------------------------------------------------------

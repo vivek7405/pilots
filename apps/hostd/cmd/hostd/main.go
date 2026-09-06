@@ -644,21 +644,50 @@ func reconcile(cfg *config.Config, mgr *machines.Manager, devices *nbd.DevicePoo
 		slog.Error("reconcile failed", "err", err)
 		return 0
 	}
+	return settleReconciled(found, cfg.MachineStateRoot(), mgr, devices)
+}
+
+// settleReconciled adopts what is still running and settles what is not.
+//
+// Split from reconcile so the ordering below can be tested against a scan this
+// host did not perform: the real one reads the live machine state root, which
+// a test must never touch.
+func settleReconciled(found []fc.Reconciled, root string, mgr *machines.Manager,
+	devices *nbd.DevicePool) int {
 
 	var adopted int
+	var dead []fc.State
 	for _, r := range found {
 		if !r.Alive {
-			// The process is gone; clear the breadcrumbs so the next start
-			// does not keep trying to adopt a machine that no longer exists.
-			_ = fc.ClearBreadcrumbs(filepath.Join(cfg.MachineStateRoot(), r.State.MachineID))
+			// The process is gone. A zombie, a Firecracker that died while
+			// hostd was down, or a pid recycled to something else all read the
+			// same here (LiveProcess checks comm and a non-zombie state).
+			// Collected rather than handled here, for the reason the second
+			// loop gives.
+			dead = append(dead, r.State)
 			continue
 		}
-		m := fc.Adopted(r.State, cfg.MachineStateRoot(), devices)
+		m := fc.Adopted(r.State, root, devices)
 		if err := mgr.Adopt(r.State.MachineID, m, r.State.SlotIdx); err != nil {
 			slog.Error("could not adopt machine", "machine", r.State.MachineID, "err", err)
 			continue
 		}
 		adopted++
+	}
+
+	// The dead ones only AFTER every live machine has reserved its slot and
+	// its NBD device. ExitedWhileDown can bring a machine back in place, and a
+	// restart run inside the loop above would take its netns slot from a pool
+	// that does not yet know about the machines further down the list -- so it
+	// can be handed an index a live guest is still serving in, and that
+	// machine's own Adopt then fails outright with "slot already held".
+	//
+	// If the row still says this host runs it, that is an exit nobody handled:
+	// react as onExit would, with no process to wait for. Otherwise the
+	// breadcrumbs are simply stale.
+	for _, st := range dead {
+		mgr.ExitedWhileDown(context.Background(), st)
+		_ = fc.ClearBreadcrumbs(filepath.Join(root, st.MachineID))
 	}
 	return adopted
 }

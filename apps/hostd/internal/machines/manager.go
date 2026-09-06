@@ -148,6 +148,12 @@ type Manager struct {
 	// retired keeps the engine counters monotonic across a machine going
 	// away. See retiredUffd.
 	retired retiredUffd
+
+	// exits is the wall time of the last exit nobody asked for, per machine.
+	// In memory on purpose: its one reader is the crash-loop guard in
+	// settleExit, and a gossiped row for a per-process policy would be a
+	// second copy of a contract. Destroy forgets the entry.
+	exits sync.Map // machine id -> time.Time
 }
 
 func New(opts Options) *Manager {
@@ -176,10 +182,31 @@ func (m *Manager) get(id string) (*fc.Machine, bool) {
 	return fcm, ok
 }
 
+// put registers a live process and starts watching it.
+//
+// The ONE place a machine enters the registry, so it is the one place its exit
+// is subscribed to: create, wake, rescue, redeploy, checkpoint restore and
+// adoption all land here.
 func (m *Manager) put(id string, fcm *fc.Machine) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.running[id] = fcm
+	m.mu.Unlock()
+
+	// No process handle, no exit to react to. A handle built for a teardown
+	// path holds only what Cleanup needs, and reading "no pid" as "the pid is
+	// gone" would tear the machine out of the registry underneath the caller
+	// that just put it there.
+	if fcm.Cmd == nil || fcm.Cmd.Process == nil {
+		return
+	}
+
+	exited := fcm.Exited()
+	go func() {
+		<-exited
+		if info := fcm.Exit(); !info.Expected {
+			m.onExit(context.Background(), id, fcm, info)
+		}
+	}()
 }
 
 func (m *Manager) drop(id string) {
@@ -460,6 +487,7 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 		errs = append(errs, fmt.Errorf("remove cache: %w", err))
 	}
 	m.forgetToken(id)
+	m.exits.Delete(id)
 
 	if err := m.deleteRemoteState(ctx, id); err != nil {
 		errs = append(errs, err)
@@ -627,6 +655,20 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 		RootfsTemplateDir: m.rootfsTemplateDir(t),
 		BuildDir:          m.buildDir(),
 	}, suspendSnapKey(id), prefetchKey(id))
+	if errors.Is(err, fc.ErrGuestGone) {
+		// The guest exited on its own, part-way through the suspend. There is
+		// nothing left to suspend and nothing here to report: the exit watcher
+		// is already tearing this machine down, writing its row and deciding
+		// whether it comes back, and it holds this same lock to do it.
+		//
+		// nil rather than the error, because every caller of Suspend treats
+		// one as a fault to log and retry. That retry loop against a machine
+		// that had already exited is what filled the log for two hours during
+		// the incident this path comes from.
+		slog.Info("a suspend found its guest already gone; its exit is being handled",
+			"machine", id)
+		return nil
+	}
 	if err != nil {
 		return err
 	}

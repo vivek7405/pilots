@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -193,5 +194,136 @@ func findDetachedSleep(t *testing.T) int {
 		}
 	}
 	t.Skip("could not find the detached process; the shell may not support setsid here")
+	return 0
+}
+
+// An exit hostd did not ask for must close Exited and say how it happened.
+//
+// Without the watcher the process stays a ZOMBIE under hostd: kill(pid, 0)
+// keeps succeeding, every loop that keys on "is it alive" keeps saying yes,
+// and nothing on the host ever learns the guest is gone. That is the whole
+// incident this file's watcher exists to prevent.
+func TestExitedFiresWhenTheChildDies(t *testing.T) {
+	cmd := exec.Command("sleep", "60")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	pid := cmd.Process.Pid
+
+	m := &Machine{Cmd: cmd, StateDir: t.TempDir()}
+	exited := m.Exited()
+
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the exit was never observed")
+	}
+
+	info := m.Exit()
+	if info.Signal != syscall.SIGKILL {
+		t.Errorf("Exit().Signal is %v, want SIGKILL", info.Signal)
+	}
+	if info.Expected {
+		t.Error("an exit nobody asked for is marked Expected")
+	}
+	if info.Pid != pid {
+		t.Errorf("Exit().Pid is %d, want %d", info.Pid, pid)
+	}
+	if syscall.Kill(pid, 0) == nil {
+		t.Error("the process is still a zombie; the watcher did not reap it")
+	}
+}
+
+// Kill must claim the exit it causes.
+//
+// The machine manager restarts a machine whose Firecracker exited without
+// being asked. If Kill did not set the flag, every destroy and every suspend
+// would look like a crash and the host would bring back what it just took
+// down.
+func TestKillMarksItsExitExpected(t *testing.T) {
+	cmd := exec.Command("sleep", "60")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	m := &Machine{Cmd: cmd, StateDir: t.TempDir()}
+	if err := m.Kill(); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	if !m.Exit().Expected {
+		t.Error("Kill's own exit is not marked Expected")
+	}
+}
+
+// An ADOPTED machine's exit must be observed too.
+//
+// Its process is not this hostd's child, so Wait returns ECHILD at once and
+// reports nothing. A pidfd tells a non-parent when a process exits, which is
+// what keeps a machine re-adopted across a hostd restart from going back to
+// being invisible when it dies.
+func TestAdoptedMachineExitIsObservedViaPidfd(t *testing.T) {
+	pid := startDetachedSleep(t)
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &Machine{Cmd: &exec.Cmd{Process: proc}, StateDir: t.TempDir()}
+	exited := m.Exited()
+
+	if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+		t.Fatalf("kill: %v", err)
+	}
+	select {
+	case <-exited:
+	case <-time.After(5 * time.Second):
+		t.Fatal("an adopted process's exit was not observed; the pidfd wait did not fire")
+	}
+	if !m.Exit().Adopted {
+		t.Error("the exit is not marked Adopted, so its status was read as a child's")
+	}
+}
+
+// startDetachedSleep launches a sleep that is NOT this process's child and
+// returns its pid.
+//
+// The pid comes from the process itself through a file rather than from a scan
+// of /proc: a scan picks up any session-leading sleep on the machine,
+// including another test binary's, and then signals it.
+func startDetachedSleep(t *testing.T) int {
+	t.Helper()
+
+	pidFile := filepath.Join(t.TempDir(), "pid")
+	launch := exec.Command("sh", "-c",
+		"setsid sh -c 'echo $$ > "+pidFile+"; exec sleep 60' & wait")
+	if err := launch.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	t.Cleanup(func() { _ = launch.Process.Kill(); _, _ = launch.Process.Wait() })
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		raw, err := os.ReadFile(pidFile)
+		if err == nil {
+			if pid, cerr := strconv.Atoi(strings.TrimSpace(string(raw))); cerr == nil && pid > 0 {
+				t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+				// exec has to have happened, or the pid still names the shell.
+				for time.Now().Before(deadline) {
+					comm, cerr := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/comm")
+					if cerr == nil && strings.TrimSpace(string(comm)) == "sleep" {
+						return pid
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				t.Fatal("the detached shell never exec'd into sleep")
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("the detached process never reported its pid")
 	return 0
 }

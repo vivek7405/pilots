@@ -381,3 +381,26 @@ func TestAStartIsRecordedBeforeTheMachineRow(t *testing.T) {
 		t.Fatalf("write order was %v, want the cpu row first", order)
 	}
 }
+
+// A row with a disk and no memory image cold-boots that disk.
+//
+// It is what an exit leaves behind: settleExit captures whatever the block
+// server still held and drops the memory image, because the disk has moved
+// past it. Without this branch the wake refuses the row for want of a memory
+// build and the machine stays down with its freshest disk sitting in object
+// storage.
+func TestADiskOnlyRowColdBoots(t *testing.T) {
+	m, _, _ := newColdBootManager(t)
+
+	_, kind, err := m.bringUp(context.Background(), &state.Machine{
+		ID: "m-1", VCPUs: 1, MemMiB: 512,
+		RootfsBuildID:         "rootfs-1",
+		TemplateRootfsBuildID: "tpl",
+	})
+	if kind != state.StartColdBoot {
+		t.Fatalf("a disk-only row reported %q, want a cold boot", kind)
+	}
+	if err != nil && strings.Contains(err.Error(), "no usable memory build") {
+		t.Fatalf("a disk-only row was refused for want of a memory build: %v", err)
+	}
+}

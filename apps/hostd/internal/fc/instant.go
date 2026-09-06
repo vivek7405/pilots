@@ -232,6 +232,7 @@ func RestoreInstant(ctx context.Context, cfg InstantConfig, dl Uploader,
 		NBD:       nbdProc,
 		Uffd:      uffdProc,
 	}
+	m.watchExit()
 	// From here the machine owns the handlers, so the cleanup above must not
 	// also stop them.
 	nbdProc, uffdProc = nil, nil
@@ -383,6 +384,23 @@ func (m *Machine) Chunkify(ctx context.Context, opts SnapshotOpts) (InstantSnaps
 	}
 	out.MemBuildID = memBuild
 
+	rootfs, err := m.ChunkifyDisk(ctx, opts)
+	if err != nil {
+		return out, err
+	}
+	out.RootfsBuildID = rootfs
+	return out, nil
+}
+
+// ChunkifyDisk writes the machine's disk as a build diffed against its
+// template and returns the build id, or uuid.Nil when the machine wrote
+// nothing.
+//
+// The memory half is separate because the disk can be captured with no memory
+// to go with it: a Firecracker that exited on its own leaves the block server
+// and its dirty bitmap behind, and that disk is the freshest durable state the
+// machine has.
+func (m *Machine) ChunkifyDisk(ctx context.Context, opts SnapshotOpts) (uuid.UUID, error) {
 	if m.NBD == nil {
 		// No block server means this machine was BOOTED rather than restored,
 		// and its disk is a plain file in the jail. That happens for exactly
@@ -402,11 +420,11 @@ func (m *Machine) Chunkify(ctx context.Context, opts SnapshotOpts) (InstantSnaps
 		// that matches the parent genuinely is unchanged -- which is exactly
 		// the ambiguity the dirty bitmap exists to resolve for a cow.
 		if opts.RootfsTemplateDir == "" {
-			return out, nil
+			return uuid.Nil, nil
 		}
 		bootedRootfs := filepath.Join(m.ChrootDir, BakedRootfsPath)
 		if _, statErr := os.Stat(bootedRootfs); statErr != nil {
-			return out, nil
+			return uuid.Nil, nil
 		}
 
 		rootfsBuild := uuid.New()
@@ -416,20 +434,19 @@ func (m *Machine) Chunkify(ctx context.Context, opts SnapshotOpts) (InstantSnaps
 			BuildID:   rootfsBuild,
 			ParentDir: opts.RootfsTemplateDir,
 		}); err != nil {
-			return out, fmt.Errorf("fc: chunkify booted disk: %w", err)
+			return uuid.Nil, fmt.Errorf("fc: chunkify booted disk: %w", err)
 		}
-		out.RootfsBuildID = rootfsBuild
-		return out, nil
+		return rootfsBuild, nil
 	}
 
 	dirty, err := m.NBD.Dirty()
 	if err != nil {
-		return out, fmt.Errorf("fc: read dirty blocks: %w", err)
+		return uuid.Nil, fmt.Errorf("fc: read dirty blocks: %w", err)
 	}
 	if dirty.IsEmpty() {
 		// The machine never wrote to its disk. Its next restore reads the
 		// template directly, so there is nothing to store.
-		return out, nil
+		return uuid.Nil, nil
 	}
 
 	rootfsBuild := uuid.New()
@@ -440,10 +457,9 @@ func (m *Machine) Chunkify(ctx context.Context, opts SnapshotOpts) (InstantSnaps
 		ParentDir: opts.RootfsTemplateDir,
 		Dirty:     dirty,
 	}); err != nil {
-		return out, fmt.Errorf("fc: chunkify disk: %w", err)
+		return uuid.Nil, fmt.Errorf("fc: chunkify disk: %w", err)
 	}
-	out.RootfsBuildID = rootfsBuild
-	return out, nil
+	return rootfsBuild, nil
 }
 
 // DirtyBlocks reports which disk blocks the machine has written.
@@ -554,16 +570,27 @@ func (m *Machine) SuspendInstant(ctx context.Context, up Uploader, chunks Upload
 
 	p, err := m.pauseAndSnapshot(ctx)
 	if err != nil {
-		m.resumeAfterFailure(ctx, err)
+		if m.resumeAfterFailure(ctx, err) {
+			err = fmt.Errorf("%w: %v", ErrGuestGone, err)
+		}
 		return res, err
 	}
 	// A failure between here and the kill leaves the guest frozen. A paused VM
 	// whose row still says "running" is worse than a failed suspend: the
 	// router proxies into a machine that can never answer, and the idle
 	// monitor retries the same failing suspend on every tick.
+	//
+	// Only up to the kill, though. Past it the process is gone because THIS
+	// call took it down, so there is nothing to resume and a socket that
+	// refuses is the corpse we just made -- reporting that as "the guest is
+	// gone" would blame a later failure on an exit nobody suffered.
+	killed := false
 	defer func() {
-		if err != nil {
-			m.resumeAfterFailure(ctx, err)
+		if err == nil || killed {
+			return
+		}
+		if m.resumeAfterFailure(ctx, err) {
+			err = fmt.Errorf("%w: %v", ErrGuestGone, err)
 		}
 	}()
 
@@ -589,7 +616,9 @@ func (m *Machine) SuspendInstant(ctx context.Context, up Uploader, chunks Upload
 	// largest files around.
 	_ = os.Remove(p.hostMem)
 
-	if err = m.Kill(); err != nil {
+	err = m.Kill()
+	killed = true
+	if err != nil {
 		return res, err
 	}
 
@@ -662,9 +691,8 @@ func (m *Machine) CheckpointInstant(ctx context.Context, up Uploader, chunks Upl
 
 	p, err := m.pauseAndSnapshot(ctx)
 	if err != nil {
-		if rerr := m.Client.Resume(context.WithoutCancel(ctx)); rerr != nil {
-			slog.Error("checkpoint failed and the guest could not be resumed",
-				"machine", m.ID, "err", rerr)
+		if m.resumeAfterFailure(ctx, err) {
+			err = fmt.Errorf("%w: %v", ErrGuestGone, err)
 		}
 		return res, err
 	}

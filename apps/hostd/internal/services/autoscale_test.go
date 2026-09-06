@@ -507,3 +507,34 @@ func TestTheAutoscalerStepsAsideDuringARollout(t *testing.T) {
 		t.Errorf("the autoscaler stayed away after the rollout ended: %v", fm.events)
 	}
 }
+
+// A replica whose Firecracker exited is absent, not present-but-broken.
+//
+// The exit path marks it error, and this is the half of that decision the
+// autoscaler owns: Running counts only running replicas, so the floor is
+// short by one and a replacement is CREATED from the release. scaleUp must
+// never try to wake the corpse, which is the loop the incident spun in for two
+// hours.
+func TestAnErrorReplicaCountsAsAbsentAndIsReplaced(t *testing.T) {
+	ctx := context.Background()
+	store, arbiter, _ := autoscaleFixture(t)
+	fm := newFakeMachines(store)
+	arb := New(Options{HostID: arbiter, Store: store, Machines: fm})
+
+	if err := store.PutMachine(ctx, &state.Machine{
+		ID: "m-1", Name: "m-1", HostID: arbiter, State: "error",
+		ServiceID: "svc-1", ReleaseID: "rel-1", KindKnobs: floorOneKnobs,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := arb.scaleOnce(ctx, fakeLoad{}, map[string]time.Time{}); err != nil {
+		t.Fatalf("scaleOnce: %v", err)
+	}
+	if got := eventsWithPrefix(fm, "create:"); len(got) != 1 {
+		t.Errorf("the floor produced %v, want exactly one replacement replica", got)
+	}
+	if got := eventsWithPrefix(fm, "wake:"); len(got) != 0 {
+		t.Errorf("the autoscaler tried to wake a machine whose process is gone: %v", got)
+	}
+}

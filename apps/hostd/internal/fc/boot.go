@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -142,6 +143,16 @@ type Machine struct {
 	// finishes. See awaitCapture.
 	captureMu   sync.Mutex
 	captureDone chan struct{}
+
+	// The exit watcher. exited is closed once, when the process is gone;
+	// exitInfo says how; expectExit is set by Kill before it signals, so a
+	// reader can tell an exit hostd asked for from one it did not. See
+	// exit.go.
+	exitOnce   sync.Once
+	exitMu     sync.Mutex
+	exited     chan struct{}
+	exitInfo   *ExitInfo
+	expectExit atomic.Bool
 }
 
 // GenerateMAC returns a locally administered unicast address.
@@ -311,6 +322,9 @@ func Boot(ctx context.Context, cfg Config) (*Machine, error) {
 		SerialLog: serialLog,
 		StartedAt: time.Now(),
 	}
+	// Reaped from the first instant: a Firecracker that dies during configure
+	// must not sit as a zombie while WaitForSocket times out.
+	m.watchExit()
 
 	if err := m.Client.WaitForSocket(ctx, 10*time.Second); err != nil {
 		_ = m.Kill()

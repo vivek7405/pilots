@@ -1,7 +1,10 @@
 package fc
 
 import (
+	"context"
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -86,5 +89,44 @@ func TestSnapshotTypeIsFullWhenTheImageIsTooLarge(t *testing.T) {
 	m := &Machine{MemMiB: 512}
 	if got := m.snapshotType(path, 512); got != SnapshotFull {
 		t.Errorf("snapshotType = %q for an oversized image, want %q", got, SnapshotFull)
+	}
+}
+
+// A resume that fails because the process is GONE must say so, not call the
+// guest frozen.
+//
+// The incident this distinction comes from logged "it is frozen and will not
+// answer" every ten seconds for two hours, against a Firecracker that had
+// already exited. "Frozen" is a machine that is still there and stuck;
+// "gone" is one the exit watcher is about to bring back.
+func TestResumeAfterFailureReportsAGoneProcess(t *testing.T) {
+	// No socket at all: the dial fails with ENOENT, which is what a jail whose
+	// chroot has been removed looks like.
+	sock := filepath.Join(t.TempDir(), "fc.sock")
+
+	dead := exec.Command("true")
+	if err := dead.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if _, err := dead.Process.Wait(); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+
+	gone := &Machine{ID: "m-gone", Client: NewClient(sock),
+		Cmd: &exec.Cmd{Process: dead.Process}}
+	if !gone.resumeAfterFailure(context.Background(), errors.New("snapshot failed")) {
+		t.Error("a refused socket over a dead pid was not reported as gone")
+	}
+
+	// The same socket failure over a pid that IS running is NOT gone: the
+	// guest may still be serving, and hostd must never destroy on a guess.
+	self, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := &Machine{ID: "m-live", Client: NewClient(sock),
+		Cmd: &exec.Cmd{Process: self}}
+	if live.resumeAfterFailure(context.Background(), errors.New("snapshot failed")) {
+		t.Error("a live process was reported gone; hostd would give up on a guest that is still serving")
 	}
 }
