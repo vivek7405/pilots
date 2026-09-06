@@ -16,6 +16,12 @@ import type { Machine } from '#modules/machines/types.ts';
 import type { Host } from '#modules/fleet/types.ts';
 import { imageVendor, resumeTier, vendorName } from '#modules/machines/utils/resume.ts';
 import { stateBadge } from '#modules/machines/utils/ui/state.ts';
+// The fragment declares its OWN dependency. A page that renders this and did
+// not import the tooltip gets an element that never upgrades, and an
+// un-upgraded <ui-tooltip-content> is not hidden: its whole explanation
+// renders inline as body text. That happened on the terminal route.
+import '#components/ui/tooltip.ts';
+import '#components/relative-time.ts';
 
 /** `<relative-time>` for a value that may be absent, with no stray markup. */
 function when(value: number | string | undefined): TemplateResult | string {

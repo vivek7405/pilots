@@ -11,6 +11,7 @@ import { orUnauthorized, requireOrg } from '#modules/auth/session.server.ts';
 import { getMachine } from '#modules/machines/queries/get-machine.server.ts';
 import { stateBadge } from '#modules/machines/utils/ui/state.ts';
 import { badgeClass } from '#components/ui/badge.ts';
+import { buttonClass } from '#components/ui/button.ts';
 import { cardClass, cardContentClass } from '#components/ui/card.ts';
 import { dataTable, emptyState, footnote, pageHeading, sectionHeading } from '#lib/utils/ui.ts';
 import { cn } from '#lib/utils/cn.ts';
@@ -36,6 +37,9 @@ export default async function MachinePage({ params }: PageProps) {
   return html`
     <div class="flex flex-wrap items-center gap-3">
       ${pageHeading(machine.name || machine.id)} ${stateBadge(machine.state)}
+      <a href=${`/machines/${machine.id}/terminal`} class=${cn(buttonClass({ size: 'sm' }), 'ml-auto')}
+        >Open a terminal</a
+      >
     </div>
 
     <div class=${cn(cardClass({ size: 'sm' }), 'mt-4')} data-slot="card" data-size="sm">

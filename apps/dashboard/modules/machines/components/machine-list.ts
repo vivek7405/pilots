@@ -32,7 +32,6 @@ import type { ResumeTier } from '#modules/machines/utils/resume.ts';
 import { statusLine } from '#modules/machines/utils/ui/status-line.ts';
 import { dataTable, emptyState } from '#lib/utils/ui.ts';
 import { cn } from '#lib/utils/cn.ts';
-import '#components/relative-time.ts';
 import '#components/copy-button.ts';
 import '#components/ui/tooltip.ts';
 

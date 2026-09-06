@@ -31,8 +31,6 @@ import { dataTable, emptyState, errorAlert, field, formRowClass, pageHeading, se
 import { cn } from '#lib/utils/cn.ts';
 import type { Machine as BrowserMachine } from '#modules/machines/types.ts';
 import '#components/copy-button.ts';
-import '#components/relative-time.ts';
-import '#components/ui/tooltip.ts';
 
 export async function generateMetadata({ params }: PageProps) {
   return { title: `Service ${params.id}` };

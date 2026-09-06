@@ -262,3 +262,34 @@ than putting prose in the query string.
 own every file under `components/ui/`, so a raw swatch arriving with a kit
 primitive is ours to fix. `test/ui/design-system.test.ts` fails on any that
 survive.
+
+**A `WS` handler receives Buffers, not strings.** The framework hands a `WS`
+export the raw `ws` socket, and `ws` delivers a message as a Buffer with the
+decoding left to the handler. A handler that branches on
+`typeof data === 'string'` and treats everything else as an already-parsed
+object gets an object with none of its own fields, so every message is dropped
+and the socket looks connected and dead. The exec console shipped with exactly
+that bug and its Run button did nothing in a browser while its unit tests, which
+pass strings, stayed green. Decode through `socketJson` in
+`lib/socket-text.server.ts`, and make at least one test send a real Buffer.
+
+**One vendored browser module, and it is xterm.js.** It lives in
+`components/terminal/vendor/`, is copied byte for byte with recorded checksums,
+and ships only to `/machines/[id]/terminal` through a dynamic import.
+`vendor/README.md` carries the versions and the update procedure. A terminal
+emulator is not a framework, a bundler or a UI kit, so it does not cross this
+repo's one-framework rule; anything else third-party in the browser does.
+
+**A `utils/ui/` fragment imports the components it renders.** A fragment that
+emits `<ui-tooltip>` must `import '#components/ui/tooltip.ts'` itself, because a
+page that renders the fragment and forgot the import gets an element that never
+upgrades, and an un-upgraded `<ui-tooltip-content>` is not hidden: its whole
+explanation renders inline as body text. Declaring the dependency where it is
+used is the only version of this that cannot be forgotten.
+
+**xterm's colours come from a probe element, not from a token read.**
+`getComputedStyle(root).getPropertyValue('--background')` does not resolve a
+custom property: it hands back the declaration's own text, which in this app is
+`light-dark(#ffffff, #16181d)`. Any library that takes a concrete colour needs
+the value applied to a real property on a throwaway element and read back from
+there. `machine-terminal.ts` has the pattern.

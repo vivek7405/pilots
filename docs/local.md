@@ -417,6 +417,22 @@ but gets you no further. Register an App with
 `http://localhost:3000/api/auth/callback/github` as a callback URL. See
 `apps/dashboard/README.md`.
 
+The routes worth opening once it is up:
+
+| Route | What it is |
+|---|---|
+| `/` | the overview: services grouped by app, sandboxes, quota, hosts |
+| `/services` | every service with its status and last deploy |
+| `/services/new` | how a service gets made, and why the browser cannot make one |
+| `/machines` | every machine, with resume-tier chips and a filter |
+| `/machines/<id>/terminal` | an interactive shell on that machine |
+
+**The terminal needs a golden rootfs built after the `tty` exec-stream change.**
+It runs the shell on a pseudo-terminal through `tty=true`, which the guest
+agent inside the machine has to understand. A machine created from an older
+template connects, gets no PTY, and the shell exits immediately. Rebuild with
+`scripts/build-golden-rootfs.sh` and create a new machine.
+
 ## 9. The e2e battery
 
 ```sh
