@@ -154,11 +154,37 @@ class MachineList extends WebComponent({
     }
   }
 
+  /**
+   * The rows this list is ABOUT, before any chip or filter.
+   *
+   * A sandboxes list holds only machines that belong to no service. The
+   * property is not enough on its own: `initial` is seeded with the page's own
+   * rows, but the socket's first snapshot carries every machine in the org and
+   * replaces them, so without this the overview's Sandboxes section filled
+   * with service replicas the moment it hydrated.
+   */
+  private base(): Machine[] {
+    return this.sandboxes ? this.rows.filter((m) => !m.service_id) : this.rows;
+  }
+
+  /**
+   * Which chip a machine answers to.
+   *
+   * `boot` is a resume tier but not a chip: a stopped machine is rare and
+   * reads as "other" to anyone who is not thinking about the ladder. It is
+   * mapped here rather than only in the counts, or the `other` chip would
+   * report a machine it then refuses to show.
+   */
+  private chipOf(machine: Machine): string {
+    const tier: ResumeTier = resumeTier(machine, this.hosts);
+    return tier === 'boot' ? 'other' : tier;
+  }
+
   /** The rows the chips, the filter and the host select leave visible. */
   private visible(): Machine[] {
     const needle = this.query.trim().toLowerCase();
-    return this.rows.filter((m) => {
-      if (this.chip !== 'all' && resumeTier(m, this.hosts) !== (this.chip as ResumeTier)) return false;
+    return this.base().filter((m) => {
+      if (this.chip !== 'all' && this.chipOf(m) !== this.chip) return false;
       if (this.host && m.host_id !== this.host) return false;
       if (needle) {
         const haystack = `${m.name ?? ''} ${m.id} ${m.state} ${m.host_id ?? ''} ${m.url ?? ''}`.toLowerCase();
@@ -169,11 +195,12 @@ class MachineList extends WebComponent({
   }
 
   private counts(): Record<string, number> {
-    const out: Record<string, number> = { all: this.rows.length, running: 0, warm: 0, cold: 0, other: 0, boot: 0 };
-    for (const m of this.rows) out[resumeTier(m, this.hosts)] = (out[resumeTier(m, this.hosts)] ?? 0) + 1;
-    // `boot` is a resume tier but not a chip: a stopped machine is rare and
-    // reads as "other" to anyone who is not thinking about the ladder.
-    out.other = (out.other ?? 0) + (out.boot ?? 0);
+    const base = this.base();
+    const out: Record<string, number> = { all: base.length, running: 0, warm: 0, cold: 0, other: 0 };
+    for (const m of base) {
+      const key = this.chipOf(m);
+      out[key] = (out[key] ?? 0) + 1;
+    }
     return out;
   }
 
@@ -183,7 +210,8 @@ class MachineList extends WebComponent({
   }
 
   render() {
-    if (this.rows.length === 0) {
+    const all = this.base();
+    if (all.length === 0) {
       // An empty list on a page that rendered while the fleet was unreachable
       // is not the same as an org with no machines, but neither the socket nor
       // the SSR read can tell us which, so the skeleton only shows while the
@@ -204,7 +232,7 @@ class MachineList extends WebComponent({
     const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
     const page = Math.min(this.page, pages - 1);
     const paged = rows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
-    const hosts = [...new Set(this.rows.map((m) => m.host_id).filter(Boolean))] as string[];
+    const hosts = [...new Set(all.map((m) => m.host_id).filter(Boolean))] as string[];
 
     return html`
       ${this.toolbar(counts, hosts)}
@@ -232,9 +260,9 @@ class MachineList extends WebComponent({
             >${this.online ? 'Live: this list updates as machines change.' : 'Reconnecting to the live feed.'}</ui-tooltip-content
           >
         </ui-tooltip>
-        ${rows.length === this.rows.length
-          ? html`${this.rows.length} machines`
-          : html`${rows.length} of ${this.rows.length} machines`}
+        ${rows.length === all.length
+          ? html`${all.length} machines`
+          : html`${rows.length} of ${all.length} machines`}
       </p>
     `;
   }

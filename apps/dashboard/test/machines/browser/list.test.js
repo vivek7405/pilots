@@ -259,6 +259,53 @@ suite('machine-list, chips filter and row navigation', () => {
     el.remove();
   });
 
+  test('the other chip shows the machines it counted', async () => {
+    // A stopped machine's resume tier is `boot`, which is not a chip: it reads
+    // as "other" to anyone not thinking about the ladder. Counting it there
+    // and then refusing to show it under that chip is the bug this pins.
+    const el = await mountTiers();
+    sockets[sockets.length - 1].deliver({
+      type: 'delta',
+      upsert: [on('m-stopped', 'stopped', 'h-amd-1')],
+      remove: [],
+    });
+    await el.updateComplete;
+
+    assert.equal(chip(el, 'other').textContent.trim(), 'other 1');
+    chip(el, 'other').click();
+    await el.updateComplete;
+    assert.deepEqual(rowIds(el), ['m-stopped']);
+    el.remove();
+  });
+
+  test('a sandboxes list never shows a service replica, whatever the socket sends', async () => {
+    await import('../../../modules/machines/components/machine-list.ts');
+    const el = document.createElement('machine-list');
+    el.hosts = hosts;
+    el.sandboxes = true;
+    el.initial = [on('m-sandbox', 'running', 'h-amd-1')];
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await new Promise((resolve) => queueMicrotask(resolve));
+
+    // The feed carries the ORG's machines, not the page's rows, so its first
+    // snapshot replaces the sandboxes the page seeded with every machine there
+    // is -- which filled the overview's Sandboxes section with replicas the
+    // moment it hydrated.
+    sockets[sockets.length - 1].deliver({
+      type: 'snapshot',
+      machines: [
+        on('m-sandbox', 'running', 'h-amd-1'),
+        { ...on('m-replica', 'running', 'h-amd-1'), service_id: 'svc-1' },
+      ],
+    });
+    await el.updateComplete;
+
+    assert.deepEqual(rowIds(el), ['m-sandbox']);
+    assert.excludes(el.textContent, 'm-replica');
+    el.remove();
+  });
+
   test('an empty list offers the command that fills it', async () => {
     const el = await mountTiers();
     el.initial = [];
