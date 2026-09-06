@@ -476,7 +476,10 @@ env and inline config bodies, gossiping both fleet-wide.
 `secret://name` references are resolved **client-side**, before any spec is
 built, so the value never enters the repo. `POST /v1/compose/plan` therefore
 returns a step's `secret_refs` as NAMES and never values; the CLI resolves them
-from the operator's own store and sends `secret_env`, which hostd seals. The CLI sends plaintext to hostd
+from the operator's own store and sends `secret_env`, which hostd seals. That
+store is written by `pilot secrets set` and `pilot secrets import` and listed by
+`pilot secrets ls` (names and digests only), all local file operations against
+the 0600 credentials file with no request to any host. The CLI sends plaintext to hostd
 over TLS; hostd seals it with a fleet key from `/etc/pilots/config` before the
 row is written. Non-secret values live in `services.env`, sealed ones in
 `services.env_sealed`. No plaintext in a gossiped row, none in object storage.
