@@ -1911,6 +1911,11 @@ if [ -n "$H_IP" ]; then
   [ -n "$EX_PID" ] \
     && ok "found ${EX_ID}'s firecracker at pid ${EX_PID}" \
     || bad "no firecracker carries --id ${EX_ID}"
+  # Read, not assumed. An empty or zero pid makes the handler check below pass
+  # without testing anything, and `kill -0 0` asks about our own process group.
+  [ "${EX_NBD:-0}" -gt 0 ] 2>/dev/null && [ "${EX_UFFD:-0}" -gt 0 ] 2>/dev/null \
+    && ok "${EX_ID} records its handlers (nbd ${EX_NBD}, uffd ${EX_UFFD})" \
+    || bad "could not read ${EX_ID}'s handler pids from its state.json (nbd '${EX_NBD}', uffd '${EX_UFFD}')"
 
   $SSH "root@$H_IP" "kill -9 ${EX_PID}" >/dev/null 2>&1
   sleep 5
@@ -1920,19 +1925,22 @@ if [ -n "$H_IP" ]; then
   [ -z "$EX_STAT" ] \
     && ok "pid ${EX_PID} is reaped within 5s (no <defunct>)" \
     || bad "pid ${EX_PID} is still present as '${EX_STAT}'"
-  $SSH "root@$H_IP" "kill -0 ${EX_NBD} 2>/dev/null || kill -0 ${EX_UFFD} 2>/dev/null" >/dev/null 2>&1 \
+  $SSH "root@$H_IP" "kill -0 ${EX_NBD:-0} 2>/dev/null || kill -0 ${EX_UFFD:-0} 2>/dev/null" >/dev/null 2>&1 \
     && bad "a handler of ${EX_ID} (nbd ${EX_NBD}, uffd ${EX_UFFD}) outlived its firecracker" \
     || ok "both handlers of ${EX_ID} are gone within 5s"
 
-  EX_UP=0; EX_T0=$SECONDS; EX_NOW=""
+  # EX_OK carries the verdict and EX_UP only the duration. A recovery that
+  # lands inside the same second measures zero, and reading zero as "it never
+  # came back" would fail this on the FASTEST possible run.
+  EX_OK=0; EX_UP=0; EX_T0=$SECONDS; EX_NOW=""
   while [ $((SECONDS - EX_T0)) -lt 60 ]; do
     EX_NOW=$(api "$H_IP" GET "/v1/machines/${EX_ID}")
     [ "$(echo "$EX_NOW" | jf state)" = running ] \
       && [ "$(echo "$EX_NOW" | jf last_start)" = cold_boot ] \
-      && { EX_UP=$((SECONDS - EX_T0)); break; }
+      && { EX_OK=1; EX_UP=$((SECONDS - EX_T0)); break; }
     sleep 1
   done
-  [ "$EX_UP" != 0 ] \
+  [ "$EX_OK" = 1 ] \
     && ok "${EX_ID} is running again after ${EX_UP}s with last_start=cold_boot" \
     || bad "${EX_ID} did not come back within 60s"
   [ "$(echo "$EX_NOW" | jf url)" = "$EX_URL" ] \
@@ -1964,14 +1972,21 @@ if [ -n "$H_IP" ]; then
   wait_serving "$H_IP" 120 || bad "hostd did not come back for the adoption half"
   EX_PID3=$(fc_pid_of "$H_IP" "$EX_ID")
   $SSH "root@$H_IP" "kill -9 ${EX_PID3}" >/dev/null 2>&1
-  EX_UP=0; EX_T0=$SECONDS
+  # The pid has to be read BEFORE the kill and has to be real, or the loop
+  # below compares against an empty string and passes on the machine that was
+  # never killed at all.
+  [ -n "$EX_PID3" ] \
+    && ok "found the adopted firecracker at pid ${EX_PID3}" \
+    || bad "no firecracker carries --id ${EX_ID} after the hostd restart"
+  EX_OK=0; EX_UP=0; EX_T0=$SECONDS
   while [ $((SECONDS - EX_T0)) -lt 60 ]; do
+    EX_PID4=$(fc_pid_of "$H_IP" "$EX_ID")
     [ "$(api "$H_IP" GET "/v1/machines/${EX_ID}" | jf state)" = running ] \
-      && [ "$(fc_pid_of "$H_IP" "$EX_ID")" != "$EX_PID3" ] \
-      && { EX_UP=$((SECONDS - EX_T0)); break; }
+      && [ -n "$EX_PID4" ] && [ "$EX_PID4" != "$EX_PID3" ] \
+      && { EX_OK=1; EX_UP=$((SECONDS - EX_T0)); break; }
     sleep 1
   done
-  [ "$EX_UP" != 0 ] \
+  [ "$EX_OK" = 1 ] \
     && ok "an ADOPTED firecracker's exit is seen through the pidfd and the machine is back after ${EX_UP}s" \
     || bad "the adopted machine did not come back"
 
@@ -1980,14 +1995,14 @@ if [ -n "$H_IP" ]; then
   # still says running, and reacts.
   $SSH "root@$H_IP" "systemctl stop hostd; kill -9 \$(for p in /proc/[0-9]*; do [ \"\$(cat \$p/comm 2>/dev/null)\" = firecracker ] && tr '\\0' ' ' < \$p/cmdline | grep -q -- '--id ${EX_ID} ' && basename \$p; done) 2>/dev/null; systemctl start hostd" >/dev/null 2>&1
   wait_serving "$H_IP" 120 || bad "hostd did not come back for the while-down half"
-  EX_UP=0; EX_T0=$SECONDS
+  EX_OK=0; EX_UP=0; EX_T0=$SECONDS
   while [ $((SECONDS - EX_T0)) -lt 90 ]; do
     [ "$(api "$H_IP" GET "/v1/machines/${EX_ID}" | jf state)" = running ] \
       && [ -n "$(fc_pid_of "$H_IP" "$EX_ID")" ] \
-      && { EX_UP=$((SECONDS - EX_T0)); break; }
+      && { EX_OK=1; EX_UP=$((SECONDS - EX_T0)); break; }
     sleep 1
   done
-  [ "$EX_UP" != 0 ] \
+  [ "$EX_OK" = 1 ] \
     && ok "a firecracker that died while hostd was down is handled at reconcile; back after ${EX_UP}s" \
     || bad "the machine that died while hostd was down stayed down"
 
