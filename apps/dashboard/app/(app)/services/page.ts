@@ -17,6 +17,10 @@ import { dataTable, emptyState, lede, pageHeading } from '#lib/utils/ui.ts';
 import { cn } from '#lib/utils/cn.ts';
 import type { Service } from '@pilots/sdk';
 import type { Machine as BrowserMachine } from '#modules/machines/types.ts';
+// The empty state carries a command with a copy control, so this page ships
+// the element that control is: an un-imported custom element never upgrades
+// and the button it renders does nothing when clicked.
+import '#components/copy-button.ts';
 import '#components/link-rows.ts';
 import '#components/list-filter.ts';
 import '#components/relative-time.ts';
