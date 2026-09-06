@@ -250,10 +250,19 @@ func Adopted(st State, stateRoot string, pool *nbd.DevicePool) *Machine {
 	// whose handler is still attached would be scanned as busy today and
 	// handed out the moment that handler exits, while this machine still
 	// believes it owns it.
-	if st.NBDPid > 0 && pool != nil {
+	//
+	// Only after the pid is confirmed to still BE that handler, and before
+	// AdoptedProcess, which reserves the device index as a side effect. A
+	// handler that fails the check is not attached, which is the same handle
+	// this builds for a handler that died cleanly: nil. That is the honest
+	// state either way, because a pid running something else is a pid our
+	// handler no longer holds -- and the machine's disk is already unusable if
+	// its block server is gone. Attaching it instead would point stopHandlers,
+	// which kills the pid AND its process group, at an innocent process.
+	if handlerIs(st.NBDPid, nbd.SubcommandName, st.NBDControl) && pool != nil {
 		m.NBD = nbd.AdoptedProcess(pool, st.NBDPid, st.NBDIndex, st.NBDControl)
 	}
-	if st.UffdPid > 0 {
+	if handlerIs(st.UffdPid, uffd.SubcommandName, st.UffdControl, st.UffdSocket) {
 		m.Uffd = uffd.AdoptedProcess(st.UffdPid, st.UffdSocket, st.UffdControl)
 	}
 	return m
@@ -263,20 +272,13 @@ func Adopted(st State, stateRoot string, pool *nbd.DevicePool) *Machine {
 // process that is gone: the state is what Cleanup needs (handlers, chroot,
 // state dir) and Cmd is nil, so nothing can signal a recycled pid.
 //
-// The handler pids get the same treatment, and they need it more. These
-// breadcrumbs survive a REBOOT -- that is why they are on disk rather than in
-// /var/run -- so after one they name pid numbers the kernel has since handed
-// to whatever started early on the new boot. Cleanup kills a handler's pid AND
-// its process group, so re-attaching a recycled one would SIGKILL an unrelated
-// service. A handler is only picked back up when its cmdline still shows the
-// hostd subcommand serving THIS machine's socket.
+// The handler pids are checked by Adopted, for both callers rather than this
+// one. A dead machine is where a recycled pid is most likely -- these
+// breadcrumbs survive a REBOOT, which is why they are on disk rather than in
+// /var/run -- but it is not the only place: a handler can die and have its pid
+// recycled inside a single boot, while its Firecracker is still running, and
+// the live half of reconcile adopts that machine through the same function.
 func AdoptedDead(st State, stateRoot string, pool *nbd.DevicePool) *Machine {
-	if !handlerIs(st.NBDPid, nbd.SubcommandName, st.NBDControl) {
-		st.NBDPid = 0
-	}
-	if !handlerIs(st.UffdPid, uffd.SubcommandName, st.UffdControl, st.UffdSocket) {
-		st.UffdPid = 0
-	}
 	m := Adopted(st, stateRoot, pool)
 	if m == nil {
 		return nil
@@ -287,7 +289,11 @@ func AdoptedDead(st State, stateRoot string, pool *nbd.DevicePool) *Machine {
 
 // handlerIs reports whether pid is still the hostd handler the breadcrumbs
 // recorded: the right subcommand, carrying a path only that machine's handler
-// carries. The pid alone proves nothing across a reboot.
+// carries. The pid alone proves nothing -- across a reboot, and equally after
+// a handler died and the kernel handed its number to something else.
+//
+// Persist writes the control socket whenever it writes the pid, so a
+// breadcrumb that names a handler always carries the path this matches on.
 func handlerIs(pid int, subcommand string, paths ...string) bool {
 	if pid <= 0 {
 		return false
