@@ -384,7 +384,15 @@ dashboard on 3000, its GitHub App callback is
 # CLI. --api-url beats PILOT_API_URL, which beats the config file.
 pilot login --token "$KEY" --api-url http://api.pilots.localhost:8080
 pilot machines ls
+pilot console <machine>          # an interactive shell, on a terminal
 ```
+
+`pilot console` is the dashboard terminal's command-line half and carries the
+same requirement: **the machine needs a golden rootfs built after the `tty`
+exec-stream change**, since the PTY is set up by the guest agent inside it. A
+machine created from an older template connects and the shell exits at once.
+It also needs a terminal on stdin and stdout, so it refuses under `--json` and
+from a script; `pilot machines exec` is the path there.
 
 `PILOT_GITHUB_URL`, `PILOT_DASHBOARD_URL` and `PILOT_GITHUB_CLIENT_ID` are only
 for the device-flow login and are not needed with `--token`.

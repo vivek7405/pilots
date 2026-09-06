@@ -91,7 +91,7 @@ Diagnostics, prompts and errors always go to stderr.
 |---|---|
 | `0` | success |
 | `1` | any failure |
-| the remote code | `pilot machines exec`, which exits with the command's own status |
+| the remote code | `pilot machines exec` and `pilot console`, which exit with the command's own status |
 | `130` | interrupted |
 
 An error from the fleet is rendered twice over. Under `--json` the server's body
@@ -140,11 +140,27 @@ pilot machines checkpoints <machine>
 pilot machines restore <checkpoint-id>
 pilot machines suspend|wake|start|stop|destroy <machine>
 pilot machines volume <machine>
+pilot console <machine> [--cwd --env K=V --user] [-- <argv...>]
 ```
 
 `exec` streams the command's output frame by frame, stdout to stdout and stderr
 to stderr, and exits with the remote status. **stdin is off unless you pass
 `--stdin`**: a guest process holding an open stdin it never reads hangs.
+
+`console` is that same stream with a terminal on both ends, which is what an
+interactive shell, `tmux` and `vim` need. It runs `/bin/sh -l` unless something
+follows `--`, puts the local terminal into raw mode so every keystroke reaches
+the remote shell as a byte, forwards a window change as a resize, and exits
+with the shell's own status.
+
+A session is bound to its socket. Leaving the shell ends the stream, and
+closing the stream ends the shell: there is nothing to detach from and
+reattach to.
+
+It needs a terminal on stdin and stdout, and refuses without one rather than
+connecting to a session nobody can type into. It has no `--json` form either,
+since a shell session is terminal bytes with no document at the end of it. Both
+refusals name `pilot machines exec`, which is what works from a script.
 
 `restore` is in place. The machine keeps its id, its URL and its agent token, so
 every link to it still works.
@@ -317,6 +333,10 @@ The global `-y/--yes` answers every confirmation. `machines destroy` and
 `domains rm` ask before acting, but only when there is somebody to answer:
 never under `-y`, never under `--json`, and never when stdin or stderr is not a
 terminal. A script and an agent are therefore never blocked on a question.
+
+`pilot console` is the one command with no non-interactive form. Off a terminal
+and under `--json` it exits `1` naming `pilot machines exec`, rather than
+opening a session with nothing on the other end of it.
 
 `services set --env` merges onto what the service already carries, because the
 underlying `PATCH` replaces the whole map. `--secret-env` replaces the sealed
