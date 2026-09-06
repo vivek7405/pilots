@@ -159,16 +159,20 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	// is reported as failed: the image is orphaned in object storage exactly
 	// as a failed upload's is, rather than handed out ownerless.
 	var ownerErr error
+	ownerDone := false
 	write := func(line BuildLogLine) {
 		if line.Result != "" {
 			// The rootfs build id is first seen here, on the builder's own
 			// "build complete" line, and again on the terminal line below.
-			// Written before either is encoded. Write-once, so the second
-			// call is a no-op.
-			if ownerErr == nil {
+			// Written before either is encoded, and ONCE: the store is
+			// write-once, but the call is a round trip that can fail on its
+			// own, and a second one failing where the first succeeded would
+			// report a finished, owned image as a failed build.
+			if !ownerDone {
 				ownerErr = d.Store.PutTenancy(bctx, &state.Tenancy{
 					ID: line.Result, OrgID: org, Kind: "build", CreatedAt: time.Now().Unix(),
 				})
+				ownerDone = ownerErr == nil
 			}
 			if ownerErr != nil {
 				line = BuildLogLine{
