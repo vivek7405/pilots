@@ -57,7 +57,7 @@ const OWNS: Record<string, string[]> = {
   '/': ['/apps', '/services'],
 };
 
-export class AppNav extends WebComponent({ current: prop(String) }) {
+export class AppNav extends WebComponent({ current: prop(String), orientation: prop(String) }) {
   #onNav = () => activePath.set(location.pathname);
 
   connectedCallback() {
@@ -75,8 +75,14 @@ export class AppNav extends WebComponent({ current: prop(String) }) {
 
   render() {
     const active = activePath.get() || this.current || '/';
+    const vertical = this.orientation === 'vertical';
     return html`
-      <nav class="flex items-center gap-0.5 overflow-x-auto sm:gap-1" aria-label="Primary">
+      <nav
+        class=${cn(
+          vertical ? 'flex flex-col gap-1' : 'flex items-center gap-0.5 overflow-x-auto sm:gap-1',
+        )}
+        aria-label="Primary"
+      >
         ${LINKS.map((link) => {
           // A section owns its subroutes, so /apps/<app> keeps Apps lit. '/'
           // is exact, or it would match every path, and it owns the paths in
@@ -88,7 +94,10 @@ export class AppNav extends WebComponent({ current: prop(String) }) {
             href=${link.href}
             aria-current=${on ? 'page' : 'false'}
             class=${cn(
-              'rounded-md px-2 py-1.5 text-body no-underline transition-colors sm:px-3',
+              'no-underline transition-colors',
+              vertical
+                ? 'flex items-center rounded-md px-3 py-2 text-body'
+                : 'rounded-md px-2 py-1.5 text-body sm:px-3',
               on
                 ? 'bg-accent font-medium text-foreground'
                 : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground',

@@ -199,16 +199,90 @@ export default async function RootLayout({ children, url }: LayoutProps) {
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
       }
+      /* The shell is a fixed left rail on md+ with the content offset by its
+         width, and a plain top bar below md where the rail collapses. The rail
+         width is a token so the offset and the fixed top bar agree on one
+         number. */
+      :root { --sidebar-w: 15rem; }
+      @media (min-width: 768px) {
+        body { padding-left: var(--sidebar-w); }
+      }
     </style>
 
     ${me
       ? html`
+          <aside
+            class="fixed inset-y-0 left-0 z-40 hidden w-[var(--sidebar-w)] flex-col border-r border-border bg-card/60 md:flex"
+          >
+            <div class="flex h-[var(--header-h)] items-center px-4">
+              <a href="/" class="font-semibold tracking-tight no-underline text-foreground">pilots</a>
+            </div>
+
+            <div class="flex-1 overflow-y-auto px-3 py-2">
+              <app-nav current=${path} orientation="vertical"></app-nav>
+
+              <div class="my-3 border-t border-border"></div>
+
+              <nav aria-label="Account" class="flex flex-col gap-1">
+                <a href="/usage" class="rounded-md px-3 py-2 text-body no-underline text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground">Usage</a>
+                <a href="/keys" class="rounded-md px-3 py-2 text-body no-underline text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground">Tokens</a>
+                <a href="/org" class="rounded-md px-3 py-2 text-body no-underline text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground">Team</a>
+              </nav>
+            </div>
+
+            <div class="border-t border-border p-3">
+              <org-switcher>
+                <ui-dropdown-menu>
+                  <ui-dropdown-menu-trigger>
+                    <button
+                      type="button"
+                      class=${cn(buttonClass({ variant: 'ghost', size: 'sm' }), 'w-full justify-start gap-2')}
+                      aria-label=${`Account: ${me.login}`}
+                    >
+                      <span class=${avatarClass({ size: 'sm' })} data-slot="avatar" data-size="sm">
+                        ${me.avatarUrl
+                          ? html`<img class=${avatarImageClass()} src=${me.avatarUrl} alt="">`
+                          : html`<span class=${avatarFallbackClass()}>${initials(me.login)}</span>`}
+                      </span>
+                      <span class="min-w-0 flex-1 truncate text-left">${me.login}</span>
+                    </button>
+                  </ui-dropdown-menu-trigger>
+                  <ui-dropdown-menu-content align="end">
+                    <ui-dropdown-menu-label>Signed in as ${me.login}</ui-dropdown-menu-label>
+                    <ui-dropdown-menu-separator></ui-dropdown-menu-separator>
+                    ${orgs.length > 1
+                      ? html`
+                          <ui-dropdown-menu-group aria-label="Team">
+                            ${orgs.map(
+                              (o) => html`<ui-dropdown-menu-item type="radio" value=${o.id} ?checked=${o.id === me.org.id}
+                                >${o.slug}</ui-dropdown-menu-item
+                              >`,
+                            )}
+                          </ui-dropdown-menu-group>
+                          <ui-dropdown-menu-separator></ui-dropdown-menu-separator>
+                        `
+                      : ''}
+                    <ui-dropdown-menu-item variant="destructive">
+                      <button type="submit" form="signout" class="w-full text-left bg-transparent border-0 p-0 font-inherit text-inherit cursor-pointer">Sign out</button>
+                    </ui-dropdown-menu-item>
+                  </ui-dropdown-menu-content>
+                </ui-dropdown-menu>
+
+                <form action=${switchOrg} data-org-switch class="hidden">
+                  <input type="hidden" name="org" value=${me.org.id}>
+                  <input type="hidden" name="back" value=${path}>
+                </form>
+              </org-switcher>
+            </div>
+          </aside>
+
           <header
-            class="fixed inset-x-0 top-0 z-40 border-b border-border bg-card/85 backdrop-blur"
+            class="fixed inset-x-0 top-0 z-30 border-b border-border bg-card/85 backdrop-blur md:left-[var(--sidebar-w)]"
             style="border-right: var(--wj-scrollbar-compensation, 0px) solid transparent"
           >
-            <div class="max-w-6xl mx-auto px-6 py-3 flex flex-wrap items-center gap-x-6 gap-y-3">
-              <nav aria-label="Breadcrumb" class="shrink-0 min-w-0">
+            <div class="flex h-[var(--header-h)] items-center gap-4 px-4 sm:px-6">
+              <a href="/" class="font-semibold tracking-tight no-underline text-foreground md:hidden">pilots</a>
+              <nav aria-label="Breadcrumb" class="min-w-0">
                 <ol class="flex items-center gap-1.5 list-none m-0 p-0 text-meta">
                   ${crumbs.map(
                     (crumb, i) => html`
@@ -234,13 +308,13 @@ export default async function RootLayout({ children, url }: LayoutProps) {
                 </ol>
               </nav>
 
-              <app-nav current=${path} class="min-w-0 flex-1"></app-nav>
+              <app-nav current=${path} class="ml-2 min-w-0 md:hidden"></app-nav>
 
               <div class="ml-auto flex items-center gap-2 text-meta">
                 <command-palette></command-palette>
                 <theme-toggle></theme-toggle>
 
-                <org-switcher>
+                <org-switcher class="md:hidden">
                   <ui-dropdown-menu>
                     <ui-dropdown-menu-trigger>
                       <button
