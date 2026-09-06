@@ -18,6 +18,9 @@
 // node:http, not fetch, for the handful of assertions that address a machine
 // by its hostname without DNS: fetch refuses to let a caller set Host.
 import http from 'node:http';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 if (process.env.PILOTS_E2E !== '1') {
   console.log('e2e: skipped (set PILOTS_E2E=1 to run)');
@@ -1030,6 +1033,19 @@ async function readNDJSON(res) {
 // tarball builds a POSIX ustar archive in memory. Hand-rolled rather than
 // shelled out to tar(1), so the battery stays a pure API client with no
 // dependency on what the machine running it happens to have installed.
+// readTree reads a directory into the { path: text } map tarball() takes, so a
+// fixture on disk can be posted to a route that wants an archive. Recursive,
+// text only: every fixture here is source.
+function readTree(dir, prefix = '') {
+  const out = {};
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) Object.assign(out, readTree(join(dir, entry.name), rel));
+    else out[rel] = readFileSync(join(dir, entry.name), 'utf8');
+  }
+  return out;
+}
+
 function tarball(files) {
   const blocks = [];
   for (const [name, content] of Object.entries(files)) {
@@ -2670,6 +2686,92 @@ async function dataRouteAssertions() {
       const compose = 'name: s\nservices:\n  web:\n    image: nginx\n# ' + 'x'.repeat(2 * 1024 * 1024);
       const { status } = await request('/v1/compose/plan', { method: 'POST', body: { compose } });
       assert(status === 400, `expected 400, got ${status}`);
+    });
+
+    // --- POST /v1/plan ------------------------------------------------------
+    //
+    // The front door, and it needs no Firecracker: a tar in, a plan out. The
+    // ladder below is the whole design of the route, and each rung is proved
+    // by removing the winner and asserting the next one takes over.
+
+    await step('the plan route recognises a webjs app with no Dockerfile', async () => {
+      const res = await postTar('/v1/plan?app=fx', tarball(readTree(WEBJS_FIXTURE)));
+      const json = await res.json();
+      assert(res.status === 200, `expected 200, got ${res.status}: ${JSON.stringify(json)}`);
+      assert(json.plan.app === 'fx', `app = ${json.plan.app}`);
+      assert(json.plan.steps.length === 1, `${json.plan.steps.length} steps`);
+      assert(json.detected[0].source === 'recipe', `source = ${json.detected[0].source}`);
+      assert(json.detected[0].framework === 'webjs', `framework = ${json.detected[0].framework}`);
+      // The platform's port, not the framework's. A recipe that declared 3000
+      // would build cleanly and answer 502, because the router dials 8080.
+      assert(json.plan.steps[0].dockerfile.includes('ENV PORT=8080'),
+        'the generated Dockerfile does not declare the port the router dials');
+      assert(json.detected[0].health?.path === '/__webjs/ready',
+        `health = ${JSON.stringify(json.detected[0].health)}`);
+    });
+
+    await step('a Dockerfile beats a recipe, and a compose file beats both', async () => {
+      const files = readTree(WEBJS_FIXTURE);
+
+      const withDockerfile = await postTar('/v1/plan?app=fx',
+        tarball({ ...files, Dockerfile: 'FROM scratch\n' }));
+      const dockerfileJSON = await withDockerfile.json();
+      assert(withDockerfile.status === 200, `expected 200, got ${withDockerfile.status}`);
+      assert(dockerfileJSON.detected[0].source === 'dockerfile',
+        `source = ${dockerfileJSON.detected[0].source}`);
+      // The repo's own file is what gets built, so the step carries no
+      // generated text at all.
+      assert(!dockerfileJSON.plan.steps[0].dockerfile,
+        'a generated Dockerfile was carried over the repository\'s own');
+
+      const withCompose = await postTar('/v1/plan?app=fx', tarball({
+        ...files,
+        Dockerfile: 'FROM scratch\n',
+        'compose.yaml': 'name: fx\nservices:\n  api:\n    build: .\n',
+      }));
+      const composeJSON = await withCompose.json();
+      assert(withCompose.status === 200, `expected 200, got ${withCompose.status}`);
+      assert(composeJSON.detected[0].source === 'compose',
+        `source = ${composeJSON.detected[0].source}`);
+      assert(composeJSON.plan.steps[0].name === 'api',
+        `the compose file's own service is not the step: ${composeJSON.plan.steps[0].name}`);
+    });
+
+    await step('a workspace repo plans one service per member, built from the root', async () => {
+      const res = await postTar('/v1/plan?app=shop', tarball(readTree(WORKSPACE_FIXTURE)));
+      const json = await res.json();
+      assert(res.status === 200, `expected 200, got ${res.status}: ${JSON.stringify(json)}`);
+      const names = json.plan.steps.map((s) => s.name).sort().join(',');
+      assert(names === 'admin,web', `steps = ${names}`);
+      for (const step_ of json.plan.steps) {
+        assert(step_.build?.context === '.',
+          `${step_.name} builds from ${JSON.stringify(step_.build)}, not the repository root`);
+        assert(step_.dockerfile.includes(`WORKDIR /app/${step_.name}`),
+          `${step_.name} does not move into its own directory`);
+      }
+    });
+
+    await step('a directory nothing recognises is refused with everything needed to fix it', async () => {
+      const res = await postTar('/v1/plan', tarball({ 'README.md': '# nothing here\n' }));
+      const json = await res.json();
+      assert(res.status === 400, `expected 400, got ${res.status}: ${JSON.stringify(json)}`);
+      assert(json.code === 'unknown_framework', `code = ${json.code}`);
+      assert(json.next && json.next.length > 0, 'the refusal says nothing about what to do');
+      assert(json.details?.looked_for?.length === 10,
+        `looked_for = ${JSON.stringify(json.details?.looked_for)}`);
+      // The two rules travel on every refusal, because the model that has to
+      // obey them may have loaded no documentation at all.
+      assert(json.details?.rules?.length === 2,
+        `rules = ${JSON.stringify(json.details?.rules)}`);
+      assert(json.details.rules.join(' ').includes('0.0.0.0'),
+        'the bind rule is not in the answer');
+    });
+
+    await step('a tar that escapes its own root is refused', async () => {
+      const res = await postTar('/v1/plan', tarball({ '../escape': 'owned\n' }));
+      const json = await res.json();
+      assert(res.status === 400, `expected 400, got ${res.status}: ${JSON.stringify(json)}`);
+      assert(json.code === 'bad_request', `code = ${json.code}`);
     });
 
     // --- PATCH /v1/services/{id} and its releases ---------------------------
@@ -4387,6 +4489,9 @@ async function tenancyAssertions() {
 
 const CLI_BIN = new URL('../packages/cli/bin/pilot.js', import.meta.url).pathname;
 const DJANGO_FIXTURE = new URL('../packages/cli/test/fixtures/django-app', import.meta.url).pathname;
+const WEBJS_FIXTURE = new URL('../packages/cli/test/fixtures/webjs-app', import.meta.url).pathname;
+const WORKSPACE_FIXTURE = new URL('../packages/cli/test/fixtures/workspace-app', import.meta.url).pathname;
+const EXAMPLE_TWO_SERVICE = new URL('../packages/cli/examples/two-services-volume-secret', import.meta.url).pathname;
 
 const MCP_TOOLS = [
   'build', 'build_logs', 'checkpoint', 'create_machine', 'deploy',
@@ -4401,9 +4506,12 @@ function toolText(result) {
   return (result.content ?? []).map((c) => c.text ?? '').join('');
 }
 
-async function agentDeployAssertions() {
+async function agentDeployAssertions(REFLINK) {
   const tag = Math.random().toString(36).slice(2, 8);
   const app = `gate-django-${tag}`;
+  const webjsApp = `gate-webjs-${tag}`;
+  const workspaceApp = `gate-ws-${tag}`;
+  const brokenApp = `gate-broken-${tag}`;
   const created = [];
   const serviceIDs = [];
   let client;
@@ -4418,8 +4526,14 @@ async function agentDeployAssertions() {
     let dockerfile;
     let build;
     let service;
+    let probeID;
+    let webjsService;
+    let oneCallMS = 0;
+    let brokenReplica;
+    let unknownDir;
+    let brokenDir;
 
-    await step('`pilot mcp` starts and offers exactly the thirteen tools', async () => {
+    await step('`pilot mcp` starts and offers exactly the tools the README lists', async () => {
       const transport = new StdioClientTransport({
         command: process.execPath,
         args: [CLI_BIN, 'mcp'],
@@ -4430,13 +4544,19 @@ async function agentDeployAssertions() {
       await client.connect(transport);
       const { tools } = await client.listTools();
       const names = tools.map((t) => t.name).sort();
-      assert(names.length === 13, `expected 13 tools, got ${names.length}: ${names.join(', ')}`);
+      assert(names.length === MCP_TOOLS.length,
+        `expected ${MCP_TOOLS.length} tools, got ${names.length}: ${names.join(', ')}`);
       assert(JSON.stringify(names) === JSON.stringify(MCP_TOOLS),
         `the tool set drifted: ${names.join(', ')}`);
+      // Every description has to say enough for a small model to choose it.
+      for (const tool of tools) {
+        assert(tool.description && tool.description.length > 40,
+          `${tool.name} has no useful description`);
+      }
     });
-    if (!client) return;
 
     await step('generate_dockerfile turns a bare Django app into a recipe', async () => {
+      assert(client, 'the MCP server did not start, so nothing below can run');
       const result = await client.callTool({ name: 'generate_dockerfile', arguments: { dir: DJANGO_FIXTURE } });
       assert(!result.isError, `generate_dockerfile failed: ${toolText(result)}`);
       const recipe = JSON.parse(toolText(result));
@@ -4449,9 +4569,9 @@ async function agentDeployAssertions() {
         'the recipe does not read the port from $PORT');
       dockerfile = recipe.dockerfile;
     });
-    if (!dockerfile) return;
 
     await step('an injected build failure comes back as readable NDJSON', async () => {
+      assert(dockerfile, 'there is no recipe to inject a failure into');
       // The failure an agent has to recover from, injected rather than waited
       // for: a base image that does not exist.
       const broken = dockerfile.replace('FROM python:3.12-slim', 'FROM python:3.12-slim-does-not-exist');
@@ -4480,6 +4600,7 @@ async function agentDeployAssertions() {
     });
 
     await step('the corrected Dockerfile builds a rootfs', async () => {
+      assert(dockerfile, 'there is no recipe to build');
       const result = await client.callTool({
         name: 'build',
         arguments: { dir: DJANGO_FIXTURE, dockerfile },
@@ -4489,9 +4610,9 @@ async function agentDeployAssertions() {
       assert(parsed.rootfs_build_id, `no rootfs build id: ${toolText(result)}`);
       build = parsed.rootfs_build_id;
     });
-    if (!build) return;
 
     await step('deploy puts the app behind a URL', async () => {
+      assert(build, 'there is no rootfs to deploy');
       const result = await client.callTool({
         name: 'deploy',
         arguments: {
@@ -4509,9 +4630,9 @@ async function agentDeployAssertions() {
       assertOpenableURL(service.url, 'service');
       assert(service.release_id, 'the deploy returned no release');
     });
-    if (!service) return;
 
     await step('a Django replica answers 200 on / from inside the fleet', async () => {
+      assert(service, 'there is no service to reach');
       // Reached by `<service>.internal` from a peer, the way every other
       // service assertion here reaches one: public DNS for the wildcard is not
       // resolvable from a battery running against one box.
@@ -4534,6 +4655,152 @@ async function agentDeployAssertions() {
         last = await reach(probe.id, target, 8);
         return last.code === '200';
       }, { timeoutMs: 90_000, what: `${target} to answer 200 (last: ${last.code})` });
+      probeID = probe.id;
+    });
+
+    // --- The one call ------------------------------------------------------
+    //
+    // Everything above is the loop an agent falls into when the platform
+    // cannot place a repository. This is the loop when it can: one tool call,
+    // no Dockerfile, no compose file, a URL at the end.
+
+    await step('deploy takes a webjs directory to a URL in ONE call', async () => {
+      assert(client, 'the MCP server did not start');
+      const started = Date.now();
+      const result = await client.callTool({
+        name: 'deploy',
+        arguments: { dir: WEBJS_FIXTURE, app: webjsApp },
+      });
+      assert(!result.isError, `the one-call deploy failed: ${toolText(result).slice(-800)}`);
+      const body = JSON.parse(toolText(result));
+      assert(body.services?.length === 1, `services = ${JSON.stringify(body.services)}`);
+      assertOpenableURL(body.services[0].url, 'the one-call service');
+      // The loop is over, and the result has to say so rather than sending
+      // the agent looking for another call to make.
+      assert(body.next === '' || /done/i.test(body.next), `next = ${JSON.stringify(body.next)}`);
+      webjsService = body.services[0];
+      oneCallMS = Date.now() - started;
+      serviceIDs.push(webjsService.id ?? webjsService.service_id);
+    });
+
+    await step('the webjs app answers 200 on /__webjs/ready inside the fleet', async () => {
+      assert(webjsService, 'the one-call deploy produced no service');
+      assert(probeID, 'there is no probe to reach it from');
+      const target = `http://${webjsService.name}.internal:8080/__webjs/ready`;
+      let last = { code: '000' };
+      await waitFor(async () => {
+        last = await reach(probeID, target, 8);
+        return last.code === '200';
+      }, { timeoutMs: 120_000, what: `${target} to answer 200 (last: ${last.code})` });
+      // Bar 4 of AGENTS.md, as a number rather than a claim. npm's network
+      // time is inside this, which is why the budget is generous relative to
+      // a restore: what is being held is the whole one-call path.
+      enforce(REFLINK, oneCallMS, 300_000, 420_000, 180_000, 'webjs one-call deploy');
+    });
+
+    await step('a monorepo deploys as one service per workspace', async () => {
+      assert(client, 'the MCP server did not start');
+      const planned = await client.callTool({
+        name: 'plan',
+        arguments: { dir: WORKSPACE_FIXTURE, app: workspaceApp },
+      });
+      assert(!planned.isError, `plan failed: ${toolText(planned)}`);
+      const plan = JSON.parse(toolText(planned)).plan;
+      assert(plan.steps.length === 2, `${plan.steps.length} steps, want 2`);
+
+      const deployed = await client.callTool({
+        name: 'deploy',
+        arguments: { dir: WORKSPACE_FIXTURE, app: workspaceApp },
+      });
+      assert(!deployed.isError, `the monorepo deploy failed: ${toolText(deployed).slice(-800)}`);
+      const body = JSON.parse(toolText(deployed));
+      assert(body.services.length === 2, `services = ${JSON.stringify(body.services)}`);
+      for (const svc of body.services) {
+        assertOpenableURL(svc.url, `${svc.name} in the monorepo`);
+        serviceIDs.push(svc.id ?? svc.service_id);
+      }
+    });
+
+    await step('a directory nothing recognises is a refusal an agent can act on', async () => {
+      assert(client, 'the MCP server did not start');
+      const dir = mkdtempSync(join(tmpdir(), 'e2e-unknown-'));
+      unknownDir = dir;
+      writeFileSync(join(dir, 'README.md'), '# nothing deployable here\n');
+
+      const result = await client.callTool({ name: 'deploy', arguments: { dir } });
+      assert(result.isError, `an empty directory deployed: ${toolText(result)}`);
+      const body = JSON.parse(toolText(result));
+      assert(body.code === 'unknown_framework', `code = ${body.code}`);
+      assert(body.details?.rules?.length === 2,
+        `rules = ${JSON.stringify(body.details?.rules)}`);
+      assert(body.details?.listing?.includes('README.md'),
+        `listing = ${JSON.stringify(body.details?.listing)}`);
+    });
+
+    await step('a health-gate failure is a 422 with a replica and no host address', async () => {
+      assert(client, 'the MCP server did not start');
+      const dir = mkdtempSync(join(tmpdir(), 'e2e-nolisten-'));
+      brokenDir = dir;
+      // Builds cleanly, starts cleanly, and never listens on anything. This
+      // is the failure the 422 exists for, and the one a 500 used to hide.
+      writeFileSync(join(dir, 'Dockerfile'),
+        'FROM alpine:3.20\nENV PORT=8080\nEXPOSE 8080\nCMD ["sh","-c","sleep 3600"]\n');
+
+      const result = await client.callTool({
+        name: 'deploy',
+        arguments: {
+          dir,
+          app: brokenApp,
+          health: { type: 'http', path: '/', grace: 20 },
+        },
+      });
+      assert(result.isError, `an app that never listens deployed: ${toolText(result).slice(0, 400)}`);
+      const raw = toolText(result);
+      const body = JSON.parse(raw.split('\n').filter((l) => l.trim()).pop());
+      assert(body.code === 'health_gate_failed', `code = ${body.code}: ${raw.slice(0, 400)}`);
+      assert(body.details?.replica, `details = ${JSON.stringify(body.details)}`);
+      assert(/connection refused|no answer/i.test(body.details.last?.error ?? ''),
+        `last = ${JSON.stringify(body.details.last)}`);
+      // The two things a body must never carry.
+      assert(!/\b10\.\d+\.\d+\.\d+\b/.test(raw), `a host-internal address leaked: ${raw.slice(0, 400)}`);
+      assert(!raw.includes('state:'), `the store's sentinel text leaked: ${raw.slice(0, 400)}`);
+      brokenReplica = body.details.replica;
+    });
+
+    await step('diagnose reads the failed replica back', async () => {
+      assert(client, 'the MCP server did not start');
+      assert(brokenReplica, 'there is no failed replica to diagnose');
+      const result = await client.callTool({
+        name: 'diagnose',
+        arguments: { replica: brokenReplica },
+      });
+      assert(!result.isError, `diagnose failed: ${toolText(result)}`);
+      const body = JSON.parse(toolText(result));
+      assert(body.replica === brokenReplica, `replica = ${body.replica}`);
+      assert(typeof body.tail === 'string', 'diagnose returned no console');
+      assert(body.checks?.length >= 3, 'diagnose suggested nothing to check');
+      assert(body.next && body.next.length > 0, 'diagnose said nothing about what to do');
+    });
+
+    await step('init is short, and docs answers with a reference', async () => {
+      assert(client, 'the MCP server did not start');
+      const primed = await client.callTool({ name: 'init', arguments: {} });
+      assert(!primed.isError, `init failed: ${toolText(primed)}`);
+      const { primer, topics } = JSON.parse(toolText(primed));
+      const lines = primer.trimEnd().split('\n');
+      assert(lines.length < 60, `the primer is ${lines.length} lines`);
+      assert(lines.slice(0, 10).join('\n').includes('deploy'),
+        'the one call is not in the first ten lines of the primer');
+      assert(topics.length === 9, `topics = ${JSON.stringify(topics)}`);
+
+      const doc = await client.callTool({ name: 'docs', arguments: { topic: 'deploy' } });
+      assert(!doc.isError, `docs failed: ${toolText(doc)}`);
+      assert(JSON.parse(toolText(doc)).text.includes('unknown_framework'),
+        'the deploy reference does not cover the refusal');
+
+      const { resources } = await client.listResources();
+      assert(resources.length === 10,
+        `${resources.length} pilots-docs:// resources, want 10`);
     });
   } finally {
     if (client) {
@@ -4545,6 +4812,9 @@ async function agentDeployAssertions() {
     }
     for (const id of doomed) {
       try { await request(`/v1/machines/${id}`, { method: 'DELETE' }); } catch { /* best effort */ }
+    }
+    for (const dir of [unknownDir, brokenDir]) {
+      if (dir) { try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ } }
     }
   }
 }
@@ -4558,6 +4828,9 @@ async function main() {
   // the usage answer need no Firecracker, and the half that does says so.
   await dataRouteAssertions();
   if (FULL) {
+    // The engine target or the degraded ceiling: enforce() needs to know
+    // which, and the agent gate holds the one-call path to a budget.
+    const reflink = await hostSharesExtents();
     await lifecycleAssertions();
     await timingAssertions();
     await volumeAssertions();
@@ -4569,7 +4842,7 @@ async function main() {
     await scopedDeployAssertions();
     await volumeServiceAssertions();
     await multiServiceAssertions();
-    await agentDeployAssertions();
+    await agentDeployAssertions(reflink);
     await execStreamAssertions();
     await hostilityAssertions();
   } else {

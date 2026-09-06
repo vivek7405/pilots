@@ -12,7 +12,9 @@ Monorepo:
 |---|---|
 | `apps/hostd/` | Go, the entire per-host data plane (FC lifecycle, router, TLS, wake, snapshots, self-heal) |
 | `apps/dashboard/` | webjs: accounts, API keys, UI (deployed on pilots itself) |
-| `packages/cli/` | `pilot` CLI |
+| `apps/website/` | webjs: the marketing site |
+| `packages/cli/` | `pilot` CLI and the MCP server |
+| `packages/cli/skill/` | the agent skill: `SKILL.md` plus nine reference pages, shipped in the npm package and served as `pilots-docs://` resources |
 | `sdks/js/`, `sdks/go/` | `@pilots/sdk` (npm) and `github.com/vivek7405/pilots/sdks/go` |
 | `scripts/` | one-shot bash: host bootstrap, golden rootfs, e2e battery |
 
