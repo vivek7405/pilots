@@ -32,18 +32,29 @@ after(() => {
 
 const TOOLS = [
   'build',
+  'build_logs',
   'checkpoint',
   'create_machine',
   'deploy',
   'destroy_machine',
+  'diagnose',
+  'docs',
+  'domains',
   'exec',
   'exec_stream',
   'generate_dockerfile',
+  'init',
   'list_machines',
+  'list_services',
   'logs',
+  'plan',
   'promote',
+  'releases',
   'restore',
+  'rollback',
+  'service',
   'status',
+  'volumes',
 ]
 
 function serverEnv(apiUrl: string): NodeJS.ProcessEnv {
@@ -76,13 +87,13 @@ function textOf(result: unknown): string {
   return content.map((c) => c.text).join('')
 }
 
-test('the server registers exactly the thirteen tools', async () => {
+test('the server registers exactly the tools the README lists', async () => {
   const api = await startFakeAPI()
   const { client, close } = await connect(serverEnv(api.url))
   try {
     const { tools } = await client.listTools()
     assert.deepEqual(tools.map((t) => t.name).sort(), TOOLS)
-    assert.equal(tools.length, 13)
+    assert.equal(tools.length, TOOLS.length)
     for (const tool of tools) {
       assert.ok(tool.description && tool.description.length > 20, `${tool.name} has no useful description`)
     }
@@ -435,6 +446,99 @@ test('status without a machine reports hosts and a count by state', async () => 
     }
     assert.equal(parsed.hosts.length, 1)
     assert.deepEqual(parsed.machines_by_state, { running: 1, suspended: 1 })
+  } finally {
+    await close()
+    await api.close()
+  }
+})
+
+// The tool list lives in five places: the registrations, this file, the e2e
+// battery, the README and ARCHITECTURE.md. This holds two of them together,
+// which is the pair that actually rots: a tool added without a README line is
+// a tool nobody driving the server by hand knows exists.
+test('the README lists exactly the tools the server registers', () => {
+  const readme = readFileSync(join(import.meta.dirname, '..', 'README.md'), 'utf8')
+  const section = readme.slice(readme.indexOf('## `pilot mcp`'))
+  const listed = section.slice(0, section.indexOf('\n\n', section.indexOf('tools:')))
+  const names = [...listed.matchAll(/`([a-z_]+)`/g)].map((m) => m[1]!).sort()
+  assert.deepEqual([...new Set(names)], TOOLS)
+})
+
+test('init is under sixty lines and names deploy in its first ten', async () => {
+  const api = await startFakeAPI()
+  const { client, close } = await connect(serverEnv(api.url))
+  try {
+    const result = await client.callTool({ name: 'init', arguments: {} })
+    const { primer, topics } = JSON.parse(textOf(result)) as { primer: string; topics: string[] }
+    const lines = primer.trimEnd().split('\n')
+    // A budget, not an aspiration: this is the first thing a small model
+    // reads and it competes with the task for the same context.
+    assert.ok(lines.length < 60, `the primer is ${lines.length} lines`)
+    assert.ok(lines.slice(0, 10).join('\n').includes('deploy'), 'the one call is not in the first ten lines')
+    assert.ok(topics.includes('deploy') && topics.includes('errors'))
+  } finally {
+    await close()
+    await api.close()
+  }
+})
+
+test('docs returns one reference, searches them, and lists the topics', async () => {
+  const api = await startFakeAPI()
+  const { client, close } = await connect(serverEnv(api.url))
+  try {
+    const one = await client.callTool({ name: 'docs', arguments: { topic: 'deploy' } })
+    const { text } = JSON.parse(textOf(one)) as { text: string }
+    assert.match(text, /# Deploy/)
+    assert.match(text, /unknown_framework/)
+
+    const listed = await client.callTool({ name: 'docs', arguments: {} })
+    assert.equal((JSON.parse(textOf(listed)) as { topics: string[] }).topics.length, 9)
+
+    const found = await client.callTool({ name: 'docs', arguments: { query: 'health_gate_failed' } })
+    const { matches } = JSON.parse(textOf(found)) as { matches: { topic: string }[] }
+    assert.ok(matches.length > 0, 'searching for a code found no page')
+
+    const missing = await client.callTool({ name: 'docs', arguments: { topic: 'nope' } })
+    assert.equal(missing.isError, true)
+  } finally {
+    await close()
+    await api.close()
+  }
+})
+
+test('the skill is served as pilots-docs resources', async () => {
+  const api = await startFakeAPI()
+  const { client, close } = await connect(serverEnv(api.url))
+  try {
+    const { resources } = await client.listResources()
+    const uris = resources.map((r) => r.uri).sort()
+    // SKILL.md plus one page per topic. A resource browser and the docs tool
+    // have to see the same corpus, or a fix lands in one and misses the other.
+    assert.equal(uris.length, 10)
+    assert.ok(uris.includes('pilots-docs://SKILL.md'))
+    assert.ok(uris.includes('pilots-docs://references/errors.md'))
+
+    const read = await client.readResource({ uri: 'pilots-docs://SKILL.md' })
+    assert.match(String((read.contents[0] as { text: string }).text), /^---\nname: pilots/)
+  } finally {
+    await close()
+    await api.close()
+  }
+})
+
+test('every result carries next, and a read-only one carries the empty string', async () => {
+  const api = await startFakeAPI()
+  const { client, close } = await connect(serverEnv(api.url))
+  try {
+    const created = await client.callTool({ name: 'create_machine', arguments: { name: 'nexty' } })
+    assert.equal((JSON.parse(textOf(created)) as { next: string }).next, 'exec on the returned id')
+
+    const listed = await client.callTool({ name: 'list_machines', arguments: {} })
+    // An array result is wrapped so `next` has somewhere to live; the rows
+    // are still the whole answer.
+    const body = JSON.parse(textOf(listed)) as { result: unknown[]; next: string }
+    assert.equal(body.next, '')
+    assert.ok(Array.isArray(body.result))
   } finally {
     await close()
     await api.close()

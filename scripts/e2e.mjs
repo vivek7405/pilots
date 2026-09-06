@@ -4389,9 +4389,11 @@ const CLI_BIN = new URL('../packages/cli/bin/pilot.js', import.meta.url).pathnam
 const DJANGO_FIXTURE = new URL('../packages/cli/test/fixtures/django-app', import.meta.url).pathname;
 
 const MCP_TOOLS = [
-  'build', 'checkpoint', 'create_machine', 'deploy', 'destroy_machine', 'exec',
-  'exec_stream', 'generate_dockerfile', 'list_machines', 'logs', 'promote',
-  'restore', 'status',
+  'build', 'build_logs', 'checkpoint', 'create_machine', 'deploy',
+  'destroy_machine', 'diagnose', 'docs', 'domains', 'exec',
+  'exec_stream', 'generate_dockerfile', 'init', 'list_machines', 'list_services',
+  'logs', 'plan', 'promote', 'releases', 'restore',
+  'rollback', 'service', 'status', 'volumes',
 ];
 
 // The text of a tool result, which is JSON in every case here.

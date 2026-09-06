@@ -270,9 +270,18 @@ Runs the MCP server on stdio. Add it to any MCP client:
 }
 ```
 
-Thirteen tools: `create_machine`, `list_machines`, `status`, `exec`,
-`exec_stream`, `logs`, `checkpoint`, `restore`, `build`, `deploy`, `promote`,
-`destroy_machine`, `generate_dockerfile`.
+Twenty-four tools: `build`, `build_logs`, `checkpoint`, `create_machine`,
+`deploy`, `destroy_machine`, `diagnose`, `docs`, `domains`, `exec`,
+`exec_stream`, `generate_dockerfile`, `init`, `list_machines`,
+`list_services`, `logs`, `plan`, `promote`, `releases`, `restore`,
+`rollback`, `service`, `status`, `volumes`.
+
+`deploy` with `dir` is the one call: it plans the directory on the host, builds
+each service, deploys, waits for the health gate and answers with the URLs.
+`init` returns the mental model in under sixty lines and is what an agent reads
+first; `docs` returns one reference page. The skill is also served as
+`pilots-docs://` resources, so a client that browses resources and one that
+calls tools see the same corpus.
 
 Three behaviours are worth knowing before writing an agent against them:
 
@@ -284,9 +293,10 @@ Three behaviours are worth knowing before writing an agent against them:
 - **An API refusal carries the server's own body.** A 429 arrives exactly as
   hostd wrote it, quota name, limit and usage included.
 
-`generate_dockerfile` detects the framework in a directory and returns a
-Dockerfile, a port and a health check: webjs, Next.js, React Router / Remix,
-Vite, Django, FastAPI, Rails, Go, Rust and Laravel.
+`generate_dockerfile` asks the host what it would write for a directory and
+returns the Dockerfile, the port and the health check: webjs, Next.js, React
+Router / Remix, Vite, Django, FastAPI, Rails, Go, Rust and Laravel. `deploy`
+does this itself, so reach for it only when the file is wanted in the repo.
 
 ### The two Dockerfile rules
 
@@ -294,7 +304,9 @@ Any Dockerfile an agent writes itself must:
 
 1. **bind `0.0.0.0`**, never `127.0.0.1`. A service bound to loopback serves
    only the guest itself, and the router's proxy into the netns reaches nothing.
-2. **read the port from `$PORT`**, with the framework's default as a fallback.
+2. **read the port from `$PORT`**, with 8080 as the fallback. The router dials
+   8080, which is why every generated recipe declares `PORT=8080` rather than
+   the framework's own default.
 
 Both mistakes produce a build that succeeds and a URL that answers 502, with
 nothing in the build log to read. `127.0.0.1` is correct in exactly one place: a

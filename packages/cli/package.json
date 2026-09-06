@@ -9,12 +9,25 @@
     "url": "git+https://github.com/vivek7405/pilots.git",
     "directory": "packages/cli"
   },
-  "bin": { "pilot": "bin/pilot.js" },
-  "files": ["bin", "src", "README.md"],
-  "engines": { "node": ">=24" },
+  "bin": {
+    "pilot": "bin/pilot.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "skill",
+    "resources",
+    "examples",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "tsc --noEmit && node --test 'test/**/*.test.ts'"
+    "test": "tsc --noEmit && node --test 'test/**/*.test.ts'",
+    "prepack": "node scripts/copy-skill.mjs",
+    "postpack": "node scripts/clean-skill.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
@@ -27,5 +40,7 @@
     "@types/node": "^24.13.3",
     "typescript": "~5.9.3"
   },
-  "publishConfig": { "access": "public" }
+  "publishConfig": {
+    "access": "public"
+  }
 }
