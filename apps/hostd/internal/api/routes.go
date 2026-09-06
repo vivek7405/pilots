@@ -281,8 +281,17 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
-// Sealer seals a secret environment. Satisfied by seal.Key.
+// Sealer seals a secret environment, and opens one again. Satisfied by
+// seal.Key.
+//
+// Open is here for the depends_on derivation and nothing else: a real
+// database URL is a sealed value, so an app whose services find each other
+// through it would draw no edges at all from the plaintext half. Nothing Open
+// returns may leave the caller. It is scanned for <name>.internal references
+// and dropped; no plaintext is returned in a response, written to a row, or
+// logged, and a host with no key derives from the plaintext half instead.
 type Sealer interface {
 	IsSet() bool
 	Seal([]byte) (string, error)
+	Open(blob string) ([]byte, error)
 }
