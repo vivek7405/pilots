@@ -187,6 +187,36 @@ suite('machine-terminal', () => {
     host.remove();
   });
 
+  test('Reconnect says Connecting, and the dead socket cannot speak over it', async () => {
+    const { el, host, socket } = await mount();
+    await until(() => el.textContent.includes('Connected'));
+
+    // Reconnect closes the live socket and dials immediately, but a close
+    // event is delivered a task LATER. Without a guard the dead socket's
+    // handler overwrites the new socket's `connecting` with `closed`, so the
+    // header reads Disconnected while a session is in fact coming up.
+    el.querySelector('button').click();
+    await until(() => sockets.length === 2);
+    const fresh = sockets[1];
+    assert.ok(fresh !== socket, 'a second socket was opened');
+
+    socket.fire('close', { code: 1006 });
+    await el.updateComplete;
+    assert.includes(el.textContent, 'Connecting', `the old socket's close won: ${el.textContent.trim()}`);
+
+    // And its last frames must not reach the screen either.
+    socket.deliver({ type: 'data', data: base64('from the dead socket') });
+    await new Promise((r) => setTimeout(r, 50));
+    const text = () => el.querySelector('.xterm-rows')?.textContent ?? '';
+    assert.ok(!text().includes('from the dead socket'), `the dead socket wrote: ${text()}`);
+
+    // The new socket still works.
+    fresh.fire('open', {});
+    await el.updateComplete;
+    assert.includes(el.textContent, 'Connected');
+    host.remove();
+  });
+
   test('an expired session says so rather than failing silently', async () => {
     const { el, host, socket } = await mount();
     socket.fire('close', { code: 4401 });

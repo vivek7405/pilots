@@ -17,6 +17,7 @@ import { epochMs } from '#lib/utils/time.ts';
 export interface HealthRelease {
   id: string;
   healthy?: boolean;
+  /** SECONDS since the epoch, as hostd stamps it. See `lib/utils/time.ts`. */
   created_at?: number;
 }
 

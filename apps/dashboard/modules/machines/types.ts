@@ -25,7 +25,13 @@ export interface Machine {
    * memory, which is a change a viewer needs to see.
    */
   last_start?: string;
-  /** Milliseconds since the epoch, as the engine stamps them. */
+  /**
+   * SECONDS since the epoch, which is what `time.Now().Unix()` returns and
+   * what hostd stamps every one of these with. JavaScript dates are
+   * milliseconds, so pass one of these through `epochMs` in
+   * `lib/utils/time.ts` before it reaches a `Date`. Reading them raw put every
+   * timestamp on every page in January 1970.
+   */
   last_start_at?: number;
   last_activity?: number;
   created_at?: number;

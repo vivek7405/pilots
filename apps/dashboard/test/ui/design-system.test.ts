@@ -250,3 +250,114 @@ test('no source file paints a raw Tailwind colour', () => {
   }
   assert.deepEqual(offenders, [], `raw Tailwind colours: ${offenders.join(' | ')}`);
 });
+
+/**
+ * Which page file serves each url in `PAGES`.
+ *
+ * Written out rather than derived, because a route group and a dynamic
+ * segment do not fall out of the url, and a wrong guess here would make the
+ * test below pass by reading the wrong file. A stale entry throws on the read.
+ */
+const PAGE_FILES: Record<string, string> = {
+  '/': 'app/page.ts',
+  '/machines': 'app/(app)/machines/page.ts',
+  '/machines/m-1': 'app/(app)/machines/[id]/page.ts',
+  '/machines/m-1/terminal': 'app/(app)/machines/[id]/terminal/page.ts',
+  '/services': 'app/(app)/services/page.ts',
+  '/services/new': 'app/(app)/services/new/page.ts',
+  '/services/svc-1': 'app/(app)/services/[id]/page.ts',
+  '/volumes': 'app/(app)/volumes/page.ts',
+  '/domains': 'app/(app)/domains/page.ts',
+  '/usage': 'app/(app)/usage/page.ts',
+  '/keys': 'app/(app)/keys/page.ts',
+  '/org': 'app/(app)/org/page.ts',
+};
+
+/** Every `#`-aliased specifier a file imports, as a repo-relative path. */
+function importsOf(source: string): string[] {
+  const out: string[] = [];
+  for (const m of source.matchAll(/from\s+'(#[^']+)'|^\s*import\s+'(#[^']+)'/gm)) {
+    const spec = m[1] ?? m[2];
+    if (spec) out.push(spec.slice(1));
+  }
+  return out;
+}
+
+/**
+ * The custom-element tags a file's module graph registers.
+ *
+ * The SERVED MARKUP cannot answer this. A custom element is registered
+ * process-wide the first time any module defines it, and the test process
+ * renders many pages, so a page that forgot its import still renders an
+ * upgraded element as long as some other page in the same run imported it.
+ * That is exactly why the missing import on the services page reached a
+ * browser: nothing server-side could see it.
+ */
+function registeredBy(entry: string): Set<string> {
+  const tags = new Set<string>();
+  const seen = new Set<string>();
+  const walk = (rel: string) => {
+    if (seen.has(rel)) return;
+    seen.add(rel);
+    let source: string;
+    try {
+      source = readFileSync(join(APP_DIR, rel), 'utf8');
+    } catch {
+      return; // a type-only or generated specifier; it registers nothing
+    }
+    for (const m of source.matchAll(/\.register\(\s*'([a-z][a-z0-9-]*)'/g)) tags.add(m[1]!);
+    for (const spec of importsOf(source)) walk(spec);
+  };
+  walk(entry);
+  return tags;
+}
+
+/** The custom-element tags in a page's markup, comments stripped. */
+function elementsIn(body: string): string[] {
+  const markup = body.replace(/<!--[\s\S]*?-->/g, '');
+  return [...new Set([...markup.matchAll(/<([a-z][a-z0-9]*-[a-z0-9-]+)[\s>]/g)].map((m) => m[1]!))];
+}
+
+/**
+ * A page that renders a custom element must import it.
+ *
+ * An un-imported custom element is not an error anywhere: it renders as an
+ * inert tag. A `<copy-button>` looks like a button and does nothing when
+ * clicked, and a `<ui-tooltip-content>` is not hidden, so it prints its whole
+ * explanation as body text. Both shipped once each and neither was visible to
+ * any other check, including a sweep of the served bytes.
+ *
+ * The empty-org render matters as much as the seeded one: an empty state is
+ * the branch that introduces a control the populated page has no use for, and
+ * it is where the services page's missing copy button lived.
+ *
+ * Counterfactual: drop `import '#components/copy-button.ts'` from
+ * `app/(app)/services/page.ts` and this fails on `/services` for the empty org.
+ */
+test('every custom element a page renders is one that page imports', async () => {
+  // The layout is on every page, so what it registers counts as available.
+  const fromLayout = registeredBy('app/layout.ts');
+  const empty = await signInAs(app.handle, { id: 7011, login: 'newcomer' });
+  let checked = 0;
+
+  for (const [path, file] of Object.entries(PAGE_FILES)) {
+    const available = new Set([...fromLayout, ...registeredBy(file)]);
+
+    for (const [label, session] of [
+      ['seeded', cookie],
+      ['empty', empty],
+    ] as const) {
+      // A seeded id under an empty org is a 404, which is correct and not
+      // what this test is about.
+      if (label === 'empty' && /\/(svc-1|m-1)/.test(path)) continue;
+      const res = await app.handle(new Request(`http://localhost${path}?since=2026-01-01&until=2026-01-03`, asUser(session)));
+      assert.equal(res.status, 200, `${path} renders for the ${label} org`);
+
+      for (const tag of elementsIn(await res.text())) {
+        checked += 1;
+        assert.ok(available.has(tag), `<${tag}> is rendered by ${file} on the ${label} org but never imported there`);
+      }
+    }
+  }
+  assert.ok(checked > 40, `expected these pages to render custom elements, found ${checked}`);
+});
