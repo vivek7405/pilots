@@ -80,7 +80,15 @@ func writeMapped(w http.ResponseWriter, err error) {
 				"; fix the app and deploy again, or pilot services rollback "+gate.Service, gate)
 	case errors.Is(err, state.ErrNotFound):
 		WriteError(w, http.StatusNotFound, CodeNotFound, "not found", NextNotFound, nil)
-	case errors.Is(err, ErrConflict), errors.Is(err, state.ErrNotOwner):
+	case errors.Is(err, state.ErrNotOwner):
+		// 409 for the same reason ErrConflict is, but with a message of our
+		// own: the sentinel reads "state: this host does not own that
+		// machine", which is the store's vocabulary and would put the `state:`
+		// prefix this function exists to keep out straight into the body.
+		WriteError(w, http.StatusConflict, CodeConflict,
+			"another host writes this object right now",
+			"retry; the request works against whichever host currently writes it", nil)
+	case errors.Is(err, ErrConflict):
 		// 409 rather than 400 or 403: nothing about the request is wrong and
 		// the caller is allowed. The object is in a state that forbids it, or
 		// this host lost a race, and the same request works once it is not.

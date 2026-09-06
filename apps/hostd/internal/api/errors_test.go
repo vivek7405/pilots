@@ -128,6 +128,9 @@ func TestWriteMappedLeaksNoInternals(t *testing.T) {
 		code   string
 	}{
 		{"not found", errNotFoundFixture(), 404, CodeNotFound},
+		// The branch that used to answer with the sentinel verbatim: its text
+		// is "state: this host does not own that machine".
+		{"not owner", fmt.Errorf("put service svc_1: %w", state.ErrNotOwner), 409, CodeConflict},
 		{"health gate", &HealthGateDetails{
 			Service: "svc_1", Replica: "m_9", Release: "rel_2", GraceSec: 40,
 			Last: HealthLast{Error: "connection refused on port 8080: the app is not listening on 0.0.0.0:$PORT"},
