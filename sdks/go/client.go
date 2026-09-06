@@ -119,6 +119,13 @@ func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
 	return &out, c.do(ctx, http.MethodGet, "/v1/health", nil, &out)
 }
 
+// Whoami is the org, scopes and host this client's key resolves to. The one
+// route a key can call to learn about itself.
+func (c *Client) Whoami(ctx context.Context) (*WhoamiResponse, error) {
+	var out WhoamiResponse
+	return &out, c.do(ctx, http.MethodGet, "/v1/whoami", nil, &out)
+}
+
 // Plan asks the host what a directory is, from a tar of it.
 //
 // A method on Client rather than under Compose or Services, because it is the

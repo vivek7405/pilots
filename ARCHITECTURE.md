@@ -303,6 +303,7 @@ POST   /v1/machines/:id/promote      {domain?} → service
 POST   /v1/volumes                   create JuiceFS volume
 GET    /v1/volumes                   list
 GET    /v1/hosts                     fleet view
+GET    /v1/whoami                    the caller's own org, scopes and host
 POST   /v1/api-keys                  admin: mint {org_id, scopes[]} → the plaintext key, ONCE
 POST   /v1/api-keys/:hash/revoke     admin: tombstone a key; no row is deleted
 GET    /v1/api-keys?org=             admin: list an org's keys, revoked ones included
@@ -1134,6 +1135,10 @@ snapshot; a database restores and then replays WAL.
   fallback: `pilot login --token` / `PILOT_API_KEY` env. **No command
   validates a cached key**: once the file exists every command talks only to
   the fleet, so a dashboard outage cannot take the CLI down with it.
+  `pilot whoami` names the source that won for the key, the fleet URL and the
+  org, and asks `GET /v1/whoami` on the FLEET for the org and scopes, never
+  the dashboard: the file records only what `login` stored, so it says nothing
+  about a key that came from `PILOT_API_KEY`.
 - **Machine auth:** every hostd request carries `Authorization: Bearer
   <api-key>`. Key **hashes** live in the Corrosion `api_keys` table, written
   by whichever host serves the `POST /v1/api-keys` that minted them, so
@@ -1149,8 +1154,8 @@ snapshot; a database restores and then replays WAL.
   scopes on the key bound what it can do, stored comma-separated and sent as
   a JSON array. They nest — `machines` ⊂ `deploy` ⊂ `admin`:
   `machines` covers `/v1/machines`, `/v1/checkpoints`, `/v1/volumes`,
-  `/v1/sprites` and `/v1/hosts`; `deploy` adds `/v1/builds`, `/v1/services`
-  and `/v1/domains`; `admin` adds `/v1/api-keys`, `/v1/quotas` and
+  `/v1/sprites`, `/v1/hosts` and `/v1/whoami`; `deploy` adds `/v1/builds`,
+  `/v1/services` and `/v1/domains`; `admin` adds `/v1/api-keys`, `/v1/quotas` and
   `/v1/usage`. An unknown path or an unknown scope name fails closed, and a
   refusal is `403 {"error":"scope <s> required"}`. The MCP server reads the
   same credentials file/env.

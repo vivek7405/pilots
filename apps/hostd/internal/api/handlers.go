@@ -681,6 +681,21 @@ func (d Deps) handleMachineVolume(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, v)
 }
 
+// handleWhoami echoes the caller's own principal back.
+//
+// A key can otherwise learn nothing about itself: GET /v1/api-keys needs an
+// org to filter by and admin scope to call, and /v1/health is unauthenticated
+// so it says nothing about the caller. Without this route the CLI can only
+// report what its credentials file happened to record, which is wrong the
+// moment PILOT_API_KEY holds a different key.
+func (d Deps) handleWhoami(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, WhoamiResponse{
+		OrgID:  OrgID(r.Context()),
+		Scopes: Scopes(r.Context()),
+		HostID: d.HostID,
+	})
+}
+
 func (d Deps) handleListHosts(w http.ResponseWriter, r *http.Request) {
 	hosts, err := d.Store.ListHosts(r.Context())
 	if err != nil {

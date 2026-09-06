@@ -31,6 +31,14 @@ func OrgID(ctx context.Context) string {
 	return p.OrgID
 }
 
+// Scopes returns a copy of the authenticated caller's scopes. A copy, because
+// the slice lives in the request context and a handler that sorted or appended
+// to it in place would be editing the principal every later check reads.
+func Scopes(ctx context.Context) []string {
+	p, _ := ctx.Value(principalKey).(principal)
+	return append([]string(nil), p.Scopes...)
+}
+
 // HasScope reports whether the caller's key carries a scope, honouring the
 // hierarchy: an admin key has every scope.
 func HasScope(ctx context.Context, want string) bool {
@@ -77,6 +85,7 @@ var scopePrefixes = []struct {
 	{"/v1/compose/plan", ScopeMachines},
 	{"/v1/plan", ScopeMachines},
 	{"/v1/hosts", ScopeMachines},
+	{"/v1/whoami", ScopeMachines},
 	{"/v1/builds", ScopeDeploy},
 	{"/v1/services", ScopeDeploy},
 	{"/v1/domains", ScopeDeploy},

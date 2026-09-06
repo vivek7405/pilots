@@ -287,6 +287,19 @@ export interface Host {
   cpu_vendor?: string
 }
 
+/**
+ * What the caller's key resolves to on the host that answered.
+ *
+ * `org_id` is empty for a key that belongs to no org, which is the bootstrap
+ * admin key's case, so a caller that needs to distinguish "no org" from "not
+ * asked" checks for the empty string rather than for the field.
+ */
+export interface WhoamiResponse {
+  org_id: string
+  scopes: string[]
+  host_id: string
+}
+
 export interface AddDomainRequest {
   service_id: string
   hostname: string

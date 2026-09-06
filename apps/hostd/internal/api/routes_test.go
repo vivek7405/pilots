@@ -265,6 +265,7 @@ func TestEveryRouteIsRegistered(t *testing.T) {
 		{"POST", "/v1/volumes"},
 		{"GET", "/v1/volumes"},
 		{"GET", "/v1/hosts"},
+		{"GET", "/v1/whoami"},
 		{"POST", "/v1/api-keys"},
 		{"GET", "/v1/api-keys"},
 		{"POST", "/v1/api-keys/abc/revoke"},

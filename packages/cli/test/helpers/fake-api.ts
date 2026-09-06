@@ -25,6 +25,8 @@ interface Machine {
   id: string
   name: string
   host_id: string
+  /** Set on a replica; what `pilot logs <service>` fans in by. */
+  service_id?: string
   state: string
   knobs: { auto_stop: string; auto_start: boolean; min_machines_running: number; soft_limit: number }
   vcpus: number
@@ -234,6 +236,9 @@ export async function startFakeAPI(): Promise<FakeAPI> {
       return json(res, 200, [
         { id: 'host-a', cpu_free: 8, mem_free_mib: 16384, last_seen: 1, alive: true },
       ])
+    }
+    if (method === 'GET' && path === '/v1/whoami') {
+      return json(res, 200, { org_id: 'org_1', scopes: ['machines', 'deploy', 'admin'], host_id: 'host-a' })
     }
     if (method === 'GET' && path === '/v1/health') {
       return json(res, 200, { ok: true, host_id: 'host-a', reflink: true })

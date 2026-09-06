@@ -37,6 +37,7 @@ One method per route, grouped by the noun it acts on.
 | Call | Route |
 | --- | --- |
 | `c.Health(ctx)` | `GET /v1/health` |
+| `c.Whoami(ctx)` | `GET /v1/whoami` |
 | `c.Machines.Create/List/Get/Destroy` | `/v1/machines` |
 | `c.Machines.Exec(ctx, id, req)` | `POST /v1/machines/{id}/exec` |
 | `c.Machines.ExecStream(ctx, id, argv, opts)` | `GET /v1/machines/{id}/exec/stream` |

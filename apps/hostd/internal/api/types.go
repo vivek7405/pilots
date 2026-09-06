@@ -562,6 +562,16 @@ type HealthResponse struct {
 	CPUVendorForced bool `json:"cpu_vendor_forced,omitempty"`
 }
 
+// WhoamiResponse is what the caller's key resolves to on the host that
+// answered. The org is empty for the bootstrap admin key, which belongs to no
+// org, and the CLI renders that case as "(admin key, no org)" rather than as a
+// missing value.
+type WhoamiResponse struct {
+	OrgID  string   `json:"org_id"`
+	Scopes []string `json:"scopes"`
+	HostID string   `json:"host_id"`
+}
+
 // ErrorResponse is every non-2xx body. Code is a stable snake_case noun a
 // client branches on; Next is the one thing to do about it, naming the
 // command or the call; Details is typed per code (HealthGateDetails,

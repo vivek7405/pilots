@@ -9,9 +9,12 @@
  * guards against, one channel over.
  */
 
+import { styleText } from 'node:util'
+
 import { PilotsError, QuotaExceededError, ComposePlanError, BuildFailedError } from '@pilots/sdk'
 
 let jsonMode = false
+let plain = false
 
 /** Set once from the program's `preAction` hook, before any command runs. */
 export function setJSONMode(on: boolean): void {
@@ -23,16 +26,70 @@ export function isJSONMode(): boolean {
 }
 
 /**
+ * Forces plain output: no colour, no line rewritten in place.
+ *
+ * Set by `--ci`, which exists because a build log read later is not a
+ * terminal, and by anything else that wants the TTY rendering off while stderr
+ * still happens to be one.
+ */
+export function setPlain(on: boolean): void {
+  plain = on
+}
+
+export function isPlain(): boolean {
+  return plain
+}
+
+/**
+ * Colour for stderr prose, and nowhere else.
+ *
+ * Plain unless stderr is a terminal and nobody asked for plain, so a redirected
+ * stderr, `--json`, `--ci` and `NO_COLOR` all get bytes a program can compare.
+ * `validateStream` is off because the decision is made here, from the caller's
+ * own `tty` argument, rather than from whichever stream styleText guesses at.
+ */
+export function paint(
+  format: Parameters<typeof styleText>[0],
+  text: string,
+  tty: boolean = Boolean(process.stderr.isTTY),
+): string {
+  if (jsonMode || plain || !tty || process.env.NO_COLOR) return text
+  return styleText(format, text, { validateStream: false })
+}
+
+/**
  * An error the CLI itself raised, as opposed to one the server returned.
  *
  * Carries no status and no body, so `fail` renders it as a plain sentence
  * rather than pretending the fleet said something it did not.
  */
 export class CliError extends Error {
-  constructor(message: string) {
+  /**
+   * The next step, rendered as a second line under the message.
+   *
+   * Never part of the message itself. An error that reads "no API key: run
+   * pilot login" gives a reader no structure to skim and a test nothing to
+   * match; the two halves are separate so the rendering can put the fix where
+   * the eye goes and a test can assert on it.
+   */
+  readonly hint: string | undefined
+
+  constructor(message: string, opts: { hint?: string } = {}) {
     super(message)
     this.name = 'CliError'
+    this.hint = opts.hint
   }
+}
+
+/**
+ * The hint on any error, the CLI's own or one decorated at the boundary.
+ *
+ * Read through this accessor rather than the field, so a hint attached to an
+ * SDK error (which has no `hint` in its type) renders the same way.
+ */
+export function hintOf(err: unknown): string | undefined {
+  const h = (err as { hint?: unknown } | null | undefined)?.hint
+  return typeof h === 'string' && h ? h : undefined
 }
 
 /** stdout, two-space indented, exactly what a `--json` caller parses. */
@@ -101,13 +158,21 @@ export function renderError(err: unknown): string {
     const last = err.lines[err.lines.length - 1]
     return `error: build ${err.buildId} failed: ${last?.error ?? err.message}`
   }
-  // The server's next step, on its own line under the error. It is the one
-  // thing a reader is meant to do about what just failed, and it is on every
-  // 4xx, so printing it here means no command has to know its own remedies.
-  const next = err instanceof PilotsError && err.next ? `\n→ ${err.next}` : ''
-  return `error: ${messageOf(err)}${next}`
+  // One next-step line, never two. There are two sources for it and they are
+  // both right: the server's `next` is on every 4xx, so no command has to know
+  // its own remedies, and the CLI's `hint` carries the two things only the
+  // client holds -- the fleet URL it resolved, and which source supplied a key
+  // the fleet rejected.
+  //
+  // The CLI's wins where both exist, because where both exist they say the
+  // same thing and the client's says it with the specifics. A 401 answers
+  // `next: "pass an API key: pilot login, or set PILOT_API_KEY"`; the hint
+  // beside it names the fleet and the source that was actually sent. Printing
+  // both would be the same sentence twice.
+  const step = hintOf(err) ?? (err instanceof PilotsError && err.next ? err.next : '')
+  return step ? `error: ${messageOf(err)}\n${paint('dim', '→')} ${step}` : `error: ${messageOf(err)}`
 }
 
-function messageOf(err: unknown): string {
+export function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }

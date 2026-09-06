@@ -13,18 +13,22 @@
 import { Command } from 'commander'
 
 import { createAddCommand } from './commands/add.ts'
+import { createCompletionCommand } from './commands/completion.ts'
 import { createDeployCommand } from './commands/deploy.ts'
 import { createDomainsCommand } from './commands/domains.ts'
+import { createInitCommand } from './commands/init.ts'
 import { createLoginCommand, createLogoutCommand, createWhoamiCommand } from './commands/login.ts'
+import { createLogsCommand } from './commands/logs.ts'
 import { createMachinesCommand } from './commands/machines.ts'
 import { createMcpCommand } from './commands/mcp.ts'
-import { createInitCommand } from './commands/init.ts'
-import { createSkillCommand } from './commands/skill.ts'
+import { createOpenCommand } from './commands/open.ts'
 import { createPromoteCommand } from './commands/promote.ts'
 import { createSecretsCommand } from './commands/secrets.ts'
 import { createServicesCommand } from './commands/services.ts'
+import { createSkillCommand } from './commands/skill.ts'
 import { createStatusCommand } from './commands/status.ts'
 import { createVolumesCommand } from './commands/volumes.ts'
+import { attachHint, type GlobalOptions } from './config.ts'
 import { fail, setJSONMode } from './output.ts'
 import { VERSION } from './version.ts'
 
@@ -36,6 +40,7 @@ export function buildProgram(): Command {
     .description('sandboxes and services on one primitive')
     .version(VERSION, '-v, --version', 'print the CLI version')
     .option('--json', 'print the API response as JSON on stdout, errors on stderr')
+    .option('-y, --yes', 'answer yes to every confirmation; for scripts and agents')
     .option('--api-url <url>', 'the fleet to talk to; wins over PILOT_API_URL and the credentials file')
     .showHelpAfterError()
     .hook('preAction', (thisCommand) => {
@@ -55,8 +60,12 @@ export function buildProgram(): Command {
   program.addCommand(createAddCommand())
   program.addCommand(createSecretsCommand())
   program.addCommand(createMcpCommand())
+  program.addCommand(createLogsCommand())
+  program.addCommand(createOpenCommand())
   program.addCommand(createInitCommand())
   program.addCommand(createSkillCommand())
+  // Last, so the generated script sees every command above it.
+  program.addCommand(createCompletionCommand(program))
 
   return program
 }
@@ -66,10 +75,14 @@ export async function run(argv: string[] = process.argv): Promise<void> {
   // and an error can happen during parsing itself. Reading argv directly is
   // the only thing available that early.
   setJSONMode(argv.includes('--json'))
+  const program = buildProgram()
   try {
-    await buildProgram().parseAsync(argv)
+    await program.parseAsync(argv)
   } catch (err) {
-    fail(err)
+    // program.opts() is populated even when the action threw, which is what
+    // makes the resolved fleet URL available here without threading it
+    // through every command.
+    fail(attachHint(err, program.opts() as GlobalOptions))
   }
 }
 

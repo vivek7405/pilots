@@ -39,6 +39,7 @@ import type {
   UpdateServiceRequest,
   UsageResponse,
   Volume,
+  WhoamiResponse,
 } from './types.ts'
 
 export interface ClientOptions extends HttpOptions {
@@ -86,6 +87,11 @@ export class PilotsClient {
   /** Liveness. The one route that needs no key. */
   health(): Promise<HealthResponse> {
     return this.http.json<HealthResponse>('GET', '/v1/health')
+  }
+
+  /** The org, scopes and host this client's key resolves to. */
+  whoami(): Promise<WhoamiResponse> {
+    return this.http.json<WhoamiResponse>('GET', '/v1/whoami')
   }
 
   /**

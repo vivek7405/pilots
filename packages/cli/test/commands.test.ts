@@ -82,7 +82,11 @@ test('machines ls --app filters, and the human form is a table', async () => {
     assert.deepEqual(list.map((m) => m.name), ['a'])
 
     const human = await pilot(env, ['machines', 'ls'])
-    assert.match(human.stdout, /^ID {2}/m)
+    // Name first, id last. The name is what a person types into every other
+    // command; the id is a 42-character string that pushed URL off the edge.
+    const header = human.stdout.split('\n')[0]!.trim().split(/ {2,}/)
+    assert.equal(header[0], 'NAME')
+    assert.equal(header.at(-1), 'ID')
     assert.match(human.stdout, /\ba\b/)
     assert.match(human.stdout, /\bb\b/)
   } finally {
@@ -228,6 +232,60 @@ test('an unreachable fleet names the route rather than the socket', async () => 
   const res = await pilot(env, ['machines', 'ls'])
   assert.equal(res.code, 1)
   assert.match(res.stderr, /GET \/v1\/machines/)
+  // The hint is built from the URL the CLI actually resolved and the source
+  // that supplied it. Building it from DEFAULT_API_URL instead would name a
+  // host nobody in this test ever addressed.
+  assert.match(res.stderr, /→ cannot reach http:\/\/127\.0\.0\.1:1 \(from .*credentials\)/)
+
+  const viaEnv = await pilot({ ...env, PILOT_API_URL: 'http://127.0.0.1:2' }, ['machines', 'ls'])
+  assert.equal(viaEnv.code, 1)
+  assert.match(viaEnv.stderr, /→ cannot reach http:\/\/127\.0\.0\.1:2 \(from PILOT_API_URL\)/)
+})
+
+// The server cannot know where the client got the key it rejected, so this is
+// the one place the fact exists. Counterfactual: reading the file first would
+// name the file while every command was sending the environment's key.
+test('a 401 names the source of the rejected key', async () => {
+  const api = await startFakeAPI()
+  api.routes.set('GET /v1/machines', (_req, res) => json(res, 401, { error: 'unauthorized' }))
+  const env = loggedIn(api.url)
+  try {
+    const fromFile = await pilot(env, ['machines', 'ls'])
+    assert.equal(fromFile.code, 1)
+    assert.match(fromFile.stderr, /rejected the key from .*credentials/)
+
+    const fromEnv = await pilot({ ...env, PILOT_API_KEY: 'pilot_other' }, ['machines', 'ls'])
+    assert.equal(fromEnv.code, 1)
+    assert.match(fromEnv.stderr, /rejected the key from PILOT_API_KEY/)
+
+    // The `--json` contract: stderr is the server's body and nothing else. A
+    // hint written into that branch would add a byte and #34 H8 compares this
+    // body across the CLI, the SDK and the MCP server.
+    const asJSON = await pilot(env, ['--json', 'machines', 'ls'])
+    assert.equal(asJSON.code, 1)
+    assert.equal(asJSON.stderr, '{"error":"unauthorized"}\n')
+  } finally {
+    await api.close()
+  }
+})
+
+// Colour is stderr prose, and `--json` promises stderr carries the server's
+// body byte for byte. FORCE_COLOR is the counterfactual: a helper that
+// consulted only isTTY would emit escapes here.
+test('stderr carries no ANSI under --json', async () => {
+  const api = await startFakeAPI()
+  api.routes.set('GET /v1/machines', (_req, res) =>
+    json(res, 429, { error: 'quota exceeded', quota: 'machines', limit: 2, used: 2 }),
+  )
+  const env = loggedIn(api.url)
+  try {
+    const res = await pilot({ ...env, FORCE_COLOR: '1' }, ['--json', 'machines', 'ls'])
+    assert.equal(res.code, 1)
+    // eslint-disable-next-line no-control-regex
+    assert.doesNotMatch(res.stderr, /\x1b\[/)
+  } finally {
+    await api.close()
+  }
 })
 
 test('no command validates the cached key: every one works with the dashboard down', async () => {
@@ -295,6 +353,117 @@ test('the type-stripping warning is filtered off stderr, and nothing else is', a
     // The filter is narrow: every other warning is re-emitted to the listeners
     // Node installed, so a real deprecation is not silently swallowed.
     assert.match(res.stderr, /something a user should actually see/)
+  } finally {
+    await api.close()
+  }
+})
+
+// Bug 1's rendering half. The header is stdout, so a script that greps for it
+// keeps working; the reason the rows are missing is prose and prose is stderr.
+// Counterfactual: the sentence written to stdout breaks the stdout-is-a-table
+// rule and the stdout assertion below.
+test('status with no hosts prints the header and says why on stderr', async () => {
+  const api = await startFakeAPI()
+  api.routes.set('GET /v1/hosts', (_req, res) => json(res, 200, []))
+  const env = loggedIn(api.url)
+  try {
+    const res = await pilot(env, ['status'])
+    assert.equal(res.code, 0, res.stderr)
+    assert.match(res.stdout, /^HOST {2}ALIVE {2}CPU FREE {2}MEM FREE MIB/)
+    assert.match(res.stderr, /lists no hosts/)
+    assert.doesNotMatch(res.stdout, /lists no hosts/)
+  } finally {
+    await api.close()
+  }
+})
+
+// The precedence is real and it is invisible everywhere else. Counterfactual:
+// reading loadCredentials() first reports the file as the key's source while
+// every other command is sending the environment's key.
+test('whoami names the winning source for each value', async () => {
+  const api = await startFakeAPI()
+  const env = loggedIn(api.url)
+  try {
+    const res = await pilot({ ...env, PILOT_API_KEY: 'pilot_env_abcdefghijkl' }, [
+      '--json',
+      '--api-url',
+      api.url,
+      'whoami',
+    ])
+    assert.equal(res.code, 0, res.stderr)
+    const me = JSON.parse(res.stdout) as Record<string, unknown>
+    assert.equal(me.key_source, 'PILOT_API_KEY')
+    assert.equal(me.key_prefix, 'pilot_env_ab')
+    assert.equal(me.api_url_source, '--api-url')
+    assert.equal(me.org_source, 'fleet')
+    assert.equal(me.org_id, 'org_1')
+    assert.deepEqual(me.scopes, ['machines', 'deploy', 'admin'])
+    assert.match(res.stderr, /also holds a key; PILOT_API_KEY wins/)
+    // Every command sent the env key, so that is the key the fleet saw.
+    assert.equal(api.find('GET', '/v1/whoami')!.headers.authorization, 'Bearer pilot_env_abcdefghijkl')
+    assert.equal(res.stdout.includes('abcdefghijkl'), false, 'the key itself never reaches stdout')
+  } finally {
+    await api.close()
+  }
+})
+
+// A key with no org is a real state, not a missing value: the bootstrap admin
+// key belongs to no org. "(unknown)" would read as "the CLI could not tell".
+test('whoami with an admin key prints (admin key, no org)', async () => {
+  const api = await startFakeAPI()
+  api.routes.set('GET /v1/whoami', (_req, res) =>
+    json(res, 200, { org_id: '', scopes: ['admin'], host_id: 'host-a' }),
+  )
+  const env = loggedIn(api.url)
+  try {
+    const res = await pilot(env, ['whoami'])
+    assert.equal(res.code, 0, res.stderr)
+    assert.match(res.stdout, /^ORG {2,}\(admin key, no org\) +from fleet$/m)
+    assert.match(res.stdout, /^SCOPES {2,}admin +from fleet$/m)
+  } finally {
+    await api.close()
+  }
+})
+
+// Every table a person reads leads with the name and ends with the id.
+// Counterfactual: a row function reordered without its header lands the values
+// in the wrong columns, which this reads column by column to catch.
+test('services and volumes tables lead with the name and end with the id', async () => {
+  const api = await startFakeAPI()
+  api.machines.push(fakeMachine({ id: 'm_1', name: 'api' }))
+  api.services.push({
+    id: 'svc_1',
+    name: 'web',
+    app: 'shop',
+    replicas: 2,
+    knobs: { auto_stop: 'off', auto_start: false, min_machines_running: 1, soft_limit: 20 },
+    url: 'https://web.pilotrun.app',
+    release_id: 'rel_1',
+    autodeploy: false,
+    created_at: 1,
+  })
+  const env = loggedIn(api.url)
+  try {
+    const columns = (out: string): string[] => out.split('\n')[0]!.trim().split(/ {2,}/)
+
+    const services = await pilot(env, ['services', 'ls'])
+    assert.deepEqual(columns(services.stdout), ['NAME', 'APP', 'REPLICAS', 'URL', 'ID'])
+    assert.match(services.stdout.split('\n')[1]!, /^web {2,}shop {2,}2 {2,}https:\/\/web\.pilotrun\.app {2,}svc_1$/)
+
+    // The release id has no everyday use, so `ls` hides it behind --wide.
+    const wide = await pilot(env, ['services', 'ls', '--wide'])
+    assert.deepEqual(columns(wide.stdout), ['NAME', 'APP', 'REPLICAS', 'URL', 'RELEASE', 'ID'])
+
+    // `info` shows one service someone is already looking closely at, so it
+    // always carries the release.
+    const info = await pilot(env, ['services', 'info', 'web'])
+    assert.deepEqual(columns(info.stdout), ['NAME', 'APP', 'REPLICAS', 'URL', 'RELEASE', 'ID'])
+
+    const volumes = await pilot(env, ['volumes', 'create', 'data', '--size-gib', '5'])
+    assert.deepEqual(columns(volumes.stdout), ['NAME', 'GIB', 'MOUNT', 'MACHINE', 'ID'])
+
+    const promoted = await pilot(env, ['promote', 'api'])
+    assert.deepEqual(columns(promoted.stdout), ['NAME', 'REPLICAS', 'URL', 'ID'])
   } finally {
     await api.close()
   }

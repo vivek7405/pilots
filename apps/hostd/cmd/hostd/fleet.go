@@ -26,6 +26,12 @@ import (
 // Everything that makes one host part of a fleet. On a single box none of it
 // runs: the state store is local SQLite, there is no mesh, and every machine
 // is this host's, so there is nothing to forward, rescue, or gossip.
+//
+// The heartbeat is the one exception, and startHeartbeat below runs it
+// everywhere. GET /v1/hosts is part of the API every host serves in full, and
+// the row it lists is the host's own, so writing it needs no fleet. A box that
+// cannot list itself is the one place where "no coordinator" reads as
+// "nothing here".
 
 // fleet is what a clustered host runs in addition to the single-box daemon.
 type fleet struct {
@@ -147,22 +153,52 @@ func startInternalListener(ctx context.Context, dev *mesh.Device, internal http.
 	return nil
 }
 
-// startSelfHeal runs the heartbeat and rescue loops.
+// heartbeatFor is what this host publishes about itself.
+//
+// One function for the lone heartbeat on a single box and for a fleet's rescue
+// options alike, so the two cannot disagree about what the row says.
+//
+// meshed is false when this host has no mesh identity. The address stays empty
+// there rather than being derived from a zero key, which would put every such
+// host on the same address.
+func heartbeatFor(cfg *config.Config, keys mesh.Keys, meshed bool) func() state.Host {
+	return func() state.Host {
+		h := state.Host{
+			ID:         cfg.HostID,
+			PublicIP:   cfg.PublicIP,
+			CPUFree:    runtime.NumCPU(),
+			MemFreeMiB: freeMemMiB(cfg.HugePages),
+		}
+		if meshed {
+			h.WGAddr = keys.Address().String()
+			h.WGPubKey = keys.Public.String()
+		}
+		return h
+	}
+}
+
+// startHeartbeat writes this host's own hosts row, fleet or not.
+//
+// RunHeartbeat writes before its first tick, so the row exists within
+// milliseconds of start and `pilot status` on a fresh single box lists the
+// host that answered it.
+func startHeartbeat(ctx context.Context, cfg *config.Config, store state.Store, keys mesh.Keys, meshed bool) {
+	go selfheal.RunHeartbeat(ctx, selfheal.Options{
+		HostID:    cfg.HostID,
+		Store:     store,
+		Heartbeat: heartbeatFor(cfg, keys, meshed),
+	})
+}
+
+// startSelfHeal runs the rescue loop. The heartbeat is started separately, by
+// startHeartbeat, because every host writes its own row whether or not it is
+// part of a fleet.
 func startSelfHeal(ctx context.Context, cfg *config.Config, f *fleet, mgr *machines.Manager) {
 	opts := selfheal.Options{
-		HostID: cfg.HostID,
-		Fleet:  f.cache,
-		Store:  f.store,
-		Heartbeat: func() state.Host {
-			return state.Host{
-				ID:         cfg.HostID,
-				WGAddr:     f.keys.Address().String(),
-				WGPubKey:   f.keys.Public.String(),
-				PublicIP:   cfg.PublicIP,
-				CPUFree:    runtime.NumCPU(),
-				MemFreeMiB: freeMemMiB(cfg.HugePages),
-			}
-		},
+		HostID:    cfg.HostID,
+		Fleet:     f.cache,
+		Store:     f.store,
+		Heartbeat: heartbeatFor(cfg, f.keys, true),
 		Capacity: func(vcpus, memMiB int) bool {
 			return memMiB <= freeMemMiB(cfg.HugePages)
 		},
@@ -171,7 +207,6 @@ func startSelfHeal(ctx context.Context, cfg *config.Config, f *fleet, mgr *machi
 		StopLocal:      mgr.StopLocal,
 	}
 
-	go selfheal.RunHeartbeat(ctx, opts)
 	go selfheal.RunRescue(ctx, opts)
 }
 

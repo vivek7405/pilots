@@ -34,8 +34,8 @@ export function createPromoteCommand(): Command {
       if (isJSONMode()) printJSON(service)
       else
         printTable([
-          ['ID', 'NAME', 'REPLICAS', 'URL'],
-          [service.id, service.name, String(service.replicas), service.custom_domain || service.url || ''],
+          ['NAME', 'REPLICAS', 'URL', 'ID'],
+          [service.name, String(service.replicas), service.custom_domain || service.url || '', service.id],
         ])
     })
 }

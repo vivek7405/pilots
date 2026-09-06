@@ -229,6 +229,14 @@ async function processAssertions() {
     const { status, json } = await request('/v1/hosts');
     assert(status === 200, `expected 200, got ${status}`);
     assert(Array.isArray(json), 'expected an array');
+    // Every host heartbeats its own row, fleet or not, so the host answering
+    // this request is always in its own answer. A single box that lists []
+    // here is invisible to itself and `pilot status` shows an empty table.
+    assert(json.length >= 1, 'the fleet lists no hosts at all');
+    const { json: health } = await request('/v1/health', { auth: false });
+    const self = json.find((h) => h.id === health.host_id);
+    assert(self, `the host that answered (${health.host_id}) is missing from its own /v1/hosts`);
+    assert(self.alive === true, `${health.host_id} lists itself as not alive; its heartbeat has stopped`);
     // Every host publishes its row before its first heartbeat, so a host in
     // this list with no vendor is one whose start never finished -- and it
     // ranks as "in no pool", which turns tier 2 into tier 3 for its machines.

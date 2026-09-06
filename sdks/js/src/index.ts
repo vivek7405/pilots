@@ -91,6 +91,7 @@ export type {
   UsageResponse,
   UsageTotals,
   Volume,
+  WhoamiResponse,
 } from './types.ts'
 
 export { FrameExit, FrameStderr, FrameStdin, FrameStdinEOF, FrameStdout } from './types.ts'

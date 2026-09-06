@@ -55,6 +55,31 @@ export async function resolveService(client: PilotsClient, idOrName: string): Pr
 }
 
 /**
+ * Resolves a name or id to whatever it is: a service first, then a machine.
+ *
+ * Services first because a promoted machine and its service share a name, and
+ * the service is the durable half: it survives a replica being replaced, which
+ * is what a URL someone bookmarked has to do too.
+ */
+export async function resolveTarget(
+  client: PilotsClient,
+  idOrName: string,
+): Promise<{ name: string; url: string; kind: 'service' | 'machine' }> {
+  try {
+    const service = await resolveService(client, idOrName)
+    return { name: service.name, url: service.custom_domain || service.url || '', kind: 'service' }
+  } catch (err) {
+    // Only "there is no such service" falls through to a machine. An AMBIGUOUS
+    // name is a real answer with the ids in it, and swallowing it here reports
+    // "no machine with id or name x" for something that exists twice.
+    const notFound = `no service with id or name ${idOrName}`
+    if (!(err instanceof CliError) || err.message !== notFound) throw err
+  }
+  const machine = await resolveMachine(client, idOrName)
+  return { name: machine.name, url: machine.custom_domain || machine.url || '', kind: 'machine' }
+}
+
+/**
  * Parses repeated `--env K=V` flags.
  *
  * A value containing `=` is kept whole (only the first separator splits), so a

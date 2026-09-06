@@ -10,6 +10,7 @@ import { Command } from 'commander'
 
 import { clientFromEnv, type GlobalOptions } from '../config.ts'
 import { isJSONMode, note, printJSON, printTable } from '../output.ts'
+import { confirmOrExit } from '../prompt.ts'
 import { resolveService } from '../resolve.ts'
 
 export function createDomainsCommand(): Command {
@@ -57,6 +58,7 @@ export function createDomainsCommand(): Command {
     .action(async function (this: Command, hostname: string) {
       const opts = this.optsWithGlobals() as GlobalOptions
       const client = clientFromEnv(opts)
+      await confirmOrExit(`detach ${hostname}?`, opts)
       await client.domains.remove(hostname)
       if (isJSONMode()) printJSON({ hostname, removed: true })
       else note(`removed ${hostname}`)
