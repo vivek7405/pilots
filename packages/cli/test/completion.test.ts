@@ -81,3 +81,24 @@ test('an unknown shell exits 1 and names the three', async () => {
   assert.match(res.stderr ?? '', /unknown shell elvish/)
   assert.match(res.stderr ?? '', /bash\|zsh\|fish/)
 })
+
+// The zsh script's own two landmines. `words` is the array zsh fills with the
+// command line, so a `local words` blanks it and `words_` is not a variable at
+// all; between them the path walk always came out empty and `pilot machines
+// <TAB>` offered the top-level command list.
+test('the zsh script reads zsh own words array and never shadows it', () => {
+  const script = generate(buildProgram(), 'zsh')
+  assert.doesNotMatch(script, /words_/, 'words_ is not a zsh variable')
+  assert.doesNotMatch(script, /^\s*local .*\bwords\b/m, 'local words shadows the command-line array')
+  assert.match(script, /word="\$\{words\[i\]\}"/)
+  assert.match(script, /__pilot_words/)
+})
+
+// At the root the path is empty, and an UNQUOTED command substitution that
+// prints nothing expands to zero arguments: fish would evaluate `test = ''`,
+// which is not a valid test, so `pilot <TAB>` completed nothing at all.
+test('the fish guard quotes the command substitution', () => {
+  const script = generate(buildProgram(), 'fish')
+  assert.match(script, /test "\(__fish_pilot_path\)" = /)
+  assert.doesNotMatch(script, /test \(__fish_pilot_path\) = /)
+})

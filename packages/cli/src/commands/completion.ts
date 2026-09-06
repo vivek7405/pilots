@@ -98,23 +98,26 @@ function zsh(nodes: Node[]): string {
     .map((n) => {
       const key = n.path.join(' ')
       const words = [...n.subcommands, ...n.options].join(' ')
-      return `    ${JSON.stringify(key)}) words=${JSON.stringify(words)} ;;`
+      return `    ${JSON.stringify(key)}) __pilot_words=${JSON.stringify(words)} ;;`
     })
     .join('\n')
+  // The result variable is __pilot_words, not words: `words` is the array zsh
+  // fills with the command line, and a `local words` here would blank the one
+  // thing the walk below has to read.
   return `#compdef pilot
 _pilot() {
-  local path i word words
+  local path i word __pilot_words
   path=""
   for ((i = 2; i < CURRENT; i++)); do
-    word="\${words_[i]}"
+    word="\${words[i]}"
     case "$word" in -*) continue ;; esac
     if [ -z "$path" ]; then path="$word"; else path="$path $word"; fi
   done
   case "$path" in
 ${cases}
-    *) words="" ;;
+    *) __pilot_words="" ;;
   esac
-  _arguments "*: :(\${=words})"
+  _arguments "*: :(\${=__pilot_words})"
 }
 compdef _pilot pilot
 `
@@ -137,7 +140,11 @@ function fish(nodes: Node[]): string {
     '',
   ]
   for (const node of nodes) {
-    const guard = `test (__fish_pilot_path) = ${quoteFish(node.path.join(' '))}`
+    // Quoted: at the root the path is empty, and an UNQUOTED command
+    // substitution that prints nothing expands to zero arguments, leaving
+    // fish to evaluate `test = ''` -- not a valid test, so `pilot <TAB>`
+    // would complete nothing at all.
+    const guard = `test "(__fish_pilot_path)" = ${quoteFish(node.path.join(' '))}`
     for (const sub of node.subcommands) {
       const child = nodes.find((n) => n.path.join(' ') === [...node.path, sub].join(' '))
       const description = child?.description ?? ''
