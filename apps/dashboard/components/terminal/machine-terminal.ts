@@ -167,6 +167,7 @@ export class MachineTerminal extends WebComponent({
     this.#socket = socket;
 
     socket.addEventListener('open', () => {
+      if (this.#socket !== socket) return;
       this.status = 'open';
       // The fitted size goes out FIRST, so the shell starts at the right
       // window and never redraws its opening prompt.
@@ -175,15 +176,25 @@ export class MachineTerminal extends WebComponent({
       term?.focus();
     });
 
-    socket.addEventListener('message', (event: MessageEvent) => this.receive(String(event.data)));
+    socket.addEventListener('message', (event: MessageEvent) => {
+      if (this.#socket !== socket) return;
+      this.receive(String(event.data));
+    });
 
+    // Every handler checks that this is still THE socket. Reconnect closes the
+    // old one and dials immediately, and a close event is delivered a task
+    // later: without the guard the dead socket's close would overwrite the new
+    // one's `connecting` with `Disconnected`, and its last frames would still
+    // be written into the screen.
     socket.addEventListener('close', (event: CloseEvent) => {
+      if (this.#socket !== socket) return;
       if (this.status !== 'error') this.status = 'closed';
       if (event.code === 4401) this.message = 'Your session expired. Reload the page to sign in again.';
       else if (event.code === 4404) this.message = 'That machine is gone.';
     });
 
     socket.addEventListener('error', () => {
+      if (this.#socket !== socket) return;
       this.status = 'error';
       if (!this.message) this.message = 'The connection failed.';
     });
