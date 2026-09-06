@@ -32,6 +32,7 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 TARBALL = re.compile(r"^/repos/[^/]+/([^/]+)/tarball/")
+INSTALLATION = re.compile(r"^/repos/[^/]+/([^/]+)/installation$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -59,6 +60,19 @@ class Handler(BaseHTTPRequestHandler):
         self._send(201, b"{}", "application/json")
 
     def do_GET(self):
+        # Which installation covers a repository. A webhook delivery carries
+        # its own installation id; a caller that merely NAMES a repository does
+        # not, so the {repo, ref} body on the plan and build routes asks first.
+        match = INSTALLATION.match(self.path)
+        if match:
+            if match.group(1) not in self.tarballs:
+                self._send(404, json.dumps(
+                    {"message": "not installed on %s" % match.group(1)}).encode(),
+                    "application/json")
+                return
+            self._send(200, json.dumps({"id": 1}).encode(), "application/json")
+            return
+
         match = TARBALL.match(self.path)
         if not match:
             self._send(404, b'{"message":"no route"}', "application/json")
