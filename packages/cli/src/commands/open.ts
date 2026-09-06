@@ -7,7 +7,7 @@
  * so nothing here goes near a shell.
  */
 
-import { execFile } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import { platform } from 'node:os'
 
 import { Command } from 'commander'
@@ -19,8 +19,21 @@ import { resolveTarget } from '../resolve.ts'
 /** Injectable so a test can prove nothing was spawned. */
 export type Spawn = (file: string, args: string[]) => void
 
+/**
+ * Fire and forget: no pipes, its own process group.
+ *
+ * `execFile` would give the child piped stdio, and `unref()` releases only the
+ * process handle, never those pipes. `xdg-open` execs the browser, the browser
+ * inherits fd 1 and 2, and node then waits on a pipe that stays open for as
+ * long as the browser runs -- so `pilot open` would not return until the user
+ * quit their browser. `stdio: 'ignore'` is what makes the command return.
+ */
 const defaultSpawn: Spawn = (file, args) => {
-  execFile(file, args, { shell: false }).unref()
+  const child = spawn(file, args, { detached: true, stdio: 'ignore', shell: false })
+  // A missing opener emits `error`; with no listener that is an uncaught
+  // exception rather than a URL the reader can still copy off the screen.
+  child.on('error', (err) => note(`could not run ${file}: ${err.message}`))
+  child.unref()
 }
 
 /** Injectable beside the spawn seam, so a test can read stdout without owning it. */
