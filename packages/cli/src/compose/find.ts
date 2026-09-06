@@ -33,9 +33,14 @@ export function findComposeFile(dir: string): string | null {
  * `name:`. Client-side because `pilot secrets` and `pilot add` run with no
  * fleet in reach, and a name that differed from the plan's would store a
  * value under a key the deploy never reads.
+ *
+ * `extraEnv` is `--env`, which hostd sees because `deploy` merges it over the
+ * `.env` file into the `env` it posts. A caller that left it out would derive
+ * a different name from the same project for `deploy --env
+ * COMPOSE_PROJECT_NAME=prod`, which is the bug this function exists to close.
  */
-export function composeAppName(file: string): string {
-  const env = loadDotEnv(dirname(file))
+export function composeAppName(file: string, extraEnv: Record<string, string> = {}): string {
+  const env = { ...loadDotEnv(dirname(file)), ...extraEnv }
   if (env.COMPOSE_PROJECT_NAME) return env.COMPOSE_PROJECT_NAME
   const doc = parse(readFileSync(file, 'utf8')) as Record<string, unknown> | null
   const xPilots = doc?.['x-pilots']

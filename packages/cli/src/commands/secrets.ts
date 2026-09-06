@@ -19,11 +19,14 @@ import { envVarFor } from '../compose/secrets.ts'
 import { credentialsPath, type GlobalOptions } from '../config.ts'
 import { CliError, isJSONMode, note, printJSON, printTable } from '../output.ts'
 import { promptSecret } from '../prompt.ts'
+import { collect, parseKeyValues } from '../resolve.ts'
 import { assertSecretName, importSecrets, listSecretNames, setSecret } from '../secrets/store.ts'
 
 interface ScopeOptions {
   app?: string
   dir: string
+  env?: string[]
+  file?: string
 }
 
 export function createSecretsCommand(): Command {
@@ -31,10 +34,16 @@ export function createSecretsCommand(): Command {
     .alias('secret')
     .description('the values secret:// references resolve to, on this machine')
 
+  // The four flags `deploy` derives its app from, so the name a value is
+  // stored under is the name the deploy looks it up under. Anything less and
+  // `deploy --env COMPOSE_PROJECT_NAME=prod` resolves against an app nothing
+  // ever wrote to.
   const scoped = (cmd: Command): Command =>
     cmd
       .option('--app <name>', 'the app the secrets belong to (default: the compose file\'s app)')
       .option('--dir <path>', 'the directory holding the compose file', '.')
+      .option('--env <K=V>', 'add to the environment the app name is derived from (repeatable)', collect)
+      .option('--file <path>', 'use this compose file instead of searching')
 
   scoped(secrets.command('set <name> [value]'))
     .description('store one secret; prompts for the value when it is omitted')
@@ -74,16 +83,24 @@ export function createSecretsCommand(): Command {
   return secrets
 }
 
-/** `--app`, else the compose file's app: the same name `pilot deploy` resolves against. */
+/**
+ * `--app`, else the compose file's app.
+ *
+ * Every input `deploy` uses, resolved the way `deploy` resolves it: `--file`
+ * relative to `--dir`, and `--env` merged over the directory's `.env`. The two
+ * commands have to agree on the name or the value is stored where the deploy
+ * will not look for it.
+ */
 function appFor(opts: ScopeOptions): string {
   if (opts.app) return opts.app
-  const file = findComposeFile(resolve(opts.dir))
+  const dir = resolve(opts.dir)
+  const file = opts.file ? resolve(dir, opts.file) : findComposeFile(dir)
   if (!file) {
     throw new CliError(
-      `no compose file in ${resolve(opts.dir)} to take the app from (looked for ${COMPOSE_NAMES.join(', ')}): pass --app`,
+      `no compose file in ${dir} to take the app from (looked for ${COMPOSE_NAMES.join(', ')}): pass --app`,
     )
   }
-  return composeAppName(file)
+  return composeAppName(file, parseKeyValues(opts.env))
 }
 
 /**

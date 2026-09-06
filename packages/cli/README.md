@@ -169,19 +169,19 @@ missing name is reported at once, before anything is built. Store values with
 ### Secrets
 
 ```
-pilot secrets set <name> [value] [--app <app>] [--dir <path>]
-pilot secrets import <file>      [--app <app>] [--dir <path>]
-pilot secrets ls                 [--app <app>] [--dir <path>]
+pilot secrets set <name> [value] [--app <app>] [--dir <path>] [--env K=V] [--file <path>]
+pilot secrets import <file>      [--app <app>] [--dir <path>] [--env K=V] [--file <path>]
+pilot secrets ls                 [--app <app>] [--dir <path>] [--env K=V] [--file <path>]
 ```
 
 The app is `--app`, or the compose file's app by the same rule `deploy` uses:
 `COMPOSE_PROJECT_NAME` from the directory's `.env`, then a top-level
 `x-pilots.app`, then a top-level `name:`. A file with none of the three is
 refused rather than given a default, because a value stored under the wrong name
-is a value the deploy will not find. `deploy` also takes the app from
-`--app` and from `--env COMPOSE_PROJECT_NAME=...`, which `secrets` has no
-equivalent of: a deploy that overrides the name that way needs the same
-`--app` here.
+is a value the deploy will not find. `--env K=V` and `--file <path>` are the
+same flags `deploy` has and feed the same derivation, so a project deployed as
+`deploy --env COMPOSE_PROJECT_NAME=prod` or `deploy --file prod.compose.yaml`
+stores its secrets under the app that deploy resolves against.
 
 `set` with no value prompts on a terminal and never echoes what is typed. When
 stdin is not a terminal it reads stdin to EOF instead, so

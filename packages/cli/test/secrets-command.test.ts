@@ -138,6 +138,43 @@ test('x-pilots.app wins over name:', async () => {
   assert.equal(loadCredentials(b.env)!.secrets?.['from-x']?.k, 'v')
 })
 
+test('--env COMPOSE_PROJECT_NAME matches what deploy --env would derive', async () => {
+  const b = bed('name: shop\n')
+  assert.equal((await pilot(b, ['secrets', 'set', 'k', 'v', '--env', 'COMPOSE_PROJECT_NAME=prod'])).code, 0)
+  // Counterfactual: without the flag this lands under `shop`, and a
+  // `pilot deploy --env COMPOSE_PROJECT_NAME=prod` then fails saying the
+  // secret was never set while `ls` shows it sitting there.
+  assert.equal(loadCredentials(b.env)!.secrets?.prod?.k, 'v')
+  assert.equal(loadCredentials(b.env)!.secrets?.shop, undefined)
+})
+
+test('--env wins over the .env file, the way deploy merges them', async () => {
+  const b = bed('name: shop\n', 'COMPOSE_PROJECT_NAME=from-file\n')
+  assert.equal((await pilot(b, ['secrets', 'set', 'k', 'v', '--env', 'COMPOSE_PROJECT_NAME=from-flag'])).code, 0)
+  assert.equal(loadCredentials(b.env)!.secrets?.['from-flag']?.k, 'v')
+})
+
+test('--file takes the app from another compose file, resolved against --dir', async () => {
+  const b = bed('name: shop\n')
+  writeFileSync(join(b.dir, 'prod.compose.yaml'), 'name: shop-prod\n')
+  assert.equal((await pilot(b, ['secrets', 'set', 'k', 'v', '--file', 'prod.compose.yaml'])).code, 0)
+  // Counterfactual: ignoring --file reads compose.yaml and stores under
+  // `shop`, which is a different app from the one that deploy --file builds.
+  assert.equal(loadCredentials(b.env)!.secrets?.['shop-prod']?.k, 'v')
+  assert.equal(loadCredentials(b.env)!.secrets?.shop, undefined)
+})
+
+test('--app still wins over --env and --file', async () => {
+  const b = bed('name: shop\n')
+  writeFileSync(join(b.dir, 'prod.compose.yaml'), 'name: shop-prod\n')
+  const res = await pilot(b, [
+    'secrets', 'ls', '--json',
+    '--app', 'explicit', '--env', 'COMPOSE_PROJECT_NAME=prod', '--file', 'prod.compose.yaml',
+  ])
+  assert.equal(res.code, 0, res.stderr)
+  assert.equal((JSON.parse(res.stdout) as { app: string }).app, 'explicit')
+})
+
 test('a compose file with no app name is refused naming the three sources', async () => {
   const b = bed('services:\n  web:\n    build: .\n')
   const res = await pilot(b, ['secrets', 'set', 'k', 'v'])
