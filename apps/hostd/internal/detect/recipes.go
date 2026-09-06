@@ -24,8 +24,12 @@ type Recipe struct {
 // ${PORT:-8080} in its start command: the platform's port, never the
 // framework's, because the router dials 8080 and an image that listens on 3000
 // builds cleanly and answers 502.
-func Generate(dir string) (Recipe, bool) {
-	switch f := Detect(dir); f {
+func Generate(dir string) (Recipe, bool) { return GenerateIn(dir, dir) }
+
+// GenerateIn is Generate for a directory whose lockfile lives somewhere else.
+// See DetectIn: an npm workspace member has no lockfile of its own.
+func GenerateIn(dir, lockRoot string) (Recipe, bool) {
+	switch f := DetectIn(dir, lockRoot); f {
 	case FrameworkWebJS:
 		return webjs(), true
 	case FrameworkNext:
@@ -51,36 +55,81 @@ func Generate(dir string) (Recipe, bool) {
 	}
 }
 
-// ForWorkspace rewrites a recipe for a workspace member of a monorepo.
+// workspaceRewritable are the frameworks ForWorkspace knows how to move into a
+// subdirectory. They are the node ones, which is all a member of an npm
+// workspace can be: the install is npm's, the build script is npm's, and the
+// only thing that has to move is the working directory.
+//
+// Anything else is refused rather than rewritten. A go or rust recipe copies a
+// built artifact out of its build stage by absolute path, and moving the
+// working directory under it produces a Dockerfile that builds the wrong
+// thing or does not build at all. Refusing means the member is skipped and
+// named, exactly as an undetected one is, which is a worse outcome than
+// working and a much better one than a broken image.
+var workspaceRewritable = map[Framework]bool{
+	FrameworkWebJS: true, FrameworkNext: true,
+	FrameworkReactRouter: true, FrameworkVite: true,
+}
+
+// ForWorkspace rewrites a recipe for a workspace member of a monorepo, and
+// reports whether it could.
 //
 // The install stays at the root, because that is where the lockfile and the
 // hoisted node_modules are, and only the working directory moves. A member
 // built from its own directory would reinstall the whole tree per service and
 // still miss anything the root hoisted.
-func (r Recipe) ForWorkspace(rel string) Recipe {
+func (r Recipe) ForWorkspace(rel string) (Recipe, bool) {
+	if !workspaceRewritable[r.Framework] {
+		return Recipe{}, false
+	}
 	out := r
 	out.Dockerfile = withWorkdir(r.Dockerfile, rel)
 	out.Notes = append(append([]string{}, r.Notes...),
 		"Built from the repository root with WORKDIR /app/"+rel+
 			": the install is the root's, so the lockfile and the hoisted "+
 			"node_modules are the ones the workspace expects.")
-	return out
+	return out, true
 }
 
-// withWorkdir inserts WORKDIR /app/<rel> just before the final CMD, so the
-// start command runs in the member's directory and everything before it, the
-// copy and the install, still runs at the root.
+// withWorkdir moves the build into the member's directory.
+//
+// The insertion point is the last `COPY . .`, which is the moment the whole
+// tree is present and the last moment before anything is built. It is NOT the
+// CMD: putting it there left `RUN npm run build` running at the workspace
+// root, where an npm-workspaces root usually has no build script at all, so
+// the image either failed to build or built the wrong app. For a multi-stage
+// recipe it was worse than that, because the CMD is in the runtime stage and
+// the WORKDIR landed there instead of in the stage that does the work.
+//
+// A stage that copies a build artifact out by absolute path has that path
+// moved too: vite's `COPY --from=build /app/dist` reads a directory the
+// member's build produced under /app/<rel>/dist and nowhere else.
 func withWorkdir(dockerfile, rel string) string {
 	lines := strings.Split(strings.TrimRight(dockerfile, "\n"), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if strings.HasPrefix(lines[i], "CMD ") {
-			out := append([]string{}, lines[:i]...)
-			out = append(out, "WORKDIR /app/"+rel)
-			out = append(out, lines[i:]...)
-			return strings.Join(out, "\n") + "\n"
+
+	last := -1
+	for i, line := range lines {
+		if strings.TrimSpace(line) == "COPY . ." {
+			last = i
 		}
 	}
-	return strings.Join(append(lines, "WORKDIR /app/"+rel), "\n") + "\n"
+	out := make([]string, 0, len(lines)+1)
+	for i, line := range lines {
+		// An artifact copied out of an earlier stage moves with the build.
+		if strings.HasPrefix(line, "COPY --from=") {
+			line = strings.Replace(line, " /app/", " /app/"+rel+"/", 1)
+		}
+		out = append(out, line)
+		if i == last {
+			out = append(out, "WORKDIR /app/"+rel)
+		}
+	}
+	if last < 0 {
+		// Nothing copied the tree in, so there is no anchor and no build to
+		// move; the working directory is all there is to set.
+		out = append(out, "WORKDIR /app/"+rel)
+	}
+	return strings.Join(out, "\n") + "\n"
 }
 
 func httpHealth(path string, grace int) *api.HealthCheck {

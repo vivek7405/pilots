@@ -7,6 +7,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/vivek7405/pilots/hostd/internal/compose"
 )
 
 const fixtures = "testdata/frameworks"
@@ -423,5 +425,109 @@ func rm(t *testing.T, dir, name string) {
 	t.Helper()
 	if err := os.Remove(filepath.Join(dir, name)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// npm hoists the lockfile to the workspace root, so a member has a
+// package.json and a framework config and no lockfile of its own.
+//
+// Detecting a member against its own directory therefore ran a check that can
+// never pass: a Next workspace fell through to unknown, was silently dropped,
+// and a monorepo of two Next apps planned zero services and answered
+// unknown_framework, which is the exact case the workspace path exists for.
+func TestAWorkspaceMemberIsDetectedAgainstTheRootsLockfile(t *testing.T) {
+	const root = "testdata/workspace-mixed"
+
+	// The member on its own: no lockfile, so the Next rung cannot fire. This
+	// is the behaviour that was wrong to rely on, pinned so the two calls are
+	// visibly different things.
+	if got := Detect(filepath.Join(root, "web")); got != FrameworkUnknown {
+		t.Fatalf("Detect(web) = %q, want unknown: the member has no lockfile", got)
+	}
+	if got := DetectIn(filepath.Join(root, "web"), root); got != FrameworkNext {
+		t.Errorf("DetectIn(web, root) = %q, want next", got)
+	}
+}
+
+// The monorepo the workspace path exists for: two apps, neither of them
+// buildless, both planned.
+func TestAMixedWorkspaceRepoPlansEveryMember(t *testing.T) {
+	res, planErr, unknown, err := Plan(context.Background(), "testdata/workspace-mixed",
+		Options{App: "shop"})
+	mustPlan(t, res, planErr, unknown, err)
+
+	if len(res.Plan.Steps) != 2 {
+		t.Fatalf("%d steps, want 2: a member that is not webjs was dropped", len(res.Plan.Steps))
+	}
+	byName := map[string]compose.Step{}
+	for _, s := range res.Plan.Steps {
+		byName[s.Name] = s
+	}
+	frameworks := map[string]string{}
+	for _, d := range res.Detected {
+		frameworks[d.Service] = d.Framework
+	}
+	if frameworks["web"] != "next" {
+		t.Errorf("web detected as %q, want next", frameworks["web"])
+	}
+	if frameworks["admin"] != "vite" {
+		t.Errorf("admin detected as %q, want vite", frameworks["admin"])
+	}
+
+	// The working directory moves BEFORE the build, not before the CMD. With
+	// it at the CMD, `RUN npm run build` ran at the workspace root, where an
+	// npm-workspaces root usually has no build script at all.
+	for name, step := range byName {
+		lines := strings.Split(step.Dockerfile, "\n")
+		workdir, build := -1, -1
+		for i, line := range lines {
+			if line == "WORKDIR /app/"+name {
+				workdir = i
+			}
+			if strings.HasPrefix(line, "RUN npm run build") && build < 0 {
+				build = i
+			}
+		}
+		if workdir < 0 {
+			t.Errorf("%s never moves into its own directory:\n%s", name, step.Dockerfile)
+			continue
+		}
+		if build < 0 {
+			t.Errorf("%s has no build step; the fixture stopped exercising this", name)
+			continue
+		}
+		if workdir > build {
+			t.Errorf("%s builds at the workspace root, then moves:\n%s", name, step.Dockerfile)
+		}
+	}
+
+	// A multi-stage recipe copies its artifact out by absolute path, and that
+	// path moved with the build. Reading /app/dist would read a directory the
+	// member's build never produced.
+	admin := byName["admin"].Dockerfile
+	if !strings.Contains(admin, "COPY --from=build /app/admin/dist") {
+		t.Errorf("the vite member copies the wrong dist out of its build stage:\n%s", admin)
+	}
+	if strings.Contains(admin, "COPY --from=build /app/dist") {
+		t.Errorf("the vite member still reads the root's dist:\n%s", admin)
+	}
+	// And the runtime stage's working directory is untouched: nginx serves
+	// from /usr/share/nginx/html and has no business in /app/admin.
+	if strings.Contains(admin, "WORKDIR /app/admin\nCMD") {
+		t.Errorf("the workdir landed in the runtime stage:\n%s", admin)
+	}
+}
+
+// A recipe the rewrite cannot move is skipped and named, not emitted broken.
+func TestAWorkspaceRecipeThatCannotBeMovedIsRefused(t *testing.T) {
+	for _, f := range []Framework{FrameworkGo, FrameworkRust, FrameworkDjango, FrameworkRails} {
+		r := Recipe{Framework: f, Dockerfile: "FROM scratch\nCOPY . .\nCMD [\"/app\"]\n"}
+		if _, ok := r.ForWorkspace("web"); ok {
+			t.Errorf("%s was rewritten for a workspace; its artifact paths are absolute", f)
+		}
+	}
+	webjs, _ := Generate(filepath.Join(fixtures, "webjs"))
+	if _, ok := webjs.ForWorkspace("web"); !ok {
+		t.Error("a node recipe was refused")
 	}
 }

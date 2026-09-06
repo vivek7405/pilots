@@ -1,0 +1,6 @@
+{
+  "name": "workspace-mixed",
+  "private": true,
+  "workspaces": ["web", "admin"],
+  "dependencies": { "next": "15", "vite": "6" }
+}

@@ -159,12 +159,19 @@ func planWorkspaces(dir, app string, members []string) *Result {
 	var skipped []string
 
 	for _, rel := range members {
-		recipe, ok := Generate(filepath.Join(dir, rel))
+		// The lockfile is the ROOT's: npm hoists it, so a member has none of
+		// its own and a detector that looked for one in the member could
+		// never recognise a framework that requires it.
+		recipe, ok := GenerateIn(filepath.Join(dir, rel), dir)
 		if !ok {
 			skipped = append(skipped, rel)
 			continue
 		}
-		member := recipe.ForWorkspace(rel)
+		member, ok := recipe.ForWorkspace(rel)
+		if !ok {
+			skipped = append(skipped, rel)
+			continue
+		}
 		name := filepath.Base(rel)
 		step := baseStep(name)
 		// The context is the repository root, never the member's directory:

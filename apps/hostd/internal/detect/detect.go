@@ -91,7 +91,20 @@ var lockfiles = []string{
 // because a webjs app has no build step and no bundler config to find. That is
 // the framework's whole point and it is also why nothing else can stand in for
 // the check.
-func Detect(dir string) Framework {
+func Detect(dir string) Framework { return DetectIn(dir, dir) }
+
+// DetectIn is Detect for a directory whose lockfile lives somewhere else.
+//
+// npm hoists the lockfile to the workspace root, so a member of a monorepo has
+// a package.json and a framework config and no lockfile of its own. Checking
+// for one in the member is then a check that can never pass: a Next workspace
+// fell straight through to unknown and was silently dropped, which took a
+// monorepo of two Next apps to zero services and an unknown_framework answer.
+//
+// lockRoot is the workspace root for a member, and the directory itself
+// otherwise. It is only ever consulted for lockfiles: everything else about a
+// framework is declared in the member.
+func DetectIn(dir, lockRoot string) Framework {
 	has := func(name string) bool {
 		_, err := os.Stat(filepath.Join(dir, name))
 		return err == nil
@@ -106,7 +119,7 @@ func Detect(dir string) Framework {
 	}
 	anyLockfile := func() bool {
 		for _, l := range lockfiles {
-			if has(l) {
+			if _, err := os.Stat(filepath.Join(lockRoot, l)); err == nil {
 				return true
 			}
 		}
