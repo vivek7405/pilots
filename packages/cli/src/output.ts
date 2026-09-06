@@ -101,7 +101,11 @@ export function renderError(err: unknown): string {
     const last = err.lines[err.lines.length - 1]
     return `error: build ${err.buildId} failed: ${last?.error ?? err.message}`
   }
-  return `error: ${messageOf(err)}`
+  // The server's next step, on its own line under the error. It is the one
+  // thing a reader is meant to do about what just failed, and it is on every
+  // 4xx, so printing it here means no command has to know its own remedies.
+  const next = err instanceof PilotsError && err.next ? `\n→ ${err.next}` : ''
+  return `error: ${messageOf(err)}${next}`
 }
 
 function messageOf(err: unknown): string {

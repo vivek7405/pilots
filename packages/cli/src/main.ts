@@ -18,6 +18,8 @@ import { createDomainsCommand } from './commands/domains.ts'
 import { createLoginCommand, createLogoutCommand, createWhoamiCommand } from './commands/login.ts'
 import { createMachinesCommand } from './commands/machines.ts'
 import { createMcpCommand } from './commands/mcp.ts'
+import { createInitCommand } from './commands/init.ts'
+import { createSkillCommand } from './commands/skill.ts'
 import { createPromoteCommand } from './commands/promote.ts'
 import { createSecretsCommand } from './commands/secrets.ts'
 import { createServicesCommand } from './commands/services.ts'
@@ -53,6 +55,8 @@ export function buildProgram(): Command {
   program.addCommand(createAddCommand())
   program.addCommand(createSecretsCommand())
   program.addCommand(createMcpCommand())
+  program.addCommand(createInitCommand())
+  program.addCommand(createSkillCommand())
 
   return program
 }

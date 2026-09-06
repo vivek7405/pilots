@@ -23,6 +23,11 @@ type App struct {
 	PrivateKey *rsa.PrivateKey
 	// Secret is the webhook shared secret.
 	Secret string
+	// BaseURL is the API base, https://api.github.com in production. It is a
+	// field rather than a constant so the fleet gate can drive the push path
+	// against a stand-in; a push path nothing can exercise end to end is one
+	// nothing tests.
+	BaseURL string
 
 	HTTP *http.Client
 }
@@ -32,7 +37,7 @@ type App struct {
 // The private key is a file rather than an environment variable because it is
 // multi-line PEM, and every layer between here and a systemd unit mangles
 // those differently.
-func LoadApp(id int64, keyPath, secret string) (*App, error) {
+func LoadApp(id int64, keyPath, secret, baseURL string) (*App, error) {
 	if id == 0 || keyPath == "" {
 		return nil, nil // not configured; push-to-deploy is simply off
 	}
@@ -55,7 +60,10 @@ func LoadApp(id int64, keyPath, secret string) (*App, error) {
 			return nil, fmt.Errorf("github: app key is not RSA")
 		}
 	}
-	return &App{ID: id, PrivateKey: key, Secret: secret,
+	if baseURL == "" {
+		baseURL = "https://api.github.com"
+	}
+	return &App{ID: id, PrivateKey: key, Secret: secret, BaseURL: baseURL,
 		HTTP: &http.Client{Timeout: 60 * time.Second}}, nil
 }
 
@@ -106,7 +114,7 @@ func (a *App) InstallationToken(ctx context.Context, installationID int64) (stri
 	if err != nil {
 		return "", err
 	}
-	url := fmt.Sprintf("https://api.github.com/app/installations/%d/access_tokens", installationID)
+	url := fmt.Sprintf("%s/app/installations/%d/access_tokens", a.base(), installationID)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return "", err
@@ -139,7 +147,7 @@ func (a *App) InstallationToken(ctx context.Context, installationID int64) (stri
 // the body streamed straight through rather than staged. The single wrapping
 // directory is stripped on the way past -- see StripRoot.
 func (a *App) Tarball(ctx context.Context, token, repo, ref string, w io.Writer) error {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/tarball/%s", repo, ref)
+	url := fmt.Sprintf("%s/repos/%s/tarball/%s", a.base(), repo, ref)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -203,10 +211,10 @@ func (a *App) Comment(ctx context.Context, token, repo string, number int, marke
 	}
 	payload, _ := json.Marshal(map[string]string{"body": marker + "\n" + body})
 
-	url := fmt.Sprintf("https://api.github.com/repos/%s/issues/%d/comments", repo, number)
+	url := fmt.Sprintf("%s/repos/%s/issues/%d/comments", a.base(), repo, number)
 	method := http.MethodPost
 	if existing != 0 {
-		url = fmt.Sprintf("https://api.github.com/repos/%s/issues/comments/%d", repo, existing)
+		url = fmt.Sprintf("%s/repos/%s/issues/comments/%d", a.base(), repo, existing)
 		method = http.MethodPatch
 	}
 	req, err := http.NewRequestWithContext(ctx, method, url, strings.NewReader(string(payload)))
@@ -227,7 +235,7 @@ func (a *App) Comment(ctx context.Context, token, repo string, number int, marke
 }
 
 func (a *App) findComment(ctx context.Context, token, repo string, number int, marker string) (int64, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/issues/%d/comments?per_page=100", repo, number)
+	url := fmt.Sprintf("%s/repos/%s/issues/%d/comments?per_page=100", a.base(), repo, number)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return 0, err
@@ -260,4 +268,12 @@ func readSnippet(r io.Reader) string {
 	buf := make([]byte, 400)
 	n, _ := r.Read(buf)
 	return strings.TrimSpace(string(buf[:n]))
+}
+
+// base is the API root, defaulting for an App built by hand in a test.
+func (a *App) base() string {
+	if a.BaseURL == "" {
+		return "https://api.github.com"
+	}
+	return a.BaseURL
 }

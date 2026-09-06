@@ -19,8 +19,9 @@ import { join } from 'node:path'
 
 const repoRoot = join(import.meta.dirname, '..', '..', '..')
 const apiDir = join(repoRoot, 'apps', 'hostd', 'internal', 'api')
-// `internal/compose` arrives with #30. Until then there is nothing to walk;
-// the day it lands, its structs are checked without touching this file.
+// `internal/compose` carries the plan, detect and error shapes, all under a
+// `Compose` prefix. Walked here so a shape added to the front door cannot
+// land unmirrored.
 const composeDir = join(repoRoot, 'apps', 'hostd', 'internal', 'compose')
 const typesTS = join(import.meta.dirname, '..', 'src', 'types.ts')
 

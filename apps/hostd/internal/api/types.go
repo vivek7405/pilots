@@ -256,6 +256,10 @@ type BuildLogLine struct {
 	TS     int64  `json:"ts"`
 	Error  string `json:"error,omitempty"`
 	Result string `json:"result,omitempty"` // rootfs_build_id on success
+	// Code is the stable code on a terminal failure line, the same closed
+	// list ErrorResponse.Code draws from, so a consumer that reads the log
+	// instead of the status branches on the same value.
+	Code string `json:"code,omitempty"`
 }
 
 // HealthCheck gates a rollout: a new release takes traffic only once healthy.
@@ -491,6 +495,10 @@ type QuotaResponse struct {
 // told what to raise rather than only that something was too big.
 type QuotaExceededResponse struct {
 	Error string `json:"error"`
+	// Code and Next mirror ErrorResponse so that a client branching on the
+	// error shape does not need a second one for this route's body.
+	Code  string `json:"code"`
+	Next  string `json:"next"`
 	Quota string `json:"quota"`
 	Limit int    `json:"limit"`
 	Used  int    `json:"used"`
@@ -554,6 +562,53 @@ type HealthResponse struct {
 	CPUVendorForced bool `json:"cpu_vendor_forced,omitempty"`
 }
 
+// ErrorResponse is every non-2xx body. Code is a stable snake_case noun a
+// client branches on; Next is the one thing to do about it, naming the
+// command or the call; Details is typed per code (HealthGateDetails,
+// compose.UnknownDetails) and absent otherwise.
+//
+// Three fields rather than one sentence because the consumer is as often an
+// agent as a person: a sentence has to be parsed to be acted on, and a parser
+// written against prose breaks the first time the prose is improved.
 type ErrorResponse struct {
-	Error string `json:"error"`
+	Error   string `json:"error"`
+	Code    string `json:"code,omitempty"`
+	Next    string `json:"next,omitempty"`
+	Details any    `json:"details,omitempty"`
+}
+
+// HealthGateDetails is the 422 body's details and the error the rollout
+// returns, one type so nothing is copied between them. It never carries an
+// address: the host-internal probe target is not something a caller can reach,
+// and printing it has only ever sent people to debug a 10.x address that is
+// not routable from where they are reading it.
+type HealthGateDetails struct {
+	Service  string     `json:"service"`
+	Replica  string     `json:"replica"`
+	Release  string     `json:"release"`
+	GraceSec int        `json:"grace_sec"`
+	Last     HealthLast `json:"last"`
+}
+
+// HealthLast is the replica's last answer: a status and body when it
+// answered, or a one-line reason when it did not.
+type HealthLast struct {
+	Status int    `json:"status,omitempty"`
+	Body   string `json:"body,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+// Error reads "replica <r> of <s> did not become healthy within <n>s: <last>",
+// where last is the error line or "last answer was <status> <body>".
+func (e *HealthGateDetails) Error() string {
+	last := e.Last.Error
+	if last == "" {
+		last = fmt.Sprintf("last answer was %d %s", e.Last.Status, e.Last.Body)
+	}
+	of := ""
+	if e.Service != "" {
+		of = " of " + e.Service
+	}
+	return fmt.Sprintf("replica %s%s did not become healthy within %ds: %s",
+		e.Replica, of, e.GraceSec, last)
 }

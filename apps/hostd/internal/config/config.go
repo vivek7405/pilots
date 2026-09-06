@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 )
 
 // Config is the full runtime configuration for a hostd process.
@@ -82,6 +83,11 @@ type Config struct {
 	GitHubAppID      int64  // PILOT_GITHUB_APP_ID
 	GitHubKeyPath    string // PILOT_GITHUB_APP_KEY
 	GitHubWebhookKey string // PILOT_GITHUB_WEBHOOK_SECRET
+	// GitHubAPIURL is the API base, PILOT_GITHUB_API_URL, defaulting to
+	// https://api.github.com. It exists so the fleet gate can point the push
+	// path at a stand-in: the rig has no GitHub App, and a push path nothing
+	// can drive end to end is a push path nothing tests.
+	GitHubAPIURL string
 
 	// Object storage: the only truth for machine state. Local disk is cache.
 	S3Endpoint  string // PILOT_S3_ENDPOINT
@@ -208,6 +214,7 @@ func Load() (*Config, error) {
 		GitHubAppID:      int64(envInt("PILOT_GITHUB_APP_ID", 0)),
 		GitHubKeyPath:    env("PILOT_GITHUB_APP_KEY", ""),
 		GitHubWebhookKey: env("PILOT_GITHUB_WEBHOOK_SECRET", ""),
+		GitHubAPIURL:     strings.TrimSuffix(env("PILOT_GITHUB_API_URL", "https://api.github.com"), "/"),
 
 		S3Endpoint:  os.Getenv("PILOT_S3_ENDPOINT"),
 		S3Region:    env("PILOT_S3_REGION", "eu-central-1"),

@@ -38,6 +38,14 @@ func (r *recordingRollout) Promote(context.Context, string, PromoteRequest) (*st
 // build to deploy, and a rollout to hand them to.
 func deployServer(t *testing.T) (http.Handler, *recordingRollout) {
 	t.Helper()
+	roll := &recordingRollout{}
+	return deployServerWith(t, roll), roll
+}
+
+// deployServerWith is the same host with a rollout of the caller's choosing,
+// so a test can supply one that refuses.
+func deployServerWith(t *testing.T, roll Rollout) http.Handler {
+	t.Helper()
 	st, err := state.Open(":memory:")
 	if err != nil {
 		t.Fatalf("state.Open: %v", err)
@@ -62,9 +70,8 @@ func deployServer(t *testing.T) (http.Handler, *recordingRollout) {
 		t.Fatalf("PutTenancy: %v", err)
 	}
 
-	roll := &recordingRollout{}
 	return Routes(Deps{HostID: "host-test", Store: st, Machines: newFakeManager(),
-		Rollout: roll}), roll
+		Rollout: roll})
 }
 
 // A deploy's knobs reach the rollout, which merges them PARTIALLY onto what

@@ -2014,6 +2014,200 @@ if [ -n "$H_IP" ]; then
     || bad "host counts went ${EX_BASE} -> ${EX_AFTER}; the exit path leaked"
 fi
 
+say "21. A push deploys, and a repo with two apps is refused where a person can read it"
+# The push path is the one deploy surface with no client on the other end: a
+# delivery lands, ONE host acts, and everything after that is a build log and a
+# journal line. Nothing about that is observable from the public API alone,
+# which is why it is here and not in the e2e battery.
+#
+# Two properties, both of which need a real fleet:
+#
+#   - exactly ONE host builds. Every host receives the delivery, because they
+#     all sit behind the same wildcard DNS, and hash(repo) mod live_hosts is
+#     what stops an N-host fleet running N builds and racing N deploys of one
+#     commit.
+#   - a repository the planner refuses leaves a record a person can READ.
+#     There is no check-run integration, so if the refusal were only a journal
+#     line on whichever host happened to act, nobody would ever find it.
+#
+# The rig has no GitHub App and no repository, so fake-github.py stands in and
+# hostd is pointed at it through PILOT_GITHUB_API_URL. This section arms four
+# environment lines on every live host and removes them again at the end.
+GH_PORT=9418
+GH_PID=""
+GH_TMP=$(mktemp -d)
+GH_KEY="${GH_TMP}/gate-app.pem"
+GH_OPIP=$(ip route get "${LIVE_IPS[0]}" 2>/dev/null | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)
+
+if [ "${#LIVE_IPS[@]}" -lt 1 ]; then
+  bad "no live host to deliver a push to"
+elif [ -z "$GH_OPIP" ]; then
+  bad "cannot work out this machine's address on the rig network; the hosts would have nothing to fetch from"
+else
+  # The tarballs, in GitHub's shape: everything under one wrapping directory,
+  # because StripRoot removes exactly one and a flat archive loses the top
+  # level of the repository.
+  for pair in "webjs-app:${REPO}/packages/cli/test/fixtures/webjs-app" \
+              "workspace-app:${REPO}/packages/cli/test/fixtures/workspace-app"; do
+    name=${pair%%:*}; src=${pair#*:}
+    stage="${GH_TMP}/gate-${name}-abc1234"
+    mkdir -p "$stage"
+    cp -r "${src}/." "$stage/"
+    tar -czf "${GH_TMP}/${name}.tar.gz" -C "$GH_TMP" "gate-${name}-abc1234"
+  done
+
+  python3 "${REPO}/scripts/cluster/fake-github.py" --port "$GH_PORT" \
+    --repo "webjs-app=${GH_TMP}/webjs-app.tar.gz" \
+    --repo "workspace-app=${GH_TMP}/workspace-app.tar.gz" \
+    >"${GH_TMP}/fake-github.log" 2>&1 &
+  GH_PID=$!
+  sleep 1
+  if kill -0 "$GH_PID" 2>/dev/null; then
+    ok "the GitHub stand-in is serving on ${GH_OPIP}:${GH_PORT}"
+  else
+    bad "the GitHub stand-in did not start: $(tail -3 "${GH_TMP}/fake-github.log")"
+  fi
+
+  openssl genrsa -out "$GH_KEY" 2048 >/dev/null 2>&1
+  for ip in "${LIVE_IPS[@]}"; do
+    $SSH "root@$ip" "mkdir -p /etc/pilots" >/dev/null 2>&1
+    scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$SSH_KEY" \
+      "$GH_KEY" "root@${ip}:/etc/pilots/gate-app.pem" >/dev/null 2>&1
+    $SSH "root@$ip" "sed -i '/^PILOT_GITHUB_/d' /etc/pilots/hostd.env; cat >> /etc/pilots/hostd.env <<EOF
+PILOT_GITHUB_APP_ID=1
+PILOT_GITHUB_APP_KEY=/etc/pilots/gate-app.pem
+PILOT_GITHUB_WEBHOOK_SECRET=gate
+PILOT_GITHUB_API_URL=http://${GH_OPIP}:${GH_PORT}
+EOF
+systemctl restart hostd" >/dev/null 2>&1
+    wait_serving "$ip" 120 || bad "${ip} did not come back after the github env was armed"
+  done
+  ok "every live host is pointed at the stand-in and restarted"
+
+  GH_SINCE=$(date -u '+%Y-%m-%d %H:%M:%S')
+
+  # deliver <repo> -- one signed push, to every live host, as the wildcard DNS
+  # would. The signature is what makes it a delivery hostd will act on rather
+  # than a 401.
+  deliver() {
+    local repo=$1
+    local body="{\"ref\":\"refs/heads/main\",\"after\":\"abc1234\",\"repository\":{\"full_name\":\"gate/${repo}\"},\"installation\":{\"id\":1}}"
+    local sig; sig=$(printf '%s' "$body" | openssl dgst -sha256 -hmac gate | awk '{print $2}')
+    for ip in "${LIVE_IPS[@]}"; do
+      curl -sf -m 30 -X POST "http://${ip}:8080/v1/github/webhook" \
+        -H 'Content-Type: application/json' \
+        -H 'X-GitHub-Event: push' \
+        -H "X-Hub-Signature-256: sha256=${sig}" \
+        -d "$body" >/dev/null 2>&1
+    done
+  }
+
+  # journal_count <needle> -- how many live hosts logged it, and which.
+  journal_count() {
+    local needle=$1 n=0
+    for ip in "${LIVE_IPS[@]}"; do
+      local hits
+      hits=$($SSH "root@$ip" "journalctl -u hostd --since '${GH_SINCE}' --no-pager 2>/dev/null | grep -c '${needle}'" 2>/dev/null | tr -d '[:space:]')
+      [ "${hits:-0}" != 0 ] && n=$((n+1))
+    done
+    echo "$n"
+  }
+
+  # The service a push deploys into. No health of its own, so the plan's is
+  # what gets recorded, which is the other half of this section.
+  GH_SVC=$(api "${LIVE_IPS[0]}" POST /v1/services \
+    "{\"name\":\"gatepush\",\"app\":\"gatepush\",\"replicas\":1,\"repo\":\"gate/webjs-app\",\"branch\":\"main\",\"autodeploy\":true}" | jf id)
+  [ -n "$GH_SVC" ] && ok "created ${GH_SVC} tracking gate/webjs-app" \
+    || bad "could not create the service a push deploys into"
+
+  GH_REL0=$(api "${LIVE_IPS[0]}" GET "/v1/services/${GH_SVC}" | jf release_id)
+  deliver webjs-app
+
+  GH_OK=0; GH_T0=$SECONDS
+  while [ $((SECONDS - GH_T0)) -lt 600 ]; do
+    GH_REL1=$(api "${LIVE_IPS[0]}" GET "/v1/services/${GH_SVC}" | jf release_id)
+    [ -n "$GH_REL1" ] && [ "$GH_REL1" != "$GH_REL0" ] && { GH_OK=1; break; }
+    sleep 5
+  done
+  [ "$GH_OK" = 1 ] \
+    && ok "a push to a repo with NO Dockerfile deployed; release ${GH_REL0:-none} -> ${GH_REL1}" \
+    || bad "the push never produced a new release (still ${GH_REL0:-none})"
+
+  GH_PLANNED=$(journal_count 'planned a push')
+  [ "$GH_PLANNED" = 1 ] \
+    && ok "exactly one host planned it" \
+    || bad "${GH_PLANNED} of ${#LIVE_IPS[@]} hosts planned the same push; the delivery owner is not exclusive"
+
+  # The health the planner worked out, recorded on a service that had none.
+  # Without it the rollout gates on hostd's default rather than on the path
+  # the framework actually serves.
+  GH_HEALTH=$(api "${LIVE_IPS[0]}" GET "/v1/services/${GH_SVC}" | python3 -c "
+import sys, json
+d = json.load(sys.stdin)
+h = d.get('health') or {}
+print(h.get('path', ''))
+")
+  [ "$GH_HEALTH" = "/__webjs/ready" ] \
+    && ok "the plan's health check was recorded on the service" \
+    || bad "the service's health path is '${GH_HEALTH}', not the recipe's"
+
+  # --- the refusal ---------------------------------------------------------
+  GH_SVC2=$(api "${LIVE_IPS[0]}" POST /v1/services \
+    "{\"name\":\"gatemulti\",\"app\":\"gatemulti\",\"replicas\":1,\"repo\":\"gate/workspace-app\",\"branch\":\"main\",\"autodeploy\":true}" | jf id)
+  GH_REL2=$(api "${LIVE_IPS[0]}" GET "/v1/services/${GH_SVC2}" | jf release_id)
+  deliver workspace-app
+  sleep 20
+
+  GH_REFUSED=$(journal_count 'refused a push')
+  [ "$GH_REFUSED" = 1 ] \
+    && ok "exactly one host refused the two-app repo" \
+    || bad "${GH_REFUSED} of ${#LIVE_IPS[@]} hosts logged a refusal"
+
+  GH_CODE=""
+  for ip in "${LIVE_IPS[@]}"; do
+    LINE=$($SSH "root@$ip" "journalctl -u hostd --since '${GH_SINCE}' --no-pager 2>/dev/null | grep 'refused a push' | tail -1" 2>/dev/null)
+    [ -n "$LINE" ] && GH_CODE="$LINE" && break
+  done
+  case "$GH_CODE" in
+    *plan_multi_service*) ok "the refusal names plan_multi_service" ;;
+    "") bad "no host logged a refusal at all" ;;
+    *) bad "the refusal is not plan_multi_service: ${GH_CODE}" ;;
+  esac
+
+  # The record a person reads. The build id is in the journal line, and the
+  # log route answers for it exactly as it answers for a failed build.
+  GH_BUILD=$(printf '%s' "$GH_CODE" | grep -o 'build=[^ ]*' | head -1 | cut -d= -f2)
+  if [ -n "$GH_BUILD" ]; then
+    GH_LOG=$(curl -sf -m 30 "http://${LIVE_IPS[0]}:8080/v1/builds/${GH_BUILD}/logs" -H "$AUTH" 2>/dev/null | tail -1)
+    case "$GH_LOG" in
+      *plan_multi_service*) ok "GET /v1/builds/${GH_BUILD}/logs carries the refusal" ;;
+      "") bad "the build log for ${GH_BUILD} is empty; the refusal is only in a journal" ;;
+      *) bad "the build log's last line is not the refusal: ${GH_LOG}" ;;
+    esac
+  else
+    bad "the refusal line carries no build id, so there is nothing to read back"
+  fi
+
+  GH_REL3=$(api "${LIVE_IPS[0]}" GET "/v1/services/${GH_SVC2}" | jf release_id)
+  [ "$GH_REL3" = "$GH_REL2" ] \
+    && ok "the refused service did not deploy anything" \
+    || bad "the refused push deployed anyway: ${GH_REL2:-none} -> ${GH_REL3}"
+
+  # Disarm. The rig goes back to having no GitHub App, so nothing below and
+  # no later run inherits a fleet pointed at a stand-in that is gone.
+  for ip in "${LIVE_IPS[@]}"; do
+    $SSH "root@$ip" "sed -i '/^PILOT_GITHUB_/d' /etc/pilots/hostd.env; rm -f /etc/pilots/gate-app.pem; systemctl restart hostd" >/dev/null 2>&1
+    wait_serving "$ip" 120 || bad "${ip} did not come back after the github env was removed"
+  done
+  GH_LEFT=$($SSH "root@${LIVE_IPS[0]}" "grep -c PILOT_GITHUB_ /etc/pilots/hostd.env" 2>/dev/null | tr -d '[:space:]')
+  [ "${GH_LEFT:-1}" = 0 ] \
+    && ok "the github env lines are out of hostd.env" \
+    || bad "a PILOT_GITHUB_ line is still in /etc/pilots/hostd.env"
+
+  [ -n "$GH_PID" ] && kill "$GH_PID" 2>/dev/null
+  rm -rf "$GH_TMP"
+fi
+
 say "Result"
 echo "  ${PASS} passed, ${FAIL} failed"
 echo

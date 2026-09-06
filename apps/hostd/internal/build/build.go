@@ -233,7 +233,7 @@ func (b *Builder) Build(ctx context.Context, id string, contextTar io.Reader,
 
 	record(status(id, "receiving context"))
 	ctxDir := filepath.Join(work, "context")
-	if err := extractContext(contextTar, ctxDir, b.opts.MaxContextBytes); err != nil {
+	if err := ExtractContext(contextTar, ctxDir, b.opts.MaxContextBytes); err != nil {
 		record(failure("receiving context", err))
 		return res, err
 	}
@@ -379,7 +379,11 @@ func contextWithTimeout(ctx context.Context, d time.Duration) (context.Context, 
 	return context.WithTimeout(ctx, d)
 }
 
-// extractContext unpacks the uploaded tar into a directory for BuildKit.
+// ExtractContext unpacks the uploaded tar into a directory for BuildKit.
+//
+// Exported because the plan route and the GitHub push path unpack the same
+// kind of archive, and this is the path-traversal guard: a second copy of it
+// is a second place to get it wrong.
 //
 // Bounded twice over. The byte budget is what stops a client filling the
 // host's disk with a POST, and every entry is checked for path traversal --
@@ -389,7 +393,7 @@ func contextWithTimeout(ctx context.Context, d time.Duration) (context.Context, 
 // An escaping path is REFUSED rather than clamped back inside the root.
 // Clamping is safe and silently changes the shape of the caller's context, so
 // the build fails later in a way that has nothing to do with the cause.
-func extractContext(r io.Reader, dir string, maxBytes int64) error {
+func ExtractContext(r io.Reader, dir string, maxBytes int64) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("build: context dir: %w", err)
 	}
