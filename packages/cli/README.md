@@ -200,7 +200,8 @@ one command. It is parsed by Node's own `.env` parser, the same one `deploy`
 uses for interpolation, so a value that quotes correctly for one quotes
 correctly for the other. The key is the secret name, matched exactly: a file
 that says `DATABASE_URL=` stores `DATABASE_URL`, which `secret://database_url`
-does not resolve to.
+does not resolve to. A deploy that misses a name the store holds in a different
+case says so rather than reporting it as unset.
 
 `ls` prints each name and the first eight hex characters of the SHA-256 of its
 value. That is enough to tell two machines hold the same secret and not enough

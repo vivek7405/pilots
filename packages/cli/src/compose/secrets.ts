@@ -50,6 +50,21 @@ export function resolveSecrets(
 
   if (missing.length > 0) {
     const unique = [...new Set(missing)].sort()
+    // A `.env` file conventionally shouts its keys and a `secret://` reference
+    // is lower-case, so `pilot secrets import` readily stores DATABASE_URL for
+    // a reference to database_url. The lookup is exact, so the value sits
+    // visible in `ls` while the deploy says it was never set, which reads as a
+    // bug in the resolver rather than a name that does not match.
+    const nearMisses = unique
+      .map((name) => [name, Object.keys(stored).find((k) => k.toLowerCase() === name.toLowerCase())] as const)
+      .filter((pair): pair is readonly [string, string] => pair[1] !== undefined)
+    if (nearMisses.length > 0) {
+      throw new CliError(
+        `no value for ${unique.length === 1 ? 'secret' : 'secrets'} ${unique.join(', ')}: ` +
+          `the store holds ${nearMisses.map(([, k]) => k).join(', ')} for ${opts.app}, and the name is matched exactly, ` +
+          `so store ${nearMisses.map(([name]) => name).join(', ')} instead`,
+      )
+    }
     throw new CliError(
       `no value for ${unique.length === 1 ? 'secret' : 'secrets'} ${unique.join(', ')}: ` +
         `set ${unique.map(envVarFor).join(', ')}, or store ${unique.length === 1 ? 'it' : 'them'} on this machine with ` +

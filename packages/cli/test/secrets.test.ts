@@ -100,3 +100,27 @@ test('one missing name points at set and not at import', () => {
     },
   )
 })
+
+test('a name that differs only in case is named rather than reported as missing', () => {
+  // The shape `pilot secrets import` produces from a conventional `.env`: the
+  // key shouts, the reference does not. Counterfactual: the plain "no value
+  // for secret database_url" makes the deploy look like a resolver bug while
+  // `pilot secrets ls` shows DATABASE_URL sitting right there.
+  assert.throws(
+    () =>
+      resolveSecrets({ DATABASE_URL: 'database_url' }, {
+        app: 'shop',
+        env: {},
+        credentials: { api_key: 'k', secrets: { shop: { DATABASE_URL: 'postgres://x' } } },
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof CliError)
+      assert.match(err.message, /the store holds DATABASE_URL for shop/)
+      assert.match(err.message, /matched exactly/)
+      assert.match(err.message, /store database_url instead/)
+      // Never the value, even while naming the key that holds it.
+      assert.equal(err.message.includes('postgres://x'), false)
+      return true
+    },
+  )
+})
