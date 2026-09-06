@@ -4517,6 +4517,12 @@ async function agentDeployAssertions(REFLINK) {
   const created = [];
   const serviceIDs = [];
   let client;
+  // Declared out here, not inside the try: `finally` is a sibling block, and a
+  // `let` in the try body is not in scope there. Reading one from the cleanup
+  // is a ReferenceError that replaces whatever the battery was actually
+  // reporting.
+  let unknownDir;
+  let brokenDir;
 
   try {
     // Imported here rather than at the top of the file: the module is a
@@ -4532,10 +4538,8 @@ async function agentDeployAssertions(REFLINK) {
     let webjsService;
     let oneCallMS = 0;
     let brokenReplica;
-    let unknownDir;
     let unknownRules;
     let recoveredService;
-    let brokenDir;
 
     await step('`pilot mcp` starts and offers exactly the tools the README lists', async () => {
       const transport = new StdioClientTransport({
