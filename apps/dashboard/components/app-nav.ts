@@ -41,6 +41,7 @@ const activePath = signal('');
 const LINKS: { href: string; label: string }[] = [
   { href: '/', label: NOUN.Apps },
   { href: '/sandboxes', label: NOUN.Sandboxes },
+  { href: '/logs', label: NOUN.Logs },
 ];
 
 /**

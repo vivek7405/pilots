@@ -16,7 +16,7 @@ import { cardClass, cardContentClass } from '#components/ui/card.ts';
 import { dataTable, emptyState, footnote, pageHeading, sectionHeading } from '#lib/utils/ui.ts';
 import { cn } from '#lib/utils/cn.ts';
 import { NOUN } from '#lib/vocabulary.ts';
-import '#modules/machines/components/log-pane.ts';
+import '#modules/logs/components/log-stream.ts';
 import '#modules/machines/components/exec-console.ts';
 import '#components/copy-button.ts';
 
@@ -57,7 +57,7 @@ export default async function MachinePage({ params }: PageProps) {
 
     <section id="console" class="mt-8">
       ${sectionHeading(NOUN.Logs, 'Everything this machine has printed since it last started. That is all pilots keeps.')}
-      <log-pane machine-id=${machine.id}></log-pane>
+      <log-stream .sources=${[{ id: machine.id, service: machine.service_id ? 'Instance' : 'Sandbox', name: machine.name ?? machine.id }]}></log-stream>
     </section>
 
     <section class="mt-8">
