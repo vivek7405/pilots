@@ -33,7 +33,18 @@ let cookie = '';
 let org = '';
 
 /** The pages that render at least one seeded table row or one form control. */
-const PAGES = ['/machines', '/services', '/services/svc-1', '/volumes', '/domains', '/usage', '/keys', '/org'] as const;
+const PAGES = [
+  '/',
+  '/machines',
+  '/services',
+  '/services/new',
+  '/services/svc-1',
+  '/volumes',
+  '/domains',
+  '/usage',
+  '/keys',
+  '/org',
+] as const;
 
 before(async () => {
   app = await bootApp();

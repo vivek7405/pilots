@@ -173,6 +173,19 @@ export default async function RootLayout({ children, url }: LayoutProps) {
          The kit's dialog scroll lock defers to this declaration, so the two
          never double-compensate. */
       html { scrollbar-gutter: stable; }
+      /* Two custom elements are a run of TEXT inside a sentence, not a block.
+         An element with no display of its own is not reliably inline once the
+         framework has upgraded it, and the visible symptom is small: a status
+         line reading "deployed" and "1 hour ago" on two lines. Declared here
+         because a light-DOM component cannot set the display of its own host,
+         and only the layout may write document-level CSS. */
+      relative-time { display: inline; }
+      copy-button { display: inline-block; vertical-align: middle; }
+      /* A tooltip wraps its trigger, so it has to take the trigger's place in
+         the line: as a block it puts every row action on its own line and
+         breaks a sentence in half around an explained word. The content
+         element is a popover in the top layer and is positioned regardless. */
+      ui-tooltip, ui-tooltip-trigger { display: inline-block; vertical-align: middle; }
       body {
         padding-top: var(--header-h);
         background: var(--background);

@@ -18,11 +18,16 @@ import { cn } from '#lib/utils/cn.ts';
  */
 const VARIANTS: Record<string, BadgeVariant> = {
   running: 'default',
+  creating: 'secondary',
   starting: 'secondary',
   suspending: 'secondary',
   suspended: 'secondary',
   stopped: 'secondary',
   destroyed: 'outline',
+  // Both spellings the engine can report. `error` is what a machine whose
+  // Firecracker process died carries, and it was falling through to `outline`,
+  // which reads as a state nobody has to look at.
+  error: 'destructive',
   failed: 'destructive',
 };
 

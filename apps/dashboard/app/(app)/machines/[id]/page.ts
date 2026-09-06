@@ -51,7 +51,7 @@ export default async function MachinePage({ params }: PageProps) {
       </div>
     </div>
 
-    <section class="mt-8">
+    <section id="console" class="mt-8">
       ${sectionHeading('Console')}
       <log-pane machine-id=${machine.id}></log-pane>
     </section>

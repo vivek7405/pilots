@@ -14,7 +14,7 @@
 
 import { PassThrough } from 'node:stream';
 
-import type { Host, Machine, Release, Service, Volume } from '@pilots/sdk';
+import type { Host, Machine, QuotaResponse, Release, Service, Volume } from '@pilots/sdk';
 
 export interface FleetCall {
   method: string;
@@ -39,6 +39,8 @@ export interface FleetData {
   volumes: Volume[];
   hosts: Host[];
   releases: Record<string, Release[]>;
+  /** What `quotas.get` answers with. The overview draws its bars from this. */
+  quotas: QuotaResponse;
   apiKeyRows: { hash: string; org_id: string; scopes: string[]; revoked_at?: string }[];
   execFrames: FakeExecFrame[];
   logLines: string[];
@@ -67,6 +69,14 @@ export function makeFakeFleet(): FakeFleet {
     volumes: [],
     hosts: [],
     releases: {},
+    quotas: {
+      org_id: '',
+      max_machines: 20,
+      max_vcpus: 32,
+      max_mem_mib: 65_536,
+      max_volume_gib: 500,
+      max_builds: 4,
+    } as QuotaResponse,
     apiKeyRows: [],
     execFrames: [],
     logLines: [],
@@ -226,6 +236,13 @@ export function makeFakeFleet(): FakeFleet {
       list: async () => {
         record('hosts.list');
         return state.hosts;
+      },
+    },
+
+    quotas: {
+      get: async (org: string) => {
+        record('quotas.get', org);
+        return { ...state.quotas, org_id: org };
       },
     },
 

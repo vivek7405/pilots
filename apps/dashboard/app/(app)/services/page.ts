@@ -1,14 +1,25 @@
 /**
  * The services list.
  *
- * There is no "new service" form. A service is created by `pilot deploy` or by
- * promoting a sandbox, both of which carry a build the dashboard does not have.
+ * Name, Replicas, Repo and URL were four facts and none of them was whether
+ * the thing is up, which is the question a reader opens this page with. The
+ * status column answers it from fields the engine already returns.
+ *
+ * A service is created by a deploy that carries a build, which this page
+ * cannot make; /services/new explains the one command that can.
  */
 import { html } from '@webjsdev/core';
 import { orUnauthorized, requireOrg } from '#modules/auth/session.server.ts';
-import { listServices } from '#modules/services/queries/list-services.server.ts';
+import { listServicesWithStatus } from '#modules/services/queries/list-services-with-status.server.ts';
+import { serviceStatusLine } from '#modules/services/utils/ui/status-line.ts';
+import { buttonClass } from '#components/ui/button.ts';
 import { dataTable, emptyState, lede, pageHeading } from '#lib/utils/ui.ts';
+import { cn } from '#lib/utils/cn.ts';
 import type { Service } from '@pilots/sdk';
+import type { Machine as BrowserMachine } from '#modules/machines/types.ts';
+import '#components/link-rows.ts';
+import '#components/list-filter.ts';
+import '#components/relative-time.ts';
 
 export const metadata = { title: 'Services' };
 
@@ -34,38 +45,67 @@ function customDomainHref(service: Service): string {
 
 export default async function ServicesPage() {
   const ctx = (await requireOrg())!;
-  const services = orUnauthorized(await listServices().catch(() => []));
+  const { services, machines, releases } = orUnauthorized(await listServicesWithStatus());
+  const replicasOf = (id: string) => machines.filter((m) => m.service_id === id) as BrowserMachine[];
 
   return html`
-    ${pageHeading('Services')}
+    <div class="flex flex-wrap items-center gap-3">
+      ${pageHeading('Services')}
+      <a href="/services/new" class=${cn(buttonClass({ size: 'sm' }), 'ml-auto')}>New service</a>
+    </div>
     ${lede(html`Created by <code class="font-mono">pilot deploy</code> or by promoting a sandbox. A promote keeps the
     URL.`)}
     ${services.length === 0
-      ? emptyState('No services.')
-      : dataTable<Service>({
-          caption: 'Services in this organisation',
-          rows: services,
-          columns: [
-            {
-              header: 'Name',
-              cell: (s) => html`<a href=${`/services/${s.id}`} class="text-foreground">${s.name}</a>`,
-            },
-            { header: 'Replicas', align: 'right', cellClass: 'tabular-nums', cell: (s) => s.replicas },
-            {
-              header: 'Repo',
-              cellClass: 'text-muted-foreground',
-              cell: (s) => (s.repo ? `${s.repo}${s.branch ? `#${s.branch}` : ''}` : '-'),
-            },
-            {
-              header: 'URL',
-              cell: (s) =>
-                s.custom_domain
-                  ? html`<a href=${customDomainHref(s)} rel="noopener">${s.custom_domain}</a>`
-                  : s.url
-                    ? html`<a href=${s.url} rel="noopener">${s.url}</a>`
-                    : '-',
-            },
-          ],
-        })}
+      ? emptyState('No services yet. A deploy from a repository with a compose file creates the first one.', {
+          command: 'pilot deploy',
+          href: '/services/new',
+          label: 'How to deploy',
+        })
+      : html`
+          <div class="mb-3 flex justify-end">
+            <list-filter for="services-table" placeholder="Filter services"></list-filter>
+          </div>
+          <link-rows>
+            ${dataTable<Service>({
+              id: 'services-table',
+              caption: 'Services in this organisation',
+              rows: services,
+              rowHref: (s) => `/services/${s.id}`,
+              columns: [
+                {
+                  header: 'Name',
+                  cell: (s) => html`<a href=${`/services/${s.id}`} class="text-foreground">${s.name}</a>`,
+                },
+                {
+                  header: 'Status',
+                  cell: (s) => serviceStatusLine(s, replicasOf(s.id), releases[s.id] ?? []),
+                },
+                { header: 'App', cellClass: 'text-muted-foreground', cell: (s) => s.app ?? '' },
+                {
+                  header: 'Replicas',
+                  align: 'right',
+                  cellClass: 'tabular-nums',
+                  cell: (s) => s.replicas,
+                },
+                {
+                  header: 'URL',
+                  cell: (s) =>
+                    s.custom_domain
+                      ? html`<a href=${customDomainHref(s)} rel="noopener">${s.custom_domain}</a>`
+                      : s.url
+                        ? html`<a href=${s.url} rel="noopener">${s.url}</a>`
+                        : '',
+                },
+                {
+                  header: 'Last deploy',
+                  cell: (s) => {
+                    const at = (releases[s.id] ?? []).find((r) => r.id === s.release_id)?.created_at;
+                    return at ? html`<relative-time datetime=${String(at)}></relative-time>` : '';
+                  },
+                },
+              ],
+            })}
+          </link-rows>
+        `}
   `;
 }

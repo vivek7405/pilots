@@ -155,3 +155,116 @@ suite('machine-list', () => {
     el.remove();
   });
 });
+
+suite('machine-list, chips filter and row navigation', () => {
+  const RealNavigate = [];
+  let navigated;
+
+  setup(() => {
+    sockets = [];
+    navigated = [];
+    globalThis.WebSocket = FakeSocket;
+  });
+
+  teardown(() => {
+    globalThis.WebSocket = RealWebSocket;
+    document.body.innerHTML = '';
+    RealNavigate.length = 0;
+  });
+
+  const hosts = [
+    { id: 'h-amd-1', alive: true, cpu_free: 4, mem_free_mib: 8192, cpu_vendor: 'AuthenticAMD' },
+    { id: 'h-amd-2', alive: false, cpu_free: 0, mem_free_mib: 0, cpu_vendor: 'AuthenticAMD' },
+  ];
+
+  const on = (id, state, host) => ({ id, name: id, state, host_id: host, url: `https://${id}.pilotrun.app` });
+
+  async function mountTiers() {
+    await import('../../../modules/machines/components/machine-list.ts');
+    const el = document.createElement('machine-list');
+    el.hosts = hosts;
+    el.initial = [
+      on('m-run', 'running', 'h-amd-1'),
+      on('m-warm', 'suspended', 'h-amd-1'),
+      // Its owner is gone entirely, so no live host can restore its image.
+      on('m-cold', 'suspended', 'h-vanished'),
+    ];
+    document.body.appendChild(el);
+    await el.updateComplete;
+    await new Promise((resolve) => queueMicrotask(resolve));
+    return el;
+  }
+
+  const chip = (el, label) =>
+    [...el.querySelectorAll('button[aria-pressed]')].find((b) => b.textContent.trim().startsWith(label));
+
+  test('the chips count by resume tier, not by state', async () => {
+    const el = await mountTiers();
+    // Both sleeping machines are `suspended`; only one of them resumes warm.
+    assert.equal(chip(el, 'All').textContent.trim(), 'All 3');
+    assert.equal(chip(el, 'running').textContent.trim(), 'running 1');
+    assert.equal(chip(el, 'warm').textContent.trim(), 'warm 1');
+    assert.equal(chip(el, 'cold').textContent.trim(), 'cold 1');
+    el.remove();
+  });
+
+  test('clicking a chip filters the rows and marks itself pressed', async () => {
+    const el = await mountTiers();
+    chip(el, 'cold').click();
+    await el.updateComplete;
+
+    assert.deepEqual(rowIds(el), ['m-cold']);
+    assert.equal(chip(el, 'cold').getAttribute('aria-pressed'), 'true');
+    assert.equal(chip(el, 'All').getAttribute('aria-pressed'), 'false');
+    el.remove();
+  });
+
+  test('the filter box hides rows that do not match', async () => {
+    const el = await mountTiers();
+    const input = el.querySelector('#machine-filter');
+    input.value = 'warm';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    await el.updateComplete;
+
+    assert.deepEqual(rowIds(el), ['m-warm']);
+    assert.includes(el.textContent, '1 of 3 machines', 'and it says how many it is hiding');
+    el.remove();
+  });
+
+  test('a sleeping machine says whether waking it costs its memory', async () => {
+    const el = await mountTiers();
+    const warm = [...el.querySelectorAll('tbody tr')].find((tr) => tr.textContent.includes('m-warm'));
+    const cold = [...el.querySelectorAll('tbody tr')].find((tr) => tr.textContent.includes('m-cold'));
+
+    assert.includes(warm.textContent, 'resumes warm');
+    assert.includes(cold.textContent, 'will cold-boot');
+    el.remove();
+  });
+
+  test('a row carries its destination, and the action buttons do not swallow it', async () => {
+    const el = await mountTiers();
+    const row = el.querySelector('tbody tr');
+    assert.equal(row.dataset.href, '/machines/m-run', 'the whole row knows where it goes');
+
+    // The click handler reads `data-href` off the closest ancestor that has
+    // one, and bails when the click landed on a control. Both halves are
+    // asserted through the DOM the handler itself queries.
+    const suspend = [...row.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Suspend');
+    assert.ok(suspend, 'the row has a Suspend button inside the click target');
+    assert.ok(suspend.closest('a, button, input, select, textarea, label') === suspend,
+      'so a click on it is recognised as a control and never navigates');
+
+    const nameCell = row.querySelector('td');
+    assert.ok(nameCell.closest('[data-href]') === row, 'and a click on the cell resolves to the row');
+    el.remove();
+  });
+
+  test('an empty list offers the command that fills it', async () => {
+    const el = await mountTiers();
+    el.initial = [];
+    el.rows = [];
+    await el.updateComplete;
+    assert.includes(el.textContent, 'pilot machines create');
+    el.remove();
+  });
+});

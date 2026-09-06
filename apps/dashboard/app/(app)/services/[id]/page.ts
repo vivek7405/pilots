@@ -18,6 +18,10 @@ import { disconnectRepo } from '#modules/github/actions/disconnect-repo.server.t
 import { githubAppConfigured } from '#modules/github/app-jwt.server.ts';
 import { installUrl } from '#modules/github/installations.server.ts';
 import { stateBadge } from '#modules/machines/utils/ui/state.ts';
+import { statusLine } from '#modules/machines/utils/ui/status-line.ts';
+import { serviceHealth } from '#modules/services/utils/health.ts';
+import { healthPills } from '#modules/services/utils/ui/health-pills.ts';
+import { doctorCard } from '#modules/services/utils/ui/doctor-card.ts';
 import { badgeClass } from '#components/ui/badge.ts';
 import { buttonClass } from '#components/ui/button.ts';
 import { checkboxClass } from '#components/ui/checkbox.ts';
@@ -25,6 +29,10 @@ import { inputClass } from '#components/ui/input.ts';
 import { labelClass } from '#components/ui/label.ts';
 import { dataTable, emptyState, errorAlert, field, formRowClass, pageHeading, sectionHeading } from '#lib/utils/ui.ts';
 import { cn } from '#lib/utils/cn.ts';
+import type { Machine as BrowserMachine } from '#modules/machines/types.ts';
+import '#components/copy-button.ts';
+import '#components/relative-time.ts';
+import '#components/ui/tooltip.ts';
 
 export async function generateMetadata({ params }: PageProps) {
   return { title: `Service ${params.id}` };
@@ -34,7 +42,8 @@ export default async function ServicePage({ params, actionData }: PageProps) {
   const ctx = (await requireOrg())!;
   const detail = orUnauthorized(await getService({ id: params.id }));
   if (!detail) throw notFound();
-  const { service, releases, previews, repo } = detail;
+  const { service, releases, previews, repo, replicas, hosts } = detail;
+  const health = serviceHealth(service, replicas as BrowserMachine[], releases);
 
   const errors = (actionData as { fieldErrors?: Record<string, string>; error?: string } | undefined) ?? {};
   // The current release is not a rollback target; the newest healthy one
@@ -43,12 +52,63 @@ export default async function ServicePage({ params, actionData }: PageProps) {
   const appConfigured = githubAppConfigured();
 
   return html`
-    ${pageHeading(service.name)}
-    <p class="text-muted-foreground mt-1 mb-6">
-      ${service.url ? html`<a href=${service.url} rel="noopener">${service.url}</a>` : 'No URL yet'}
-    </p>
+    <div class="flex flex-wrap items-center gap-3">
+      ${pageHeading(service.name)} ${healthPills(health)}
+    </div>
+    <div class="mt-2 mb-6 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-muted-foreground">
+      ${service.url
+        ? html`<span class="flex items-center gap-1">
+            <a href=${service.url} rel="noopener">${service.url}</a>
+            <copy-button value=${service.url} label="URL"></copy-button>
+          </span>`
+        : 'No URL yet'}
+      <span>${replicas.filter((m) => m.state === 'running').length}/${service.replicas} replicas</span>
+      ${service.app ? html`<span>app ${service.app}</span>` : ''}
+      ${service.release_id
+        ? html`<span class="flex items-center gap-1"
+            >release <span class="font-mono">${service.release_id}</span>
+            <copy-button value=${service.release_id} label="release id"></copy-button>
+          </span>`
+        : ''}
+      ${repo
+        ? html`<span class=${badgeClass({ variant: repo.autodeploy ? 'secondary' : 'outline' })}
+            >Autodeploy ${repo.autodeploy ? 'on' : 'off'}</span
+          >`
+        : ''}
+    </div>
 
     ${errors.error ? errorAlert(errors.error) : ''}
+    ${doctorCard({
+      health,
+      replicas: replicas as BrowserMachine[],
+      serviceName: service.name,
+      // The deploy action's own words when the failure is this fresh, rather
+      // than a paraphrase of them.
+      ...(errors.error ? { symptom: errors.error } : {}),
+    })}
+
+    ${replicas.length > 0
+      ? html`<section class="mb-8">
+          ${sectionHeading('Replicas')}
+          ${dataTable<Machine>({
+            caption: 'Machines running this service',
+            rows: replicas,
+            columns: [
+              {
+                header: 'Name',
+                cell: (m) => html`<a href=${`/machines/${m.id}`} class="text-foreground">${m.name || m.id}</a>`,
+              },
+              { header: 'Status', cell: (m) => statusLine(m as BrowserMachine, hosts) },
+              { header: 'Host', cellClass: 'font-mono text-muted-foreground', cell: (m) => m.host_id ?? '' },
+              {
+                header: 'Release',
+                cellClass: 'font-mono text-muted-foreground',
+                cell: (m) => m.release_id ?? '',
+              },
+            ],
+          })}
+        </section>`
+      : ''}
 
     <section class="mb-8">
       ${sectionHeading('Scale')}
