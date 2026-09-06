@@ -113,7 +113,7 @@ export function createAddCommand(): Command {
         note('not logged in: the values below are not stored, keep them somewhere safe')
       }
       note(`Add to the services that need it:   environment: { DATABASE_URL: secret://database_url }`)
-      note('On another machine, export before deploying:')
+      note('On another machine, store them once (`pilot secrets set postgres_password --app ' + app + '`) or export before deploying:')
       note(`  export PILOT_SECRET_POSTGRES_PASSWORD=${password}`)
       note(`  export PILOT_SECRET_DATABASE_URL=${url}`)
     })

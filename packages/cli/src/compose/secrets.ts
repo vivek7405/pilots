@@ -52,7 +52,9 @@ export function resolveSecrets(
     const unique = [...new Set(missing)].sort()
     throw new CliError(
       `no value for ${unique.length === 1 ? 'secret' : 'secrets'} ${unique.join(', ')}: ` +
-        `set ${unique.map(envVarFor).join(', ')} or run \`pilot add postgres\` on this machine`,
+        `set ${unique.map(envVarFor).join(', ')}, or store ${unique.length === 1 ? 'it' : 'them'} on this machine with ` +
+        `\`pilot secrets set ${unique[0]} --app ${opts.app}\`` +
+        (unique.length > 1 ? ' (one per name) or `pilot secrets import <file> --app ' + opts.app + '`' : ''),
     )
   }
   return out
