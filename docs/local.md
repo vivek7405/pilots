@@ -335,7 +335,9 @@ KEY=$(sudo /opt/pilots/bin/hostd bootstrap-key)
 
 It works with hostd running: the subcommand reads `/etc/pilots/config` and
 opens the same SQLite file. The key is `admin`-scoped, which is what the e2e
-battery and the dashboard both need.
+battery and the dashboard both need. A key minted with `POST /v1/api-keys` and
+scope `deploy` is enough to build and deploy; that is what `pilot login` uses,
+and the battery exercises it.
 
 ## 6. Hostnames
 
