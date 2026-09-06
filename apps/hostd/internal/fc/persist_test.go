@@ -3,6 +3,7 @@ package fc
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -319,5 +320,81 @@ func TestPersistCarriesMemMiB(t *testing.T) {
 	}
 	if Adopted(got, t.TempDir(), nil).MemMiB != 512 {
 		t.Errorf("an adopted machine lost its MemMiB")
+	}
+}
+
+// A dead machine's breadcrumbs must never hand a live, unrelated pid to the
+// teardown.
+//
+// These breadcrumbs are on persistent disk precisely so they survive a reboot,
+// so after one their NBDPid and UffdPid name whatever the kernel has since
+// handed those numbers to. Cleanup stops a handler with kill(pid, SIGTERM)
+// followed by kill(-pid, SIGKILL) on the whole process group and no identity
+// check, and AdoptedDead is the FIRST thing hostd does with those numbers on
+// the first boot after a reboot. Attaching one would SIGKILL an unrelated
+// service's process group and disconnect an nbd index out from under it.
+func TestAdoptedDeadRefusesARecycledHandlerPid(t *testing.T) {
+	pool := nbd.NewDevicePool(nbd.DefaultMaxDevices)
+
+	// Alive, and emphatically not a pilots handler: this test binary.
+	m := AdoptedDead(State{
+		MachineID: "m-1", Pid: os.Getpid(),
+		NBDPid: os.Getpid(), NBDIndex: 5, NBDControl: "/tmp/nbd.sock",
+		UffdPid: os.Getpid(), UffdSocket: "/tmp/uffd.sock",
+		UffdControl: "/tmp/uffd-ctl.sock",
+	}, t.TempDir(), pool)
+
+	if m == nil {
+		t.Fatal("AdoptedDead returned nil")
+	}
+	if m.NBD != nil {
+		t.Error("a pid that is not this machine's block server was attached; " +
+			"stopping it would SIGKILL an unrelated process group")
+	}
+	if m.Uffd != nil {
+		t.Error("a pid that is not this machine's fault server was attached; " +
+			"stopping it would SIGKILL an unrelated process group")
+	}
+	// AdoptedProcess reserves the index as a side effect, so the refusal has
+	// to happen before it or the device is claimed for a handler that is not
+	// there.
+	if pool.InUse() != 0 {
+		t.Errorf("the pool reserved %d devices for a handler that does not exist", pool.InUse())
+	}
+	if m.Cmd != nil {
+		t.Error("a dead machine's handle carries a Cmd, so something can still signal its pid")
+	}
+}
+
+// The other direction: a pid that really is running the recorded handler is
+// still picked back up. Without this the refusal above would be indiscriminate
+// and every restart would leak the handlers it should have stopped.
+//
+// This process stands in for the handler, matched on its own real cmdline,
+// because a pid's argv is the only evidence there is.
+func TestHandlerIsAcceptsThePidStillRunningIt(t *testing.T) {
+	raw, err := os.ReadFile("/proc/self/cmdline")
+	if err != nil {
+		t.Fatalf("read our own cmdline: %v", err)
+	}
+	args := strings.Split(strings.TrimRight(string(raw), "\x00"), "\x00")
+	if len(args) < 2 {
+		t.Fatalf("this process has argv %v; the fixture needs a subcommand to match on", args)
+	}
+
+	if !handlerIs(os.Getpid(), args[1], args[len(args)-1]) {
+		t.Errorf("handlerIs rejected the pid actually running argv %v", args)
+	}
+	// The subcommand alone is not enough: a second machine's handler runs the
+	// same one, and its control socket is what tells them apart.
+	if handlerIs(os.Getpid(), args[1], "/var/lib/pilots/machines/somebody-else/nbd.sock") {
+		t.Error("handlerIs matched on the subcommand alone, so any machine's handler " +
+			"would answer for any other machine's breadcrumbs")
+	}
+	if handlerIs(0, args[1], args[len(args)-1]) {
+		t.Error("handlerIs accepted pid 0")
+	}
+	if handlerIs(999999, args[1], args[len(args)-1]) {
+		t.Error("handlerIs accepted a pid that does not exist")
 	}
 }
