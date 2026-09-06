@@ -30,7 +30,7 @@ import { promisify } from 'node:util'
 import { createConsoleCommand } from '../src/commands/console.ts'
 import type { Terminal } from '../src/commands/machines.ts'
 import { saveCredentials } from '../src/config.ts'
-import { fakeMachine } from './helpers/fake-api.ts'
+import { fakeMachine, startFakeAPI } from './helpers/fake-api.ts'
 import { startWSServer, type WSConnection, type WSServer } from './helpers/ws-server.ts'
 
 const exec = promisify(execFile)
@@ -227,6 +227,65 @@ test('raw mode goes on, comes off, and the exit code is the shell\'s', async () 
     // `exit 7` in the shell exits 7 here, the same contract machines exec has.
     assert.equal(res.code, 7)
     assert.equal(fake.printed(), 'hello from the guest\n')
+  } finally {
+    await ws.close()
+  }
+})
+
+test('the terminal is untouched until the socket is up', async () => {
+  // Raw mode clears ISIG, so the moment it goes on there is no ctrl-c. Doing it
+  // before the handshake hands the user an echo-less terminal with no way out
+  // for however long the connect takes, which against a suspended machine is a
+  // wake.
+  const seen: number[] = []
+  const fake = fakeTerminal()
+  const ws = await fleet((conn) => {
+    // The server has written its 101 and the client cannot have read it yet, so
+    // this is the last moment that is definitely still "connecting".
+    seen.push(fake.raw.length)
+    conn.frame(3, new Uint8Array([0]))
+  })
+  try {
+    await runConsole(loggedIn(ws.url), ['box'], fake.term)
+    assert.deepEqual(seen, [0], 'the terminal went raw before the socket existed')
+    assert.deepEqual(fake.raw, [true, false])
+  } finally {
+    await ws.close()
+  }
+
+  // And a stream that never connects never touches the terminal at all: this
+  // fleet answers the machine lookup and then refuses the upgrade.
+  const api = await startFakeAPI()
+  api.machines.push(fakeMachine({ id: 'm_1', name: 'box' }))
+  const never = fakeTerminal()
+  try {
+    const res = await runConsole(loggedIn(api.url), ['box'], never.term)
+    assert.match(String((res.err as Error)?.message), /could not connect/)
+    assert.deepEqual(never.raw, [], 'a session that never opened still changed the terminal')
+  } finally {
+    await api.close()
+  }
+})
+
+test('a terminal that goes away ends the session instead of reporting a stream failure', async () => {
+  // The controlling terminal vanishing without a signal reaching us first: an
+  // ssh session dropped, an emulator closed. We close the socket ourselves, so
+  // no exit frame arrives, and the stream is right to call that a failure when
+  // it happens TO us. Here it did not.
+  const ws = await fleet()
+  const fake = fakeTerminal()
+  try {
+    const pending = runConsole(loggedIn(ws.url), ['box'], fake.term)
+    await waitFor('the terminal to go raw', () => fake.raw.length > 0)
+    fake.stdin.end()
+
+    const res = await pending
+    assert.equal(res.err, null, 'a deliberate hangup was reported as a stream failure')
+    assert.equal(res.code, 0)
+    // The shell goes with it: the guest cancels its context when the socket
+    // closes, so a hangup leaves nothing running.
+    await ws.connections[0]!.closed
+    assert.deepEqual(fake.raw, [true, false])
   } finally {
     await ws.close()
   }

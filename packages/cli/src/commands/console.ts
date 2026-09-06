@@ -79,7 +79,12 @@ export function createConsoleCommand(term: Terminal = processTerminal): Command 
       const argv = this.args.slice(1)
       // stderr, never stdout: the session's own bytes are the output here, and
       // a banner mixed into them is a banner in the middle of a `tmux` screen.
-      note(`connected to ${found.name} (${found.id}); the shell ends when you leave it`)
+      //
+      // "connecting", because the socket is not open yet and a wake can take
+      // seconds. Claiming the connection here would print "connected" and then
+      // the connect error underneath it, which reads as a session that died
+      // rather than one that never started.
+      note(`connecting to ${found.name} (${found.id}); the shell ends when you leave it`)
       // The remote status, exactly as `machines exec` reports it. Leaving a
       // shell with `exit 3` exits 3.
       process.exitCode = await execStream(

@@ -295,12 +295,35 @@ export async function execStream(
   }
   // A terminal has no separate write end to close, so an EOF on the local one
   // is a hangup: end the session rather than send an EOT the shell may ignore.
-  const onStdinEnd = () => (tty ? stream.kill() : stream.endStdin())
-  if (wantsStdin) {
+  //
+  // It is recorded because closing the socket ourselves means no exit frame
+  // arrives, and the stream is right to call that a failure when it happens TO
+  // us. Here we did it, so the verdict below is a deliberate teardown rather
+  // than `stream closed before exit` printed at somebody whose terminal just
+  // went away.
+  let hungUp = false
+  const onStdinEnd = () => {
+    if (!tty) return stream.endStdin()
+    hungUp = true
+    stream.kill()
+  }
+  // Deferred to the socket, not done here, and the reason is ctrl-c.
+  //
+  // Raw mode clears ISIG, so from the moment it goes on the terminal generates
+  // no SIGINT and the handler registered below cannot fire. Doing it before the
+  // handshake would hand the user an echo-less terminal with no way out for the
+  // whole connect window, which against a suspended machine is however long the
+  // wake takes: hostd restores the microVM before it completes the upgrade.
+  // Until the socket is up, ctrl-c is still an ordinary interrupt.
+  //
+  // Nothing is lost by waiting. An unread stdin is buffered by the OS, so what
+  // was typed early arrives when the listener attaches.
+  const attachStdin = () => {
     setRaw(true)
     term.stdin.on('data', onStdin)
     term.stdin.on('end', onStdinEnd)
   }
+  if (wantsStdin) stream.once('open', attachStdin)
   const onResize = () => {
     try {
       stream.resize(colsOf(term), rowsOf(term))
@@ -347,6 +370,12 @@ export async function execStream(
     // The stream's own "closed before exit" is true but useless here: the
     // caller asked for the deadline and deserves to be told it was hit.
     if (timedOut) throw new CliError(`timed out after ${timeoutMs}ms: the command was killed`)
+    // The terminal went away and we ended the session on purpose. There is no
+    // exit frame because there was nobody left to deliver one to, and the last
+    // thing that reader sees should not be the name of a protocol they never
+    // knew about. Whatever status did arrive stands; otherwise the session
+    // simply ended.
+    if (hungUp) return stream.exitCode ?? 0
     throw err
   } finally {
     // First, before anything below it can throw and strand the terminal.
@@ -355,6 +384,10 @@ export async function execStream(
     for (const [signal, handler] of handlers) term.signals.off(signal, handler)
     if (tty) term.signals.off('SIGWINCH', onResize)
     if (wantsStdin) {
+      // Dropped whether or not it ever fired: a stream that failed to connect
+      // leaves this armed, and an open arriving after the teardown would put
+      // the terminal into raw mode with nothing left to take it out again.
+      stream.off('open', attachStdin)
       // Reading stdin keeps the handle referenced, so without this the CLI
       // outlives the command it ran: `pilot machines exec --stdin` would sit
       // there after the guest had already exited, waiting on a terminal
