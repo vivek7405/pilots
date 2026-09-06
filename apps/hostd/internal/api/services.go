@@ -144,7 +144,7 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	// A service's replicas are machines, so a create is admitted against the
 	// same limits a create of that many machines would be. A replica boots
 	// with the manager's defaults, which is where these numbers come from.
-	req.OrgID = OrgID(r.Context())
+	req.OrgID = actingOrg(r)
 	if !d.checkQuota(w, r, quota.Delta{
 		Machines: req.Replicas, VCPUs: req.Replicas, MemMiB: req.Replicas * 512,
 	}) {

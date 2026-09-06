@@ -83,7 +83,7 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	//
 	// Taken before the context is spooled: refusing after accepting a 2 GiB
 	// upload would make the limit cost more than the build it refused.
-	org := OrgID(r.Context())
+	org := actingOrg(r)
 	limits := quota.For(r.Context(), d.Store, org)
 	if used, ok := d.BuildGate.Acquire(org, limits.MaxBuilds); !ok {
 		// The build gate is the one refusal that does not go through

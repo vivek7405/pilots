@@ -158,6 +158,94 @@ func TestTheBodyCannotChooseTheOrg(t *testing.T) {
 	}
 }
 
+// An admin key naming ?org= acts as that org: the row it creates is owned by
+// the named org, and reads narrowed to any other org cannot see it.
+//
+// This is what lets one operator process serve a browser session belonging to
+// somebody else's org. Without it every row the dashboard created would belong
+// to the ops org, and the org the person is in would 404 its own service.
+func TestAnAdminKeyActsAsTheOrgItNames(t *testing.T) {
+	h, _, fake := twoTenants(t)
+
+	req := httptest.NewRequest("POST", "/v1/machines?org=org_2",
+		strings.NewReader(`{"vcpus":1,"mem_mib":512}`))
+	req.Header.Set("Authorization", "Bearer "+testKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: got %d, want 201 (%s)", rec.Code, rec.Body.String())
+	}
+	if fake.lastCreate.OrgID != "org_2" {
+		t.Fatalf("the machine was created in %q; ?org= said org_2", fake.lastCreate.OrgID)
+	}
+
+	// The same admin key, narrowed to the OTHER org, must not see it. Reads
+	// and writes agree, or the dashboard would create rows it cannot read.
+	if rec := do(t, h, "GET", "/v1/machines/m_2?org=org_1", testKey); rec.Code != http.StatusNotFound {
+		t.Errorf("admin ?org=org_1 sees org_2's row: got %d, want 404", rec.Code)
+	}
+	// And with no ?org= at all it still sees everything, unowned rows included.
+	if rec := do(t, h, "GET", "/v1/machines/m_legacy", testKey); rec.Code != http.StatusOK {
+		t.Errorf("an unnarrowed admin lost the unowned row: got %d, want 200", rec.Code)
+	}
+}
+
+// A tenant key's ?org= is ignored on a WRITE for the same reason it is ignored
+// on a list: the caller has exactly one org, so the parameter can only be
+// redundant or wrong, and honouring it would be a create inside another tenant.
+func TestATenantKeysOrgParameterIsIgnoredOnAWrite(t *testing.T) {
+	h, _, fake := twoTenants(t)
+
+	req := httptest.NewRequest("POST", "/v1/machines?org=org_2",
+		strings.NewReader(`{"vcpus":1,"mem_mib":512}`))
+	req.Header.Set("Authorization", "Bearer pilot_org1")
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("create: got %d, want 201 (%s)", rec.Code, rec.Body.String())
+	}
+	if fake.lastCreate.OrgID != "org_1" {
+		t.Errorf("the machine was created in %q; the key says org_1", fake.lastCreate.OrgID)
+	}
+}
+
+// The charge follows the acting org. An admin creating as an org that has no
+// headroom is refused, or the named org's limit would be a limit only its own
+// key respects.
+func TestAnAdminCreateIsChargedToTheNamedOrg(t *testing.T) {
+	h, st, fake := twoTenants(t)
+	if err := st.PutQuota(context.Background(), &state.Quota{
+		OrgID: "org_2", MaxMachines: 0, MaxVCPUs: 10, MaxMemMiB: 4096, MaxVolumeGiB: 10,
+	}); err != nil {
+		t.Fatalf("PutQuota: %v", err)
+	}
+	before := fake.created
+
+	req := httptest.NewRequest("POST", "/v1/machines?org=org_2",
+		strings.NewReader(`{"vcpus":1,"mem_mib":512}`))
+	req.Header.Set("Authorization", "Bearer "+testKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("create as a frozen org: got %d, want 429 (%s)", rec.Code, rec.Body.String())
+	}
+	if fake.created != before {
+		t.Errorf("a refused create reached the manager")
+	}
+	// The admin's OWN org is not frozen, so the same body with no ?org= works.
+	req = httptest.NewRequest("POST", "/v1/machines", strings.NewReader(`{"vcpus":1,"mem_mib":512}`))
+	req.Header.Set("Authorization", "Bearer "+testKey)
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Errorf("the admin's own org was charged org_2's limit: got %d", rec.Code)
+	}
+}
+
 // A tenant sees its own org on the rows it can see.
 func TestAMachineReportsItsOrg(t *testing.T) {
 	h, _, _ := twoTenants(t)

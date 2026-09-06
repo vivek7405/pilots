@@ -91,7 +91,7 @@ func writeQuotaError(w http.ResponseWriter, err error) bool {
 
 // checkQuota runs the org's limits over a request and answers if it refuses.
 func (d Deps) checkQuota(w http.ResponseWriter, r *http.Request, delta quota.Delta) bool {
-	err := quota.Check(r.Context(), d.Store, OrgID(r.Context()), delta)
+	err := quota.Check(r.Context(), d.Store, actingOrg(r), delta)
 	if err == nil {
 		return true
 	}

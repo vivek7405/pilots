@@ -105,10 +105,11 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, "bad request body", NextBadBody, nil)
 		return
 	}
-	// The org comes from the authenticated key and overwrites whatever the
-	// body said. CreateMachineRequest.OrgID is `json:"-"` so a body cannot
-	// carry one at all, and this line is the only thing that ever sets it.
-	req.OrgID = OrgID(r.Context())
+	// The org comes from the authenticated key, or from ?org= on an admin
+	// key acting as another org, and overwrites whatever the body said.
+	// CreateMachineRequest.OrgID is `json:"-"` so a body cannot carry one at
+	// all, and this line is the only thing that ever sets it. See actingOrg.
+	req.OrgID = actingOrg(r)
 
 	// A create may name a volume to attach, and a volume is another tenant's
 	// data. Without this, naming a foreign id in the body would mount someone
@@ -638,7 +639,7 @@ func (d Deps) handleCreateVolume(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, "size_gib is required", "pass size_gib", nil)
 		return
 	}
-	req.OrgID = OrgID(r.Context())
+	req.OrgID = actingOrg(r)
 	if !d.checkQuota(w, r, quota.Delta{VolumeGiB: req.SizeGiB}) {
 		return
 	}
