@@ -577,3 +577,22 @@ test('a build step with no overrides sends the context Dockerfile as it is', asy
     await api.close()
   }
 })
+
+// `--env` is the interpolation environment for a compose file. On a directory
+// that has none it has nothing to interpolate, and a flag that is parsed and
+// then ignored deploys something other than what was asked for while
+// reporting success.
+test('--env on a directory with no compose file is refused, not dropped', async () => {
+  const api = await startFakeAPI()
+  const dir = join(import.meta.dirname, 'fixtures', 'webjs-app')
+  const env = loggedIn(api.url)
+  try {
+    const res = await pilot(env, ['deploy', '--env', 'DATABASE_URL=postgres://x'], dir)
+    assert.equal(res.code, 1)
+    assert.match(res.stderr, /--env is the interpolation environment/)
+    assert.equal(api.all('POST', '/v1/plan').length, 0, 'it planned before refusing')
+    assert.equal(api.all('POST', '/v1/builds').length, 0, 'it built before refusing')
+  } finally {
+    await api.close()
+  }
+})

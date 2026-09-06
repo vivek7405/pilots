@@ -60,6 +60,16 @@ export function createDeployCommand(): Command {
         const env = { ...loadDotEnv(composeDir), ...parseKeyValues(opts.env as string[] | undefined) }
         plan = await client.compose.plan({ compose: text, env })
       } else {
+        // `--env` is the compose interpolation environment and there is no
+        // compose file here, so it has nothing to interpolate. Refused rather
+        // than dropped: an argument that is quietly ignored deploys something
+        // other than what was asked for and says nothing about it.
+        if ((opts.env as string[] | undefined)?.length) {
+          throw new CliError(
+            `--env is the interpolation environment for a compose file, and ${dir} has none; ` +
+              'put the values in a compose file, or set them on the service with `pilot services update`',
+          )
+        }
         // No compose file: the host decides what this directory is, from the
         // same tar the build would upload. Its `.env` is inside the tar, so
         // the planner reads it there rather than being handed a map.
