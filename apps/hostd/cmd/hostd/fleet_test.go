@@ -1,6 +1,15 @@
 package main
 
-import "testing"
+import (
+	"context"
+	"runtime"
+	"testing"
+	"time"
+
+	"github.com/vivek7405/pilots/hostd/internal/config"
+	"github.com/vivek7405/pilots/hostd/internal/mesh"
+	"github.com/vivek7405/pilots/hostd/internal/state"
+)
 
 // A /proc/meminfo from a host with a large hugepage pool reserved. The point
 // is the relationship between the numbers: MemAvailable is small precisely
@@ -82,5 +91,73 @@ func TestFreeMemCountsThePoolUnderHugePages(t *testing.T) {
 	if fromPool/fromAvailable < 10 {
 		t.Errorf("pool/available = %d, want the fixture to keep them far apart",
 			fromPool/fromAvailable)
+	}
+}
+
+// A host with no mesh identity publishes an empty address rather than the one
+// the zero key derives, which every such host would share.
+func TestHeartbeatRowWithoutAMesh(t *testing.T) {
+	cfg := &config.Config{HostID: "host-a", PublicIP: "203.0.113.7"}
+
+	h := heartbeatFor(cfg, mesh.Keys{}, false)()
+	if h.ID != "host-a" {
+		t.Errorf("ID = %q, want host-a", h.ID)
+	}
+	if h.PublicIP != "203.0.113.7" {
+		t.Errorf("PublicIP = %q, want 203.0.113.7", h.PublicIP)
+	}
+	if h.CPUFree != runtime.NumCPU() {
+		t.Errorf("CPUFree = %d, want %d", h.CPUFree, runtime.NumCPU())
+	}
+	if h.WGAddr != "" || h.WGPubKey != "" {
+		t.Errorf("keyless host published wg_addr %q and wg_pubkey %q, want both empty", h.WGAddr, h.WGPubKey)
+	}
+
+	keys, err := mesh.NewKeys()
+	if err != nil {
+		t.Fatalf("NewKeys: %v", err)
+	}
+	meshed := heartbeatFor(cfg, keys, true)()
+	if meshed.WGAddr != keys.Address().String() {
+		t.Errorf("wg_addr = %q, want %q", meshed.WGAddr, keys.Address().String())
+	}
+	if meshed.WGPubKey != keys.Public.String() {
+		t.Errorf("wg_pubkey = %q, want %q", meshed.WGPubKey, keys.Public.String())
+	}
+}
+
+// The bug this fixes: a single box wrote no hosts row at all, so GET /v1/hosts
+// answered [] on the exact setup the local runbook builds. Gating the
+// heartbeat on cfg.Fleet() again leaves the list empty here.
+func TestASingleBoxListsItself(t *testing.T) {
+	store, err := state.Open(":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	startHeartbeat(ctx, &config.Config{HostID: "host-a"}, store, mesh.Keys{}, false)
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		hosts, err := store.ListHosts(ctx)
+		if err != nil {
+			t.Fatalf("ListHosts: %v", err)
+		}
+		if len(hosts) == 1 {
+			if hosts[0].ID != "host-a" {
+				t.Fatalf("listed host %q, want host-a", hosts[0].ID)
+			}
+			if age := time.Since(time.Unix(hosts[0].LastSeen, 0)); age > time.Minute {
+				t.Fatalf("last_seen is %v old, want a fresh heartbeat", age)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after 2s the store lists %d hosts, want 1", len(hosts))
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

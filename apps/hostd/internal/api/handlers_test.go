@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
@@ -235,5 +236,44 @@ func TestCreateMachineURLOnPlainHTTP(t *testing.T) {
 	}
 	if got.URL != "http://webapp.pilotrun.app:8080" {
 		t.Errorf("url = %q, want the listener's scheme and port", got.URL)
+	}
+}
+
+// alive is computed from last_seen against a 30s window, not stored. A host
+// that stopped heartbeating half a minute ago is listed and marked dead, which
+// is what makes the row worth writing on a single box.
+func TestListHostsReportsAliveFromLastSeen(t *testing.T) {
+	h, st := newTestServer(t)
+	ctx := context.Background()
+	now := time.Now().Unix()
+	for _, row := range []*state.Host{
+		{ID: "host-fresh", LastSeen: now, CPUFree: 8, MemFreeMiB: 4096},
+		{ID: "host-stale", LastSeen: now - 31},
+	} {
+		if err := st.PutHost(ctx, row); err != nil {
+			t.Fatalf("PutHost(%s): %v", row.ID, err)
+		}
+	}
+
+	rec := do(t, h, "GET", "/v1/hosts", testKey)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d: %s", rec.Code, rec.Body)
+	}
+	var got []Host
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	alive := map[string]bool{}
+	for _, host := range got {
+		alive[host.ID] = host.Alive
+	}
+	if len(got) != 2 {
+		t.Fatalf("listed %d hosts, want 2: %+v", len(got), got)
+	}
+	if !alive["host-fresh"] {
+		t.Error("a host that heartbeat just now is listed dead")
+	}
+	if alive["host-stale"] {
+		t.Error("a host last seen 31s ago is listed alive; the window is 30s")
 	}
 }

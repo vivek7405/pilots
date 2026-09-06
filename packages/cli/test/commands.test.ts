@@ -299,3 +299,22 @@ test('the type-stripping warning is filtered off stderr, and nothing else is', a
     await api.close()
   }
 })
+
+// Bug 1's rendering half. The header is stdout, so a script that greps for it
+// keeps working; the reason the rows are missing is prose and prose is stderr.
+// Counterfactual: the sentence written to stdout breaks the stdout-is-a-table
+// rule and the stdout assertion below.
+test('status with no hosts prints the header and says why on stderr', async () => {
+  const api = await startFakeAPI()
+  api.routes.set('GET /v1/hosts', (_req, res) => json(res, 200, []))
+  const env = loggedIn(api.url)
+  try {
+    const res = await pilot(env, ['status'])
+    assert.equal(res.code, 0, res.stderr)
+    assert.match(res.stdout, /^HOST {2}ALIVE {2}CPU FREE {2}MEM FREE MIB/)
+    assert.match(res.stderr, /lists no hosts/)
+    assert.doesNotMatch(res.stdout, /lists no hosts/)
+  } finally {
+    await api.close()
+  }
+})

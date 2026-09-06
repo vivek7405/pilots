@@ -165,6 +165,9 @@ func run() error {
 	// .internal would work in a fleet and silently not on one machine, which
 	// is the worst place for a behavioural difference to hide.
 	var machinePrefix netip.Prefix
+	// Whether this host has a mesh identity at all. The heartbeat reads it so
+	// a keyless host publishes an empty address instead of the zero key's.
+	meshed := false
 	meshKeys, err := mesh.LoadOrCreateKeys(cfg.MeshKeyPath())
 	if err != nil {
 		if cfg.Fleet() {
@@ -181,6 +184,7 @@ func run() error {
 			"each other and .internal will not resolve", "err", err)
 	} else {
 		machinePrefix = meshKeys.MachinePrefix()
+		meshed = true
 	}
 
 	// A second client over the same bucket under the chunk prefix. Content-
@@ -355,6 +359,9 @@ func run() error {
 	// Sweeps up Firecrackers this host has no record of -- the residue of a
 	// hostd killed mid-create, or a destroy that failed partway.
 	go mgr.RunReaper(ctx)
+	// Every host publishes its own row, fleet or not, so that GET /v1/hosts on
+	// any host lists at least the one answering.
+	startHeartbeat(ctx, cfg, store, meshKeys, meshed)
 	// Never fc.UnconfiguredStore: a stub that fails every put would log a
 	// warning a minute on a single box that is configured exactly as intended.
 	// Nil instead, and the ledger says so once at start.

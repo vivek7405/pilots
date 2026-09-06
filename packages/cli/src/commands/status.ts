@@ -9,8 +9,8 @@
 import { Command } from 'commander'
 import type { Machine, MachineState } from '@pilots/sdk'
 
-import { clientFromEnv, type GlobalOptions } from '../config.ts'
-import { isJSONMode, printJSON, printTable } from '../output.ts'
+import { clientFromEnv, resolveApiUrl, type GlobalOptions } from '../config.ts'
+import { isJSONMode, note, printJSON, printTable } from '../output.ts'
 
 export function createStatusCommand(): Command {
   return new Command('status')
@@ -24,6 +24,14 @@ export function createStatusCommand(): Command {
       if (isJSONMode()) {
         printJSON({ hosts, machines_by_state: byState, machines_total: machines.length })
         return
+      }
+      // The header still prints, so a script that greps for it keeps working;
+      // the reason the rows are missing is prose, and prose goes to stderr.
+      if (hosts.length === 0) {
+        note(
+          `the fleet at ${resolveApiUrl(opts)} lists no hosts; every hostd writes its own row within a ` +
+            'second of starting, so the host that answered is still starting or its state store is unwritable',
+        )
       }
       printTable([
         ['HOST', 'ALIVE', 'CPU FREE', 'MEM FREE MIB'],
