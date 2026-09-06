@@ -57,6 +57,10 @@ export function serviceCard(opts: {
 }): TemplateResult {
   const { app, service, placed, replicas, volume, selected } = opts;
   const href = `/apps/${encodeURIComponent(app)}?service=${encodeURIComponent(service.id)}`;
+  // A service with no domain has no stable URL, but its running instance has a
+  // routable name-based one. Show that so the card is never a dead end; it is
+  // the current instance's address and moves if the instance is replaced.
+  const liveUrl = service.url || replicas.find((r) => r.url)?.url || '';
   return html`<a
     href=${href}
     data-canvas-card
@@ -69,7 +73,7 @@ export function serviceCard(opts: {
     style=${`left:${placed.x}px;top:${placed.y}px`}
   >
     <span class="truncate text-body font-semibold leading-tight">${service.name}</span>
-    <span class="truncate text-meta leading-tight text-muted-foreground">${service.url ? host(service.url) : 'No URL yet'}</span>
+    <span class="truncate text-meta leading-tight text-muted-foreground">${liveUrl ? host(liveUrl) : 'No URL yet'}</span>
     <span class="mt-auto text-meta leading-tight">${serviceStatus(replicas)}</span>
     ${volume
       ? html`<span class="mt-1 flex items-center gap-1.5 border-t border-border pt-1.5 text-meta leading-tight text-muted-foreground">

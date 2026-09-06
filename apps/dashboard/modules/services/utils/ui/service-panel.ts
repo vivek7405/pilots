@@ -60,12 +60,18 @@ export function servicePanel(detail: ServiceDetail, tab: Tab, ctx: PanelContext 
             ${service.name}
           </h2>
           <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-meta text-muted-foreground">
-            ${service.url
-              ? html`<span class="flex items-center gap-1">
-                  <a href=${service.url} rel="noopener" class="truncate">${service.url}</a>
-                  <copy-button value=${service.url} label="URL"></copy-button>
-                </span>`
-              : html`<span>No URL yet</span>`}
+            ${(() => {
+              // A service with a domain has a stable URL; one without still has
+              // a routable instance URL. Show whichever exists so the panel is
+              // never a dead end.
+              const liveUrl = service.url || replicas.find((r) => r.url)?.url || '';
+              return liveUrl
+                ? html`<span class="flex items-center gap-1">
+                    <a href=${liveUrl} rel="noopener" class="truncate">${liveUrl}</a>
+                    <copy-button value=${liveUrl} label="URL"></copy-button>
+                  </span>`
+                : html`<span>No URL yet</span>`;
+            })()}
             ${healthPills(health)}
           </div>
         </div>
