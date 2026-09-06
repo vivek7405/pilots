@@ -255,6 +255,10 @@ func (d Deps) handleListServices(w http.ResponseWriter, r *http.Request) {
 		mounts[b.ServiceID] = b.VolumeID
 	}
 
+	// One pass over the same rows, grouped by owner and app, so the edges
+	// cost no extra query and no extra tenancy lookup per row. See depends.go.
+	groups := d.siblingsOf(r.Context(), rows)
+
 	org, narrow := listOrg(r)
 	out := make([]Service, 0, len(rows))
 	for _, svc := range rows {
@@ -264,6 +268,7 @@ func (d Deps) handleListServices(w http.ResponseWriter, r *http.Request) {
 		}
 		row := d.serviceToAPI(svc, owner)
 		row.VolumeID = mounts[svc.ID]
+		row.DependsOn = d.dependsOn(svc, groups[siblingKey{org: owner, app: svc.App}])
 		out = append(out, row)
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -282,6 +287,7 @@ func (d Deps) handleGetService(w http.ResponseWriter, r *http.Request) {
 	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
 	out := d.serviceToAPI(*svc, owner)
 	out.VolumeID = volumeID
+	d.withEdges(r.Context(), &out, *svc, owner)
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -339,6 +345,7 @@ func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
 	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
 	out := d.serviceToAPI(*svc, owner)
 	out.VolumeID = volumeID
+	d.withEdges(r.Context(), &out, *svc, owner)
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -574,6 +581,7 @@ func (d Deps) handlePromote(w http.ResponseWriter, r *http.Request) {
 	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
 	out := d.serviceToAPI(*svc, owner)
 	out.VolumeID = volumeID
+	d.withEdges(r.Context(), &out, *svc, owner)
 	writeJSON(w, http.StatusOK, out)
 }
 
