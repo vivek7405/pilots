@@ -1049,6 +1049,10 @@ snapshot; a database restores and then replays WAL.
   fallback: `pilot login --token` / `PILOT_API_KEY` env. **No command
   validates a cached key**: once the file exists every command talks only to
   the fleet, so a dashboard outage cannot take the CLI down with it.
+  `pilot whoami` names the source that won for the key, the fleet URL and the
+  org, and asks `GET /v1/whoami` on the FLEET for the org and scopes, never
+  the dashboard: the file records only what `login` stored, so it says nothing
+  about a key that came from `PILOT_API_KEY`.
 - **Machine auth:** every hostd request carries `Authorization: Bearer
   <api-key>`. Key **hashes** live in the Corrosion `api_keys` table, written
   by whichever host serves the `POST /v1/api-keys` that minted them, so
