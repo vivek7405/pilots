@@ -579,8 +579,17 @@ func (m *Machine) SuspendInstant(ctx context.Context, up Uploader, chunks Upload
 	// whose row still says "running" is worse than a failed suspend: the
 	// router proxies into a machine that can never answer, and the idle
 	// monitor retries the same failing suspend on every tick.
+	//
+	// Only up to the kill, though. Past it the process is gone because THIS
+	// call took it down, so there is nothing to resume and a socket that
+	// refuses is the corpse we just made -- reporting that as "the guest is
+	// gone" would blame a later failure on an exit nobody suffered.
+	killed := false
 	defer func() {
-		if err != nil && m.resumeAfterFailure(ctx, err) {
+		if err == nil || killed {
+			return
+		}
+		if m.resumeAfterFailure(ctx, err) {
 			err = fmt.Errorf("%w: %v", ErrGuestGone, err)
 		}
 	}()
@@ -607,7 +616,9 @@ func (m *Machine) SuspendInstant(ctx context.Context, up Uploader, chunks Upload
 	// largest files around.
 	_ = os.Remove(p.hostMem)
 
-	if err = m.Kill(); err != nil {
+	err = m.Kill()
+	killed = true
+	if err != nil {
 		return res, err
 	}
 

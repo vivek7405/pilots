@@ -655,6 +655,20 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 		RootfsTemplateDir: m.rootfsTemplateDir(t),
 		BuildDir:          m.buildDir(),
 	}, suspendSnapKey(id), prefetchKey(id))
+	if errors.Is(err, fc.ErrGuestGone) {
+		// The guest exited on its own, part-way through the suspend. There is
+		// nothing left to suspend and nothing here to report: the exit watcher
+		// is already tearing this machine down, writing its row and deciding
+		// whether it comes back, and it holds this same lock to do it.
+		//
+		// nil rather than the error, because every caller of Suspend treats
+		// one as a fault to log and retry. That retry loop against a machine
+		// that had already exited is what filled the log for two hours during
+		// the incident this path comes from.
+		slog.Info("a suspend found its guest already gone; its exit is being handled",
+			"machine", id)
+		return nil
+	}
 	if err != nil {
 		return err
 	}

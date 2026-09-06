@@ -602,3 +602,53 @@ func TestAnEmptyBitmapKeepsTheDurablePair(t *testing.T) {
 			"that is the image the machine comes back from", deleted)
 	}
 }
+
+// A suspend that finds its guest already gone is not a failure to report.
+//
+// SuspendInstant returns fc.ErrGuestGone when the API socket refuses and the
+// pid is not running. Every caller of Suspend -- the idle monitor, the
+// rollout's supersede loop, the autoscaler's scale-down -- treats an error as
+// a fault to log and try again on the next tick, and that retry against a
+// machine that had already exited is what filled the log for two hours during
+// the incident. The exit watcher owns this machine now, so there is nothing
+// here to report.
+func TestASuspendWhoseGuestIsGoneIsNotAnError(t *testing.T) {
+	m, _, _ := newExitManager(t)
+	ctx := context.Background()
+
+	tpl := stageTemplate(t, m)
+	row := runningRow("m-gone")
+	row.TemplateMemBuildID = tpl.MemBuildID.String()
+	row.TemplateRootfsBuildID = tpl.RootfsBuildID.String()
+	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
+		t.Fatal(err)
+	}
+
+	// A machine whose Firecracker is a child that has already exited and whose
+	// API socket was never there: the shape SuspendInstant meets when a guest
+	// died under it.
+	dead := exec.Command("true")
+	if err := dead.Start(); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if _, err := dead.Process.Wait(); err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+	dir := m.stateDir("m-gone")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fcm := &fc.Machine{
+		ID: "m-gone", StateDir: dir, MemMiB: 512,
+		Client: fc.NewClient(filepath.Join(dir, "fc.sock")),
+		Cmd:    &exec.Cmd{Process: dead.Process},
+	}
+	m.mu.Lock()
+	m.running["m-gone"] = fcm
+	m.mu.Unlock()
+
+	if err := m.Suspend(ctx, "m-gone"); err != nil {
+		t.Errorf("Suspend reported %v for a guest that had already exited; every "+
+			"caller logs that and retries it on the next tick", err)
+	}
+}
