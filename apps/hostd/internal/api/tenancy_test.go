@@ -239,6 +239,39 @@ func TestACreateCannotBootAForeignImage(t *testing.T) {
 	}
 }
 
+// A release's build pair RESTORES another org's memory image, and both fields
+// decode from a request body even though only the rollout is meant to set
+// them. The rollout never comes through this handler -- it creates in-process
+// -- so a pair named HERE is a client naming one, and it gets the check the
+// image field already gets.
+//
+// No memory build ever has an owner row, which makes a pair admin-only on the
+// API by construction. Left unchecked, a scoped key naming another org's
+// release pair reached the boot path and left a machine in the caller's org.
+func TestACreateCannotRestoreAForeignBuildPair(t *testing.T) {
+	h, _, fake := twoTenants(t)
+
+	const pair = `{"vcpus":1,"mem_mib":512,"mem_build_id":"mem_1","rootfs_build_id":"bld_1"}`
+	rec := postJSON(t, h, "/v1/machines", "pilot_org2", pair)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("restoring a foreign build pair: got %d, want 404 (%s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "build not found") {
+		t.Errorf("the refusal names something other than the build: %s", rec.Body.String())
+	}
+	if fake.created != 0 {
+		t.Errorf("the create reached the manager anyway (%d creates)", fake.created)
+	}
+
+	// An admin key still names a pair: that is a peer host's forwarded create
+	// and the battery's release-restore timing step.
+	if ok := doJSON(t, h, "POST", "/v1/machines", map[string]any{
+		"vcpus": 1, "mem_mib": 512, "mem_build_id": "mem_1", "rootfs_build_id": "bld_1",
+	}); ok.Code != http.StatusCreated {
+		t.Errorf("an admin create from a build pair: got %d, want 201 (%s)", ok.Code, ok.Body.String())
+	}
+}
+
 // The build log is the build's own output -- Dockerfile lines, registry URLs,
 // whatever the build echoed -- so it is scoped like the build it belongs to.
 // The key here carries `deploy`, so the scope gate lets it through and the

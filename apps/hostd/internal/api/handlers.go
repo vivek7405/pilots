@@ -143,6 +143,19 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The same door a third time. A release's build pair RESTORES another
+	// org's memory image, and the fields decode from a body even though only
+	// the rollout is meant to set them (see CreateMachineRequest). The
+	// rollout never comes through this handler; it creates in-process. So a
+	// pair named here is held to the check image gets: no memory build ever
+	// has an owner row, which makes the pair admin-only, and a tenant naming
+	// one is told the build is not there.
+	for _, b := range []string{req.MemBuildID, req.RootfsBuildID} {
+		if b != "" && !d.ownedBuild(w, r, b) {
+			return
+		}
+	}
+
 	if !d.checkQuota(w, r, quota.Delta{
 		Machines: 1,
 		VCPUs:    orDefault(req.VCPUs, 1),
