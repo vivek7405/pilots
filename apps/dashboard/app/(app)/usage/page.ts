@@ -15,10 +15,49 @@ import { resolvePeriod } from '#modules/usage/period.ts';
 import { buttonClass } from '#components/ui/button.ts';
 import { cardClass, cardContentClass } from '#components/ui/card.ts';
 import { inputClass } from '#components/ui/input.ts';
+import { progressClass } from '#components/ui/progress.ts';
 import { dataTable, emptyState, field, formRowClass, lede, pageHeading, sectionHeading } from '#lib/utils/ui.ts';
 import { cn } from '#lib/utils/cn.ts';
+import { listServicesWithStatus } from '#modules/services/queries/list-services-with-status.server.ts';
+import { getQuota } from '#modules/fleet/queries/get-quota.server.ts';
+import { isSignedOut } from '#modules/auth/session.server.ts';
+import { NOUN } from '#lib/vocabulary.ts';
+import type { Quota } from '#modules/fleet/types.ts';
+import '#modules/usage/components/hosts-strip.ts';
 
 export const metadata = { title: 'Usage' };
+
+interface Bar {
+  label: string;
+  used: number;
+  limit?: number;
+  unit?: string;
+}
+
+function sum<T>(rows: T[], of: (row: T) => number | undefined): number {
+  return rows.reduce((total, row) => total + (of(row) ?? 0), 0);
+}
+
+/**
+ * One ceiling. The number is beside the bar rather than only in it, because a
+ * bar is a proportion and what a reader needs before a create is the count.
+ */
+function quotaBar(bar: Bar) {
+  const label = `${bar.label}: ${bar.used}${bar.limit === undefined ? '' : ` of ${bar.limit}`}${bar.unit ? ` ${bar.unit}` : ''}`;
+  return html`
+    <div class="grid gap-1">
+      <div class="flex items-baseline justify-between text-body">
+        <span>${bar.label}</span>
+        <span class="tabular-nums text-muted-foreground">
+          ${bar.used}${bar.limit === undefined ? '' : html` / ${bar.limit}`}${bar.unit ? html` ${bar.unit}` : ''}
+        </span>
+      </div>
+      ${bar.limit === undefined
+        ? html`<p class="m-0 text-meta text-muted-foreground">No ceiling reported for this team.</p>`
+        : html`<progress class=${progressClass()} value=${bar.used} max=${bar.limit} aria-label=${label}></progress>`}
+    </div>
+  `;
+}
 
 export default async function UsagePage({ searchParams }: PageProps) {
   const ctx = (await requireOrg())!;
@@ -28,6 +67,22 @@ export default async function UsagePage({ searchParams }: PageProps) {
   );
   const rows = orUnauthorized(await usageForOrg({ since, until }));
   const { totals } = toJson(rows);
+
+  // Limits and capacity read the same fleet the apps list does. Each read
+  // degrades on its own: a fleet that cannot answer costs the reader the
+  // limits, not the whole page.
+  const status = await listServicesWithStatus();
+  const fleet = isSignedOut(status)
+    ? { machines: [], hosts: [], volumes: [] }
+    : { machines: status.machines, hosts: status.hosts, volumes: status.volumes };
+  const quotaRead = await getQuota().catch((): Quota => ({}));
+  const quota: Quota = isSignedOut(quotaRead) ? {} : quotaRead;
+  const bars: Bar[] = [
+    { label: NOUN.Instances, used: fleet.machines.length, limit: quota.max_machines },
+    { label: 'vCPUs', used: sum(fleet.machines, (m) => m.vcpus), limit: quota.max_vcpus },
+    { label: 'Memory', used: sum(fleet.machines, (m) => m.mem_mib), limit: quota.max_mem_mib, unit: 'MiB' },
+    { label: NOUN.Storage, used: sum(fleet.volumes, (v) => v.size_gib), limit: quota.max_volume_gib, unit: 'GiB' },
+  ];
 
   const day = (d: Date) => d.toISOString().slice(0, 10);
   const query = `org=${encodeURIComponent(ctx.org.id)}&since=${day(since)}&until=${day(until)}`;
@@ -95,6 +150,16 @@ export default async function UsagePage({ searchParams }: PageProps) {
                 { header: 'Volume GiB s', align: 'right', cellClass: 'tabular-nums', cell: (r) => r.volumeGibSeconds },
               ],
             })}
+    </div>
+
+    <div class="mb-8">
+      ${sectionHeading('Limits', 'What this team may run at once. A create that would cross a line is refused.')}
+      <div class="grid gap-3 sm:grid-cols-2">${bars.map((bar) => quotaBar(bar))}</div>
+    </div>
+
+    <div>
+      ${sectionHeading('Capacity', 'Where your services run right now, and how much room is left there.')}
+      <hosts-strip .initial=${fleet.hosts}></hosts-strip>
     </div>
   `;
 }

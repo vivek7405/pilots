@@ -67,9 +67,10 @@ test('the home page is the overview once signed in, and the sign-in offer before
   const signedIn = await app.handle(new Request('http://localhost/', asUser(cookie)));
   assert.equal(signedIn.status, 200, 'no redirect: this page is the app list');
   const body = await signedIn.text();
-  for (const section of ['Apps', 'Limits', 'Capacity']) {
-    assert.ok(body.includes(`>${section}<`), `the app list has a ${section} section`);
-  }
+  assert.ok(body.includes('>Apps<'), 'the app list is the home page');
+  // Limits and capacity moved to Usage: the apps page is apps and nothing else.
+  assert.ok(!body.includes('>Limits<'), 'no limits on the apps page');
+  assert.ok(!body.includes('>Capacity<'), 'no capacity on the apps page');
 });
 
 test('the login page shows a failed sign-in rather than swallowing it', async () => {

@@ -9,21 +9,19 @@
  * scripting off: the filter is an island over server-rendered rows, the sort
  * is a GET form, the toggle is two links.
  *
- * A service with no app is listed below the grid under its own name. It is
- * not hidden, because it exists and costs money, and it is not promoted to a
- * card, because a card is a canvas and a canvas needs an app.
- *
- * Every read here degrades on its own. A fleet that cannot answer for quotas
- * should cost the reader the limits, not the page.
+ * A service with no app is a card too, drawn as its own one-node canvas and
+ * linking to the service, so this page is one grid of cards rather than a
+ * grid and a leftover table. Limits and capacity live on Usage now, not here:
+ * this page is the apps and nothing else.
  */
 import { html } from '@webjsdev/core';
 import type { PageProps } from '@webjsdev/core';
 import { currentUser } from '#modules/auth/queries/current-user.server.ts';
 import { listServicesWithStatus } from '#modules/services/queries/list-services-with-status.server.ts';
-import { getQuota } from '#modules/fleet/queries/get-quota.server.ts';
 import { isSignedOut } from '#modules/auth/session.server.ts';
 import { signInLink } from '#modules/auth/sign-in-link.ts';
 import { serviceStatusLine } from '#modules/services/utils/ui/status-line.ts';
+import type { HealthRelease } from '#modules/services/utils/health.ts';
 import { appTone, groupApps, sortApps, sortKey } from '#modules/apps/utils/apps.ts';
 import type { AppGroup } from '#modules/apps/utils/apps.ts';
 import { layoutApp } from '#modules/apps/utils/layout.ts';
@@ -34,28 +32,19 @@ import { NOUN } from '#lib/vocabulary.ts';
 import { badgeClass } from '#components/ui/badge.ts';
 import { buttonClass } from '#components/ui/button.ts';
 import { cardClass } from '#components/ui/card.ts';
-import { progressClass } from '#components/ui/progress.ts';
 import { nativeSelectClass, nativeSelectIconClass, nativeSelectWrapperClass } from '#components/ui/native-select.ts';
-import { cardBody, dataTable, emptyState, lede, pageHeading, sectionGap, sectionHeading } from '#lib/utils/ui.ts';
+import { cardBody, dataTable, lede, pageHeading, sectionEmpty, sectionGap, sectionHeading } from '#lib/utils/ui.ts';
 import { cn } from '#lib/utils/cn.ts';
-import type { Machine, Release, Service, Volume } from '@pilots/sdk';
+import type { Machine, Release, Service } from '@pilots/sdk';
 import type { Machine as BrowserMachine } from '#modules/machines/types.ts';
-import type { Quota } from '#modules/fleet/types.ts';
 import '#components/auto-submit.ts';
 import '#components/copy-button.ts';
 import '#components/link-rows.ts';
 import '#components/list-filter.ts';
 import '#components/relative-time.ts';
-import '#modules/usage/components/hosts-strip.ts';
 
 export const metadata = { title: 'pilots' };
 
-interface Bar {
-  label: string;
-  used: number;
-  limit?: number;
-  unit?: string;
-}
 
 const SORTS: { value: 'activity' | 'created' | 'name'; label: string }[] = [
   { value: 'activity', label: 'Recent activity' },
@@ -77,18 +66,13 @@ export default async function Home({ searchParams }: PageProps) {
   }
 
   const status = await listServicesWithStatus();
-  const { services, machines, hosts, releases, volumes } = isSignedOut(status)
+  const { services, machines, releases } = isSignedOut(status)
     ? {
         services: [] as Service[],
         machines: [] as Machine[],
-        hosts: [],
         releases: {} as Record<string, Release[]>,
-        volumes: [] as Volume[],
       }
     : status;
-  const quotaRead = await getQuota().catch((): Quota => ({}));
-  const quota: Quota = isSignedOut(quotaRead) ? {} : quotaRead;
-
   const sort = sortKey(searchParams.sort);
   const view = searchParams.view === 'list' ? 'list' : 'grid';
   const grouped = groupApps(services, machines as BrowserMachine[], releases);
@@ -96,14 +80,6 @@ export default async function Home({ searchParams }: PageProps) {
   const loose = grouped.loose;
   const replicasOf = (id: string) => machines.filter((m) => m.service_id === id) as BrowserMachine[];
 
-  // Every machine the API returns counts against the ceiling: a destroyed one
-  // is removed from the list rather than reported in a terminal state.
-  const bars: Bar[] = [
-    { label: NOUN.Instances, used: machines.length, limit: quota.max_machines },
-    { label: 'vCPUs', used: sum(machines, (m) => m.vcpus), limit: quota.max_vcpus },
-    { label: 'Memory', used: sum(machines, (m) => m.mem_mib), limit: quota.max_mem_mib, unit: 'MiB' },
-    { label: NOUN.Storage, used: sum(volumes, (v) => v.size_gib), limit: quota.max_volume_gib, unit: 'GiB' },
-  ];
 
   const viewHref = (v: 'grid' | 'list') => `/?sort=${sort}&view=${v}`;
 
@@ -141,74 +117,34 @@ export default async function Home({ searchParams }: PageProps) {
         </div>
 
         ${apps.length === 0 && loose.length === 0
-          ? emptyState(
-              'No apps yet. Deploy a repository and its services appear here as one app you can open, watch and change.',
-              { command: 'pilot deploy', href: '/services/new', label: 'Deploy an app' },
-            )
-          : html`<div id="apps">
-              ${view === 'grid'
-                ? html`<link-rows>
-                    <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">${apps.map((app) => appCard(app))}</div>
-                  </link-rows>`
-                : html`<link-rows>
-                    ${dataTable<AppGroup<Service>>({
-                      caption: 'Your apps',
-                      rows: apps,
-                      rowHref: (app) => `/apps/${encodeURIComponent(app.name)}`,
-                      columns: [
-                        {
-                          header: NOUN.App,
-                          cell: (app) =>
-                            html`<a href=${`/apps/${encodeURIComponent(app.name)}`} class="text-foreground font-medium"
-                              >${app.name}</a
-                            >`,
-                        },
-                        { header: NOUN.Services, cell: (app) => onlineLine(app) },
-                        { header: 'Deployed', cell: (app) => deployedAt(app) },
-                      ],
-                    })}
-                  </link-rows>`}
-            </div>`}
-      </section>
-
-      ${loose.length > 0
-        ? html`<section>
-            ${sectionHeading(
-              'Not in an app',
-              'A service outside an app cannot be reached by name from other services. An app is set when the service is created, by the compose file or the name given at deploy.',
-            )}
-            <link-rows>
-              ${dataTable<Service>({
-                caption: 'Services that belong to no app',
-                rows: loose,
-                rowHref: (s) => `/services/${s.id}`,
-                columns: [
-                  {
-                    header: 'Name',
-                    cell: (s) => html`<a href=${`/services/${s.id}`} class="text-foreground">${s.name}</a>`,
-                  },
-                  {
-                    header: 'Status',
-                    cell: (s) => serviceStatusLine(s, replicasOf(s.id), releases[s.id] ?? []),
-                  },
-                  {
-                    header: 'URL',
-                    cell: (s) => (s.url ? html`<a href=${s.url} rel="noopener">${s.url}</a>` : ''),
-                  },
-                ],
-              })}
-            </link-rows>
-          </section>`
-        : ''}
-
-      <section>
-        ${sectionHeading('Limits', 'What this team may run at once. A create that would cross a line is refused.')}
-        <div class="grid gap-3 sm:grid-cols-2">${bars.map((bar) => quotaBar(bar))}</div>
-      </section>
-
-      <section>
-        ${sectionHeading('Capacity', 'Where your services run right now, and how much room is left there.')}
-        <hosts-strip .initial=${hosts}></hosts-strip>
+          ? sectionEmpty('No apps yet', {
+              text: 'Deploy a repository, then it appears here as an app you can open, watch and change.',
+              href: '/services/new',
+            })
+          : view === 'grid'
+            ? html`<link-rows>
+                <div id="apps" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  ${apps.map((app) => appCard(app))} ${loose.map((s) => looseCard(s, replicasOf(s.id), releases[s.id] ?? []))}
+                </div>
+              </link-rows>`
+            : html`<div id="apps"><link-rows>
+                ${dataTable<AppGroup<Service>>({
+                  caption: 'Your apps',
+                  rows: apps,
+                  rowHref: (app) => `/apps/${encodeURIComponent(app.name)}`,
+                  columns: [
+                    {
+                      header: NOUN.App,
+                      cell: (app) =>
+                        html`<a href=${`/apps/${encodeURIComponent(app.name)}`} class="text-foreground font-medium"
+                          >${app.name}</a
+                        >`,
+                    },
+                    { header: NOUN.Services, cell: (app) => onlineLine(app) },
+                    { header: 'Deployed', cell: (app) => deployedAt(app) },
+                  ],
+                })}
+              </link-rows></div>`}
       </section>
     </div>
   `;
@@ -263,27 +199,22 @@ function appCard(app: AppGroup<Service>) {
   `;
 }
 
-function sum<T>(rows: T[], of: (row: T) => number | undefined): number {
-  return rows.reduce((total, row) => total + (of(row) ?? 0), 0);
-}
-
 /**
- * One ceiling. The number is beside the bar rather than only in it, because a
- * bar is a proportion and what a reader needs before a create is the count.
+ * A service that belongs to no app is still a card, so the apps page is one
+ * grid of cards rather than a grid and a leftover table. It draws its own
+ * one-node canvas and links to the service, since there is no app to open.
  */
-function quotaBar(bar: Bar) {
-  const label = `${bar.label}: ${bar.used}${bar.limit === undefined ? '' : ` of ${bar.limit}`}${bar.unit ? ` ${bar.unit}` : ''}`;
+function looseCard(service: Service, replicas: BrowserMachine[], rels: HealthRelease[]) {
+  const href = `/services/${service.id}`;
+  const layout = layoutApp([{ id: service.id, name: service.name, dependsOn: [] }]);
   return html`
-    <div class="grid gap-1">
-      <div class="flex items-baseline justify-between text-body">
-        <span>${bar.label}</span>
-        <span class="tabular-nums text-muted-foreground">
-          ${bar.used}${bar.limit === undefined ? '' : html` / ${bar.limit}`}${bar.unit ? html` ${bar.unit}` : ''}
-        </span>
+    <div class=${cn(cardClass(), 'gap-0 py-0 cursor-pointer transition-colors hover:border-border-strong')} data-filter-row data-href=${href}>
+      <div class=${cardBody()}>
+        <h2 class="m-0 text-body font-semibold"><a href=${href} class="text-foreground no-underline">${service.name}</a></h2>
+        <div class=${cn(stageClass(), 'mt-3 py-4')}>${thumbnailSvg(layout)}</div>
+        <p class="m-0 mt-3 text-meta text-muted-foreground">${serviceStatusLine(service, replicas, rels)}</p>
       </div>
-      ${bar.limit === undefined
-        ? html`<p class="m-0 text-meta text-muted-foreground">No ceiling reported for this team.</p>`
-        : html`<progress class=${progressClass()} value=${bar.used} max=${bar.limit} aria-label=${label}></progress>`}
     </div>
   `;
 }
+

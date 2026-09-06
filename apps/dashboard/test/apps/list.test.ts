@@ -96,14 +96,14 @@ test('one card per app, linking to its canvas, with a status line and a thumbnai
   assert.ok(!gallery.includes('>docs<'), 'the loose service is not on an app card');
 });
 
-test('a service with no app is listed under its own name below the grid', async () => {
+test('a service with no app is its own card in the grid, linking to the service', async () => {
   const body = await list();
-  const start = body.indexOf('Not in an app');
-  assert.ok(start > 0, 'the section exists');
-  const section = body.slice(start);
-  assert.match(section, /Services that belong to no app/);
-  assert.match(section, /href="\/services\/svc-docs"/);
-  assert.match(section, /data-href="\/services\/svc-docs"/, 'the row navigates');
+  // No leftover table: the loose service is a card like every app, drawn as a
+  // one-node canvas and navigating to the service, since there is no app.
+  assert.ok(!body.includes('Not in an app'), 'no separate table for loose services');
+  assert.match(body, /data-href="\/services\/svc-docs"/, 'the loose service is a navigating card');
+  const card = body.slice(body.indexOf('data-href="/services/svc-docs"'), body.indexOf('data-href="/services/svc-docs"') + 900);
+  assert.match(card, /<svg[^>]*role="img"/, 'the loose card draws its own one-node canvas');
 });
 
 test('the sort is a GET parameter, applied on the server', async () => {
@@ -130,16 +130,12 @@ test('the list view is the same apps as rows, one link each', async () => {
   assert.match(body, /href="\/\?sort=activity&amp;view=list"[^>]*aria-current="true"/);
 });
 
-test('the four limits carry the team ceiling and the current use, in the user words', async () => {
+test('limits and capacity are not on the apps page', async () => {
+  // They moved to Usage, where the room left matters. The apps page is apps.
   const body = await list();
-  const bars = [...body.matchAll(/<progress[^>]*>/g)].map((m) => m[0]);
-  assert.equal(bars.length, 4, `expected four bars, found ${bars.length}`);
-  for (const bar of bars) assert.match(bar, /aria-label="/);
-  assert.ok(bars.some((b) => /aria-label="Instances: 4 of 10"/.test(b)), `instances bar: ${bars.join(' | ')}`);
-  assert.ok(bars.some((b) => /aria-label="vCPUs: 5 of 16"/.test(b)), `vcpu bar: ${bars.join(' | ')}`);
-  assert.ok(bars.some((b) => /aria-label="Memory: 4096 of 8192 MiB"/.test(b)), `memory bar: ${bars.join(' | ')}`);
-  assert.ok(bars.some((b) => /aria-label="Storage: 25 of 100 GiB"/.test(b)), `storage bar: ${bars.join(' | ')}`);
-  assert.match(body, /<hosts-strip/, 'capacity is on the list, where the room left matters');
+  assert.ok(!/<progress/.test(body), 'no quota bars on the apps page');
+  assert.ok(!body.includes('<hosts-strip'), 'no capacity strip on the apps page');
+  assert.ok(!body.includes('>Limits<') && !body.includes('>Capacity<'));
 });
 
 test('an org with nothing in it is told what to do, not just that it is empty', async () => {
@@ -148,7 +144,7 @@ test('an org with nothing in it is told what to do, not just that it is empty', 
   const body = await res.text();
 
   assert.equal(res.status, 200);
-  assert.match(body, /No apps yet/);
-  assert.match(body, /pilot deploy/, 'the empty state carries the command that ends it');
-  assert.match(body, /Deploy an app/, 'and a link to the page that explains it');
+  assert.match(body, /No apps yet/, 'the empty state names what is missing');
+  assert.match(body, /border-dashed/, 'and it is the padded box, not a bare line');
+  assert.match(body, /href="\/services\/new"/, 'with a link to the page that explains the fix');
 });
