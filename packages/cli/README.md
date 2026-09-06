@@ -50,7 +50,7 @@ Other variables the CLI reads:
 - `PILOT_GITHUB_CLIENT_ID` — the GitHub App's public client id for `pilot login`.
 - `PILOT_DASHBOARD_URL` — where the token exchange happens; defaults to `https://pilots.run`.
 - `PILOT_GITHUB_URL` — the GitHub the device flow runs against; defaults to `https://github.com`. Point it at a GitHub Enterprise Server to use one.
-- `PILOT_SECRET_<NAME>` — the value for a `secret://<name>` reference in a compose file.
+- `PILOT_SECRET_<NAME>` — the value for a `secret://<name>` reference in a compose file; `pilot secrets` stores the same value in the credentials file instead.
 
 ### The credentials file
 
@@ -67,6 +67,9 @@ Other variables the CLI reads:
 on this machine. The directory is `0700` and the file is `0600`; a file that any
 other user can read is refused with the path named, because a mode that drifted
 through a backup restore or a dotfiles checkout is silent until it is not.
+
+`pilot secrets set`, `import` and `ls` are the commands that write and list it;
+`add postgres` writes its generated password there too.
 
 ## Output and exit codes
 
@@ -160,7 +163,64 @@ than quietly deployed onto an empty disk.
 A `secret://name` value in the compose file never travels as a value. hostd
 returns the reference, the CLI resolves it from `PILOT_SECRET_<NAME>` or the
 credentials file, and sends the result as `secret_env`, which hostd seals. Every
-missing name is reported at once, before anything is built.
+missing name is reported at once, before anything is built. Store values with
+`pilot secrets`.
+
+### Secrets
+
+```
+pilot secrets set <name> [value] [--app <app>] [--dir <path>] [--env K=V] [--file <path>]
+pilot secrets import <file>      [--app <app>] [--dir <path>] [--env K=V] [--file <path>]
+pilot secrets ls                 [--app <app>] [--dir <path>] [--env K=V] [--file <path>]
+```
+
+The app is `--app`, or the compose file's app by the same rule `deploy` uses:
+`COMPOSE_PROJECT_NAME` from the directory's `.env`, then a top-level
+`x-pilots.app`, then a top-level `name:`. A file with none of the three is
+refused rather than given a default, because a value stored under the wrong name
+is a value the deploy will not find. `--env K=V` and `--file <path>` are the
+same flags `deploy` has and feed the same derivation, so a project deployed as
+`deploy --env COMPOSE_PROJECT_NAME=prod` or `deploy --file prod.compose.yaml`
+stores its secrets under the app that deploy resolves against.
+
+`set` with no value prompts on a terminal and never echoes what is typed. When
+stdin is not a terminal it reads stdin to EOF instead, so
+`printf '%s' "$V" | pilot secrets set n` works in a script. One trailing newline
+is stripped, since that one belongs to `echo` rather than to the secret.
+
+A value that starts with a dash is stored as a value, not read as an option, so
+`pilot secrets set tok -sk-live-...` and `pilot secrets set tok -- -sk-live-...`
+both work. The cost of accepting an unknown option there is that a mistyped flag
+becomes an argument instead: `set` takes at most two, so `--ap x` is refused for
+arity rather than named. That refusal counts the arguments and never lists them,
+because one of them is the secret.
+
+`import` takes a `.env` file, or `-` for stdin, and stores every pair in it in
+one command. It is parsed by Node's own `.env` parser, the same one `deploy`
+uses for interpolation, so a value that quotes correctly for one quotes
+correctly for the other. The key is the secret name, matched exactly: a file
+that says `DATABASE_URL=` stores `DATABASE_URL`, which `secret://database_url`
+does not resolve to. A deploy that misses a name the store holds in a different
+case says so rather than reporting it as unset.
+
+`ls` prints each name and the first eight hex characters of the SHA-256 of its
+value. That is enough to tell two machines hold the same secret and not enough
+to recover it; no command in this group prints a value, on success or on
+failure.
+
+None of the three talks to the fleet. A value has to be storable on a laptop
+with no host in reach, so every subcommand is local file manipulation against
+the `0600` credentials file.
+
+`set` and `import` therefore need that file, and `PILOT_API_KEY` on its own is
+not enough: it signs requests, and a secret is written rather than sent. Writing
+the file from the variable would persist a key nobody asked to persist, or leave
+one with no `api_key` in it. So they refuse and name `pilot login` for a laptop
+and `PILOT_SECRET_<NAME>` for a CI runner, which is the right answer there
+anyway, since a file the job throws away stores nothing.
+
+`PILOT_SECRET_<NAME>` still wins over the file at deploy time, so a CI job
+overrides a stored value without editing anything.
 
 ### Services, domains, volumes
 

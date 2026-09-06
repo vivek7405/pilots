@@ -137,7 +137,9 @@ type CreateMachineRequest struct {
 	// rather than booting an image -- how every replica of a release after the
 	// first comes up, and what makes a deploy land on the measured sub-second
 	// path instead of a cold boot. Internal: set by the rollout, not by a
-	// client, and ignored unless both are present.
+	// client, and ignored unless both are present. A client that names a
+	// pair is held to the same ownership check as Image, and a memory build
+	// never has an owner row, so the pair is admin-only on the API.
 	MemBuildID    string `json:"mem_build_id,omitempty"`
 	RootfsBuildID string `json:"rootfs_build_id,omitempty"`
 

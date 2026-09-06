@@ -61,6 +61,12 @@ test('every missing name is listed at once', () => {
       assert.match(err.message, /alpha, beta/)
       assert.match(err.message, /PILOT_SECRET_ALPHA, PILOT_SECRET_BETA/)
       assert.equal(err.message.includes('postgres_password'), false)
+      // The message has to name the command that fixes it. `pilot add
+      // postgres` generates a database password and has nothing to do with an
+      // app's own AUTH_SECRET, so pointing at it sent people somewhere useless.
+      assert.match(err.message, /pilot secrets set alpha --app shop/)
+      assert.match(err.message, /pilot secrets import <file> --app shop/)
+      assert.equal(err.message.includes('pilot add postgres'), false)
       return true
     },
   )
@@ -79,5 +85,42 @@ test('collectRefs gathers every name in the plan, deduplicated and sorted', () =
       {},
     ]),
     ['alpha', 'beta'],
+  )
+})
+
+test('one missing name points at set and not at import', () => {
+  assert.throws(
+    () => resolveSecrets({ A: 'alpha' }, { app: 'shop', env: {}, credentials }),
+    (err: unknown) => {
+      assert.ok(err instanceof CliError)
+      assert.match(err.message, /store it on this machine with `pilot secrets set alpha --app shop`/)
+      // One name needs one command, not a file.
+      assert.equal(err.message.includes('import'), false)
+      return true
+    },
+  )
+})
+
+test('a name that differs only in case is named rather than reported as missing', () => {
+  // The shape `pilot secrets import` produces from a conventional `.env`: the
+  // key shouts, the reference does not. Counterfactual: the plain "no value
+  // for secret database_url" makes the deploy look like a resolver bug while
+  // `pilot secrets ls` shows DATABASE_URL sitting right there.
+  assert.throws(
+    () =>
+      resolveSecrets({ DATABASE_URL: 'database_url' }, {
+        app: 'shop',
+        env: {},
+        credentials: { api_key: 'k', secrets: { shop: { DATABASE_URL: 'postgres://x' } } },
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof CliError)
+      assert.match(err.message, /the store holds DATABASE_URL for shop/)
+      assert.match(err.message, /matched exactly/)
+      assert.match(err.message, /store database_url instead/)
+      // Never the value, even while naming the key that holds it.
+      assert.equal(err.message.includes('postgres://x'), false)
+      return true
+    },
   )
 })

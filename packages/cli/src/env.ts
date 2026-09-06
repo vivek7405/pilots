@@ -25,6 +25,15 @@ export function loadDotEnv(dir: string, filename = '.env'): Record<string, strin
   } catch {
     return {}
   }
+  return parseDotEnv(text)
+}
+
+/**
+ * The text of a `.env` file as a map. Node's parser, so `pilot deploy`'s
+ * interpolation file and `pilot secrets import`'s input read identically: a
+ * value that quotes correctly for one quotes correctly for the other.
+ */
+export function parseDotEnv(text: string): Record<string, string> {
   const parsed = parseEnv(text) as Record<string, string | undefined>
   const out: Record<string, string> = {}
   for (const [key, value] of Object.entries(parsed)) {

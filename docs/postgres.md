@@ -192,12 +192,24 @@ services:
       DATABASE_URL: secret://database_url
 ```
 
-On another machine, or in CI, export the values instead:
+In CI, export the values instead:
 
 ```
 export PILOT_SECRET_POSTGRES_PASSWORD=...
 export PILOT_SECRET_DATABASE_URL=postgres://postgres:...@postgres.internal:5432/postgres
 ```
+
+On another developer machine, store them once and deploy with nothing exported:
+
+```
+pilot secrets set postgres_password --app shop
+pilot secrets set database_url --app shop
+```
+
+That form needs a credentials file, so it wants a machine someone has run
+`pilot login` on. A CI runner authenticated by `PILOT_API_KEY` alone has no such
+file, and a secret written into a file the job then throws away buys nothing, so
+the exports above are the answer there.
 
 ## One thing to carry into operations
 
