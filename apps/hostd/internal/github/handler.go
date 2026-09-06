@@ -4,13 +4,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/vivek7405/pilots/hostd/internal/build"
+	"github.com/vivek7405/pilots/hostd/internal/compose"
+	"github.com/vivek7405/pilots/hostd/internal/detect"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -40,6 +46,10 @@ type BuildRunner interface {
 	NewBuildID() string
 	StartBuild(ctx context.Context, id string, contextTar io.Reader,
 		emit func(api.BuildLogLine)) (string, error)
+	// RecordRefusal writes a failed build log with no build run, so a push
+	// the planner refused is readable at GET /v1/builds/{id}/logs exactly as
+	// a failed build is.
+	RecordRefusal(id string, line api.BuildLogLine)
 }
 
 type Rollout interface {
@@ -128,9 +138,28 @@ func (d Deps) onPush(ctx context.Context, ev Event) error {
 		return nil
 	}
 
-	build, err := d.buildRef(ctx, ev, ev.After)
+	build, step, err := d.buildRef(ctx, ev, ev.After, svc.App)
 	if err != nil {
 		return err
+	}
+	// The health the plan worked out, when the service has none of its own.
+	// Without this a repository with no Dockerfile deploys and then gates on
+	// hostd's default check rather than on the readiness path its framework
+	// actually serves, which is a rollout that passes before the app is up.
+	//
+	// Written on THIS host, the one the delivery elected. A row it may not
+	// write comes back as state.ErrNotOwner, which is reported rather than
+	// retried: retrying a write this host is not allowed to make cannot start
+	// succeeding.
+	if svc.Health == "" && step != nil && step.Health != nil {
+		raw, err := json.Marshal(step.Health)
+		if err != nil {
+			return fmt.Errorf("github: encoding %s's health: %w", svc.ID, err)
+		}
+		svc.Health = string(raw)
+		if err := d.Store.PutService(ctx, svc); err != nil {
+			return fmt.Errorf("github: recording %s's health from the plan: %w", svc.ID, err)
+		}
 	}
 	// A push carries no policy of its own; the replicas inherit whatever the
 	// previous release's carry.
@@ -160,8 +189,17 @@ func (d Deps) onPullRequest(ctx context.Context, ev Event) error {
 		return nil
 	}
 
-	build, err := d.buildRef(ctx, ev, ev.PullRequest.Head.SHA)
+	build, _, err := d.buildRef(ctx, ev, ev.PullRequest.Head.SHA, svc.App)
 	if err != nil {
+		// A pull request's one surface is its comment, so a refusal says so
+		// there. Otherwise the author sees a preview that never appeared and
+		// no reason anywhere they can reach.
+		if refusal := refusalOf(err); refusal != nil {
+			if token, terr := d.App.InstallationToken(ctx, ev.Installation.ID); terr == nil {
+				_ = d.App.Comment(ctx, token, ev.Repository.FullName, ev.PullRequest.Number,
+					previewMarker, refusalComment(ev.PullRequest.Head.SHA, refusal))
+			}
+		}
 		return err
 	}
 
@@ -224,21 +262,119 @@ func (d Deps) destroyPreview(ctx context.Context, name string, ev Event) error {
 	return nil
 }
 
-// buildRef fetches a ref's tarball and builds it.
-func (d Deps) buildRef(ctx context.Context, ev Event, ref string) (string, error) {
+// Refusal is a push the planner would not build, and why.
+//
+// It is an error type rather than a log line because both callers need to act
+// on it: the push path stops, and the pull-request path posts the reason as a
+// comment. The build id is in it so a person can read the whole thing at
+// GET /v1/builds/{id}/logs.
+type Refusal struct {
+	BuildID string
+	Code    string
+	Message string
+	Next    string
+}
+
+func (r *Refusal) Error() string {
+	return fmt.Sprintf("github: %s: %s", r.Code, r.Message)
+}
+
+func refusalOf(err error) *Refusal {
+	var r *Refusal
+	if errors.As(err, &r) {
+		return r
+	}
+	return nil
+}
+
+// buildRef fetches a ref's tarball, plans it, and builds the one step a push
+// may deploy.
+//
+// Planning first is what lets a repository with no Dockerfile deploy at all,
+// and it is also where a push has to stop: a plan with more than one service
+// needs an order, a dependency graph and a shared app name, which is what a
+// compose file is for. Executing one inside hostd would be a second executor
+// beside the CLI's.
+//
+// The build id is minted BEFORE the plan, so a refusal has a log a person can
+// read at the same route a failed build's is at.
+func (d Deps) buildRef(ctx context.Context, ev Event, ref, app string) (string, *compose.Step, error) {
 	token, err := d.App.InstallationToken(ctx, ev.Installation.ID)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	var buf bytes.Buffer
 	if err := d.App.Tarball(ctx, token, ev.Repository.FullName, ref, &buf); err != nil {
-		return "", err
+		return "", nil, err
 	}
+
+	dir, err := os.MkdirTemp("", "pilot-push-*")
+	if err != nil {
+		return "", nil, err
+	}
+	defer os.RemoveAll(dir)
+	if err := build.ExtractContext(bytes.NewReader(buf.Bytes()), dir, api.MaxBuildContext); err != nil {
+		return "", nil, fmt.Errorf("github: unpacking %s@%s: %w", ev.Repository.FullName, ref, err)
+	}
+
 	id := d.Builds.NewBuildID()
+	res, planErr, unknown, err := detect.Plan(ctx, dir, detect.Options{App: app})
+	switch {
+	case planErr != nil:
+		return "", nil, d.refuse(ctx, id, ev, api.CodePlanUnsupported, planErr.Error,
+			"fix the listed keys in the compose file")
+	case unknown != nil:
+		return "", nil, d.refuse(ctx, id, ev, api.CodeUnknownFramework, unknown.Error(),
+			"commit a Dockerfile; pilot mcp can write one from the plan's details")
+	case err != nil:
+		return "", nil, d.refuse(ctx, id, ev, api.CodeComposeInvalid, err.Error(),
+			"fix the compose file")
+	case len(res.Plan.Steps) != 1:
+		return "", nil, d.refuse(ctx, id, ev, api.CodePlanMultiService,
+			fmt.Sprintf("the plan has %d services; a push deploys one", len(res.Plan.Steps)),
+			"commit a compose file and deploy it with pilot deploy; a push deploys one service")
+	}
+
+	step := res.Plan.Steps[0]
+	if step.Dockerfile != "" {
+		// A recipe. Never over an existing file: the Dockerfile rung would
+		// have won and this step would carry no text at all.
+		if err := os.WriteFile(filepath.Join(dir, "Dockerfile"),
+			[]byte(step.Dockerfile), 0o644); err != nil {
+			return "", nil, err
+		}
+	}
+	slog.Info("planned a push", "repo", ev.Repository.FullName, "ref", ref, "build", id,
+		"source", res.Detected[0].Source, "framework", res.Detected[0].Framework)
+
+	tar, err := detect.TarDir(dir)
+	if err != nil {
+		return "", nil, err
+	}
 	// Logs are recorded by the builder and readable at
-	// GET /v1/builds/{id}/logs, which is what a check run links to. Nothing is
-	// emitted inline here: there is no client on the other end of a webhook.
-	return d.Builds.StartBuild(ctx, id, &buf, func(api.BuildLogLine) {})
+	// GET /v1/builds/{id}/logs. Nothing is emitted inline here: there is no
+	// client on the other end of a webhook.
+	rootfs, err := d.Builds.StartBuild(ctx, id, tar, func(api.BuildLogLine) {})
+	return rootfs, &step, err
+}
+
+// refuse records a refusal where a person can read it and returns it as an
+// error. There is no check-run integration, so the build log and the journal
+// are the two places this can live, and it lives in both.
+func (d Deps) refuse(ctx context.Context, id string, ev Event, code, msg, next string) error {
+	d.Builds.RecordRefusal(id, api.BuildLogLine{
+		Step: id, Stream: "status", Line: "refused",
+		Error: msg, Code: code, TS: time.Now().UnixMilli(),
+	})
+	slog.Warn("refused a push", "repo", ev.Repository.FullName, "build", id,
+		"code", code, "next", next)
+	return &Refusal{BuildID: id, Code: code, Message: msg, Next: next}
+}
+
+// refusalComment is what a pull request whose preview was refused says.
+func refusalComment(sha string, r *Refusal) string {
+	return fmt.Sprintf("Preview for `%s` was not built: %s\n\nNext: %s",
+		sha[:min(7, len(sha))], r.Message, r.Next)
 }
 
 // serviceFor finds the service connected to a repository, and to a branch when

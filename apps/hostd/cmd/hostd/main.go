@@ -449,7 +449,8 @@ func run() error {
 
 	// Push-to-deploy and pull-request previews. The webhook is an ordinary
 	// route on every host; exactly one acts on any delivery.
-	ghApp, err := github.LoadApp(cfg.GitHubAppID, cfg.GitHubKeyPath, cfg.GitHubWebhookKey)
+	ghApp, err := github.LoadApp(cfg.GitHubAppID, cfg.GitHubKeyPath, cfg.GitHubWebhookKey,
+		cfg.GitHubAPIURL)
 	if err != nil {
 		return err
 	}

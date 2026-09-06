@@ -32,6 +32,11 @@ type BuildRunner interface {
 	// BuildLog returns what was recorded and, when following, a channel of
 	// what comes next. The bool reports whether this host has the build at all.
 	BuildLog(ctx context.Context, id string, follow bool) ([]BuildLogLine, <-chan BuildLogLine, bool)
+	// RecordRefusal writes a failed build log with no build run, so a push
+	// the planner refused reads back at GET /v1/builds/{id}/logs the way a
+	// failed build does. On this interface rather than only on the GitHub
+	// one, because the route that serves those logs is here.
+	RecordRefusal(id string, line BuildLogLine)
 }
 
 // ndjson is the media type of the build log stream: one JSON object per line,

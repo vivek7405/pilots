@@ -27,6 +27,22 @@ func (b *Builder) StartBuild(ctx context.Context, id string, contextTar io.Reade
 	return res.RootfsBuildID.String(), nil
 }
 
+// RecordRefusal writes a failed build log for a build that never ran.
+//
+// The push path can refuse before it builds: a plan with more than one
+// service, a compose file the planner will not accept, a repository no recipe
+// knows. A refusal cannot go through StartBuild, because an empty context
+// fails inside the builder with a message about the context rather than about
+// the refusal. So it gets its own one-line log under the id the delivery
+// minted, and GET /v1/builds/{id}/logs answers for a refused push exactly as
+// it answers for a failed build. Otherwise the only record is a journal line
+// on whichever host happened to act.
+func (b *Builder) RecordRefusal(id string, line api.BuildLogLine) {
+	log := b.logs.create(id)
+	log.Append(line)
+	log.Close()
+}
+
 // BuildLog returns a build's recorded output and, when following, a channel of
 // what comes after it.
 //
