@@ -12,7 +12,7 @@ import { badgeClass } from '#components/ui/badge.ts';
 import { cn } from '#lib/utils/cn.ts';
 
 /** The pane itself: a bordered, scrolling, monospaced surface for guest bytes. */
-const PANE = 'h-72 overflow-auto rounded-md border border-border bg-muted p-3 text-xs font-mono whitespace-pre-wrap';
+const PANE = 'h-72 overflow-auto rounded-md border border-border bg-muted p-3 text-meta font-mono whitespace-pre-wrap';
 
 class LogPane extends WebComponent({
   machineId: prop(String, { attribute: 'machine-id' }),

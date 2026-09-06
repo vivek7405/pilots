@@ -259,7 +259,7 @@ export class MachineTerminal extends WebComponent({
     const label = this.status === 'open' ? 'Connected' : this.status === 'connecting' ? 'Connecting' : 'Disconnected';
     return html`
       <div class="flex h-full flex-col">
-        <div class="flex items-center gap-2 border-b border-border px-3 py-2 text-xs">
+        <div class="flex items-center gap-2 border-b border-border px-3 py-2 text-meta">
           <span class=${cn('inline-block size-1.5 rounded-full', dot)} aria-hidden="true"></span>
           <span role="status" aria-live="polite">${label}</span>
           ${this.message ? html`<span class="text-destructive">${this.message}</span>` : ''}

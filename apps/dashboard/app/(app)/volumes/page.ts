@@ -1,33 +1,12 @@
-/** Volumes, read-only: they come from a deploy, not from a button here. */
-import { html } from '@webjsdev/core';
-import type { Volume } from '@pilots/sdk';
-import { orUnauthorized, requireOrg } from '#modules/auth/session.server.ts';
-import { listVolumes } from '#modules/volumes/queries/list-volumes.server.ts';
-import { dataTable, emptyState, lede, pageHeading } from '#lib/utils/ui.ts';
-import '#components/copy-button.ts';
+/**
+ * `/volumes` is now `/storage`.
+ *
+ * "Volume" is the engine's word for a disk that outlives the machine it is
+ * attached to. "Storage" is what a person calls the same thing, and it is the
+ * word every other surface in this app now uses.
+ */
+import { redirect } from '@webjsdev/core';
 
-export const metadata = { title: 'Volumes' };
-
-export default async function VolumesPage() {
-  const ctx = (await requireOrg())!;
-  const volumes = orUnauthorized(await listVolumes().catch(() => []));
-
-  return html`
-    ${pageHeading('Volumes')} ${lede('Created by a deploy from the volumes a compose file names.')}
-    ${volumes.length === 0
-      ? emptyState('No volumes yet. A volume is declared in the compose file and created with the service that mounts it.', {
-          command: 'pilot deploy',
-        })
-      : dataTable<Volume>({
-          caption: 'Volumes in this organisation',
-          rows: volumes,
-          columns: [
-            { header: 'Name', cell: (v) => v.name },
-            { header: 'Size', align: 'right', cellClass: 'tabular-nums', cell: (v) => `${v.size_gib} GiB` },
-            { header: 'Mount', cellClass: 'font-mono', cell: (v) => v.mount_path },
-            { header: 'Machine', cellClass: 'font-mono text-muted-foreground', cell: (v) => v.machine_id ?? '-' },
-            { header: 'Host', cellClass: 'font-mono text-muted-foreground', cell: (v) => v.host_id ?? '-' },
-          ],
-        })}
-  `;
+export default function VolumesRedirect(): never {
+  throw redirect('/storage', 308);
 }

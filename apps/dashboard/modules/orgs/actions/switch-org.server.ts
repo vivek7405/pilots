@@ -29,7 +29,7 @@ export async function switchOrg(formData: FormData): Promise<Response | { succes
   return new Response(null, {
     status: 303,
     headers: {
-      location: localPath(formData.get('back'), '/machines'),
+      location: localPath(formData.get('back'), '/sandboxes'),
       'set-cookie': orgCookie(orgId),
     },
   });

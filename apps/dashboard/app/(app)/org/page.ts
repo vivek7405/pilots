@@ -51,7 +51,7 @@ export default async function OrgPage({ actionData }: PageProps) {
 
     <div class="mb-8">
       ${dataTable<MemberRow>({
-        caption: 'Members of this organisation',
+        caption: 'Members of this team',
         rows: members,
         columns: [
           {
@@ -99,7 +99,7 @@ export default async function OrgPage({ actionData }: PageProps) {
 
     ${isOwner
       ? html`
-          ${sectionHeading('Add a member')}
+          ${sectionHeading('Add a member', 'Anyone you add sees and can change everything this team owns.')}
           <form action=${inviteMember} class=${formRowClass()}>
             ${field({
               id: 'login',
@@ -116,12 +116,12 @@ export default async function OrgPage({ actionData }: PageProps) {
             })}
             <button type="submit" class=${buttonClass()}>Add</button>
           </form>
-          ${footnote('An owner cannot remove themselves: an org with no owner has nobody who can invite one back.')}
+          ${footnote('An owner cannot remove themselves. A team with no owner has nobody left who can invite one back.')}
         `
       : ''}
 
     <div class="mt-10 pt-8 border-t border-border">
-      ${sectionHeading('Account')}
+      ${sectionHeading('Account', 'Switch teams or sign out. These work with scripting off, which the header menu does not.')}
       ${lede('The same actions the account menu in the header holds. They live here too so they work with scripting off.')}
       <div class="flex flex-wrap items-end gap-6">
         ${orgs.length > 1
@@ -130,7 +130,7 @@ export default async function OrgPage({ actionData }: PageProps) {
                 <input type="hidden" name="back" value="/org">
                 ${field({
                   id: 'org-switch',
-                  label: 'Organisation',
+                  label: 'Team',
                   control: html`
                     <div class=${nativeSelectWrapperClass()}>
                       <select id="org-switch" name="org" data-size="sm" class=${nativeSelectClass()}>

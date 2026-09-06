@@ -12,13 +12,11 @@ import { usageForOrg } from '#modules/usage/queries/usage-for-org.server.ts';
 import type { UsageSample } from '#db/schema.server.ts';
 import { toJson } from '#modules/usage/export.server.ts';
 import { resolvePeriod } from '#modules/usage/period.ts';
-import { fleet } from '#modules/fleet/client.server.ts';
 import { buttonClass } from '#components/ui/button.ts';
 import { cardClass, cardContentClass } from '#components/ui/card.ts';
 import { inputClass } from '#components/ui/input.ts';
 import { dataTable, emptyState, field, formRowClass, lede, pageHeading, sectionHeading } from '#lib/utils/ui.ts';
 import { cn } from '#lib/utils/cn.ts';
-import '#modules/usage/components/hosts-strip.ts';
 
 export const metadata = { title: 'Usage' };
 
@@ -30,7 +28,6 @@ export default async function UsagePage({ searchParams }: PageProps) {
   );
   const rows = orUnauthorized(await usageForOrg({ since, until }));
   const { totals } = toJson(rows);
-  const hosts = await fleet.hosts.list().catch(() => []);
 
   const day = (d: Date) => d.toISOString().slice(0, 10);
   const query = `org=${encodeURIComponent(ctx.org.id)}&since=${day(since)}&until=${day(until)}`;
@@ -38,7 +35,7 @@ export default async function UsagePage({ searchParams }: PageProps) {
 
   return html`
     ${pageHeading('Usage')}
-    ${lede('Metered on the hosts, aggregated here. The dashboard being down does not stop metering.')}
+    ${lede('Metered where your code runs and collected here. This page being down does not stop the metering.')}
 
     <form method="GET" class=${cn(formRowClass(), 'mb-6')}>
       ${field({
@@ -68,20 +65,20 @@ export default async function UsagePage({ searchParams }: PageProps) {
         ([label, value]) => html`
           <div class=${cardClass({ size: 'sm' })} data-slot="card" data-size="sm">
             <div class=${cardContentClass()}>
-              <dt class="text-xs text-muted-foreground m-0">${label}</dt>
-              <dd class="m-0 text-lg font-medium tabular-nums">${number(value)}</dd>
+              <dt class="text-meta text-muted-foreground m-0">${label}</dt>
+              <dd class="m-0 text-heading font-medium tabular-nums">${number(value)}</dd>
             </div>
           </div>
         `,
       )}
     </dl>
 
-    ${sectionHeading('Samples')}
+    ${sectionHeading('Usage over time', 'What this team ran, hour by hour, as pilots metered it for billing.')}
     <!-- One wrapper around BOTH branches, so the gap before the Fleet heading
          does not disappear when the period is empty. -->
     <div class="mb-8">
       ${rows.length === 0
-        ? emptyState('Nothing recorded for this period. Usage is metered per hour, so a machine created minutes ago has not been counted yet.')
+        ? emptyState('Nothing recorded for this period. Usage is metered by the hour, so something started minutes ago has not been counted yet.')
         : dataTable<UsageSample>({
               caption: 'Usage samples for the selected period',
               rows,
@@ -99,8 +96,5 @@ export default async function UsagePage({ searchParams }: PageProps) {
               ],
             })}
     </div>
-
-    ${sectionHeading('Fleet')}
-    <hosts-strip .initial=${hosts}></hosts-strip>
   `;
 }

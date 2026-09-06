@@ -51,9 +51,9 @@ class HostsStrip extends WebComponent({
   }
 
   render() {
-    if (this.hosts.length === 0) return emptyState('No hosts reporting.');
+    if (this.hosts.length === 0) return emptyState('Nothing is reporting capacity right now.');
     return html`
-      <ul class="flex flex-wrap gap-3 list-none p-0 m-0 text-sm">
+      <ul class="flex flex-wrap gap-3 list-none p-0 m-0 text-meta">
         ${this.hosts.map(
           (h) => html`
             <li class=${cn(cardClass({ size: 'sm' }), 'flex-row items-center gap-3 px-4')} data-slot="card" data-size="sm">

@@ -12,8 +12,8 @@ import { badgeClass } from '#components/ui/badge.ts';
 import type { ServiceHealth } from '#modules/services/utils/health.ts';
 
 const LABEL: Record<string, string> = {
-  failing: 'Replicas failing health checks',
-  suspended: 'Suspended',
+  failing: 'Instances failing health checks',
+  suspended: 'Sleeping',
 };
 
 export function healthPills(health: ServiceHealth): TemplateResult | string {

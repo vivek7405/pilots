@@ -23,6 +23,7 @@ import { switchOrg } from '#modules/orgs/actions/switch-org.server.ts';
 import { buttonClass } from '#components/ui/button.ts';
 import { avatarClass, avatarFallbackClass, avatarImageClass } from '#components/ui/avatar.ts';
 import { initials } from '#lib/utils/ui.ts';
+import { breadcrumb } from '#lib/utils/breadcrumb.ts';
 import { cn } from '#lib/utils/cn.ts';
 import '#components/theme-toggle.ts';
 import '#components/app-nav.ts';
@@ -42,6 +43,9 @@ export default async function RootLayout({ children, url }: LayoutProps) {
   const listed = me ? await listOrgs() : [];
   const orgs = isSignedOut(listed) ? [] : listed;
   const path = new URL(url ?? 'http://localhost/').pathname;
+  // Derived from the path alone. See lib/utils/breadcrumb.ts for why it cannot
+  // read the page's data and what that settles about an id in the URL.
+  const crumbs = breadcrumb(path);
   const nonce = cspNonce();
 
   return html`
@@ -204,11 +208,35 @@ export default async function RootLayout({ children, url }: LayoutProps) {
             style="border-right: var(--wj-scrollbar-compensation, 0px) solid transparent"
           >
             <div class="max-w-6xl mx-auto px-6 py-3 flex flex-wrap items-center gap-x-6 gap-y-3">
-              <a href="/" class="font-semibold tracking-tight no-underline text-foreground shrink-0">pilots</a>
+              <nav aria-label="Breadcrumb" class="shrink-0 min-w-0">
+                <ol class="flex items-center gap-1.5 list-none m-0 p-0 text-meta">
+                  ${crumbs.map(
+                    (crumb, i) => html`
+                      ${i === 0 ? '' : html`<li aria-hidden="true" class="text-muted-foreground">/</li>`}
+                      <li class="min-w-0 truncate">
+                        ${crumb.href
+                          ? html`<a
+                              href=${crumb.href}
+                              class=${cn(
+                                'no-underline',
+                                i === 0 ? 'font-semibold tracking-tight text-foreground' : 'text-muted-foreground',
+                              )}
+                              >${crumb.label}</a
+                            >`
+                          : html`<span
+                              aria-current="page"
+                              class=${cn('font-medium', i === 0 ? 'font-semibold tracking-tight' : '')}
+                              >${crumb.label}</span
+                            >`}
+                      </li>
+                    `,
+                  )}
+                </ol>
+              </nav>
 
               <app-nav current=${path} class="min-w-0 flex-1"></app-nav>
 
-              <div class="ml-auto flex items-center gap-2 text-sm">
+              <div class="ml-auto flex items-center gap-2 text-meta">
                 <command-palette></command-palette>
                 <theme-toggle></theme-toggle>
 
@@ -236,7 +264,7 @@ export default async function RootLayout({ children, url }: LayoutProps) {
                       <ui-dropdown-menu-separator></ui-dropdown-menu-separator>
                       ${orgs.length > 1
                         ? html`
-                            <ui-dropdown-menu-group aria-label="Organisation">
+                            <ui-dropdown-menu-group aria-label="Team">
                               ${orgs.map(
                                 (o) => html`<ui-dropdown-menu-item type="radio" value=${o.id} ?checked=${o.id === me.org.id}
                                   >${o.slug}</ui-dropdown-menu-item

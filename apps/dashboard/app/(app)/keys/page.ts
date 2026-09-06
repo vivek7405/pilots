@@ -89,7 +89,7 @@ export default async function KeysPage({ actionData }: PageProps) {
 
   return html`
     ${pageHeading('Tokens')}
-    ${lede('Minted here, verified on every host from its own replica. This dashboard is in no request path.')}
+    ${lede('Minted here and verified everywhere pilots runs, from a local copy. This page is in no request path, so a token keeps working while it is down.')}
 
     ${result.data
       ? html`
@@ -100,12 +100,12 @@ export default async function KeysPage({ actionData }: PageProps) {
             <div data-slot="alert-title" class=${alertTitleClass()}>Copy this key now. It is shown once.</div>
             <div data-slot="alert-description" class=${alertDescriptionClass()}>
               <span class="flex w-full items-start gap-1">
-                <code class="min-w-0 flex-1 break-all font-mono text-sm text-foreground">${result.data.key}</code>
+                <code class="min-w-0 flex-1 break-all font-mono text-body text-foreground">${result.data.key}</code>
                 <copy-button value=${result.data.key} label="token"></copy-button>
               </span>
-              <span class="text-xs">Only its hash was stored, so it cannot be shown again.</span>
+              <span class="text-meta">Only its hash was stored, so it cannot be shown again.</span>
               <span class="flex w-full items-start gap-1">
-                <code class="min-w-0 flex-1 break-all font-mono text-xs"
+                <code class="min-w-0 flex-1 break-all font-mono text-meta"
                   >PILOT_API_KEY=${result.data.key}</code
                 >
                 <copy-button value=${`PILOT_API_KEY=${result.data.key}`} label="environment line"></copy-button>
@@ -136,7 +136,7 @@ export default async function KeysPage({ actionData }: PageProps) {
            laid out specially and does not take part in its fieldset's grid,
            which left it half a step above the fields beside it. -->
       <fieldset class="border-0 p-0 m-0">
-        <legend class="text-sm leading-none font-medium text-muted-foreground p-0 mb-1.5">Scopes</legend>
+        <legend class="text-meta leading-none font-medium text-muted-foreground p-0 mb-1.5">Scopes</legend>
         <div class="flex items-center gap-4 h-9">
           ${SCOPES.map(
             (scope) => html`
@@ -164,14 +164,14 @@ export default async function KeysPage({ actionData }: PageProps) {
           command: 'pilot login --token <token>',
         })
       : html`
-          ${tokenTable('Tokens for this organisation', live)}
+          ${tokenTable('Tokens for this team', live)}
           ${revoked.length > 0
             ? html`
                 <details class="mt-6">
-                  <summary class="cursor-pointer text-sm text-muted-foreground">
+                  <summary class="cursor-pointer text-meta text-muted-foreground">
                     ${revoked.length} revoked ${revoked.length === 1 ? 'token' : 'tokens'}
                   </summary>
-                  <div class="mt-3">${tokenTable('Revoked tokens for this organisation', revoked)}</div>
+                  <div class="mt-3">${tokenTable('Revoked tokens for this team', revoked)}</div>
                 </details>
               `
             : ''}

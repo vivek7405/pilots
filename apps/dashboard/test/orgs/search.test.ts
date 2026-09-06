@@ -28,11 +28,11 @@ const machines: Named[] = Array.from({ length: 30 }, (_, i) => ({
   state: 'running',
 }));
 
-test('a query matches services, machines and pages by name', () => {
+test('a query matches services, sandboxes and pages by name', () => {
   const hits = rankHits(services, machines, 'web');
 
   assert.ok(hits.some((h) => h.kind === 'service' && h.label === 'web'));
-  assert.ok(hits.some((h) => h.kind === 'machine' && h.label.startsWith('webbox-')));
+  assert.ok(hits.some((h) => h.kind === 'sandbox' && h.label.startsWith('webbox-')));
   assert.ok(!hits.some((h) => h.label === 'api'), 'a service that does not match is not returned');
 });
 
@@ -45,7 +45,7 @@ test('a page is reachable by its own name, so Tokens finds /keys', () => {
   );
 });
 
-test('a machine is reachable by its id as well as its name', () => {
+test('a sandbox is reachable by its id as well as its name', () => {
   const hits = rankHits([], machines, 'm-17');
   assert.deepEqual(
     hits.map((h) => h.href),
@@ -53,9 +53,9 @@ test('a machine is reachable by its id as well as its name', () => {
   );
 });
 
-test('the cap is per kind, so machines cannot crowd out services', () => {
+test('the cap is per kind, so sandboxes cannot crowd out services', () => {
   const hits = rankHits(services, machines, 'web');
-  assert.equal(hits.filter((h) => h.kind === 'machine').length, PER_KIND, 'machines are capped');
+  assert.equal(hits.filter((h) => h.kind === 'sandbox').length, PER_KIND, 'sandboxes are capped');
   assert.ok(
     hits.some((h) => h.kind === 'service' && h.label === 'web'),
     'and the matching service still made it into the answer',
@@ -68,10 +68,11 @@ test('an empty query offers everything, and every hit has somewhere to go', () =
   for (const hit of hits) assert.match(hit.href, /^\//, `a hit with no destination: ${JSON.stringify(hit)}`);
 });
 
-test('a machine named after a state does not drag every running machine in', () => {
-  // `detail` is matched too, which is what makes "running" a useful query. The
-  // point of this test is that it is deliberate rather than accidental.
-  const hits = rankHits([], machines.slice(0, 3), 'running');
+test('a machine named after a status does not drag every online machine in', () => {
+  // `detail` is matched too, which is what makes "online" a useful query. The
+  // point of this test is that it is deliberate rather than accidental, and
+  // the word it matches is the one a reader sees rather than the engine's.
+  const hits = rankHits([], machines.slice(0, 3), 'online');
   assert.equal(hits.length, 3);
 });
 
@@ -90,4 +91,26 @@ test('the query reads its org from the session and takes none as an argument', (
   // A read action must declare GET, or its arguments ride a POST body, no ETag
   // applies, and the CSRF exemption for safe reads does not.
   assert.match(source, /export const method = 'GET';/);
+});
+
+// A machine that belongs to a service is an INSTANCE of it, and one that does
+// not is a sandbox. The palette is where a person goes knowing what they want,
+// so the two must not read as one thing.
+test('a machine is a sandbox or an instance by whether it names a service', () => {
+  const hits = rankHits(
+    [],
+    [
+      { id: 'm-solo', name: 'solo', state: 'running' },
+      { id: 'm-copy', name: 'copy', state: 'running', service_id: 'svc-web' },
+    ],
+    '',
+  );
+  assert.equal(hits.find((h) => h.id === 'm-solo')?.kind, 'sandbox');
+  assert.equal(hits.find((h) => h.id === 'm-copy')?.kind, 'instance');
+});
+
+// The detail line is the word a reader knows, never the engine's own value.
+test("a machine's state reaches the palette as a word, not as a raw state", () => {
+  const hits = rankHits([], [{ id: 'm-1', name: 'one', state: 'suspended' }], 'one');
+  assert.equal(hits[0]?.detail, 'Sleeping');
 });

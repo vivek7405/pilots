@@ -17,17 +17,20 @@ import { toast } from '#components/ui/sonner.ts';
 
 const OK: Record<string, string> = {
   deployed: 'Deploy started.',
+  building: 'Building. The deployment appears when it succeeds.',
+  created: 'Created.',
   'rolled-back': 'Rolled back.',
-  destroyed: 'Machine destroyed.',
-  suspended: 'Machine suspended.',
-  woken: 'Machine woken.',
+  destroyed: 'Removed.',
+  suspended: 'Put to sleep.',
+  woken: 'Woken.',
   saved: 'Saved.',
+  'variables-saved': 'Variables saved. They apply on the next deployment.',
   connected: 'Repository connected.',
   disconnected: 'Repository disconnected.',
   'key-revoked': 'Token revoked.',
   invited: 'Invitation sent.',
   removed: 'Member removed.',
-  switched: 'Organisation switched.',
+  switched: 'Team switched.',
 };
 
 const ERR: Record<string, string> = {

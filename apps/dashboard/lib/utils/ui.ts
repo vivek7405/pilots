@@ -53,47 +53,42 @@ export function lede(content: unknown): TemplateResult {
 }
 
 /**
- * The `<h2>` that opens a section within a page, with the one sentence that
- * says what the section is.
+ * The `<h2>` that opens a section within a page, and the one sentence saying
+ * what the section is.
  *
- * The sentence is the point (#85, D4): a heading on its own names a thing,
- * and a reader who has never read this repo needs to be told what the thing
- * is for. The explanation is optional here only until every call site
- * carries one; a section written after this landed passes it.
+ * The explanation is a REQUIRED argument, not an optional one. Every section
+ * in this app used to be a bare noun over a table, which reads as a product
+ * that assumes you already know what it does. Making the sentence part of the
+ * signature turns a missing one into a type error rather than into a screen
+ * nobody notices is unexplained.
  */
-export function sectionHeading(title: unknown, explanation?: unknown): TemplateResult {
-  return html`<div class="mb-3">
-    <h2 class="text-heading font-medium m-0">${title}</h2>
-    ${explanation ? html`<p class="text-meta text-muted-foreground m-0 mt-0.5">${explanation}</p>` : ''}
-  </div>`;
+export function sectionHeading(title: unknown, explanation: unknown): TemplateResult {
+  return html`
+    <div class="mb-3">
+      <h2 class="text-heading font-medium m-0">${title}</h2>
+      <p class="text-meta text-muted-foreground m-0 mt-0.5">${explanation}</p>
+    </div>
+  `;
 }
 
 /**
- * A section with nothing in it yet: a dashed box with a headline and the
- * one inline fix that ends the emptiness.
+ * What a SECTION renders instead of itself when it has nothing in it.
  *
- * Section-level, as opposed to `emptyState`, which is the page-level version
- * naming a command. A section inside a panel does not need a card and a
- * copy button; it needs a line and a link.
+ * Distinct from `emptyState`, which is the page-level one: this is the dashed
+ * box that sits where a table would be, carrying a bold line and the one thing
+ * to do about it inline. A section that renders nothing at all reads as a
+ * screen that failed to load.
  */
 export function sectionEmpty(headline: unknown, fix: { text: unknown; href: string }): TemplateResult {
-  return html`<div class="rounded-lg border border-dashed border-border px-6 py-10 text-center">
-    <p class="m-0 text-body font-medium">${headline}</p>
-    <p class="m-0 mt-1 text-meta text-muted-foreground"><a href=${fix.href}>${fix.text}</a></p>
-  </div>`;
+  return html`
+    <div class="rounded-lg border border-dashed border-border px-6 py-10 text-center">
+      <p class="m-0 text-body font-medium">${headline}</p>
+      <p class="m-0 mt-1 text-meta text-muted-foreground">
+        <a href=${fix.href}>${fix.text}</a>
+      </p>
+    </div>
+  `;
 }
-
-/**
- * The interior padding every card body carries.
- *
- * Spacing is a rule, not a per-page choice: cards and sections used to sit
- * flush with no interior padding on some pages and generous padding on
- * others. One helper, one value.
- */
-export const cardBody = (): string => 'p-5 sm:p-6';
-
-/** The vertical rhythm between a page's sections. */
-export const sectionGap = (): string => 'space-y-8';
 
 /**
  * What a list renders instead of itself when it has nothing in it.
@@ -112,7 +107,7 @@ export function emptyState(
       <p class="m-0 text-muted-foreground">${message}</p>
       ${next.command
         ? html`<span class="flex items-center gap-1">
-            <code class="font-mono text-sm bg-muted rounded-md px-3 py-2">${next.command}</code>
+            <code class="font-mono text-meta bg-muted rounded-md px-3 py-2">${next.command}</code>
             <copy-button value=${next.command} label="command"></copy-button>
           </span>`
         : ''}
@@ -130,6 +125,18 @@ export function footnote(content: unknown): TemplateResult {
 
 /** Horizontal row of form fields ending in a submit button. */
 export const formRowClass = (): string => 'flex flex-wrap items-end gap-3';
+
+/**
+ * The interior padding every card body carries.
+ *
+ * Spacing is a rule, not a per-page choice: cards and sections used to sit
+ * flush with no interior padding on some pages and generous padding on
+ * others. One helper, one value.
+ */
+export const cardBody = (): string => 'p-5 sm:p-6';
+
+/** The vertical rhythm between a page's sections. */
+export const sectionGap = (): string => 'space-y-8';
 
 /**
  * The banner an action's `error` renders into.
@@ -167,10 +174,10 @@ export function field(opts: {
 }): TemplateResult {
   return html`
     <div class="grid gap-1.5">
-      <label class="text-sm leading-none font-medium text-muted-foreground" for=${opts.id}>${opts.label}</label>
+      <label class="text-meta leading-none font-medium text-muted-foreground" for=${opts.id}>${opts.label}</label>
       ${opts.control}
-      ${opts.hint ? html`<p class="m-0 text-xs text-muted-foreground">${opts.hint}</p>` : ''}
-      ${opts.error ? html`<p class="m-0 text-sm text-destructive">${opts.error}</p>` : ''}
+      ${opts.hint ? html`<p class="m-0 text-meta text-muted-foreground">${opts.hint}</p>` : ''}
+      ${opts.error ? html`<p class="m-0 text-meta text-destructive">${opts.error}</p>` : ''}
     </div>
   `;
 }

@@ -31,7 +31,7 @@ export default function Login({ searchParams }: PageProps) {
       <div class=${cardClass()} data-slot="card">
         <div class=${cardHeaderClass()}>
           <h1 class=${cardTitleClass()}>Sign in</h1>
-          <p class="text-sm text-muted-foreground m-0">A pilots account is a GitHub account.</p>
+          <p class="text-meta text-muted-foreground m-0">A pilots account is a GitHub account.</p>
         </div>
         <div class=${cardContentClass()}>${signInLink(next)}</div>
       </div>

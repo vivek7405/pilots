@@ -26,7 +26,7 @@ after(() => {
 });
 
 /** The bytes between <header> and </header> on a served page. */
-async function header(cookie: string, path = '/machines'): Promise<string> {
+async function header(cookie: string, path = '/sandboxes'): Promise<string> {
   const res = await app.handle(new Request(`http://localhost${path}`, asUser(cookie)));
   assert.equal(res.status, 200, `${path} is served`);
   const body = await res.text();
@@ -98,7 +98,7 @@ test('a user in more than one org gets a radio group in the menu', async () => {
 
   const chrome = await header(cookie);
 
-  assert.match(chrome, /<ui-dropdown-menu-group aria-label="Organisation"/);
+  assert.match(chrome, /<ui-dropdown-menu-group aria-label="Team"/);
   assert.match(chrome, /type="radio"/);
   assert.ok(chrome.includes('globex'), 'the other org is offered');
   // The radio items cannot post; the form <org-switcher> submits must be there.
@@ -107,7 +107,7 @@ test('a user in more than one org gets a radio group in the menu', async () => {
 
 test('the header is fixed and its height is reserved', async () => {
   const cookie = await signInAs(app.handle, { id: 8103, login: 'layout-pilot' });
-  const res = await app.handle(new Request('http://localhost/machines', asUser(cookie)));
+  const res = await app.handle(new Request('http://localhost/sandboxes', asUser(cookie)));
   const body = await res.text();
 
   // Fixed, never sticky: sticky flickers on iOS WebKit during a soft
