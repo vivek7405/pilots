@@ -157,6 +157,7 @@ func BootFromDisk(ctx context.Context, cfg InstantConfig, store block.ObjectStor
 		// a woken machine's does.
 		NBD: nbdProc,
 	}
+	m.watchExit()
 	// From here the machine owns the handler, so the cleanup above must not
 	// also stop it.
 	nbdProc = nil

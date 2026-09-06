@@ -32,56 +32,44 @@ const killGrace = 2 * time.Second
 //  3. Remove the breadcrumbs LAST. While fc.pid exists, reconcile treats the
 //     machine as live and will happily resurrect a machine that was destroyed.
 func (m *Machine) Kill() error {
-	var errs []error
-
 	if m.Cmd != nil && m.Cmd.Process != nil {
 		pid := m.Cmd.Process.Pid
+		// Before the signal, never after: the watcher reads this flag the
+		// moment the process is gone, and an exit it saw first is an exit the
+		// machine manager would bring the machine back from.
+		m.expectExit.Store(true)
+		exited := m.Exited()
 		_ = m.Cmd.Process.Signal(syscall.SIGTERM)
 
-		// Reaping, not polling. After SIGTERM the process becomes a ZOMBIE
-		// until it is waited for, and kill(pid, 0) on a zombie SUCCEEDS -- so
-		// polling for its absence burns the whole grace period on a process
-		// that already exited. Nothing fails; every destroy on the host just
-		// takes killGrace longer than it should.
-		//
-		// An adopted machine is not our child, so Wait returns ECHILD at once
-		// and the poll below is what actually observes its exit.
-		reaped := make(chan struct{})
-		go func() { _, _ = m.Cmd.Process.Wait(); close(reaped) }()
-
-		// reapedC is nil'ed once the wait has returned without the process
-		// actually being gone -- which is what happens for an ADOPTED machine,
-		// where Wait returns ECHILD immediately. A closed channel is always
-		// ready, so leaving it in the select would spin this loop at full tilt,
-		// issuing a kill(2) per iteration for the whole grace period.
-		reapedC := reaped
-
-		deadline := time.After(killGrace)
-		poll := time.NewTicker(20 * time.Millisecond)
-		defer poll.Stop()
-
-	wait:
-		for {
+		// Reaping, not polling. The watcher started at Start reaps our own
+		// child and holds a pidfd on an adopted one, so this select wakes the
+		// instant the process is gone -- for a zombie too, which kill(pid, 0)
+		// would have reported alive for the whole grace period.
+		select {
+		case <-exited:
+		case <-time.After(killGrace):
+			// Kill the whole process group: the jailer's Firecracker child
+			// would otherwise survive its parent.
+			_ = syscall.Kill(-pid, syscall.SIGKILL)
+			_ = m.Cmd.Process.Kill()
 			select {
-			case <-reapedC:
-				if !processAlive(pid) {
-					break wait
-				}
-				reapedC = nil
-			case <-poll.C:
-				if !processAlive(pid) {
-					break wait
-				}
-			case <-deadline:
-				// Kill the whole process group: the jailer's Firecracker child
-				// would otherwise survive its parent.
-				_ = syscall.Kill(-pid, syscall.SIGKILL)
-				_ = m.Cmd.Process.Kill()
-				<-reaped
-				break wait
+			case <-exited:
+			case <-time.After(killGrace):
+				// Only the pidfd-less fallback poller can get here; SIGKILL is
+				// not refusable, so the process is gone and the poller notices
+				// on its next tick.
 			}
 		}
 	}
+	return m.Cleanup()
+}
+
+// Cleanup removes everything a machine holds on the host once its Firecracker
+// is gone: the handlers, the namespace, the volume bind, the chroot and the
+// breadcrumbs, in that order. Kill calls it after the process; the machine
+// manager calls it directly for a process that exited on its own.
+func (m *Machine) Cleanup() error {
+	var errs []error
 
 	// After Firecracker, never before: the handlers serve its disk and its
 	// memory, and taking either away from a live guest leaves it in an
@@ -113,12 +101,23 @@ func (m *Machine) Kill() error {
 	return errors.Join(errs...)
 }
 
-// processAlive reports whether a pid exists.
+// processAlive reports whether a pid names a process that is still running.
+//
+// NOT kill(pid, 0): that succeeds on a zombie, and a zombie is exactly what a
+// Firecracker that died under hostd is until something waits for it. The state
+// field of /proc/<pid>/stat is the first field after the closing parenthesis
+// of comm, which may itself contain spaces and parentheses.
 func processAlive(pid int) bool {
 	if pid <= 0 {
 		return false
 	}
-	return syscall.Kill(pid, 0) == nil
+	raw, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return false
+	}
+	stat := string(raw)
+	fields := strings.Fields(stat[strings.LastIndex(stat, ")")+1:])
+	return len(fields) > 0 && fields[0] != "Z" && fields[0] != "X"
 }
 
 // isFirecracker checks that a pid is actually a Firecracker process.

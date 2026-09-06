@@ -245,3 +245,25 @@ func TestStopHandlersIsSafeAndIdempotent(t *testing.T) {
 		t.Errorf("second call returned %v", errs)
 	}
 }
+
+// The disk half must be callable on its own, and must be quiet when there is
+// no disk worth keeping.
+//
+// The exit path captures a disk with no memory image to pair it with: a
+// Firecracker that died leaves its block server and its dirty bitmap behind,
+// and that disk is the freshest durable state the machine has. Chunkify's
+// behaviour is unchanged, which is what the sibling test above pins.
+func TestChunkifyDiskWithoutABlockServerIsNil(t *testing.T) {
+	dir := t.TempDir()
+	m := &Machine{ID: "m-1", ChrootDir: dir, StateDir: dir}
+
+	got, err := m.ChunkifyDisk(context.Background(), SnapshotOpts{
+		BuildDir: filepath.Join(dir, "builds"),
+	})
+	if err != nil {
+		t.Fatalf("ChunkifyDisk: %v", err)
+	}
+	if got != uuid.Nil {
+		t.Errorf("a rootfs build was produced with no block server: %s", got)
+	}
+}

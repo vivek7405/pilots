@@ -258,3 +258,15 @@ func Adopted(st State, stateRoot string, pool *nbd.DevicePool) *Machine {
 	}
 	return m
 }
+
+// AdoptedDead rebuilds the handle for a machine whose breadcrumbs name a
+// process that is gone: the state is what Cleanup needs (handlers, chroot,
+// state dir) and Cmd is nil, so nothing can signal a recycled pid.
+func AdoptedDead(st State, stateRoot string, pool *nbd.DevicePool) *Machine {
+	m := Adopted(st, stateRoot, pool)
+	if m == nil {
+		return nil
+	}
+	m.Cmd = nil
+	return m
+}
