@@ -153,7 +153,10 @@ func TestARefusedPreviewCommentNamesTheReasonAndTheNextStep(t *testing.T) {
 
 // recordingBuilds captures what the builder was handed instead of running one.
 type recordingBuilds struct {
-	lastID   string
+	lastID string
+	// onStart runs inside StartBuild, which is the one moment the staging
+	// directory is guaranteed to exist.
+	onStart  func()
 	started  bool
 	context  string
 	refusals []api.BuildLogLine
@@ -170,6 +173,9 @@ func (r *recordingBuilds) StartBuild(_ context.Context, _ string, contextTar io.
 	_ func(api.BuildLogLine)) (string, error) {
 
 	r.started = true
+	if r.onStart != nil {
+		r.onStart()
+	}
 	raw, err := io.ReadAll(contextTar)
 	if err != nil {
 		return "", err
@@ -409,43 +415,34 @@ func TestAPushWithNoOwningOrgStillBuilds(t *testing.T) {
 // /tmp on a systemd host is very commonly tmpfs, and this path holds a whole
 // repository twice over. Doing that in the RAM of a host that is also running
 // other tenants' microVMs is not something a push should be able to ask for.
+//
+// The staging directory is removed when buildRef returns, so it is observed
+// from inside StartBuild, which runs while it is still there. Sampling it on a
+// timer from another goroutine is a race that passes on a busy machine and
+// fails on a fast one.
 func TestAPushStagesUnderTheWorkRoot(t *testing.T) {
-	builds := &recordingBuilds{}
-	d := pushDeps(t, tarballOf(t, "webjs"), builds)
 	root := filepath.Join(t.TempDir(), "push-work")
-	d.WorkRoot = root
 
-	seen := make(chan string, 1)
-	done := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case <-done:
-				return
-			default:
-			}
-			if entries, _ := os.ReadDir(root); len(entries) > 0 {
-				select {
-				case seen <- entries[0].Name():
-				default:
-				}
-				return
-			}
+	var staged []string
+	builds := &recordingBuilds{onStart: func() {
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			return
 		}
-	}()
+		for _, e := range entries {
+			staged = append(staged, e.Name())
+		}
+	}}
+	d := pushDeps(t, tarballOf(t, "webjs"), builds)
+	d.WorkRoot = root
 
 	if _, _, err := d.buildRef(context.Background(), pushEvent(), "abc1234", "shop", "org_1"); err != nil {
 		t.Fatalf("buildRef: %v", err)
 	}
-	close(done)
 
-	select {
-	case name := <-seen:
-		if !strings.HasPrefix(name, "pilot-push-") {
-			t.Errorf("staged %q under the work root, want a pilot-push-* directory", name)
-		}
-	default:
-		t.Fatal("nothing was staged under the work root; the repository went to the process temp dir")
+	if len(staged) != 1 || !strings.HasPrefix(staged[0], "pilot-push-") {
+		t.Errorf("staged %v under the work root, want one pilot-push-* directory; "+
+			"the repository went to the process temp dir", staged)
 	}
 	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
 		t.Errorf("the work root still holds %v after the push", entries)

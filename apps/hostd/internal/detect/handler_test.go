@@ -185,56 +185,68 @@ func extractInto(r io.Reader, dir string) error {
 // os.MkdirTemp("") resolves to /tmp, which on a systemd host is very commonly
 // tmpfs, so the difference is whether an authenticated caller can extract
 // 2 GiB into the RAM of a host that is also running other tenants' microVMs.
-// Asserted by handing the handler a root and watching a staging directory
-// appear inside it, because nothing about the answer says where it staged.
+//
+// The staging directory is removed when the handler returns, so it can only be
+// observed while the handler runs. It is observed by HOLDING the handler
+// there: the request body stops on its first read, which is after the
+// directory has been made and before anything has been unpacked into it.
+// Sampling on a timer instead is a race, and it is one that passes on a busy
+// machine and fails on a fast one.
 func TestTheHandlerStagesUnderTheRootItWasGiven(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "plan-work")
 
-	staged := make(chan []string, 1)
+	body := &haltingReader{
+		inner:   tarOf(t, filepath.Join(fixtures, "webjs")),
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/plan", body)
+	rec := httptest.NewRecorder()
+
 	done := make(chan struct{})
 	go func() {
-		// Sampled while the handler runs: the directory is removed on return,
-		// so a look afterwards finds nothing either way.
-		for {
-			select {
-			case <-done:
-				return
-			default:
-			}
-			if entries, err := os.ReadDir(root); err == nil && len(entries) > 0 {
-				names := make([]string, 0, len(entries))
-				for _, e := range entries {
-					names = append(names, e.Name())
-				}
-				select {
-				case staged <- names:
-				default:
-				}
-				return
-			}
-		}
+		defer close(done)
+		Handler(root)(rec, req)
 	}()
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/plan", tarOf(t, filepath.Join(fixtures, "webjs")))
-	rec := httptest.NewRecorder()
-	Handler(root)(rec, req)
-	close(done)
+	<-body.started
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Errorf("nothing was staged under the root; the context went to the process temp dir: %v", err)
+	} else if len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "pilot-plan-") {
+		names := make([]string, 0, len(entries))
+		for _, e := range entries {
+			names = append(names, e.Name())
+		}
+		t.Errorf("staged %v under the root, want one pilot-plan-* directory", names)
+	}
+	close(body.release)
+	<-done
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
 	}
-	select {
-	case names := <-staged:
-		if len(names) != 1 || !strings.HasPrefix(names[0], "pilot-plan-") {
-			t.Errorf("staged %v under the root, want one pilot-plan-* directory", names)
-		}
-	default:
-		t.Fatal("nothing was staged under the root; the context went to the process temp dir")
-	}
-
 	// And it cleans up after itself: a plan route that left every context
 	// behind would fill the cache root instead of tmpfs, which is not better.
 	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
 		t.Errorf("the root still holds %v after the handler returned", entries)
 	}
+}
+
+// haltingReader stops on its first read until it is released, so a test can
+// look at the world while a handler is mid-flight.
+type haltingReader struct {
+	inner   io.Reader
+	started chan struct{}
+	release chan struct{}
+	once    bool
+}
+
+func (h *haltingReader) Read(p []byte) (int, error) {
+	if !h.once {
+		h.once = true
+		close(h.started)
+		<-h.release
+	}
+	return h.inner.Read(p)
 }
