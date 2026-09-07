@@ -73,10 +73,19 @@ export class LogStream extends WebComponent({
   private async open(source: LogSource) {
     const controller = new AbortController();
     this.controllers.push(controller);
+    // Whether THIS call incremented the counter. The increment happens after
+    // the response is known good, so a source that 404s, or a fetch that
+    // throws, reaches `finally` having counted nothing -- and an unguarded
+    // decrement there takes a live stream off the badge instead. With three
+    // sources and one bad id the badge read "1 live" while two streams ran.
+    // `Math.max(0, ...)` used to hide that as a wrong number rather than a
+    // negative one, so the badge was quietly wrong instead of obviously so.
+    let counted = false;
     try {
       const res = await fetch(`/api/machines/${source.id}/logs`, { signal: controller.signal });
       if (!res.ok || !res.body) return;
       this.live += 1;
+      counted = true;
       const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
       let carry = '';
       for (;;) {
@@ -91,7 +100,7 @@ export class LogStream extends WebComponent({
     } catch (err) {
       if ((err as Error).name !== 'AbortError') this.appendRow(source, `[log stream ended: ${(err as Error).message}]`);
     } finally {
-      this.live = Math.max(0, this.live - 1);
+      if (counted) this.live -= 1;
     }
   }
 
