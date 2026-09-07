@@ -259,19 +259,11 @@
   --text-h1:      clamp(2rem, 1.5rem + 1.6vw, 2.85rem);
   --text-h2:      clamp(1.35rem, 1.15rem + 0.7vw, 1.7rem);
   --text-lede:    clamp(1.05rem, 0.95rem + 0.3vw, 1.2rem);
-  /* The four type steps every page is set in (#85, D4): a page title, a
-     section heading, body text and the small print. Defined here because
-     this @theme block is the one place Tailwind turns a token into a
-     utility; a font size needs no light-dark() and so has no reason to
-     live in the layout. */
-  --text-title: 1.5rem;
-  --text-title--line-height: 2rem;
-  --text-heading: 1.125rem;
-  --text-heading--line-height: 1.75rem;
-  --text-body: 0.9375rem;
-  --text-body--line-height: 1.6;
-  --text-meta: 0.8125rem;
-  --text-meta--line-height: 1.25rem;
+  /* The four type steps every page is set in (#85, D4) are defined ONCE, in
+     the @theme block above. They were repeated here with identical values,
+     and identical is what made it harmless rather than what made it right: a
+     later block silently wins, so the next person to change a size here
+     would have changed the one that does not apply. */
   --duration-fast: 140ms;
   --duration-slow: 380ms;
 }

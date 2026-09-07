@@ -66,6 +66,8 @@ export interface FleetData {
    * would close the socket before a test could type into it.
    */
   execHold: boolean;
+  /** Set to make `services.create` refuse, the way a taken name does. */
+  createServiceError: Error | null;
 }
 
 export interface FakeFleet {
@@ -109,6 +111,7 @@ export function makeFakeFleet(): FakeFleet {
     execStdin: [],
     execResizes: [],
     execHold: false,
+    createServiceError: null,
   };
 
   const reset = () => {
@@ -130,6 +133,7 @@ export function makeFakeFleet(): FakeFleet {
     state.execStdin.length = 0;
     state.execResizes.length = 0;
     state.execHold = false;
+    state.createServiceError = null;
   };
 
   const notFound = (what: string) => {
@@ -264,6 +268,7 @@ export function makeFakeFleet(): FakeFleet {
       },
       create: async (req: unknown) => {
         record('services.create', req);
+        if (state.createServiceError) throw state.createServiceError;
         return state.services[0];
       },
       patch: async (id: string, req: unknown) => {

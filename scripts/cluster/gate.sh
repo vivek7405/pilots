@@ -2279,7 +2279,17 @@ print(det[0].get('framework', ''))
 
   # The refusal is recorded under a build id even though no build ran, so a
   # person reads the reason at the same route a failed build's log is at.
-  GH_RID=$(journal_grep_build "${LIVE_IPS[0]}" 'refused a build from a repository')
+  #
+  # The id comes from the RESPONSE HEADER when the route sent one, and only
+  # falls back to the journal when it did not. The header was already being
+  # captured and then thrown away, and it is the stronger assertion: it ties
+  # the refusal the caller was handed to the log that explains it, where a
+  # journal grep only proves that SOME host logged a refusal of that shape.
+  [ -n "$GH_MULTI_BID" ] \
+    && ok "the 400 carries a build id in X-Pilot-Build-Id" \
+    || bad "the 400 carried no X-Pilot-Build-Id, so a caller cannot find its log"
+  GH_RID="$GH_MULTI_BID"
+  [ -n "$GH_RID" ] || GH_RID=$(journal_grep_build "${LIVE_IPS[0]}" 'refused a build from a repository')
   if [ -n "$GH_RID" ]; then
     case "$(curl -sf -m 30 "http://${LIVE_IPS[0]}:8080/v1/builds/${GH_RID}/logs" -H "$AUTH" 2>/dev/null | tail -1)" in
       *plan_multi_service*) ok "the refused build's log carries the reason" ;;

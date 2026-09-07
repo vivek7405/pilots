@@ -219,3 +219,43 @@ test('a one-step plan starts the build, creates the service as the org, and land
   const conns = await db.query.repoConnections.findMany();
   assert.ok(conns.some((c) => c.serviceId === 'svc-new' && c.repo === 'acme/shop' && c.autodeploy), 'the repository is connected');
 });
+
+// The ORDER of the two fleet calls, which is only observable when the second
+// one fails. The build used to be started first, so a refused create -- a name
+// already taken, a domain already claimed, a quota reached -- left a real
+// build running on a host against a MaxBuilds slot, with no service to deliver
+// to and no `builds` row to find it by, reported to the person as a 502.
+//
+// Counterfactual: move `builds.createFromRepo` back above `services.create`
+// and this fails, while the success test above keeps passing because both
+// calls happen there either way.
+test('a refused create starts no build, so nothing is left running on a host', async () => {
+  stubInstallations({ id: 1, login: 'acme' });
+  app.fleet.calls.length = 0;
+  app.fleet.data.plan = ONE_STEP;
+  app.fleet.data.createServiceError = new PilotsError('a service named web already exists in shop', 409);
+
+  const res = await create({});
+  assert.equal(res.status, 502);
+  assert.ok(
+    app.fleet.calls.some((c) => c.method === 'services.create'),
+    'the create was attempted',
+  );
+  assert.ok(
+    !app.fleet.calls.some((c) => c.method === 'builds.createFromRepo'),
+    'and no build was started for a service that does not exist',
+  );
+});
+
+// `app` is the only name here that can be DERIVED rather than typed, from the
+// repo half of owner/name, so an unvalidated one reaches hostd as an app group
+// nobody typed and nobody can address.
+test('the app name is validated like the others', async () => {
+  stubInstallations({ id: 1, login: 'acme' });
+  app.fleet.calls.length = 0;
+  app.fleet.data.plan = ONE_STEP;
+  const res = await create({ app: 'Not An App' });
+  assert.equal(res.status, 422);
+  assert.ok(!app.fleet.calls.some((c) => c.method === 'services.create'), 'nothing was created');
+  assert.ok(!app.fleet.calls.some((c) => c.method === 'builds.createFromRepo'), 'nothing was built');
+});

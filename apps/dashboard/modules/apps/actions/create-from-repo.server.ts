@@ -38,6 +38,11 @@ export async function createFromRepo(formData: FormData) {
   const fieldErrors: Record<string, string> = {};
   if (!isRepoSlug(repo)) fieldErrors.repo = 'Use owner/name.';
   if (!NAME.test(name)) fieldErrors.name = 'Lowercase letters, digits and hyphens, up to 63.';
+  // `app` is checked like its siblings, and it is the one that is easy to
+  // miss: it is the only name here that can be DERIVED rather than typed
+  // (from the repo half of owner/name), so an unvalidated one reaches hostd
+  // as an app group nobody typed and nobody can address.
+  if (!NAME.test(app)) fieldErrors.app = 'Lowercase letters, digits and hyphens, up to 63.';
   if (domain && !NAME.test(domain)) fieldErrors.domain = 'Lowercase letters, digits and hyphens, up to 63.';
   if (Object.keys(fieldErrors).length > 0) return { success: false, fieldErrors, status: 422 };
 
@@ -65,11 +70,6 @@ export async function createFromRepo(formData: FormData) {
       secretEnv[key] = value;
     }
 
-    // Start the build and let the stream go: hostd continues without us.
-    const stream = await client.builds.createFromRepo({ repo, ref }, { app });
-    const jobId = stream.buildId;
-    await stream.close();
-
     const create: CreateServiceRequest = {
       name,
       app,
@@ -82,7 +82,22 @@ export async function createFromRepo(formData: FormData) {
     if (step.env && Object.keys(step.env).length > 0) create.env = step.env;
     if (Object.keys(secretEnv).length > 0) create.secret_env = secretEnv;
     if (domain) create.domain = domain;
+    // The SERVICE first, then the build. The other order started a real build
+    // on a host and only then asked hostd to create the service, so a refused
+    // create -- a name already taken, a domain already claimed, a quota --
+    // left a build running against a MaxBuilds slot with no service to
+    // deliver to and no `builds` row to find it by, reported to the person as
+    // a generic 502.
+    //
+    // The failure this order can produce instead is a service with no release
+    // yet, which the Deployments tab already has words for and which its
+    // owner can retry or remove.
     const service = await client.services.create(create);
+
+    // Start the build and let the stream go: hostd continues without us.
+    const stream = await client.builds.createFromRepo({ repo, ref }, { app });
+    const jobId = stream.buildId;
+    await stream.close();
 
     await db
       .insert(builds)
