@@ -136,10 +136,16 @@ test('the shell is chosen in the guest, so an image without bash still gets one'
   // Not `bash -l` from here: a built image may be alpine or distroless, and
   // asking for a shell that is not there ends the session with a start failure
   // instead of a prompt.
+  //
+  // And an ABSOLUTE path, because the guest agent execs this argv without a
+  // PATH search: a bare `sh` starts nothing on a built image, and the terminal
+  // then shows a cursor that swallows every keystroke. Verified against a live
+  // replica: `sh -c 'echo OK'` closed with "start failed" while
+  // `/bin/sh -c 'echo OK'` returned OK on the same machine.
   const argv = app.fleet.data.lastExec!.argv;
-  assert.equal(argv[0], 'sh');
+  assert.equal(argv[0], '/bin/sh', 'absolute: the agent does not search PATH');
   assert.match(argv[2]!, /command -v bash/);
-  assert.match(argv[2]!, /exec sh -l/);
+  assert.match(argv[2]!, /exec \/bin\/sh -l/);
 });
 
 test('a second open is ignored rather than obeyed', async () => {

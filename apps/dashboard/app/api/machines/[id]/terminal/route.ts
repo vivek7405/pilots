@@ -46,7 +46,15 @@ interface ClientMessage {
  * or distroless, and asking for a shell that is not there would end the
  * session with a start failure instead of a prompt.
  */
-const SHELL = ['sh', '-c', 'command -v bash >/dev/null 2>&1 && exec bash -l || exec sh -l'];
+/**
+ * ABSOLUTE path, not a bare `sh`. The guest agent execs the argv it is given
+ * without a PATH search, so `sh` fails to start on an image whose environment
+ * the agent does not inherit: the socket opens, no shell ever runs, and the
+ * terminal shows a blinking cursor that swallows every keystroke. `/bin/sh`
+ * exists in every image pilots can build. The interactive shell is still
+ * chosen INSIDE the guest, so an image without bash still gets one.
+ */
+const SHELL = ['/bin/sh', '-c', 'command -v bash >/dev/null 2>&1 && exec bash -l || exec /bin/sh -l'];
 
 /** A window size the guest will accept. Out of range closes the stream. */
 function dimension(value: unknown, fallback: number): number {
