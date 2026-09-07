@@ -548,7 +548,8 @@ runs the bootstrap. Rotation requires a re-seal sweep over the affected rows.
 `GET /health` · `POST /init {timestamp_nanos}` (sets CLOCK_REALTIME — kvm-clock
 covers MONOTONIC; without this poke a restored guest's TLS/cron/JS clocks are
 frozen at snapshot time) · `POST /exec` (buffered; `bash -c`; default user
-uid-1000 = `sprite`, home `/home/sprite`, Node 24 on PATH; root opt-in) ·
+uid-1000 = `pilot`, home `/home/pilot`, Node 24 on PATH; root opt-in; `sprite`
+is a second NAME for the same uid, see the compatibility note below) ·
 `GET /exec/stream` WS — binary frames, **byte 0: 1=stdout 2=stderr 3=exit
 (payload[0]=code)**; the verdict goes out as a text
 `{"type":"exit","exit_code":n}` FIRST and the binary `3` after it, because a
@@ -1201,14 +1202,30 @@ writes cannot hang on a process holding an open stdin.
 
 Three things together are what make a hand-built sprites client work
 unchanged. `GET /v1/sprites/:name/exec` is the name-keyed route such a client
-constructs itself, with the key in an `Authorization` header. The guest is the
-sprites environment: user `sprite`, home `/home/sprite`, Node 24 on `PATH`, so
-an exec that names no user lands where the client expects. And
+constructs itself, with the key in an `Authorization` header. The guest
+ANSWERS to the sprites environment: `sprite` resolves to uid 1000 with Node 24
+on `PATH`, so an exec that names it lands where the client expects. And
 `@pilots/sdk/sprites-compat` is the drop-in adapter for anyone who would rather
 change one import line: a sprite's `id` is the machine's NAME, because a
 sprites consumer persists that id and hands it back as a path segment to a
 name-keyed route, and `machineId` carries the `m-…` id for anything going
 through the typed client.
+
+**The default identity is `pilot`, and `sprite` is only an alias.** The guest
+account is `pilot` at uid 1000, home `/home/pilot`, passwordless sudo; an exec
+naming no user runs as that, and every prompt a pilots customer sees reads
+`pilot@instance`. `sprite` is a SECOND NAME for the same uid and the same home
+(`useradd -o -u 1000 -d /home/pilot sprite`), which costs one line and keeps
+the migration promise above literally true.
+
+The asymmetry is deliberate and worth stating, because the obvious tidy-up is
+wrong. The route and the alias are spelled in a competitor's vocabulary
+BECAUSE their only job is to match strings a foreign client already hardcodes.
+Renaming `/v1/sprites/:name/exec` to `/v1/pilots/…` would not rebrand the
+feature, it would delete it: no sprites client could reach the renamed path,
+and pilots-native clients never used it — they call `/v1/machines/:id/exec`.
+So the foreign spelling stays exactly where a foreigner looks for it, and
+nowhere else. Nothing a pilots user is shown carries it.
 
 ---
 
