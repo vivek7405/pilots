@@ -119,6 +119,38 @@ test('nothing opens until the client says how big its window is', async () => {
   assert.deepEqual(opened.opts, { user: 'sprite', tty: true, rows: 40, cols: 120 });
 });
 
+test('an `open` sent before the handler has authenticated still starts the shell', async () => {
+  const ws = fakeSocket();
+
+  // NOT awaited. Every other test here awaits `WS` and only then emits, which
+  // is what hid this for a whole session: the browser sends `open` from its own
+  // `open` event, the instant the upgrade completes, while the handler is still
+  // reading the session and asking hostd about the machine. `ws` buffers
+  // nothing, so a listener attached after those awaits never sees the frame.
+  const handled = WS(ws, request(cookieA), routeCtx({ id: 'm-1' }));
+  ws.emit('message', JSON.stringify({ type: 'open', rows: 40, cols: 120 }));
+  await handled;
+
+  // Counterfactual: move `ws.on('message', ...)` back below the `requireOrg`
+  // and `machines.get` awaits and `lastExec` is null here, which is the
+  // "Connected, blinking cursor, no output" the user reported.
+  const opened = app.fleet.data.lastExec;
+  assert.ok(opened, 'the early frame was queued, not dropped');
+  assert.deepEqual(opened.opts, { user: 'sprite', tty: true, rows: 40, cols: 120 });
+});
+
+test('an early frame on a socket that fails auth opens nothing', async () => {
+  const ws = fakeSocket();
+  const handled = WS(ws, request(), routeCtx({ id: 'm-1' }));
+  ws.emit('message', JSON.stringify({ type: 'open', rows: 40, cols: 120 }));
+  await handled;
+
+  // Queueing must not become a way past the gate: the queue is drained only
+  // after the session and the tenancy check have both passed.
+  assert.deepEqual(ws.closed, { code: 4401, reason: 'unauthorized' });
+  assert.equal(app.fleet.data.lastExec, null);
+});
+
 test('a service replica asks for no user, so the guest runs the image\'s own', async () => {
   const ws = fakeSocket();
   await WS(ws, request(cookieA), routeCtx({ id: 'm-r' }));

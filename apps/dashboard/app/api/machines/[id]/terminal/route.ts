@@ -64,41 +64,25 @@ function dimension(value: unknown, fallback: number): number {
 }
 
 export async function WS(ws: TerminalSocket, req: Request, { params }: RouteHandlerContext): Promise<void> {
-  const ctx = await requireOrg(req);
-  if (!ctx) {
-    ws.close(4401, 'unauthorized');
-    return;
-  }
-
-  // The user is resolved per machine, never hardcoded. A sandbox from the
-  // golden rootfs has `sprite`; a service replica built from someone's
-  // Dockerfile very often does not, and asking for it fails closed with
-  // "user does not exist". A replica asks for no user and the guest agent
-  // runs the image's own, which is what docker exec would do.
-  let sandbox = false;
-  try {
-    const machine = await fleet.machines.get(params.id);
-    if (!assertOwned(ctx.org.id, machine)) {
-      ws.close(4404, 'not found');
-      return;
-    }
-    sandbox = !machine.service_id;
-  } catch {
-    ws.close(1011, 'fleet unavailable');
-    return;
-  }
-
   // The stream is not opened until the client has said how big its window is.
   // A shell reads its window size at startup, so opening one at 24 by 80 and
   // resizing a moment later makes the first prompt redraw visibly.
   let stream: ReturnType<typeof fleet.machines.execStream> | null = null;
+  let sandbox = false;
+  let closed = false;
 
-  ws.on('message', (data) => {
+  // Frames that arrived before the handler finished authenticating. The
+  // listener below is attached SYNCHRONOUSLY, so nothing the client sends is
+  // ever dropped; anything early waits here until `ready` runs.
+  const early: unknown[] = [];
+  let ready = false;
+
+  const handle = (data: unknown): void => {
     const message = parse(data);
     if (!message) return;
 
     if (message.type === 'open') {
-      if (stream) return; // `open` is once; a second one is ignored, not obeyed
+      if (stream || closed) return; // `open` is once; a second one is ignored, not obeyed
       stream = start(ws, params.id, sandbox, dimension(message.rows, 24), dimension(message.cols, 80));
       return;
     }
@@ -120,15 +104,64 @@ export async function WS(ws: TerminalSocket, req: Request, { params }: RouteHand
         // Same: a resize after the shell exited changes nothing.
       }
     }
+  };
+
+  // ATTACHED BEFORE THE FIRST `await`, and this ordering is the whole bug fix.
+  // The browser sends `open` from its own `open` event, which fires the instant
+  // the upgrade completes. Authenticating first costs a database read and a
+  // call to hostd, tens of milliseconds during which `ws` is already flowing
+  // and buffers nothing: the `open` frame was delivered to a socket with no
+  // listener and vanished. The terminal then sat on "Connected" for ever with a
+  // cursor that swallowed every keystroke, because the shell was never started.
+  // Registering here and queueing into `early` makes the handler's own latency
+  // invisible to the client.
+  ws.on('message', (data) => {
+    if (!ready) {
+      // A ceiling, so a client that floods before auth completes cannot use the
+      // queue as free memory. Twenty frames is a window size and a few
+      // keystrokes; beyond that the connection is not a terminal session.
+      if (early.length < 20) early.push(data);
+      return;
+    }
+    handle(data);
   });
 
   ws.on('close', () => {
     // Killing the stream closes the socket to the guest, whose context cancel
     // kills the shell. Without this a closed browser tab leaves a shell
     // running and a machine that never goes idle.
+    closed = true;
     stream?.kill();
     stream = null;
   });
+
+  const ctx = await requireOrg(req);
+  if (!ctx) {
+    ws.close(4401, 'unauthorized');
+    return;
+  }
+
+  // The user is resolved per machine, never hardcoded. A sandbox from the
+  // golden rootfs has `sprite`; a service replica built from someone's
+  // Dockerfile very often does not, and asking for it fails closed with
+  // "user does not exist". A replica asks for no user and the guest agent
+  // runs the image's own, which is what docker exec would do.
+  try {
+    const machine = await fleet.machines.get(params.id);
+    if (!assertOwned(ctx.org.id, machine)) {
+      ws.close(4404, 'not found');
+      return;
+    }
+    sandbox = !machine.service_id;
+  } catch {
+    ws.close(1011, 'fleet unavailable');
+    return;
+  }
+
+  if (closed) return;
+  ready = true;
+  for (const data of early) handle(data);
+  early.length = 0;
 }
 
 function start(ws: TerminalSocket, machineId: string, sandbox: boolean, rows: number, cols: number) {
