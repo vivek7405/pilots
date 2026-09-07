@@ -53,8 +53,11 @@ RUN systemctl enable systemd-networkd
 # /home/pilot/app as the working directory.
 #
 # `sprite` is a SECOND NAME for the same uid, not a second account: -o allows
-# the duplicate uid and -d points it at the same home, so the two names share
-# one identity, one home and one set of files. It exists only so a hand-built
+# the duplicate uid, -g 1000 puts it in pilot's group rather than minting a
+# second one, -d points it at the same home and -M declines to create another,
+# so the two names share one identity, one group, one home and one set of
+# files. Without -g 1000 the alias lands in a group of its own, and a file a
+# migrating client writes carries a group the pilot user is not in. It exists only so a hand-built
 # sprites.dev client that passes user: 'sprite' still resolves, which is half
 # of the migration promise in ARCHITECTURE.md; the other half is the
 # /v1/sprites route. Nothing pilots shows a customer uses this name -- the
@@ -71,7 +74,7 @@ RUN systemctl enable systemd-networkd
 # and every exec defaults to uid 1000, so free it first.
 RUN userdel -r ubuntu 2>/dev/null || true; \
     useradd -m -u 1000 -s /bin/bash pilot \
-    && useradd -o -u 1000 -d /home/pilot -s /bin/bash sprite \
+    && useradd -o -u 1000 -g 1000 -d /home/pilot -M -s /bin/bash sprite \
     && echo 'pilot ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-pilot \
     && echo 'sprite ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers.d/90-pilot \
     && chmod 0440 /etc/sudoers.d/90-pilot \
