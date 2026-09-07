@@ -16,25 +16,36 @@
  * two products together.
  */
 import { html } from '@webjsdev/core';
+import type { PageProps } from '@webjsdev/core';
 import { orUnauthorized, requireOrg } from '#modules/auth/session.server.ts';
 import { listServicesWithStatus } from '#modules/services/queries/list-services-with-status.server.ts';
-import { lede, pageHeading } from '#lib/utils/ui.ts';
+import { errorAlert, lede, pageHeading } from '#lib/utils/ui.ts';
 import { buttonClass } from '#components/ui/button.ts';
-import { cn } from '#lib/utils/cn.ts';
+import { createSandbox } from '#modules/machines/actions/create-sandbox.server.ts';
 import { NOUN, SLEEP_SENTENCE } from '#lib/vocabulary.ts';
 import '#modules/machines/components/machine-list.ts';
 
 export const metadata = { title: 'Sandboxes' };
 
-export default async function SandboxesPage() {
+export default async function SandboxesPage({ actionData }: PageProps) {
   const ctx = (await requireOrg())!;
   const { machines, hosts, services } = orUnauthorized(await listServicesWithStatus());
+  const errors = (actionData as { error?: string } | undefined) ?? {};
 
   return html`
     <div class="flex flex-wrap items-center gap-3">
       ${pageHeading(NOUN.Sandboxes)}
-      <a href="/sandboxes/playground" class=${cn(buttonClass({ size: 'sm' }), 'ml-auto no-underline')}>Open a sandbox</a>
+      <!--
+        A form, not a link. This button used to navigate to the playground,
+        where a second button with the SAME words did the creating -- so the
+        label named an action the control did not perform, and getting a
+        sandbox took two clicks that looked like one.
+      -->
+      <form action=${createSandbox} class="ml-auto">
+        <button type="submit" class=${buttonClass({ size: 'sm' })}>Create a sandbox</button>
+      </form>
     </div>
+    ${errors.error ? errorAlert(errors.error) : ''}
     ${lede(
       html`A sandbox is a machine that belongs to no service: yours to open a terminal on, snapshot and turn into a
         service later. ${SLEEP_SENTENCE} These are the ones in <strong>${ctx.org.slug}</strong>.`,

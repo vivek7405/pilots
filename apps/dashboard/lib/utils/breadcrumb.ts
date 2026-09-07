@@ -55,12 +55,6 @@ export function breadcrumb(path: string): Crumb[] {
     return trail;
   }
 
-  if (first === 'sandboxes' && second === 'playground') {
-    trail.push({ label: 'Sandboxes', href: '/sandboxes' });
-    trail.push({ label: 'Playground' });
-    return trail;
-  }
-
   const section = first ? SECTION[first] : undefined;
   if (!section) return trail;
 

@@ -40,7 +40,6 @@ export const NOUN = {
   Logs: 'Logs',
   Usage: 'Usage',
   Domains: 'Domains',
-  Playground: 'Playground',
 } as const;
 
 /**

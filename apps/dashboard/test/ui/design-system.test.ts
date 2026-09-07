@@ -46,7 +46,6 @@ const PAGES = [
   '/domains',
   '/usage',
   '/logs',
-  '/sandboxes/playground',
   '/keys',
   '/org',
 ] as const;
@@ -288,7 +287,6 @@ const PAGE_FILES: Record<string, string> = {
   '/domains': 'app/(app)/domains/page.ts',
   '/usage': 'app/(app)/usage/page.ts',
   '/logs': 'app/(app)/logs/page.ts',
-  '/sandboxes/playground': 'app/(app)/sandboxes/playground/page.ts',
   '/keys': 'app/(app)/keys/page.ts',
   '/org': 'app/(app)/org/page.ts',
 };

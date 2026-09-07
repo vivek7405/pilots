@@ -42,7 +42,6 @@ const LINKS: { href: string; label: string }[] = [
   { href: '/', label: NOUN.Apps },
   { href: '/sandboxes', label: NOUN.Sandboxes },
   { href: '/logs', label: NOUN.Logs },
-  { href: '/sandboxes/playground', label: 'Playground' },
 ];
 
 /**
@@ -56,7 +55,6 @@ const LINKS: { href: string; label: string }[] = [
  */
 const OWNS: Record<string, string[]> = {
   '/sandboxes': ['/machines'],
-  '/sandboxes/playground': [],
   '/': ['/apps', '/services'],
 };
 
