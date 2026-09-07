@@ -146,6 +146,24 @@ func (d Deps) withEdges(ctx context.Context, out *Service, svc state.Service, ow
 	if err != nil {
 		return
 	}
-	groups := d.siblingsOf(ctx, rows)
-	out.DependsOn = d.dependsOn(svc, groups[siblingKey{org: owner, app: svc.App}])
+	// Narrowed to this app BEFORE the tenancy lookups, not grouped by every
+	// (org, app) on the fleet and then indexed into. `siblingsOf` is right for
+	// a LIST, which needs every group it built; a single-row read uses exactly
+	// one and paid an OrgOf per service on the fleet to build the rest. This
+	// path runs on every GET and PATCH of a service and on promote, and the
+	// dashboard reaches it on every panel render and every tab click.
+	//
+	// The app name is compared exactly, as `siblingsOf` keys it, so the two
+	// paths cannot come to disagree about what a sibling is.
+	siblings := map[string]bool{}
+	for _, row := range rows {
+		if row.App != svc.App {
+			continue
+		}
+		if org, ok := d.tenancy().OrgOf(ctx, row.ID); !ok || org != owner {
+			continue
+		}
+		siblings[strings.ToLower(row.Name)] = true
+	}
+	out.DependsOn = d.dependsOn(svc, siblings)
 }
