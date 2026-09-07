@@ -13,7 +13,7 @@ import type { Machine, Release } from '@pilots/sdk';
 import type { TabProps } from '#modules/services/utils/tabs.ts';
 import { deployService } from '#modules/services/actions/deploy-service.server.ts';
 import { rollbackService } from '#modules/services/actions/rollback-service.server.ts';
-import { statusDot } from '#modules/machines/utils/ui/state.ts';
+import { machineStateSince } from '#modules/machines/utils/ui/status-line.ts';
 import { badgeClass } from '#components/ui/badge.ts';
 import { buttonClass } from '#components/ui/button.ts';
 import { checkboxClass } from '#components/ui/checkbox.ts';
@@ -102,7 +102,7 @@ export function deploymentsTab({ detail, back, errors, build }: TabProps): Templ
                       ${replicas.map(
                         (m) => html`<li class="flex items-center gap-3">
                           <a href=${`/machines/${m.id}`} class="text-foreground">${m.name || m.id}</a>
-                          ${statusDot(m.state)}
+                          ${machineStateSince(m)}
                         </li>`,
                       )}
                     </ul>`
@@ -183,7 +183,7 @@ export function deploymentsTab({ detail, back, errors, build }: TabProps): Templ
                   header: 'Preview',
                   cell: (m) => html`<a href=${`/machines/${m.id}`} class="text-foreground">${m.name}</a>`,
                 },
-                { header: 'Status', cell: (m) => statusDot(m.state) },
+                { header: 'Status', cell: (m) => machineStateSince(m) },
                 { header: 'URL', cell: (m) => (m.url ? html`<a href=${m.url} rel="noopener">${m.url}</a>` : '') },
               ],
             })}

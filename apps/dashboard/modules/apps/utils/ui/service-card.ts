@@ -12,7 +12,7 @@
 import { html } from '@webjsdev/core';
 import type { TemplateResult } from '@webjsdev/core';
 import { statusDot, toneDot } from '#modules/machines/utils/ui/state.ts';
-import { when } from '#modules/machines/utils/ui/status-line.ts';
+import { stateSince } from '#modules/machines/utils/ui/status-line.ts';
 import type { PlacedNode } from '#modules/apps/utils/layout.ts';
 import type { Machine } from '#modules/machines/types.ts';
 import { cn } from '#lib/utils/cn.ts';
@@ -63,28 +63,17 @@ function serviceStatus(replicas: Machine[]): TemplateResult {
   if (replicas.length === 0) return html`<span class="inline-flex items-center gap-1.5">${toneDot('muted')} <span>No instances</span></span>`;
 
   const failed = replicas.filter((r) => r.state === 'error' || r.state === 'failed');
-  if (failed.length > 0) {
-    const at = edge(failed, (r) => r.last_activity ?? r.last_start_at, 'last');
-    // "Failed 2 hours ago", not "Failed since": the failure was a moment.
-    return at === undefined ? statusDot('error') : html`${statusDot('error')} ${when(at)}`;
-  }
+  if (failed.length > 0) return stateSince('error', edge(failed, (r) => r.last_activity ?? r.last_start_at, 'last'));
 
   const running = replicas.filter((r) => r.state === 'running');
-  if (running.length > 0) return since(statusDot('running'), edge(running, (r) => r.last_start_at ?? r.created_at, 'first'));
+  if (running.length > 0) return stateSince('running', edge(running, (r) => r.last_start_at ?? r.created_at, 'first'));
 
   if (replicas.every((r) => r.state === 'suspended')) {
-    return since(statusDot('suspended'), edge(replicas, (r) => r.last_activity ?? r.last_start_at, 'last'));
+    return stateSince('suspended', edge(replicas, (r) => r.last_activity ?? r.last_start_at, 'last'));
   }
 
-  // Starting and creating are moments, not durations. A clock on them counts
-  // up for a few seconds and then the card says something else.
-  if (replicas.some((r) => r.state === 'creating' || r.state === 'starting')) return statusDot('starting');
+  if (replicas.some((r) => r.state === 'creating' || r.state === 'starting')) return stateSince('starting', undefined);
   return statusDot(replicas[0]!.state);
-}
-
-/** The state word, then `since <time>` when there is a time to name. */
-function since(dot: TemplateResult, at: number | undefined): TemplateResult {
-  return at === undefined ? dot : html`${dot} since ${when(at)}`;
 }
 
 function host(url: string): string {

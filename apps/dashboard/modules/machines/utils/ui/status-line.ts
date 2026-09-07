@@ -38,6 +38,40 @@ export function when(value: number | string | undefined): TemplateResult | strin
   return html`<relative-time datetime=${String(value)}></relative-time>`;
 }
 
+/**
+ * The state word, then `since <time>` when there is a time worth naming.
+ *
+ * The short form, for a surface that has room for a phrase but not for the
+ * resume detail `statusPhrase` adds: the replica list in a service's
+ * Deployments tab, and the cards on an app's canvas. One helper rather than
+ * three, so "Sleeping since 2 hours ago" is worded identically wherever a
+ * reader meets it, and "no timestamp" cannot come to mean three things.
+ *
+ * `at` is passed in rather than read off a machine, because a service card
+ * aggregates several replicas and has to decide which stamp it means.
+ */
+export function stateSince(state: string, at: number | undefined): TemplateResult {
+  // A failure was a moment, not a duration: "Failed 2 hours ago", never
+  // "Failed since". Starting and creating get no clock at all, because it
+  // would count up for a few seconds and then be replaced by another word.
+  if (state === 'error' || state === 'failed') {
+    return at === undefined ? statusDot('error') : html`${statusDot('error')} ${when(at)}`;
+  }
+  if (state === 'creating' || state === 'starting') return statusDot(state);
+  // "Sleeping since" with nothing after it is worse than "Sleeping": a machine
+  // the engine has never stamped a time for should not imply one.
+  return at === undefined ? statusDot(state) : html`${statusDot(state)} since ${when(at)}`;
+}
+
+/** `stateSince` for one machine, which knows which of its stamps it means. */
+export function machineStateSince(machine: Machine): TemplateResult {
+  const at =
+    machine.state === 'running'
+      ? (machine.last_start_at ?? machine.created_at)
+      : (machine.last_activity ?? machine.last_start_at);
+  return stateSince(machine.state, at);
+}
+
 const COLD_BOOT_NOTE =
   'No host of this image’s CPU vendor was alive, so the machine booted from its own disk. ' +
   'Its URL, disk and volume are intact; its processes and everything in memory were lost.';
