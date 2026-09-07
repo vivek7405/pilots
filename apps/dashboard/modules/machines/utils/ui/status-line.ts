@@ -24,8 +24,16 @@ import { statusDot } from '#modules/machines/utils/ui/state.ts';
 import '#components/ui/tooltip.ts';
 import '#components/relative-time.ts';
 
-/** `<relative-time>` for a value that may be absent, with no stray markup. */
-function when(value: number | string | undefined): TemplateResult | string {
+/**
+ * `<relative-time>` for a value that may be absent, with no stray markup.
+ *
+ * Exported because the service cards on an app's canvas say "since" the same
+ * way, and a second copy of this would be a second place for "no timestamp"
+ * to be handled differently. A caller must import `#components/relative-time.ts`
+ * itself; an un-upgraded element renders nothing, which is the failure this
+ * file's other import comment describes.
+ */
+export function when(value: number | string | undefined): TemplateResult | string {
   if (value === undefined || value === null || value === '') return '';
   return html`<relative-time datetime=${String(value)}></relative-time>`;
 }
