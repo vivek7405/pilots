@@ -39,6 +39,19 @@ export function when(value: number | string | undefined): TemplateResult | strin
 }
 
 /**
+ * The same, for a phrase that has already said "since".
+ *
+ * `since ${when(t)}` renders "since 8 hours ago", which says the direction
+ * twice and reads as broken English. `duration` drops it: "Sleeping since 8
+ * hours". Use `when` where the sentence supplies no direction of its own
+ * ("Failed 8 hours ago", "Restored 8 hours ago").
+ */
+export function sinceWhen(value: number | string | undefined): TemplateResult | string {
+  if (value === undefined || value === null || value === '') return '';
+  return html`<relative-time duration datetime=${String(value)}></relative-time>`;
+}
+
+/**
  * The state word, then `since <time>` when there is a time worth naming.
  *
  * The short form, for a surface that has room for a phrase but not for the
@@ -60,7 +73,7 @@ export function stateSince(state: string, at: number | undefined): TemplateResul
   if (state === 'creating' || state === 'starting') return statusDot(state);
   // "Sleeping since" with nothing after it is worse than "Sleeping": a machine
   // the engine has never stamped a time for should not imply one.
-  return at === undefined ? statusDot(state) : html`${statusDot(state)} since ${when(at)}`;
+  return at === undefined ? statusDot(state) : html`${statusDot(state)} since ${sinceWhen(at)}`;
 }
 
 /** `stateSince` for one machine, which knows which of its stamps it means. */
@@ -93,7 +106,7 @@ export function statusPhrase(machine: Machine, hosts: Host[]): TemplateResult | 
     }
     if (machine.last_start === 'restore') return html`${startLabel('restore')} ${when(machine.last_start_at)}`;
     if (machine.last_start === 'boot') return html`${startLabel('boot')} ${when(machine.last_start_at)}`;
-    return html`Running since ${when(machine.last_start_at ?? machine.created_at)}`;
+    return html`Running since ${sinceWhen(machine.last_start_at ?? machine.created_at)}`;
   }
 
   if (machine.state === 'suspended') {
@@ -102,7 +115,7 @@ export function statusPhrase(machine: Machine, hosts: Host[]): TemplateResult | 
     const since = machine.last_activity ?? machine.last_start_at;
     // "Sleeping since" with nothing after it is worse than "Sleeping": a
     // machine the engine has never stamped a time for should not imply one.
-    return html`${since === undefined ? html`Sleeping` : html`Sleeping since ${when(since)}`} · wakes on request ·
+    return html`${since === undefined ? html`Sleeping` : html`Sleeping since ${sinceWhen(since)}`} · wakes on request ·
       ${tier === 'warm'
         ? html`<span>resumes warm</span>`
         : html`<ui-tooltip>
@@ -117,7 +130,7 @@ export function statusPhrase(machine: Machine, hosts: Host[]): TemplateResult | 
           </ui-tooltip>`}`;
   }
 
-  if (machine.state === 'stopped') return html`Stopped since ${when(machine.last_activity)}`;
+  if (machine.state === 'stopped') return html`Stopped since ${sinceWhen(machine.last_activity)}`;
   if (machine.state === 'error') return html`Failed ${when(machine.last_activity ?? machine.last_start_at)}`;
   return when(machine.last_activity ?? machine.created_at);
 }

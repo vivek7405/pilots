@@ -15,7 +15,7 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { ago, absolute, isoOf } from '#components/relative-time.ts';
+import { ago, absolute, isoOf, elapsed } from '#components/relative-time.ts';
 
 const AT = Date.parse('2026-09-01T10:00:00Z');
 
@@ -66,4 +66,32 @@ test('the age reads the way a person says it', () => {
 
 test('a time in the future is said as a future, not as a negative past', () => {
   assert.equal(ago(AT + 5 * 60_000, AT), 'in 5 minutes');
+});
+
+test('a duration says the magnitude and never the direction', () => {
+  // The phrase that uses it has already said "since", so "8 hours ago" there
+  // reads as "since 8 hours ago": the direction twice, and broken English.
+  const cases: [offsetMs: number, expected: string][] = [
+    [3_000, 'a few seconds'],
+    [45_000, '45 seconds'],
+    [60_000, '1 minute'],
+    [8 * 3_600_000, '8 hours'],
+    [14 * 86_400_000, '2 weeks'],
+    [800 * 86_400_000, '2 years'],
+  ];
+  for (const [offset, expected] of cases) {
+    assert.equal(elapsed(AT - offset, AT), expected, `${offset} ms`);
+    assert.ok(!elapsed(AT - offset, AT).includes('ago'), 'never "ago"');
+  }
+});
+
+test('a duration from a future stamp is a magnitude, not "in 5 minutes"', () => {
+  // Clock skew between a host and a browser, not a real event. It should
+  // degrade to a slightly wrong number rather than to "since in 5 minutes".
+  assert.equal(elapsed(AT + 5 * 60_000, AT), '5 minutes');
+});
+
+test('a missing value is empty in both forms, so no phrase is left dangling', () => {
+  assert.equal(elapsed(undefined, AT), '');
+  assert.equal(ago(undefined, AT), '');
 });
