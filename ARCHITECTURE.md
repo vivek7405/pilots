@@ -1310,7 +1310,8 @@ per-host resource counts, cgroup containment, Firecracker API exhaustion,
 orphan pile-up) is in `scripts/cluster/gate.sh` as numbered sections.
 The battery's exec-stream section drives the
 frames, both key carriers, the sprites alias, the `logs?follow` tail across a
-suspend, and the guest contract (`sprite`, `/home/sprite`, Node 24) through
+suspend, and the guest contract (`pilot`, `/home/pilot`, Node 24, plus the
+`sprite` alias resolving to the same uid and home) through
 Node's global `WebSocket`; the gate streams the same command through every
 host that does not own the machine, by id and through the alias. Its edge
 section drives a machine that echoes what reached it, so a forged
