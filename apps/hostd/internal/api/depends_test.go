@@ -216,3 +216,40 @@ func TestTheListDerivesTheSameEdges(t *testing.T) {
 		t.Errorf("an empty depends_on was rendered: %s", body)
 	}
 }
+
+// Two references separated by exactly ONE character. The pattern consumes the
+// delimiter on both sides of a match and RE2 has no lookahead, so a scan that
+// resumed after the whole match had no delimiter left for the second
+// reference and silently returned only the first. A comma-separated host list
+// is ordinary in an environment value, and half its arrows went missing.
+//
+// Counterfactual: put FindAllStringSubmatch back in internalNames and every
+// case here that uses a single separator fails, while the two-separator cases
+// above keep passing, which is why nothing caught it.
+func TestTwoReferencesSeparatedByOneCharacterAreBothEdges(t *testing.T) {
+	for _, env := range []string{
+		`{"HOSTS":"db.internal,cache.internal"}`,
+		`{"HOSTS":"db.internal cache.internal"}`,
+		`{"HOSTS":"db.internal;cache.internal"}`,
+	} {
+		h := dependsServer(t, fakeSealer{set: true}, env, "")
+		got, _ := readWeb(t, h, "/v1/services/s_web")
+		wantEdges(t, got, []string{"cache", "db"})
+	}
+}
+
+// The same, with a separator on each side, which always worked. Kept so the
+// fix cannot be "special-case a comma".
+func TestTwoReferencesWithPortsAreBothEdges(t *testing.T) {
+	h := dependsServer(t, fakeSealer{set: true}, `{"HOSTS":"db.internal:5432,cache.internal:6379"}`, "")
+	got, _ := readWeb(t, h, "/v1/services/s_web")
+	wantEdges(t, got, []string{"cache", "db"})
+}
+
+// A suffix immediately after a real reference is still not an edge: the
+// resumed scan must not have widened what counts as a name.
+func TestAResumedScanStillRejectsASuffix(t *testing.T) {
+	h := dependsServer(t, fakeSealer{set: true}, `{"HOSTS":"db.internal,cache.internalfoo"}`, "")
+	got, _ := readWeb(t, h, "/v1/services/s_web")
+	wantEdges(t, got, []string{"db"})
+}

@@ -24,6 +24,32 @@ import (
 // match and the label class consumes "mydb" before ".internal" is required.
 var internalRef = regexp.MustCompile(`(?i)(?:^|[^a-z0-9-])([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)\.internal(?:[^a-z0-9-]|$)`)
 
+// internalNames returns every <name>.internal label in a string.
+//
+// It is NOT FindAllStringSubmatch, and the difference is a real bug rather
+// than a preference. The pattern CONSUMES the delimiter on either side of a
+// reference, and RE2 has no lookahead to match a boundary without eating it.
+// FindAll then resumes after that trailing byte, so when two references are
+// separated by exactly ONE character the second has no delimiter left to
+// match and is never seen: "db.internal,cache.internal" reported only db,
+// while "a.internal:1,b.internal:2" (two separators) reported both. A
+// comma-separated or space-separated host list drew half its arrows.
+//
+// So the scan resumes at the end of the NAME plus ".internal", leaving the
+// delimiter in place for the next match to claim.
+func internalNames(text string) []string {
+	var out []string
+	for pos := 0; pos < len(text); {
+		m := internalRef.FindStringSubmatchIndex(text[pos:])
+		if m == nil {
+			break
+		}
+		out = append(out, text[pos+m[2]:pos+m[3]])
+		pos += m[3] + len(".internal")
+	}
+	return out
+}
+
 // dependsOn is the sorted set of siblings this service's environment dials.
 //
 // BOTH halves are read. A real database URL is a secret, so an app whose
@@ -46,8 +72,8 @@ func (d Deps) dependsOn(svc state.Service, siblings map[string]bool) []string {
 	self := strings.ToLower(svc.Name)
 	found := map[string]bool{}
 	scan := func(text string) {
-		for _, m := range internalRef.FindAllStringSubmatch(text, -1) {
-			name := strings.ToLower(m[1])
+		for _, raw := range internalNames(text) {
+			name := strings.ToLower(raw)
 			// Never itself. A service that reads its own address out of its
 			// own environment does not depend on itself, and a self-edge is a
 			// cycle the layout would have to break for no reason.
