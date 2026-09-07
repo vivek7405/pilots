@@ -261,12 +261,15 @@ shows each instance's allotment and says "Not recorded yet" in the chart
 cards rather than drawing an empty grid under a toolbar for data that does
 not exist.
 
-**A terminal's user is resolved per machine, never hardcoded.** A sandbox
-from the golden rootfs runs a shell as `sprite`; a service replica built from
-someone's Dockerfile very often has no such account and asking for it fails
-closed, so a replica asks for no user and the guest agent runs the image's
-own, which is what `docker exec` does. The Run-button console that hardcoded
-`sprite` is gone; there is one terminal surface, `<machine-terminal>`.
+**A terminal names NO user, and that is deliberate.** Which account exists
+depends on which generation of image answers: the current golden rootfs has
+`pilot` at uid 1000, one built before the rename has `sprite`, and an image
+from someone's Dockerfile very often has neither. Naming any of them here
+means guessing, and a wrong guess fails closed on "user does not exist". The
+guest agent resolves its own default -- `pilot`, then `sprite`, then the USER
+the image declared -- so it is the only party that can answer, and it does.
+The Run-button console that hardcoded a user is gone; there is one terminal
+surface, `<machine-terminal>`.
 
 **The active nav link is computed in the browser, not on the server.** The root
 layout is preserved across a client-router navigation, so a server-rendered

@@ -1215,8 +1215,10 @@ through the typed client.
 account is `pilot` at uid 1000, home `/home/pilot`, passwordless sudo; an exec
 naming no user runs as that, and every prompt a pilots customer sees reads
 `pilot@instance`. `sprite` is a SECOND NAME for the same uid and the same home
-(`useradd -o -u 1000 -d /home/pilot sprite`), which costs one line and keeps
-the migration promise above literally true.
+(`useradd -o -u 1000 -d /home/pilot sprite`), and `/home/sprite` is a symlink
+to `/home/pilot`. Two lines, and they keep the migration promise above
+literally true in both directions: an alias covers the name a client sends as
+a `user`, and the symlink covers the one it sends as a `cwd`.
 
 The asymmetry is deliberate and worth stating, because the obvious tidy-up is
 wrong. The route and the alias are spelled in a competitor's vocabulary

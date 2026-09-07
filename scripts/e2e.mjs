@@ -4307,16 +4307,32 @@ async function execStreamAssertions() {
         `state moved from ${before.json?.state} to ${after.json?.state} on a refused query`);
     });
 
-    await step('an exec with no user runs as sprite in /home/sprite with Node 24', async () => {
+    await step('an exec with no user runs as pilot in /home/pilot with Node 24', async () => {
       const { status, json } = await request(`/v1/machines/${id}/exec`, {
         method: 'POST', body: { cmd: 'id -un; pwd; node -v' },
       });
       assert(status === 200, `expected 200, got ${status}: ${json?.error}`);
       assert(json.exit_code === 0, `exited ${json.exit_code}: ${json.stderr}`);
       const [who, cwd, node] = json.stdout.trim().split('\n');
-      assert(who === 'sprite', `ran as ${who}`);
-      assert(cwd === '/home/sprite', `cwd = ${cwd}`);
+      assert(who === 'pilot', `ran as ${who}`);
+      assert(cwd === '/home/pilot', `cwd = ${cwd}`);
       assert(node?.startsWith('v24.'), `node -v said ${node}`);
+    });
+
+    // The other half of the migration promise in ARCHITECTURE.md. `sprite` is
+    // a SECOND NAME for uid 1000, not a second account, so a hand-built
+    // sprites.dev client that names it must land on the same identity and the
+    // same home as the default -- otherwise the compatibility claim is a
+    // sentence in a document rather than a property of the product.
+    await step('`sprite` still resolves, to the same uid and home as pilot', async () => {
+      const { status, json } = await request(`/v1/machines/${id}/exec`, {
+        method: 'POST', body: { cmd: 'id -u; pwd', user: 'sprite' },
+      });
+      assert(status === 200, `expected 200, got ${status}: ${json?.error}`);
+      assert(json.exit_code === 0, `exited ${json.exit_code}: ${json.stderr}`);
+      const [uid, cwd] = json.stdout.trim().split('\n');
+      assert(uid === '1000', `sprite is uid ${uid}, not 1000`);
+      assert(cwd === '/home/pilot', `sprite's home is ${cwd}, not /home/pilot`);
     });
 
     // A foreign name must be indistinguishable from one that never existed: a

@@ -333,7 +333,7 @@ func TestGuestShellFallsBackWhenBashIsAbsent(t *testing.T) {
 	}
 }
 
-// An image with no `sprite` account runs an exec as the USER its own
+// An image with no `pilot` or `sprite` account runs an exec as the USER its own
 // Dockerfile declared, which the build records in the start spec, before it
 // falls back to the agent's own credentials. A declared USER the image does
 // not actually carry yields nothing rather than an error: that was reported

@@ -7,7 +7,8 @@
  * `Remove` that confirms, over a terminal filling the rest of the window. The
  * sandbox is an ordinary sandbox: it appears on /sandboxes, sleeps when idle,
  * and outlives this tab. With scripting off the page says the terminal needs
- * a browser and hands over the CLI (`sp-23-sprite-detail.png`).
+ * a browser and hands over the CLI. (Shape borrowed from the sprites.dev tour
+ * captured in `docs/prior-art`, frame `sp-23-sprite-detail.png`.)
  */
 import { html, notFound } from '@webjsdev/core';
 import type { PageProps } from '@webjsdev/core';

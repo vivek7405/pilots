@@ -116,7 +116,7 @@ test('nothing opens until the client says how big its window is', async () => {
   ws.emit('message', JSON.stringify({ type: 'open', rows: 40, cols: 120 }));
   const opened = app.fleet.data.lastExec!;
   assert.equal(opened.id, 'm-1');
-  assert.deepEqual(opened.opts, { user: 'sprite', tty: true, rows: 40, cols: 120 });
+  assert.deepEqual(opened.opts, { tty: true, rows: 40, cols: 120 });
 });
 
 test('an `open` sent before the handler has authenticated still starts the shell', async () => {
@@ -136,7 +136,7 @@ test('an `open` sent before the handler has authenticated still starts the shell
   // "Connected, blinking cursor, no output" the user reported.
   const opened = app.fleet.data.lastExec;
   assert.ok(opened, 'the early frame was queued, not dropped');
-  assert.deepEqual(opened.opts, { user: 'sprite', tty: true, rows: 40, cols: 120 });
+  assert.deepEqual(opened.opts, { tty: true, rows: 40, cols: 120 });
 });
 
 test('an early frame on a socket that fails auth opens nothing', async () => {
@@ -151,13 +151,20 @@ test('an early frame on a socket that fails auth opens nothing', async () => {
   assert.equal(app.fleet.data.lastExec, null);
 });
 
-test('a service replica asks for no user, so the guest runs the image\'s own', async () => {
-  const ws = fakeSocket();
-  await WS(ws, request(cookieA), routeCtx({ id: 'm-r' }));
-  ws.emit('message', JSON.stringify({ type: 'open', rows: 24, cols: 80 }));
-  const opened = app.fleet.data.lastExec!;
-  assert.equal(opened.id, 'm-r');
-  assert.deepEqual(opened.opts, { tty: true, rows: 24, cols: 80 }, 'no user: a Dockerfile image rarely has sprite');
+test('no terminal names a user, whatever kind of machine it is', async () => {
+  // Sandbox and service replica alike. Naming one here would mean guessing
+  // which generation of image is on the other end: the current rootfs has
+  // `pilot`, one built before the rename has `sprite`, and an image from
+  // someone's Dockerfile has neither. Only the guest agent can resolve that,
+  // and it does, so this handler stays out of it.
+  for (const id of ['m-1', 'm-r']) {
+    const ws = fakeSocket();
+    await WS(ws, request(cookieA), routeCtx({ id }));
+    ws.emit('message', JSON.stringify({ type: 'open', rows: 24, cols: 80 }));
+    const opened = app.fleet.data.lastExec!;
+    assert.equal(opened.id, id);
+    assert.deepEqual(opened.opts, { tty: true, rows: 24, cols: 80 }, `${id} named a user`);
+  }
 });
 
 test('the shell is chosen in the guest, so an image without bash still gets one', async () => {
@@ -210,7 +217,7 @@ test('a window size outside 1..65535 falls back rather than reaching the guest',
   // computed one wrongly would lose the session before it started.
   ws.emit('message', JSON.stringify({ type: 'open', rows: 0, cols: 999_999 }));
 
-  assert.deepEqual(app.fleet.data.lastExec!.opts, { user: 'sprite', tty: true, rows: 24, cols: 80 });
+  assert.deepEqual(app.fleet.data.lastExec!.opts, { tty: true, rows: 24, cols: 80 });
 });
 
 test('output comes back base64, and a message before open is dropped', async () => {
@@ -246,7 +253,7 @@ test('a frame arrives as a Buffer, which is what the socket library delivers', a
   ws.emit('message', Buffer.from(JSON.stringify({ type: 'open', rows: 30, cols: 100 })));
 
   assert.ok(app.fleet.data.lastExec, 'the open message was understood');
-  assert.deepEqual(app.fleet.data.lastExec!.opts, { user: 'sprite', tty: true, rows: 30, cols: 100 });
+  assert.deepEqual(app.fleet.data.lastExec!.opts, { tty: true, rows: 30, cols: 100 });
 });
 
 test('closing the socket kills the shell, so a closed tab leaves nothing running', async () => {

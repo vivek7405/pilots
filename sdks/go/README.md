@@ -182,7 +182,7 @@ own view of the replica and is not reachable from wherever this is read.
 ```go
 s, err := c.Machines.ExecStream(ctx, m.ID,
 	[]string{"bash", "-c", "npm run build"},
-	pilots.ExecStreamOptions{Dir: "/home/sprite/app", Env: map[string]string{"CI": "1"}})
+	pilots.ExecStreamOptions{Dir: "/home/pilot/app", Env: map[string]string{"CI": "1"}})
 if err != nil {
 	log.Fatal(err)
 }
@@ -210,9 +210,11 @@ first and closes the socket, so the text one has to be first for the
 untruncated code to be the one you get. Frame `3` still follows it, unchanged,
 for a client that reads only binary frames.
 
-**An exec that names no user runs as `sprite`.** The guest image bakes that
-account at uid 1000 with home `/home/sprite` and Node 24 on `PATH`, so a
+**An exec that names no user runs as `pilot`.** The guest image bakes that
+account at uid 1000 with home `/home/pilot` and Node 24 on `PATH`, so a
 command needs neither a `User` nor a `Dir` to land where these examples assume.
+`sprite` is a second name for the same uid and the same home, kept so a client
+written against sprites.dev resolves; prefer `pilot`, or name neither.
 
 **A close with no exit frame is an error.** `Wait` returns it rather than a
 code of 0: an exit frame means the output that preceded it has already

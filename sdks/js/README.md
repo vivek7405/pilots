@@ -172,7 +172,7 @@ from wherever the error is being read.
 
 ```ts
 const stream = pilots.machines.execStream('m-…', ['bash', '-c', 'npm run build'], {
-  cwd: '/home/sprite/app',
+  cwd: '/home/pilot/app',
   env: { NODE_ENV: 'production' },
 })
 stream.stdout.pipe(process.stdout)
@@ -196,9 +196,11 @@ first and closes the socket, so the text one has to be first for the
 untruncated code to be the one you get. Frame `3` still follows it, unchanged,
 for a client that reads only binary frames.
 
-**An exec that names no user runs as `sprite`.** The guest image bakes that
-account at uid 1000 with home `/home/sprite` and Node 24 on `PATH`, so a
+**An exec that names no user runs as `pilot`.** The guest image bakes that
+account at uid 1000 with home `/home/pilot` and Node 24 on `PATH`, so a
 command needs neither a `user` nor a `cwd` to land where these examples assume.
+`sprite` is a second name for the same uid and the same home, kept so a client
+written against sprites.dev resolves; prefer `pilot`, or name neither.
 
 ### An interactive terminal
 
@@ -328,7 +330,8 @@ The reference customer's coupling to its provider is one file,
    `SPRITES_TOKEN`, and name it in the error text. The constructor call is
    unchanged, because the adapter reads `PILOT_API_URL` itself.
 5. `modules/sprites/actions/create-sprite.ts`: drop the five nvm lines. Node 24
-   is on the image. `/home/sprite/app` stays.
+   is on the image. `/home/sprite/app` stays: the guest's home is `/home/pilot`
+   and `/home/sprite` is a symlink to it, kept so a hardcoded path resolves.
 6. `.env.example`: the `PILOTS_API_URL` / `PILOTS_TOKEN` / `SPRITES_TOKEN`
    block becomes `PILOT_API_URL=` and `PILOT_API_KEY=`.
 

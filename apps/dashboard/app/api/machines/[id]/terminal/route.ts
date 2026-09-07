@@ -68,7 +68,6 @@ export async function WS(ws: TerminalSocket, req: Request, { params }: RouteHand
   // A shell reads its window size at startup, so opening one at 24 by 80 and
   // resizing a moment later makes the first prompt redraw visibly.
   let stream: ReturnType<typeof fleet.machines.execStream> | null = null;
-  let sandbox = false;
   let closed = false;
 
   // Frames that arrived before the handler finished authenticating. The
@@ -83,7 +82,7 @@ export async function WS(ws: TerminalSocket, req: Request, { params }: RouteHand
 
     if (message.type === 'open') {
       if (stream || closed) return; // `open` is once; a second one is ignored, not obeyed
-      stream = start(ws, params.id, sandbox, dimension(message.rows, 24), dimension(message.cols, 80));
+      stream = start(ws, params.id, dimension(message.rows, 24), dimension(message.cols, 80));
       return;
     }
     if (!stream) return;
@@ -141,18 +140,23 @@ export async function WS(ws: TerminalSocket, req: Request, { params }: RouteHand
     return;
   }
 
-  // The user is resolved per machine, never hardcoded. A sandbox from the
-  // golden rootfs has `sprite`; a service replica built from someone's
-  // Dockerfile very often does not, and asking for it fails closed with
-  // "user does not exist". A replica asks for no user and the guest agent
-  // runs the image's own, which is what docker exec would do.
+  // The machine is fetched for the TENANCY check, not to pick a user. This
+  // handler names no user at all, deliberately.
+  //
+  // It used to send `sprite` for a sandbox, which was wrong in three
+  // directions at once: a service replica built from someone's Dockerfile has
+  // no such account and fails closed on "user does not exist", a sandbox from
+  // the current rootfs is `pilot`, and one created before the rename is
+  // `sprite`. Naming any of them here means guessing which generation of image
+  // is on the other end. The guest agent already resolves its own default --
+  // `pilot`, then `sprite`, then the image's declared USER -- so it is the
+  // only party that can answer correctly, and it does.
   try {
     const machine = await fleet.machines.get(params.id);
     if (!assertOwned(ctx.org.id, machine)) {
       ws.close(4404, 'not found');
       return;
     }
-    sandbox = !machine.service_id;
   } catch {
     ws.close(1011, 'fleet unavailable');
     return;
@@ -164,9 +168,8 @@ export async function WS(ws: TerminalSocket, req: Request, { params }: RouteHand
   early.length = 0;
 }
 
-function start(ws: TerminalSocket, machineId: string, sandbox: boolean, rows: number, cols: number) {
+function start(ws: TerminalSocket, machineId: string, rows: number, cols: number) {
   const stream = fleet.machines.execStream(machineId, SHELL, {
-    ...(sandbox ? { user: 'sprite' } : {}),
     tty: true,
     rows,
     cols,
