@@ -323,3 +323,77 @@ suite('machine-terminal and a hidden tab', () => {
     host.remove();
   });
 });
+
+/**
+ * Line mode: a terminal on a machine that cannot give us a pty.
+ *
+ * A browser test is the only tier that can see this. Without a pty nothing
+ * echoes what is typed and Return reaches the shell as a carriage return that
+ * no line discipline translates, so the session looks dead while being
+ * perfectly connected -- measured on a real replica whose image predates `tty`
+ * on the exec stream. In that mode the component does the line discipline's
+ * job itself: echo, backspace, and a whole line terminated by a newline.
+ *
+ * Counterfactual: send the keystrokes straight through, as pty mode does, and
+ * nothing appears on screen and no line is ever submitted.
+ */
+suite('machine-terminal in line mode', () => {
+  setup(() => {
+    sockets = [];
+    globalThis.WebSocket = FakeSocket;
+    globalThis.WebSocket.OPEN = 1;
+  });
+
+  teardown(async () => {
+    document.body.innerHTML = '';
+    await new Promise((r) => setTimeout(r, 20));
+    globalThis.WebSocket = RealWebSocket;
+  });
+
+  const typed = (socket) =>
+    socket.sent
+      .filter((m) => m.type === 'data')
+      .map((m) => atob(m.data))
+      .join('');
+
+  test('typing is echoed locally and Return sends the whole line with a newline', async () => {
+    const { el, host, socket } = await mount();
+    socket.deliver({ type: 'mode', tty: false });
+    await el.updateComplete;
+
+    for (const ch of 'ls -l') el.onKey(ch);
+    await el.updateComplete;
+    assert.equal(typed(socket), '', 'nothing is sent while the line is being typed');
+
+    el.onKey('\r');
+    assert.equal(typed(socket), 'ls -l\n', 'the whole line goes out, ended by a NEWLINE not a CR');
+
+    // The DOM renderer paints on a later frame, so the echo is polled for
+    // rather than read straight after the write.
+    const shown = await until(() => (el.querySelector('.xterm-rows')?.innerText ?? '').includes('ls -l'));
+    assert.ok(shown, 'and the reader can see what they typed');
+    host.remove();
+  });
+
+  test('backspace rubs out a character instead of reaching the shell', async () => {
+    const { el, host, socket } = await mount();
+    socket.deliver({ type: 'mode', tty: false });
+    await el.updateComplete;
+
+    for (const ch of 'lsx') el.onKey(ch);
+    el.onKey('\u007f');
+    el.onKey('\r');
+    assert.equal(typed(socket), 'ls\n', 'the rubbed-out character never left the browser');
+    host.remove();
+  });
+
+  test('with a real terminal the keystrokes go straight through', async () => {
+    const { el, host, socket } = await mount();
+    // No `mode` frame: this session is a pty, so the kernel echoes and the
+    // shell wants the carriage return exactly as the emulator sent it.
+    el.onKey('l');
+    el.onKey('\r');
+    assert.equal(typed(socket), 'l\r', 'raw, unbuffered, untranslated');
+    host.remove();
+  });
+});

@@ -200,7 +200,22 @@ function start(ws: TerminalSocket, machineId: string, rows: number, cols: number
     ws.send(JSON.stringify({ type: 'data', data: chunk.toString('base64') }));
   };
   stream.stdout.on('data', toScreen);
-  stream.stderr.on('data', toScreen);
+
+  // A byte on stderr is PROOF there is no pty: a pty has one output side, so
+  // the engine can only be reporting two because it opened pipes instead --
+  // which is what an agent older than `tty` on the exec stream does, silently.
+  // Measured: a sandbox's whole session arrives on channel 1, while a machine
+  // built before that support reports `not a tty` inside and answers on
+  // channel 2. The client is told once so it can drive a line-mode shell
+  // rather than a dead-looking one; the bytes go to the screen either way.
+  let told = false;
+  stream.stderr.on('data', (chunk: Buffer) => {
+    if (!told) {
+      told = true;
+      ws.send(JSON.stringify({ type: 'mode', tty: false }));
+    }
+    toScreen(chunk);
+  });
 
   stream.on('error', (err: Error) => {
     ws.send(JSON.stringify({ type: 'error', message: err.message }));

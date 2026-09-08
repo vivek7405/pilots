@@ -312,3 +312,41 @@ test('a prompt written to stderr still reaches the screen', async () => {
   assert.match(screen, /instance:~# /, 'stderr is the screen too, not something to drain');
   assert.match(screen, /and stdout too/, 'and stdout still arrives');
 });
+
+/**
+ * The route says, once, when a session is not a real terminal.
+ *
+ * A byte on stderr proves it: a pty has one output side, so two channels means
+ * the engine opened pipes, which is what an agent older than `tty` on the exec
+ * stream does without saying so. The client needs to know, because on that
+ * session nothing echoes and Return never submits.
+ */
+test('a session that turns out not to be a tty says so, once', async () => {
+  app.fleet.data.execHold = false;
+  app.fleet.data.execFrames.push(
+    { frame: 2, data: 'instance:~# ' },
+    { frame: 2, data: 'more stderr' },
+    { frame: 3, data: '0' },
+  );
+
+  const ws = fakeSocket();
+  await WS(ws, request(cookieA), routeCtx({ id: 'm-1' }));
+  ws.emit('message', JSON.stringify({ type: 'open', rows: 24, cols: 80 }));
+  await ws.whenClosed;
+
+  const modes = ws.sent.filter((m) => m.type === 'mode');
+  assert.equal(modes.length, 1, 'said once, not once per chunk');
+  assert.equal((modes[0] as unknown as { tty: boolean }).tty, false);
+});
+
+test('a tty session, whose output is all on one channel, says nothing', async () => {
+  app.fleet.data.execHold = false;
+  app.fleet.data.execFrames.push({ frame: 1, data: 'pilot@instance:~$ ' }, { frame: 3, data: '0' });
+
+  const ws = fakeSocket();
+  await WS(ws, request(cookieA), routeCtx({ id: 'm-1' }));
+  ws.emit('message', JSON.stringify({ type: 'open', rows: 24, cols: 80 }));
+  await ws.whenClosed;
+
+  assert.equal(ws.sent.filter((m) => m.type === 'mode').length, 0, 'a real terminal is not announced');
+});

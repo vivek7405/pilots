@@ -108,6 +108,10 @@ export class MachineTerminal extends WebComponent({
   #themeObserver: MutationObserver | null = null;
   #onData: { dispose(): void } | null = null;
   #hideTimer: ReturnType<typeof setTimeout> | null = null;
+  /** True once the route has told us this session is not a real terminal. */
+  #cooked = false;
+  /** The line being typed, kept here because no line discipline is keeping it. */
+  #line = '';
 
   constructor() {
     super();
@@ -212,7 +216,7 @@ export class MachineTerminal extends WebComponent({
     this.#term = term;
     this.#fit = fit;
 
-    this.#onData = term.onData((data) => this.send({ type: 'data', data: encodeUtf8(data) }));
+    this.#onData = term.onData((data) => this.onKey(data));
     this.#resizeObserver = new ResizeObserver(() => this.refit());
     this.#resizeObserver.observe(this);
     this.#themeObserver = new MutationObserver(() => {
@@ -224,6 +228,69 @@ export class MachineTerminal extends WebComponent({
     });
 
     this.connect();
+  }
+
+  /**
+   * A keystroke, in whichever mode this session turned out to be.
+   *
+   * With a pty the kernel echoes what is typed, turns Return into a newline
+   * and gives the shell a line at a time, so the bytes go straight out. On a
+   * machine whose agent is too old to open one, NONE of that happens: nothing
+   * echoes, and Return arrives at the shell as a carriage return that no line
+   * discipline translates, so a command is never submitted. That is a terminal
+   * which looks broken while being perfectly connected.
+   *
+   * So when the route tells us there is no pty, this does the line discipline's
+   * job in the browser: it echoes, it handles Backspace, and it sends a whole
+   * line terminated by a real newline. Enough for commands; not a substitute
+   * for a pty, which is why it says so.
+   */
+  private onKey(data: string): void {
+    if (!this.#cooked) {
+      this.send({ type: 'data', data: encodeUtf8(data) });
+      return;
+    }
+
+    for (const ch of data) {
+      if (ch === '\r' || ch === '\n') {
+        this.#term?.write('\r\n');
+        this.send({ type: 'data', data: encodeUtf8(`${this.#line}\n`) });
+        this.#line = '';
+        continue;
+      }
+      if (ch === '\u007f' || ch === '\b') {
+        if (this.#line.length === 0) continue;
+        this.#line = this.#line.slice(0, -1);
+        // Back over the character, blank it, back again: the only way to
+        // rub one out on a terminal that is not redrawing the line for us.
+        this.#term?.write('\b \b');
+        continue;
+      }
+      if (ch === '\u0003') {
+        this.#term?.write('^C\r\n');
+        this.#line = '';
+        // Sent anyway. Without a controlling terminal the shell will not turn
+        // it into a signal, but a program reading stdin may still want it.
+        this.send({ type: 'data', data: encodeUtf8(ch) });
+        continue;
+      }
+      // Anything else printable is echoed, because nothing else will.
+      if (ch >= ' ') {
+        this.#line += ch;
+        this.#term?.write(ch);
+      }
+    }
+  }
+
+  /** Says once, in the buffer, that this session is a line-mode shell. */
+  private enterCookedMode(): void {
+    if (this.#cooked) return;
+    this.#cooked = true;
+    this.#term?.writeln(
+      `\r\n${DIM}-- This instance predates terminal support, so this is a line-mode shell: ` +
+        `typing is echoed here, Return sends the line, and there is no job control. ` +
+        `Redeploy the service for a full terminal.${RESET}`,
+    );
   }
 
   /**
@@ -296,10 +363,17 @@ export class MachineTerminal extends WebComponent({
   }
 
   private receive(raw: string): void {
-    let frame: { type?: string; data?: string; code?: number; message?: string };
+    let frame: { type?: string; data?: string; code?: number; message?: string; tty?: boolean };
     try {
       frame = JSON.parse(raw) as typeof frame;
     } catch {
+      return;
+    }
+    // The route says this session is not a real terminal. Announced before the
+    // bytes that revealed it are written, so the explanation reads above the
+    // prompt rather than in the middle of it.
+    if (frame.type === 'mode' && frame.tty === false) {
+      this.enterCookedMode();
       return;
     }
     if (frame.type === 'data' && typeof frame.data === 'string') {
