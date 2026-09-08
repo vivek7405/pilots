@@ -99,3 +99,71 @@ suite('live-status', () => {
     assert.ok(listenerCount() < before, 'removing the elements gives their share of the socket back');
   });
 });
+
+/**
+ * The drawer.
+ *
+ * The card that opens the panel went live first, and the panel behind it did
+ * not, so opening a drawer on a machine that had just woken showed a `Sleeping`
+ * badge beside a card that already said Online. Both halves of the drawer are
+ * covered: the badge over the service, and the per-instance row.
+ *
+ * Counterfactual: return the slot for the empty-pills case instead of an empty
+ * template, and the woken service below keeps its `Sleeping` badge forever --
+ * the server's markup would be projected straight back.
+ */
+suite('live-status in the drawer', () => {
+  teardown(() => {
+    document.body.innerHTML = '';
+  });
+
+  const SLEEPY = { id: 'svc-1', name: 'web', app: 'shop', replicas: 1, release_id: 'rel-2' };
+
+  test('the health badge clears when the service is no longer asleep', async () => {
+    const { deliver } = await import('../../../modules/machines/live-client.ts');
+    const el = await mount('pills', [SLEEPY], '<span class="badge">Sleeping</span>');
+    el.releases = { 'svc-1': [{ id: 'rel-2', healthy: true, created_at: 1 }] };
+
+    deliver({ type: 'snapshot', machines: [machine({ state: 'suspended' })] });
+    await settle(el);
+    assert.match(el.textContent, /Sleeping/, 'still asleep, so the badge stands');
+
+    deliver({ type: 'delta', upsert: [machine({ state: 'running' })], remove: [] });
+    await settle(el);
+    assert.noMatch(el.textContent, /Sleeping/, `the badge goes when the machine wakes: ${el.textContent}`);
+  });
+
+  test('an instance row follows its own machine', async () => {
+    const { deliver } = await import('../../../modules/machines/live-client.ts');
+    await import('../../../modules/machines/components/live-machine-state.ts');
+    const el = document.createElement('live-machine-state');
+    el.setAttribute('machine-id', 'm-1');
+    el.setAttribute('mode', 'since');
+    el.innerHTML = '<span>SERVER ROW</span>';
+    document.body.appendChild(el);
+    await el.updateComplete;
+    assert.match(el.textContent, /SERVER ROW/, 'the server markup shows until the feed speaks');
+
+    deliver({ type: 'snapshot', machines: [machine({ state: 'running' })] });
+    await settle(el);
+    assert.match(el.textContent, /Online/, `the row went live: ${el.textContent}`);
+
+    deliver({ type: 'delta', upsert: [machine({ state: 'suspended' })], remove: [] });
+    await settle(el);
+    assert.match(el.textContent, /Sleeping/, `and follows it back down: ${el.textContent}`);
+  });
+
+  test('a row whose machine the feed never mentions keeps the server markup', async () => {
+    const { deliver } = await import('../../../modules/machines/live-client.ts');
+    await import('../../../modules/machines/components/live-machine-state.ts');
+    const el = document.createElement('live-machine-state');
+    el.setAttribute('machine-id', 'm-absent');
+    el.innerHTML = '<span>SERVER ROW</span>';
+    document.body.appendChild(el);
+    await el.updateComplete;
+
+    deliver({ type: 'snapshot', machines: [machine({ state: 'running' })] });
+    await settle(el);
+    assert.match(el.textContent, /SERVER ROW/, 'an unmentioned machine is not erased, only left stale');
+  });
+});

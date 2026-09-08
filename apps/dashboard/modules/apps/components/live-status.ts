@@ -35,14 +35,17 @@ import { onlineLine } from '#modules/apps/utils/ui/online-line.ts';
 import { serviceStatusLine } from '#modules/services/utils/ui/status-line.ts';
 import type { StatusService } from '#modules/services/utils/ui/status-line.ts';
 import { serviceStatus } from '#modules/apps/utils/ui/service-state.ts';
+import { healthPills } from '#modules/services/utils/ui/health-pills.ts';
+import { serviceHealth } from '#modules/services/utils/health.ts';
 import { attachedTo, currentReplicas } from '#modules/services/utils/replicas.ts';
 import { subscribeMachines } from '#modules/machines/live-client.ts';
 
 export class LiveStatus extends WebComponent({
   /**
    * `app` renders `N/M services online`, `service` the service status line,
-   * `card` the canvas card's `Sleeping since ...`. Three lines, three shapes,
-   * one feed -- each rendered by the same function the server used.
+   * `card` the canvas card's `Sleeping since ...`, and `pills` the drawer's
+   * health badges. Four shapes, one feed -- each rendered by the same function
+   * the server used, so none of them can change shape when it goes live.
    */
   kind: prop(String),
   /** For `app`, every service in it. For `service`, the one service. */
@@ -82,6 +85,20 @@ export class LiveStatus extends WebComponent({
 
   render() {
     if (!this.live) return html`<slot></slot>`;
+    if (this.kind === 'pills') {
+      const service = this.services[0];
+      if (!service) return html`<slot></slot>`;
+      // Renders to nothing when there is nothing to say, which is the point: a
+      // service that has just woken must not keep a `Sleeping` badge because
+      // the badge was what the server had to draw. `healthPills` says "nothing"
+      // with an empty STRING, and an empty template is what clears the element
+      // -- returning the string would leave the base class a value it cannot
+      // render, and returning the slot would put the stale badge back.
+      const pills = healthPills(
+        serviceHealth(service, currentReplicas(this.rows, service), this.releases[service.id] ?? []),
+      );
+      return typeof pills === 'string' ? html`` : pills;
+    }
     if (this.kind === 'service' || this.kind === 'card') {
       const service = this.services[0];
       if (!service) return html`<slot></slot>`;

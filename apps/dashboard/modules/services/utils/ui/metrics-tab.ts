@@ -20,6 +20,7 @@ import type { TabProps } from '#modules/services/utils/tabs.ts';
 import { statusDot } from '#modules/machines/utils/ui/state.ts';
 import { startLabel } from '#lib/vocabulary.ts';
 import { isStaleReplica } from '#modules/services/utils/replicas.ts';
+import '#modules/machines/components/live-machine-state.ts';
 import { badgeClass } from '#components/ui/badge.ts';
 import { cardClass } from '#components/ui/card.ts';
 import { cardBody, sectionEmpty, sectionGap, sectionHeading } from '#lib/utils/ui.ts';
@@ -42,7 +43,7 @@ export function metricsTab({ detail }: TabProps): TemplateResult {
                     <div class=${cn(cardBody(), 'grid gap-2')}>
                       <div class="flex items-center justify-between gap-2">
                         <a href=${`/machines/${m.id}`} class="truncate font-medium text-foreground">${m.name || m.id}</a>
-                        ${statusDot(m.state)}
+                        <live-machine-state machine-id=${m.id} mode="dot">${statusDot(m.state)}</live-machine-state>
                       </div>
                       ${isStaleReplica(m, service)
                         ? html`<p class="m-0">

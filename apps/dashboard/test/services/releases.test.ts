@@ -66,9 +66,15 @@ test('only the previous HEALTHY release is offered as a rollback target', async 
   assert.equal(buttons.length, 1, 'exactly one release carries the button');
 
   // The row for rel-1 (healthy, older) holds it; rel-2 (never healthy) does not.
+  //
+  // Scoped to the history table. A release id also appears in the hydration
+  // payload and in any element prop that carries a release, both of which come
+  // earlier in the document, so `indexOf` over the whole body used to find one
+  // of those and slice a "row" that was not a row at all.
+  const table = body.slice(body.indexOf('Deployments of this service, newest first'));
   const rowOf = (id: string) => {
-    const start = body.indexOf(id);
-    return body.slice(start, body.indexOf('</tr>', start));
+    const start = table.indexOf(id);
+    return table.slice(start, table.indexOf('</tr>', start));
   };
   assert.match(rowOf('rel-1'), /Roll back to this/, 'the newest healthy release before the current one');
   assert.doesNotMatch(rowOf('rel-2'), /Roll back to this/, 'a release that never passed its gate is not a target');

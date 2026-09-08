@@ -17,6 +17,7 @@ import { TABS, tabHref } from '#modules/services/utils/tabs.ts';
 import type { PanelErrors, Tab, TabProps } from '#modules/services/utils/tabs.ts';
 import { healthPills } from '#modules/services/utils/ui/health-pills.ts';
 import { currentReplicas } from '#modules/services/utils/replicas.ts';
+import '#modules/apps/components/live-status.ts';
 import { deploymentsTab } from '#modules/services/utils/ui/deployments-tab.ts';
 import { variablesTab } from '#modules/services/utils/ui/variables-tab.ts';
 import { metricsTab } from '#modules/services/utils/ui/metrics-tab.ts';
@@ -92,7 +93,19 @@ export function servicePanel(detail: ServiceDetail, tab: Tab, ctx: PanelContext 
                   </span>`
                 : html`<span>No URL yet</span>`;
             })()}
-            ${healthPills(health)}
+            <!--
+              Only the CURRENT release is handed over: serviceHealth looks up
+              exactly one, the one the service names, so serialising the whole
+              history into this element would be payload for nothing. (No
+              backticks in this comment: it sits inside a template literal, so
+              one would end it.)
+            -->
+            <live-status
+              kind="pills"
+              .services=${[service]}
+              .releases=${{ [service.id]: releases.filter((r) => r.id === service.release_id) }}
+              >${healthPills(health)}</live-status
+            >
           </div>
         </div>
         ${ctx.app

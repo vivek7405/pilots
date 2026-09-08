@@ -15,6 +15,7 @@ import { deployService } from '#modules/services/actions/deploy-service.server.t
 import { rollbackService } from '#modules/services/actions/rollback-service.server.ts';
 import { machineStateSince } from '#modules/machines/utils/ui/status-line.ts';
 import { currentReplicas } from '#modules/services/utils/replicas.ts';
+import '#modules/machines/components/live-machine-state.ts';
 import { badgeClass } from '#components/ui/badge.ts';
 import { buttonClass } from '#components/ui/button.ts';
 import { checkboxClass } from '#components/ui/checkbox.ts';
@@ -109,7 +110,9 @@ export function deploymentsTab({ detail, back, errors, build }: TabProps): Templ
                       ${replicas.map(
                         (m) => html`<li class="flex items-center gap-3">
                           <a href=${`/machines/${m.id}`} class="text-foreground">${m.name || m.id}</a>
-                          ${machineStateSince(m)}
+                          <live-machine-state machine-id=${m.id} mode="since"
+                            >${machineStateSince(m)}</live-machine-state
+                          >
                         </li>`,
                       )}
                     </ul>`
