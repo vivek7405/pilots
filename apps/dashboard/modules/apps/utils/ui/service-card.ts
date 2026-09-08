@@ -12,6 +12,10 @@
 import { html } from '@webjsdev/core';
 import type { TemplateResult } from '@webjsdev/core';
 import { statusDot, toneDot } from '#modules/machines/utils/ui/state.ts';
+import { serviceStatus } from '#modules/apps/utils/ui/service-state.ts';
+// The card declares its own dependency: a canvas rendered by a page that
+// forgot this import would get a status that never goes live again.
+import '#modules/apps/components/live-status.ts';
 import { stateSince } from '#modules/machines/utils/ui/status-line.ts';
 import type { PlacedNode } from '#modules/apps/utils/layout.ts';
 import type { Machine } from '#modules/machines/types.ts';
@@ -32,48 +36,6 @@ export interface CardVolume {
   id: string;
   name: string;
   size_gib: number;
-}
-
-/** The earliest or latest of a stamp across replicas, ignoring the unstamped. */
-function edge(replicas: Machine[], pick: (m: Machine) => number | undefined, side: 'first' | 'last'): number | undefined {
-  const stamps = replicas.map(pick).filter((v): v is number => typeof v === 'number');
-  if (stamps.length === 0) return undefined;
-  return side === 'first' ? Math.min(...stamps) : Math.max(...stamps);
-}
-
-/**
- * The state, and since when.
- *
- * Same shape as a sandbox's status line, because a reader who has learned
- * "Sleeping since 2 hours ago" on the sandboxes list should not have to learn
- * a second vocabulary here. What differs is that a service is SEVERAL
- * machines, so "since" needs a definition rather than a field:
- *
- * - Running takes the EARLIEST start among the running replicas, which is how
- *   long the service has been continuously answering. The latest would reset
- *   the clock every time one replica was replaced, during a rolling deploy
- *   that never dropped a request.
- * - Sleeping takes the LATEST activity across them all: the service went idle
- *   when its last awake replica did, not when its first one did.
- *
- * A missing stamp prints the word alone. "Sleeping since" with nothing after
- * it is worse than "Sleeping", the same rule the sandbox status line follows.
- */
-function serviceStatus(replicas: Machine[]): TemplateResult {
-  if (replicas.length === 0) return html`<span class="inline-flex items-center gap-1.5">${toneDot('muted')} <span>No instances</span></span>`;
-
-  const failed = replicas.filter((r) => r.state === 'error' || r.state === 'failed');
-  if (failed.length > 0) return stateSince('error', edge(failed, (r) => r.last_activity ?? r.last_start_at, 'last'));
-
-  const running = replicas.filter((r) => r.state === 'running');
-  if (running.length > 0) return stateSince('running', edge(running, (r) => r.last_start_at ?? r.created_at, 'first'));
-
-  if (replicas.every((r) => r.state === 'suspended')) {
-    return stateSince('suspended', edge(replicas, (r) => r.last_activity ?? r.last_start_at, 'last'));
-  }
-
-  if (replicas.some((r) => r.state === 'creating' || r.state === 'starting')) return stateSince('starting', undefined);
-  return statusDot(replicas[0]!.state);
 }
 
 function host(url: string): string {
@@ -118,7 +80,9 @@ export function serviceCard(opts: {
       card. (No backticks in this comment: it sits inside a template literal,
       so one would end it.)
     -->
-    <span class="mt-auto truncate text-meta leading-tight">${serviceStatus(replicas)}</span>
+    <span class="mt-auto truncate text-meta leading-tight"
+      ><live-status kind="card" .services=${[service]}>${serviceStatus(replicas)}</live-status></span
+    >
     ${volume
       ? html`<span class="mt-1 flex items-center gap-1.5 border-t border-border pt-1.5 text-meta leading-tight text-muted-foreground">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="size-3.5 shrink-0" aria-hidden="true"><path d="M22 12H2M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"/><path d="M6 16h.01M10 16h.01"/></svg>

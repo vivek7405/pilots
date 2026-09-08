@@ -150,6 +150,27 @@ test('an org with nothing in it is told what to do, not just that it is empty', 
 });
 
 /**
+ * The live element is on the page, wrapping the line the server just computed.
+ *
+ * Both halves matter and they are easy to break independently: an element that
+ * is not there leaves a page that only tells the truth at load, and an element
+ * whose slot is empty leaves a browser with no scripting showing nothing where
+ * the status was. The socket itself is covered in
+ * `test/apps/browser/live-status.test.js`, which is the only tier that can see
+ * it replace the server's markup.
+ */
+test('the status lines ship wrapped in the live element, with the server line inside', async () => {
+  const body = await list();
+  assert.match(body, /<live-status/, 'the apps page carries the live element');
+  assert.match(body, /kind="app"/, 'an app card keeps its own count live');
+  assert.match(
+    body,
+    /<live-status[^>]*>[\s\S]*?services online[\s\S]*?<\/live-status>/,
+    'and the server-rendered line is inside it, which is what a browser with no scripting shows',
+  );
+});
+
+/**
  * `docs` is a service outside any app, so its card renders the service status
  * line -- the one that reads `N/M instances online`. Left behind on `rel-d0`
  * is a second machine, which is exactly the fleet shape that read `2/1`.

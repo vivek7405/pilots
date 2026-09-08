@@ -22,12 +22,12 @@ import { isSignedOut } from '#modules/auth/session.server.ts';
 import { signInLink } from '#modules/auth/sign-in-link.ts';
 import { serviceStatusLine } from '#modules/services/utils/ui/status-line.ts';
 import type { HealthRelease } from '#modules/services/utils/health.ts';
-import { appTone, groupApps, sortApps, sortKey } from '#modules/apps/utils/apps.ts';
+import { groupApps, sortApps, sortKey } from '#modules/apps/utils/apps.ts';
+import { onlineLine } from '#modules/apps/utils/ui/online-line.ts';
 import type { AppGroup } from '#modules/apps/utils/apps.ts';
 import { layoutApp } from '#modules/apps/utils/layout.ts';
 import { thumbnailSvg } from '#modules/apps/utils/ui/canvas-svg.ts';
 import { stageClass } from '#modules/apps/utils/ui/stage.ts';
-import { toneDot } from '#modules/machines/utils/ui/state.ts';
 import { NOUN } from '#lib/vocabulary.ts';
 import { badgeClass } from '#components/ui/badge.ts';
 import { buttonClass } from '#components/ui/button.ts';
@@ -42,6 +42,7 @@ import '#components/copy-button.ts';
 import '#components/link-rows.ts';
 import '#components/list-filter.ts';
 import '#components/relative-time.ts';
+import '#modules/apps/components/live-status.ts';
 
 export const metadata = { title: 'pilots' };
 
@@ -124,7 +125,7 @@ export default async function Home({ searchParams }: PageProps) {
           : view === 'grid'
             ? html`<link-rows>
                 <div id="apps" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                  ${apps.map((app) => appCard(app))} ${loose.map((s) => looseCard(s, replicasOf(s.id), releases[s.id] ?? []))}
+                  ${apps.map((app) => appCard(app, releases))} ${loose.map((s) => looseCard(s, replicasOf(s.id), releases[s.id] ?? []))}
                 </div>
               </link-rows>`
             : html`<div id="apps"><link-rows>
@@ -140,7 +141,7 @@ export default async function Home({ searchParams }: PageProps) {
                           >${app.name}</a
                         >`,
                     },
-                    { header: NOUN.Services, cell: (app) => onlineLine(app) },
+                    { header: NOUN.Services, cell: (app) => liveApp(app, releases) },
                     { header: 'Deployed', cell: (app) => deployedAt(app) },
                   ],
                 })}
@@ -160,17 +161,33 @@ function viewLink(value: 'grid' | 'list', label: string, current: string, href: 
   >`;
 }
 
-function onlineLine(app: AppGroup<Service>) {
-  const total = app.services.length;
-  return html`<span class="inline-flex items-center gap-1.5 whitespace-nowrap">
-    ${toneDot(appTone(app))} ${app.online}/${total} ${total === 1 ? 'service' : 'services'} online
-  </span>`;
-}
-
 function deployedAt(app: AppGroup<Service>) {
   return app.lastDeploy === undefined
     ? html`<span class="text-muted-foreground">never</span>`
     : html`<relative-time datetime=${String(app.lastDeploy)}></relative-time>`;
+}
+
+/**
+ * The same line the server just computed, wrapped in the element that keeps it
+ * current. The slot's content is what a browser with no scripting shows, and
+ * what every browser shows until the feed's first message.
+ *
+ * Only the services and their releases are handed over: the machines arrive on
+ * the socket, once, for the whole page.
+ */
+function liveApp(app: AppGroup<Service>, releases: Record<string, HealthRelease[]>) {
+  return html`<live-status
+    kind="app"
+    .services=${app.services}
+    .releases=${Object.fromEntries(app.services.map((s) => [s.id, releases[s.id] ?? []]))}
+    >${onlineLine(app)}</live-status
+  >`;
+}
+
+function liveService(service: Service, replicas: BrowserMachine[], rels: HealthRelease[]) {
+  return html`<live-status kind="service" .services=${[service]} .releases=${{ [service.id]: rels }}
+    >${serviceStatusLine(service, replicas, rels)}</live-status
+  >`;
 }
 
 /**
@@ -179,7 +196,7 @@ function deployedAt(app: AppGroup<Service>) {
  * a screen reader gets one link named after the app rather than the whole
  * card's text.
  */
-function appCard(app: AppGroup<Service>) {
+function appCard(app: AppGroup<Service>, releases: Record<string, HealthRelease[]>) {
   const href = `/apps/${encodeURIComponent(app.name)}`;
   const layout = layoutApp(app.services.map((s) => ({ id: s.id, name: s.name, dependsOn: s.depends_on ?? [] })));
   return html`
@@ -188,7 +205,7 @@ function appCard(app: AppGroup<Service>) {
         <h2 class="m-0 text-body font-semibold"><a href=${href} class="text-foreground no-underline">${app.name}</a></h2>
         <div class=${cn(stageClass(), 'mt-3 py-4')}>${thumbnailSvg(layout)}</div>
         <p class="m-0 mt-3 flex flex-wrap items-center gap-x-2 text-meta text-muted-foreground">
-          ${onlineLine(app)}
+          ${liveApp(app, releases)}
           ${app.lastDeploy === undefined
             ? ''
             : html`<span aria-hidden="true">·</span
@@ -212,7 +229,7 @@ function looseCard(service: Service, replicas: BrowserMachine[], rels: HealthRel
       <div class=${cardBody()}>
         <h2 class="m-0 text-body font-semibold"><a href=${href} class="text-foreground no-underline">${service.name}</a></h2>
         <div class=${cn(stageClass(), 'mt-3 py-4')}>${thumbnailSvg(layout)}</div>
-        <p class="m-0 mt-3 text-meta text-muted-foreground">${serviceStatusLine(service, replicas, rels)}</p>
+        <p class="m-0 mt-3 text-meta text-muted-foreground">${liveService(service, replicas, rels)}</p>
       </div>
     </div>
   `;
