@@ -47,7 +47,7 @@ export default async function SandboxesPage({ actionData }: PageProps) {
     </div>
     ${errors.error ? errorAlert(errors.error) : ''}
     ${lede(
-      html`A sandbox is a machine that belongs to no service: yours to open a terminal on, snapshot and turn into a
+      html`A sandbox is an instance that belongs to no service: yours to open a terminal on, snapshot and turn into a
         service later. ${SLEEP_SENTENCE} These are the ones in <strong>${ctx.org.slug}</strong>.`,
     )}
     <machine-list

@@ -213,7 +213,7 @@ test('a machine left on an older release is not counted, but is still named', as
     // machine holding a URL and burning quota is named on some page.
     const metrics = await page('/services/svc-web?tab=metrics');
     assert.match(metrics.body, /href="\/machines\/m-web-old"/, 'the leftover is still listed among the instances');
-    assert.match(metrics.body, /On an older release/, 'and it is marked as what it is');
+    assert.match(metrics.body, /On an older deployment/, 'and it is marked as what it is');
     assert.match(metrics.body, /web-1/, 'beside the instance that is serving');
   } finally {
     app.fleet.data.machines = app.fleet.data.machines.filter((m) => m.id !== 'm-web-old');

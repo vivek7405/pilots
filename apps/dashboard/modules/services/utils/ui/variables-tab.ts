@@ -85,7 +85,7 @@ export function variablesTab({ detail, back, errors }: TabProps): TemplateResult
       </section>
 
       <section id="variables-form">
-        ${sectionHeading('Set variables', 'Plain values are visible to anyone who can read this service. A secret is sealed on the host.')}
+        ${sectionHeading('Set variables', 'Plain values are visible to anyone who can read this service. A secret is sealed where it runs.')}
         <form action=${saveVariables} class="grid gap-4">
           <input type="hidden" name="service" value=${service.id}>
           <input type="hidden" name="back" value=${back}>

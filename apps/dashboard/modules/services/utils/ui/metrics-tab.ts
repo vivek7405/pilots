@@ -48,7 +48,7 @@ export function metricsTab({ detail }: TabProps): TemplateResult {
                       ${isStaleReplica(m, service)
                         ? html`<p class="m-0">
                             <span class=${badgeClass({ variant: 'outline' })} title="Left behind by a deploy: this service points at a newer release, and the engine's autoscaler only manages instances on that one."
-                              >On an older release</span
+                              >On an older deployment</span
                             >
                           </p>`
                         : ''}

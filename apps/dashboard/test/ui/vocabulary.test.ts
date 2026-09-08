@@ -87,14 +87,17 @@ export function templateBodies(source: string): string[] {
       if (depth > 0) {
         if (ch === '{') depth++;
         else if (ch === '}') depth--;
-        // A nested html`` inside a hole is found by the outer loop when it
-        // gets there, so the hole itself contributes nothing here.
+        // A nested html`` inside a hole is found by the outer loop, which
+        // resumes just past this template's opening backtick rather than
+        // past its closing one, so the hole itself contributes nothing here.
         continue;
       }
       text += ch;
     }
     out.push(text);
-    i = j;
+    // NOT `i = j`: that skipped every html`` nested inside a hole, which is
+    // where most of this app's copy lives (`${lede(html`...`)}`).
+    i += 4;
   }
   return out;
 }
@@ -138,6 +141,10 @@ test('no template renders an engine word to a person', () => {
  */
 test('no heading, lede, empty state or footnote says an engine word', () => {
   const HELPERS = /\b(pageHeading|sectionHeading|lede|emptyState|sectionEmpty|footnote)\(\s*'([^']{2,})'/g;
+  // `sectionHeading` takes a description as its SECOND argument, and its first
+  // is usually a NOUN.* rather than a literal, so the pattern above never sees
+  // the sentence a person reads under the heading.
+  const DESCRIPTIONS = /\bsectionHeading\(\s*[^,()]+,\s*'([^']{2,})'/g;
   const offenders: string[] = [];
   for (const file of sources()) {
     const rel = relative(APP_DIR, file).replaceAll('\\', '/');
@@ -145,6 +152,10 @@ test('no heading, lede, empty state or footnote says an engine word', () => {
     for (const m of source.matchAll(HELPERS)) {
       const hit = BANNED.exec(m[2]!);
       if (hit) offenders.push(`${rel}: ${m[1]}('${m[2]}')`);
+    }
+    for (const m of source.matchAll(DESCRIPTIONS)) {
+      const hit = BANNED.exec(m[1]!);
+      if (hit) offenders.push(`${rel}: sectionHeading(..., '${m[1]}')`);
     }
   }
   assert.deepEqual(offenders, [], `these helper arguments speak the engine's language:\n${offenders.join('\n')}`);

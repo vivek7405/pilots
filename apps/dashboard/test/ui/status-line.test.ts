@@ -63,7 +63,7 @@ test('a sleeping machine whose vendor has no live host is labelled before it is 
   assert.match(out, /starts fresh when woken/);
   // The vendor is named, because "no matching host" tells a reader nothing
   // they can act on and "no AMD host is live" tells them what to add.
-  assert.match(out, /No AMD host is live/);
+  assert.match(out, /No AMD computer is live/);
 });
 
 test('every timestamp carries the machine-readable value beside the words', async () => {

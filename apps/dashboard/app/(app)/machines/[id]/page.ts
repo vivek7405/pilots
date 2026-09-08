@@ -56,13 +56,13 @@ export default async function MachinePage({ params }: PageProps) {
     </div>
 
     <section id="console" class="mt-8">
-      ${sectionHeading(NOUN.Logs, 'Everything this machine has printed since it last started. That is all pilots keeps.')}
+      ${sectionHeading(NOUN.Logs, 'Everything this instance has printed since it last started. That is all pilots keeps.')}
       <log-stream .sources=${[{ id: machine.id, service: machine.service_id ? 'Instance' : 'Sandbox', name: machine.name ?? machine.id }]}></log-stream>
     </section>
 
     <section class="mt-8">
       <div class="flex flex-wrap items-center justify-between gap-3">
-        ${sectionHeading(NOUN.Terminal, 'A shell inside this machine, as if you had opened one on the box it runs on.')}
+        ${sectionHeading(NOUN.Terminal, 'A shell inside this instance, as if you had opened one on the box it runs on.')}
         <a href=${`/machines/${machine.id}/terminal`} class="text-meta">Full screen</a>
       </div>
       <div class="h-[24rem] overflow-hidden rounded-md border border-border">

@@ -70,7 +70,7 @@ export default async function TerminalPage({ params }: PageProps) {
             ${machine.state === 'running'
               ? ''
               : html`<span class="text-meta text-muted-foreground"
-                  >Visiting it wakes the machine; the request is held, not refused.</span
+                  >Visiting it wakes the instance; the request is held, not refused.</span
                 >`}
           </div>
 

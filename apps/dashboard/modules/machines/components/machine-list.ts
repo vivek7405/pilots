@@ -363,7 +363,7 @@ class MachineList extends WebComponent({
         <kbd class=${kbdClass()} aria-hidden="true">/</kbd>
 
         ${hosts.length > 1
-          ? html`<label class="sr-only" for="machine-host">Host</label>
+          ? html`<label class="sr-only" for="machine-host">Where it runs</label>
               <select
                 id="machine-host"
                 class=${cn(inputClass(), 'h-8 w-40')}
@@ -372,7 +372,7 @@ class MachineList extends WebComponent({
                   this.page = 0;
                 }}
               >
-                <option value="">Every host</option>
+                <option value="">Anywhere</option>
                 ${hosts.map((h) => html`<option value=${h} ?selected=${this.host === h}>${h}</option>`)}
               </select>`
           : ''}

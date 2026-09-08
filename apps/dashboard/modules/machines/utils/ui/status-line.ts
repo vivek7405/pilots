@@ -123,8 +123,8 @@ export function statusPhrase(machine: Machine, hosts: Host[]): TemplateResult | 
               <span tabindex="0" class="underline decoration-dotted">starts fresh when woken</span>
             </ui-tooltip-trigger>
             <ui-tooltip-content side="top">
-              No ${vendor} host is live, and a memory image is never restored across the CPU vendor boundary. Waking
-              this machine boots it from its own disk instead: the URL, the disk and the volume survive, the processes
+              No ${vendor} computer is live, and a memory image is never restored across the CPU vendor boundary. Waking
+              this instance boots it from its own disk instead: the URL, the disk and the storage survive, the processes
               and the memory do not.
             </ui-tooltip-content>
           </ui-tooltip>`}`;
