@@ -229,7 +229,7 @@ header widens with the viewport when a modal hides the scrollbar and its
 contents slide sideways.
 
 **The shell is a left rail of product nouns; the account chores sit under
-them.** Apps, Sandboxes, Logs and Playground are the primary nav, run down a
+them.** Apps, Sandboxes and Logs are the primary nav, run down a
 fixed left sidebar with the identity menu pinned at the bottom. Usage, Tokens
 and Team are the secondary group in the same rail. Storage and Domains stay
 routable and are reached from the service they belong to. A flat top bar of

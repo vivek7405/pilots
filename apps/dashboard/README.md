@@ -12,8 +12,7 @@ on `pilots.run` by the platform it administers.
 | `/apps/[app]` | one app's canvas, and the service panel in a slide-over when a card is clicked (`?service=&tab=`) |
 | `/services/[id]` | the same panel full width: Deployments, Variables, Metrics, Terminal, Settings |
 | `/services/new` | point pilots at a GitHub repository; it plans it, shows what it found, and deploys it to a URL |
-| `/sandboxes` | every sandbox, with a filter, a terminal action per row, and the playground button |
-| `/sandboxes/playground` | one click from nothing to a shell in a fresh sandbox |
+| `/sandboxes` | every sandbox, with a filter, a terminal action per row, and a create button |
 | `/machines/[id]` | one sandbox or instance: its facts, logs, an inline terminal and its snapshots |
 | `/machines/[id]/terminal` | the same shell, full screen, where `tmux` and `vim` work |
 | `/logs` | every running instance's console in one table, filterable by service and instance |

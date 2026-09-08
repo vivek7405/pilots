@@ -475,8 +475,7 @@ The routes worth opening once it is up:
 | `/` | your apps, one card each with a thumbnail of its canvas |
 | `/apps/<app>` | one app's canvas: its services as cards, an arrow from each to what it dials; click a card for its panel |
 | `/services/new` | point pilots at a GitHub repository and deploy it to a URL |
-| `/sandboxes` | every sandbox, with a filter, a terminal action per row, and the playground button |
-| `/sandboxes/playground` | one click from nothing to a shell in a fresh sandbox |
+| `/sandboxes` | every sandbox, with a filter, a terminal action per row, and a create button |
 | `/machines/<id>` | one sandbox or instance: its facts, logs, an inline terminal and its snapshots |
 | `/machines/<id>/terminal` | the same shell, full screen |
 | `/logs` | every running instance's console in one table, filterable by service and instance |
