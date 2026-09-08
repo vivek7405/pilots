@@ -32,6 +32,8 @@ export class BuildLog extends WebComponent({
   buildId: prop(String, { attribute: 'build-id' }),
   serviceId: prop(String, { attribute: 'service-id' }),
   autodeploy: prop(Boolean),
+  /** Where a finished deploy lands. Empty means the service page. */
+  back: prop(String),
   status: prop(String, { state: true }),
   failure: prop(String, { state: true }),
 }) {
@@ -44,6 +46,7 @@ export class BuildLog extends WebComponent({
     super();
     this.buildId = '';
     this.serviceId = '';
+    this.back = '';
     this.autodeploy = false;
     this.status = 'connecting';
     this.failure = '';
@@ -121,10 +124,20 @@ export class BuildLog extends WebComponent({
       });
       if (!res.ok) {
         this.status = 'failed';
-        this.failure = `The image was built but the deploy was refused (${res.status}).`;
+        // The engine's own words, not a bare status. A 422 is the health gate
+        // naming the instance that failed and what to look at; dropping that
+        // into "refused (422)" was the one path where the browser-driven deploy
+        // never reached the doctor's verdict.
+        const body = (await res.json().catch(() => null)) as { error?: string; next?: string } | null;
+        this.failure = body?.error
+          ? `The image was built but the deploy was refused: ${body.error}${body.next ? ` ${body.next}` : ''}`
+          : `The image was built but the deploy was refused (${res.status}).`;
         return;
       }
-      navigate(`/services/${this.serviceId}?tab=deployments&ok=deployed` as Route);
+      // Back to where the build was followed from -- the canvas slide-over
+      // when it started there -- rather than always the service page.
+      const target = this.back || `/services/${this.serviceId}?tab=deployments`;
+      navigate(`${target}${target.includes('?') ? '&' : '?'}ok=deployed` as Route);
     } catch (err) {
       this.status = 'failed';
       this.failure = (err as Error).message;

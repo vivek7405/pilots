@@ -53,7 +53,7 @@ export function deploymentsTab({ detail, back, errors, build }: TabProps): Templ
               html`The image is being built from <span class="font-mono">${following.repo}@${following.ref}</span>. When it
               succeeds it is deployed and this page moves to the new deployment.`,
             )}
-            <build-log build-id=${following.jobId} service-id=${service.id} autodeploy></build-log>
+            <build-log build-id=${following.jobId} service-id=${service.id} back=${back} autodeploy></build-log>
             <p class="m-0 mt-2 text-meta text-muted-foreground">
               With scripting off, the last line of the raw log carries the image id; the Deploy form below takes it.
             </p>
