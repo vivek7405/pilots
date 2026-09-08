@@ -315,6 +315,56 @@ CREATE TABLE IF NOT EXISTS org_quotas (          -- writer: any host, on an admi
   updated_at     INTEGER
 );
 
+-- Which repositories an org may ask this fleet to fetch.
+--
+-- The fleet's GitHub App holds an installation token for every repository it
+-- is installed on. Without a row saying otherwise, `POST /v1/builds` and
+-- `POST /v1/plan` with a {repo, ref} body would let ANY key name ANY of those
+-- repositories, build it, and boot a shell inside another tenant's source
+-- under the fleet's own credential. This table is the answer to "may this org
+-- fetch this repository?", and hostd answers it from its LOCAL replica --
+-- never from the dashboard's database, which the data plane may not depend on
+-- (ARCHITECTURE.md invariant 2).
+--
+-- A NEW table, and not a column on services, for two independent reasons.
+-- The mechanical one: services carries rows, and cr-sqlite backfills every row
+-- of a table whose columns change, which is the fleet-wide gossip storm that
+-- took fly's fleet down twice for ~11.5h. The authorization one: services.repo
+-- is written by whoever creates a service, so a permission read out of it
+-- would be granted by the very caller it is meant to constrain.
+--
+-- WRITE-ONCE, exactly like tenancy, and that is what makes "any host may write
+-- it" safe where nearly every other table here names one writer: the row's
+-- whole content IS its key, so two hosts racing cannot merge into a value
+-- neither wrote, and both drivers write ON CONFLICT DO NOTHING so a second
+-- writer cannot change one even by accident.
+--
+-- The key is <org_id>/<repo> and NOT <repo>: one repository may legitimately
+-- be connected to more than one org (a public repo two tenants both deploy),
+-- and a repo-keyed row would turn the first claim into a fleet-wide land grab
+-- on that name -- a tenant could park on `acme/shop` and lock its real owner
+-- out. Lowercased on the way in, because GitHub owner and repository names are
+-- case-insensitive and `Acme/Shop` must not read back as unconnected.
+--
+-- WHO may write one is the API's question, not the schema's: connecting is
+-- admin-scoped (POST /v1/repos), because the proof that an org controls a
+-- repository is held at GitHub -- the App installation, bound to an org by the
+-- dashboard's install callback -- and hostd cannot check it from a request.
+-- FETCHING is not admin-scoped, and that is the whole point of the table: a
+-- tenant-scoped key deploys from a repository its own org is connected to.
+--
+-- There is no disconnect yet, deliberately. Removing a link is a
+-- tombstone-shaped problem -- a DELETE loses to a replica still carrying the
+-- insert and the link comes back, see api_key_revocations -- so it wants its
+-- own write-once table and its own decision. Until then access is cut where it
+-- is granted: uninstall the App from the repository, or revoke the org's keys.
+CREATE TABLE IF NOT EXISTS repo_links (          -- writer: any host, on an admin-scoped request (write-once)
+  id           TEXT NOT NULL PRIMARY KEY,        -- <org_id>/<owner>/<name>, lowercased
+  org_id       TEXT,
+  repo         TEXT,                             -- owner/name, lowercased
+  connected_at INTEGER
+);
+
 -- Which CPU vendor a host is, and which vendor photographed a memory image.
 --
 -- Two NEW tables rather than a column on hosts or machines: both carry rows,

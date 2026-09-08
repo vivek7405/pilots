@@ -519,7 +519,7 @@ func run() error {
 		CPUVendor: vendor, CPUVendorForced: vendorForced,
 		Usage:   ledger,
 		Compose: compose.Handler(),
-		Plan:    detect.Handler(filepath.Join(cfg.CacheRoot(), "plan-work"), planStager(stager)),
+		Plan:    detect.Handler(filepath.Join(cfg.CacheRoot(), "plan-work"), planStager(stager), store),
 		Lookup:  machineByName(f),
 		GitHub:  github.Handler(ghDeps),
 	}

@@ -498,6 +498,76 @@ func (s *Store) IsRevoked(ctx context.Context, hash string) (bool, error) {
 	return true, rows.Err()
 }
 
+const repoLinkCols = `id, org_id, repo, connected_at`
+
+// PutRepoLink connects a repository to an org.
+//
+// Unguarded by single-writer and DO NOTHING rather than DO UPDATE, exactly as
+// PutTenancy is, and for the same reason: any host may write this row
+// precisely because nothing can ever change a value it already holds, so two
+// hosts racing cannot produce a merge neither of them wrote. Turn this into DO
+// UPDATE and "any host may write it" stops being true.
+func (s *Store) PutRepoLink(ctx context.Context, l *state.RepoLink) error {
+	_, err := s.client.Exec(ctx, `
+		INSERT INTO repo_links (`+repoLinkCols+`) VALUES (?,?,?,?)
+		ON CONFLICT(id) DO NOTHING`,
+		state.RepoLinkID(l.OrgID, l.Repo), l.OrgID, state.NormalizeRepo(l.Repo), l.ConnectedAt)
+	if err != nil {
+		return fmt.Errorf("state: put repo link %q: %w", l.Repo, err)
+	}
+	return nil
+}
+
+// GetRepoLink is a point read against the LOCAL replica, on the request path
+// of every {repo, ref} build and plan. It must never grow a network hop.
+func (s *Store) GetRepoLink(ctx context.Context, orgID, repo string) (*state.RepoLink, error) {
+	rows, err := s.client.Query(ctx,
+		`SELECT `+repoLinkCols+` FROM repo_links WHERE id = ?`, state.RepoLinkID(orgID, repo))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("state: repo link %q: %w", repo, state.ErrNotFound)
+	}
+	var l state.RepoLink
+	if err := rows.Scan(&l.ID, &l.OrgID, &l.Repo, &l.ConnectedAt); err != nil {
+		return nil, err
+	}
+	return &l, rows.Err()
+}
+
+func (s *Store) ListRepoLinks(ctx context.Context, orgID string) ([]state.RepoLink, error) {
+	var (
+		rows *Rows
+		err  error
+	)
+	if orgID == "" {
+		rows, err = s.client.Query(ctx, `SELECT `+repoLinkCols+` FROM repo_links ORDER BY id`)
+	} else {
+		rows, err = s.client.Query(ctx,
+			`SELECT `+repoLinkCols+` FROM repo_links WHERE org_id = ? ORDER BY id`, orgID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: list repo links: %w", err)
+	}
+	defer rows.Close()
+
+	var out []state.RepoLink
+	for rows.Next() {
+		var l state.RepoLink
+		if err := rows.Scan(&l.ID, &l.OrgID, &l.Repo, &l.ConnectedAt); err != nil {
+			return nil, fmt.Errorf("state: scan repo link: %w", err)
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
 const quotaCols = `org_id, max_machines, max_vcpus, max_mem_mib, max_volume_gib, max_builds, updated_at`
 
 func (s *Store) GetQuota(ctx context.Context, orgID string) (*state.Quota, error) {

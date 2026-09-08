@@ -141,6 +141,17 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 		volume = v
 	}
 
+	// Connecting a service to a repository is the PUSH half of the same
+	// authorization question POST /v1/builds asks, and it is asked here with
+	// the same function. A push is a signed delivery resolved to the service
+	// rows that name a repository (internal/github, serviceFor), so a service
+	// naming someone else's repository is a standing order to build their
+	// source into a machine of ours on their next commit -- the very hole the
+	// {repo, ref} gate was closed for, reached the long way round.
+	if req.Repo != "" && !AllowRepo(w, r, d.Store, req.Repo) {
+		return
+	}
+
 	// A service's replicas are machines, so a create is admitted against the
 	// same limits a create of that many machines would be. A replica boots
 	// with the manager's defaults, which is where these numbers come from.
@@ -316,6 +327,13 @@ func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
 	var req UpdateServiceRequest
 	if err := dec.Decode(&req); err != nil {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(), NextBadBody, nil)
+		return
+	}
+	// Repointing a service at a repository is the same claim the create makes,
+	// so it is checked the same way. An empty string is the dashboard's
+	// explicit disconnect and needs no claim: giving a repository up is never
+	// something to be refused.
+	if req.Repo != nil && *req.Repo != "" && !AllowRepo(w, r, d.Store, *req.Repo) {
 		return
 	}
 	volumeID, err := d.volumeOf(r.Context(), svc.ID)

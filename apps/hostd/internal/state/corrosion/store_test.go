@@ -538,6 +538,43 @@ func TestTenancyRoundTripsAndIsWriteOnce(t *testing.T) {
 	}
 }
 
+// The replicated half of the repo link: unguarded by single-writer, so the
+// SQL is the only thing keeping it write-once. A DO UPDATE here would let two
+// hosts racing hand a repository to an org neither of them named.
+func TestRepoLinkIsWriteOnceOnTheReplicatedStore(t *testing.T) {
+	ctx := context.Background()
+	store, agent := newTestStore(t, "host-a")
+
+	if err := store.PutRepoLink(ctx, &state.RepoLink{
+		OrgID: "org-1", Repo: "Acme/Shop", ConnectedAt: 10,
+	}); err != nil {
+		t.Fatalf("PutRepoLink: %v", err)
+	}
+	if err := store.PutRepoLink(ctx, &state.RepoLink{
+		OrgID: "org-1", Repo: "acme/shop", ConnectedAt: 20,
+	}); err != nil {
+		t.Fatalf("PutRepoLink again: %v", err)
+	}
+	if got := agent.scalar(t, `SELECT connected_at FROM repo_links WHERE id='org-1/acme/shop'`); got != "10" {
+		t.Errorf("connected_at moved to %q; the SQL must be ON CONFLICT DO NOTHING", got)
+	}
+	if got := agent.scalar(t, `SELECT repo FROM repo_links WHERE id='org-1/acme/shop'`); got != "acme/shop" {
+		t.Errorf("repo stored as %q, want it lowercased", got)
+	}
+
+	got, err := store.GetRepoLink(ctx, "org-1", "acme/shop")
+	if err != nil || got.OrgID != "org-1" {
+		t.Fatalf("GetRepoLink = %+v, %v", got, err)
+	}
+	if _, err := store.GetRepoLink(ctx, "org-2", "acme/shop"); !errors.Is(err, state.ErrNotFound) {
+		t.Errorf("another org's read returned %v, want ErrNotFound", err)
+	}
+	mine, err := store.ListRepoLinks(ctx, "org-1")
+	if err != nil || len(mine) != 1 {
+		t.Errorf("ListRepoLinks = %+v, %v", mine, err)
+	}
+}
+
 func TestRevocationRoundTripsAndKeepsTheKeyRow(t *testing.T) {
 	ctx := context.Background()
 	store, agent := newTestStore(t, "host-a")

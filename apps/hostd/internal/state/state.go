@@ -10,10 +10,11 @@
 //   - Single-writer: a host writes ONLY rows describing its own machines. The
 //     sanctioned exceptions are deterministic-owner operations -- name
 //     allocation and self-heal claims of a provably dead host's machines --
-//     and the tables whose rows describe no machine: tenancy and
-//     api_key_revocations, which are write-once, and api_keys and org_quotas,
-//     written by any host serving an admin-scoped request. A row is safe for
-//     "any host" only when it is written once or has one logical writer.
+//     and the tables whose rows describe no machine: tenancy,
+//     api_key_revocations and repo_links, which are write-once, and api_keys
+//     and org_quotas, written by any host serving an admin-scoped request. A
+//     row is safe for "any host" only when it is written once or has one
+//     logical writer.
 //   - Reads are local and must never block on another host. Routing and wake
 //     depend on this.
 package state
@@ -29,6 +30,7 @@ import (
 	"hash/fnv"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite" // pure-Go driver: hostd builds with CGO_ENABLED=0
@@ -341,6 +343,38 @@ type Tenancy struct {
 	CreatedAt int64
 }
 
+// RepoLink is one org's standing permission to have this fleet fetch one
+// repository through its GitHub App.
+//
+// A row of its own, write-once, for the reasons the schema comment gives at
+// length: it is the only thing that ties a caller to a repository, and reading
+// that permission out of services.repo would take the answer from the very
+// caller it constrains.
+type RepoLink struct {
+	ID          string // RepoLinkID(OrgID, Repo)
+	OrgID       string
+	Repo        string // owner/name, lowercased
+	ConnectedAt int64
+}
+
+// NormalizeRepo folds a repository slug to the form the rows are keyed by.
+//
+// GitHub owner and repository names are case-insensitive, so `Acme/Shop` and
+// `acme/shop` are one repository and must not be two rows: the second spelling
+// would otherwise read back as unconnected and refuse a caller that has every
+// right to build. One function, called on both the write and the read, because
+// two normalisations would be exactly that bug.
+func NormalizeRepo(repo string) string { return strings.ToLower(strings.TrimSpace(repo)) }
+
+// RepoLinkID is the primary key: <org_id>/<owner>/<name>, lowercased.
+//
+// Keyed by the pair and not by the repository alone, so two orgs may each be
+// connected to one public repository and neither can squat on the other's
+// name. See the schema comment on repo_links.
+func RepoLinkID(orgID, repo string) string {
+	return strings.ToLower(strings.TrimSpace(orgID)) + "/" + NormalizeRepo(repo)
+}
+
 // Revocation is a killed API key. Adding a row rather than deleting the key's,
 // because a delete loses to a replica still carrying the insert and the
 // credential comes back alive.
@@ -431,6 +465,20 @@ type Store interface {
 	// ListTenancy returns every row. The quota counter reads it once per
 	// create, joined against the object tables in memory.
 	ListTenancy(ctx context.Context) ([]Tenancy, error)
+
+	// PutRepoLink connects a repository to an org. Write-once in both
+	// drivers, for the reason PutTenancy is: the row is what makes "any host
+	// may write this" safe, and it is only safe while nothing can change a
+	// value already written.
+	PutRepoLink(ctx context.Context, l *RepoLink) error
+	// GetRepoLink answers "may this org fetch this repository?" from LOCAL
+	// state. ErrNotFound is the answer "no claim on record", which the API
+	// turns into a 403 that says how to connect it. It is on the request path
+	// of every {repo, ref} build, so it must never make a network call.
+	GetRepoLink(ctx context.Context, orgID, repo string) (*RepoLink, error)
+	// ListRepoLinks returns one org's connected repositories, or every row
+	// when orgID is empty, which is what an admin key with no ?org= sees.
+	ListRepoLinks(ctx context.Context, orgID string) ([]RepoLink, error)
 
 	// PutRevocation tombstones a key. Write-once, and never paired with a
 	// delete: see the Revocation type.
@@ -1017,6 +1065,62 @@ func (s *sqliteStore) ListTenancy(ctx context.Context) ([]Tenancy, error) {
 			return nil, fmt.Errorf("state: scan tenancy: %w", err)
 		}
 		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+const repoLinkCols = `id, org_id, repo, connected_at`
+
+// PutRepoLink is DO NOTHING for the reason PutTenancy is: the row is only safe
+// for any host to write while nothing can change a value already written.
+func (s *sqliteStore) PutRepoLink(ctx context.Context, l *RepoLink) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO repo_links (`+repoLinkCols+`) VALUES (?,?,?,?)
+		ON CONFLICT(id) DO NOTHING`,
+		RepoLinkID(l.OrgID, l.Repo), l.OrgID, NormalizeRepo(l.Repo), l.ConnectedAt)
+	if err != nil {
+		return fmt.Errorf("state: put repo link %q: %w", l.Repo, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) GetRepoLink(ctx context.Context, orgID, repo string) (*RepoLink, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+repoLinkCols+` FROM repo_links WHERE id = ?`, RepoLinkID(orgID, repo))
+	var l RepoLink
+	err := row.Scan(&l.ID, &l.OrgID, &l.Repo, &l.ConnectedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get repo link %q: %w", repo, err)
+	}
+	return &l, nil
+}
+
+func (s *sqliteStore) ListRepoLinks(ctx context.Context, orgID string) ([]RepoLink, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if orgID == "" {
+		rows, err = s.db.QueryContext(ctx, `SELECT `+repoLinkCols+` FROM repo_links ORDER BY id`)
+	} else {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT `+repoLinkCols+` FROM repo_links WHERE org_id = ? ORDER BY id`, orgID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: list repo links: %w", err)
+	}
+	defer rows.Close()
+
+	var out []RepoLink
+	for rows.Next() {
+		var l RepoLink
+		if err := rows.Scan(&l.ID, &l.OrgID, &l.Repo, &l.ConnectedAt); err != nil {
+			return nil, fmt.Errorf("state: scan repo link: %w", err)
+		}
+		out = append(out, l)
 	}
 	return out, rows.Err()
 }

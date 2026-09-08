@@ -17,6 +17,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/compose"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
 func TestTheHandlerPlansATarredRecipe(t *testing.T) {
@@ -110,7 +111,7 @@ func post(t *testing.T, body io.Reader, query string) *httptest.ResponseRecorder
 	req := httptest.NewRequest(http.MethodPost, "/v1/plan"+query, body)
 	req.Header.Set("Content-Type", "application/x-tar")
 	rec := httptest.NewRecorder()
-	Handler(t.TempDir(), nil)(rec, req)
+	Handler(t.TempDir(), nil, nil)(rec, req)
 	return rec
 }
 
@@ -210,7 +211,7 @@ func TestTheHandlerStagesUnderTheRootItWasGiven(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		Handler(root, nil)(rec, req)
+		Handler(root, nil, nil)(rec, req)
 	}()
 
 	<-body.started
@@ -283,29 +284,96 @@ func postRepoRef(t *testing.T, repos Stager, body string) *httptest.ResponseReco
 	req := httptest.NewRequest(http.MethodPost, "/v1/plan?app=fx", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	// Behind the auth middleware in production, so the tests hand the handler
-	// the context it is actually given. Naming a repository is admin-only.
+	// the context it is actually given. An admin key may name any repository,
+	// here as everywhere else on this API.
 	req = req.WithContext(api.WithAdminPrincipal(req.Context()))
 	rec := httptest.NewRecorder()
-	Handler(t.TempDir(), repos)(rec, req)
+	Handler(t.TempDir(), repos, nil)(rec, req)
 	return rec
 }
 
-// A tenant key may not name a repository: the App's token reaches every
-// repository the fleet's App is installed on, and nothing ties this caller's
-// org to the one it named. A tar of the same tree is still accepted.
-func TestNamingARepositoryNeedsAnAdminKey(t *testing.T) {
-	stager := &fakeStager{dir: filepath.Join(fixtures, "webjs")}
-	req := httptest.NewRequest(http.MethodPost, "/v1/plan?app=fx",
-		strings.NewReader(`{"repo":"o/r","ref":"abc123"}`))
+// postRepoRefAs is the same request from a TENANT key, against a real store,
+// which is the only way the connection rule can be exercised at all.
+func postRepoRefAs(t *testing.T, repos Stager, st state.Store, org, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/v1/plan?app=fx", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req = req.WithContext(api.WithTenantPrincipal(req.Context(), org))
 	rec := httptest.NewRecorder()
-	Handler(t.TempDir(), stager)(rec, req)
+	Handler(t.TempDir(), repos, st)(rec, req)
+	return rec
+}
 
+// linkedStore is a store in which one org is connected to one repository.
+func linkedStore(t *testing.T, org, repo string) state.Store {
+	t.Helper()
+	st, err := state.Open(":memory:")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	if err := st.PutRepoLink(context.Background(), &state.RepoLink{
+		OrgID: org, Repo: repo, ConnectedAt: 1,
+	}); err != nil {
+		t.Fatalf("PutRepoLink: %v", err)
+	}
+	return st
+}
+
+// A tenant key may name a repository its org is CONNECTED to, and only that
+// one. The App's installation token reaches every repository the fleet's App
+// is installed on, so the repo_links row is the whole of what ties this caller
+// to the one it named -- it is what replaced the admin-only gate this test
+// used to assert.
+func TestNamingAnUnconnectedRepositoryIsRefused(t *testing.T) {
+	stager := &fakeStager{dir: filepath.Join(fixtures, "webjs")}
+	st := linkedStore(t, "org_2", "acme/mine")
+
+	rec := postRepoRefAs(t, stager, st, "org_2", `{"repo":"other/private","ref":"abc123"}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"repo_not_connected"`) {
+		t.Errorf("body = %s, want repo_not_connected", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "/v1/repos") {
+		t.Errorf("the refusal does not say how to connect it: %s", rec.Body.String())
+	}
+	if len(stager.seen) != 0 {
+		t.Fatalf("a refused caller reached the stager: %v", stager.seen)
+	}
+}
+
+// The other half, without which the rule could be "refuse everyone" and stay
+// green: connected, and the plan runs on a key carrying no admin scope at all.
+//
+// Spelled with different case than the row on purpose. GitHub owner and
+// repository names are case-insensitive, so a caller typing Acme/Mine holds
+// the same claim and must not be refused for shouting.
+func TestAConnectedRepositoryPlansOnATenantKey(t *testing.T) {
+	stager := &fakeStager{dir: filepath.Join(fixtures, "webjs")}
+	st := linkedStore(t, "org_2", "acme/mine")
+
+	rec := postRepoRefAs(t, stager, st, "org_2", `{"repo":"Acme/Mine","ref":"abc123"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if len(stager.seen) != 1 {
+		t.Fatalf("the stager saw %v", stager.seen)
+	}
+}
+
+// One org's connection is not another's. The rows are keyed by the pair, and
+// this is that decision asserted from outside the schema.
+func TestAnotherOrgsConnectionDoesNotCarry(t *testing.T) {
+	stager := &fakeStager{dir: filepath.Join(fixtures, "webjs")}
+	st := linkedStore(t, "org_2", "acme/mine")
+
+	rec := postRepoRefAs(t, stager, st, "org_3", `{"repo":"acme/mine","ref":"abc123"}`)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403: %s", rec.Code, rec.Body.String())
 	}
 	if len(stager.seen) != 0 {
-		t.Fatalf("a refused caller reached the stager: %v", stager.seen)
+		t.Fatalf("another org's connection staged the repository: %v", stager.seen)
 	}
 }
 
@@ -386,7 +454,7 @@ func TestATarStillPlansWhenAStagerIsConfigured(t *testing.T) {
 		tarOf(t, filepath.Join(fixtures, "webjs")))
 	req.Header.Set("Content-Type", "application/x-tar")
 	rec := httptest.NewRecorder()
-	Handler(t.TempDir(), stager)(rec, req)
+	Handler(t.TempDir(), stager, nil)(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
