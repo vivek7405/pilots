@@ -2320,6 +2320,20 @@ print(det[0].get('framework', ''))
     ok "a deploy-scoped key was minted for ${GH_ORG}"
     GH_TAUTH="Authorization: Bearer ${GH_TENANT}"
 
+    # The KEY gossips too, so wait for the far host to know it before asking it
+    # anything. Without this the first refusal below could be a 401 that
+    # happened to contain no code, and the section would report the rule broken
+    # when what was late was the credential.
+    GH_AUTHOK=""
+    for _ in $(seq 1 30); do
+      GH_AUTHOK=$(curl -sf -m 30 "http://${GH_LAST}:8080/v1/whoami" -H "$GH_TAUTH" 2>/dev/null | jf org_id)
+      [ -n "$GH_AUTHOK" ] && break
+      sleep 1
+    done
+    [ "$GH_AUTHOK" = "$GH_ORG" ] \
+      && ok "the key authenticates on ${GH_LAST} as ${GH_ORG}" \
+      || bad "${GH_LAST} never learned the key minted on ${LIVE_IPS[0]} (whoami said '${GH_AUTHOK}')"
+
     # Before the connection: refused on the far host, by code, with the route
     # that fixes it in the message.
     GH_UNCONN=$(curl -s -m 60 -X POST "http://${GH_LAST}:8080/v1/plan" \
