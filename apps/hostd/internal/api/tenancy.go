@@ -52,16 +52,22 @@ func (d Deps) tenancy() TenancyView {
 
 // mayAccess reports whether the caller may see an object.
 //
-// An admin key sees everything, including rows created before tenancy existed
-// -- those have no owner, so admin is the only caller that can be shown them
-// without handing one tenant's machine to another. Every other caller needs a
-// tenancy row naming its own org.
+// An admin key with no ?org= sees everything, including rows created before
+// tenancy existed -- those have no owner, so admin is the only caller that can
+// be shown them without handing one tenant's machine to another. Every other
+// caller needs a tenancy row naming the org it is acting as.
+//
+// The narrowing is what makes an admin key usable by a process acting for one
+// org at a time: with ?org= the key sees exactly what that org's own key would
+// see, unowned rows included in neither. Reads and writes then agree, so a row
+// an admin created as an org reads back as that org and 404s to any other.
 func (d Deps) mayAccess(r *http.Request, id string) bool {
-	if IsAdmin(r.Context()) {
-		return true
+	want, narrow := listOrg(r)
+	if !narrow {
+		return true // an admin with no ?org= sees everything, unowned rows included
 	}
 	org, ok := d.tenancy().OrgOf(r.Context(), id)
-	return ok && org != "" && org == OrgID(r.Context())
+	return ok && org != "" && org == want
 }
 
 // notFound answers for an object the caller may not see.
@@ -132,6 +138,28 @@ func listOrg(r *http.Request) (org string, narrow bool) {
 	return OrgID(r.Context()), true
 }
 
+// actingOrg is the org a WRITE should be stamped with, charged to, and read
+// back as.
+//
+// An admin key naming ?org= acts AS that org: the row it creates is owned by
+// it, the quota it consumes is that org's, and every later read of the row
+// narrows to it. That is the trust an admin key already carries -- it mints
+// keys for any org -- expressed on the create path, and it is what lets one
+// operator process serve a browser session that belongs to somebody else's
+// org without holding that org's key.
+//
+// Hard rule 1 is untouched. A tenancy row is still written once, by the host
+// arbitrating the object; only the value an admin may put in one widens.
+//
+// A non-admin's ?org= is ignored here for the reason listOrg ignores it: the
+// caller has exactly one org, so the parameter can only be redundant or wrong.
+func actingOrg(r *http.Request) string {
+	if org, narrow := listOrg(r); narrow {
+		return org
+	}
+	return OrgID(r.Context())
+}
+
 // visible reports whether a listed row belongs in the answer, and returns the
 // org that owns it.
 //
@@ -144,10 +172,19 @@ func listOrg(r *http.Request) (org string, narrow bool) {
 // not be handed every unowned object on the fleet.
 func (d Deps) visible(r *http.Request, id, org string, narrow bool) (owner string, ok bool) {
 	owner, found := d.tenancy().OrgOf(r.Context(), id)
+	return owner, visibleTo(owner, found, org, narrow)
+}
+
+// visibleTo is that rule over an owner someone has ALREADY resolved.
+//
+// A list resolves every row's owner once to group siblings; without this it
+// restated the rule inline to filter from that map, and two copies of a
+// tenancy rule are two places for it to drift.
+func visibleTo(owner string, found bool, org string, narrow bool) bool {
 	if !narrow {
-		return owner, true
+		return true
 	}
-	return owner, found && org != "" && owner == org
+	return found && org != "" && owner == org
 }
 
 // ownedBuild resolves a build the caller is allowed to name.

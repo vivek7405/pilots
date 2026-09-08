@@ -12,15 +12,19 @@
  * The org the service is checked against is the SESSION's, so a caller cannot
  * pass the org id that would make the tenancy check pass.
  */
-import { eq } from 'drizzle-orm';
+import { and, eq } from 'drizzle-orm';
 import { db } from '#db/connection.server.ts';
 import { repoConnections } from '#db/schema.server.ts';
 import { fleet, listMachines } from '#modules/fleet/client.server.ts';
 import { assertOwned } from '#modules/fleet/org-filter.server.ts';
 import { requireOrg, signedOut } from '#modules/auth/session.server.ts';
 import type { SignedOut } from '#modules/auth/session.server.ts';
-import type { RepoConnection } from '#db/schema.server.ts';
-import type { Host, Machine, Release, Service } from '@pilots/sdk';
+import { githubAppConfigured } from '#modules/github/app-jwt.server.ts';
+import { installUrl } from '#modules/github/installations.server.ts';
+import type { Build, RepoConnection, ServiceVariable } from '#db/schema.server.ts';
+import { builds, serviceVariables } from '#db/schema.server.ts';
+import { desc } from 'drizzle-orm';
+import type { DomainResponse, Host, Machine, Release, Service } from '@pilots/sdk';
 
 export interface ServiceDetail {
   service: Service;
@@ -31,6 +35,18 @@ export interface ServiceDetail {
   replicas: Machine[];
   /** Every host, so a replica's resume tier can be named without a second read. */
   hosts: Host[];
+  /** Builds started from here, newest first, for the Deployments tab and the doctor card. */
+  builds: Build[];
+  /** The names of variables set from here, for the Variables tab. Never values. */
+  variables: ServiceVariable[];
+  /** The custom domains pointing at this service, for its Settings tab. */
+  domains: DomainResponse[];
+  /**
+   * Whether this fleet has a GitHub App, and where to install it. Read here
+   * because the panel that renders it is a pure fragment and may not touch
+   * the environment itself.
+   */
+  github: { configured: boolean; installUrl: string };
 }
 
 export async function getService(input: { id: string }): Promise<ServiceDetail | null | SignedOut> {
@@ -53,6 +69,40 @@ export async function getService(input: { id: string }): Promise<ServiceDetail |
   const replicas = machines.filter((m) => m.service_id === service.id);
   const hosts = await fleet.hosts.list().catch(() => [] as Host[]);
   const repo = (await db.select().from(repoConnections).where(eq(repoConnections.serviceId, input.id)).get()) ?? null;
+  const domains = (await fleet.domains.list().catch(() => [] as DomainResponse[])).filter(
+    (d) => d.service_id === service.id,
+  );
 
-  return { service, releases, previews, repo, replicas, hosts };
+  // Defense in depth. hostd never returns an environment, but a service that
+  // reaches a page is serialised for hydration, so strip both halves here in
+  // case a future API or a fixture ever includes them. A value must never be
+  // in a page.
+  const { env: _env, secret_env: _secret, ...publicService } = service as Service & { env?: unknown; secret_env?: unknown };
+  service = publicService as Service;
+
+  const variables = await db
+    .select()
+    .from(serviceVariables)
+    .where(and(eq(serviceVariables.serviceId, service.id), eq(serviceVariables.orgId, ctx.org.id)))
+    .all();
+
+  const buildRows = await db
+    .select()
+    .from(builds)
+    .where(and(eq(builds.serviceId, service.id), eq(builds.orgId, ctx.org.id)))
+    .orderBy(desc(builds.createdAt))
+    .all();
+
+  return {
+    variables,
+    builds: buildRows,
+    service,
+    releases,
+    previews,
+    repo,
+    replicas,
+    hosts,
+    domains,
+    github: { configured: githubAppConfigured(), installUrl: installUrl() },
+  };
 }

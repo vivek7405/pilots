@@ -32,6 +32,13 @@ write that arrives at the wrong host is forwarded by hostd itself.
 | `fetch` | `globalThis.fetch` | Wrap it to add retries, pooling or tracing. |
 | `timeoutMs` | `30000` | JSON calls only. Builds, log follows and streams get no deadline. |
 | `WebSocket` | `globalThis.WebSocket` | The seam for the `ws` package on an older runtime. |
+| `org` | none | Makes an ADMIN key act as one org. Every request carries `?org=`. |
+
+`org` is for a process that serves many orgs from one operator key. hostd reads
+it as the org to create rows in, charge quota to, and narrow every read by, so
+the rows the process creates belong to the person who asked for them. A
+tenant-scoped key already has exactly one org, so hostd ignores the parameter
+there and setting it changes nothing.
 
 An empty key throws before any request is made.
 
@@ -52,7 +59,7 @@ One method per route, grouped by the noun it acts on.
 | `machines.promote(id, req)` | `POST /v1/machines/{id}/promote` |
 | `machines.volume(id)` | `GET /v1/machines/{id}/volume` |
 | `checkpoints.restore(id)` `.get(id)` | `/v1/checkpoints/{id}` |
-| `builds.create(tar)` `.logs(id, {follow})` | `/v1/builds` |
+| `builds.create(tar)` `.createFromRepo(ref)` `.logs(id, {follow})` | `/v1/builds` |
 | `services.create(req)` `.list()` `.get(id)` `.patch(id, req)` | `/v1/services` |
 | `services.deploy(id, req)` `.rollback(id)` `.releases(id)` | `/v1/services/{id}/…` |
 | `domains.add(req)` `.list()` `.remove(hostname)` | `/v1/domains` |
@@ -69,6 +76,11 @@ are refused there with a 400 naming the field and travel on `services.deploy`.
 `volume` on a service create is create-only and pins `replicas` to one; the
 patch refuses it as an unknown field and refuses `replicas` above one on a
 service that mounts a volume.
+
+A service read carries `depends_on`, the sibling services in the same app whose
+`<name>.internal` address this one's environment references. hostd derives it on
+every read from both halves of the environment and stores it nowhere, so it says
+what the service is configured to dial right now. Names only, never values.
 `usage.get` answers for the ONE host it reached, so a fleet is the sum of a
 call to each; a suspended machine bills storage only.
 
@@ -113,6 +125,15 @@ plus one `detected` entry per step saying where it came from: a compose file, a
 `compose` or `services` because it is what a caller reaches for before it knows
 which of those a directory is.
 
+```ts
+const { plan } = await client.planRepo({ repo: 'you/shop', ref: 'main' }, { app: 'shop' })
+```
+
+`planRepo()` names a repository instead of sending one. The host fetches the
+ref through the fleet's GitHub App, the same path a push takes, so a caller
+that holds no repository bytes can still plan. A fleet with no App configured
+answers `not_configured` and says to send a tar instead.
+
 ## Errors
 
 Every non-2xx throws. The subclass tells you what to do about it.
@@ -151,7 +172,7 @@ from wherever the error is being read.
 
 ```ts
 const stream = pilots.machines.execStream('m-…', ['bash', '-c', 'npm run build'], {
-  cwd: '/home/sprite/app',
+  cwd: '/home/pilot/app',
   env: { NODE_ENV: 'production' },
 })
 stream.stdout.pipe(process.stdout)
@@ -175,9 +196,11 @@ first and closes the socket, so the text one has to be first for the
 untruncated code to be the one you get. Frame `3` still follows it, unchanged,
 for a client that reads only binary frames.
 
-**An exec that names no user runs as `sprite`.** The guest image bakes that
-account at uid 1000 with home `/home/sprite` and Node 24 on `PATH`, so a
+**An exec that names no user runs as `pilot`.** The guest image bakes that
+account at uid 1000 with home `/home/pilot` and Node 24 on `PATH`, so a
 command needs neither a `user` nor a `cwd` to land where these examples assume.
+`sprite` is a second name for the same uid and the same home, kept so a client
+written against sprites.dev resolves; prefer `pilot`, or name neither.
 
 ### An interactive terminal
 
@@ -244,6 +267,20 @@ while it runs. That means the status code cannot be the verdict: the last line
 is. `result()` reads it, and throws `BuildFailedError` both when that line
 carries an error and when the stream ended with no verdict at all.
 
+`close()` walks away from a build without draining it, releasing the socket
+rather than holding it until GC. A `result()` afterwards throws, because a
+stream nobody finished has no verdict and an abandoned build must never read as
+a successful one.
+
+```ts
+const build = await pilots.builds.createFromRepo({ repo: 'you/shop', ref: 'main' })
+```
+
+`createFromRepo()` builds a repository by naming it. The host fetches the ref
+through the fleet's GitHub App, plans it, and builds the one step a plan may
+produce. A plan with more than one step is refused with `plan_multi_service`,
+readable at the build's own log.
+
 ## `@pilots/sdk/sprites-compat`
 
 A sprites-shaped face over the same client, so a codebase written against the
@@ -293,7 +330,8 @@ The reference customer's coupling to its provider is one file,
    `SPRITES_TOKEN`, and name it in the error text. The constructor call is
    unchanged, because the adapter reads `PILOT_API_URL` itself.
 5. `modules/sprites/actions/create-sprite.ts`: drop the five nvm lines. Node 24
-   is on the image. `/home/sprite/app` stays.
+   is on the image. `/home/sprite/app` stays: the guest's home is `/home/pilot`
+   and `/home/sprite` is a symlink to it, kept so a hardcoded path resolves.
 6. `.env.example`: the `PILOTS_API_URL` / `PILOTS_TOKEN` / `SPRITES_TOKEN`
    block becomes `PILOT_API_URL=` and `PILOT_API_KEY=`.
 

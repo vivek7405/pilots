@@ -8,15 +8,16 @@ on `pilots.run` by the platform it administers.
 
 | Route | What it is |
 |---|---|
-| `/` | the overview: services grouped by the app they resolve each other within, the sandboxes that belong to no service, four quota bars, the fleet |
-| `/services` | every service with whether it is up, not just how many replicas it declares |
-| `/services/[id]` | one service, its releases, its repo connection, and a diagnosis card when it is not serving |
-| `/services/new` | how a service gets made, and why the browser cannot make one yet |
-| `/machines` | every machine, filtered by resume tier: a suspended machine says whether waking it costs its memory |
-| `/machines/[id]` | one machine's facts, its console and its checkpoints |
-| `/machines/[id]/terminal` | a real shell on a pseudo-terminal, where `tmux` and `vim` work |
-| `/volumes`, `/domains` | attributes of a service, reached from it |
-| `/usage`, `/keys`, `/org` | the account chores, reached from the identity menu |
+| `/` | your apps, one card each with a thumbnail of its canvas; a service in no app is its own card |
+| `/apps/[app]` | one app's canvas, and the service panel in a slide-over when a card is clicked (`?service=&tab=`) |
+| `/services/[id]` | the same panel full width: Deployments, Variables, Metrics, Terminal, Settings |
+| `/services/new` | point pilots at a GitHub repository; it plans it, shows what it found, and deploys it to a URL |
+| `/sandboxes` | every sandbox, with a filter, a terminal action per row, and a create button |
+| `/machines/[id]` | one sandbox or instance: its facts, logs, an inline terminal and its snapshots |
+| `/machines/[id]/terminal` | the same shell, full screen, where `tmux` and `vim` work |
+| `/logs` | every running instance's console in one table, filterable by service and instance |
+| `/storage`, `/domains` | attributes of a service, reached from it |
+| `/usage`, `/keys`, `/org` | the account chores, reached from the rail; usage also carries the limits and capacity |
 
 `Ctrl K` opens a palette that reaches any of them, or any service or machine,
 by name.
@@ -200,6 +201,9 @@ server layer:
   dynamically imports 345 KB, measures its container to fit rows and columns,
   and sends that size in its first message. A server test sees an empty custom
   element.
+- `test/apps/browser/canvas.test.js` scales the canvas to fit a narrow
+  viewport and moves focus between cards on the arrow keys, both of which
+  happen after hydration and leave the served bytes unchanged.
 
 Run `npm run css:build` before the browser layer if the stylesheet is stale:
 two of those files fetch `/public/tailwind.css` and assert it is served.

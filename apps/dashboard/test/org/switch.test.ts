@@ -13,7 +13,7 @@
  * visitor with more than one org, so the fixture gives them two.
  *
  * Counterfactual: replace `localPath(...)` with `back.startsWith('/') &&
- * !back.startsWith('//') ? back : '/machines'` and the backslash case fails
+ * !back.startsWith('//') ? back : '/sandboxes'` and the backslash case fails
  * with `Location: /\evil.com`.
  */
 
@@ -27,9 +27,9 @@ let app: TestApp;
 let cookie = '';
 let orgId = '';
 
-/** Post the org switcher from the layout of `/machines`, with these fields. */
+/** Post the org switcher from the layout of `/sandboxes`, with these fields. */
 async function switchTo(fields: Record<string, string>): Promise<Response> {
-  return submitForm(app.handle, '/machines', fields, { cookies: cookie, match: /name="org"/ });
+  return submitForm(app.handle, '/sandboxes', fields, { cookies: cookie, match: /name="org"/ });
 }
 
 before(async () => {
@@ -60,18 +60,18 @@ test('a same-origin path is honoured, and the org cookie rides the redirect', as
 test('a backslash after the slash is an open redirect and falls back', async () => {
   const res = await switchTo({ org: orgId, back: '/\\evil.com' });
   assert.equal(res.status, 303);
-  assert.equal(res.headers.get('location'), '/machines', 'Chrome and Safari would resolve /\\evil.com as //evil.com');
+  assert.equal(res.headers.get('location'), '/sandboxes', 'Chrome and Safari would resolve /\\evil.com as //evil.com');
 });
 
 test('a protocol-relative or absolute target falls back', async () => {
   for (const back of ['//evil.com', '//evil.com/x', 'https://evil.com', 'evil.com', '', '\\\\evil.com', '/']) {
     const res = await switchTo({ org: orgId, back });
-    assert.equal(res.headers.get('location'), '/machines', `back=${JSON.stringify(back)} never leaves the origin`);
+    assert.equal(res.headers.get('location'), '/sandboxes', `back=${JSON.stringify(back)} never leaves the origin`);
   }
 });
 
 test('an org the visitor is not a member of is refused without a redirect', async () => {
-  const res = await switchTo({ org: 'not-mine', back: '/machines' });
+  const res = await switchTo({ org: 'not-mine', back: '/sandboxes' });
   assert.equal(res.status, 403, 'the envelope status re-renders the page rather than redirecting');
   assert.equal(res.headers.get('location'), null);
   assert.equal(getSetCookies(res).some((c) => c.startsWith('pilots_org=')), false, 'and no cookie is written');

@@ -1,53 +1,65 @@
 /**
- * The overview: what an org has and whether it is working.
+ * The list of your apps: the first of the three steps a person takes
+ * through this product (an app, its canvas, one service on it).
  *
- * Signed in, this used to redirect straight to the machines list, which meant
- * the product's first screen was a table of rows with no state on them and no
- * sense of the shape above them. A pilots org has a shape: services grouped by
- * the app they resolve each other within, sandboxes that are not part of any
- * service, and four ceilings that decide when the next create fails.
+ * One card per app, carrying its name, how many of its services are online,
+ * when it last deployed, and a thumbnail of its own canvas in the positions
+ * the canvas draws, so the list and the canvas read as one object at two
+ * zoom levels. Search, sort and the grid or list toggle all work with
+ * scripting off: the filter is an island over server-rendered rows, the sort
+ * is a GET form, the toggle is two links.
  *
- * Every read here degrades on its own. A fleet that cannot answer for quotas
- * should cost the reader the quota bars, not the page.
+ * A service with no app is a card too, drawn as its own one-node canvas and
+ * linking to the service, so this page is one grid of cards rather than a
+ * grid and a leftover table. Limits and capacity live on Usage now, not here:
+ * this page is the apps and nothing else.
  */
 import { html } from '@webjsdev/core';
+import type { PageProps } from '@webjsdev/core';
 import { currentUser } from '#modules/auth/queries/current-user.server.ts';
 import { listServicesWithStatus } from '#modules/services/queries/list-services-with-status.server.ts';
-import { listVolumes } from '#modules/volumes/queries/list-volumes.server.ts';
-import { getQuota } from '#modules/fleet/queries/get-quota.server.ts';
 import { isSignedOut } from '#modules/auth/session.server.ts';
 import { signInLink } from '#modules/auth/sign-in-link.ts';
 import { serviceStatusLine } from '#modules/services/utils/ui/status-line.ts';
+import type { HealthRelease } from '#modules/services/utils/health.ts';
+import { groupApps, sortApps, sortKey } from '#modules/apps/utils/apps.ts';
+import { onlineLine } from '#modules/apps/utils/ui/online-line.ts';
+import type { AppGroup } from '#modules/apps/utils/apps.ts';
+import { layoutApp } from '#modules/apps/utils/layout.ts';
+import { thumbnailSvg } from '#modules/apps/utils/ui/canvas-svg.ts';
+import { stageClass } from '#modules/apps/utils/ui/stage.ts';
+import { NOUN } from '#lib/vocabulary.ts';
 import { badgeClass } from '#components/ui/badge.ts';
 import { buttonClass } from '#components/ui/button.ts';
 import { cardClass } from '#components/ui/card.ts';
-import { progressClass } from '#components/ui/progress.ts';
-import { dataTable, emptyState, lede, pageHeading, sectionHeading } from '#lib/utils/ui.ts';
+import { nativeSelectClass, nativeSelectIconClass, nativeSelectWrapperClass } from '#components/ui/native-select.ts';
+import { cardBody, dataTable, lede, pageHeading, sectionEmpty, sectionGap, sectionHeading } from '#lib/utils/ui.ts';
 import { cn } from '#lib/utils/cn.ts';
 import type { Machine, Release, Service } from '@pilots/sdk';
 import type { Machine as BrowserMachine } from '#modules/machines/types.ts';
-import type { Host as BrowserHost, Quota } from '#modules/fleet/types.ts';
+import '#components/auto-submit.ts';
+import '#components/copy-button.ts';
 import '#components/link-rows.ts';
+import '#components/list-filter.ts';
 import '#components/relative-time.ts';
-import '#modules/machines/components/machine-list.ts';
-import '#modules/usage/components/hosts-strip.ts';
+import '#modules/apps/components/live-status.ts';
 
 export const metadata = { title: 'pilots' };
 
-interface Bar {
-  label: string;
-  used: number;
-  limit?: number;
-  unit?: string;
-}
 
-export default async function Home() {
+const SORTS: { value: 'activity' | 'created' | 'name'; label: string }[] = [
+  { value: 'activity', label: 'Recent activity' },
+  { value: 'created', label: 'Newest first' },
+  { value: 'name', label: 'Name' },
+];
+
+export default async function Home({ searchParams }: PageProps) {
   const me = await currentUser();
   if (!me) {
     return html`
       <div class="max-w-md mx-auto py-24 flex flex-col items-center gap-6 text-center">
         <span class=${badgeClass({ variant: 'outline' })}>Firecracker microVMs</span>
-        <h1 class="text-3xl font-semibold tracking-tight m-0">pilots</h1>
+        <h1 class="text-title font-semibold tracking-tight m-0">pilots</h1>
         <p class="text-muted-foreground m-0">Sandboxes and production services on one primitive.</p>
         ${signInLink()}
       </div>
@@ -55,131 +67,171 @@ export default async function Home() {
   }
 
   const status = await listServicesWithStatus();
-  const { services, machines, hosts, releases } = isSignedOut(status)
-    ? { services: [] as Service[], machines: [] as Machine[], hosts: [], releases: {} as Record<string, Release[]> }
+  const { services, machines, releases } = isSignedOut(status)
+    ? {
+        services: [] as Service[],
+        machines: [] as Machine[],
+        releases: {} as Record<string, Release[]>,
+      }
     : status;
-  const volumesRead = await listVolumes().catch(() => []);
-  const volumes = isSignedOut(volumesRead) ? [] : volumesRead;
-  const quotaRead = await getQuota().catch((): Quota => ({}));
-  const quota: Quota = isSignedOut(quotaRead) ? {} : quotaRead;
-
+  const sort = sortKey(searchParams.sort);
+  const view = searchParams.view === 'list' ? 'list' : 'grid';
+  const grouped = groupApps(services, machines as BrowserMachine[], releases);
+  const apps = sortApps(grouped.apps, sort);
+  const loose = grouped.loose;
   const replicasOf = (id: string) => machines.filter((m) => m.service_id === id) as BrowserMachine[];
-  const sandboxes = machines.filter((m) => !m.service_id) as BrowserMachine[];
-  // Every machine the API returns counts against the ceiling: a destroyed one
-  // is removed from the list rather than reported in a terminal state.
-  const live = machines;
 
-  // Ungrouped last: a service with no app is a service that has not been given
-  // a place yet, and sorting it first would bury the ones that have.
-  const groups = new Map<string, Service[]>();
-  for (const service of services) {
-    const key = service.app ?? '';
-    groups.set(key, [...(groups.get(key) ?? []), service]);
-  }
-  const ordered = [...groups.entries()].sort(([a], [b]) => (a === '' ? 1 : b === '' ? -1 : a.localeCompare(b)));
 
-  const bars: Bar[] = [
-    { label: 'Machines', used: live.length, limit: quota.max_machines },
-    { label: 'vCPUs', used: sum(live, (m) => m.vcpus), limit: quota.max_vcpus },
-    { label: 'Memory', used: sum(live, (m) => m.mem_mib), limit: quota.max_mem_mib, unit: 'MiB' },
-    { label: 'Volumes', used: sum(volumes, (v) => v.size_gib), limit: quota.max_volume_gib, unit: 'GiB' },
-  ];
+  const viewHref = (v: 'grid' | 'list') => `/?sort=${sort}&view=${v}`;
 
   return html`
     <div class="flex flex-wrap items-center gap-3">
-      ${pageHeading(me.org.name)}
-      <a href="/services/new" class=${cn(buttonClass({ size: 'sm' }), 'ml-auto')}>New service</a>
+      ${pageHeading(NOUN.Apps)}
+      <a href="/services/new" class=${cn(buttonClass({ size: 'sm' }), 'ml-auto')}>New app</a>
     </div>
     ${lede(
-      html`Services and sandboxes in <strong>${me.org.slug}</strong>. A sandbox and a service are the same machine with
-      different lifecycle knobs.`,
+      html`An app is a group of services that reach each other by name. Open one to see what talks to what, in
+      <strong>${me.org.slug}</strong>.`,
     )}
 
-    ${sectionHeading('Services')}
-    ${services.length === 0
-      ? emptyState('No services yet. A service is created by a deploy from a repository with a compose file.', {
-          command: 'pilot deploy',
-          href: '/services/new',
-          label: 'How to deploy',
-        })
-      : html`<div class="grid gap-4 mb-8">
-          ${ordered.map(
-            ([app, list]) => html`
-              <div class=${cardClass()}>
-                <h3 class="m-0 text-base font-medium">
-                  ${app || 'Ungrouped'}
-                  ${app
-                    ? html`<span class="ml-2 font-normal text-xs text-muted-foreground"
-                        >services here reach each other at &lt;name&gt;.internal</span
-                      >`
-                    : ''}
-                </h3>
-                <link-rows>
-                  ${dataTable<Service>({
-                    caption: `Services in ${app || 'no app group'}`,
-                    rows: list,
-                    rowHref: (s) => `/services/${s.id}`,
-                    columns: [
-                      {
-                        header: 'Name',
-                        cell: (s) => html`<a href=${`/services/${s.id}`} class="text-foreground">${s.name}</a>`,
-                      },
-                      {
-                        header: 'Status',
-                        cell: (s) => serviceStatusLine(s, replicasOf(s.id), releases[s.id] ?? []),
-                      },
-                      {
-                        header: 'URL',
-                        cell: (s) => (s.url ? html`<a href=${s.url} rel="noopener">${s.url}</a>` : ''),
-                      },
-                    ],
-                  })}
-                </link-rows>
+    <div class=${sectionGap()}>
+      <section>
+        <div class="mb-4 flex flex-wrap items-center gap-x-4 gap-y-3">
+          <list-filter for="apps" placeholder="Search apps"></list-filter>
+          <span class="text-meta text-muted-foreground">${apps.length} ${apps.length === 1 ? 'app' : 'apps'}</span>
+          <auto-submit class="contents">
+            <form method="get" action="/" class="flex items-center gap-2">
+              <input type="hidden" name="view" value=${view}>
+              <label for="sort" class="text-meta text-muted-foreground">Sort by</label>
+              <div class=${nativeSelectWrapperClass()}>
+                <select id="sort" name="sort" data-size="sm" class=${nativeSelectClass()}>
+                  ${SORTS.map((s) => html`<option value=${s.value} ?selected=${s.value === sort}>${s.label}</option>`)}
+                </select>
+                <svg class=${nativeSelectIconClass()} viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
               </div>
-            `,
-          )}
-        </div>`}
+              <button type="submit" data-auto-submit-button class=${buttonClass({ variant: 'outline', size: 'sm' })}>Apply</button>
+            </form>
+          </auto-submit>
+          <nav aria-label="View" class="ml-auto flex items-center gap-1">
+            ${viewLink('grid', 'Grid', view, viewHref('grid'))} ${viewLink('list', 'List', view, viewHref('list'))}
+          </nav>
+        </div>
 
-    ${sectionHeading('Sandboxes')}
-    <div class="mb-8">
-      <machine-list
-        .initial=${sandboxes}
-        .hosts=${hosts as unknown as BrowserHost[]}
-        sandboxes
-      ></machine-list>
+        ${apps.length === 0 && loose.length === 0
+          ? sectionEmpty('No apps yet', {
+              text: 'Deploy a repository, then it appears here as an app you can open, watch and change.',
+              href: '/services/new',
+            })
+          : view === 'grid'
+            ? html`<link-rows>
+                <div id="apps" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+                  ${apps.map((app) => appCard(app, releases))} ${loose.map((s) => looseCard(s, replicasOf(s.id), releases[s.id] ?? []))}
+                </div>
+              </link-rows>`
+            : html`<div id="apps"><link-rows>
+                ${dataTable<AppGroup<Service>>({
+                  caption: 'Your apps',
+                  rows: apps,
+                  rowHref: (app) => `/apps/${encodeURIComponent(app.name)}`,
+                  columns: [
+                    {
+                      header: NOUN.App,
+                      cell: (app) =>
+                        html`<a href=${`/apps/${encodeURIComponent(app.name)}`} class="text-foreground font-medium"
+                          >${app.name}</a
+                        >`,
+                    },
+                    { header: NOUN.Services, cell: (app) => liveApp(app, releases) },
+                    { header: 'Deployed', cell: (app) => deployedAt(app) },
+                  ],
+                })}
+              </link-rows></div>`}
+      </section>
     </div>
-
-    ${sectionHeading('Quota')}
-    <div class="grid gap-3 sm:grid-cols-2 mb-8">
-      ${bars.map((bar) => quotaBar(bar))}
-    </div>
-
-    ${sectionHeading('Fleet')}
-    <hosts-strip .initial=${hosts}></hosts-strip>
   `;
 }
 
-function sum<T>(rows: T[], of: (row: T) => number | undefined): number {
-  return rows.reduce((total, row) => total + (of(row) ?? 0), 0);
+function viewLink(value: 'grid' | 'list', label: string, current: string, href: string) {
+  const on = value === current;
+  return html`<a
+    href=${href}
+    aria-current=${on ? 'true' : 'false'}
+    class=${cn(buttonClass({ variant: on ? 'secondary' : 'ghost', size: 'sm' }), 'no-underline')}
+    >${label}</a
+  >`;
+}
+
+function deployedAt(app: AppGroup<Service>) {
+  return app.lastDeploy === undefined
+    ? html`<span class="text-muted-foreground">never</span>`
+    : html`<relative-time datetime=${String(app.lastDeploy)}></relative-time>`;
 }
 
 /**
- * One ceiling. The number is beside the bar rather than only in it, because a
- * bar is a proportion and what a reader needs before a create is the count.
+ * The same line the server just computed, wrapped in the element that keeps it
+ * current. The slot's content is what a browser with no scripting shows, and
+ * what every browser shows until the feed's first message.
+ *
+ * Only the services and their releases are handed over: the machines arrive on
+ * the socket, once, for the whole page.
  */
-function quotaBar(bar: Bar) {
-  const label = `${bar.label}: ${bar.used}${bar.limit === undefined ? '' : ` of ${bar.limit}`}${bar.unit ? ` ${bar.unit}` : ''}`;
+function liveApp(app: AppGroup<Service>, releases: Record<string, HealthRelease[]>) {
+  return html`<live-status
+    kind="app"
+    .services=${app.services}
+    .releases=${Object.fromEntries(app.services.map((s) => [s.id, releases[s.id] ?? []]))}
+    >${onlineLine(app)}</live-status
+  >`;
+}
+
+function liveService(service: Service, replicas: BrowserMachine[], rels: HealthRelease[]) {
+  return html`<live-status kind="service" .services=${[service]} .releases=${{ [service.id]: rels }}
+    >${serviceStatusLine(service, replicas, rels)}</live-status
+  >`;
+}
+
+/**
+ * One app. The name is the link and the whole card navigates through
+ * `<link-rows>`, so a middle click and a copied address both still work and
+ * a screen reader gets one link named after the app rather than the whole
+ * card's text.
+ */
+function appCard(app: AppGroup<Service>, releases: Record<string, HealthRelease[]>) {
+  const href = `/apps/${encodeURIComponent(app.name)}`;
+  const layout = layoutApp(app.services.map((s) => ({ id: s.id, name: s.name, dependsOn: s.depends_on ?? [] })));
   return html`
-    <div class="grid gap-1">
-      <div class="flex items-baseline justify-between text-sm">
-        <span>${bar.label}</span>
-        <span class="tabular-nums text-muted-foreground">
-          ${bar.used}${bar.limit === undefined ? '' : html` / ${bar.limit}`}${bar.unit ? html` ${bar.unit}` : ''}
-        </span>
+    <div class=${cn(cardClass(), 'gap-0 py-0 cursor-pointer transition-colors hover:border-border-strong')} data-filter-row data-href=${href}>
+      <div class=${cardBody()}>
+        <h2 class="m-0 text-body font-semibold"><a href=${href} class="text-foreground no-underline">${app.name}</a></h2>
+        <div class=${cn(stageClass(), 'mt-3 py-4')}>${thumbnailSvg(layout)}</div>
+        <p class="m-0 mt-3 flex flex-wrap items-center gap-x-2 text-meta text-muted-foreground">
+          ${liveApp(app, releases)}
+          ${app.lastDeploy === undefined
+            ? ''
+            : html`<span aria-hidden="true">·</span
+              ><span class="whitespace-nowrap">deployed ${deployedAt(app)}</span>`}
+        </p>
       </div>
-      ${bar.limit === undefined
-        ? html`<p class="m-0 text-xs text-muted-foreground">No ceiling reported for this org.</p>`
-        : html`<progress class=${progressClass()} value=${bar.used} max=${bar.limit} aria-label=${label}></progress>`}
     </div>
   `;
 }
+
+/**
+ * A service that belongs to no app is still a card, so the apps page is one
+ * grid of cards rather than a grid and a leftover table. It draws its own
+ * one-node canvas and links to the service, since there is no app to open.
+ */
+function looseCard(service: Service, replicas: BrowserMachine[], rels: HealthRelease[]) {
+  const href = `/services/${service.id}`;
+  const layout = layoutApp([{ id: service.id, name: service.name, dependsOn: [] }]);
+  return html`
+    <div class=${cn(cardClass(), 'gap-0 py-0 cursor-pointer transition-colors hover:border-border-strong')} data-filter-row data-href=${href}>
+      <div class=${cardBody()}>
+        <h2 class="m-0 text-body font-semibold"><a href=${href} class="text-foreground no-underline">${service.name}</a></h2>
+        <div class=${cn(stageClass(), 'mt-3 py-4')}>${thumbnailSvg(layout)}</div>
+        <p class="m-0 mt-3 text-meta text-muted-foreground">${liveService(service, replicas, rels)}</p>
+      </div>
+    </div>
+  `;
+}
+

@@ -21,9 +21,30 @@ import (
 )
 
 // defaultGuestUser is the unprivileged account baked into the golden rootfs at
-// uid 1000: the sandbox contract's `sprite`, home /home/sprite, with Node on
+// uid 1000: the sandbox contract's `pilot`, home /home/pilot, with Node on
 // PATH. Commands run as this user unless one is explicitly requested.
-const defaultGuestUser = "sprite"
+const defaultGuestUser = "pilot"
+
+// legacyGuestUser is the name that account carried before it was renamed, kept
+// as a fallback rather than a fiction. The current rootfs makes `sprite` a
+// second name for the same uid, so on a machine built from it either lookup
+// finds the same identity and this is never reached. It is reached on an image
+// built BEFORE the rename, which has `sprite` and no `pilot` at all: the agent
+// is baked into an image at build time, so those images outlive the template
+// they came from. Without this they would fall through to the image's declared
+// USER and quietly stop running as uid 1000.
+const legacyGuestUser = "sprite"
+
+// defaultGuestAccount returns the name of the unprivileged account this image
+// actually has, preferring the current one, or "" when it has neither.
+func defaultGuestAccount() string {
+	for _, name := range []string{defaultGuestUser, legacyGuestUser} {
+		if _, err := user.Lookup(name); err == nil {
+			return name
+		}
+	}
+	return ""
+}
 
 const defaultExecTimeout = 30 * time.Second
 
@@ -106,28 +127,35 @@ func prepareCommand(cmd *exec.Cmd, username, cwd string, env map[string]string) 
 	// applyUserCredential. The DEFAULT is different, and the difference is not
 	// a loophole in that rule.
 	//
-	// `sprite` is an account the golden rootfs bakes in. An image built from
+	// `pilot` is an account the golden rootfs bakes in. An image built from
 	// someone's Dockerfile has no reason to have it -- alpine, distroless and
 	// slim images do not -- and Docker's own default there is root. Failing
 	// closed on an account the caller never asked for makes every exec on
-	// every built image fail with "user \"sprite\" does not exist", which is
+	// every built image fail with "user \"pilot\" does not exist", which is
 	// the machine refusing to run its owner's commands.
 	//
 	// So: no user requested and no default account present means run as the
 	// image's own default. Nothing unprivileged was asked for, so nothing was
 	// escalated away from.
 	if username == "" {
-		if _, err := user.Lookup(defaultGuestUser); err != nil {
-			// The image has no unprivileged default account, so run as
-			// whatever the agent is -- but STILL apply the caller's cwd and
-			// env below. Returning here dropped both, so an exec asking for a
-			// working directory or an environment silently got neither.
-			if err := applyImageDefaultUser(cmd); err != nil {
-				return err
-			}
-			username = ""
+		if account := defaultGuestAccount(); account != "" {
+			username = account
 		} else {
-			username = defaultGuestUser
+			// The image has no unprivileged default account. Prefer the USER
+			// its own Dockerfile declared, which the build recorded in the
+			// start spec and which is what `docker run` would use; only when
+			// there is none run as whatever the agent is -- but STILL apply
+			// the caller's cwd and env below. Returning here dropped both, so
+			// an exec asking for a working directory or an environment
+			// silently got neither.
+			if imageUser := imageDefaultUser(); imageUser != "" {
+				username = imageUser
+			} else {
+				if err := applyImageDefaultUser(cmd); err != nil {
+					return err
+				}
+				username = ""
+			}
 		}
 	}
 	if username != "" {
@@ -142,6 +170,21 @@ func prepareCommand(cmd *exec.Cmd, username, cwd string, env map[string]string) 
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
 	return nil
+}
+
+// imageDefaultUser is the USER the image's Dockerfile declared, from the start
+// spec the build recorded, when it names an account that exists here. A USER
+// the image declared but does not carry is not an error at exec time (it was
+// already reported at boot) and simply yields nothing.
+func imageDefaultUser() string {
+	spec, ok := readStartSpec()
+	if !ok || spec.User == "" {
+		return ""
+	}
+	if _, err := user.Lookup(spec.User); err != nil {
+		return ""
+	}
+	return spec.User
 }
 
 // applyImageDefaultUser leaves the command with the credentials the agent

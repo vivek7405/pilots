@@ -30,6 +30,13 @@ write that arrives at the wrong host is forwarded by hostd itself.
 `WithHTTPClient` replaces the `*http.Client`, which is where retries, pooling
 or tracing belong. Nothing inside this package does any of them.
 
+`WithOrg` makes an ADMIN key act as one org: every request carries `?org=`,
+which hostd reads as the org to create rows in, charge quota to, and narrow
+every read by. It is for a process that serves many orgs from one operator key,
+so the rows it creates belong to the person who asked for them. A tenant-scoped
+key already has exactly one org, so hostd ignores the parameter there and
+setting it changes nothing.
+
 ## Methods
 
 One method per route, grouped by the noun it acts on.
@@ -46,7 +53,7 @@ One method per route, grouped by the noun it acts on.
 | `c.Machines.Checkpoint / ListCheckpoints` | `/v1/machines/{id}/checkpoints` |
 | `c.Machines.Promote / Volume` | `/v1/machines/{id}/…` |
 | `c.Checkpoints.Restore / Get` | `/v1/checkpoints/{id}` |
-| `c.Builds.Create / Logs` | `/v1/builds` |
+| `c.Builds.Create / CreateFromRepo / Logs` | `/v1/builds` |
 | `c.Services.Create/List/Get/Patch/Deploy/Rollback/Releases` | `/v1/services` |
 | `c.Domains.Add / List / Remove` | `/v1/domains` |
 | `c.Volumes.Create / List` | `/v1/volumes` |
@@ -62,6 +69,11 @@ are refused there with a 400 naming the field and travel on `Services.Deploy`.
 `Volume` on a service create is create-only and pins `Replicas` to one; the
 patch refuses it as an unknown field and refuses `Replicas` above one on a
 service that mounts a volume.
+
+A service read carries `DependsOn`, the sibling services in the same app whose
+`<name>.internal` address this one's environment references. hostd derives it on
+every read from both halves of the environment and stores it nowhere, so it says
+what the service is configured to dial right now. Names only, never values.
 `Usage.Get` answers for the ONE host it reached, so a fleet is the sum of a
 call to each; a suspended machine bills storage only.
 
@@ -108,6 +120,15 @@ plus one `Detected` entry per step saying where it came from: a compose file, a
 `Dockerfile`, or a framework recipe. It is a method on `Client` rather than on
 `Compose` or `Services` because it is what a caller reaches for before it knows
 which of those a directory is.
+
+```go
+res, err := c.PlanRepo(ctx, pilots.RepoRef{Repo: "you/shop", Ref: "main"}, "shop")
+```
+
+`PlanRepo` names a repository instead of sending one. The host fetches the ref
+through the fleet's GitHub App, the same path a push takes, so a caller that
+holds no repository bytes can still plan. A fleet with no App configured answers
+`not_configured` and says to send a tar instead.
 
 ## Errors
 
@@ -161,7 +182,7 @@ own view of the replica and is not reachable from wherever this is read.
 ```go
 s, err := c.Machines.ExecStream(ctx, m.ID,
 	[]string{"bash", "-c", "npm run build"},
-	pilots.ExecStreamOptions{Dir: "/home/sprite/app", Env: map[string]string{"CI": "1"}})
+	pilots.ExecStreamOptions{Dir: "/home/pilot/app", Env: map[string]string{"CI": "1"}})
 if err != nil {
 	log.Fatal(err)
 }
@@ -189,9 +210,11 @@ first and closes the socket, so the text one has to be first for the
 untruncated code to be the one you get. Frame `3` still follows it, unchanged,
 for a client that reads only binary frames.
 
-**An exec that names no user runs as `sprite`.** The guest image bakes that
-account at uid 1000 with home `/home/sprite` and Node 24 on `PATH`, so a
+**An exec that names no user runs as `pilot`.** The guest image bakes that
+account at uid 1000 with home `/home/pilot` and Node 24 on `PATH`, so a
 command needs neither a `User` nor a `Dir` to land where these examples assume.
+`sprite` is a second name for the same uid and the same home, kept so a client
+written against sprites.dev resolves; prefer `pilot`, or name neither.
 
 **A close with no exit frame is an error.** `Wait` returns it rather than a
 code of 0: an exit frame means the output that preceded it has already
@@ -256,3 +279,12 @@ hostd answers 200 before the build starts, so the log is watchable while it
 runs. The status code therefore cannot be the verdict: the last line is.
 `Result` reads it, and returns a `*BuildFailed` both when that line carries an
 error and when the stream ended with no verdict at all.
+
+```go
+build, err := c.Builds.CreateFromRepo(ctx, pilots.RepoRef{Repo: "you/shop", Ref: "main"}, "shop")
+```
+
+`CreateFromRepo` builds a repository by naming it. The host fetches the ref
+through the fleet's GitHub App, plans it, and builds the one step a plan may
+produce. A plan with more than one step is refused with `plan_multi_service`,
+readable at the build's own log.

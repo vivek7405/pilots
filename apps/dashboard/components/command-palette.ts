@@ -26,7 +26,8 @@ import type { SearchHit } from '#modules/orgs/utils/search.ts';
 
 const KIND_LABEL: Record<string, string> = {
   service: 'service',
-  machine: 'machine',
+  instance: 'instance',
+  sandbox: 'sandbox',
   page: 'page',
 };
 
@@ -121,8 +122,8 @@ export class CommandPalette extends WebComponent({
       // discoverable rather than folklore.
       return html`<button
         type="button"
-        class="flex items-center gap-2 rounded-md border border-border bg-background px-2 py-1 text-xs text-muted-foreground hover:text-foreground"
-        aria-label="Search this organisation"
+        class="flex items-center gap-2 rounded-md border border-border bg-background px-2 py-1 text-meta text-muted-foreground hover:text-foreground"
+        aria-label="Search this team"
         @click=${this.show}
       >
         <span>Search</span>
@@ -137,29 +138,29 @@ export class CommandPalette extends WebComponent({
         <div
           role="dialog"
           aria-modal="true"
-          aria-label="Search this organisation"
+          aria-label="Search this team"
           class="w-full max-w-lg overflow-hidden rounded-lg border border-border bg-popover shadow-lg"
           @click=${(e: Event) => e.stopPropagation()}
         >
-          <label class="sr-only" for="palette-input">Search services, machines and pages</label>
+          <label class="sr-only" for="palette-input">Search services, sandboxes and pages</label>
           <input
             id="palette-input"
             type="search"
-            placeholder="Search services, machines and pages"
+            placeholder="Search services, sandboxes and pages"
             .value=${this.query}
             class=${cn(inputClass(), 'w-full rounded-none border-0 border-b border-border')}
             @input=${this.#onInput}
           >
           <ul role="listbox" aria-label="Results" class="m-0 max-h-80 list-none overflow-y-auto p-1">
             ${this.hits.length === 0
-              ? html`<li class="px-3 py-6 text-center text-sm text-muted-foreground">Nothing matches that.</li>`
+              ? html`<li class="px-3 py-6 text-center text-meta text-muted-foreground">Nothing matches that.</li>`
               : this.hits.map(
                   (hit, index) => html`
                     <li
                       role="option"
                       aria-selected=${index === this.active ? 'true' : 'false'}
                       class=${cn(
-                        'flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-sm',
+                        'flex cursor-pointer items-center gap-2 rounded-md px-3 py-2 text-body',
                         index === this.active ? 'bg-accent text-accent-foreground' : '',
                       )}
                       @mouseenter=${() => (this.active = index)}
@@ -167,7 +168,7 @@ export class CommandPalette extends WebComponent({
                     >
                       <span class="min-w-0 flex-1 truncate">${hit.label}</span>
                       ${hit.detail
-                        ? html`<span class="text-xs text-muted-foreground">${hit.detail}</span>`
+                        ? html`<span class="text-meta text-muted-foreground">${hit.detail}</span>`
                         : ''}
                       <span class=${badgeClass({ variant: 'outline' })}>${KIND_LABEL[hit.kind]}</span>
                     </li>

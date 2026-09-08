@@ -140,6 +140,49 @@ func (a *App) InstallationToken(ctx context.Context, installationID int64) (stri
 	return out.Token, nil
 }
 
+// InstallationFor resolves the installation id for a repository.
+//
+// A webhook delivery carries its installation id; a caller that merely NAMES a
+// repository does not, and asking the App which installation covers it is the
+// only way to get one. Authenticated with the App JWT rather than an
+// installation token, because that token is what this call exists to obtain.
+//
+// A non-2xx means the App is not installed on that owner, which is the
+// answer the caller has to relay: no token can be minted, and no bytes fetched.
+func (a *App) InstallationFor(ctx context.Context, repo string) (int64, error) {
+	assertion, err := a.jwt()
+	if err != nil {
+		return 0, err
+	}
+	url := fmt.Sprintf("%s/repos/%s/installation", a.base(), repo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return 0, err
+	}
+	req.Header.Set("Authorization", "Bearer "+assertion)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := a.HTTP.Do(req)
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return 0, fmt.Errorf("github: no installation on %s: %s: %s", repo,
+			resp.Status, readSnippet(resp.Body))
+	}
+	var out struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return 0, err
+	}
+	if out.ID == 0 {
+		return 0, fmt.Errorf("github: %s reports installation 0", repo)
+	}
+	return out.ID, nil
+}
+
 // Tarball streams a repository at a ref into a build context.
 //
 // GitHub answers with a 302 to a codeload URL that is valid for about five

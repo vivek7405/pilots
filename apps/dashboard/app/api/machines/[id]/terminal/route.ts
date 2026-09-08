@@ -45,8 +45,25 @@ interface ClientMessage {
  * `bash -l` where it exists and `sh -l` otherwise: a built image may be alpine
  * or distroless, and asking for a shell that is not there would end the
  * session with a start failure instead of a prompt.
+ *
+ * `-i` is not decoration. busybox ash -- what `/bin/sh` is on the alpine base
+ * most built images use -- does not consider itself interactive just because
+ * its stdin is a pty, so it printed NO PROMPT: the terminal opened on a
+ * service replica, showed an empty black rectangle, and only answered if you
+ * typed a command blind into it. Measured against a real replica: `/bin/sh -l`
+ * returned zero bytes until input arrived, `/bin/sh -l -i` greeted with
+ * `instance:~#`. bash is unaffected either way, so the flag goes on both
+ * arms rather than only the one that needs it.
  */
-const SHELL = ['sh', '-c', 'command -v bash >/dev/null 2>&1 && exec bash -l || exec sh -l'];
+/**
+ * ABSOLUTE path, not a bare `sh`. The guest agent execs the argv it is given
+ * without a PATH search, so `sh` fails to start on an image whose environment
+ * the agent does not inherit: the socket opens, no shell ever runs, and the
+ * terminal shows a blinking cursor that swallows every keystroke. `/bin/sh`
+ * exists in every image pilots can build. The interactive shell is still
+ * chosen INSIDE the guest, so an image without bash still gets one.
+ */
+const SHELL = ['/bin/sh', '-c', 'command -v bash >/dev/null 2>&1 && exec bash -l -i || exec /bin/sh -l -i'];
 
 /** A window size the guest will accept. Out of range closes the stream. */
 function dimension(value: unknown, fallback: number): number {
@@ -56,33 +73,24 @@ function dimension(value: unknown, fallback: number): number {
 }
 
 export async function WS(ws: TerminalSocket, req: Request, { params }: RouteHandlerContext): Promise<void> {
-  const ctx = await requireOrg(req);
-  if (!ctx) {
-    ws.close(4401, 'unauthorized');
-    return;
-  }
-
-  try {
-    if (!assertOwned(ctx.org.id, await fleet.machines.get(params.id))) {
-      ws.close(4404, 'not found');
-      return;
-    }
-  } catch {
-    ws.close(1011, 'fleet unavailable');
-    return;
-  }
-
   // The stream is not opened until the client has said how big its window is.
   // A shell reads its window size at startup, so opening one at 24 by 80 and
   // resizing a moment later makes the first prompt redraw visibly.
   let stream: ReturnType<typeof fleet.machines.execStream> | null = null;
+  let closed = false;
 
-  ws.on('message', (data) => {
+  // Frames that arrived before the handler finished authenticating. The
+  // listener below is attached SYNCHRONOUSLY, so nothing the client sends is
+  // ever dropped; anything early waits here until `ready` runs.
+  const early: unknown[] = [];
+  let ready = false;
+
+  const handle = (data: unknown): void => {
     const message = parse(data);
     if (!message) return;
 
     if (message.type === 'open') {
-      if (stream) return; // `open` is once; a second one is ignored, not obeyed
+      if (stream || closed) return; // `open` is once; a second one is ignored, not obeyed
       stream = start(ws, params.id, dimension(message.rows, 24), dimension(message.cols, 80));
       return;
     }
@@ -104,32 +112,108 @@ export async function WS(ws: TerminalSocket, req: Request, { params }: RouteHand
         // Same: a resize after the shell exited changes nothing.
       }
     }
+  };
+
+  // ATTACHED BEFORE THE FIRST `await`, and this ordering is the whole bug fix.
+  // The browser sends `open` from its own `open` event, which fires the instant
+  // the upgrade completes. Authenticating first costs a database read and a
+  // call to hostd, tens of milliseconds during which `ws` is already flowing
+  // and buffers nothing: the `open` frame was delivered to a socket with no
+  // listener and vanished. The terminal then sat on "Connected" for ever with a
+  // cursor that swallowed every keystroke, because the shell was never started.
+  // Registering here and queueing into `early` makes the handler's own latency
+  // invisible to the client.
+  ws.on('message', (data) => {
+    if (!ready) {
+      // A ceiling, so a client that floods before auth completes cannot use the
+      // queue as free memory. Twenty frames is a window size and a few
+      // keystrokes; beyond that the connection is not a terminal session.
+      if (early.length < 20) early.push(data);
+      return;
+    }
+    handle(data);
   });
 
   ws.on('close', () => {
     // Killing the stream closes the socket to the guest, whose context cancel
     // kills the shell. Without this a closed browser tab leaves a shell
     // running and a machine that never goes idle.
+    closed = true;
     stream?.kill();
     stream = null;
   });
+
+  const ctx = await requireOrg(req);
+  if (!ctx) {
+    ws.close(4401, 'unauthorized');
+    return;
+  }
+
+  // The machine is fetched for the TENANCY check, not to pick a user. This
+  // handler names no user at all, deliberately.
+  //
+  // It used to send `sprite` for a sandbox, which was wrong in three
+  // directions at once: a service replica built from someone's Dockerfile has
+  // no such account and fails closed on "user does not exist", a sandbox from
+  // the current rootfs is `pilot`, and one created before the rename is
+  // `sprite`. Naming any of them here means guessing which generation of image
+  // is on the other end. The guest agent already resolves its own default --
+  // `pilot`, then `sprite`, then the image's declared USER -- so it is the
+  // only party that can answer correctly, and it does.
+  try {
+    const machine = await fleet.machines.get(params.id);
+    if (!assertOwned(ctx.org.id, machine)) {
+      ws.close(4404, 'not found');
+      return;
+    }
+  } catch {
+    ws.close(1011, 'fleet unavailable');
+    return;
+  }
+
+  if (closed) return;
+  ready = true;
+  for (const data of early) handle(data);
+  early.length = 0;
 }
 
 function start(ws: TerminalSocket, machineId: string, rows: number, cols: number) {
   const stream = fleet.machines.execStream(machineId, SHELL, {
-    user: 'sprite',
     tty: true,
     rows,
     cols,
   });
 
-  // A PTY merges the two output streams, so everything arrives on stdout and
-  // stderr never produces a byte. It is still drained, because an unread
-  // stream on this SDK grows without limit.
-  stream.stdout.on('data', (chunk: Buffer) => {
+  // BOTH channels are the screen. Under a real pty the guest pumps only the
+  // pty master, on channel 1, so stderr never carries a byte -- which is true
+  // of every sandbox and of any image built with a current agent. An agent
+  // that predates `tty` on the exec stream ignores the flag and runs plain
+  // pipes instead, and THEN the shell's prompt and its stderr arrive on
+  // channel 2 (measured against such a replica as `\x02instance:~# `).
+  // Draining stderr threw that whole visible session away and kept only the
+  // stdout of whatever was run: a terminal that blinks, never greets, and
+  // appears to swallow every keystroke -- on exactly the machines that also
+  // cannot echo. Every byte on either channel is output for the screen.
+  const toScreen = (chunk: Buffer) => {
     ws.send(JSON.stringify({ type: 'data', data: chunk.toString('base64') }));
+  };
+  stream.stdout.on('data', toScreen);
+
+  // A byte on stderr is PROOF there is no pty: a pty has one output side, so
+  // the engine can only be reporting two because it opened pipes instead --
+  // which is what an agent older than `tty` on the exec stream does, silently.
+  // Measured: a sandbox's whole session arrives on channel 1, while a machine
+  // built before that support reports `not a tty` inside and answers on
+  // channel 2. The client is told once so it can drive a line-mode shell
+  // rather than a dead-looking one; the bytes go to the screen either way.
+  let told = false;
+  stream.stderr.on('data', (chunk: Buffer) => {
+    if (!told) {
+      told = true;
+      ws.send(JSON.stringify({ type: 'mode', tty: false }));
+    }
+    toScreen(chunk);
   });
-  stream.stderr.resume();
 
   stream.on('error', (err: Error) => {
     ws.send(JSON.stringify({ type: 'error', message: err.message }));

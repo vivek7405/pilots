@@ -22,6 +22,16 @@ import type { Route } from '@webjsdev/core';
 import type { Machine } from '#modules/machines/types.ts';
 import type { Host } from '#modules/fleet/types.ts';
 import { buttonClass } from '#components/ui/button.ts';
+import {
+  alertDialogDescriptionClass,
+  alertDialogFooterClass,
+  alertDialogHeaderClass,
+  alertDialogTitleClass,
+} from '#components/ui/alert-dialog.ts';
+// The fragment declares its own dependency: a list rendered on a page that
+// forgot this import gets a trigger that never upgrades, and a destructive
+// action with no confirmation behind it.
+import '#components/ui/alert-dialog.ts';
 import { badgeClass } from '#components/ui/badge.ts';
 import { inputClass } from '#components/ui/input.ts';
 import { kbdClass } from '#components/ui/kbd.ts';
@@ -53,13 +63,35 @@ interface ServiceName {
 /** Rows per page. Past this a list stops being readable and starts scrolling. */
 const PAGE_SIZE = 100;
 
+/**
+ * The filters, in the user's words, each carrying its own count.
+ *
+ * The count is the point. A row of bare filters says nothing until one is
+ * clicked, and then the reader has to click back to learn what they gave up.
+ * `All 38 · Online 12 · Sleeping (resumes warm) 26` is the distribution
+ * before any choice is made, which is what the reference does on the screen
+ * that is closest to this one.
+ *
+ * `resumes warm` and `starts fresh` are the difference between a wake that
+ * keeps every process and one that does not, and a person deciding which
+ * sandbox to open needs that before they click, not after.
+ */
 const CHIPS: { key: string; label: string }[] = [
   { key: 'all', label: 'All' },
-  { key: 'running', label: 'running' },
-  { key: 'warm', label: 'warm' },
-  { key: 'cold', label: 'cold' },
-  { key: 'other', label: 'other' },
+  { key: 'running', label: 'Online' },
+  { key: 'warm', label: 'Sleeping (resumes warm)' },
+  { key: 'cold', label: 'Sleeping (starts fresh)' },
+  { key: 'other', label: 'Other' },
 ];
+
+/** What a chip that matched nothing says, so it never reads as an empty account. */
+const NOTHING_MATCHED: Record<string, string> = {
+  running: 'Nothing is online right now',
+  warm: 'No sandboxes are sleeping with their memory kept',
+  cold: 'No sandboxes would start fresh when woken',
+  other: 'Nothing is stopped or failed',
+  all: 'Nothing matches that filter',
+};
 
 class MachineList extends WebComponent({
   initial: prop<Machine[]>(Array),
@@ -194,6 +226,37 @@ class MachineList extends WebComponent({
     });
   }
 
+  /**
+   * What a filter that matched nothing says.
+   *
+   * Deliberately NOT the never-created copy. Telling a returning user "No
+   * sandboxes yet" because they clicked a chip tells them their sandboxes are
+   * gone, which is the one thing an empty state must never imply. This names
+   * the filter and offers the way back.
+   */
+  private nothingMatched() {
+    const headline = NOTHING_MATCHED[this.chip] ?? NOTHING_MATCHED.all!;
+    return html`
+      <div class="rounded-lg border border-dashed border-border px-6 py-10 text-center">
+        <p class="m-0 text-body font-medium">${headline}</p>
+        <p class="m-0 mt-1 text-meta text-muted-foreground">
+          <button
+            type="button"
+            class="bg-transparent border-0 p-0 underline cursor-pointer text-inherit font-inherit"
+            @click=${() => {
+              this.chip = 'all';
+              this.query = '';
+              this.host = '';
+              this.page = 0;
+            }}
+          >
+            Clear filters
+          </button>
+        </p>
+      </div>
+    `;
+  }
+
   private counts(): Record<string, number> {
     const base = this.base();
     const out: Record<string, number> = { all: base.length, running: 0, warm: 0, cold: 0, other: 0 };
@@ -222,7 +285,7 @@ class MachineList extends WebComponent({
         </div>`;
       }
       return emptyState(
-        this.sandboxes ? 'No sandboxes yet.' : 'No machines yet.',
+        this.sandboxes ? 'No sandboxes yet.' : 'Nothing here yet.',
         { command: 'pilot machines create' },
       );
     }
@@ -237,17 +300,17 @@ class MachineList extends WebComponent({
     return html`
       ${this.toolbar(counts, hosts)}
       ${rows.length === 0
-        ? emptyState('Nothing matches that filter.')
+        ? this.nothingMatched()
         : html`<div @click=${this.rowClick}>
             ${dataTable<Machine>({
-              caption: this.sandboxes ? 'Sandboxes in this organisation' : 'Machines in this organisation',
+              caption: this.sandboxes ? 'Sandboxes in this team' : 'Everything running in this team',
               rows: paged,
               rowHref: (m) => `/machines/${m.id}`,
               columns: this.columns(),
             })}
           </div>`}
       ${pages > 1 ? this.pager(page, pages) : ''}
-      <p class="mt-3 flex items-center gap-2 text-xs text-muted-foreground">
+      <p class="mt-3 flex items-center gap-2 text-meta text-muted-foreground">
         <ui-tooltip>
           <ui-tooltip-trigger>
             <span
@@ -261,8 +324,8 @@ class MachineList extends WebComponent({
           >
         </ui-tooltip>
         ${rows.length === all.length
-          ? html`${all.length} machines`
-          : html`${rows.length} of ${all.length} machines`}
+          ? html`${all.length} ${this.sandboxes ? 'sandboxes' : 'in this list'}`
+          : html`${rows.length} of ${all.length}`}
       </p>
     `;
   }
@@ -285,11 +348,11 @@ class MachineList extends WebComponent({
           </button>`;
         })}
 
-        <label class="sr-only" for="machine-filter">Filter machines</label>
+        <label class="sr-only" for="machine-filter">Filter this list</label>
         <input
           id="machine-filter"
           type="search"
-          placeholder="Filter machines"
+          placeholder="Filter by name, id or URL"
           .value=${this.query}
           class=${cn(inputClass(), 'ml-auto h-8 w-56')}
           @input=${(e: Event) => {
@@ -300,7 +363,7 @@ class MachineList extends WebComponent({
         <kbd class=${kbdClass()} aria-hidden="true">/</kbd>
 
         ${hosts.length > 1
-          ? html`<label class="sr-only" for="machine-host">Host</label>
+          ? html`<label class="sr-only" for="machine-host">Where it runs</label>
               <select
                 id="machine-host"
                 class=${cn(inputClass(), 'h-8 w-40')}
@@ -309,7 +372,7 @@ class MachineList extends WebComponent({
                   this.page = 0;
                 }}
               >
-                <option value="">Every host</option>
+                <option value="">Anywhere</option>
                 ${hosts.map((h) => html`<option value=${h} ?selected=${this.host === h}>${h}</option>`)}
               </select>`
           : ''}
@@ -319,7 +382,7 @@ class MachineList extends WebComponent({
 
   private pager(page: number, pages: number) {
     return html`
-      <div class="mt-3 flex items-center gap-3 text-sm">
+      <div class="mt-3 flex items-center gap-3 text-meta">
         <button
           type="button"
           class=${buttonClass({ variant: 'outline', size: 'sm' })}
@@ -371,7 +434,7 @@ class MachineList extends WebComponent({
           <a href=${`/machines/${m.id}`} class="text-foreground">${m.name || m.id}</a>
           ${this.sandboxes || !m.service_id
             ? ''
-            : html`<span class="block text-xs text-muted-foreground">${this.serviceName(m.service_id)}</span>`}
+            : html`<span class="block text-meta text-muted-foreground">${this.serviceName(m.service_id)}</span>`}
         `,
       },
       {
@@ -381,7 +444,6 @@ class MachineList extends WebComponent({
             ? html`<span class=${cn(skeletonClass(), 'inline-block h-5 w-40 align-middle')} aria-busy="true"></span>`
             : statusLine(m, this.hosts),
       },
-      { header: 'Host', cellClass: 'font-mono text-muted-foreground', cell: (m: Machine) => m.host_id ?? '' },
       {
         header: 'URL',
         cell: (m: Machine) =>
@@ -389,7 +451,7 @@ class MachineList extends WebComponent({
             ? html`<span class="flex items-center gap-1">
                 <a href=${m.url} rel="noopener" @click=${stop}>${m.url}</a>
                 <copy-button value=${m.url} label="URL"></copy-button>
-                ${m.state === 'running' ? '' : html`<span class="text-xs text-muted-foreground">wakes on request</span>`}
+                ${m.state === 'running' ? '' : html`<span class="text-meta text-muted-foreground">wakes on request</span>`}
               </span>`
             : '',
       },
@@ -398,25 +460,12 @@ class MachineList extends WebComponent({
         headerHidden: true,
         align: 'right' as const,
         cellClass: 'whitespace-nowrap',
-        // Icons with tooltips for the two navigations, words for the two
-        // actions that change something. Four labelled buttons per row pushed
-        // the table wider than the page and clipped the last one, and the two
-        // that go somewhere are the ones a reader recognises by shape.
+        // An icon with a tooltip for the one navigation a reader recognises by
+        // shape, and words for everything else. Terminal is a WORD rather than
+        // an icon because on a sandbox it is the thing the product is for, and
+        // it was an accent icon per row until that meant a screen with three
+        // sandboxes had three primary actions and therefore none.
         cell: (m: Machine) => html`
-          <ui-tooltip>
-            <ui-tooltip-trigger>
-              <a
-                href=${`/machines/${m.id}/terminal`}
-                class=${buttonClass({ variant: this.sandboxes ? 'default' : 'ghost', size: 'icon-sm' })}
-                aria-label=${`Open a terminal on ${m.name || m.id}`}
-                @click=${stop}
-              >
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4 17 6-6-6-6M12 19h8" /></svg>
-              </a>
-            </ui-tooltip-trigger>
-            <ui-tooltip-content side="top">Open a terminal</ui-tooltip-content>
-          </ui-tooltip>
-
           <ui-tooltip>
             <ui-tooltip-trigger>
               <a
@@ -431,6 +480,14 @@ class MachineList extends WebComponent({
             <ui-tooltip-content side="top">Logs</ui-tooltip-content>
           </ui-tooltip>
 
+          <a
+            href=${`/machines/${m.id}/terminal`}
+            class=${buttonClass({ variant: 'outline', size: 'xs' })}
+            @click=${stop}
+          >
+            Terminal
+          </a>
+
           <button
             class=${buttonClass({ variant: 'outline', size: 'xs' })}
             ?disabled=${this.busy === m.id}
@@ -439,30 +496,40 @@ class MachineList extends WebComponent({
               void this.act(m.id, m.state === 'suspended' ? 'wake' : 'suspend');
             }}
           >
-            ${m.state === 'suspended' ? 'Wake' : 'Suspend'}
+            ${m.state === 'suspended' ? 'Wake' : 'Sleep'}
           </button>
 
-          <ui-tooltip>
-            <ui-tooltip-trigger>
+          <ui-alert-dialog>
+            <ui-alert-dialog-trigger>
               <button
                 class=${cn(buttonClass({ variant: 'ghost', size: 'icon-sm' }), 'text-muted-foreground hover:text-destructive')}
-                aria-label=${`Destroy ${m.name || m.id}`}
+                aria-label=${`Remove ${m.name || m.id}`}
                 ?disabled=${this.busy === m.id}
-                @click=${(e: Event) => {
-                  stop(e);
-                  // A window.confirm until the alert dialog lands. It is
-                  // deliberately not nothing: destroy is irreversible and the
-                  // button sits one row away from Suspend.
-                  if (globalThis.confirm?.(`Destroy ${m.name || m.id}? This cannot be undone.`)) {
-                    void this.act(m.id, 'destroy');
-                  }
-                }}
+                @click=${stop}
               >
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6" /></svg>
               </button>
-            </ui-tooltip-trigger>
-            <ui-tooltip-content side="top">Destroy, permanently</ui-tooltip-content>
-          </ui-tooltip>
+            </ui-alert-dialog-trigger>
+            <ui-alert-dialog-content size="sm" @click=${stop}>
+              <div class=${alertDialogHeaderClass()}>
+                <h2 data-slot="alert-dialog-title" class=${alertDialogTitleClass()}>Remove ${m.name || m.id}?</h2>
+                <p data-slot="alert-dialog-description" class=${alertDialogDescriptionClass()}>
+                  Its disk and everything on it go with it, and its URL stops answering. This cannot be undone.
+                </p>
+              </div>
+              <div class=${alertDialogFooterClass()}>
+                <ui-alert-dialog-cancel>Keep it</ui-alert-dialog-cancel>
+                <ui-alert-dialog-action
+                  variant="destructive"
+                  @click=${(e: Event) => {
+                    stop(e);
+                    void this.act(m.id, 'destroy');
+                  }}
+                  >Remove</ui-alert-dialog-action
+                >
+              </div>
+            </ui-alert-dialog-content>
+          </ui-alert-dialog>
         `,
       },
     ];

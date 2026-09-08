@@ -31,7 +31,7 @@ export async function generateMetadata({ params }: PageProps) {
 /** A command with a one-click copy, because these are retyped into a shell. */
 function command(text: string) {
   return html`<span class="flex items-start gap-1">
-    <code class="min-w-0 flex-1 rounded-md bg-muted px-2 py-1 font-mono text-xs break-all">${text}</code>
+    <code class="min-w-0 flex-1 rounded-md bg-muted px-2 py-1 font-mono text-meta break-all">${text}</code>
     <copy-button value=${text} label="command"></copy-button>
   </span>`;
 }
@@ -51,14 +51,14 @@ export default async function TerminalPage({ params }: PageProps) {
     <div class="fixed inset-x-0 bottom-0 flex" style="top: var(--header-h)">
       <div class="flex min-w-0 flex-1 flex-col border-r border-border">
         <div class="flex flex-wrap items-center gap-3 border-b border-border px-4 py-2">
-          <a href=${`/machines/${machine.id}`} class="text-sm">${name}</a>
+          <a href=${`/machines/${machine.id}`} class="text-body">&larr; Back to ${name}</a>
           ${statusLine(machine as BrowserMachine, hosts)}
         </div>
         <machine-terminal machine-id=${machine.id} class="min-h-0 flex-1"></machine-terminal>
       </div>
 
       <side-panel name="terminal">
-        <div class="grid gap-4 p-4 text-sm">
+        <div class="grid gap-4 p-4 text-meta">
           <div class="grid gap-1">
             <span class="text-muted-foreground">URL</span>
             ${machine.url
@@ -69,22 +69,17 @@ export default async function TerminalPage({ params }: PageProps) {
               : html`<span class="text-muted-foreground">none</span>`}
             ${machine.state === 'running'
               ? ''
-              : html`<span class="text-xs text-muted-foreground"
-                  >Visiting it wakes the machine; the request is held, not refused.</span
+              : html`<span class="text-meta text-muted-foreground"
+                  >Visiting it wakes the instance; the request is held, not refused.</span
                 >`}
           </div>
 
           <div class="grid gap-1">
             <span class="text-muted-foreground">Id</span>
             <span class="flex items-center gap-1">
-              <code class="font-mono text-xs break-all">${machine.id}</code>
-              <copy-button value=${machine.id} label="machine id"></copy-button>
+              <code class="font-mono text-meta break-all">${machine.id}</code>
+              <copy-button value=${machine.id} label="id"></copy-button>
             </span>
-          </div>
-
-          <div class="grid gap-1">
-            <span class="text-muted-foreground">Host</span>
-            <code class="font-mono text-xs">${machine.host_id ?? 'none'}</code>
           </div>
 
           <div class="grid gap-2">
@@ -94,7 +89,7 @@ export default async function TerminalPage({ params }: PageProps) {
           </div>
 
           <a href=${`/machines/${machine.id}`} class=${cn(buttonClass({ variant: 'outline', size: 'sm' }), 'w-full')}
-            >Machine details</a
+            >All details</a
           >
         </div>
       </side-panel>

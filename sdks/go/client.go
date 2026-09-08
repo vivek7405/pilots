@@ -46,6 +46,8 @@ type Client struct {
 	apiKey     string
 	baseURL    string
 	httpClient *http.Client
+	// org narrows every request to one org. See WithOrg.
+	org string
 
 	Machines    *Machines
 	Checkpoints *Checkpoints
@@ -66,6 +68,19 @@ type Option func(*Client)
 // WithBaseURL overrides the API base URL.
 func WithBaseURL(u string) Option {
 	return func(c *Client) { c.baseURL = strings.TrimRight(u, "/") }
+}
+
+// WithOrg makes an ADMIN key act as one org: every request carries ?org=,
+// which hostd reads as the org to create rows in, charge quota to, and narrow
+// every read by.
+//
+// For a process that serves many orgs from one operator key -- the dashboard
+// is the case this exists for -- so that the rows it creates belong to the
+// person who asked for them rather than to the ops org. hostd ignores the
+// parameter on a tenant-scoped key, which has exactly one org already, so
+// setting this on one changes nothing.
+func WithOrg(org string) Option {
+	return func(c *Client) { c.org = org }
 }
 
 // WithHTTPClient overrides the underlying *http.Client. The websocket dial
@@ -157,14 +172,50 @@ func (c *Client) Plan(ctx context.Context, contextTar io.Reader, app string) (*C
 	return &out, nil
 }
 
+// PlanRepo asks the host what a REPOSITORY is, naming it rather than sending
+// it. The host fetches the ref through the fleet's GitHub App, the same path a
+// push takes.
+//
+// For a caller that holds no repository bytes. A fleet with no App configured
+// answers not_configured and says to send a tar instead.
+func (c *Client) PlanRepo(ctx context.Context, ref RepoRef, app string) (*ComposePlanResponse, error) {
+	path := "/v1/plan"
+	if app != "" {
+		path = query(path, [2]string{"app", app})
+	}
+	body, err := json.Marshal(ref)
+	if err != nil {
+		return nil, fmt.Errorf("pilots: encoding the repository: %w", err)
+	}
+	var out ComposePlanResponse
+	return &out, c.do(ctx, http.MethodPost, path, json.RawMessage(body), &out)
+}
+
 // request builds an authenticated request. body may be nil.
+//
+// The org narrowing is applied HERE rather than at each call site, because it
+// has to reach every route: a client acting as an org must create as it, be
+// charged as it, and read as it, and a route that forgot the parameter would
+// create a row its own reads cannot see.
 func (c *Client) request(ctx context.Context, method, path string, body io.Reader) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+path, body)
+	req, err := http.NewRequestWithContext(ctx, method, c.baseURL+withOrg(path, c.org), body)
 	if err != nil {
 		return nil, fmt.Errorf("pilots: building the request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	return req, nil
+}
+
+// withOrg appends ?org= to a path that may already carry a query.
+func withOrg(path, org string) string {
+	if org == "" {
+		return path
+	}
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + "org=" + url.QueryEscape(org)
 }
 
 // send performs a request and maps any non-2xx onto the error model. The

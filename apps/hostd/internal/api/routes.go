@@ -68,6 +68,15 @@ type Deps struct {
 	// which case the route answers 503 rather than accepting deliveries it
 	// cannot verify.
 	GitHub http.HandlerFunc
+	// Repos turns a named repository into a build context, through the fleet's
+	// GitHub App. Injected for the reason Plan and Compose are: the
+	// implementation lives in internal/github, which imports this package.
+	//
+	// Nil when no app is configured, in which case POST /v1/builds answers
+	// not_configured to a JSON body and goes on taking tars. Keep the nil
+	// VISIBLE at the call site: a nil *github.Stager assigned here is a
+	// non-nil interface, and the 503 branch would never run.
+	Repos RepoStager
 	// Tenancy answers which org owns an object and whether a key has been
 	// revoked, from local state. Nil falls back to the store, which is what a
 	// single box wants; a fleet passes the subscription cache so neither
@@ -281,8 +290,27 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	json.NewEncoder(w).Encode(v)
 }
 
-// Sealer seals a secret environment. Satisfied by seal.Key.
+// RepoStager fetches a repository at a ref and answers with a build context
+// tar, recording anything it refuses under the given build id so a person
+// reads the reason at GET /v1/builds/{id}/logs.
+//
+// The caller closes the reader. A refusal comes back as *Refusal, which is why
+// that type lives in this package.
+type RepoStager interface {
+	Context(ctx context.Context, id, repo, ref, app string) (io.ReadCloser, error)
+}
+
+// Sealer seals a secret environment, and opens one again. Satisfied by
+// seal.Key.
+//
+// Open is here for the depends_on derivation and nothing else: a real
+// database URL is a sealed value, so an app whose services find each other
+// through it would draw no edges at all from the plaintext half. Nothing Open
+// returns may leave the caller. It is scanned for <name>.internal references
+// and dropped; no plaintext is returned in a response, written to a row, or
+// logged, and a host with no key derives from the plaintext half instead.
 type Sealer interface {
 	IsSet() bool
 	Seal([]byte) (string, error)
+	Open(blob string) ([]byte, error)
 }

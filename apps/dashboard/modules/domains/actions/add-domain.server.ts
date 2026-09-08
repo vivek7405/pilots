@@ -3,6 +3,7 @@
 import { requireOrg } from '#modules/auth/session.server.ts';
 import { fleet, listServices } from '#modules/fleet/client.server.ts';
 import { isHostname } from '#modules/domains/hostname.ts';
+import { backTo } from '#modules/services/utils/back.ts';
 
 export async function addDomain(formData: FormData) {
   const ctx = await requireOrg();
@@ -23,5 +24,5 @@ export async function addDomain(formData: FormData) {
   } catch (err) {
     return { success: false, error: `The fleet refused: ${(err as Error).message}`, status: 502 };
   }
-  return { success: true, redirect: '/domains?ok=saved' };
+  return { success: true, redirect: backTo(formData, '/domains', 'saved') };
 }

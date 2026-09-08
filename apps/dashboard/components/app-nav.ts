@@ -14,6 +14,7 @@
  */
 
 import { WebComponent, prop, html, signal } from '@webjsdev/core';
+import { NOUN } from '#lib/vocabulary.ts';
 import { cn } from '#lib/utils/cn.ts';
 
 // Module scope so the value survives a re-render. Written on the client only,
@@ -24,20 +25,40 @@ const activePath = signal('');
  * The product nouns, and only those.
  *
  * Tokens, Team and Usage are account chores and live in the identity menu;
- * Volumes and Domains are attributes of a service and stay routable, reached
+ * Storage and Domains are attributes of a service and stay routable, reached
  * from a service rather than from here. A nav of seven equal items said
  * nothing about what this product is for.
  *
- * Logs will join this list when /logs exists. A nav entry pointing at a 404 is
+ * The words are the user's, from `lib/vocabulary.ts`. `Apps` rather than
+ * `Overview` because the root IS the list of apps rather than a summary of
+ * something else, and `Sandboxes` rather than `Machines` because a machine is
+ * an engine word for two different products: an instance inside a service and
+ * a sandbox that belongs to no service.
+ *
+ * Logs joins this list when /logs exists. A nav entry pointing at a 404 is
  * worse than one missing entry.
  */
 const LINKS: { href: string; label: string }[] = [
-  { href: '/', label: 'Overview' },
-  { href: '/services', label: 'Services' },
-  { href: '/machines', label: 'Machines' },
+  { href: '/', label: NOUN.Apps },
+  { href: '/sandboxes', label: NOUN.Sandboxes },
+  { href: '/logs', label: NOUN.Logs },
 ];
 
-export class AppNav extends WebComponent({ current: prop(String) }) {
+/**
+ * Paths a nav entry owns that do not sit under it.
+ *
+ * A URL segment is an address and `/machines/<id>` keeps its path, so a
+ * sandbox's own page does not live under `/sandboxes`. Without this the nav
+ * goes dark the moment you open one, which reads as having left the section
+ * you are plainly still in. Likewise a service's page belongs to Apps, which
+ * is where the service was found.
+ */
+const OWNS: Record<string, string[]> = {
+  '/sandboxes': ['/machines'],
+  '/': ['/apps', '/services'],
+};
+
+export class AppNav extends WebComponent({ current: prop(String), orientation: prop(String) }) {
   #onNav = () => activePath.set(location.pathname);
 
   connectedCallback() {
@@ -55,20 +76,29 @@ export class AppNav extends WebComponent({ current: prop(String) }) {
 
   render() {
     const active = activePath.get() || this.current || '/';
+    const vertical = this.orientation === 'vertical';
     return html`
-      <nav class="flex items-center gap-0.5 overflow-x-auto sm:gap-1" aria-label="Primary">
+      <nav
+        class=${cn(
+          vertical ? 'flex flex-col gap-1' : 'flex items-center gap-0.5 overflow-x-auto sm:gap-1',
+        )}
+        aria-label="Primary"
+      >
         ${LINKS.map((link) => {
-          // A section owns its subroutes, so /services/<id> keeps Services
-          // lit. '/' is exact, or it would match every path.
-          const on =
-            link.href === '/'
-              ? active === '/'
-              : active === link.href || active.startsWith(link.href + '/');
+          // A section owns its subroutes, so /apps/<app> keeps Apps lit. '/'
+          // is exact, or it would match every path, and it owns the paths in
+          // OWNS instead.
+          const under = (base: string) => active === base || active.startsWith(base + '/');
+          const owned = (OWNS[link.href] ?? []).some(under);
+          const on = link.href === '/' ? active === '/' || owned : under(link.href) || owned;
           return html`<a
             href=${link.href}
             aria-current=${on ? 'page' : 'false'}
             class=${cn(
-              'rounded-md px-2 py-1.5 text-sm no-underline transition-colors sm:px-3',
+              'no-underline transition-colors',
+              vertical
+                ? 'flex items-center rounded-md px-3 py-2 text-body'
+                : 'rounded-md px-2 py-1.5 text-body sm:px-3',
               on
                 ? 'bg-accent font-medium text-foreground'
                 : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground',

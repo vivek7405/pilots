@@ -85,6 +85,7 @@ beforeEach(() => {
   app.fleet.reset();
   app.fleet.data.execHold = true;
   app.fleet.data.machines.push({ id: 'm-1', name: 'box', state: 'running', org_id: orgA } as unknown as Machine);
+  app.fleet.data.machines.push({ id: 'm-r', name: 'web-1', state: 'running', org_id: orgA, service_id: 'svc-w' } as unknown as Machine);
 });
 
 test('a signed-out socket is closed 4401 and never reaches the fleet', async () => {
@@ -115,7 +116,55 @@ test('nothing opens until the client says how big its window is', async () => {
   ws.emit('message', JSON.stringify({ type: 'open', rows: 40, cols: 120 }));
   const opened = app.fleet.data.lastExec!;
   assert.equal(opened.id, 'm-1');
-  assert.deepEqual(opened.opts, { user: 'sprite', tty: true, rows: 40, cols: 120 });
+  assert.deepEqual(opened.opts, { tty: true, rows: 40, cols: 120 });
+});
+
+test('an `open` sent before the handler has authenticated still starts the shell', async () => {
+  const ws = fakeSocket();
+
+  // NOT awaited. Every other test here awaits `WS` and only then emits, which
+  // is what hid this for a whole session: the browser sends `open` from its own
+  // `open` event, the instant the upgrade completes, while the handler is still
+  // reading the session and asking hostd about the machine. `ws` buffers
+  // nothing, so a listener attached after those awaits never sees the frame.
+  const handled = WS(ws, request(cookieA), routeCtx({ id: 'm-1' }));
+  ws.emit('message', JSON.stringify({ type: 'open', rows: 40, cols: 120 }));
+  await handled;
+
+  // Counterfactual: move `ws.on('message', ...)` back below the `requireOrg`
+  // and `machines.get` awaits and `lastExec` is null here, which is the
+  // "Connected, blinking cursor, no output" the user reported.
+  const opened = app.fleet.data.lastExec;
+  assert.ok(opened, 'the early frame was queued, not dropped');
+  assert.deepEqual(opened.opts, { tty: true, rows: 40, cols: 120 });
+});
+
+test('an early frame on a socket that fails auth opens nothing', async () => {
+  const ws = fakeSocket();
+  const handled = WS(ws, request(), routeCtx({ id: 'm-1' }));
+  ws.emit('message', JSON.stringify({ type: 'open', rows: 40, cols: 120 }));
+  await handled;
+
+  // Queueing must not become a way past the gate: the queue is drained only
+  // after the session and the tenancy check have both passed.
+  assert.deepEqual(ws.closed, { code: 4401, reason: 'unauthorized' });
+  assert.equal(app.fleet.data.lastExec, null);
+});
+
+test('no terminal names a user, whatever kind of machine it is', async () => {
+  // Sandbox and service replica alike. Naming one here would mean guessing
+  // which generation of image is on the other end: the current rootfs has
+  // `pilot`, one built before the rename has `sprite`, and an image from
+  // someone's Dockerfile has neither. Only the guest agent can resolve that,
+  // and it does, so this handler stays out of it.
+  for (const id of ['m-1', 'm-r']) {
+    const ws = fakeSocket();
+    await WS(ws, request(cookieA), routeCtx({ id }));
+    ws.emit('message', JSON.stringify({ type: 'open', rows: 24, cols: 80 }));
+    const opened = app.fleet.data.lastExec!;
+    assert.equal(opened.id, id);
+    assert.deepEqual(opened.opts, { tty: true, rows: 24, cols: 80 }, `${id} named a user`);
+  }
 });
 
 test('the shell is chosen in the guest, so an image without bash still gets one', async () => {
@@ -126,10 +175,21 @@ test('the shell is chosen in the guest, so an image without bash still gets one'
   // Not `bash -l` from here: a built image may be alpine or distroless, and
   // asking for a shell that is not there ends the session with a start failure
   // instead of a prompt.
+  //
+  // And an ABSOLUTE path, because the guest agent execs this argv without a
+  // PATH search: a bare `sh` starts nothing on a built image, and the terminal
+  // then shows a cursor that swallows every keystroke. Verified against a live
+  // replica: `sh -c 'echo OK'` closed with "start failed" while
+  // `/bin/sh -c 'echo OK'` returned OK on the same machine.
   const argv = app.fleet.data.lastExec!.argv;
-  assert.equal(argv[0], 'sh');
+  assert.equal(argv[0], '/bin/sh', 'absolute: the agent does not search PATH');
   assert.match(argv[2]!, /command -v bash/);
-  assert.match(argv[2]!, /exec sh -l/);
+  assert.match(argv[2]!, /exec \/bin\/sh -l -i/);
+  // `-i` on both arms. Without it busybox ash -- `/bin/sh` on the alpine base
+  // most built images use -- starts without printing a prompt, and the
+  // terminal on a service replica is an empty rectangle that only answers if
+  // you type into it blind.
+  assert.match(argv[2]!, /exec bash -l -i/);
 });
 
 test('a second open is ignored rather than obeyed', async () => {
@@ -162,7 +222,7 @@ test('a window size outside 1..65535 falls back rather than reaching the guest',
   // computed one wrongly would lose the session before it started.
   ws.emit('message', JSON.stringify({ type: 'open', rows: 0, cols: 999_999 }));
 
-  assert.deepEqual(app.fleet.data.lastExec!.opts, { user: 'sprite', tty: true, rows: 24, cols: 80 });
+  assert.deepEqual(app.fleet.data.lastExec!.opts, { tty: true, rows: 24, cols: 80 });
 });
 
 test('output comes back base64, and a message before open is dropped', async () => {
@@ -198,7 +258,7 @@ test('a frame arrives as a Buffer, which is what the socket library delivers', a
   ws.emit('message', Buffer.from(JSON.stringify({ type: 'open', rows: 30, cols: 100 })));
 
   assert.ok(app.fleet.data.lastExec, 'the open message was understood');
-  assert.deepEqual(app.fleet.data.lastExec!.opts, { user: 'sprite', tty: true, rows: 30, cols: 100 });
+  assert.deepEqual(app.fleet.data.lastExec!.opts, { tty: true, rows: 30, cols: 100 });
 });
 
 test('closing the socket kills the shell, so a closed tab leaves nothing running', async () => {
@@ -211,4 +271,82 @@ test('closing the socket kills the shell, so a closed tab leaves nothing running
   // observable: without the close handler this promise never resolves and a
   // machine with a live shell never goes idle.
   await ws.whenClosed;
+});
+
+
+/**
+ * Both output channels are the screen.
+ *
+ * A PTY merges them, and on the golden image it does -- bash's prompt arrives
+ * on stdout. On an image driven by an agent too old to honour `tty` on the exec
+ * stream, the session falls back to plain pipes, and then the prompt and the
+ * echo of every keystroke arrive on STDERR. Measured against a real replica:
+ * the bytes came back on channel 2 as `instance:~# `.
+ *
+ * The route used to drain stderr on the theory that a tty never writes to it,
+ * so on that machine the entire visible session was thrown away and only the
+ * stdout of an explicitly submitted command survived -- a terminal that blinks,
+ * never greets, and looks like it swallows every keystroke, while the very same
+ * component worked on a sandbox.
+ *
+ * Counterfactual: restore `stream.stderr.resume()` and the prompt below never
+ * reaches the socket.
+ */
+test('a prompt written to stderr still reaches the screen', async () => {
+  app.fleet.data.execHold = false;
+  app.fleet.data.execFrames.push(
+    { frame: 2, data: 'instance:~# ' },
+    { frame: 1, data: 'and stdout too' },
+    { frame: 3, data: '0' },
+  );
+
+  const ws = fakeSocket();
+  await WS(ws, request(cookieA), routeCtx({ id: 'm-1' }));
+  ws.emit('message', JSON.stringify({ type: 'open', rows: 24, cols: 80 }));
+  await ws.whenClosed;
+
+  const screen = ws.sent
+    .filter((m) => m.type === 'data')
+    .map((m) => Buffer.from(m.data!, 'base64').toString())
+    .join('');
+  assert.match(screen, /instance:~# /, 'stderr is the screen too, not something to drain');
+  assert.match(screen, /and stdout too/, 'and stdout still arrives');
+});
+
+/**
+ * The route says, once, when a session is not a real terminal.
+ *
+ * A byte on stderr proves it: a pty has one output side, so two channels means
+ * the engine opened pipes, which is what an agent older than `tty` on the exec
+ * stream does without saying so. The client needs to know, because on that
+ * session nothing echoes and Return never submits.
+ */
+test('a session that turns out not to be a tty says so, once', async () => {
+  app.fleet.data.execHold = false;
+  app.fleet.data.execFrames.push(
+    { frame: 2, data: 'instance:~# ' },
+    { frame: 2, data: 'more stderr' },
+    { frame: 3, data: '0' },
+  );
+
+  const ws = fakeSocket();
+  await WS(ws, request(cookieA), routeCtx({ id: 'm-1' }));
+  ws.emit('message', JSON.stringify({ type: 'open', rows: 24, cols: 80 }));
+  await ws.whenClosed;
+
+  const modes = ws.sent.filter((m) => m.type === 'mode');
+  assert.equal(modes.length, 1, 'said once, not once per chunk');
+  assert.equal((modes[0] as unknown as { tty: boolean }).tty, false);
+});
+
+test('a tty session, whose output is all on one channel, says nothing', async () => {
+  app.fleet.data.execHold = false;
+  app.fleet.data.execFrames.push({ frame: 1, data: 'pilot@instance:~$ ' }, { frame: 3, data: '0' });
+
+  const ws = fakeSocket();
+  await WS(ws, request(cookieA), routeCtx({ id: 'm-1' }));
+  ws.emit('message', JSON.stringify({ type: 'open', rows: 24, cols: 80 }));
+  await ws.whenClosed;
+
+  assert.equal(ws.sent.filter((m) => m.type === 'mode').length, 0, 'a real terminal is not announced');
 });

@@ -486,28 +486,47 @@ func run() error {
 	certClient, certErr := newCertStore(cfg)
 	publicURL := publicURLFor(cfg)
 
-	controlAPI := api.Routes(api.Deps{
+	// Hoisted out of the api.Deps literal because THREE routes are built from
+	// it now: the webhook, POST /v1/plan and POST /v1/builds. The last two
+	// reach it through a Stager, which exposes exactly the fetch and the plan
+	// and none of the rest of the delivery path.
+	ghDeps := github.Deps{
+		HostID: cfg.HostID, App: ghApp, Store: store, Builds: builder,
+		Rollout: rollout, Machines: mgr, Domain: cfg.WorkloadDomain,
+		WorkRoot: filepath.Join(cfg.CacheRoot(), "push-work"),
+		// The same value the API handlers render URLs with, so the link on a
+		// pull request opens the way the one from POST /v1/machines does.
+		// Without it a single box tells a developer https://<name> on a host
+		// that only listens plain on :8080.
+		URL: publicURL,
+	}
+	// Nil on a fleet with no App, and the nil is kept VISIBLE below: assigning
+	// a nil *github.Stager to an interface field yields a non-nil interface
+	// holding a nil pointer, and the not_configured branch would never run.
+	stager := github.NewStager(ghDeps)
+
+	deps := api.Deps{
 		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink, HugePages: cfg.HugePages,
 		StoreVersion: storeVersion(store),
 		Builds:       builder, Rollout: rollout, Domain: cfg.WorkloadDomain, URL: publicURL,
 		Peers: peerLookup(f), PeerToken: api.PeerTokenFor(cfg.AgentTokenSecret),
 		Tenancy: tenancy, MachineCPU: machineCPU, BuildGate: &quota.HostGate{},
+		// The key the boot path already holds, handed to the API too. Without
+		// this line every service create and patch carrying secret_env is
+		// refused on a host that HAS a key, because the field it is refused on
+		// is the zero value.
+		FleetKey:  sealerOrNil(fleetKey),
 		CPUVendor: vendor, CPUVendorForced: vendorForced,
 		Usage:   ledger,
 		Compose: compose.Handler(),
-		Plan:    detect.Handler(filepath.Join(cfg.CacheRoot(), "plan-work")),
+		Plan:    detect.Handler(filepath.Join(cfg.CacheRoot(), "plan-work"), planStager(stager)),
 		Lookup:  machineByName(f),
-		GitHub: github.Handler(github.Deps{
-			HostID: cfg.HostID, App: ghApp, Store: store, Builds: builder,
-			Rollout: rollout, Machines: mgr, Domain: cfg.WorkloadDomain,
-			WorkRoot: filepath.Join(cfg.CacheRoot(), "push-work"),
-			// The same value the API handlers render URLs with, so the link
-			// on a pull request opens the way the one from POST /v1/machines
-			// does. Without it a single box tells a developer https://<name>
-			// on a host that only listens plain on :8080.
-			URL: publicURL,
-		}),
-	})
+		GitHub:  github.Handler(ghDeps),
+	}
+	if stager != nil {
+		deps.Repos = stager
+	}
+	controlAPI := api.Routes(deps)
 
 	// Machine-scoped API calls go to the host that owns the machine. Without
 	// this, "every host serves the full API" means every host answers and
@@ -802,6 +821,17 @@ func peerLookup(f *fleet) api.PeerLookup {
 		return nil
 	}
 	return peers{f.cache}
+}
+
+// planStager hands POST /v1/plan the stager, keeping an absent App visible as
+// a nil interface. See sealerOrNil, which exists for the same reason: a typed
+// nil satisfies an interface, and the route's not_configured branch tests the
+// interface for nil.
+func planStager(s *github.Stager) detect.Stager {
+	if s == nil {
+		return nil
+	}
+	return s
 }
 
 // sealerOrNil hands the API the seal key when this host has one.

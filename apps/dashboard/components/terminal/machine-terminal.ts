@@ -6,7 +6,35 @@
  * `vendor/README.md` for why that is the one piece of third-party browser code
  * in this app and how to update it.
  *
- * Two things here are load-bearing rather than stylistic.
+ * A HIDDEN TAB RELEASES THE MACHINE. hostd counts an exec stream as a request
+ * in flight (`Begin`/`End` around it in `internal/machines/exec.go`), and the
+ * autoscaler re-touches any replica with traffic on it every tick. So a shell
+ * held open by a page nobody is looking at pinned its machine awake for as
+ * long as the tab existed -- on a platform whose whole pitch is that an idle
+ * machine sleeps, leaving this page open was a machine that could never idle,
+ * and billed for it. Closing the socket ends the stream, hostd's `defer End`
+ * runs, the idle clock finally starts, and the machine sleeps on its own.
+ *
+ * Coming back reconnects, and the exec stream wakes a suspended machine on the
+ * way in (`m.Wake` in that same file), so returning to the tab is a new shell
+ * on a woken machine rather than an error. The scrollback stays: the emulator
+ * is never disposed, only the socket, and the break is written into the buffer
+ * so a reader is never left wondering why their prompt stopped answering.
+ *
+ * AN IDLE SHELL RELEASES IT TOO. Hiding the tab is one way to stop using a
+ * terminal; leaving it open on a desk is the other, and the machine cannot
+ * tell the two apart -- an open exec stream is traffic either way, and it
+ * pinned a machine awake for as long as the page existed. So a session with
+ * no keystroke sent and no byte received for a long stretch is released the
+ * same way, and the next keystroke starts a new one on a woken machine.
+ *
+ * The grace period is why this is not instant. A glance at another tab must
+ * not kill a command someone is running, and a shell that died on every
+ * alt-tab would be worse than one that costs a minute of idle. It does mean a
+ * command still running when the grace expires is killed with the shell --
+ * long work belongs in a detached session, not in a browser tab.
+ *
+ * Two more things here are load-bearing rather than stylistic.
  *
  * The first message is `open`, and it carries the FITTED rows and columns. A
  * shell reads its window size at startup, so a session opened at 24 by 80 and
@@ -57,8 +85,34 @@ function wash(rgb: string, alpha: number): string {
 const DIM = '\u001b[2m';
 const RESET = '\u001b[0m';
 
+/**
+ * How long the tab may be hidden before the shell lets the machine go.
+ *
+ * Long enough that switching tabs to read something is free, short enough that
+ * the machine still sleeps promptly after a reader wanders off: this plus the
+ * engine's own idle window (30s for a service replica, 60s for a sandbox) is
+ * the whole delay before it suspends.
+ */
+const HIDDEN_GRACE_MS = 30_000;
+
+/**
+ * How long a session may go with no keystroke and no output before the shell
+ * lets the machine go. Long, because a person reads output for minutes at a
+ * time; not indefinite, because an open tab on a desk is not a person.
+ */
+const IDLE_RELEASE_MS = 10 * 60_000;
+
 export class MachineTerminal extends WebComponent({
   machineId: prop(String),
+  /**
+   * How long the tab may be hidden before the shell lets the machine go.
+   *
+   * A prop only so a test can drive the rule without sitting through the real
+   * grace; no page sets it, and the default below is what ships.
+   */
+  hiddenGraceMs: prop(Number, { attribute: 'hidden-grace-ms' }),
+  /** Same contract as `hiddenGraceMs`: a knob only a test sets. */
+  idleReleaseMs: prop(Number, { attribute: 'idle-release-ms' }),
   status: prop(String, { state: true }),
   message: prop(String, { state: true }),
 }) {
@@ -69,10 +123,18 @@ export class MachineTerminal extends WebComponent({
   #resizeObserver: ResizeObserver | null = null;
   #themeObserver: MutationObserver | null = null;
   #onData: { dispose(): void } | null = null;
+  #hideTimer: ReturnType<typeof setTimeout> | null = null;
+  #idleTimer: ReturnType<typeof setTimeout> | null = null;
+  /** True once the route has told us this session is not a real terminal. */
+  #cooked = false;
+  /** The line being typed, kept here because no line discipline is keeping it. */
+  #line = '';
 
   constructor() {
     super();
     this.machineId = '';
+    this.hiddenGraceMs = HIDDEN_GRACE_MS;
+    this.idleReleaseMs = IDLE_RELEASE_MS;
     this.status = 'connecting';
     this.message = '';
   }
@@ -80,11 +142,70 @@ export class MachineTerminal extends WebComponent({
   connectedCallback() {
     super.connectedCallback();
     void this.boot();
+    document.addEventListener('visibilitychange', this.onVisibility);
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
+    document.removeEventListener('visibilitychange', this.onVisibility);
     this.teardown();
+  }
+
+  /**
+   * Hidden long enough: drop the socket so the machine can idle. Back: pick it
+   * up again.
+   *
+   * The timer is cancelled on the way back, so flipping to another tab and
+   * returning inside the grace leaves the session untouched -- no reconnect, no
+   * lost shell, nothing written into the buffer.
+   */
+  private onVisibility = (): void => {
+    if (document.visibilityState === 'hidden') {
+      if (this.#hideTimer || !this.#socket) return;
+      this.#hideTimer = setTimeout(() => {
+        this.#hideTimer = null;
+        if (document.visibilityState !== 'hidden') return;
+        this.release('hidden');
+      }, this.hiddenGraceMs);
+      return;
+    }
+
+    if (this.#hideTimer) {
+      clearTimeout(this.#hideTimer);
+      this.#hideTimer = null;
+    }
+    // Only when this component let the socket go. A socket dropped for any
+    // other reason has its own Reconnect button, and racing it from here would
+    // open a second shell on the machine.
+    if (this.status === 'released' && this.#term) {
+      this.note('reconnecting');
+      this.connect();
+    }
+  };
+
+  /**
+   * Gives the machine back: the socket goes, the emulator and its scrollback
+   * stay. hostd kills the shell when the socket closes, which is what ends the
+   * in-flight count and lets the idle clock start.
+   */
+  private release(why: 'hidden' | 'idle' = 'hidden'): void {
+    if (this.#idleTimer) clearTimeout(this.#idleTimer);
+    this.#idleTimer = null;
+    this.#socket?.close();
+    this.#socket = null;
+    this.status = 'released';
+    this.note(why);
+  }
+
+  /** A dim line in the buffer, so a break in the session is never silent. */
+  private note(kind: 'hidden' | 'idle' | 'reconnecting'): void {
+    const text =
+      kind === 'hidden'
+        ? 'Session closed while this tab was in the background, so the machine can sleep. Come back to start a new one.'
+        : kind === 'idle'
+          ? 'Session closed after a long stretch with no activity, so the machine can sleep. Press any key to start a new one.'
+          : 'Reconnecting, and waking the machine if it slept...';
+    this.#term?.writeln(`\r\n${DIM}-- ${text}${RESET}`);
   }
 
   /**
@@ -117,7 +238,7 @@ export class MachineTerminal extends WebComponent({
     this.#term = term;
     this.#fit = fit;
 
-    this.#onData = term.onData((data) => this.send({ type: 'data', data: encodeUtf8(data) }));
+    this.#onData = term.onData((data) => this.onKey(data));
     this.#resizeObserver = new ResizeObserver(() => this.refit());
     this.#resizeObserver.observe(this);
     this.#themeObserver = new MutationObserver(() => {
@@ -129,6 +250,92 @@ export class MachineTerminal extends WebComponent({
     });
 
     this.connect();
+  }
+
+  /**
+   * A keystroke, in whichever mode this session turned out to be.
+   *
+   * With a pty the kernel echoes what is typed, turns Return into a newline
+   * and gives the shell a line at a time, so the bytes go straight out. On a
+   * machine whose agent is too old to open one, NONE of that happens: nothing
+   * echoes, and Return arrives at the shell as a carriage return that no line
+   * discipline translates, so a command is never submitted. That is a terminal
+   * which looks broken while being perfectly connected.
+   *
+   * So when the route tells us there is no pty, this does the line discipline's
+   * job in the browser: it echoes, it handles Backspace, and it sends a whole
+   * line terminated by a real newline. Enough for commands; not a substitute
+   * for a pty, which is why it says so.
+   */
+  /**
+   * Something happened on the session, so it is not idle. Armed only while a
+   * shell is open: a released or closed session has nothing to let go of.
+   */
+  private touchActivity(): void {
+    if (this.#idleTimer) clearTimeout(this.#idleTimer);
+    this.#idleTimer = null;
+    if (this.status !== 'open') return;
+    this.#idleTimer = setTimeout(() => {
+      this.#idleTimer = null;
+      if (this.status === 'open') this.release('idle');
+    }, this.idleReleaseMs);
+  }
+
+  private onKey(data: string): void {
+    // A keystroke on a released session is the ask to start a new one. The
+    // key itself is dropped: there is no shell yet to receive it, and the
+    // note in the buffer says so.
+    if (this.status === 'released') {
+      this.note('reconnecting');
+      this.connect();
+      return;
+    }
+    this.touchActivity();
+    if (!this.#cooked) {
+      this.send({ type: 'data', data: encodeUtf8(data) });
+      return;
+    }
+
+    for (const ch of data) {
+      if (ch === '\r' || ch === '\n') {
+        this.#term?.write('\r\n');
+        this.send({ type: 'data', data: encodeUtf8(`${this.#line}\n`) });
+        this.#line = '';
+        continue;
+      }
+      if (ch === '\u007f' || ch === '\b') {
+        if (this.#line.length === 0) continue;
+        this.#line = this.#line.slice(0, -1);
+        // Back over the character, blank it, back again: the only way to
+        // rub one out on a terminal that is not redrawing the line for us.
+        this.#term?.write('\b \b');
+        continue;
+      }
+      if (ch === '\u0003') {
+        this.#term?.write('^C\r\n');
+        this.#line = '';
+        // Sent anyway. Without a controlling terminal the shell will not turn
+        // it into a signal, but a program reading stdin may still want it.
+        this.send({ type: 'data', data: encodeUtf8(ch) });
+        continue;
+      }
+      // Anything else printable is echoed, because nothing else will.
+      if (ch >= ' ') {
+        this.#line += ch;
+        this.#term?.write(ch);
+      }
+    }
+  }
+
+  /** Says once, in the buffer, that this session is a line-mode shell. */
+  private enterCookedMode(): void {
+    if (this.#cooked) return;
+    this.#cooked = true;
+    this.#term?.writeln(
+      `\r\n${DIM}-- This instance predates terminal support, so this is a line-mode shell: ` +
+        `typing is echoed here, Return sends the line, and there is no job control. ` +
+        `Redeploy the service for a full terminal.${RESET}`,
+    );
   }
 
   /**
@@ -169,6 +376,7 @@ export class MachineTerminal extends WebComponent({
     socket.addEventListener('open', () => {
       if (this.#socket !== socket) return;
       this.status = 'open';
+      this.touchActivity();
       // The fitted size goes out FIRST, so the shell starts at the right
       // window and never redraws its opening prompt.
       const term = this.#term;
@@ -201,13 +409,21 @@ export class MachineTerminal extends WebComponent({
   }
 
   private receive(raw: string): void {
-    let frame: { type?: string; data?: string; code?: number; message?: string };
+    let frame: { type?: string; data?: string; code?: number; message?: string; tty?: boolean };
     try {
       frame = JSON.parse(raw) as typeof frame;
     } catch {
       return;
     }
+    // The route says this session is not a real terminal. Announced before the
+    // bytes that revealed it are written, so the explanation reads above the
+    // prompt rather than in the middle of it.
+    if (frame.type === 'mode' && frame.tty === false) {
+      this.enterCookedMode();
+      return;
+    }
     if (frame.type === 'data' && typeof frame.data === 'string') {
+      this.touchActivity();
       this.#term?.write(decodeBase64(frame.data));
       return;
     }
@@ -235,6 +451,8 @@ export class MachineTerminal extends WebComponent({
   }
 
   private teardown(): void {
+    if (this.#idleTimer) clearTimeout(this.#idleTimer);
+    this.#idleTimer = null;
     this.#resizeObserver?.disconnect();
     this.#themeObserver?.disconnect();
     this.#onData?.dispose();
@@ -256,10 +474,17 @@ export class MachineTerminal extends WebComponent({
   render() {
     const dot =
       this.status === 'open' ? 'bg-primary' : this.status === 'error' ? 'bg-destructive' : 'bg-muted-foreground';
-    const label = this.status === 'open' ? 'Connected' : this.status === 'connecting' ? 'Connecting' : 'Disconnected';
+    const label =
+      this.status === 'open'
+        ? 'Connected'
+        : this.status === 'connecting'
+          ? 'Connecting'
+          : this.status === 'released'
+            ? 'Asleep - this tab was in the background'
+            : 'Disconnected';
     return html`
       <div class="flex h-full flex-col">
-        <div class="flex items-center gap-2 border-b border-border px-3 py-2 text-xs">
+        <div class="flex items-center gap-2 border-b border-border px-3 py-2 text-meta">
           <span class=${cn('inline-block size-1.5 rounded-full', dot)} aria-hidden="true"></span>
           <span role="status" aria-live="polite">${label}</span>
           ${this.message ? html`<span class="text-destructive">${this.message}</span>` : ''}

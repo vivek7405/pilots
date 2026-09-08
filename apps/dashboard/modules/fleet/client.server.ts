@@ -20,7 +20,7 @@ import { PilotsClient } from '@pilots/sdk';
 import type { Machine, Service, Volume } from '@pilots/sdk';
 
 interface FleetGlobal {
-  __pilots_fleet?: PilotsClient;
+  __pilots_fleet?: PilotsClient & { as?: (org: string) => PilotsClient };
 }
 
 /**
@@ -29,6 +29,25 @@ interface FleetGlobal {
  * by accident.
  */
 export const fleet: PilotsClient = ((globalThis as FleetGlobal).__pilots_fleet ??= createClient());
+
+/**
+ * The admin key acting AS one org. Every request from this client carries
+ * `?org=`, which hostd reads as the org to create rows in, charge quota to and
+ * narrow reads to, so a service the dashboard creates belongs to the visitor
+ * rather than to the ops org. One client per org, made once. The test seam's
+ * `as` is honoured first so the fake can record the org it was asked for.
+ */
+const perOrg = new Map<string, PilotsClient>();
+export function fleetAs(org: string): PilotsClient {
+  const seam = (globalThis as FleetGlobal).__pilots_fleet;
+  if (seam?.as) return seam.as(org);
+  let client = perOrg.get(org);
+  if (!client) {
+    client = createClient(org);
+    perOrg.set(org, client);
+  }
+  return client;
+}
 
 /** The hostname TLS is verified against when the poller dials a host by IP. */
 export const apiHost: string = new URL(requireApiUrl()).hostname;
@@ -39,10 +58,10 @@ function requireApiUrl(): string {
   return url;
 }
 
-function createClient(): PilotsClient {
+function createClient(org?: string): PilotsClient {
   const key = process.env.PILOT_ADMIN_KEY;
   if (!key) throw new Error('PILOT_ADMIN_KEY must be set (an admin-scoped key, sealed as secret_env)');
-  return new PilotsClient(key, { baseURL: requireApiUrl() });
+  return new PilotsClient(key, { baseURL: requireApiUrl() , ...(org ? { org } : {}) });
 }
 
 /*

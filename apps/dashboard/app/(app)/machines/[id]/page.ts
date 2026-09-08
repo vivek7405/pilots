@@ -9,14 +9,15 @@ import { html, notFound } from '@webjsdev/core';
 import type { PageProps } from '@webjsdev/core';
 import { orUnauthorized, requireOrg } from '#modules/auth/session.server.ts';
 import { getMachine } from '#modules/machines/queries/get-machine.server.ts';
-import { stateBadge } from '#modules/machines/utils/ui/state.ts';
+import { statusDot } from '#modules/machines/utils/ui/state.ts';
 import { badgeClass } from '#components/ui/badge.ts';
 import { buttonClass } from '#components/ui/button.ts';
 import { cardClass, cardContentClass } from '#components/ui/card.ts';
 import { dataTable, emptyState, footnote, pageHeading, sectionHeading } from '#lib/utils/ui.ts';
 import { cn } from '#lib/utils/cn.ts';
-import '#modules/machines/components/log-pane.ts';
-import '#modules/machines/components/exec-console.ts';
+import { NOUN } from '#lib/vocabulary.ts';
+import '#modules/logs/components/log-stream.ts';
+import '#components/terminal/machine-terminal.ts';
 import '#components/copy-button.ts';
 
 interface Checkpoint {
@@ -37,7 +38,7 @@ export default async function MachinePage({ params }: PageProps) {
 
   return html`
     <div class="flex flex-wrap items-center gap-3">
-      ${pageHeading(machine.name || machine.id)} ${stateBadge(machine.state)}
+      ${pageHeading(machine.name || machine.id)} ${statusDot(machine.state)}
       <a href=${`/machines/${machine.id}/terminal`} class=${cn(buttonClass({ size: 'sm' }), 'ml-auto')}
         >Open a terminal</a
       >
@@ -45,11 +46,9 @@ export default async function MachinePage({ params }: PageProps) {
 
     <div class=${cn(cardClass({ size: 'sm' }), 'mt-4')} data-slot="card" data-size="sm">
       <div class=${cardContentClass()}>
-        <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1 text-sm m-0">
+        <dl class="grid grid-cols-[max-content_1fr] gap-x-6 gap-y-1 text-meta m-0">
           <dt class="text-muted-foreground">Id</dt>
           <dd class="m-0 font-mono">${machine.id}</dd>
-          <dt class="text-muted-foreground">Host</dt>
-          <dd class="m-0 font-mono">${machine.host_id ?? '-'}</dd>
           <dt class="text-muted-foreground">URL</dt>
           <dd class="m-0">${machine.url ? html`<a href=${machine.url} rel="noopener">${machine.url}</a>` : '-'}</dd>
         </dl>
@@ -57,19 +56,24 @@ export default async function MachinePage({ params }: PageProps) {
     </div>
 
     <section id="console" class="mt-8">
-      ${sectionHeading('Console')}
-      <log-pane machine-id=${machine.id}></log-pane>
+      ${sectionHeading(NOUN.Logs, 'Everything this instance has printed since it last started. That is all pilots keeps.')}
+      <log-stream .sources=${[{ id: machine.id, service: machine.service_id ? 'Instance' : 'Sandbox', name: machine.name ?? machine.id }]}></log-stream>
     </section>
 
     <section class="mt-8">
-      ${sectionHeading('Run a command')}
-      <exec-console machine-id=${machine.id}></exec-console>
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        ${sectionHeading(NOUN.Terminal, 'A shell inside this instance, as if you had opened one on the box it runs on.')}
+        <a href=${`/machines/${machine.id}/terminal`} class="text-meta">Full screen</a>
+      </div>
+      <div class="h-[24rem] overflow-hidden rounded-md border border-border">
+        <machine-terminal machine-id=${machine.id} class="flex h-full min-h-0 flex-col"></machine-terminal>
+      </div>
     </section>
 
     <section class="mt-8">
-      ${sectionHeading('Checkpoints')}
+      ${sectionHeading(NOUN.Snapshots, 'A point you can return to. Restoring one keeps the URL.')}
       ${checkpoints.length === 0
-        ? emptyState('None yet. A checkpoint is copy-on-write metadata, so taking one costs no data copy.', {
+        ? emptyState('None yet. A snapshot records where the disk was, so taking one copies no data and costs almost nothing.', {
             command: `pilot machines checkpoint ${machine.name || machine.id}`,
           })
         : dataTable<Checkpoint>({
@@ -87,7 +91,7 @@ export default async function MachinePage({ params }: PageProps) {
               { header: 'Comment', cellClass: 'text-muted-foreground', cell: (c) => c.comment ?? '' },
             ],
           })}
-      ${footnote('A restore is in place: the machine keeps its id and its URL.')}
+      ${footnote('Returning to a snapshot happens in place: the URL and the id are kept.')}
     </section>
   `;
 }

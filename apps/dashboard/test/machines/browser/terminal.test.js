@@ -233,3 +233,237 @@ suite('machine-terminal', () => {
     host.remove();
   });
 });
+
+/**
+ * A hidden tab must give the machine back.
+ *
+ * hostd counts an exec stream as a request in flight, and the autoscaler
+ * re-touches any replica carrying traffic every tick, so a shell held open by
+ * a page nobody is looking at pinned its machine awake for as long as the tab
+ * existed. Verified on a real fleet: a machine page left open kept
+ * `pilots_router_inflight` at 1 and `last_activity` under 10s forever, and the
+ * machine suspended within a minute of the socket closing.
+ *
+ * The grace is driven through `hidden-grace-ms` rather than waited out.
+ *
+ * Counterfactual: drop the visibilitychange listener and the first test below
+ * still finds an open socket, which is the bug exactly.
+ */
+suite('machine-terminal and a hidden tab', () => {
+  let visibility = 'visible';
+  let originalDescriptor;
+
+  setup(() => {
+    sockets = [];
+    globalThis.WebSocket = FakeSocket;
+    globalThis.WebSocket.OPEN = 1;
+    originalDescriptor = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState');
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility });
+  });
+
+  teardown(async () => {
+    visibility = 'visible';
+    delete document.visibilityState;
+    if (originalDescriptor) Object.defineProperty(Document.prototype, 'visibilityState', originalDescriptor);
+    document.body.innerHTML = '';
+    await new Promise((r) => setTimeout(r, 20));
+    globalThis.WebSocket = RealWebSocket;
+  });
+
+  const setVisibility = (value) => {
+    visibility = value;
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
+
+  async function mountFast() {
+    const host = document.createElement('div');
+    host.style.cssText = 'width:640px;height:320px';
+    document.body.appendChild(host);
+    const el = document.createElement('machine-terminal');
+    el.setAttribute('machine-id', 'm-1');
+    el.setAttribute('hidden-grace-ms', '5');
+    host.appendChild(el);
+    await until(() => sockets.length > 0);
+    await el.updateComplete;
+    return { el, host, socket: sockets[0] };
+  }
+
+  test('a tab hidden past the grace closes the shell so the machine can sleep', async () => {
+    const { el, host, socket } = await mountFast();
+    assert.equal(socket.readyState, 1, 'the shell is open while the tab is watched');
+
+    setVisibility('hidden');
+    await until(() => socket.readyState === 3);
+    await el.updateComplete;
+    assert.equal(el.status, 'released', `status says why: ${el.status}`);
+    assert.equal(sockets.length, 1, 'and it did not open another one on the way out');
+    host.remove();
+  });
+
+  test('coming back starts a new shell, which is what wakes the machine', async () => {
+    const { el, host, socket } = await mountFast();
+    setVisibility('hidden');
+    await until(() => socket.readyState === 3);
+
+    setVisibility('visible');
+    await until(() => sockets.length === 2);
+    await el.updateComplete;
+    assert.includes(String(sockets[1].url), '/api/machines/m-1/terminal', 'it dials the same machine again');
+    host.remove();
+  });
+
+  test('a glance at another tab inside the grace leaves the session alone', async () => {
+    const { el, host, socket } = await mountFast();
+    setVisibility('hidden');
+    setVisibility('visible');
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(socket.readyState, 1, 'the shell was never dropped');
+    assert.equal(sockets.length, 1, 'and nothing reconnected over the top of it');
+    assert.equal(el.status, 'open');
+    host.remove();
+  });
+});
+
+/**
+ * Line mode: a terminal on a machine that cannot give us a pty.
+ *
+ * A browser test is the only tier that can see this. Without a pty nothing
+ * echoes what is typed and Return reaches the shell as a carriage return that
+ * no line discipline translates, so the session looks dead while being
+ * perfectly connected -- measured on a real replica whose image predates `tty`
+ * on the exec stream. In that mode the component does the line discipline's
+ * job itself: echo, backspace, and a whole line terminated by a newline.
+ *
+ * Counterfactual: send the keystrokes straight through, as pty mode does, and
+ * nothing appears on screen and no line is ever submitted.
+ */
+suite('machine-terminal in line mode', () => {
+  setup(() => {
+    sockets = [];
+    globalThis.WebSocket = FakeSocket;
+    globalThis.WebSocket.OPEN = 1;
+  });
+
+  teardown(async () => {
+    document.body.innerHTML = '';
+    await new Promise((r) => setTimeout(r, 20));
+    globalThis.WebSocket = RealWebSocket;
+  });
+
+  const typed = (socket) =>
+    socket.sent
+      .filter((m) => m.type === 'data')
+      .map((m) => atob(m.data))
+      .join('');
+
+  test('typing is echoed locally and Return sends the whole line with a newline', async () => {
+    const { el, host, socket } = await mount();
+    socket.deliver({ type: 'mode', tty: false });
+    await el.updateComplete;
+
+    for (const ch of 'ls -l') el.onKey(ch);
+    await el.updateComplete;
+    assert.equal(typed(socket), '', 'nothing is sent while the line is being typed');
+
+    el.onKey('\r');
+    assert.equal(typed(socket), 'ls -l\n', 'the whole line goes out, ended by a NEWLINE not a CR');
+
+    // The DOM renderer paints on a later frame, so the echo is polled for
+    // rather than read straight after the write.
+    const shown = await until(() => (el.querySelector('.xterm-rows')?.innerText ?? '').includes('ls -l'));
+    assert.ok(shown, 'and the reader can see what they typed');
+    host.remove();
+  });
+
+  test('backspace rubs out a character instead of reaching the shell', async () => {
+    const { el, host, socket } = await mount();
+    socket.deliver({ type: 'mode', tty: false });
+    await el.updateComplete;
+
+    for (const ch of 'lsx') el.onKey(ch);
+    el.onKey('\u007f');
+    el.onKey('\r');
+    assert.equal(typed(socket), 'ls\n', 'the rubbed-out character never left the browser');
+    host.remove();
+  });
+
+  test('with a real terminal the keystrokes go straight through', async () => {
+    const { el, host, socket } = await mount();
+    // No `mode` frame: this session is a pty, so the kernel echoes and the
+    // shell wants the carriage return exactly as the emulator sent it.
+    el.onKey('l');
+    el.onKey('\r');
+    assert.equal(typed(socket), 'l\r', 'raw, unbuffered, untranslated');
+    host.remove();
+  });
+});
+
+/**
+ * An idle shell gives the machine back too.
+ *
+ * Hiding the tab is one way to stop using a terminal; leaving it open on a
+ * desk is the other, and the machine cannot tell them apart: an open exec
+ * stream is traffic either way, and it kept a machine awake for as long as
+ * the page existed. Measured on a real fleet: a service replica reported
+ * "online since 42 minutes" under a terminal nobody had typed into.
+ *
+ * Driven through `idle-release-ms`. Counterfactual: never arm the idle timer
+ * and the first test below still finds an open socket.
+ */
+suite('machine-terminal and an idle shell', () => {
+  setup(() => {
+    sockets = [];
+    globalThis.WebSocket = FakeSocket;
+    globalThis.WebSocket.OPEN = 1;
+  });
+
+  teardown(async () => {
+    document.body.innerHTML = '';
+    await new Promise((r) => setTimeout(r, 20));
+    globalThis.WebSocket = RealWebSocket;
+  });
+
+  async function mountIdle(ms) {
+    const host = document.createElement('div');
+    host.style.cssText = 'width:640px;height:320px';
+    document.body.appendChild(host);
+    const el = document.createElement('machine-terminal');
+    el.setAttribute('machine-id', 'm-1');
+    el.setAttribute('idle-release-ms', String(ms));
+    host.appendChild(el);
+    await until(() => sockets.length > 0);
+    await el.updateComplete;
+    return { el, host, socket: sockets[0] };
+  }
+
+  test('a shell with no keystroke and no output past the limit is released', async () => {
+    const { el, host, socket } = await mountIdle(60);
+    await until(() => socket.readyState === 3);
+    await el.updateComplete;
+    assert.equal(el.status, 'released', `status says why: ${el.status}`);
+    assert.equal(sockets.length, 1, 'and nothing reconnected on its own');
+    host.remove();
+  });
+
+  test('output arriving keeps the shell alive', async () => {
+    const { el, host, socket } = await mountIdle(80);
+    // A build printing a line every so often is not idle, however long it runs.
+    for (let i = 0; i < 4; i += 1) {
+      await new Promise((r) => setTimeout(r, 40));
+      socket.deliver({ type: 'data', data: btoa('still going\n') });
+    }
+    assert.equal(socket.readyState, 1, 'the shell was never dropped while it was talking');
+    assert.equal(el.status, 'open');
+    host.remove();
+  });
+
+  test('a keystroke on a released shell starts a new one', async () => {
+    const { el, host, socket } = await mountIdle(60);
+    await until(() => socket.readyState === 3);
+    el.onKey('l');
+    await until(() => sockets.length === 2);
+    assert.includes(String(sockets[1].url), '/api/machines/m-1/terminal', 'the same machine, again');
+    assert.equal(sockets[1].sent.filter((m) => m.type === 'data').length, 0, 'the waking keystroke itself is not sent');
+    host.remove();
+  });
+});

@@ -67,6 +67,34 @@ const UNITS: [limit: number, seconds: number, name: string][] = [
   [Infinity, 31_557_600, 'year'],
 ];
 
+/**
+ * The same magnitude with no direction: `8 hours`, `2 weeks`, `a few seconds`.
+ *
+ * For a sentence that supplies the direction itself. "Sleeping since 8 hours
+ * ago" says it twice and reads as broken English; "Sleeping since 8 hours" is
+ * the phrase the reader expected.
+ *
+ * A stamp in the FUTURE renders its magnitude rather than "in 8 hours", which
+ * after the word "since" would be nonsense. That is clock skew between a host
+ * and a browser, not a real event, and it should degrade to a slightly wrong
+ * number rather than to a broken sentence.
+ */
+export function elapsed(value: number | string | undefined, now = Date.now()): string {
+  const date = toDate(value);
+  if (!date) return '';
+  const abs = Math.abs((now - date.getTime()) / 1000);
+  // Not "just now": that is a direction too, and "since just now" is no better
+  // than "since 8 hours ago".
+  if (abs < 10) return 'a few seconds';
+  for (const [limit, seconds, name] of UNITS) {
+    if (abs < limit) {
+      const n = Math.floor(abs / seconds);
+      return `${n} ${n === 1 ? name : `${name}s`}`;
+    }
+  }
+  return '';
+}
+
 /** `just now`, `3 min ago`, `8 hours ago`, `2 weeks ago`, `in 5 minutes`. */
 export function ago(value: number | string | undefined, now = Date.now()): string {
   const date = toDate(value);
@@ -88,6 +116,8 @@ export class RelativeTime extends WebComponent({
   datetime: prop(String),
   /** Set once the browser has taken over, so SSR keeps the absolute form. */
   live: prop(Boolean, { state: true }),
+  /** Render the magnitude alone, for a sentence that says "since" itself. */
+  duration: prop(Boolean),
 }) {
   #tick = () => this.requestUpdate();
 
@@ -95,6 +125,7 @@ export class RelativeTime extends WebComponent({
     super();
     this.datetime = '';
     this.live = false;
+    this.duration = false;
   }
 
   connectedCallback() {
@@ -121,7 +152,8 @@ export class RelativeTime extends WebComponent({
     const iso = isoOf(this.datetime);
     if (!iso) return html`<time class="text-muted-foreground">never</time>`;
     const exact = absolute(this.datetime);
-    return html`<time datetime=${iso} title=${exact}>${this.live ? ago(this.datetime) : exact}</time>`;
+    const text = this.live ? (this.duration ? elapsed(this.datetime) : ago(this.datetime)) : exact;
+    return html`<time datetime=${iso} title=${exact}>${text}</time>`;
   }
 }
 RelativeTime.register('relative-time');

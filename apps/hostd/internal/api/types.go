@@ -288,7 +288,20 @@ type Service struct {
 	Name  string `json:"name"`
 	OrgID string `json:"org_id,omitempty"`
 	// App groups services that may find each other by <name>.internal.
-	App          string       `json:"app,omitempty"`
+	App string `json:"app,omitempty"`
+	// DependsOn names the sibling services in this app whose <name>.internal
+	// address this service's environment references.
+	//
+	// DERIVED on every read, from both halves of the environment, and stored
+	// nowhere. There is no depends_on column and there will not be one:
+	// adding a column to a populated Corrosion table backfills and gossips
+	// every existing row, which is hard rule 6, and a declared dependency
+	// would then need a dual read to be believed.
+	//
+	// A NAME, never a value. "web dials db" is what the app grouping and a
+	// connection attempt already say out loud, so nothing here is a secret
+	// the caller could not have learned by reading its own compose file.
+	DependsOn    []string     `json:"depends_on,omitempty"`
 	Replicas     int          `json:"replicas"`
 	Knobs        Knobs        `json:"knobs"`
 	Health       *HealthCheck `json:"health,omitempty"`
@@ -340,6 +353,19 @@ type CreateServiceRequest struct {
 	// OrgID comes from the authenticated key, never from the body. See
 	// CreateMachineRequest.OrgID.
 	OrgID string `json:"-"`
+}
+
+// RepoRef is the JSON body POST /v1/plan and POST /v1/builds accept in place
+// of a tar: a repository the fleet's GitHub App is installed on, at a ref.
+// The host fetches the bytes through the path a push takes.
+//
+// So that no client has to hold the repository. A browser session holds an
+// App JWT and nothing else, and a tar it staged itself would be a second copy
+// of the fetch, the root strip and the recipe rules, with 2 GiB uploads
+// transiting a tenant-facing process.
+type RepoRef struct {
+	Repo string `json:"repo"` // owner/name
+	Ref  string `json:"ref"`  // branch, tag or sha
 }
 
 // DeployRequest cuts a new release over, health-gated, keeping the previous

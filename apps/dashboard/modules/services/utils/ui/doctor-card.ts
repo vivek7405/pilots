@@ -17,6 +17,7 @@ import { cardClass } from '#components/ui/card.ts';
 import { cn } from '#lib/utils/cn.ts';
 import type { Machine } from '#modules/machines/types.ts';
 import type { ServiceHealth } from '#modules/services/utils/health.ts';
+import type { HealthGateDetails } from '@pilots/sdk';
 
 export function doctorCard(opts: {
   health: ServiceHealth;
@@ -24,8 +25,12 @@ export function doctorCard(opts: {
   serviceName: string;
   /** The error string the deploy action returned, when the failure is fresh. */
   symptom?: string;
+  /** The structured 422 from a deploy: which instance, and its last answer. */
+  gate?: HealthGateDetails;
+  /** The newest build's log, when one was started from here. */
+  buildLogHref?: string;
 }): TemplateResult | string {
-  const { health, replicas, serviceName } = opts;
+  const { health, replicas, serviceName, gate, buildLogHref } = opts;
   if (!health.pills.includes('failing')) return '';
 
   const named = health.failing
@@ -33,19 +38,28 @@ export function doctorCard(opts: {
     .filter((r): r is Machine => Boolean(r));
   const first = named[0];
 
-  const symptom =
-    opts.symptom ??
+  const gated = gate ? replicas.find((r) => r.id === gate.replica || r.name === gate.replica) : undefined;
+  const symptom = gate
+    ? html`Instance
+        <a href=${`/machines/${gated?.id ?? gate.replica}`} class="underline">${gated?.name ?? gate.replica}</a>
+        did not answer its health check within ${gate.grace_sec} s.`
+    : opts.symptom ??
     (health.release
-      ? `Release ${health.release.id} has not passed its health check in ${health.graceSec} s.`
-      : 'Replicas of this service are not serving.');
+      ? `Deployment ${health.release.id} has not passed its health check in ${health.graceSec} s.`
+      : 'This service has no instance answering.');
 
   return html`
     <div class=${cn(cardClass(), 'border-destructive/40 mb-6')} role="group" aria-label="Diagnosis">
-      <h2 class="m-0 text-base font-medium">This service is not serving</h2>
-      <p class="m-0 text-sm text-destructive">${symptom}</p>
+      <h2 class="m-0 text-heading font-medium">This service is not serving</h2>
+      <p class="m-0 text-body text-destructive">${symptom}</p>
+      ${gate
+        ? html`<blockquote class="m-0 rounded-md bg-muted px-3 py-2 font-mono text-meta">${gate.last.error
+            ? gate.last.error
+            : html`${gate.last.status ?? ''} ${gate.last.body ?? ''}`}</blockquote>`
+        : ''}
 
-      <p class="m-0 text-sm text-muted-foreground">
-        ${named.length === 1 ? 'The replica' : 'The replicas'} involved:
+      <p class="m-0 text-meta text-muted-foreground">
+        ${named.length === 1 ? 'The instance' : 'The instances'} involved:
         ${named.map(
           (replica, index) =>
             html`${index > 0 ? ', ' : ''}<a href=${`/machines/${replica.id}`} class="text-primary underline"
@@ -54,9 +68,13 @@ export function doctorCard(opts: {
         )}
       </p>
 
-      <ul class="m-0 pl-5 list-disc text-sm text-muted-foreground">
-        <li>Open the build log for this release: a build that succeeded can still ship an image that exits at start.</li>
-        <li>Open a replica's log and read the first thirty lines. A crash on boot is almost always there.</li>
+      <ul class="m-0 pl-5 list-disc text-meta text-muted-foreground">
+        <li>
+          ${buildLogHref
+            ? html`<a href=${buildLogHref} class="text-primary underline">Open the build log for this deployment</a>`
+            : 'Open the build log for this deployment'}: a build that succeeded can still ship an image that exits at start.
+        </li>
+        <li>Open an instance's log and read the first thirty lines. A crash on start is almost always there.</li>
         <li>
           Check the app listens on <code class="font-mono">PORT</code>, which is
           <code class="font-mono">8080</code>. The router dials that port and nothing else.
@@ -67,8 +85,8 @@ export function doctorCard(opts: {
         </li>
       </ul>
 
-      <p class="m-0 text-sm text-muted-foreground">From a terminal:</p>
-      <code class="block font-mono text-sm bg-muted rounded-md px-3 py-2"
+      <p class="m-0 text-meta text-muted-foreground">From a terminal:</p>
+      <code class="block font-mono text-meta bg-muted rounded-md px-3 py-2"
         >pilot machines logs ${first?.name || first?.id || serviceName}</code
       >
     </div>

@@ -35,7 +35,7 @@ export default async function DomainsPage({ actionData }: PageProps) {
 
   return html`
     ${pageHeading('Domains')}
-    ${lede('A certificate is issued over HTTP-01, which any host in the fleet can answer.')}
+    ${lede('A certificate is issued over HTTP-01 once the record resolves. Anything pilots runs can answer that challenge, so there is nothing to keep awake for it.')}
     ${errors.error ? errorAlert(errors.error) : ''}
     <!-- One wrapper around BOTH branches, so the gap before the form below does
          not disappear when the list is empty. -->
@@ -44,7 +44,7 @@ export default async function DomainsPage({ actionData }: PageProps) {
         ? emptyState('No custom domains. A service is reachable on its own URL until one is added here.')
         : html`
             ${dataTable<DomainRow>({
-              caption: 'Custom domains in this organisation',
+              caption: 'Custom domains in this team',
               rows,
               columns: [
                 { header: 'Hostname', cell: ({ domain }) => domain.hostname },
@@ -81,7 +81,7 @@ export default async function DomainsPage({ actionData }: PageProps) {
           `}
     </div>
 
-    ${sectionHeading('Add a domain')}
+    ${sectionHeading('Add a domain', 'Point a hostname at a service with a CNAME. The certificate is issued once the record resolves.')}
     <form action=${addDomain} class=${formRowClass()}>
       ${field({
         id: 'hostname',

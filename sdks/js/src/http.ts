@@ -29,6 +29,16 @@ export interface HttpOptions {
   fetch?: FetchLike
   /** Applies to JSON calls only. Streams are never given a deadline. */
   timeoutMs?: number
+  /**
+   * Makes an ADMIN key act as one org: every request carries `?org=`, which
+   * hostd reads as the org to create rows in, charge quota to, and narrow
+   * every read by.
+   *
+   * For a process serving many orgs from one operator key. hostd ignores the
+   * parameter on a tenant-scoped key, which has exactly one org already, so
+   * setting this on one changes nothing.
+   */
+  org?: string
 }
 
 export interface RequestInit_ {
@@ -57,6 +67,8 @@ export class Http {
   readonly baseURL: string
   readonly apiKey: string
   readonly timeoutMs: number
+  /** See HttpOptions.org. Empty on a client that acts as its own key's org. */
+  readonly org: string | undefined
   private readonly fetchImpl: FetchLike
 
   constructor(apiKey: string, opts: HttpOptions = {}) {
@@ -68,14 +80,23 @@ export class Http {
     this.apiKey = apiKey
     this.baseURL = resolveBaseURL(opts.baseURL)
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
+    this.org = opts.org || undefined
     this.fetchImpl = opts.fetch ?? globalThis.fetch
   }
 
+  /**
+   * Builds the URL for a call, and this is where the org narrowing is applied
+   * rather than at each call site: it has to reach every route. A client
+   * acting as an org must create as it, be charged as it and read as it, and
+   * a route that forgot the parameter would create a row its own reads cannot
+   * see.
+   */
   url(path: string, query?: RequestInit_['query']): URL {
     const url = new URL(this.baseURL + path)
     for (const [key, value] of Object.entries(query ?? {})) {
       if (value !== undefined) url.searchParams.set(key, String(value))
     }
+    if (this.org) url.searchParams.set('org', this.org)
     return url
   }
 

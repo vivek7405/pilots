@@ -19,10 +19,37 @@ export class BuildStream {
   readonly lines: BuildLogLine[] = []
 
   private readonly source: AsyncGenerator<BuildLogLine, void, undefined>
+  private readonly res: Response
 
   constructor(res: Response, buildId?: string) {
     this.buildId = buildId ?? res.headers.get('x-pilot-build-id') ?? ''
+    this.res = res
     this.source = ndjson<BuildLogLine>(res)
+  }
+
+  /**
+   * Stops reading and releases the response.
+   *
+   * For a caller that has seen what it needed and is walking away -- a page
+   * whose reader navigated off a build log. Without it the generator is left
+   * suspended holding an open body, and the socket is not returned until the
+   * whole build finishes. A `result()` after this throws rather than hanging,
+   * because a closed stream has no verdict to wait for and an interrupted
+   * build must never read as a successful one.
+   */
+  async close(): Promise<void> {
+    // The BODY first, not the generator. While a build is being followed the
+    // generator is suspended inside `reader.read()`, and `return()` queues
+    // behind that pending `next()`: it does not resolve until the next line
+    // arrives, which on a quiet build step is minutes, and the upstream
+    // connection stays open for all of it. Cancelling the body tears the read
+    // out from under it, so the return below resolves at once.
+    //
+    // Guarded rather than conditional: a generator that took the reader's lock
+    // makes this throw, and there is no way to ask a suspended one whether it
+    // did. Either way the socket is released.
+    await this.res.body?.cancel().catch(() => {})
+    await this.source.return(undefined).catch(() => {})
   }
 
   /** `for await (const line of build)`. Consumes the stream; iterate once. */

@@ -256,7 +256,7 @@ func TestCloseReturnsWithUnreadOutput(t *testing.T) {
 // contradiction is settled in the SDK rather than at the wire.
 func TestExecStreamTTYQuery(t *testing.T) {
 	got := execURL("http://h", "/v1/machines/m-1/exec/stream", []string{"bash", "-l"},
-		ExecStreamOptions{TTY: true, Rows: 40, Cols: 120})
+		ExecStreamOptions{TTY: true, Rows: 40, Cols: 120}, "")
 	q, err := url.Parse(got)
 	if err != nil {
 		t.Fatalf("parse %q: %v", got, err)
@@ -269,7 +269,7 @@ func TestExecStreamTTYQuery(t *testing.T) {
 
 	// Without TTY none of the three appears, so a plain exec's URL is
 	// byte-for-byte what it always was.
-	plain, err := url.Parse(execURL("http://h", "/p", []string{"true"}, ExecStreamOptions{}))
+	plain, err := url.Parse(execURL("http://h", "/p", []string{"true"}, ExecStreamOptions{}, ""))
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -330,5 +330,27 @@ func TestResizeWithoutTTYErrors(t *testing.T) {
 	defer s.Close()
 	if err := s.Resize(100, 30); err == nil {
 		t.Error("Resize was accepted on a stream opened without TTY")
+	}
+}
+
+// WithOrg narrows the exec stream too.
+//
+// Every other call goes through `request`, which applies the narrowing; this
+// URL is built by hand, so an admin client acting as one org used to open a
+// shell on another org's machine while WithOrg's doc promised otherwise.
+func TestExecStreamCarriesTheOrgNarrowing(t *testing.T) {
+	got := execURL("http://h", "/v1/machines/m-1/exec/stream", []string{"true"}, ExecStreamOptions{}, "org_a")
+	q, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("parse %q: %v", got, err)
+	}
+	if have := q.Query().Get("org"); have != "org_a" {
+		t.Errorf("org = %q, want org_a", have)
+	}
+	// A client that is not acting as an org sends no org at all, so a
+	// tenant key's URL is unchanged.
+	plain, _ := url.Parse(execURL("http://h", "/p", []string{"true"}, ExecStreamOptions{}, ""))
+	if have := plain.Query().Get("org"); have != "" {
+		t.Errorf("org = %q on an unnarrowed client, want absent", have)
 	}
 }

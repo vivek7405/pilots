@@ -303,6 +303,14 @@ this was written on:
 | `192.168.29.207` (this host's LAN address) | 200 |
 | `192.168.124.1` (the libvirt bridge) | 200 |
 
+**`PILOT_FLEET_KEY` has to be on every host, or service secrets do not work
+at all.** It is what seals `secret_env` before the row is written, and a row
+replicates to every host, so a host without the key refuses the write rather
+than storing plaintext. A service create or patch carrying `secret_env` on a
+host with no key answers 400 saying so. The Variables tab in the dashboard is
+the only way a repo-connected service can be given a secret, since a push
+applies none, so an unset key is not a corner case.
+
 `local-host.sh` derives the address rather than hardcoding one -- the source
 address the kernel would use to leave the box, then any global address if there
 is no default route -- and `local-s3.sh` listens on `0.0.0.0` precisely so that
@@ -464,11 +472,13 @@ The routes worth opening once it is up:
 
 | Route | What it is |
 |---|---|
-| `/` | the overview: services grouped by app, sandboxes, quota, hosts |
-| `/services` | every service with its status and last deploy |
-| `/services/new` | how a service gets made, and why the browser cannot make one |
-| `/machines` | every machine, with resume-tier chips and a filter |
-| `/machines/<id>/terminal` | an interactive shell on that machine |
+| `/` | your apps, one card each with a thumbnail of its canvas |
+| `/apps/<app>` | one app's canvas: its services as cards, an arrow from each to what it dials; click a card for its panel |
+| `/services/new` | point pilots at a GitHub repository and deploy it to a URL |
+| `/sandboxes` | every sandbox, with a filter, a terminal action per row, and a create button |
+| `/machines/<id>` | one sandbox or instance: its facts, logs, an inline terminal and its snapshots |
+| `/machines/<id>/terminal` | the same shell, full screen |
+| `/logs` | every running instance's console in one table, filterable by service and instance |
 
 **The terminal needs a golden rootfs built after the `tty` exec-stream change.**
 It runs the shell on a pseudo-terminal through `tty=true`, which the guest
@@ -487,6 +497,24 @@ Without `PILOTS_E2E_FULL=1` it runs the process-only half and skips everything
 that boots a machine, which on a Firecracker host is most of what you want. The
 `POST /v1/plan` cases are in that half: a tar in, a plan out, no Firecracker
 needed, so the whole resolution ladder is asserted on any machine.
+
+Three more cases are in that half, and all three are about a route rather than
+a guest:
+
+- A `{repo, ref}` body to `POST /v1/plan` or `POST /v1/builds` on a fleet with
+  no GitHub App is 503 `not_configured` and the refusal names the tar. The
+  positive path needs a real App and lives in the fleet gate's section 21b,
+  against `scripts/cluster/fake-github.py`.
+- A `secret_env` patch is 200 and no answer carries the value. It runs against
+  a real hostd process on purpose: the Go tests build their own `api.Deps` with
+  a fake key, so they exercise the field while leaving the wiring untested,
+  which is exactly how the field went unset in `main.go`.
+- An admin key naming `?org=` creates a service in that org, cannot see it when
+  narrowed elsewhere, and finds it in that org's list.
+
+Under `PILOTS_E2E_FULL=1` the multi-service app also asserts that `web`'s
+`depends_on` reads back as `db`, derived from the `<name>.internal` address in
+its environment with the variable itself in no answer.
 
 **The agent gate needs npm registry egress FROM THE GUEST.** Under
 `PILOTS_E2E_FULL=1` it builds the webjs fixture for real, which runs

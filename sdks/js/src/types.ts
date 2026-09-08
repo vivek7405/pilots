@@ -159,6 +159,13 @@ export interface Service {
   id: string
   name: string
   app?: string
+  /**
+   * The sibling services in this app whose `<name>.internal` address this
+   * service's environment references. Derived by hostd on every read from
+   * both halves of the environment and stored nowhere, so it says what the
+   * service is configured to dial right now.
+   */
+  depends_on?: string[]
   replicas: number
   knobs: Knobs
   health?: HealthCheck
@@ -174,6 +181,19 @@ export interface Service {
   branch?: string
   autodeploy: boolean
   created_at: number
+}
+
+/**
+ * The body `POST /v1/plan` and `POST /v1/builds` accept in place of a tar: a
+ * repository the fleet's GitHub App is installed on, at a ref. The host
+ * fetches the bytes itself, through the path a push takes, so no client has to
+ * hold them.
+ */
+export interface RepoRef {
+  /** owner/name */
+  repo: string
+  /** branch, tag or sha */
+  ref: string
 }
 
 export interface CreateServiceRequest {

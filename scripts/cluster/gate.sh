@@ -2113,6 +2113,21 @@ systemctl restart hostd" >/dev/null 2>&1
     echo "$n"
   }
 
+  # journal_grep_build <ip> <needle> -- the build id on the LAST line matching
+  # the needle on ONE host. Distinct from journal_count because a refusal's
+  # whole value is that it is readable, and reading it needs the id rather
+  # than a count.
+  #
+  # One host, named by the caller, because a refusal from the build route was
+  # made by the host that served the request, and a push's refusal was made by
+  # whichever host the delivery elected. Searching every host would find the
+  # other one's and read back a log that happens to say the same thing.
+  journal_grep_build() {
+    local ip=$1 needle=$2 line
+    line=$($SSH "root@$ip" "journalctl -u hostd --since '${GH_SINCE}' --no-pager 2>/dev/null | grep '${needle}' | tail -1" 2>/dev/null)
+    printf '%s' "$line" | grep -o 'build=[^ ]*' | tail -1 | cut -d= -f2
+  }
+
   # The service a push deploys into. No health of its own, so the plan's is
   # what gets recorded, which is the other half of this section.
   GH_SVC=$(api "${LIVE_IPS[0]}" POST /v1/services \
@@ -2133,7 +2148,7 @@ systemctl restart hostd" >/dev/null 2>&1
     && ok "a push to a repo with NO Dockerfile deployed; release ${GH_REL0:-none} -> ${GH_REL1}" \
     || bad "the push never produced a new release (still ${GH_REL0:-none})"
 
-  GH_PLANNED=$(journal_count 'planned a push')
+  GH_PLANNED=$(journal_count 'planned a repository')
   [ "$GH_PLANNED" = 1 ] \
     && ok "exactly one host planned it" \
     || bad "${GH_PLANNED} of ${#LIVE_IPS[@]} hosts planned the same push; the delivery owner is not exclusive"
@@ -2158,14 +2173,14 @@ print(h.get('path', ''))
   deliver workspace-app
   sleep 20
 
-  GH_REFUSED=$(journal_count 'refused a push')
+  GH_REFUSED=$(journal_count 'refused a build from a repository')
   [ "$GH_REFUSED" = 1 ] \
     && ok "exactly one host refused the two-app repo" \
     || bad "${GH_REFUSED} of ${#LIVE_IPS[@]} hosts logged a refusal"
 
   GH_CODE=""
   for ip in "${LIVE_IPS[@]}"; do
-    LINE=$($SSH "root@$ip" "journalctl -u hostd --since '${GH_SINCE}' --no-pager 2>/dev/null | grep 'refused a push' | tail -1" 2>/dev/null)
+    LINE=$($SSH "root@$ip" "journalctl -u hostd --since '${GH_SINCE}' --no-pager 2>/dev/null | grep 'refused a build from a repository' | tail -1" 2>/dev/null)
     [ -n "$LINE" ] && GH_CODE="$LINE" && break
   done
   case "$GH_CODE" in
@@ -2192,6 +2207,98 @@ print(h.get('path', ''))
   [ "$GH_REL3" = "$GH_REL2" ] \
     && ok "the refused service did not deploy anything" \
     || bad "the refused push deployed anyway: ${GH_REL2:-none} -> ${GH_REL3}"
+
+  say "21b. A {repo, ref} body plans and builds through the same App the push uses"
+  # The other half of the same machinery, reached from the front instead of
+  # from a delivery. The dashboard holds a GitHub App credential and no
+  # repository bytes, so both build routes take a repository by NAME and hostd
+  # fetches it through the App -- the identical Stage and ContextOf a push
+  # runs. The e2e battery can only assert the refusal on a fleet with no App;
+  # the positive path needs a real App, which is what the stand-in is, so it
+  # is here.
+
+  GH_PLAN=$(api "${LIVE_IPS[0]}" POST /v1/plan \
+    '{"repo":"gate/webjs-app","ref":"abc1234"}' 2>/dev/null)
+  GH_FW=$(printf '%s' "$GH_PLAN" | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print('')
+    raise SystemExit
+det = d.get('detected') or [{}]
+print(det[0].get('framework', ''))
+" 2>/dev/null)
+  [ "$GH_FW" = "webjs" ] \
+    && ok "POST /v1/plan named a repository and planned it: framework webjs" \
+    || bad "the {repo, ref} plan answered framework '${GH_FW}': ${GH_PLAN:0:200}"
+
+  # The build. The id comes back in a header before the stream starts, and the
+  # log route replays what the build recorded, so the two together prove the
+  # job was real rather than a 200 with an empty body.
+  GH_HDR=$(mktemp)
+  GH_STREAM=$(curl -sf -m 900 -D "$GH_HDR" -X POST "http://${LIVE_IPS[0]}:8080/v1/builds" \
+    -H "$AUTH" -H 'Content-Type: application/json' \
+    -d '{"repo":"gate/webjs-app","ref":"abc1234"}' 2>/dev/null)
+  GH_BID=$(grep -i '^X-Pilot-Build-Id:' "$GH_HDR" | awk '{print $2}' | tr -d '\r')
+  rm -f "$GH_HDR"
+  [ -n "$GH_BID" ] \
+    && ok "the build from a repository answered X-Pilot-Build-Id ${GH_BID}" \
+    || bad "a {repo, ref} build returned no build id: $(printf '%s' "$GH_STREAM" | tail -2)"
+
+  case "$(printf '%s' "$GH_STREAM" | tail -1)" in
+    *'"result"'*) ok "the stream ends with an image id" ;;
+    "") bad "the {repo, ref} build streamed nothing" ;;
+    *) bad "the build did not succeed: $(printf '%s' "$GH_STREAM" | tail -1)" ;;
+  esac
+
+  if [ -n "$GH_BID" ]; then
+    GH_REPLAY=$(curl -sf -m 60 "http://${LIVE_IPS[0]}:8080/v1/builds/${GH_BID}/logs" -H "$AUTH" 2>/dev/null | wc -l | tr -d '[:space:]')
+    [ "${GH_REPLAY:-0}" -gt 0 ] \
+      && ok "its log replays at GET /v1/builds/${GH_BID}/logs (${GH_REPLAY} lines)" \
+      || bad "the build's log is empty, so nobody can read what it did"
+  fi
+
+  # And the refusal, from the front door. A repository the planner will not
+  # build is a 400 carrying the planner's own code, and the reason is readable
+  # at the build's log exactly as a push's refusal is.
+  GH_MULTI_HDR=$(mktemp)
+  GH_MULTI=$(curl -s -m 300 -o "${GH_TMP}/multi.json" -D "$GH_MULTI_HDR" -w '%{http_code}' \
+    -X POST "http://${LIVE_IPS[0]}:8080/v1/builds" \
+    -H "$AUTH" -H 'Content-Type: application/json' \
+    -d '{"repo":"gate/workspace-app","ref":"abc1234"}' 2>/dev/null)
+  GH_MULTI_BID=$(grep -i '^X-Pilot-Build-Id:' "$GH_MULTI_HDR" | awk '{print $2}' | tr -d '\r')
+  rm -f "$GH_MULTI_HDR"
+  [ "$GH_MULTI" = "400" ] \
+    && ok "a two-app repository is a 400 from the build route" \
+    || bad "the two-app repository answered HTTP ${GH_MULTI}: $(head -c 200 "${GH_TMP}/multi.json" 2>/dev/null)"
+  case "$(cat "${GH_TMP}/multi.json" 2>/dev/null)" in
+    *plan_multi_service*) ok "the 400 carries plan_multi_service" ;;
+    *) bad "the 400 does not name the code: $(head -c 200 "${GH_TMP}/multi.json" 2>/dev/null)" ;;
+  esac
+
+  # The refusal is recorded under a build id even though no build ran, so a
+  # person reads the reason at the same route a failed build's log is at.
+  #
+  # The id comes from the RESPONSE HEADER when the route sent one, and only
+  # falls back to the journal when it did not. The header was already being
+  # captured and then thrown away, and it is the stronger assertion: it ties
+  # the refusal the caller was handed to the log that explains it, where a
+  # journal grep only proves that SOME host logged a refusal of that shape.
+  [ -n "$GH_MULTI_BID" ] \
+    && ok "the 400 carries a build id in X-Pilot-Build-Id" \
+    || bad "the 400 carried no X-Pilot-Build-Id, so a caller cannot find its log"
+  GH_RID="$GH_MULTI_BID"
+  [ -n "$GH_RID" ] || GH_RID=$(journal_grep_build "${LIVE_IPS[0]}" 'refused a build from a repository')
+  if [ -n "$GH_RID" ]; then
+    case "$(curl -sf -m 30 "http://${LIVE_IPS[0]}:8080/v1/builds/${GH_RID}/logs" -H "$AUTH" 2>/dev/null | tail -1)" in
+      *plan_multi_service*) ok "the refused build's log carries the reason" ;;
+      "") bad "the refused build ${GH_RID} has an empty log" ;;
+      *) bad "the refused build's log does not name the code" ;;
+    esac
+  else
+    bad "no host logged a refusal for the {repo, ref} build"
+  fi
 
   # Disarm. The rig goes back to having no GitHub App, so nothing below and
   # no later run inherits a fleet pointed at a stand-in that is gone.

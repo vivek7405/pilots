@@ -44,6 +44,15 @@ export interface FleetData {
   apiKeyRows: { hash: string; org_id: string; scopes: string[]; revoked_at?: string }[];
   execFrames: FakeExecFrame[];
   logLines: string[];
+  /** What `planRepo` answers with, or the error it throws. */
+  plan: unknown;
+  /** When set, each `planRepo` call shifts one answer off this first. */
+  planQueue: unknown[];
+  planError: Error | null;
+  /** Thrown by `services.deploy` when set, so a 422 path can be driven. */
+  deployError: Error | null;
+  /** What `builds.logs` yields, one object per line. */
+  buildLines: unknown[];
   /** Records what `execStream` was asked for, so a test can assert stdin=false. */
   lastExec: { id: string; argv: string[]; opts: Record<string, unknown> } | null;
   /** Bytes a caller wrote to the stream's stdin, newest last. */
@@ -57,6 +66,8 @@ export interface FleetData {
    * would close the socket before a test could type into it.
    */
   execHold: boolean;
+  /** Set to make `services.create` refuse, the way a taken name does. */
+  createServiceError: Error | null;
 }
 
 export interface FakeFleet {
@@ -92,13 +103,24 @@ export function makeFakeFleet(): FakeFleet {
     execFrames: [],
     logLines: [],
     lastExec: null,
+    plan: null,
+    planQueue: [],
+    planError: null,
+    deployError: null,
+    buildLines: [],
     execStdin: [],
     execResizes: [],
     execHold: false,
+    createServiceError: null,
   };
 
   const reset = () => {
     calls.length = 0;
+    state.plan = null;
+    state.planQueue.length = 0;
+    state.planError = null;
+    state.deployError = null;
+    state.buildLines.length = 0;
     state.machines.length = 0;
     state.services.length = 0;
     state.volumes.length = 0;
@@ -111,6 +133,7 @@ export function makeFakeFleet(): FakeFleet {
     state.execStdin.length = 0;
     state.execResizes.length = 0;
     state.execHold = false;
+    state.createServiceError = null;
   };
 
   const notFound = (what: string) => {
@@ -124,6 +147,36 @@ export function makeFakeFleet(): FakeFleet {
     calls,
     data: state,
     reset,
+
+    /** `fleetAs(org)`: records the org and returns this same fake. */
+    as: (org: string) => {
+      record('as', org);
+      return fleet;
+    },
+    planRepo: async (ref: unknown, opts: unknown) => {
+      record('planRepo', ref, opts);
+      if (state.planError) throw state.planError;
+      if (state.planQueue.length > 0) return state.planQueue.shift();
+      if (!state.plan) throw new Error('fake fleet: set data.plan first');
+      return state.plan;
+    },
+    builds: {
+      createFromRepo: async (ref: unknown, opts: unknown) => {
+        record('builds.createFromRepo', ref, opts);
+        return { buildId: 'bld-fake', close: async () => {}, lines: [] };
+      },
+      logs: async (id: string, opts: unknown) => {
+        record('builds.logs', id, opts);
+        const lines = [...state.buildLines];
+        return {
+          buildId: id,
+          close: async () => {},
+          async *[Symbol.asyncIterator]() {
+            for (const l of lines) yield l;
+          },
+        };
+      },
+    },
 
     // `Http` is reached directly for the two list calls that need `?org=`; see
     // modules/fleet/client.server.ts for why.
@@ -142,6 +195,14 @@ export function makeFakeFleet(): FakeFleet {
     },
 
     machines: {
+      /** A fresh sandbox, as `POST /v1/machines` answers: named, creating, owned. */
+      create: async (req: unknown) => {
+        record('machines.create', req);
+        const id = `m-new-${state.machines.length + 1}`;
+        const row = { id, name: `fresh-box-${state.machines.length + 1}`, state: 'creating', org_id: '', url: '' } as unknown as Machine;
+        state.machines.push(row);
+        return row;
+      },
       list: async () => {
         record('machines.list');
         return state.machines;
@@ -207,15 +268,22 @@ export function makeFakeFleet(): FakeFleet {
       },
       create: async (req: unknown) => {
         record('services.create', req);
+        if (state.createServiceError) throw state.createServiceError;
         return state.services[0];
       },
       patch: async (id: string, req: unknown) => {
         record('services.patch', id, req);
         const s = state.services.find((x) => x.id === id) ?? notFound('service');
-        return Object.assign(s as Service, req);
+        // hostd accepts env and secret_env on a patch and returns NEITHER on
+        // any read (serviceToAPI drops both halves), so the fake must not
+        // echo them either, or a page that serialises a service leaks a value
+        // the real API would never have sent.
+        const { env: _env, secret_env: _secret, ...rest } = (req ?? {}) as Record<string, unknown>;
+        return Object.assign(s as Service, rest);
       },
       deploy: async (id: string, req: unknown) => {
         record('services.deploy', id, req);
+        if (state.deployError) throw state.deployError;
         return (state.releases[id] ?? [])[0];
       },
       rollback: async (id: string) => {

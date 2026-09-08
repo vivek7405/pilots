@@ -46,6 +46,16 @@ func HasScope(ctx context.Context, want string) bool {
 	return rankOf(p.Scopes) >= scopeRank[want] && scopeRank[want] != 0
 }
 
+// WithAdminPrincipal returns a context carrying an admin-scoped caller.
+//
+// The principal is unexported, so this is how a caller outside this package
+// builds the context a handler is handed in production: the mesh path above
+// uses it, and so does anything mounted behind this middleware that has to
+// construct the same value (internal/detect's handler, in its tests).
+func WithAdminPrincipal(ctx context.Context) context.Context {
+	return context.WithValue(ctx, principalKey, principal{Scopes: []string{ScopeAdmin}})
+}
+
 // IsAdmin reports whether the caller may act across orgs. Admin is the ops
 // org's key: it sees every row, including rows created before tenancy
 // existed, and it is the only scope that may mint or revoke a key.
@@ -177,9 +187,7 @@ func WithAuth(d Deps, next http.Handler) http.Handler {
 		// the fleet.
 		if d.PeerToken != "" && r.Header.Get(forwardedHeader) != "" &&
 			subtle.ConstantTimeCompare([]byte(key), []byte(d.PeerToken)) == 1 {
-			ctx := context.WithValue(r.Context(), principalKey,
-				principal{Scopes: []string{ScopeAdmin}})
-			next.ServeHTTP(w, r.WithContext(ctx))
+			next.ServeHTTP(w, r.WithContext(WithAdminPrincipal(r.Context())))
 			return
 		}
 

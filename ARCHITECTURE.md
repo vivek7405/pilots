@@ -376,10 +376,16 @@ A release that never becomes healthy is **422 `health_gate_failed`**, not a
 
 Every read is scoped to the caller's org. An id another org owns answers
 **404**, never 403: existence must not leak across tenants. An `admin` key
-sees every row and may narrow a list with `?org=`; a non-admin's `?org=` is
-ignored rather than refused. Creates take the org from the authenticated key
-and never from the request body. A create refused by a quota answers **429**
-with `{"error":"quota exceeded","quota","limit","used"}`.
+with no `?org=` sees every row; a non-admin's `?org=` is ignored rather than
+refused. An `admin` key that DOES name `?org=` **acts as that org and is
+narrowed to it**: the rows it creates are owned by that org, the quota it
+consumes is that org's, and every read it makes answers as that org's own key
+would, unowned rows included in neither. That is what lets one operator
+process serve a browser session belonging to somebody else's org without
+holding that org's key, and it is the trust an admin key already carries when
+it mints one. Creates take the org from the authenticated key, or from `?org=`
+on an admin key, and never from the request body. A create refused by a quota
+answers **429** with `{"error":"quota exceeded","quota","limit","used"}`.
 
 A host's own calls to a peer's internal listener — the arbiter waking,
 suspending or redeploying a machine another host holds — carry the fleet peer
@@ -542,7 +548,8 @@ runs the bootstrap. Rotation requires a re-seal sweep over the affected rows.
 `GET /health` · `POST /init {timestamp_nanos}` (sets CLOCK_REALTIME — kvm-clock
 covers MONOTONIC; without this poke a restored guest's TLS/cron/JS clocks are
 frozen at snapshot time) · `POST /exec` (buffered; `bash -c`; default user
-uid-1000 = `sprite`, home `/home/sprite`, Node 24 on PATH; root opt-in) ·
+uid-1000 = `pilot`, home `/home/pilot`, Node 24 on PATH; root opt-in; `sprite`
+is a second NAME for the same uid, see the compatibility note below) ·
 `GET /exec/stream` WS — binary frames, **byte 0: 1=stdout 2=stderr 3=exit
 (payload[0]=code)**; the verdict goes out as a text
 `{"type":"exit","exit_code":n}` FIRST and the binary `3` after it, because a
@@ -981,6 +988,17 @@ step out. The CLI, the MCP server, the dashboard and the GitHub push path
 all call it, so there is one copy of the rule and every caller sees it. A
 second copy in the CLI was invisible to three of those four.
 
+`POST /v1/plan` and `POST /v1/builds` also accept an `application/json` body
+of `{repo, ref}` in place of the tar. The host fetches and unpacks the ref
+through the fleet's GitHub App and plans it, using the same `Stage` and
+`ContextOf` in `internal/github` that a push runs, so **no client has to hold
+repository bytes** and there is one copy of the fetch, the root strip and the
+recipe placement. A fleet with no App answers 503 `not_configured` and names
+the tar. `GET /v1/services` derives each service's `depends_on` at read time,
+from the `<name>.internal` addresses in BOTH halves of its environment, and
+stores it nowhere: a name is not a value, and a `depends_on` column would be a
+column added to a populated table.
+
 Resolution order, first hit wins, per directory:
 1. A **compose file** at the root → the compose planner compiles it, with
    the tar's own `.env` as the interpolation map.
@@ -1184,14 +1202,32 @@ writes cannot hang on a process holding an open stdin.
 
 Three things together are what make a hand-built sprites client work
 unchanged. `GET /v1/sprites/:name/exec` is the name-keyed route such a client
-constructs itself, with the key in an `Authorization` header. The guest is the
-sprites environment: user `sprite`, home `/home/sprite`, Node 24 on `PATH`, so
-an exec that names no user lands where the client expects. And
+constructs itself, with the key in an `Authorization` header. The guest
+ANSWERS to the sprites environment: `sprite` resolves to uid 1000 with Node 24
+on `PATH`, so an exec that names it lands where the client expects. And
 `@pilots/sdk/sprites-compat` is the drop-in adapter for anyone who would rather
 change one import line: a sprite's `id` is the machine's NAME, because a
 sprites consumer persists that id and hands it back as a path segment to a
 name-keyed route, and `machineId` carries the `m-…` id for anything going
 through the typed client.
+
+**The default identity is `pilot`, and `sprite` is only an alias.** The guest
+account is `pilot` at uid 1000, home `/home/pilot`, passwordless sudo; an exec
+naming no user runs as that, and every prompt a pilots customer sees reads
+`pilot@instance`. `sprite` is a SECOND NAME for the same uid and the same home
+(`useradd -o -u 1000 -d /home/pilot sprite`), and `/home/sprite` is a symlink
+to `/home/pilot`. Two lines, and they keep the migration promise above
+literally true in both directions: an alias covers the name a client sends as
+a `user`, and the symlink covers the one it sends as a `cwd`.
+
+The asymmetry is deliberate and worth stating, because the obvious tidy-up is
+wrong. The route and the alias are spelled in a competitor's vocabulary
+BECAUSE their only job is to match strings a foreign client already hardcodes.
+Renaming `/v1/sprites/:name/exec` to `/v1/pilots/…` would not rebrand the
+feature, it would delete it: no sprites client could reach the renamed path,
+and pilots-native clients never used it — they call `/v1/machines/:id/exec`.
+So the foreign spelling stays exactly where a foreigner looks for it, and
+nowhere else. Nothing a pilots user is shown carries it.
 
 ---
 
@@ -1274,7 +1310,8 @@ per-host resource counts, cgroup containment, Firecracker API exhaustion,
 orphan pile-up) is in `scripts/cluster/gate.sh` as numbered sections.
 The battery's exec-stream section drives the
 frames, both key carriers, the sprites alias, the `logs?follow` tail across a
-suspend, and the guest contract (`sprite`, `/home/sprite`, Node 24) through
+suspend, and the guest contract (`pilot`, `/home/pilot`, Node 24, plus the
+`sprite` alias resolving to the same uid and home) through
 Node's global `WebSocket`; the gate streams the same command through every
 host that does not own the machine, by id and through the alias. Its edge
 section drives a machine that echoes what reached it, so a forged

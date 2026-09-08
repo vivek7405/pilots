@@ -47,17 +47,38 @@ RUN install -d -m0700 /etc/pilot
 COPY eth0.network /etc/systemd/network/10-eth0.network
 RUN systemctl enable systemd-networkd
 
-# The sandbox contract: user `sprite` at uid 1000, home /home/sprite,
+# The sandbox contract: user `pilot` at uid 1000, home /home/pilot,
 # passwordless sudo. Every client is written against it -- the dashboard's
-# console sends user: 'sprite' on every command, and both SDK READMEs document
-# /home/sprite/app as the working directory.
+# console sends user: 'pilot' on every command, and both SDK READMEs document
+# /home/pilot/app as the working directory.
+#
+# `sprite` is a SECOND NAME for the same uid, not a second account: -o allows
+# the duplicate uid, -g 1000 puts it in pilot's group rather than minting a
+# second one, -d points it at the same home and -M declines to create another,
+# so the two names share one identity, one group, one home and one set of
+# files. Without -g 1000 the alias lands in a group of its own, and a file a
+# migrating client writes carries a group the pilot user is not in. It exists only so a hand-built
+# sprites.dev client that passes user: 'sprite' still resolves, which is half
+# of the migration promise in ARCHITECTURE.md; the other half is the
+# /v1/sprites route. Nothing pilots shows a customer uses this name -- the
+# prompt reads pilot@instance -- and `pilot` is created FIRST so it is the one
+# a uid-to-name lookup returns.
+#
+# The /home/sprite symlink is the same promise for PATHS rather than names. A
+# sprites client hardcodes `cwd: '/home/sprite/app'`, and an account alias does
+# nothing for a string the client sends as a directory: without the link that
+# exec fails on a path that does not exist. Relative on purpose, so it survives
+# being packed into a rootfs and mounted anywhere.
 #
 # Ubuntu 24.04's base image already occupies uid 1000 with an `ubuntu` user,
 # and every exec defaults to uid 1000, so free it first.
 RUN userdel -r ubuntu 2>/dev/null || true; \
-    useradd -m -u 1000 -s /bin/bash sprite \
-    && echo 'sprite ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-sprite \
-    && chmod 0440 /etc/sudoers.d/90-sprite
+    useradd -m -u 1000 -s /bin/bash pilot \
+    && useradd -o -u 1000 -g 1000 -d /home/pilot -M -s /bin/bash sprite \
+    && echo 'pilot ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/90-pilot \
+    && echo 'sprite ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers.d/90-pilot \
+    && chmod 0440 /etc/sudoers.d/90-pilot \
+    && ln -s pilot /home/sprite
 
 # Trim the boot: wait-online stalls ~2 minutes on a link that is already
 # statically configured; multi-user is the target; a passwordless root makes

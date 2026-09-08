@@ -144,7 +144,7 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	// A service's replicas are machines, so a create is admitted against the
 	// same limits a create of that many machines would be. A replica boots
 	// with the manager's defaults, which is where these numbers come from.
-	req.OrgID = OrgID(r.Context())
+	req.OrgID = actingOrg(r)
 	if !d.checkQuota(w, r, quota.Delta{
 		Machines: req.Replicas, VCPUs: req.Replicas, MemMiB: req.Replicas * 512,
 	}) {
@@ -255,15 +255,23 @@ func (d Deps) handleListServices(w http.ResponseWriter, r *http.Request) {
 		mounts[b.ServiceID] = b.VolumeID
 	}
 
+	// One pass over the same rows, grouped by owner and app, and the owner
+	// each row resolved to comes back with the groups: the filter below reads
+	// that map rather than asking the tenancy store again per row, so a list
+	// costs one lookup per row, not two. See depends.go.
+	groups, owners := d.siblingsOf(r.Context(), rows)
+
 	org, narrow := listOrg(r)
 	out := make([]Service, 0, len(rows))
 	for _, svc := range rows {
-		owner, ok := d.visible(r, svc.ID, org, narrow)
-		if !ok {
+		// The same rule `visible` applies, over the owners already resolved.
+		owner, found := owners[svc.ID]
+		if !visibleTo(owner, found, org, narrow) {
 			continue
 		}
 		row := d.serviceToAPI(svc, owner)
 		row.VolumeID = mounts[svc.ID]
+		row.DependsOn = d.dependsOn(svc, groups[siblingKey{org: owner, app: svc.App}])
 		out = append(out, row)
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -282,6 +290,7 @@ func (d Deps) handleGetService(w http.ResponseWriter, r *http.Request) {
 	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
 	out := d.serviceToAPI(*svc, owner)
 	out.VolumeID = volumeID
+	d.withEdges(r.Context(), &out, *svc, owner)
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -339,6 +348,7 @@ func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
 	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
 	out := d.serviceToAPI(*svc, owner)
 	out.VolumeID = volumeID
+	d.withEdges(r.Context(), &out, *svc, owner)
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -574,6 +584,7 @@ func (d Deps) handlePromote(w http.ResponseWriter, r *http.Request) {
 	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
 	out := d.serviceToAPI(*svc, owner)
 	out.VolumeID = volumeID
+	d.withEdges(r.Context(), &out, *svc, owner)
 	writeJSON(w, http.StatusOK, out)
 }
 

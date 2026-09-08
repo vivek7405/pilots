@@ -59,31 +59,39 @@ suite('app-nav', () => {
   });
 
   test('the current attribute seeds the first paint', async () => {
-    history.replaceState({}, '', '/services');
-    const el = await mount('/services');
-    assert.equal(lit(el), '/services');
+    history.replaceState({}, '', '/sandboxes');
+    const el = await mount('/sandboxes');
+    assert.equal(lit(el), '/sandboxes');
   });
 
   test('a soft navigation moves the highlight', async () => {
-    history.replaceState({}, '', '/services');
-    const el = await mount('/services');
-    await softNavigate(el, '/machines');
-    assert.equal(lit(el), '/machines', 'the highlight followed the router, not the server render');
+    history.replaceState({}, '', '/');
+    const el = await mount('/');
+    await softNavigate(el, '/sandboxes');
+    assert.equal(lit(el), '/sandboxes', 'the highlight followed the router, not the server render');
   });
 
-  test('a section owns its subroutes, and Overview does not own everything', async () => {
-    history.replaceState({}, '', '/services');
-    const el = await mount('/services');
+  test('a section owns its subroutes, and Apps does not own everything', async () => {
+    history.replaceState({}, '', '/');
+    const el = await mount('/');
 
+    await softNavigate(el, '/apps/gallery');
+    assert.equal(lit(el), '/', 'an app page keeps Apps lit');
+
+    // A service's page belongs to Apps, which is where the service was found.
     await softNavigate(el, '/services/svc-1');
-    assert.equal(lit(el), '/services', 'a detail page keeps its section lit');
+    assert.equal(lit(el), '/');
 
+    // A sandbox keeps its /machines/<id> address, so Sandboxes has to own it
+    // explicitly or the nav goes dark the moment one is opened.
     await softNavigate(el, '/machines/m-1');
-    assert.equal(lit(el), '/machines');
+    assert.equal(lit(el), '/sandboxes');
+    await softNavigate(el, '/machines/m-1/terminal');
+    assert.equal(lit(el), '/sandboxes');
 
     // '/' is matched exactly, or it would be lit on every page in the app.
-    await softNavigate(el, '/');
-    assert.equal(lit(el), '/');
+    await softNavigate(el, '/usage');
+    assert.equal(lit(el), null, 'an account chore lights nothing in the product nav');
   });
 
   test('the nav names itself for a screen reader', async () => {

@@ -228,11 +228,48 @@ is what the kit's dialog scroll lock needs from a fixed element: without it the
 header widens with the viewport when a modal hides the scrollbar and its
 contents slide sideways.
 
-**The primary nav holds product nouns; the identity menu holds account
-chores.** Overview, Services and Machines are the nav. Usage, Tokens, Team and
-Sign out are in the account menu. Volumes and Domains stay routable and are
-reached from the service they belong to. A flat list of seven equal items said
-nothing about what the product is for.
+**The shell is a left rail of product nouns; the account chores sit under
+them.** Apps, Sandboxes and Logs are the primary nav, run down a
+fixed left sidebar with the identity menu pinned at the bottom. Usage, Tokens
+and Team are the secondary group in the same rail. Storage and Domains stay
+routable and are reached from the service they belong to. A flat top bar of
+seven equal items said nothing about what the product is for.
+
+**The dashboard speaks the user's words, from one module.** Every noun a page
+shows comes from `lib/vocabulary.ts`: app, service, instance, sandbox,
+storage, deployment, snapshot, image. Engine words (machine, volume, fleet,
+release, replica, host, exec, rootfs) never reach a template, and
+`test/ui/vocabulary.test.ts` fails on any that do. A person deploying a web
+app does not have a machine.
+
+**Every section heading carries one sentence.** `sectionHeading(title,
+explanation)` takes both on purpose, and the sentence says what the thing on
+the screen is for, the way the reference product never skips it. A heading
+with no sentence assumes the reader already understands the engine.
+
+**The canvas is drawn by the server, and a tab is a URL.** An app's canvas is
+a pure layout (`modules/apps/utils/layout.ts`) rendered as positioned cards
+and an SVG of arrows, so it exists at first paint and with scripting off;
+the client component only scales it and moves focus. A service panel's tab
+is `?tab=`, not `<ui-tabs>`: a reload restores it, only the selected tab
+renders, and the terminal emulator is not shipped to someone reading
+settings.
+
+**Metrics show only what is measured.** pilots meters instance-seconds for
+billing and keeps no CPU or memory series per service, so the Metrics tab
+shows each instance's allotment and says "Not recorded yet" in the chart
+cards rather than drawing an empty grid under a toolbar for data that does
+not exist.
+
+**A terminal names NO user, and that is deliberate.** Which account exists
+depends on which generation of image answers: the current golden rootfs has
+`pilot` at uid 1000, one built before the rename has `sprite`, and an image
+from someone's Dockerfile very often has neither. Naming any of them here
+means guessing, and a wrong guess fails closed on "user does not exist". The
+guest agent resolves its own default -- `pilot`, then `sprite`, then the USER
+the image declared -- so it is the only party that can answer, and it does.
+The Run-button console that hardcoded a user is gone; there is one terminal
+surface, `<machine-terminal>`.
 
 **The active nav link is computed in the browser, not on the server.** The root
 layout is preserved across a client-router navigation, so a server-rendered
@@ -253,7 +290,8 @@ parameter once, publishes one toast, and strips it with `history.replaceState`
 so a reload does not repeat it. The keys are a CLOSED SET in
 `components/flash-toast.ts`: a message interpolated from the URL is a message
 an attacker writes into a surface the visitor trusts. Add a key there rather
-than putting prose in the query string.
+than putting prose in the query string. `building`, `created` and
+`variables-saved` are the ones the rebuild added.
 
 **Colours are tokens, with no exception for a file the kit wrote.** The kit's
 `sonner.ts` shipped `text-emerald-500`, `text-sky-500` and `text-amber-500`;
@@ -303,11 +341,12 @@ listeners are on `document`, which is the case the skill sanctions: a global
 shortcut has no element to dispatch from, and neither handler reads markup
 another component rendered.
 
-**No control for something the engine does not enforce.** Two absences in this
-app are deliberate and both are recorded where they would otherwise be
-questioned. `/services/new` has no create button, because `POST /v1/services`
-would accept a service with no release and hostd serves no `DELETE` for one, so
-the row could never be removed. `/keys` has no expiry, because nothing in
+**No control for something the engine does not enforce.** One absence in this
+app is deliberate and recorded where it would otherwise be questioned. The
+create on `/services/new` exists because it creates a service with a build in
+flight and a connected repository, retried by a push or by `pilot deploy`,
+which is the same leftover a CLI deploy leaves; it used to be withheld while
+a create could only make a row nothing could remove. `/keys` has no expiry, because nothing in
 hostd's schema or its verification path reads a date, so an expiry stored here
 would be a date nobody enforces and the token would go on working past it. A
 security control that does not control anything is worse than an absent one.

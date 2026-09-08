@@ -3,10 +3,13 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/metrics"
@@ -44,7 +47,8 @@ type BuildRunner interface {
 // the build finishes.
 const ndjson = "application/x-ndjson"
 
-// handleBuild accepts a context tar and streams the build.
+// handleBuild accepts a context tar, or a repository to fetch one from, and
+// streams the build.
 //
 // The response starts before the build does. That is what makes the stream
 // useful -- a client watching a ten-minute build needs the first step's output
@@ -52,6 +56,10 @@ const ndjson = "application/x-ndjson"
 // code is decided before the outcome is known, so it is always 200 and the
 // LAST line of the stream is what says whether the build worked. A line
 // carrying `result` is a success; one carrying `error` is not.
+//
+// A JSON body is the exception: it names a repository, so the fetch and the
+// plan both happen BEFORE any of that, and their failures are ordinary status
+// codes. Nothing has been streamed yet when they are decided.
 // MaxBuildContext bounds an upload. Exported because internal/detect serves
 // POST /v1/plan under the same ceiling, from the same tar.
 //
@@ -83,7 +91,19 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	//
 	// Taken before the context is spooled: refusing after accepting a 2 GiB
 	// upload would make the limit cost more than the build it refused.
-	org := OrgID(r.Context())
+	// The repository body is read and refused BEFORE anything is recorded: the
+	// tenancy row below gossips fleet-wide, and a bad body, a fleet with no
+	// App or a key that may not name a repository must not each leave one.
+	var ref RepoRef
+	named := isJSONBody(r)
+	if named {
+		var ok bool
+		if ref, ok = d.parseRepoRef(w, r); !ok {
+			return
+		}
+	}
+
+	org := actingOrg(r)
 	limits := quota.For(r.Context(), d.Store, org)
 	if used, ok := d.BuildGate.Acquire(org, limits.MaxBuilds); !ok {
 		// The build gate is the one refusal that does not go through
@@ -97,6 +117,45 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	}
 	defer d.BuildGate.Release(org)
 
+	// The build's owner, recorded before ANY branch below can hand the id out.
+	// GET /v1/builds/{id}/logs is scoped by tenancy, so a refusal recorded
+	// under an id with no owner row is readable by nobody it was for. Moved
+	// above the two branches rather than duplicated into each: the repository
+	// branch records a refusal, and the refusal is the whole answer.
+	//
+	// This is the JOB id, which scopes the log route. The image the build
+	// produces has a second id, the rootfs build id, minted inside the
+	// builder; that one is what a deploy and a create name, and its owner is
+	// recorded in write below, on the first line that carries it, for the same
+	// reason: an id that escapes before its owner is written is an id anyone
+	// may boot.
+	if err := d.Store.PutTenancy(r.Context(), &state.Tenancy{
+		ID: id, OrgID: org, Kind: "build", CreatedAt: time.Now().Unix(),
+	}); err != nil {
+		WriteError(w, http.StatusInternalServerError, CodeInternal, "cannot record the build's owner: "+err.Error(),
+			NextInternal, nil)
+		return
+	}
+
+	// The id goes out BEFORE the repository branch: a refusal below is a 400
+	// with no id in the body, and the log it was recorded under is only
+	// reachable through this header. The tenancy row is already written, so
+	// the id is safe to hand out.
+	w.Header().Set("X-Pilot-Build-Id", id)
+
+	// A repository named rather than sent. The host fetches and plans it
+	// through the fleet's GitHub App, the path a push takes, so a client that
+	// holds no repository bytes can still build.
+	var contextTar io.ReadCloser
+	if named {
+		rc, ok := d.stageRepo(w, r, id, ref)
+		if !ok {
+			return
+		}
+		defer rc.Close()
+		contextTar = rc
+	}
+
 	// Spool the context to disk BEFORE writing a single byte of response.
 	//
 	// Not an optimisation -- a correctness fix. Go's server treats the request
@@ -108,47 +167,35 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	// A file rather than memory: a context is arbitrary user data, and holding
 	// it in RAM on a host that also runs other tenants' machines makes a large
 	// upload a memory-exhaustion lever.
-	spool, err := os.CreateTemp("", "pilot-build-context-*.tar")
-	if err != nil {
-		WriteError(w, http.StatusInternalServerError, CodeInternal, "cannot stage the build context: "+err.Error(),
-			NextInternal, nil)
-		return
-	}
-	defer func() {
-		spool.Close()
-		os.Remove(spool.Name())
-	}()
+	if contextTar == nil {
+		spool, err := os.CreateTemp("", "pilot-build-context-*.tar")
+		if err != nil {
+			WriteError(w, http.StatusInternalServerError, CodeInternal, "cannot stage the build context: "+err.Error(),
+				NextInternal, nil)
+			return
+		}
+		defer func() {
+			spool.Close()
+			os.Remove(spool.Name())
+		}()
 
-	if _, err := io.Copy(spool, http.MaxBytesReader(w, r.Body, MaxBuildContext)); err != nil {
-		WriteError(w, http.StatusBadRequest, CodeBadRequest, "reading the build context: "+err.Error(),
-			"the context is over 2 GiB or the upload was cut; add a .dockerignore", nil)
-		return
-	}
-	if _, err := spool.Seek(0, io.SeekStart); err != nil {
-		WriteError(w, http.StatusInternalServerError, CodeInternal, "cannot rewind the build context: "+err.Error(),
-			NextInternal, nil)
-		return
-	}
-
-	// Recorded BEFORE the id leaves this handler, in the header below and in
-	// the stream. This is the JOB id, which scopes the log route. The image
-	// the build produces has a second id, the rootfs build id, minted inside
-	// the builder; that one is what a deploy and a create name, and its owner
-	// is recorded in write below, on the first line that carries it, for the
-	// same reason: an id that escapes before its owner is written is an id
-	// anyone may boot.
-	if err := d.Store.PutTenancy(r.Context(), &state.Tenancy{
-		ID: id, OrgID: org, Kind: "build", CreatedAt: time.Now().Unix(),
-	}); err != nil {
-		WriteError(w, http.StatusInternalServerError, CodeInternal, "cannot record the build's owner: "+err.Error(),
-			NextInternal, nil)
-		return
+		if _, err := io.Copy(spool, http.MaxBytesReader(w, r.Body, MaxBuildContext)); err != nil {
+			WriteError(w, http.StatusBadRequest, CodeBadRequest, "reading the build context: "+err.Error(),
+				"the context is over 2 GiB or the upload was cut; add a .dockerignore", nil)
+			return
+		}
+		if _, err := spool.Seek(0, io.SeekStart); err != nil {
+			WriteError(w, http.StatusInternalServerError, CodeInternal, "cannot rewind the build context: "+err.Error(),
+				NextInternal, nil)
+			return
+		}
+		contextTar = spool
 	}
 
 	w.Header().Set("Content-Type", ndjson)
-	// The id in a header as well as the stream: a client that wants to reattach
-	// should not have to parse the body to learn what to reattach to.
-	w.Header().Set("X-Pilot-Build-Id", id)
+	// The id is already in the header (set above, before the repository
+	// branch) as well as in the stream: a client that wants to reattach should
+	// not have to parse the body to learn what to reattach to.
 	w.WriteHeader(http.StatusOK)
 
 	// Deliberately NOT the request context, for the build and for the owner
@@ -207,7 +254,7 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 		TS: time.Now().UnixMilli(),
 	})
 
-	buildID, err := d.Builds.StartBuild(bctx, id, spool, write)
+	buildID, err := d.Builds.StartBuild(bctx, id, contextTar, write)
 	if err == nil && ownerErr != nil {
 		err = fmt.Errorf("cannot record the image's owner: %w", ownerErr)
 	}
@@ -225,6 +272,124 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 		Step: id, Stream: "status", Line: "build succeeded",
 		Result: buildID, TS: time.Now().UnixMilli(),
 	})
+}
+
+// isJSONBody reports whether the body names a repository rather than carrying
+// a tar. The media type, not a sniff of the bytes: a tar whose first bytes
+// happen to look like JSON must not change which branch runs.
+func isJSONBody(r *http.Request) bool {
+	ct, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	return err == nil && ct == "application/json"
+}
+
+// stageRepo turns a RepoRef body into a build context, writing the refusal
+// itself when it cannot. Nothing has been streamed when it answers, so every
+// failure here is an ordinary status code rather than a line in a 200.
+// RepoSlug is the only shape a repository may take on the wire: `owner/name`,
+// each half a GitHub name, nothing else.
+//
+// The API is the trust boundary, not the dashboard. `ref.Repo` is interpolated
+// into `/repos/%s/installation` under the App JWT and into the tarball URL
+// under an installation token, so a `..`, a `?` or a `#` in it rewrites the
+// path or the query of a request made with the fleet's own credential.
+var RepoSlug = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$`)
+
+// parseRepoRef reads and validates the {repo, ref} body, and reports whether
+// this caller may name a repository at all.
+//
+// Split from the fetch so every one of these refusals lands BEFORE the build's
+// tenancy row is written: a row gossips to every host on the fleet, and a
+// client retrying a bad body on a fleet with no App would otherwise write one
+// per attempt. The planner's refusal still comes after, because that verdict
+// is recorded under the build id and has to be readable at its log.
+func (d Deps) parseRepoRef(w http.ResponseWriter, r *http.Request) (RepoRef, bool) {
+	var ref RepoRef
+	if d.Repos == nil {
+		// 503 and not 501: the route exists and works on a fleet whose hosts
+		// carry an App. Naming the tar is what makes this actionable without
+		// an operator, since every client that can build can send one.
+		WriteError(w, http.StatusServiceUnavailable, CodeNotConfigured,
+			"this fleet has no GitHub App, so it cannot fetch a repository",
+			"send a tar of the directory, or set PILOT_GITHUB_APP_ID and PILOT_GITHUB_APP_KEY on every host", nil)
+		return ref, false
+	}
+	// ADMIN ONLY, for now. Nothing here ties the caller's org to the
+	// repository: the App's installation token can fetch every repository the
+	// fleet's App is installed on, so a tenant key naming one would read
+	// another tenant's source through the fleet's credential and then exec
+	// into the image. A push cannot: it is a signed delivery about a
+	// repository, resolved to the service rows that name it.
+	//
+	// The gate is the fail-closed half of that until an org-to-repository
+	// record exists in state for this to check. The dashboard and the CLI's
+	// deploy both hold an admin-scoped key, so it costs them nothing.
+	if !IsAdmin(r.Context()) {
+		WriteError(w, http.StatusForbidden, CodeScopeRequired,
+			"naming a repository needs an admin-scoped key on this fleet",
+			"send a tar of the directory instead, or use a key with scope admin", nil)
+		return ref, false
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&ref); err != nil {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest,
+			"reading the repository: "+err.Error(), NextBadBody, nil)
+		return ref, false
+	}
+	if ref.Repo == "" || ref.Ref == "" {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest,
+			"repo and ref are both required",
+			`send {"repo":"owner/name","ref":"main"}`, nil)
+		return ref, false
+	}
+	if !RepoSlug.MatchString(ref.Repo) {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest,
+			"repo must be owner/name",
+			`send {"repo":"owner/name","ref":"main"}`, nil)
+		return ref, false
+	}
+	return ref, true
+}
+
+// stageRepo fetches a validated ref, and records the planner's verdict under
+// the build id when it refuses.
+func (d Deps) stageRepo(w http.ResponseWriter, r *http.Request, id string, ref RepoRef) (io.ReadCloser, bool) {
+
+	// Not the request context. The fetch and the plan are recorded under the
+	// build id, and a client that hung up must not leave a half-written
+	// refusal nobody can read.
+	rc, err := d.Repos.Context(context.WithoutCancel(r.Context()), id,
+		ref.Repo, ref.Ref, r.URL.Query().Get("app"))
+	if err == nil {
+		return rc, true
+	}
+
+	// A refusal is the planner's verdict on the repository, so it is a 400
+	// with the planner's own code. The codes are constants because
+	// errors_test.go walks every WriteError call and refuses one it cannot
+	// see, which a refusal.Code passed straight through would be.
+	var refusal *Refusal
+	if errors.As(err, &refusal) {
+		next := refusal.Next
+		switch refusal.Code {
+		case CodePlanUnsupported:
+			WriteError(w, http.StatusBadRequest, CodePlanUnsupported, refusal.Message, next, nil)
+		case CodeUnknownFramework:
+			WriteError(w, http.StatusBadRequest, CodeUnknownFramework, refusal.Message, next, nil)
+		case CodeComposeInvalid:
+			WriteError(w, http.StatusBadRequest, CodeComposeInvalid, refusal.Message, next, nil)
+		case CodePlanMultiService:
+			WriteError(w, http.StatusBadRequest, CodePlanMultiService, refusal.Message, next, nil)
+		default:
+			WriteError(w, http.StatusBadRequest, CodeBadRequest, refusal.Message, next, nil)
+		}
+		return nil, false
+	}
+	// 502 and not 500: the failure is GitHub's answer, not this host's state,
+	// and the caller's next step is to check the App's access to that
+	// repository rather than to retry.
+	WriteError(w, http.StatusBadGateway, CodeUnavailable,
+		"fetching "+ref.Repo+"@"+ref.Ref+": "+err.Error(),
+		"check that the fleet's GitHub App is installed on that repository and the ref exists", nil)
+	return nil, false
 }
 
 // handleBuildLogs replays a build's log, optionally following it live.

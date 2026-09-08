@@ -17,7 +17,14 @@ import type { TestApp } from '../helpers/app.ts';
 let app: TestApp;
 let cookie = '';
 
-const PAGES = ['/machines', '/services', '/volumes', '/domains', '/usage', '/keys', '/org'] as const;
+const PAGES = ['/sandboxes', '/storage', '/domains', '/usage', '/keys', '/org'] as const;
+
+/** The three that moved. Each answers 308 to its new address, signed in or not. */
+const MOVED: [string, string][] = [
+  ['/machines', '/sandboxes'],
+  ['/services', '/'],
+  ['/volumes', '/storage'],
+];
 
 before(async () => {
   app = await bootApp();
@@ -56,13 +63,14 @@ test('the home page is the overview once signed in, and the sign-in offer before
   assert.match(await anon.text(), /Sign in with GitHub/);
 
   // It used to redirect to /machines, which made the product's first screen a
-  // table of rows with no state on them.
+  // table of rows with no state on them. Now it is the list of apps.
   const signedIn = await app.handle(new Request('http://localhost/', asUser(cookie)));
-  assert.equal(signedIn.status, 200, 'no redirect: this page is the overview');
+  assert.equal(signedIn.status, 200, 'no redirect: this page is the app list');
   const body = await signedIn.text();
-  for (const section of ['Services', 'Sandboxes', 'Quota', 'Fleet']) {
-    assert.ok(body.includes(`>${section}<`), `the overview has a ${section} section`);
-  }
+  assert.ok(body.includes('>Apps<'), 'the app list is the home page');
+  // Limits and capacity moved to Usage: the apps page is apps and nothing else.
+  assert.ok(!body.includes('>Limits<'), 'no limits on the apps page');
+  assert.ok(!body.includes('>Capacity<'), 'no capacity on the apps page');
 });
 
 test('the login page shows a failed sign-in rather than swallowing it', async () => {
@@ -85,4 +93,15 @@ test('the keys page never renders a stored key value', async () => {
   assert.match(body, /page-check/, 'the key is listed');
   assert.equal(body.includes(key), false, 'but its plaintext is not on the page');
   assert.equal(body.includes('sha256:'), false, 'and neither is its hash');
+});
+
+// A URL segment is an address. `/machines` was in the nav, in the command
+// palette and in anyone's bookmarks, so it moves with a permanent redirect
+// rather than a 404, while `/machines/<id>` keeps its path entirely.
+test('the renamed list routes redirect permanently to their new address', async () => {
+  for (const [from, to] of MOVED) {
+    const res = await app.handle(new Request(`http://localhost${from}`, asUser(cookie)));
+    assert.equal(res.status, 308, `${from} redirects permanently`);
+    assert.equal(res.headers.get('location'), to, `${from} points at ${to}`);
+  }
 });

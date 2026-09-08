@@ -8,6 +8,7 @@
 import { requireOrg } from '#modules/auth/session.server.ts';
 import { fleet } from '#modules/fleet/client.server.ts';
 import { assertOwned } from '#modules/fleet/org-filter.server.ts';
+import { backTo } from '#modules/services/utils/back.ts';
 
 export async function rollbackService(formData: FormData) {
   const ctx = await requireOrg();
@@ -22,5 +23,5 @@ export async function rollbackService(formData: FormData) {
   } catch (err) {
     return { success: false, error: `Rollback refused: ${(err as Error).message}`, status: 502 };
   }
-  return { success: true, redirect: `/services/${id}?ok=rolled-back` };
+  return { success: true, redirect: backTo(formData, `/services/${id}`, 'rolled-back') };
 }

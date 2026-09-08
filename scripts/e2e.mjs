@@ -2782,6 +2782,36 @@ async function dataRouteAssertions() {
       assert(json.code === 'bad_request', `code = ${json.code}`);
     });
 
+    // --- A repository named rather than sent --------------------------------
+    //
+    // Both build routes take {repo, ref} so a client holding only a GitHub App
+    // credential -- the dashboard -- can plan and build without ever holding
+    // repository bytes. This battery runs on a fleet with no App configured,
+    // so what it can assert is the refusal, and the refusal is the part a
+    // caller has to be able to act on: it names the tar every client already
+    // knows how to send. The positive path needs a real App and lives in the
+    // fleet gate, against its fake GitHub.
+
+    await step('a {repo, ref} plan on a fleet with no GitHub App says what to send instead', async () => {
+      const { status, json } = await request('/v1/plan', {
+        method: 'POST', body: { repo: 'owner/name', ref: 'main' },
+      });
+      assert(status === 503, `expected 503, got ${status}: ${JSON.stringify(json)}`);
+      assert(json?.code === 'not_configured', `code = ${json?.code}`);
+      assert((json?.next ?? '').includes('tar'),
+        `the next does not name the tar: ${json?.next}`);
+    });
+
+    await step('a {repo, ref} build on a fleet with no GitHub App says the same', async () => {
+      const { status, json } = await request('/v1/builds', {
+        method: 'POST', body: { repo: 'owner/name', ref: 'main' },
+      });
+      assert(status === 503, `expected 503, got ${status}: ${JSON.stringify(json)}`);
+      assert(json?.code === 'not_configured', `code = ${json?.code}`);
+      assert((json?.next ?? '').includes('tar'),
+        `the next does not name the tar: ${json?.next}`);
+    });
+
     // --- PATCH /v1/services/{id} and its releases ---------------------------
 
     await step('a service is created for the patch battery', async () => {
@@ -2833,6 +2863,73 @@ async function dataRouteAssertions() {
         assert(status === 200, `expected 200, got ${status}`);
         assert(Array.isArray(json) && json.length === 0,
           `releases = ${JSON.stringify(json)}, want []`);
+      });
+
+      // The fleet key, against a REAL hostd process rather than a constructed
+      // Deps. api.Deps declared a FleetKey, main.go parsed the key, and the
+      // literal never set it, so on every real host a service patch carrying
+      // secret_env answered 400 "this host has no fleet key". Every Go test on
+      // that path builds its own Deps with a fake key, which is why the suite
+      // was green while the product was broken. This is the assertion that
+      // could have caught it, and it can only be made from out here.
+      await step('a secret_env patch is sealed, and no answer carries the value', async () => {
+        const secret = `e2e-secret-${tag}`;
+        const { status, json } = await request(`/v1/services/${svc.id}`, {
+          method: 'PATCH', body: { secret_env: { API_SECRET: secret } },
+        });
+        assert(status === 200,
+          `expected 200, got ${status}: ${JSON.stringify(json)} ` +
+          '(a 400 saying this host has no fleet key means PILOT_FLEET_KEY ' +
+          'never reached the API handlers)');
+        const body = JSON.stringify(json);
+        assert(!body.includes(secret), `the patch answer carries the value: ${body}`);
+        assert(!('env' in json) && !('secret_env' in json),
+          `the answer carries an environment: ${body}`);
+
+        // And a later read does not leak it either: nothing on this route ever
+        // renders either half.
+        const read = await request(`/v1/services/${svc.id}`);
+        assert(read.status === 200, `read back: ${read.status}`);
+        assert(!read.text.includes(secret), `a service read carries the value: ${read.text}`);
+      });
+    }
+
+    // --- An admin key acting as another org ---------------------------------
+    //
+    // One operator key serving a browser session that belongs to somebody
+    // else's org. Without this the dashboard's every create would belong to the
+    // ops org and 404 to the org that asked for it.
+
+    const actingOrg = `e2e-org-${tag}`;
+    let actedID = null;
+
+    await step('an admin create naming ?org= belongs to that org', async () => {
+      const { status, json } = await request(`/v1/services?org=${actingOrg}`, {
+        method: 'POST',
+        body: { name: `acted-${tag}`, app: `e2e-acted-${tag}`, replicas: 0 },
+      });
+      assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
+      assert(json.org_id === actingOrg, `org_id = ${json.org_id}, want ${actingOrg}`);
+      actedID = json.id;
+    });
+
+    if (actedID) {
+      await step('the same key narrowed to its own org cannot see it', async () => {
+        const me = await request('/v1/whoami');
+        assert(me.status === 200, `whoami: ${me.status}`);
+        const own = me.json?.org_id;
+        assert(own && own !== actingOrg, `whoami org = ${own}`);
+
+        const { status } = await request(`/v1/services/${actedID}?org=${own}`);
+        assert(status === 404, `expected 404, got ${status}`);
+      });
+
+      await step('a list narrowed to that org carries it', async () => {
+        const { status, json } = await request(`/v1/services?org=${actingOrg}`);
+        assert(status === 200, `expected 200, got ${status}`);
+        const ids = (json ?? []).map((row) => row.id);
+        assert(ids.includes(actedID), `the list is ${JSON.stringify(ids)}`);
+        assert(ids.length === 1, `the list is not narrowed: ${JSON.stringify(ids)}`);
       });
     }
 
@@ -3118,7 +3215,13 @@ async function multiServiceAssertions() {
     const health = { type: 'cmd', test: ['CMD-SHELL', 'true'], grace: 90, interval: 2, healthy_threshold: 1 };
     const services = {};
 
-    for (const [role, env] of [['db', { ROLE: 'db', TAG: tag }], ['web', { ROLE: 'web', TAG: tag }]]) {
+    // web's environment names db by the address an application would really
+    // write, which is what depends_on is derived from two steps below.
+    const envFor = {
+      db: { ROLE: 'db', TAG: tag },
+      web: { ROLE: 'web', TAG: tag, DB_URL: `http://db-${tag}.internal:${AGENT_PORT}` },
+    };
+    for (const [role, env] of [['db', envFor.db], ['web', envFor.web]]) {
       await step(`the ${role} service deploys from a release, health-gated`, async () => {
         const { status, json: svc } = await request('/v1/services', {
           method: 'POST',
@@ -3137,6 +3240,27 @@ async function multiServiceAssertions() {
       });
     }
     if (!services.db || !services.web) return;
+
+    // The canvas's edges, derived at read time from the environment and stored
+    // nowhere. A name, never a value: the answer says web dials db, and the
+    // body carries neither the variable nor what it was set to.
+    await step('web depends_on db, derived from the environment it was created with', async () => {
+      const { status, json } = await request(`/v1/services/${services.web.svc.id}`);
+      assert(status === 200, `expected 200, got ${status}: ${JSON.stringify(json)}`);
+      assert(Array.isArray(json.depends_on), `depends_on = ${JSON.stringify(json.depends_on)}`);
+      assert(json.depends_on.length === 1 && json.depends_on[0] === `db-${tag}`,
+        `depends_on = ${JSON.stringify(json.depends_on)}, want ["db-${tag}"]`);
+      assert(!JSON.stringify(json).includes('DB_URL'),
+        `the answer carries the variable itself: ${JSON.stringify(json)}`);
+
+      // db dials nothing, so the field is absent rather than an empty array:
+      // a canvas draws no edge and has nothing to draw one from.
+      const other = await request(`/v1/services/${services.db.svc.id}`);
+      assert(other.status === 200, `db read: ${other.status}`);
+      assert(!('depends_on' in other.json),
+        `db carries depends_on = ${JSON.stringify(other.json.depends_on)}`);
+      assert(!other.text.includes('DB_URL'), `db's answer carries DB_URL: ${other.text}`);
+    });
 
     // The replicas the rollout produced, which is what .internal has to resolve.
     const replicas = {};
@@ -4183,16 +4307,32 @@ async function execStreamAssertions() {
         `state moved from ${before.json?.state} to ${after.json?.state} on a refused query`);
     });
 
-    await step('an exec with no user runs as sprite in /home/sprite with Node 24', async () => {
+    await step('an exec with no user runs as pilot in /home/pilot with Node 24', async () => {
       const { status, json } = await request(`/v1/machines/${id}/exec`, {
         method: 'POST', body: { cmd: 'id -un; pwd; node -v' },
       });
       assert(status === 200, `expected 200, got ${status}: ${json?.error}`);
       assert(json.exit_code === 0, `exited ${json.exit_code}: ${json.stderr}`);
       const [who, cwd, node] = json.stdout.trim().split('\n');
-      assert(who === 'sprite', `ran as ${who}`);
-      assert(cwd === '/home/sprite', `cwd = ${cwd}`);
+      assert(who === 'pilot', `ran as ${who}`);
+      assert(cwd === '/home/pilot', `cwd = ${cwd}`);
       assert(node?.startsWith('v24.'), `node -v said ${node}`);
+    });
+
+    // The other half of the migration promise in ARCHITECTURE.md. `sprite` is
+    // a SECOND NAME for uid 1000, not a second account, so a hand-built
+    // sprites.dev client that names it must land on the same identity and the
+    // same home as the default -- otherwise the compatibility claim is a
+    // sentence in a document rather than a property of the product.
+    await step('`sprite` still resolves, to the same uid and home as pilot', async () => {
+      const { status, json } = await request(`/v1/machines/${id}/exec`, {
+        method: 'POST', body: { cmd: 'id -u; pwd', user: 'sprite' },
+      });
+      assert(status === 200, `expected 200, got ${status}: ${json?.error}`);
+      assert(json.exit_code === 0, `exited ${json.exit_code}: ${json.stderr}`);
+      const [uid, cwd] = json.stdout.trim().split('\n');
+      assert(uid === '1000', `sprite is uid ${uid}, not 1000`);
+      assert(cwd === '/home/pilot', `sprite's home is ${cwd}, not /home/pilot`);
     });
 
     // A foreign name must be indistinguishable from one that never existed: a

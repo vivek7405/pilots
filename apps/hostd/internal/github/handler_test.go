@@ -188,12 +188,20 @@ func (r *recordingBuilds) RecordRefusal(_ string, line api.BuildLogLine) {
 	r.refusals = append(r.refusals, line)
 }
 
-// fakeGitHub answers the two calls buildRef makes, so the push path runs end
-// to end with no GitHub App and no network.
-type fakeGitHub struct{ tarball []byte }
+// fakeGitHub answers the three calls the staging path makes, so it runs end to
+// end with no GitHub App and no network. installations records every
+// repository asked about, so a test can assert the lookup happened.
+type fakeGitHub struct {
+	tarball       []byte
+	installations []string
+}
 
 func (f *fakeGitHub) RoundTrip(req *http.Request) (*http.Response, error) {
 	switch {
+	case strings.HasSuffix(req.URL.Path, "/installation"):
+		f.installations = append(f.installations, strings.TrimSuffix(
+			strings.TrimPrefix(req.URL.Path, "/repos/"), "/installation"))
+		return jsonResponse(`{"id":1}`), nil
 	case strings.Contains(req.URL.Path, "/access_tokens"):
 		return jsonResponse(`{"token":"t"}`), nil
 	case strings.Contains(req.URL.Path, "/tarball/"):
@@ -446,5 +454,50 @@ func TestAPushStagesUnderTheWorkRoot(t *testing.T) {
 	}
 	if entries, err := os.ReadDir(root); err != nil || len(entries) != 0 {
 		t.Errorf("the work root still holds %v after the push", entries)
+	}
+}
+
+// A delivery carries its own installation id. A caller that merely NAMES a
+// repository does not, so Stage asks the App which installation covers it --
+// without that, a browser-driven build could mint no token at all.
+func TestStageResolvesTheInstallationWhenNoneIsGiven(t *testing.T) {
+	fake := &fakeGitHub{tarball: tarballOf(t, "webjs")}
+	d := pushDeps(t, nil, &recordingBuilds{})
+	d.App.HTTP = &http.Client{Transport: fake}
+	d.WorkRoot = t.TempDir()
+
+	dir, err := d.Stage(context.Background(), 0, "gate/webjs-app", "abc1234")
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	if len(fake.installations) != 1 || fake.installations[0] != "gate/webjs-app" {
+		t.Errorf("looked up %v, want one lookup of gate/webjs-app", fake.installations)
+	}
+	// The wrapper directory GitHub adds is stripped on the way past, so the
+	// repository's own files sit at the root the planner reads.
+	if _, err := os.Stat(filepath.Join(dir, "package.json")); err != nil {
+		t.Errorf("the staged directory has no package.json at its root: %v", err)
+	}
+}
+
+// A delivery's own installation id is used as given, and no lookup is made:
+// the push path has one already and a second round trip per delivery would be
+// a call GitHub rate-limits for nothing.
+func TestStageUsesTheInstallationItIsGiven(t *testing.T) {
+	fake := &fakeGitHub{tarball: tarballOf(t, "webjs")}
+	d := pushDeps(t, nil, &recordingBuilds{})
+	d.App.HTTP = &http.Client{Transport: fake}
+	d.WorkRoot = t.TempDir()
+
+	dir, err := d.Stage(context.Background(), 7, "gate/webjs-app", "abc1234")
+	if err != nil {
+		t.Fatalf("Stage: %v", err)
+	}
+	defer os.RemoveAll(dir)
+
+	if len(fake.installations) != 0 {
+		t.Errorf("looked up %v; the caller gave an installation", fake.installations)
 	}
 }

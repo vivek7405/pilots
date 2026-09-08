@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,6 +20,19 @@ func (f fakeSealer) IsSet() bool { return f.set }
 
 func (f fakeSealer) Seal(raw []byte) (string, error) {
 	return "sealed:" + string(raw), nil
+}
+
+// Open is Seal's inverse, and errors without a key exactly as seal.Key does:
+// a test that drops the key must see the derivation fall back to the
+// plaintext half rather than silently read a blob it cannot decrypt.
+func (f fakeSealer) Open(blob string) ([]byte, error) {
+	if blob == "" {
+		return nil, nil
+	}
+	if !f.set {
+		return nil, errors.New("no fleet key")
+	}
+	return []byte(strings.TrimPrefix(blob, "sealed:")), nil
 }
 
 // serviceServer seeds one service owned by org_1 and returns a server holding
