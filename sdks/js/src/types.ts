@@ -427,6 +427,30 @@ export interface RevokeResponse {
   revoked_at: number
 }
 
+/**
+ * Tie a repository to an org, which is what lets that org's own keys name it
+ * in a `{repo, ref}` build or plan.
+ *
+ * Admin-scoped: the proof that an org controls a repository is held at GitHub,
+ * so the connection is asserted once by a party that can prove it. The org is
+ * not in the body -- it comes from the key, or from `?org=` on an admin key,
+ * as it does on every other create.
+ */
+export interface ConnectRepoRequest {
+  repo: string
+}
+
+/** One connection between an org and a repository. */
+export interface RepoLinkResponse {
+  repo: string
+  org_id: string
+  connected_at: number
+}
+
+export interface RepoLinkListResponse {
+  repos: RepoLinkResponse[]
+}
+
 export interface QuotaResponse {
   org_id: string
   max_machines: number
