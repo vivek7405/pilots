@@ -184,13 +184,23 @@ function start(ws: TerminalSocket, machineId: string, rows: number, cols: number
     cols,
   });
 
-  // A PTY merges the two output streams, so everything arrives on stdout and
-  // stderr never produces a byte. It is still drained, because an unread
-  // stream on this SDK grows without limit.
-  stream.stdout.on('data', (chunk: Buffer) => {
+  // BOTH channels are the screen. A PTY is supposed to merge them, and on the
+  // golden image it does -- bash's prompt arrives on channel 1. On an image
+  // whose /bin/sh is busybox it does NOT: the prompt, and the echo of every
+  // character typed, arrive on channel 2, measured against a real replica as
+  // `\x02instance:~# `. Draining stderr therefore threw the entire visible
+  // session away and kept only the stdout of whatever was run, which is a
+  // terminal that shows a blinking cursor, never greets, and appears to
+  // swallow every keystroke -- while working perfectly for a sandbox.
+  //
+  // There is nothing to lose by forwarding it: in a tty session every byte
+  // either stream carries is output meant for the screen, and the emulator is
+  // what decides where it lands.
+  const toScreen = (chunk: Buffer) => {
     ws.send(JSON.stringify({ type: 'data', data: chunk.toString('base64') }));
-  });
-  stream.stderr.resume();
+  };
+  stream.stdout.on('data', toScreen);
+  stream.stderr.on('data', toScreen);
 
   stream.on('error', (err: Error) => {
     ws.send(JSON.stringify({ type: 'error', message: err.message }));

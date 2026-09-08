@@ -272,3 +272,43 @@ test('closing the socket kills the shell, so a closed tab leaves nothing running
   // machine with a live shell never goes idle.
   await ws.whenClosed;
 });
+
+
+/**
+ * Both output channels are the screen.
+ *
+ * A PTY merges them, and on the golden image it does -- bash's prompt arrives
+ * on stdout. On an image driven by an agent too old to honour `tty` on the exec
+ * stream, the session falls back to plain pipes, and then the prompt and the
+ * echo of every keystroke arrive on STDERR. Measured against a real replica:
+ * the bytes came back on channel 2 as `instance:~# `.
+ *
+ * The route used to drain stderr on the theory that a tty never writes to it,
+ * so on that machine the entire visible session was thrown away and only the
+ * stdout of an explicitly submitted command survived -- a terminal that blinks,
+ * never greets, and looks like it swallows every keystroke, while the very same
+ * component worked on a sandbox.
+ *
+ * Counterfactual: restore `stream.stderr.resume()` and the prompt below never
+ * reaches the socket.
+ */
+test('a prompt written to stderr still reaches the screen', async () => {
+  app.fleet.data.execHold = false;
+  app.fleet.data.execFrames.push(
+    { frame: 2, data: 'instance:~# ' },
+    { frame: 1, data: 'and stdout too' },
+    { frame: 3, data: '0' },
+  );
+
+  const ws = fakeSocket();
+  await WS(ws, request(cookieA), routeCtx({ id: 'm-1' }));
+  ws.emit('message', JSON.stringify({ type: 'open', rows: 24, cols: 80 }));
+  await ws.whenClosed;
+
+  const screen = ws.sent
+    .filter((m) => m.type === 'data')
+    .map((m) => Buffer.from(m.data!, 'base64').toString())
+    .join('');
+  assert.match(screen, /instance:~# /, 'stderr is the screen too, not something to drain');
+  assert.match(screen, /and stdout too/, 'and stdout still arrives');
+});
