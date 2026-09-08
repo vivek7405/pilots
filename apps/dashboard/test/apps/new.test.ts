@@ -233,7 +233,7 @@ test('a refused create starts no build, so nothing is left running on a host', a
   stubInstallations({ id: 1, login: 'acme' });
   app.fleet.calls.length = 0;
   app.fleet.data.plan = ONE_STEP;
-  app.fleet.data.createServiceError = new PilotsError('a service named web already exists in shop', 409);
+  app.fleet.data.createServiceError = new PilotsError('a service named web already exists in shop', { status: 409, code: 'name_taken' });
 
   const res = await create({});
   assert.equal(res.status, 502);
