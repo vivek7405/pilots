@@ -119,3 +119,57 @@ func TestLogStoreForgetsOldBuilds(t *testing.T) {
 		}
 	}
 }
+
+// A held log outlives the build that wrote it, because the interesting part
+// of a deploying build happens after the image exists.
+//
+// Without the hold, Build's `defer log.Close()` releases every follower the
+// instant the image is published: the browser watching the build would see the
+// image id and never the release it became, nor the health gate's refusal to
+// cut one. That is the client-side deploy's failure moved one layer down.
+func TestAHeldLogStaysOpenUntilItIsReleased(t *testing.T) {
+	l := newLog()
+	l.Hold()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, live := l.Follow(ctx)
+
+	l.Close() // the build ends; the deploy has not happened yet
+	l.Append(api.BuildLogLine{Line: "deployed rel_1", Release: "rel_1"})
+
+	select {
+	case got, ok := <-live:
+		if !ok {
+			t.Fatal("the follower was released when the build ended, before the release was cut")
+		}
+		if got.Release != "rel_1" {
+			t.Fatalf("the follower got %+v, want the release line", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the line appended after the build never arrived")
+	}
+
+	l.Release()
+	select {
+	case _, ok := <-live:
+		if ok {
+			t.Fatal("a line arrived after the log was released")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Release never let the follower go")
+	}
+}
+
+// The hold is taken before the build, so the build must not replace the log it
+// was taken on. It did, once: logStore.create always made a new Log, and the
+// hold -- with every follower on it -- went to the one the build threw away.
+func TestABuildReusesALogHeldBeforeIt(t *testing.T) {
+	s := newLogStore(4)
+	held := s.create("bld-1")
+	held.Hold()
+
+	if again := s.create("bld-1"); again != held {
+		t.Fatal("the build replaced the log that was held for it")
+	}
+}

@@ -78,30 +78,52 @@ func WriteJSON(w http.ResponseWriter, status int, v any) { writeJSON(w, status, 
 // client; on a 500 it goes to details.cause, where a person debugging can
 // still find it, and nowhere else.
 func writeMapped(w http.ResponseWriter, err error) {
+	status, body := mapError(err)
+	writeJSON(w, status, body)
+}
+
+// mapError is writeMapped's verdict without a response to write it to.
+//
+// Split out because a deploy no longer always answers a request: a build that
+// carried a `deploy=` cuts its release after the image exists, and the
+// refusal's words -- the health gate's above all -- reach the person as a
+// LINE in the build log rather than as a status. One mapping, two carriers;
+// two mappings would be two vocabularies for the same failure.
+func mapError(err error) (int, ErrorResponse) {
 	var gate *HealthGateDetails
 	switch {
 	case errors.As(err, &gate):
-		WriteError(w, http.StatusUnprocessableEntity, CodeHealthGateFailed, gate.Error(),
-			"read the replica's console: pilot machines logs "+gate.Replica+
-				"; fix the app and deploy again, or pilot services rollback "+gate.Service, gate)
+		return http.StatusUnprocessableEntity, ErrorResponse{
+			Error: gate.Error(), Code: CodeHealthGateFailed,
+			Next: "read the replica's console: pilot machines logs " + gate.Replica +
+				"; fix the app and deploy again, or pilot services rollback " + gate.Service,
+			Details: gate,
+		}
 	case errors.Is(err, state.ErrNotFound):
-		WriteError(w, http.StatusNotFound, CodeNotFound, "not found", NextNotFound, nil)
+		return http.StatusNotFound, ErrorResponse{
+			Error: "not found", Code: CodeNotFound, Next: NextNotFound,
+		}
 	case errors.Is(err, state.ErrNotOwner):
 		// 409 for the same reason ErrConflict is, but with a message of our
 		// own: the sentinel reads "state: this host does not own that
 		// machine", which is the store's vocabulary and would put the `state:`
 		// prefix this function exists to keep out straight into the body.
-		WriteError(w, http.StatusConflict, CodeConflict,
-			"another host writes this object right now",
-			"retry; the request works against whichever host currently writes it", nil)
+		return http.StatusConflict, ErrorResponse{
+			Error: "another host writes this object right now", Code: CodeConflict,
+			Next: "retry; the request works against whichever host currently writes it",
+		}
 	case errors.Is(err, ErrConflict):
 		// 409 rather than 400 or 403: nothing about the request is wrong and
 		// the caller is allowed. The object is in a state that forbids it, or
 		// this host lost a race, and the same request works once it is not.
-		WriteError(w, http.StatusConflict, CodeConflict, err.Error(),
-			"retry once the current operation finishes; pilot services info <service> shows it", nil)
+		return http.StatusConflict, ErrorResponse{
+			Error: err.Error(), Code: CodeConflict,
+			Next: "retry once the current operation finishes; pilot services info <service> shows it",
+		}
 	default:
-		WriteError(w, http.StatusInternalServerError, CodeInternal, "internal error",
-			NextInternal, map[string]any{"cause": err.Error()})
+		return http.StatusInternalServerError, ErrorResponse{
+			Error: "internal error", Code: CodeInternal, Next: NextInternal,
+			Details: map[string]any{"cause": err.Error()},
+		}
 	}
 }

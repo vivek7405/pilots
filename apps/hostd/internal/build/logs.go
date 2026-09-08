@@ -24,10 +24,12 @@ const maxLines = 20000
 
 // Log is one build's output.
 type Log struct {
-	mu       sync.Mutex
-	lines    []api.BuildLogLine
-	dropped  int
-	done     bool
+	mu      sync.Mutex
+	lines   []api.BuildLogLine
+	dropped int
+	done    bool
+	// held keeps the log open past the end of the build writing it. See Hold.
+	held     bool
 	watchers []chan api.BuildLogLine
 }
 
@@ -56,10 +58,46 @@ func (l *Log) Append(line api.BuildLogLine) {
 	}
 }
 
-// Close marks the build finished and releases every follower.
+// Hold keeps this log open after the build that writes it has ended.
+//
+// A build whose request asked for a release is not over when the image
+// exists: the rollout that follows is the part the person watching is waiting
+// for, and its verdict has to land in THIS log, because a browser follows
+// GET /v1/builds/{id}/logs rather than the response to the POST that started
+// the build. Without a hold, Build's own `defer log.Close()` releases every
+// follower the instant the image is published, and the release -- or the
+// health gate's refusal to cut one -- reaches nobody who was watching.
+func (l *Log) Hold() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.held = true
+}
+
+// Close marks the build finished and releases every follower. On a held log
+// it does nothing: Release ends that one.
 func (l *Log) Close() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.held {
+		return
+	}
+	l.close()
+}
+
+// Release ends a hold and closes the log.
+//
+// Exactly one call per Hold, on every path out of the handler that took it: a
+// held log nobody releases never lets its followers go, which is a browser
+// watching a build that finished minutes ago.
+func (l *Log) Release() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.held = false
+	l.close()
+}
+
+// close is Close's body, under the lock both callers already hold.
+func (l *Log) close() {
 	if l.done {
 		return
 	}
@@ -134,6 +172,15 @@ func newLogStore(limit int) *logStore {
 func (s *logStore) create(id string) *Log {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// An id already here was created BEFORE the build started, by a caller
+	// holding its log open past the build (see Builder.HoldLog). Reused
+	// rather than replaced, or the hold -- and every follower waiting on it
+	// -- is dropped on the floor by the build it was taken for. Ids are
+	// minted one per build, so this never merges two builds' output.
+	if l, ok := s.logs[id]; ok {
+		return l
+	}
 
 	l := newLog()
 	s.logs[id] = l

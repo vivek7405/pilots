@@ -43,8 +43,9 @@ func deployServer(t *testing.T) (http.Handler, *recordingRollout) {
 }
 
 // deployServerWith is the same host with a rollout of the caller's choosing,
-// so a test can supply one that refuses.
-func deployServerWith(t *testing.T, roll Rollout) http.Handler {
+// so a test can supply one that refuses. An optional builder makes it a host
+// that can also take a build through to the release it was asked for.
+func deployServerWith(t *testing.T, roll Rollout, builds ...BuildRunner) http.Handler {
 	t.Helper()
 	st, err := state.Open(":memory:")
 	if err != nil {
@@ -70,8 +71,11 @@ func deployServerWith(t *testing.T, roll Rollout) http.Handler {
 		t.Fatalf("PutTenancy: %v", err)
 	}
 
-	return Routes(Deps{HostID: "host-test", Store: st, Machines: newFakeManager(),
-		Rollout: roll})
+	deps := Deps{HostID: "host-test", Store: st, Machines: newFakeManager(), Rollout: roll}
+	if len(builds) > 0 {
+		deps.Builds = builds[0]
+	}
+	return Routes(deps)
 }
 
 // A deploy's knobs reach the rollout, which merges them PARTIALLY onto what

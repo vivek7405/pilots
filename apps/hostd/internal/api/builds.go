@@ -42,6 +42,30 @@ type BuildRunner interface {
 	RecordRefusal(id string, line BuildLogLine)
 }
 
+// BuildLogHolder is the extra a build that ends in a RELEASE needs: its log
+// has to outlive the build itself.
+//
+// A browser watching a build reads GET /v1/builds/{id}/logs, not the response
+// to the POST that started it -- the tab that posted may never have existed,
+// and the connection that did is closed the moment the build is under way. So
+// the rollout's verdict, minutes after the image is published, has to be a
+// line in the recorded log; without a hold the builder closes that log when
+// the image exists and every follower is released before the interesting part.
+//
+// Separate from BuildRunner, and taken with a type assertion, so a runner that
+// only builds stays a runner that only builds. internal/build asserts that the
+// real builder satisfies it at compile time.
+type BuildLogHolder interface {
+	// HoldLog keeps a build's log open past the end of the build. Called
+	// BEFORE the build, which is what creates the log.
+	HoldLog(id string)
+	// RecordLine appends a line to the recorded log, for every follower.
+	RecordLine(id string, line BuildLogLine)
+	// ReleaseLog ends the hold and lets the followers go. Exactly one call
+	// per HoldLog, on every path out.
+	ReleaseLog(id string)
+}
+
 // ndjson is the media type of the build log stream: one JSON object per line,
 // so a consumer can act on a failure the moment it appears rather than after
 // the build finishes.
@@ -60,6 +84,13 @@ const ndjson = "application/x-ndjson"
 // A JSON body is the exception: it names a repository, so the fetch and the
 // plan both happen BEFORE any of that, and their failures are ordinary status
 // codes. Nothing has been streamed yet when they are decided.
+//
+// `?deploy=<service>` carries the DEPLOY INTENT with the build: the host that
+// built the image cuts the release itself, on the verdict, exactly once. The
+// alternative -- a client that watches the stream and posts the deploy when it
+// sees the image id -- makes the release only as reliable as whoever is
+// watching: a closed tab is a successful build that deployed nothing, and two
+// tabs are two rollouts of one image.
 // MaxBuildContext bounds an upload. Exported because internal/detect serves
 // POST /v1/plan under the same ceiling, from the same tar.
 //
@@ -82,7 +113,61 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The deploy this build is for, if it is for one. Everything it needs is
+	// decided HERE, before a byte is streamed and before a ten-minute build:
+	// a refusal a person can act on is worth nothing ten minutes late.
+	deployTo := r.URL.Query().Get("deploy")
+	var holder BuildLogHolder
+	if deployTo != "" {
+		// Ownership before forwarding, exactly as handleDeploy does it: a
+		// foreign service must not be told which host arbitrates it.
+		if _, ok := d.ownedService(w, r, deployTo); !ok {
+			return
+		}
+		// Only the arbiter may write a service, so the BUILD goes to the
+		// arbiter too. The release is cut in this handler once the image
+		// exists, and a rollout attempted anywhere else is refused by the
+		// store's single-writer check -- minutes after the point where the
+		// person could have been told, with an image built and nothing
+		// deployed. One hop, the same proxy every service write takes.
+		if d.forwardToArbiter(w, r, deployTo) {
+			return
+		}
+		if d.Rollout == nil {
+			WriteError(w, http.StatusServiceUnavailable, CodeNotConfigured,
+				"this host cannot deploy: no object storage is configured",
+				"deploy from a host with object storage; pilot status lists hosts", nil)
+			return
+		}
+		holder, _ = d.Builds.(BuildLogHolder)
+		if holder == nil {
+			// Refused rather than degraded. The deploy would still happen,
+			// but its verdict would exist only on the connection that started
+			// the build -- which is the failure this whole route shape exists
+			// to remove.
+			WriteError(w, http.StatusNotImplemented, CodeNotImplemented,
+				"this host's builder cannot follow a build through to a release",
+				"build without deploy=, then POST /v1/services/{id}/deploy with the image id", nil)
+			return
+		}
+		// A rollout boots one extra machine before it retires the old one, so
+		// the deploy is admitted against one replica's worth of headroom --
+		// here, rather than after the build has already run.
+		if !d.checkQuota(w, r, quota.Delta{Machines: 1, VCPUs: 1, MemMiB: 512}) {
+			return
+		}
+	}
+
 	id := d.Builds.NewBuildID()
+
+	if holder != nil {
+		// The log outlives the build, because the release is cut after the
+		// image exists and its verdict belongs in the same log. Released on
+		// EVERY path out of this handler: a held log nobody releases never
+		// lets its followers go.
+		holder.HoldLog(id)
+		defer holder.ReleaseLog(id)
+	}
 
 	// Concurrent builds are bounded per org ON THIS HOST. A build is not a
 	// replicated object -- no row describes one -- so there is nothing
@@ -249,6 +334,18 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 		_ = enc.Encode(line)
 		flusher.Flush()
 	}
+	// say is write for the lines that come AFTER the builder's own. The
+	// builder records every line it emits, so a follower of the log route
+	// sees the build; these are written once it has returned, and a deploying
+	// build has to record them too or the person watching the log sees the
+	// image and never the release it became.
+	say := func(line BuildLogLine) {
+		if holder != nil {
+			holder.RecordLine(id, line)
+		}
+		write(line)
+	}
+
 	write(BuildLogLine{
 		Step: id, Stream: "status", Line: "build accepted",
 		TS: time.Now().UnixMilli(),
@@ -262,15 +359,49 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 		// The failing step was already emitted by the builder. This is the
 		// terminal line, so that a consumer reading to the end always has a
 		// verdict rather than having to infer one from the stream stopping.
-		write(BuildLogLine{
+		say(BuildLogLine{
 			Step: id, Stream: "status", Line: "build failed",
 			Error: err.Error(), Code: CodeBuildFailed, TS: time.Now().UnixMilli(),
 		})
 		return
 	}
-	write(BuildLogLine{
-		Step: id, Stream: "status", Line: "build succeeded",
+	if deployTo == "" {
+		say(BuildLogLine{
+			Step: id, Stream: "status", Line: "build succeeded",
+			Result: buildID, TS: time.Now().UnixMilli(),
+		})
+		return
+	}
+
+	say(BuildLogLine{
+		Step: id, Stream: "status", Line: "build succeeded, deploying " + deployTo,
 		Result: buildID, TS: time.Now().UnixMilli(),
+	})
+	// The release, cut here, by the host that built the image.
+	//
+	// bctx and not the request's context, for the reason the build itself
+	// runs on bctx: this is the half that must not depend on anyone watching.
+	// A rollout gates a replica for as long as the health check's grace
+	// period, which is routinely minutes, and a person who closed the tab --
+	// or a laptop that closed its lid -- must not be the reason a successful
+	// build deployed nothing.
+	rel, derr := d.Rollout.Deploy(bctx, deployTo, buildID, nil)
+	if derr != nil {
+		// The engine's own words, on the line a follower reads as the
+		// verdict: the same message, code and next a POST to the deploy route
+		// would have answered with. A health gate that never passed names the
+		// replica to read the console of, and that is the whole value of it.
+		_, body := mapError(derr)
+		say(BuildLogLine{
+			Step: id, Stream: "status", Line: "deploy refused",
+			Error: body.Error, Code: body.Code, Next: body.Next,
+			TS: time.Now().UnixMilli(),
+		})
+		return
+	}
+	say(BuildLogLine{
+		Step: id, Stream: "status", Line: "deployed " + rel.ID,
+		Result: buildID, Release: rel.ID, TS: time.Now().UnixMilli(),
 	})
 }
 
