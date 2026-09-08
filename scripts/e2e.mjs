@@ -2308,6 +2308,127 @@ async function replicasOf(serviceID) {
 }
 
 // ---------------------------------------------------------------------------
+// The deploy a build carries: nobody watches, and exactly one release exists.
+//
+// The browser used to follow the build stream, see the image id, and post the
+// deploy itself, which made the release only as reliable as the tab that
+// started it. Closing the tab left a successful build with NOTHING deployed --
+// silently, the service still on its old image -- and two tabs open on one
+// build rolled the same image out twice.
+//
+// So the intent travels with the build (`POST /v1/builds?deploy=<service>`)
+// and the host cuts the release on the verdict. Everything below is what a
+// client can observe about that, which is why it is here and not in the fleet
+// gate: the connection is dropped mid-build and the release is checked from a
+// different one.
+// ---------------------------------------------------------------------------
+
+async function deployOnVerdictAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  let svc;
+  try {
+    await step('a service for a build to deploy into', async () => {
+      const { status, json } = await request('/v1/services', {
+        method: 'POST',
+        body: {
+          name: `verdict-${tag}`, app: `e2e-verdict-${tag}`, replicas: 1,
+          health: { type: 'cmd', test: ['CMD-SHELL', 'true'], grace: 60, interval: 2, healthy_threshold: 1 },
+        },
+      });
+      assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
+      svc = json;
+    });
+    if (!svc) return;
+
+    let job;
+    await step('a build that carries its deploy, abandoned the moment it starts', async () => {
+      const res = await postTar(`/v1/builds?deploy=${svc.id}`, tarball({
+        'Dockerfile': [
+          'FROM alpine:3.20',
+          `RUN echo ${tag} > /etc/pilots-verdict-marker`,
+          'CMD ["/bin/sh", "-c", "while true; do sleep 3600; done"]',
+          '',
+        ].join('\n'),
+      }));
+      assert(res.status === 200, `build: HTTP ${res.status}`);
+      job = res.headers.get('x-pilot-build-id');
+      assert(job, 'no build id header, so nothing could reattach to this build');
+      // The watcher goes away: the body is cancelled and the connection with
+      // it. This is the closed tab, the lost session, the shut laptop lid.
+      await res.body.cancel();
+    });
+    if (!job) return;
+
+    let release;
+    await step('the release is cut anyway, and the build log carries its id', async () => {
+      await waitFor(async () => {
+        const { json } = await request(`/v1/services/${svc.id}/releases`);
+        return (json ?? []).length > 0;
+      }, { timeoutMs: 600_000, everyMs: 2_000, what: 'the abandoned build to cut its release' });
+
+      const { json: releases } = await request(`/v1/services/${svc.id}/releases`);
+      assert(releases.length === 1,
+        `a build with one deploy produced ${releases.length} releases: ${JSON.stringify(releases)}`);
+      release = releases[0];
+      assert(release.healthy, 'the release was flipped without passing its health gate');
+
+      // The verdict, in the RECORDED log. This is the only place a client that
+      // comes back -- a reloaded page, a second tab, an agent that reattached
+      // -- can learn that the release exists, so a verdict that lived only on
+      // the connection that started the build would be no verdict at all.
+      const { status, text } = await request(`/v1/builds/${job}/logs`, { raw: true });
+      assert(status === 200, `the build log answered ${status}`);
+      const lines = text.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l));
+      const last = lines[lines.length - 1];
+      assert(last.release === release.id,
+        `the log's last line does not carry the release: ${JSON.stringify(last)}`);
+      assert(last.result === release.rootfs_build_id,
+        `the log's image id and the release's disagree: ${JSON.stringify(last)} vs ${release.rootfs_build_id}`);
+      assert(!last.error, `the terminal line reports an error: ${JSON.stringify(last)}`);
+    });
+    if (!release) return;
+
+    await step('the service points at that release, and reading the log again cuts no second one', async () => {
+      const { json: after } = await request(`/v1/services/${svc.id}`);
+      assert(after?.release_id === release.id,
+        `the service points at ${after?.release_id}, want ${release.id}`);
+
+      // A second reader is a READER. Two tabs on one build were two rollouts
+      // when the browser decided; now the log is replayed and nothing happens.
+      const again = await request(`/v1/builds/${job}/logs`, { raw: true });
+      assert(again.status === 200, `the replay answered ${again.status}`);
+      assert(again.text.includes(release.id), 'the replayed log lost the release id');
+
+      await sleep(5_000);
+      const { json: releases } = await request(`/v1/services/${svc.id}/releases`);
+      assert(releases.length === 1,
+        `${releases.length} releases exist after two readers of one build: ${JSON.stringify(releases)}`);
+      const reps = await replicasOf(svc.id);
+      assert(reps.length === 1, `the service has ${reps.length} replicas, want 1`);
+    });
+
+    await step('a build naming a service that is not there is refused before it builds', async () => {
+      // Before, not after: a build is minutes of a host's CPU, and whether
+      // this key may deploy that service is knowable now.
+      const res = await postTar('/v1/builds?deploy=svc-does-not-exist', tarball({
+        'Dockerfile': 'FROM alpine:3.20\nRUN echo nope\n',
+      }));
+      assert(res.status === 404, `expected 404, got ${res.status}`);
+      const body = await res.text();
+      assert(!res.headers.get('x-pilot-build-id'),
+        `a refused build handed out an id: ${res.headers.get('x-pilot-build-id')}`);
+      assert(body.includes('next'), `the refusal carries no next step: ${body}`);
+    });
+  } finally {
+    if (svc) {
+      for (const m of await replicasOf(svc.id).catch(() => [])) {
+        try { await request(`/v1/machines/${m.id}`, { method: 'DELETE' }); } catch { /* best effort */ }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // A service that mounts a volume.
 //
 // One machine, because one machine mounts a volume, and a deploy that replaces
@@ -5273,6 +5394,7 @@ async function main() {
     await edgeAssertions();
     await envAssertions();
     await serviceAssertions();
+    await deployOnVerdictAssertions();
     await scopedDeployAssertions();
     await volumeServiceAssertions();
     await multiServiceAssertions();

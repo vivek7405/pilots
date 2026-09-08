@@ -167,7 +167,9 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
   property, run against the local multi-node rig. It grows monotonically too.
   Section 21 covers the push path against `scripts/cluster/fake-github.py`,
   because a delivery has no client on the other end and nothing about it is
-  observable from the public API alone.
+  observable from the public API alone. Section 22 kills a build's client
+  mid-build and reads the release it still cut from a host that did not build
+  it — the shell half of the e2e battery's `deployOnVerdictAssertions`.
 
 **Where a new test belongs** — the split is what can *observe* the assertion:
 
