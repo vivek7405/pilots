@@ -127,7 +127,12 @@ export async function createFromRepo(formData: FormData) {
     };
   } catch (err) {
     if (err instanceof PilotsError) {
-      return { success: false, status: 502, error: err.next ? `${err.message} ${err.next}` : err.message };
+      // The engine's own verdict when it gave one. A planner refusal (400), a
+      // taken name (409), a gate (422) or a quota (429) is the caller's to fix;
+      // only a status the engine did not choose -- a dropped connection, a 5xx
+      // -- is the fleet being unavailable, and says so as 502.
+      const status = err.status >= 400 && err.status < 500 ? err.status : 502;
+      return { success: false, status, error: err.next ? `${err.message} ${err.next}` : err.message };
     }
     return { success: false, status: 502, error: (err as Error).message };
   }

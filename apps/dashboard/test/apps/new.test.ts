@@ -236,7 +236,9 @@ test('a refused create starts no build, so nothing is left running on a host', a
   app.fleet.data.createServiceError = new PilotsError('a service named web already exists in shop', { status: 409, code: 'name_taken' });
 
   const res = await create({});
-  assert.equal(res.status, 502);
+  // The engine's verdict, not a fleet outage: a taken name is the caller's to
+  // fix, and the page says so with the status the engine gave.
+  assert.equal(res.status, 409);
   assert.ok(
     app.fleet.calls.some((c) => c.method === 'services.create'),
     'the create was attempted',
