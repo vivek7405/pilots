@@ -13,6 +13,14 @@
  * `pilot deploy` re-sends its own full set on every deploy, so the next deploy
  * from a machine holding a different set replaces what was saved here. The
  * confirm sentence says so.
+ *
+ * REMOVING is its own intent, not an empty submission. The form always carries
+ * both kinds and no API returns an environment to any client, so the textarea
+ * cannot be pre-filled with what is already set: inferring "replace with what
+ * is here" from an empty field would wipe the plain variables of anyone who
+ * came to add one secret. So a kind is only sent when it has content or when
+ * its `clear_` box is ticked, and an empty map is what hostd reads as clear
+ * (`PATCH /v1/services/{id}` distinguishes an absent key from an empty one).
  */
 import { and, eq, inArray } from 'drizzle-orm';
 import { requireOrg } from '#modules/auth/session.server.ts';
@@ -63,20 +71,31 @@ export async function saveVariables(formData: FormData) {
     secrets[name] = values[i] ?? '';
   });
 
-  if (Object.keys(fieldErrors).length > 0) return { success: false, fieldErrors, status: 422 };
-
   const hasEnv = Object.keys(parsed.env).length > 0;
   const hasSecrets = Object.keys(secrets).length > 0;
-  if (!hasEnv && !hasSecrets) {
-    return { success: false, error: 'Nothing to save: add at least one variable or secret.', status: 422 };
+  const clearEnv = formData.get('clear_env') === 'on';
+  const clearSecrets = formData.get('clear_secrets') === 'on';
+
+  // Ticking remove AND typing a value of the same kind is two intents for one
+  // set. Neither one is safe to guess at, so the form comes back saying which
+  // field to settle rather than picking one.
+  if (clearEnv && hasEnv) fieldErrors.env = 'Remove them, or set them -- not both. Untick the box or empty the lines.';
+  if (clearSecrets && hasSecrets) fieldErrors.secrets = 'Remove them, or set them -- not both. Untick the box or empty the rows.';
+
+  if (Object.keys(fieldErrors).length > 0) return { success: false, fieldErrors, status: 422 };
+
+  if (!hasEnv && !hasSecrets && !clearEnv && !clearSecrets) {
+    return { success: false, error: 'Nothing to save: add at least one variable or secret, or tick a remove box.', status: 422 };
   }
   if (formData.get('confirm') !== 'on') {
     return { success: false, fieldErrors: { confirm: 'Tick the box to confirm this replaces the set.' }, status: 422 };
   }
 
+  // An empty map is not an omitted key: hostd clears the kind on `{}` and
+  // leaves it untouched when the key is absent.
   const patch: UpdateServiceRequest = {};
-  if (hasEnv) patch.env = parsed.env;
-  if (hasSecrets) patch.secret_env = secrets;
+  if (hasEnv || clearEnv) patch.env = clearEnv ? {} : parsed.env;
+  if (hasSecrets || clearSecrets) patch.secret_env = clearSecrets ? {} : secrets;
 
   try {
     if (!assertOwned(ctx.org.id, await fleet.services.get(id))) {
@@ -95,7 +114,9 @@ export async function saveVariables(formData: FormData) {
     ...Object.keys(secrets).map((name) => ({ name, secret: true })),
   ];
   for (const kind of [false, true]) {
-    const replaced = kind ? hasSecrets : hasEnv;
+    // A cleared kind is a replacement by an empty set: `keep` is empty below,
+    // so every name of that kind goes, which is what hostd was just told.
+    const replaced = kind ? hasSecrets || clearSecrets : hasEnv || clearEnv;
     if (!replaced) continue;
     const keep = rows.filter((r) => r.secret === kind).map((r) => r.name);
     const stale = await db

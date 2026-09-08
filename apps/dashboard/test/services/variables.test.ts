@@ -154,3 +154,44 @@ test('saving one kind leaves the other kind alone on hostd', async () => {
   const patch = app.fleet.calls.find((c) => c.method === 'services.patch')!;
   assert.deepEqual(patch.args, ['svc-var', { env: { ONLY: 'plain' } }], 'no secret_env key at all, so hostd keeps its secrets');
 });
+
+// Removing is the other half of "replaces the whole set", and it cannot be an
+// empty submission: the form has no way to show what is already set, so an
+// empty field means "not this kind" and a remove box means "this kind, gone".
+//
+// Counterfactual: drop `clear_secrets` from the action and this fails with a
+// patch carrying no `secret_env` at all, which is hostd's "keep what you have".
+test('a remove box empties one kind on hostd and drops its names here', async () => {
+  const body = await tab('variables');
+  assert.match(body, /name="clear_env"/, 'each kind has its own remove box');
+  assert.match(body, /name="clear_secrets"/);
+
+  app.fleet.calls.length = 0;
+  const res = await submitForm(
+    app.handle,
+    '/services/svc-var?tab=variables',
+    { service: 'svc-var', back: '/services/svc-var?tab=variables', env: '', clear_secrets: 'on', confirm: 'on' },
+    { cookies: cookie, match: 'Save' },
+  );
+  assert.equal(res.status, 303);
+
+  const patch = app.fleet.calls.find((c) => c.method === 'services.patch')!;
+  assert.deepEqual(patch.args, ['svc-var', { secret_env: {} }], 'an empty map is what hostd reads as clear, and no env key');
+
+  const { db } = await import('#db/connection.server.ts');
+  const mine = (await db.query.serviceVariables.findMany()).filter((r) => r.serviceId === 'svc-var');
+  assert.deepEqual(mine.map((r) => [r.name, r.secret]), [['ONLY', false]], 'the secret name is gone, the plain one untouched');
+});
+
+test('ticking remove and typing a value of the same kind is refused, not guessed at', async () => {
+  app.fleet.calls.length = 0;
+  const res = await submitForm(
+    app.handle,
+    '/services/svc-var?tab=variables',
+    { service: 'svc-var', back: '/services/svc-var?tab=variables', env: 'A=1', clear_env: 'on', confirm: 'on' },
+    { cookies: cookie, match: 'Save' },
+  );
+  assert.equal(res.status, 422);
+  assert.match(await res.text(), /Remove them, or set them/);
+  assert.ok(!app.fleet.calls.some((c) => c.method === 'services.patch'), 'two intents patch nothing');
+});

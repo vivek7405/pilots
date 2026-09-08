@@ -4,7 +4,9 @@
  * Names are listed from this app's own table, values are never shown, because
  * no API returns an environment to any client. Saving replaces the whole set
  * of each kind on hostd and applies on the next deployment, and the form says
- * both before it asks for a confirm. Everything pilots injects on its own is
+ * both before it asks for a confirm. Each kind carries its own remove box:
+ * with no way to pre-fill a field, an empty one has to mean "leave this kind
+ * alone", so emptying a set is a thing you ask for rather than imply. Everything pilots injects on its own is
  * listed under a collapsible, each with a sentence, so a reader who has never
  * seen this platform knows what `PORT` is for (`rw-28-variables-provided.png`).
  */
@@ -30,6 +32,20 @@ const PROVIDED: { name: string; what: string }[] = [
   { name: '<name>.internal', what: 'How the other services in this app reach this one by name, privately.' },
   { name: 'URL', what: 'The public address this service answers at, when it has one.' },
 ];
+
+/**
+ * The per-kind remove box.
+ *
+ * Removing has to be asked for, because the form cannot show what is already
+ * set -- no API returns an environment -- so an empty field means "I am not
+ * touching this kind", never "delete it". See `save-variables.server.ts`.
+ */
+function removeBox(id: string, name: string, label: string): TemplateResult {
+  return html`<label class=${cn(labelClass(), 'flex items-center gap-2 font-normal text-muted-foreground')} for=${id}>
+    <input id=${id} name=${name} type="checkbox" data-slot="checkbox" class=${checkboxClass()}>
+    <span>${label}</span>
+  </label>`;
+}
 
 export function variablesTab({ detail, back, errors }: TabProps): TemplateResult {
   const { service } = detail;
@@ -88,11 +104,13 @@ export function variablesTab({ detail, back, errors }: TabProps): TemplateResult
               class=${cn(textareaClass(), 'font-mono')}
             ></textarea>`,
           })}
+          ${removeBox('clear_env', 'clear_env', 'Remove every plain variable set from here')}
 
           <fieldset class="m-0 grid gap-2 border-0 p-0">
             <legend class=${cn(labelClass(), 'mb-1')}>Secrets</legend>
             ${fieldErrors.secrets ? html`<p class="m-0 text-meta text-destructive" role="alert">${fieldErrors.secrets}</p>` : ''}
             <add-secret-row></add-secret-row>
+            ${removeBox('clear_secrets', 'clear_secrets', 'Remove every secret set from here')}
           </fieldset>
 
           <label class=${cn(labelClass(), 'flex items-start gap-2 font-normal')} for="confirm">
