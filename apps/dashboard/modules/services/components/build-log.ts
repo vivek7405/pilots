@@ -1,16 +1,23 @@
 /**
- * <build-log>: a build's output as it happens, and the deploy on its verdict.
+ * <build-log>: a build's output as it happens, and the deployment it became.
  *
  * Rendered ONCE and appended to imperatively, like the log stream: a
  * component that re-rendered on every line would wipe the lines it had. It
  * reads `/api/builds/<id>/logs?follow=1` as NDJSON, appends `step` and `line`,
  * and keeps the last two thousand.
  *
- * With `autodeploy`, the terminal line carrying `result` (the image id) posts
- * the existing deploy route ONCE and then navigates to the new deployment.
- * A terminal `error` line becomes an alert with its code and nothing is
- * deployed. With scripting off the page shows the raw log link and the
- * Deploy form takes the image id by hand, so the verdict is never lost.
+ * It READS the verdict; it does not decide it. The build was started with the
+ * deploy it is for (`?deploy=<service>`), so the host cuts the release on the
+ * verdict and puts its id on the log's last line. This element sees `release`
+ * and navigates to it. That is the whole point of the shape: a tab that is
+ * closed, a laptop lid that shuts, or a second tab open on the same build
+ * changes nothing about whether a release is cut, or how many.
+ *
+ * A terminal `error` line is an alert carrying the engine's own words --
+ * `error`, `code` and `next` -- whether it failed in the build or in the
+ * health gate afterwards. With scripting off the page shows the raw log link
+ * and the Deploy form takes the image id by hand, so the verdict is never
+ * lost.
  */
 import { WebComponent, html, prop, navigate } from '@webjsdev/core';
 import { createRef, ref } from '@webjsdev/core/directives';
@@ -20,17 +27,51 @@ import { cn } from '#lib/utils/cn.ts';
 
 const PANE = 'h-72 overflow-auto rounded-md border border-border bg-muted p-3 text-meta font-mono whitespace-pre-wrap';
 
-interface Line {
+export interface Line {
   step?: string;
   line?: string;
   error?: string;
   code?: string;
   result?: string;
+  release?: string;
+  next?: string;
+}
+
+/**
+ * What a terminal line says happened, or null while the build is still going.
+ *
+ * A function of the line alone, exported so the reading of the engine's
+ * verdict is testable without a browser. The four outcomes are the four the
+ * log can end on: the image exists, the release exists, something refused, or
+ * nothing terminal yet.
+ */
+export function verdictOf(line: Line): { kind: 'built' | 'deployed' | 'failed'; text: string } | null {
+  // A failure FIRST: a refused deploy carries `next` and no `release`, and a
+  // failed build carries neither. Either way the reason outranks the image.
+  if (line.error) return { kind: 'failed', text: failureText(line) };
+  if (line.release) return { kind: 'deployed', text: line.release };
+  if (line.result) return { kind: 'built', text: line.result };
+  return null;
+}
+
+/**
+ * The engine's own words for a failure, not a bare status.
+ *
+ * A build that did not compile and a health gate that never passed both land
+ * here. The second names the instance whose console says why and what to do
+ * about it, and dropping that into "refused (422)" was the one path where a
+ * deploy's verdict never reached the person who could act on it.
+ */
+export function failureText(line: Line): string {
+  return [line.error ?? '', line.code ? `(${line.code})` : '', line.next ?? '']
+    .filter(Boolean)
+    .join(' ');
 }
 
 export class BuildLog extends WebComponent({
   buildId: prop(String, { attribute: 'build-id' }),
   serviceId: prop(String, { attribute: 'service-id' }),
+  /** This build was started with a deploy attached, so a release is coming. */
   autodeploy: prop(Boolean),
   /** Where a finished deploy lands. Empty means the service page. */
   back: prop(String),
@@ -40,7 +81,8 @@ export class BuildLog extends WebComponent({
   private pane = createRef<HTMLPreElement>();
   private controller: AbortController | null = null;
   private lines = 0;
-  private deployed = false;
+  private built = '';
+  private left = false;
 
   constructor() {
     super();
@@ -85,6 +127,16 @@ export class BuildLog extends WebComponent({
       }
       if (carry) this.take(carry);
       if (this.status === 'building') this.status = 'ended';
+      // A stream that ended after the image and before any release. The build
+      // carried no deploy intent -- it was started by a version of this app
+      // that deployed from the browser, and its release is nobody's now -- so
+      // say so, with the image id the Deploy form below takes.
+      if (this.autodeploy && this.built && this.status === 'deploying') {
+        this.status = 'built';
+        this.failure =
+          `The image ${this.built} was built, but this build carried no deploy. ` +
+          'Deploy it with the form below.';
+      }
     } catch (err) {
       if ((err as Error).name !== 'AbortError') this.status = 'disconnected';
     }
@@ -100,48 +152,42 @@ export class BuildLog extends WebComponent({
       return;
     }
     if (line.line !== undefined) this.appendText(line.step ? `[${line.step}] ${line.line}` : line.line);
-    if (line.error) {
+    const verdict = verdictOf(line);
+    if (!verdict) return;
+    if (verdict.kind === 'failed') {
       this.status = 'failed';
-      this.failure = line.code ? `${line.error} (${line.code})` : line.error;
+      this.failure = verdict.text;
       return;
     }
-    if (line.result) {
-      this.status = 'built';
-      this.appendText(`image ${line.result}`);
-      if (this.autodeploy && !this.deployed) {
-        this.deployed = true;
-        void this.deploy(line.result);
-      }
+    if (verdict.kind === 'built' && !this.built) {
+      this.built = verdict.text;
+      this.status = this.autodeploy ? 'deploying' : 'built';
+      this.appendText(`image ${verdict.text}`);
+      return;
+    }
+    // The release the HOST cut, on the log's last line. Nothing is posted from
+    // here: this element reads a verdict that has already happened, so a
+    // second tab following the same build lands on the same deployment rather
+    // than rolling it out again.
+    if (verdict.kind === 'deployed') {
+      this.status = 'deployed';
+      this.land();
     }
   }
 
-  private async deploy(build: string) {
-    try {
-      const res = await fetch(`/api/services/${this.serviceId}/deploy`, {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ build }),
-      });
-      if (!res.ok) {
-        this.status = 'failed';
-        // The engine's own words, not a bare status. A 422 is the health gate
-        // naming the instance that failed and what to look at; dropping that
-        // into "refused (422)" was the one path where the browser-driven deploy
-        // never reached the doctor's verdict.
-        const body = (await res.json().catch(() => null)) as { error?: string; next?: string } | null;
-        this.failure = body?.error
-          ? `The image was built but the deploy was refused: ${body.error}${body.next ? ` ${body.next}` : ''}`
-          : `The image was built but the deploy was refused (${res.status}).`;
-        return;
-      }
-      // Back to where the build was followed from -- the canvas slide-over
-      // when it started there -- rather than always the service page.
-      const target = this.back || `/services/${this.serviceId}?tab=deployments`;
-      navigate(`${target}${target.includes('?') ? '&' : '?'}ok=deployed` as Route);
-    } catch (err) {
-      this.status = 'failed';
-      this.failure = (err as Error).message;
-    }
+  /**
+   * Back to where the build was followed from -- the canvas slide-over when it
+   * started there -- rather than always the service page.
+   *
+   * Guarded, because the release line is in the RECORDED log: a reader who
+   * arrives after the deploy replays it, and every follower of one build runs
+   * this. One navigation per element.
+   */
+  private land() {
+    if (this.left) return;
+    this.left = true;
+    const target = this.back || `/services/${this.serviceId}?tab=deployments`;
+    navigate(`${target}${target.includes('?') ? '&' : '?'}ok=deployed` as Route);
   }
 
   private appendText(text: string) {
