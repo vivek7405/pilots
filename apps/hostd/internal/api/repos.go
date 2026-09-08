@@ -47,9 +47,12 @@ func AllowRepo(w http.ResponseWriter, r *http.Request, st state.Store, repo stri
 			// A store that cannot answer is not an authorisation to proceed.
 			// Fail closed: the alternative is that a wedged replica hands one
 			// tenant another tenant's private source.
-			WriteError(w, http.StatusInternalServerError, CodeInternal,
-				"cannot read this org's connected repositories: "+err.Error(),
-				NextInternal, nil)
+			//
+			// Through writeMapped, so the store's own vocabulary ("state:
+			// ...") lands in details.cause rather than in the message, which
+			// is the rule that function exists to keep. ErrNotFound is already
+			// handled above, so this can only be the 500 branch.
+			writeMapped(w, err)
 			return false
 		}
 	}
