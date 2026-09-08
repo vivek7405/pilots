@@ -184,7 +184,12 @@ test('the shell is chosen in the guest, so an image without bash still gets one'
   const argv = app.fleet.data.lastExec!.argv;
   assert.equal(argv[0], '/bin/sh', 'absolute: the agent does not search PATH');
   assert.match(argv[2]!, /command -v bash/);
-  assert.match(argv[2]!, /exec \/bin\/sh -l/);
+  assert.match(argv[2]!, /exec \/bin\/sh -l -i/);
+  // `-i` on both arms. Without it busybox ash -- `/bin/sh` on the alpine base
+  // most built images use -- starts without printing a prompt, and the
+  // terminal on a service replica is an empty rectangle that only answers if
+  // you type into it blind.
+  assert.match(argv[2]!, /exec bash -l -i/);
 });
 
 test('a second open is ignored rather than obeyed', async () => {

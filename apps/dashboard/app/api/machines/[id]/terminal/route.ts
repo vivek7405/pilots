@@ -45,6 +45,15 @@ interface ClientMessage {
  * `bash -l` where it exists and `sh -l` otherwise: a built image may be alpine
  * or distroless, and asking for a shell that is not there would end the
  * session with a start failure instead of a prompt.
+ *
+ * `-i` is not decoration. busybox ash -- what `/bin/sh` is on the alpine base
+ * most built images use -- does not consider itself interactive just because
+ * its stdin is a pty, so it printed NO PROMPT: the terminal opened on a
+ * service replica, showed an empty black rectangle, and only answered if you
+ * typed a command blind into it. Measured against a real replica: `/bin/sh -l`
+ * returned zero bytes until input arrived, `/bin/sh -l -i` greeted with
+ * `instance:~#`. bash is unaffected either way, so the flag goes on both
+ * arms rather than only the one that needs it.
  */
 /**
  * ABSOLUTE path, not a bare `sh`. The guest agent execs the argv it is given
@@ -54,7 +63,7 @@ interface ClientMessage {
  * exists in every image pilots can build. The interactive shell is still
  * chosen INSIDE the guest, so an image without bash still gets one.
  */
-const SHELL = ['/bin/sh', '-c', 'command -v bash >/dev/null 2>&1 && exec bash -l || exec /bin/sh -l'];
+const SHELL = ['/bin/sh', '-c', 'command -v bash >/dev/null 2>&1 && exec bash -l -i || exec /bin/sh -l -i'];
 
 /** A window size the guest will accept. Out of range closes the stream. */
 function dimension(value: unknown, fallback: number): number {
