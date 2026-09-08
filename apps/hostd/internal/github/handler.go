@@ -1,7 +1,6 @@
 package github
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -297,11 +296,6 @@ func (d Deps) Stage(ctx context.Context, installation int64, repo, ref string) (
 	if err != nil {
 		return "", err
 	}
-	var buf bytes.Buffer
-	if err := d.App.Tarball(ctx, token, repo, ref, &buf); err != nil {
-		return "", err
-	}
-
 	// Under the work root, not /tmp: a repository is unpacked here and then
 	// repacked, and /tmp on a systemd host is very commonly tmpfs. Two copies
 	// of a large repo in the RAM of a host running other tenants' microVMs is
@@ -311,15 +305,56 @@ func (d Deps) Stage(ctx context.Context, installation int64, repo, ref string) (
 			return "", fmt.Errorf("github: staging %s: %w", d.WorkRoot, err)
 		}
 	}
+
+	// To a FILE beside the work dir, under a ceiling, rather than into a
+	// bytes.Buffer. The tar branch of POST /v1/builds spools for exactly this
+	// reason and says so; this path buffered the whole repository in RAM,
+	// where a few concurrent large ones are a host OOM on a box running other
+	// tenants' machines. The ceiling is the same one an upload gets, applied
+	// while the bytes arrive rather than after they are all held.
+	spool, err := os.CreateTemp(d.WorkRoot, "pilot-push-tar-*")
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		spool.Close()
+		os.Remove(spool.Name())
+	}()
+	if err := d.App.Tarball(ctx, token, repo, ref, &cappedWriter{w: spool, left: api.MaxBuildContext}); err != nil {
+		return "", err
+	}
+	if _, err := spool.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+
 	dir, err := os.MkdirTemp(d.WorkRoot, "pilot-push-*")
 	if err != nil {
 		return "", err
 	}
-	if err := build.ExtractContext(bytes.NewReader(buf.Bytes()), dir, api.MaxBuildContext); err != nil {
+	if err := build.ExtractContext(spool, dir, api.MaxBuildContext); err != nil {
 		os.RemoveAll(dir)
 		return "", fmt.Errorf("github: unpacking %s@%s: %w", repo, ref, err)
 	}
 	return dir, nil
+}
+
+// cappedWriter refuses a stream past a ceiling instead of letting it run.
+//
+// io has a LimitReader and no LimitWriter, and the writer is what Tarball is
+// given, so this is the missing half: it stops at the limit and says which
+// repository was too large rather than filling a disk quietly.
+type cappedWriter struct {
+	w    io.Writer
+	left int64
+}
+
+func (c *cappedWriter) Write(p []byte) (int, error) {
+	if int64(len(p)) > c.left {
+		return 0, fmt.Errorf("github: repository is larger than the %d byte build context limit", api.MaxBuildContext)
+	}
+	n, err := c.w.Write(p)
+	c.left -= int64(n)
+	return n, err
 }
 
 // ContextOf plans a staged directory and returns the build context tar for the
