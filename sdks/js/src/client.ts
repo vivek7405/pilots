@@ -198,6 +198,7 @@ export class Machines {
       `/v1/machines/${encodeURIComponent(id)}/exec/stream`,
       argv,
       opts,
+      this.http.org,
     )
     return new ExecStream(url, this.http.apiKey, {
       // A tty implies stdin, so the pair is settled here rather than left to

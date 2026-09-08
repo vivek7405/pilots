@@ -76,7 +76,7 @@ func (m *Machines) ExecStream(ctx context.Context, id string, argv []string, opt
 	if len(argv) == 0 {
 		return nil, errors.New("pilots: ExecStream needs at least one argv element")
 	}
-	target := execURL(m.c.baseURL, "/v1/machines/"+url.PathEscape(id)+"/exec/stream", argv, opts)
+	target := execURL(m.c.baseURL, "/v1/machines/"+url.PathEscape(id)+"/exec/stream", argv, opts, m.c.org)
 
 	// Detached from the caller's context on purpose: the stream outlives the
 	// dial, and cancelling it is Close's job.
@@ -110,9 +110,16 @@ func (m *Machines) ExecStream(ctx context.Context, id string, argv []string, opt
 
 // execURL builds the exec-stream URL with the query names sprites uses.
 // `path` is argv[0] repeated: hostd ignores it, but sprites clients send it.
-func execURL(baseURL, path string, argv []string, opts ExecStreamOptions) string {
+func execURL(baseURL, path string, argv []string, opts ExecStreamOptions, org string) string {
 	u := strings.Replace(baseURL, "http", "ws", 1) + path
 	q := url.Values{}
+	// The org narrowing reaches THIS route too. Every other call goes through
+	// `request`, which applies it; this one builds its own URL, so an admin
+	// client acting as one org was not narrowed on exec -- it could open a
+	// shell on another org's machine while WithOrg's doc said otherwise.
+	if org != "" {
+		q.Set("org", org)
+	}
 	for _, arg := range argv {
 		q.Add("cmd", arg)
 	}

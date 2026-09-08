@@ -64,8 +64,14 @@ export function buildExecURL(
   path: string,
   argv: string[],
   opts: ExecStreamOptions = {},
+  org?: string,
 ): URL {
   const url = new URL(baseURL.replace(/^http/, 'ws') + path)
+  // The org narrowing reaches THIS route too. Every other call goes through
+  // `Http.url`, which applies it; this one builds its own URL, so an admin
+  // client acting as one org was not narrowed on exec -- it could open a shell
+  // on another org's machine while the SDK's own contract said otherwise.
+  if (org) url.searchParams.set('org', org)
   for (const arg of argv) url.searchParams.append('cmd', arg)
   if (argv.length > 0) url.searchParams.set('path', argv[0]!)
   if (opts.cwd) url.searchParams.set('dir', opts.cwd)
