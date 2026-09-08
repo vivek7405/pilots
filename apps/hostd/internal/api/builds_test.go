@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"crypto/sha256"
+	"encoding/hex"
 	"github.com/vivek7405/pilots/hostd/internal/quota"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
@@ -909,4 +911,86 @@ func TestATarStillBuildsWhenAStagerIsConfigured(t *testing.T) {
 	if fb.started != 1 {
 		t.Errorf("the builder ran %d times, want once", fb.started)
 	}
+}
+
+// A tenant key may not name a repository.
+//
+// The App's installation token reaches every repository the fleet's App is
+// installed on, and nothing here ties the caller's org to the one it named, so
+// a tenant naming another tenant's private repository would read its source
+// through the fleet's own credential and then exec into the image. A push
+// cannot do that: it is a signed delivery about a repository, resolved to the
+// service rows that name it.
+//
+// Sending a tar is unaffected, which is the point: the gate is on naming, not
+// on building.
+func TestNamingARepositoryNeedsAnAdminKey(t *testing.T) {
+	fb := &fakeBuilder{}
+	stager := &fakeStager{}
+	_, st, fake := newTestServerWithManager(t)
+	h := Routes(Deps{HostID: "host-test", Store: st, Machines: fake, Builds: fb, Repos: stager})
+
+	const tenant = "pilot_tenantkey"
+	sum := sha256.Sum256([]byte(tenant))
+	if err := st.PutAPIKey(context.Background(), &state.APIKey{
+		Hash: hex.EncodeToString(sum[:]), OrgID: "org_2", Scopes: "builds",
+	}); err != nil {
+		t.Fatalf("PutAPIKey: %v", err)
+	}
+
+	rec := postJSON(t, h, "/v1/builds", tenant, `{"repo":"acme/private","ref":"main"}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("got %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+	if fb.started != 0 {
+		t.Errorf("a refused caller reached the builder")
+	}
+}
+
+// `repo` is interpolated into GitHub API paths under the fleet's App
+// credential, so the API validates its shape rather than trusting a client to.
+func TestARepoThatIsNotOwnerNameIs400(t *testing.T) {
+	fb := &fakeBuilder{}
+	stager := &fakeStager{}
+	_, st, fake := newTestServerWithManager(t)
+	h := Routes(Deps{HostID: "host-test", Store: st, Machines: fake, Builds: fb, Repos: stager})
+
+	for _, repo := range []string{"owner/../app", "x/y?z", "owner", "owner/name/extra", "o/r#f"} {
+		rec := postJSON(t, h, "/v1/builds", testKey, `{"repo":"`+repo+`","ref":"main"}`)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("%q: got %d, want 400: %s", repo, rec.Code, rec.Body.String())
+		}
+	}
+	if len(stager.seen) != 0 {
+		t.Errorf("a malformed repo reached the stager: %v", stager.seen)
+	}
+}
+
+// A refusal that happens before the build has an owner must not leave a
+// tenancy row: those rows gossip to every host, and a client retrying a bad
+// body on a fleet with no App would write one per attempt.
+func TestARefusalBeforeTheOwnerRowWritesNoTenancy(t *testing.T) {
+	fb := &fakeBuilder{}
+	_, st, fake := newTestServerWithManager(t)
+	// No Repos: this fleet has no App, which is the 503 that used to land
+	// after the row was written.
+	h := Routes(Deps{HostID: "host-test", Store: st, Machines: fake, Builds: fb})
+
+	before := countTenancy(t, st)
+	rec := postJSON(t, h, "/v1/builds", testKey, `{"repo":"o/r","ref":"main"}`)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("got %d, want 503: %s", rec.Code, rec.Body.String())
+	}
+	if after := countTenancy(t, st); after != before {
+		t.Errorf("tenancy rows %d -> %d; a refusal recorded an owner", before, after)
+	}
+}
+
+func countTenancy(t *testing.T, st state.Store) int {
+	t.Helper()
+	rows, err := st.ListTenancy(context.Background())
+	if err != nil {
+		t.Fatalf("ListTenancy: %v", err)
+	}
+	return len(rows)
 }

@@ -15,6 +15,8 @@ import (
 	"testing"
 
 	"github.com/vivek7405/pilots/hostd/internal/compose"
+
+	"github.com/vivek7405/pilots/hostd/internal/api"
 )
 
 func TestTheHandlerPlansATarredRecipe(t *testing.T) {
@@ -280,9 +282,31 @@ func postRepoRef(t *testing.T, repos Stager, body string) *httptest.ResponseReco
 	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/v1/plan?app=fx", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	// Behind the auth middleware in production, so the tests hand the handler
+	// the context it is actually given. Naming a repository is admin-only.
+	req = req.WithContext(api.WithAdminPrincipal(req.Context()))
 	rec := httptest.NewRecorder()
 	Handler(t.TempDir(), repos)(rec, req)
 	return rec
+}
+
+// A tenant key may not name a repository: the App's token reaches every
+// repository the fleet's App is installed on, and nothing ties this caller's
+// org to the one it named. A tar of the same tree is still accepted.
+func TestNamingARepositoryNeedsAnAdminKey(t *testing.T) {
+	stager := &fakeStager{dir: filepath.Join(fixtures, "webjs")}
+	req := httptest.NewRequest(http.MethodPost, "/v1/plan?app=fx",
+		strings.NewReader(`{"repo":"o/r","ref":"abc123"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	Handler(t.TempDir(), stager)(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+	if len(stager.seen) != 0 {
+		t.Fatalf("a refused caller reached the stager: %v", stager.seen)
+	}
 }
 
 // A repository named rather than sent is staged and planned, and the answer is

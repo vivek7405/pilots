@@ -9,6 +9,7 @@ import (
 	"mime"
 	"net/http"
 	"os"
+	"regexp"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/metrics"
@@ -90,6 +91,18 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	//
 	// Taken before the context is spooled: refusing after accepting a 2 GiB
 	// upload would make the limit cost more than the build it refused.
+	// The repository body is read and refused BEFORE anything is recorded: the
+	// tenancy row below gossips fleet-wide, and a bad body, a fleet with no
+	// App or a key that may not name a repository must not each leave one.
+	var ref RepoRef
+	named := isJSONBody(r)
+	if named {
+		var ok bool
+		if ref, ok = d.parseRepoRef(w, r); !ok {
+			return
+		}
+	}
+
 	org := actingOrg(r)
 	limits := quota.For(r.Context(), d.Store, org)
 	if used, ok := d.BuildGate.Acquire(org, limits.MaxBuilds); !ok {
@@ -134,8 +147,8 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	// through the fleet's GitHub App, the path a push takes, so a client that
 	// holds no repository bytes can still build.
 	var contextTar io.ReadCloser
-	if isJSONBody(r) {
-		rc, ok := d.stageRepo(w, r, id)
+	if named {
+		rc, ok := d.stageRepo(w, r, id, ref)
 		if !ok {
 			return
 		}
@@ -272,7 +285,25 @@ func isJSONBody(r *http.Request) bool {
 // stageRepo turns a RepoRef body into a build context, writing the refusal
 // itself when it cannot. Nothing has been streamed when it answers, so every
 // failure here is an ordinary status code rather than a line in a 200.
-func (d Deps) stageRepo(w http.ResponseWriter, r *http.Request, id string) (io.ReadCloser, bool) {
+// RepoSlug is the only shape a repository may take on the wire: `owner/name`,
+// each half a GitHub name, nothing else.
+//
+// The API is the trust boundary, not the dashboard. `ref.Repo` is interpolated
+// into `/repos/%s/installation` under the App JWT and into the tarball URL
+// under an installation token, so a `..`, a `?` or a `#` in it rewrites the
+// path or the query of a request made with the fleet's own credential.
+var RepoSlug = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$`)
+
+// parseRepoRef reads and validates the {repo, ref} body, and reports whether
+// this caller may name a repository at all.
+//
+// Split from the fetch so every one of these refusals lands BEFORE the build's
+// tenancy row is written: a row gossips to every host on the fleet, and a
+// client retrying a bad body on a fleet with no App would otherwise write one
+// per attempt. The planner's refusal still comes after, because that verdict
+// is recorded under the build id and has to be readable at its log.
+func (d Deps) parseRepoRef(w http.ResponseWriter, r *http.Request) (RepoRef, bool) {
+	var ref RepoRef
 	if d.Repos == nil {
 		// 503 and not 501: the route exists and works on a fleet whose hosts
 		// carry an App. Naming the tar is what makes this actionable without
@@ -280,20 +311,47 @@ func (d Deps) stageRepo(w http.ResponseWriter, r *http.Request, id string) (io.R
 		WriteError(w, http.StatusServiceUnavailable, CodeNotConfigured,
 			"this fleet has no GitHub App, so it cannot fetch a repository",
 			"send a tar of the directory, or set PILOT_GITHUB_APP_ID and PILOT_GITHUB_APP_KEY on every host", nil)
-		return nil, false
+		return ref, false
 	}
-	var ref RepoRef
+	// ADMIN ONLY, for now. Nothing here ties the caller's org to the
+	// repository: the App's installation token can fetch every repository the
+	// fleet's App is installed on, so a tenant key naming one would read
+	// another tenant's source through the fleet's credential and then exec
+	// into the image. A push cannot: it is a signed delivery about a
+	// repository, resolved to the service rows that name it.
+	//
+	// The gate is the fail-closed half of that until an org-to-repository
+	// record exists in state for this to check. The dashboard and the CLI's
+	// deploy both hold an admin-scoped key, so it costs them nothing.
+	if !IsAdmin(r.Context()) {
+		WriteError(w, http.StatusForbidden, CodeScopeRequired,
+			"naming a repository needs an admin-scoped key on this fleet",
+			"send a tar of the directory instead, or use a key with scope admin", nil)
+		return ref, false
+	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&ref); err != nil {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest,
 			"reading the repository: "+err.Error(), NextBadBody, nil)
-		return nil, false
+		return ref, false
 	}
 	if ref.Repo == "" || ref.Ref == "" {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest,
 			"repo and ref are both required",
 			`send {"repo":"owner/name","ref":"main"}`, nil)
-		return nil, false
+		return ref, false
 	}
+	if !RepoSlug.MatchString(ref.Repo) {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest,
+			"repo must be owner/name",
+			`send {"repo":"owner/name","ref":"main"}`, nil)
+		return ref, false
+	}
+	return ref, true
+}
+
+// stageRepo fetches a validated ref, and records the planner's verdict under
+// the build id when it refuses.
+func (d Deps) stageRepo(w http.ResponseWriter, r *http.Request, id string, ref RepoRef) (io.ReadCloser, bool) {
 
 	// Not the request context. The fetch and the plan are recorded under the
 	// build id, and a client that hung up must not leave a half-written

@@ -103,6 +103,17 @@ func stageRepo(w http.ResponseWriter, r *http.Request, repos Stager) (string, bo
 			"send a tar of the directory, or set PILOT_GITHUB_APP_ID and PILOT_GITHUB_APP_KEY on every host", nil)
 		return "", false
 	}
+	// ADMIN ONLY, as on /v1/builds and for the same reason: the App's token
+	// can fetch every repository the fleet's App is installed on, and nothing
+	// here ties this caller's org to the one it named. Planning leaks a
+	// private repository's shape rather than its source, which is a smaller
+	// hole than building it, but it is the same hole.
+	if !api.IsAdmin(r.Context()) {
+		api.WriteError(w, http.StatusForbidden, api.CodeScopeRequired,
+			"naming a repository needs an admin-scoped key on this fleet",
+			"send a tar of the directory instead, or use a key with scope admin", nil)
+		return "", false
+	}
 	var ref api.RepoRef
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&ref); err != nil {
 		api.WriteError(w, http.StatusBadRequest, api.CodeBadRequest,
@@ -112,6 +123,14 @@ func stageRepo(w http.ResponseWriter, r *http.Request, repos Stager) (string, bo
 	if ref.Repo == "" || ref.Ref == "" {
 		api.WriteError(w, http.StatusBadRequest, api.CodeBadRequest,
 			"repo and ref are both required",
+			`send {"repo":"owner/name","ref":"main"}`, nil)
+		return "", false
+	}
+	// The API is the trust boundary: this string is interpolated into GitHub
+	// API paths under the fleet's own credential. See api.RepoSlug.
+	if !api.RepoSlug.MatchString(ref.Repo) {
+		api.WriteError(w, http.StatusBadRequest, api.CodeBadRequest,
+			"repo must be owner/name",
 			`send {"repo":"owner/name","ref":"main"}`, nil)
 		return "", false
 	}
