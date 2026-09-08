@@ -11,6 +11,7 @@
 import type { Machine } from '#modules/machines/types.ts';
 import type { HealthRelease } from '#modules/services/utils/health.ts';
 import { serviceHealth } from '#modules/services/utils/health.ts';
+import { currentReplicas } from '#modules/services/utils/replicas.ts';
 import type { Tone } from '#lib/vocabulary.ts';
 
 export interface AppService {
@@ -46,11 +47,14 @@ export interface AppGroup<S extends AppService = AppService> {
  * still starting, or a service scaled to nothing, is not.
  */
 export function isOnline(service: AppService, replicas: Machine[], releases: HealthRelease[]): boolean {
-  const health = serviceHealth(service, replicas, releases);
+  // The current release only, as the engine counts. A machine left on an older
+  // one answers nothing this service points at.
+  const current = currentReplicas(replicas, service);
+  const health = serviceHealth(service, current, releases);
   if (health.pills.includes('failing')) return false;
-  const wanted = service.replicas ?? replicas.length;
+  const wanted = service.replicas ?? current.length;
   if (wanted === 0) return false;
-  const answering = replicas.filter((r) => r.state === 'running' || r.state === 'suspended').length;
+  const answering = current.filter((r) => r.state === 'running' || r.state === 'suspended').length;
   return answering >= wanted;
 }
 
@@ -84,7 +88,7 @@ export function groupApps<S extends AppService>(
     let lastDeploy: number | undefined;
     let created: number | undefined;
     for (const service of list) {
-      const replicas = machines.filter((m) => m.service_id === service.id);
+      const replicas = currentReplicas(machines, service);
       const own = releases[service.id] ?? [];
       if (isOnline(service, replicas, own)) online += 1;
       if (serviceHealth(service, replicas, own).pills.includes('failing')) failing = true;

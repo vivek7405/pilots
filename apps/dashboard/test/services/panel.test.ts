@@ -161,3 +161,44 @@ test('an unknown tab falls back to Deployments rather than an empty panel', asyn
   const { body } = await page('/services/svc-web?tab=nonsense');
   assert.match(body, /data-current-deployment/);
 });
+
+/**
+ * The `2/1` case, end to end.
+ *
+ * A real fleet had `website` asking for one instance, one machine on its
+ * current release and one still on the release before it. The page counted
+ * both and read `2/1 instances online`. The engine never counted the second:
+ * `replicasOf` pairs service id with release id, so its autoscaler cannot see
+ * a leftover and will never retire one.
+ *
+ * Both halves are asserted here because they pull in opposite directions: the
+ * VERDICT must ignore the leftover, and the instance list must still show it,
+ * or a machine holding a URL and burning quota would be named on no page at
+ * all. The `N/M instances online` count is asserted where it is rendered, on
+ * the apps page (`test/apps/list.test.ts`).
+ */
+test('a machine left on an older release is not counted, but is still named', async () => {
+  app.fleet.data.machines.push({
+    id: 'm-web-old',
+    name: 'web-0',
+    state: 'suspended',
+    org_id: org,
+    host_id: 'h-1',
+    service_id: 'svc-web',
+    release_id: 'rel-w0',
+  } as unknown as Machine);
+
+  try {
+    // The leftover is suspended, not failed, so nothing should change here --
+    // the assertion that matters is the one below it, with a failed leftover.
+    const { body } = await page('/services/svc-web');
+    assert.ok(!/Failing/.test(body), 'a service serving its current release is not failing');
+
+    const metrics = await page('/services/svc-web?tab=metrics');
+    assert.match(metrics.body, /web-0/, 'the leftover is still listed among the instances');
+    assert.match(metrics.body, /On an older release/, 'and it is marked as what it is');
+    assert.match(metrics.body, /web-1/, 'beside the instance that is serving');
+  } finally {
+    app.fleet.data.machines = app.fleet.data.machines.filter((m) => m.id !== 'm-web-old');
+  }
+});

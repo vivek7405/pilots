@@ -20,6 +20,7 @@ import { getService } from '#modules/services/queries/get-service.server.ts';
 import { servicePanel } from '#modules/services/utils/ui/service-panel.ts';
 import { tabOf } from '#modules/services/utils/tabs.ts';
 import { layoutApp } from '#modules/apps/utils/layout.ts';
+import { currentReplicas } from '#modules/services/utils/replicas.ts';
 import { edgesSvg } from '#modules/apps/utils/ui/canvas-svg.ts';
 import { serviceCard } from '#modules/apps/utils/ui/service-card.ts';
 import { stageClass } from '#modules/apps/utils/ui/stage.ts';
@@ -87,7 +88,7 @@ export default async function AppPage({ params, searchParams, actionData }: Page
             app,
             service,
             placed,
-            replicas: machines.filter((m) => m.service_id === service.id) as BrowserMachine[],
+            replicas: currentReplicas(machines as BrowserMachine[], service),
             volume: volumeOf(service.volume_id),
             selected: service.id === selected,
           });

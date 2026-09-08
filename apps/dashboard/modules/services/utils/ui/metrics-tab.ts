@@ -6,19 +6,28 @@
  * and does not yet keep CPU or memory over time per service, so the two chart
  * cards say so in their own body rather than drawing an empty grid, and there
  * is no range or pause toolbar for data that does not exist.
+ *
+ * This list is the one place that shows EVERY machine attached to the service,
+ * including one left behind on a superseded release. The counts elsewhere
+ * narrow to the current release the way the engine does, so without this a
+ * leftover would hold a URL and burn quota with nothing on any page naming it.
+ * It is marked rather than mixed in: the engine's autoscaler cannot see it, so
+ * it will not be retired on its own.
  */
 import { html } from '@webjsdev/core';
 import type { TemplateResult } from '@webjsdev/core';
 import type { TabProps } from '#modules/services/utils/tabs.ts';
 import { statusDot } from '#modules/machines/utils/ui/state.ts';
 import { startLabel } from '#lib/vocabulary.ts';
+import { isStaleReplica } from '#modules/services/utils/replicas.ts';
+import { badgeClass } from '#components/ui/badge.ts';
 import { cardClass } from '#components/ui/card.ts';
 import { cardBody, sectionEmpty, sectionGap, sectionHeading } from '#lib/utils/ui.ts';
 import { cn } from '#lib/utils/cn.ts';
 import '#components/relative-time.ts';
 
 export function metricsTab({ detail }: TabProps): TemplateResult {
-  const { replicas } = detail;
+  const { replicas, service } = detail;
 
   return html`
     <div class=${sectionGap()}>
@@ -35,6 +44,13 @@ export function metricsTab({ detail }: TabProps): TemplateResult {
                         <a href=${`/machines/${m.id}`} class="truncate font-medium text-foreground">${m.name || m.id}</a>
                         ${statusDot(m.state)}
                       </div>
+                      ${isStaleReplica(m, service)
+                        ? html`<p class="m-0">
+                            <span class=${badgeClass({ variant: 'outline' })} title="Left behind by a deploy: this service points at a newer release, and the engine's autoscaler only manages instances on that one."
+                              >On an older release</span
+                            >
+                          </p>`
+                        : ''}
                       <p class="m-0 text-meta text-muted-foreground">
                         ${startLabel(m.last_start)}${m.last_start_at
                           ? html` <relative-time datetime=${String(m.last_start_at)}></relative-time>`

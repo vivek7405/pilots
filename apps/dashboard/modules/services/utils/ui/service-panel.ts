@@ -16,6 +16,7 @@ import { serviceHealth } from '#modules/services/utils/health.ts';
 import { TABS, tabHref } from '#modules/services/utils/tabs.ts';
 import type { PanelErrors, Tab, TabProps } from '#modules/services/utils/tabs.ts';
 import { healthPills } from '#modules/services/utils/ui/health-pills.ts';
+import { currentReplicas } from '#modules/services/utils/replicas.ts';
 import { deploymentsTab } from '#modules/services/utils/ui/deployments-tab.ts';
 import { variablesTab } from '#modules/services/utils/ui/variables-tab.ts';
 import { metricsTab } from '#modules/services/utils/ui/metrics-tab.ts';
@@ -56,7 +57,11 @@ const TAB_RENDER: Record<Tab, (props: TabProps) => TemplateResult> = {
 
 export function servicePanel(detail: ServiceDetail, tab: Tab, ctx: PanelContext = {}): TemplateResult {
   const { service, replicas, releases } = detail;
-  const health = serviceHealth(service, replicas as BrowserMachine[], releases);
+  // The current release's instances decide the verdict, as they do for the
+  // engine. A machine left behind by a deploy that the engine has stopped
+  // managing must not put a "failing" pill on a service that is serving.
+  // The Metrics tab below still lists every attached machine, marked.
+  const health = serviceHealth(service, currentReplicas(replicas as BrowserMachine[], service), releases);
   const back = tabHref(detail, tab, ctx.app);
   const errors = ctx.errors ?? {};
 

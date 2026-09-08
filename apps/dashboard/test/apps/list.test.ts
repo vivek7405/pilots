@@ -148,3 +148,26 @@ test('an org with nothing in it is told what to do, not just that it is empty', 
   assert.match(body, /border-dashed/, 'and it is the padded box, not a bare line');
   assert.match(body, /href="\/services\/new"/, 'with a link to the page that explains the fix');
 });
+
+/**
+ * `docs` is a service outside any app, so its card renders the service status
+ * line -- the one that reads `N/M instances online`. Left behind on `rel-d0`
+ * is a second machine, which is exactly the fleet shape that read `2/1`.
+ *
+ * Counterfactual: drop the release filter and this reads `2/1 instances
+ * online` for a service asking for one.
+ */
+test('a machine left on an older release does not inflate the instance count', async () => {
+  app.fleet.data.machines.push({
+    id: 'm-docs-old', name: 'docs-0', state: 'suspended', org_id: org,
+    host_id: 'h-1', service_id: 'svc-docs', release_id: 'rel-d0', vcpus: 1, mem_mib: 512,
+  } as unknown as Machine);
+
+  try {
+    const body = await list();
+    assert.match(body, /1\/1 instances online/, 'the count is what the service asked for');
+    assert.ok(!/2\/1 instances online/.test(body), 'not one per machine ever attached to it');
+  } finally {
+    app.fleet.data.machines = app.fleet.data.machines.filter((m) => m.id !== 'm-docs-old');
+  }
+});
