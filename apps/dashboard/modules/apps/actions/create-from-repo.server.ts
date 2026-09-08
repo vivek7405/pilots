@@ -26,13 +26,35 @@ import { builds, repoConnections } from '#db/schema.server.ts';
 
 const NAME = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
+/**
+ * A repository's own half of `owner/name`, as an app name this app can address.
+ *
+ * `acme/My.Repo` and `acme/foo_bar` are perfectly ordinary repositories whose
+ * names are not valid here: uppercase, dots and underscores all fail `NAME`.
+ * Derived, the failure reached the person as `fieldErrors.app` on a form that
+ * carries `app` as a HIDDEN input and never renders that error -- a Deploy
+ * button that refused with nothing on screen. A name nobody typed is ours to
+ * make addressable rather than to refuse.
+ *
+ * A typed `app` is never touched: that one the person can see and correct.
+ */
+function slugifyApp(repoName: string): string {
+  return repoName
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 63)
+    .replace(/-+$/g, '');
+}
+
 export async function createFromRepo(formData: FormData) {
   const ctx = await requireOrg();
   if (!ctx) return { success: false, error: 'Sign in to continue.', status: 401 };
 
   const repo = String(formData.get('repo') || '').trim();
   const ref = String(formData.get('ref') || 'main').trim();
-  const app = String(formData.get('app') || '').trim() || repo.split('/')[1] || '';
+  const typedApp = String(formData.get('app') || '').trim();
+  const app = typedApp || slugifyApp(repo.split('/')[1] || '');
   const name = String(formData.get('name') || '').trim();
   const domain = String(formData.get('domain') || '').trim();
   const fieldErrors: Record<string, string> = {};

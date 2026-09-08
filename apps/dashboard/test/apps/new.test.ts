@@ -261,3 +261,28 @@ test('the app name is validated like the others', async () => {
   assert.ok(!app.fleet.calls.some((c) => c.method === 'services.create'), 'nothing was created');
   assert.ok(!app.fleet.calls.some((c) => c.method === 'builds.createFromRepo'), 'nothing was built');
 });
+
+/**
+ * A repository whose name is not already a valid app name still deploys.
+ *
+ * `app` is derived from the repo half of `owner/name` and carried as a HIDDEN
+ * input, so when the derived name failed validation the person saw a Deploy
+ * button that refused with nothing on screen: the error had nowhere to render.
+ * A name nobody typed is ours to make addressable.
+ *
+ * Counterfactual: pass the repo half through unchanged and this is a 422 whose
+ * fieldErrors.app never reaches a page.
+ */
+test('an app name derived from the repository is made addressable, not refused', async () => {
+  stubInstallations({ id: 1, login: 'acme' });
+  app.fleet.calls.length = 0;
+  app.fleet.data.plan = ONE_STEP;
+
+  // `app` empty: this is the DERIVED path, which is where the refusal was.
+  const res = await create({ repo: 'acme/My.Repo_v2', app: '', name: 'web' });
+  assert.notEqual(res.status, 422, `derived name refused: ${JSON.stringify(res)}`);
+
+  const created = app.fleet.calls.find((c) => c.method === 'services.create');
+  assert.ok(created, 'the service was created');
+  assert.equal((created!.args[0] as { app?: string }).app, 'my-repo-v2', 'lowercased, punctuation to hyphens');
+});
