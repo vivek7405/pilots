@@ -124,6 +124,7 @@ const TABLES: [string, string, string][] = [
   ['api_key_revocations', 'any host, on an admin-scoped request', 'A tombstone per revoked key. It only ever appears and never changes, so no two writers can disagree about it.'],
   ['tenancy', 'the host writing the object row', 'Which org owns each machine, service, and volume. Written once, before the object row it names, so a create that dies partway leaves an owner and never an orphan.'],
   ['org_quotas', 'any host, on an admin-scoped request', 'Ceilings per org on machines, cores, memory, volume space, and concurrent builds. One logical writer per row, so the merge has nothing to corrupt.'],
+  ['repo_links', 'any host, on an admin-scoped request', 'Which repositories an org may have the fleet fetch through its GitHub App. Keyed by the org and the repository together, written once, and read from the local replica before any build names a repository by name.'],
 ];
 
 export default function Internals() {

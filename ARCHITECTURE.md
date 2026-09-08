@@ -229,6 +229,30 @@ CREATE TABLE api_key_revocations (hash TEXT PRIMARY KEY, revoked_at INTEGER);
                        -- writer: any host, on an admin-scoped request
                        -- (write-once)
 
+-- Which repositories an org may have this fleet fetch. The fleet's GitHub App
+-- holds an installation token for every repository it is installed on, so
+-- without this row a {repo, ref} build from any key could fetch any of them
+-- and boot a shell inside another tenant's source. hostd answers "may this org
+-- fetch this repository?" from its LOCAL replica, never from the dashboard's
+-- database: the dashboard is a guest, and the data plane may not depend on it.
+--
+-- Keyed by the PAIR and not by the repository, so one repository may be
+-- connected to more than one org and a first claim is not a fleet-wide land
+-- grab on the name. Write-once for the reason tenancy is: the row's whole
+-- content is its key, so any host may write one.
+--
+-- Connecting is admin-scoped and fetching is not, and the asymmetry is the
+-- design: the proof that an org controls a repository is held at GitHub (the
+-- App installation, bound to an org by the dashboard's install callback) and
+-- hostd cannot check it from a request. There is no disconnect yet -- removing
+-- a link is tombstone-shaped, like a revocation, and wants its own table.
+CREATE TABLE repo_links (id TEXT PRIMARY KEY,  -- <org_id>/<owner>/<name>
+                       org_id TEXT,
+                       repo TEXT,        -- owner/name, lowercased
+                       connected_at INTEGER);
+                       -- writer: any host, on an admin-scoped request
+                       -- (write-once)
+
 -- Per-org limits. One logical writer -- an admin request -- so last-write-wins
 -- between two admins editing the same org is the intended semantics.
 CREATE TABLE org_quotas (org_id TEXT PRIMARY KEY, max_machines INTEGER,
@@ -240,8 +264,11 @@ CREATE TABLE org_quotas (org_id TEXT PRIMARY KEY, max_machines INTEGER,
 -- Operator note for a fleet that is already bootstrapped: corrosion reads
 -- schema_paths at agent start, so a host that has run before needs the new
 -- schema.sql copied and its corrosion unit restarted before it can serve the
--- four tables above. They backfill nothing -- they have no rows -- so the
--- restart is the whole of the rollout.
+-- new tables above, repo_links included. They backfill nothing -- they have no
+-- rows -- so the restart is the whole of the rollout. Until that restart a
+-- {repo, ref} build from a tenant key on that host is refused -- a 500 naming
+-- the read that failed, not a 200 -- because a store that cannot answer is
+-- never an authorization to proceed.
 
 -- Grouping is a property of the client's compose file, not a fleet object, so
 -- there is deliberately no apps table. App names take their uniqueness from
