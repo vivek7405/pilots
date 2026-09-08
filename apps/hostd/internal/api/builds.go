@@ -124,6 +124,12 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The id goes out BEFORE the repository branch: a refusal below is a 400
+	// with no id in the body, and the log it was recorded under is only
+	// reachable through this header. The tenancy row is already written, so
+	// the id is safe to hand out.
+	w.Header().Set("X-Pilot-Build-Id", id)
+
 	// A repository named rather than sent. The host fetches and plans it
 	// through the fleet's GitHub App, the path a push takes, so a client that
 	// holds no repository bytes can still build.
@@ -174,9 +180,9 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", ndjson)
-	// The id in a header as well as the stream: a client that wants to reattach
-	// should not have to parse the body to learn what to reattach to.
-	w.Header().Set("X-Pilot-Build-Id", id)
+	// The id is already in the header (set above, before the repository
+	// branch) as well as in the stream: a client that wants to reattach should
+	// not have to parse the body to learn what to reattach to.
 	w.WriteHeader(http.StatusOK)
 
 	// Deliberately NOT the request context, for the build and for the owner

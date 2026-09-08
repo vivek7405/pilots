@@ -856,6 +856,12 @@ func TestARefusedRepoRefIsA400AndReadableAtTheLog(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"code":"plan_multi_service"`) {
 		t.Errorf("body = %s, want plan_multi_service", rec.Body.String())
 	}
+	// The 400 carries the id in the header: the body names no build, and the
+	// log the refusal was recorded under is only reachable through it. This
+	// used to be asserted by the fleet gate alone (gate.sh 21b).
+	if got := rec.Header().Get("X-Pilot-Build-Id"); got != "bld-test" {
+		t.Errorf("X-Pilot-Build-Id = %q, want bld-test", got)
+	}
 	if fb.started != 0 {
 		t.Errorf("a refused plan reached the builder")
 	}
