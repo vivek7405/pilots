@@ -255,15 +255,18 @@ func (d Deps) handleListServices(w http.ResponseWriter, r *http.Request) {
 		mounts[b.ServiceID] = b.VolumeID
 	}
 
-	// One pass over the same rows, grouped by owner and app, so the edges
-	// cost no extra query and no extra tenancy lookup per row. See depends.go.
-	groups := d.siblingsOf(r.Context(), rows)
+	// One pass over the same rows, grouped by owner and app, and the owner
+	// each row resolved to comes back with the groups: the filter below reads
+	// that map rather than asking the tenancy store again per row, so a list
+	// costs one lookup per row, not two. See depends.go.
+	groups, owners := d.siblingsOf(r.Context(), rows)
 
 	org, narrow := listOrg(r)
 	out := make([]Service, 0, len(rows))
 	for _, svc := range rows {
-		owner, ok := d.visible(r, svc.ID, org, narrow)
-		if !ok {
+		// The same rule `visible` applies, over the owners already resolved.
+		owner, found := owners[svc.ID]
+		if narrow && !(found && org != "" && owner == org) {
 			continue
 		}
 		row := d.serviceToAPI(svc, owner)

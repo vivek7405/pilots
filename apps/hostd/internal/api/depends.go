@@ -113,13 +113,22 @@ type siblingKey struct{ org, app string }
 // A service with no app has no siblings, and neither has one with no owner: an
 // empty App is not a group, and treating it as one would join every app-less
 // service on the fleet into a single canvas.
-func (d Deps) siblingsOf(ctx context.Context, rows []state.Service) map[siblingKey]map[string]bool {
+//
+// It also returns the owner it resolved for EVERY row, app or not, so the list
+// that called it can filter and serialise rows from that map instead of asking
+// the tenancy store a second time per row. Before this the list did 2N lookups
+// where it had done N.
+func (d Deps) siblingsOf(ctx context.Context, rows []state.Service) (map[siblingKey]map[string]bool, map[string]string) {
 	out := map[siblingKey]map[string]bool{}
+	owners := make(map[string]string, len(rows))
 	for _, row := range rows {
+		org, ok := d.tenancy().OrgOf(ctx, row.ID)
+		if ok {
+			owners[row.ID] = org
+		}
 		if row.App == "" {
 			continue
 		}
-		org, ok := d.tenancy().OrgOf(ctx, row.ID)
 		if !ok || org == "" {
 			continue
 		}
@@ -129,7 +138,7 @@ func (d Deps) siblingsOf(ctx context.Context, rows []state.Service) map[siblingK
 		}
 		out[k][strings.ToLower(row.Name)] = true
 	}
-	return out
+	return out, owners
 }
 
 // withEdges fills DependsOn on a single-row read, which has no list of its own
