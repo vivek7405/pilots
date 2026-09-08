@@ -36,12 +36,19 @@ export function attachedTo<M extends { service_id?: string }>(machines: M[], ser
 /**
  * The replicas the engine would act on: attached, and on the current release.
  *
- * A service naming NO release is the one case this does not narrow. The engine
- * returns an empty set there (`replicasOf` refuses an empty release id), but a
- * service with no release row and a running machine is inconsistent data, and
- * answering `0/1 instances online` about a machine that is demonstrably
- * serving requests is the same lie in the other direction. With nothing to
- * compare against, everything attached counts.
+ * Only a machine that POSITIVELY names a different release is excluded. Two
+ * cases are left in, because in both the comparison cannot be made and
+ * dropping the machine would be inventing debris:
+ *
+ *   - the service names no release. The engine returns an empty set there
+ *     (`replicasOf` refuses an empty release id), but a service with no
+ *     release row and a running machine is inconsistent data, and answering
+ *     `0/1 instances online` about a machine that is demonstrably serving is
+ *     the same lie pointing the other way;
+ *   - the MACHINE names no release. An absent field is not a statement that
+ *     the machine is on an older release, and reading it as one would hide a
+ *     live instance from every count and list on the strength of a missing
+ *     value.
  */
 export function currentReplicas<M extends { service_id?: string; release_id?: string }>(
   machines: M[],
@@ -49,12 +56,18 @@ export function currentReplicas<M extends { service_id?: string; release_id?: st
 ): M[] {
   const attached = attachedTo(machines, service);
   if (!service.release_id) return attached;
-  return attached.filter((m) => m.release_id === service.release_id);
+  return attached.filter((m) => !m.release_id || m.release_id === service.release_id);
 }
 
-/** A machine attached to the service but left on an older release. */
+/**
+ * A machine attached to the service but left on an older release.
+ *
+ * Both sides have to name a release for this to be true. An absent one on
+ * either is unknown, not stale -- the same rule `currentReplicas` applies, so
+ * a machine can never be dropped from the count and left unmarked in the list.
+ */
 export function isStaleReplica(machine: { release_id?: string }, service: ReleasedService): boolean {
-  if (!service.release_id) return false;
+  if (!service.release_id || !machine.release_id) return false;
   return machine.release_id !== service.release_id;
 }
 

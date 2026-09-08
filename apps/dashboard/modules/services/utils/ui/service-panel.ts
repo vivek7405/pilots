@@ -61,7 +61,14 @@ export function servicePanel(detail: ServiceDetail, tab: Tab, ctx: PanelContext 
   // engine. A machine left behind by a deploy that the engine has stopped
   // managing must not put a "failing" pill on a service that is serving.
   // The Metrics tab below still lists every attached machine, marked.
-  const health = serviceHealth(service, currentReplicas(replicas as BrowserMachine[], service), releases);
+  // Everything here that speaks FOR the service reads this, not `replicas`:
+  // the verdict, and the address the panel offers. A machine left behind by a
+  // deploy is not serving this service's current release, so it must not put a
+  // "failing" pill on a service that is serving, and its routable name must
+  // not be handed to a reader as this service's address. The Metrics tab is
+  // where every attached machine is listed, marked as what it is.
+  const current = currentReplicas(replicas as BrowserMachine[], service);
+  const health = serviceHealth(service, current, releases);
   const back = tabHref(detail, tab, ctx.app);
   const errors = ctx.errors ?? {};
 
@@ -77,7 +84,7 @@ export function servicePanel(detail: ServiceDetail, tab: Tab, ctx: PanelContext 
               // A service with a domain has a stable URL; one without still has
               // a routable instance URL. Show whichever exists so the panel is
               // never a dead end.
-              const liveUrl = service.url || replicas.find((r) => r.url)?.url || '';
+              const liveUrl = service.url || current.find((r) => r.url)?.url || '';
               return liveUrl
                 ? html`<span class="flex items-center gap-1">
                     <a href=${liveUrl} rel="noopener" class="truncate">${liveUrl}</a>

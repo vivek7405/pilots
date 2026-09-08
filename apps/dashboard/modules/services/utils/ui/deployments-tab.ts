@@ -14,6 +14,7 @@ import type { TabProps } from '#modules/services/utils/tabs.ts';
 import { deployService } from '#modules/services/actions/deploy-service.server.ts';
 import { rollbackService } from '#modules/services/actions/rollback-service.server.ts';
 import { machineStateSince } from '#modules/machines/utils/ui/status-line.ts';
+import { currentReplicas } from '#modules/services/utils/replicas.ts';
 import { badgeClass } from '#components/ui/badge.ts';
 import { buttonClass } from '#components/ui/button.ts';
 import { checkboxClass } from '#components/ui/checkbox.ts';
@@ -28,7 +29,13 @@ import '#modules/services/components/build-log.ts';
 import '#components/relative-time.ts';
 
 export function deploymentsTab({ detail, back, errors, build }: TabProps): TemplateResult {
-  const { service, releases, replicas, previews, repo } = detail;
+  const { service, releases, previews, repo } = detail;
+  // The list below sits INSIDE the current release's card, under its deploy
+  // stamp and its image id, so it answers "what is running this release". A
+  // machine left behind on an older one answers a different question, and
+  // listing it here said the current deployment had instances it does not.
+  // The Metrics tab is where every attached machine is listed, marked.
+  const replicas = currentReplicas(detail.replicas, service);
   const builds = detail.builds ?? [];
   const following = build ? builds.find((b) => b.jobId === build) : undefined;
   const current = releases.find((r) => r.id === service.release_id);

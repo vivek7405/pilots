@@ -194,8 +194,25 @@ test('a machine left on an older release is not counted, but is still named', as
     const { body } = await page('/services/svc-web');
     assert.ok(!/Failing/.test(body), 'a service serving its current release is not failing');
 
+    // Deployments lists instances INSIDE the current release's card, under its
+    // deploy stamp and image id, so it answers "what is running this release".
+    // The leftover answers a different question and does not belong there.
+    //
+    // Asserted on the rendered LINK, not on the name: `detail` is serialised
+    // into the page for hydration, so every attached machine's name appears in
+    // that payload whatever the markup shows. `href="/machines/<id>"` is only
+    // written by a list that actually drew the row.
+    const deployments = await page('/services/svc-web?tab=deployments');
+    assert.match(deployments.body, /href="\/machines\/m-web"/, 'the current release names the instance running it');
+    assert.ok(
+      !/href="\/machines\/m-web-old"/.test(deployments.body),
+      'and not the one left on the release before it, which is not running this deployment',
+    );
+
+    // Metrics is the one place that shows everything attached, marked, so a
+    // machine holding a URL and burning quota is named on some page.
     const metrics = await page('/services/svc-web?tab=metrics');
-    assert.match(metrics.body, /web-0/, 'the leftover is still listed among the instances');
+    assert.match(metrics.body, /href="\/machines\/m-web-old"/, 'the leftover is still listed among the instances');
     assert.match(metrics.body, /On an older release/, 'and it is marked as what it is');
     assert.match(metrics.body, /web-1/, 'beside the instance that is serving');
   } finally {

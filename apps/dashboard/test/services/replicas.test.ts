@@ -73,3 +73,25 @@ test('a failed leftover does not make a healthy service look failing', () => {
   assert.equal(apps[0]!.failing, false, 'the engine gave up on a machine nothing routes to any more');
   assert.equal(apps[0]!.online, 1);
 });
+
+/**
+ * The narrowing excludes only a machine that POSITIVELY names another release.
+ *
+ * A missing `release_id` on the machine is unknown, not stale. Reading it as
+ * stale would hide a live instance from every count and every list on the
+ * strength of an absent field -- which is a worse failure than the `2/1` this
+ * rule exists to fix, because it removes something that is serving.
+ *
+ * Counterfactual: compare with `m.release_id === service.release_id` and this
+ * service reports no instances at all.
+ */
+test('a machine that names no release is unknown, not stale', () => {
+  const machines = [
+    { id: 'm-1', service_id: 'svc-1', state: 'running' },
+    { id: 'm-2', service_id: 'svc-1', state: 'suspended' },
+  ] as unknown as Machine[];
+
+  assert.equal(currentReplicas(machines, SERVICE).length, 2, 'both still count as replicas');
+  assert.equal(staleCount(machines, SERVICE), 0, 'and neither is marked as a leftover');
+  assert.equal(isStaleReplica(machines[0]!, SERVICE), false);
+});
