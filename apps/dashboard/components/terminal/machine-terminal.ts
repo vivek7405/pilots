@@ -6,7 +6,28 @@
  * `vendor/README.md` for why that is the one piece of third-party browser code
  * in this app and how to update it.
  *
- * Two things here are load-bearing rather than stylistic.
+ * A HIDDEN TAB RELEASES THE MACHINE. hostd counts an exec stream as a request
+ * in flight (`Begin`/`End` around it in `internal/machines/exec.go`), and the
+ * autoscaler re-touches any replica with traffic on it every tick. So a shell
+ * held open by a page nobody is looking at pinned its machine awake for as
+ * long as the tab existed -- on a platform whose whole pitch is that an idle
+ * machine sleeps, leaving this page open was a machine that could never idle,
+ * and billed for it. Closing the socket ends the stream, hostd's `defer End`
+ * runs, the idle clock finally starts, and the machine sleeps on its own.
+ *
+ * Coming back reconnects, and the exec stream wakes a suspended machine on the
+ * way in (`m.Wake` in that same file), so returning to the tab is a new shell
+ * on a woken machine rather than an error. The scrollback stays: the emulator
+ * is never disposed, only the socket, and the break is written into the buffer
+ * so a reader is never left wondering why their prompt stopped answering.
+ *
+ * The grace period is why this is not instant. A glance at another tab must
+ * not kill a command someone is running, and a shell that died on every
+ * alt-tab would be worse than one that costs a minute of idle. It does mean a
+ * command still running when the grace expires is killed with the shell --
+ * long work belongs in a detached session, not in a browser tab.
+ *
+ * Two more things here are load-bearing rather than stylistic.
  *
  * The first message is `open`, and it carries the FITTED rows and columns. A
  * shell reads its window size at startup, so a session opened at 24 by 80 and
@@ -57,8 +78,25 @@ function wash(rgb: string, alpha: number): string {
 const DIM = '\u001b[2m';
 const RESET = '\u001b[0m';
 
+/**
+ * How long the tab may be hidden before the shell lets the machine go.
+ *
+ * Long enough that switching tabs to read something is free, short enough that
+ * the machine still sleeps promptly after a reader wanders off: this plus the
+ * engine's own idle window (30s for a service replica, 60s for a sandbox) is
+ * the whole delay before it suspends.
+ */
+const HIDDEN_GRACE_MS = 30_000;
+
 export class MachineTerminal extends WebComponent({
   machineId: prop(String),
+  /**
+   * How long the tab may be hidden before the shell lets the machine go.
+   *
+   * A prop only so a test can drive the rule without sitting through the real
+   * grace; no page sets it, and the default below is what ships.
+   */
+  hiddenGraceMs: prop(Number, { attribute: 'hidden-grace-ms' }),
   status: prop(String, { state: true }),
   message: prop(String, { state: true }),
 }) {
@@ -69,10 +107,12 @@ export class MachineTerminal extends WebComponent({
   #resizeObserver: ResizeObserver | null = null;
   #themeObserver: MutationObserver | null = null;
   #onData: { dispose(): void } | null = null;
+  #hideTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor() {
     super();
     this.machineId = '';
+    this.hiddenGraceMs = HIDDEN_GRACE_MS;
     this.status = 'connecting';
     this.message = '';
   }
@@ -80,11 +120,66 @@ export class MachineTerminal extends WebComponent({
   connectedCallback() {
     super.connectedCallback();
     void this.boot();
+    document.addEventListener('visibilitychange', this.onVisibility);
   }
 
   disconnectedCallback() {
     super.disconnectedCallback();
+    document.removeEventListener('visibilitychange', this.onVisibility);
     this.teardown();
+  }
+
+  /**
+   * Hidden long enough: drop the socket so the machine can idle. Back: pick it
+   * up again.
+   *
+   * The timer is cancelled on the way back, so flipping to another tab and
+   * returning inside the grace leaves the session untouched -- no reconnect, no
+   * lost shell, nothing written into the buffer.
+   */
+  private onVisibility = (): void => {
+    if (document.visibilityState === 'hidden') {
+      if (this.#hideTimer || !this.#socket) return;
+      this.#hideTimer = setTimeout(() => {
+        this.#hideTimer = null;
+        if (document.visibilityState !== 'hidden') return;
+        this.release();
+      }, this.hiddenGraceMs);
+      return;
+    }
+
+    if (this.#hideTimer) {
+      clearTimeout(this.#hideTimer);
+      this.#hideTimer = null;
+    }
+    // Only when this component let the socket go. A socket dropped for any
+    // other reason has its own Reconnect button, and racing it from here would
+    // open a second shell on the machine.
+    if (this.status === 'released' && this.#term) {
+      this.note('reconnecting');
+      this.connect();
+    }
+  };
+
+  /**
+   * Gives the machine back: the socket goes, the emulator and its scrollback
+   * stay. hostd kills the shell when the socket closes, which is what ends the
+   * in-flight count and lets the idle clock start.
+   */
+  private release(): void {
+    this.#socket?.close();
+    this.#socket = null;
+    this.status = 'released';
+    this.note('released');
+  }
+
+  /** A dim line in the buffer, so a break in the session is never silent. */
+  private note(kind: 'released' | 'reconnecting'): void {
+    const text =
+      kind === 'released'
+        ? 'Session closed while this tab was in the background, so the machine can sleep. Come back to start a new one.'
+        : 'Reconnecting, and waking the machine if it slept...';
+    this.#term?.writeln(`\r\n${DIM}-- ${text}${RESET}`);
   }
 
   /**
@@ -256,7 +351,14 @@ export class MachineTerminal extends WebComponent({
   render() {
     const dot =
       this.status === 'open' ? 'bg-primary' : this.status === 'error' ? 'bg-destructive' : 'bg-muted-foreground';
-    const label = this.status === 'open' ? 'Connected' : this.status === 'connecting' ? 'Connecting' : 'Disconnected';
+    const label =
+      this.status === 'open'
+        ? 'Connected'
+        : this.status === 'connecting'
+          ? 'Connecting'
+          : this.status === 'released'
+            ? 'Asleep - this tab was in the background'
+            : 'Disconnected';
     return html`
       <div class="flex h-full flex-col">
         <div class="flex items-center gap-2 border-b border-border px-3 py-2 text-meta">

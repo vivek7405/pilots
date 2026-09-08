@@ -233,3 +233,93 @@ suite('machine-terminal', () => {
     host.remove();
   });
 });
+
+/**
+ * A hidden tab must give the machine back.
+ *
+ * hostd counts an exec stream as a request in flight, and the autoscaler
+ * re-touches any replica carrying traffic every tick, so a shell held open by
+ * a page nobody is looking at pinned its machine awake for as long as the tab
+ * existed. Verified on a real fleet: a machine page left open kept
+ * `pilots_router_inflight` at 1 and `last_activity` under 10s forever, and the
+ * machine suspended within a minute of the socket closing.
+ *
+ * The grace is driven through `hidden-grace-ms` rather than waited out.
+ *
+ * Counterfactual: drop the visibilitychange listener and the first test below
+ * still finds an open socket, which is the bug exactly.
+ */
+suite('machine-terminal and a hidden tab', () => {
+  let visibility = 'visible';
+  let originalDescriptor;
+
+  setup(() => {
+    sockets = [];
+    globalThis.WebSocket = FakeSocket;
+    globalThis.WebSocket.OPEN = 1;
+    originalDescriptor = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState');
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility });
+  });
+
+  teardown(async () => {
+    visibility = 'visible';
+    delete document.visibilityState;
+    if (originalDescriptor) Object.defineProperty(Document.prototype, 'visibilityState', originalDescriptor);
+    document.body.innerHTML = '';
+    await new Promise((r) => setTimeout(r, 20));
+    globalThis.WebSocket = RealWebSocket;
+  });
+
+  const setVisibility = (value) => {
+    visibility = value;
+    document.dispatchEvent(new Event('visibilitychange'));
+  };
+
+  async function mountFast() {
+    const host = document.createElement('div');
+    host.style.cssText = 'width:640px;height:320px';
+    document.body.appendChild(host);
+    const el = document.createElement('machine-terminal');
+    el.setAttribute('machine-id', 'm-1');
+    el.setAttribute('hidden-grace-ms', '5');
+    host.appendChild(el);
+    await until(() => sockets.length > 0);
+    await el.updateComplete;
+    return { el, host, socket: sockets[0] };
+  }
+
+  test('a tab hidden past the grace closes the shell so the machine can sleep', async () => {
+    const { el, host, socket } = await mountFast();
+    assert.equal(socket.readyState, 1, 'the shell is open while the tab is watched');
+
+    setVisibility('hidden');
+    await until(() => socket.readyState === 3);
+    await el.updateComplete;
+    assert.equal(el.status, 'released', `status says why: ${el.status}`);
+    assert.equal(sockets.length, 1, 'and it did not open another one on the way out');
+    host.remove();
+  });
+
+  test('coming back starts a new shell, which is what wakes the machine', async () => {
+    const { el, host, socket } = await mountFast();
+    setVisibility('hidden');
+    await until(() => socket.readyState === 3);
+
+    setVisibility('visible');
+    await until(() => sockets.length === 2);
+    await el.updateComplete;
+    assert.includes(String(sockets[1].url), '/api/machines/m-1/terminal', 'it dials the same machine again');
+    host.remove();
+  });
+
+  test('a glance at another tab inside the grace leaves the session alone', async () => {
+    const { el, host, socket } = await mountFast();
+    setVisibility('hidden');
+    setVisibility('visible');
+    await new Promise((r) => setTimeout(r, 40));
+    assert.equal(socket.readyState, 1, 'the shell was never dropped');
+    assert.equal(sockets.length, 1, 'and nothing reconnected over the top of it');
+    assert.equal(el.status, 'open');
+    host.remove();
+  });
+});
