@@ -91,12 +91,12 @@ export function subscribeMachines(listener: Listener): () => void {
         if (!apply(g, message)) return;
         for (const l of g.listeners) l(g.rows);
       },
-      onClose: () => {
-        // The rows stay: a dropped socket is not news that every machine is
-        // gone, and the framework reconnects. `seeded` stays true so a late
-        // element still gets what was last known rather than nothing.
-        feed().conn = null;
-      },
+      // No onClose. connectWS fires it on EVERY close and then reconnects on
+      // its own, so nulling `conn` there orphaned the reconnecting socket (the
+      // last unsubscribe could no longer close it) and made the next
+      // subscriber open a second one. The rows stay across a drop on purpose:
+      // a dropped socket is not news that every machine is gone, and `seeded`
+      // stays true so a late element still gets what was last known.
     });
   }
 
