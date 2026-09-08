@@ -38,14 +38,18 @@ export class BuildStream {
    * build must never read as a successful one.
    */
   async close(): Promise<void> {
-    await this.source.return(undefined)
-    // The body too, and not only through the generator. Returning a generator
-    // that was never started skips its body entirely, so the one case this
-    // exists for -- a stream nobody read -- would leave the socket open until
-    // GC. Cancelling a body the generator already holds throws instead, which
-    // is why this is guarded rather than conditional: there is no way to ask a
-    // suspended generator whether it took the lock.
+    // The BODY first, not the generator. While a build is being followed the
+    // generator is suspended inside `reader.read()`, and `return()` queues
+    // behind that pending `next()`: it does not resolve until the next line
+    // arrives, which on a quiet build step is minutes, and the upstream
+    // connection stays open for all of it. Cancelling the body tears the read
+    // out from under it, so the return below resolves at once.
+    //
+    // Guarded rather than conditional: a generator that took the reader's lock
+    // makes this throw, and there is no way to ask a suspended one whether it
+    // did. Either way the socket is released.
     await this.res.body?.cancel().catch(() => {})
+    await this.source.return(undefined).catch(() => {})
   }
 
   /** `for await (const line of build)`. Consumes the stream; iterate once. */
