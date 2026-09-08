@@ -166,6 +166,15 @@ type BuildLogLine struct {
 	Result string `json:"result,omitempty"` // rootfs build id on success
 	// Code is the stable code on a terminal failure line, build_failed.
 	Code string `json:"code,omitempty"`
+	// Release is the deployment cut from this image, on the last line of a
+	// build whose request named a service to deploy. Its presence is what
+	// says the release exists: Result says only that the image does.
+	Release string `json:"release,omitempty"`
+	// Next is the reader's next step on a terminal failure line. A deploy
+	// refused after the image was built -- a health gate that never passed,
+	// above all -- reaches the reader through the log, so it carries the same
+	// next the deploy route would have answered with.
+	Next string `json:"next,omitempty"`
 }
 
 // HealthCheck gates a rollout: a new release takes traffic only once healthy.

@@ -281,6 +281,20 @@ through the fleet's GitHub App, plans it, and builds the one step a plan may
 produce. A plan with more than one step is refused with `plan_multi_service`,
 readable at the build's own log.
 
+```ts
+const build = await pilots.builds.create(tarStream, { deploy: 'svc_1' })
+const rootfsBuildId = await build.result()
+build.release // the deployment the HOST cut from that image
+```
+
+`deploy` asks the host to cut that service a release from the image, on the
+build's verdict, exactly once. Nothing on this side of the connection decides
+whether it happens: a caller that walks away mid-build still ends with a
+release, and two callers watching one build still produce one rollout. A
+refusal after the image exists -- a health gate that never passed, most of all
+-- arrives as the log's last line, carrying the same `error`, `code` and `next`
+`POST /v1/services/{id}/deploy` would have answered with.
+
 ## `@pilots/sdk/sprites-compat`
 
 A sprites-shaped face over the same client, so a codebase written against the

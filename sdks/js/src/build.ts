@@ -61,6 +61,18 @@ export class BuildStream {
   }
 
   /**
+   * The deployment this build was cut into, once the stream has been read.
+   *
+   * Present only on a build whose request named a service to deploy: the host
+   * cuts that release itself and puts its id on the last line. `undefined`
+   * means no release was cut -- either none was asked for, or the stream has
+   * not been drained yet.
+   */
+  get release(): string | undefined {
+    return this.lines[this.lines.length - 1]?.release
+  }
+
+  /**
    * Drains the stream and returns the rootfs build id.
    *
    * Throws `BuildFailedError` when the last line carries `error`, and equally
