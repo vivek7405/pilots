@@ -11,12 +11,10 @@
 
 import { html } from '@webjsdev/core';
 import type { TemplateResult } from '@webjsdev/core';
-import { statusDot, toneDot } from '#modules/machines/utils/ui/state.ts';
 import { serviceStatus } from '#modules/apps/utils/ui/service-state.ts';
 // The card declares its own dependency: a canvas rendered by a page that
 // forgot this import would get a status that never goes live again.
 import '#modules/apps/components/live-status.ts';
-import { stateSince } from '#modules/machines/utils/ui/status-line.ts';
 import type { PlacedNode } from '#modules/apps/utils/layout.ts';
 import type { Machine } from '#modules/machines/types.ts';
 import { cn } from '#lib/utils/cn.ts';

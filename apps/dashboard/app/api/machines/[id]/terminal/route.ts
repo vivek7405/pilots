@@ -184,18 +184,16 @@ function start(ws: TerminalSocket, machineId: string, rows: number, cols: number
     cols,
   });
 
-  // BOTH channels are the screen. A PTY is supposed to merge them, and on the
-  // golden image it does -- bash's prompt arrives on channel 1. On an image
-  // whose /bin/sh is busybox it does NOT: the prompt, and the echo of every
-  // character typed, arrive on channel 2, measured against a real replica as
-  // `\x02instance:~# `. Draining stderr therefore threw the entire visible
-  // session away and kept only the stdout of whatever was run, which is a
-  // terminal that shows a blinking cursor, never greets, and appears to
-  // swallow every keystroke -- while working perfectly for a sandbox.
-  //
-  // There is nothing to lose by forwarding it: in a tty session every byte
-  // either stream carries is output meant for the screen, and the emulator is
-  // what decides where it lands.
+  // BOTH channels are the screen. Under a real pty the guest pumps only the
+  // pty master, on channel 1, so stderr never carries a byte -- which is true
+  // of every sandbox and of any image built with a current agent. An agent
+  // that predates `tty` on the exec stream ignores the flag and runs plain
+  // pipes instead, and THEN the shell's prompt and its stderr arrive on
+  // channel 2 (measured against such a replica as `\x02instance:~# `).
+  // Draining stderr threw that whole visible session away and kept only the
+  // stdout of whatever was run: a terminal that blinks, never greets, and
+  // appears to swallow every keystroke -- on exactly the machines that also
+  // cannot echo. Every byte on either channel is output for the screen.
   const toScreen = (chunk: Buffer) => {
     ws.send(JSON.stringify({ type: 'data', data: chunk.toString('base64') }));
   };
