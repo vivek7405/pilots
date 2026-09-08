@@ -2300,6 +2300,94 @@ print(det[0].get('framework', ''))
     bad "no host logged a refusal for the {repo, ref} build"
   fi
 
+  say "21c. A repository connected on one host is fetchable from every host"
+  # The claim that lets a TENANT key name a repository is a repo_links row. The
+  # e2e battery can drive the whole rule against one host, but not the property
+  # that makes it usable on a fleet: the row is written on whichever host the
+  # connect landed on, and every other host has to be able to answer with it
+  # from its own replica, with no coordinator and no host having to be up.
+  #
+  # So it is written on the FIRST host and used on the LAST one. On a
+  # single-host rig those are the same box and the section still asserts the
+  # rule; on a real fleet it asserts the gossip too.
+  GH_LAST=${LIVE_IPS[$(( ${#LIVE_IPS[@]} - 1 ))]}
+  GH_ORG="org-gate-repo-$$"
+  GH_TENANT=$(api "${LIVE_IPS[0]}" POST /v1/api-keys \
+    "{\"org_id\":\"${GH_ORG}\",\"scopes\":[\"deploy\"]}" | jf key)
+  if [ -z "$GH_TENANT" ]; then
+    bad "could not mint a deploy-scoped key for ${GH_ORG}"
+  else
+    ok "a deploy-scoped key was minted for ${GH_ORG}"
+    GH_TAUTH="Authorization: Bearer ${GH_TENANT}"
+
+    # Before the connection: refused on the far host, by code, with the route
+    # that fixes it in the message.
+    GH_UNCONN=$(curl -s -m 60 -X POST "http://${GH_LAST}:8080/v1/plan" \
+      -H "$GH_TAUTH" -H 'Content-Type: application/json' \
+      -d '{"repo":"gate/webjs-app","ref":"abc1234"}' 2>/dev/null)
+    case "$GH_UNCONN" in
+      *repo_not_connected*) ok "an unconnected org is refused on ${GH_LAST}" ;;
+      *) bad "the unconnected plan did not answer repo_not_connected: ${GH_UNCONN:0:200}" ;;
+    esac
+    case "$GH_UNCONN" in
+      */v1/repos*) ok "the refusal names the route that fixes it" ;;
+      *) bad "the refusal does not say how to connect the repository: ${GH_UNCONN:0:200}" ;;
+    esac
+
+    # Connect on the FIRST host, use on the LAST.
+    GH_CONN=$(api "${LIVE_IPS[0]}" POST "/v1/repos?org=${GH_ORG}" \
+      '{"repo":"gate/webjs-app"}' | jf repo)
+    [ "$GH_CONN" = "gate/webjs-app" ] \
+      && ok "the repository was connected on ${LIVE_IPS[0]}" \
+      || bad "the connect on ${LIVE_IPS[0]} answered '${GH_CONN}'"
+
+    # The row gossips; it is not written to the far host synchronously. Poll
+    # rather than sleep, so a fast fleet costs nothing and a slow one is not a
+    # flake.
+    GH_FW=""
+    for _ in $(seq 1 30); do
+      GH_FW=$(curl -s -m 60 -X POST "http://${GH_LAST}:8080/v1/plan" \
+        -H "$GH_TAUTH" -H 'Content-Type: application/json' \
+        -d '{"repo":"gate/webjs-app","ref":"abc1234"}' 2>/dev/null | python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print('')
+    raise SystemExit
+det = d.get('detected') or [{}]
+print(det[0].get('framework', ''))
+" 2>/dev/null)
+      [ "$GH_FW" = "webjs" ] && break
+      sleep 1
+    done
+    [ "$GH_FW" = "webjs" ] \
+      && ok "a tenant key planned it on ${GH_LAST} through a claim written on ${LIVE_IPS[0]}" \
+      || bad "the connected tenant still cannot plan on ${GH_LAST} (framework '${GH_FW}')"
+
+    # And the far host serves the org's own list from that same replica.
+    GH_LIST=$(curl -s -m 30 "http://${GH_LAST}:8080/v1/repos" -H "$GH_TAUTH" 2>/dev/null)
+    case "$GH_LIST" in
+      *gate/webjs-app*) ok "GET /v1/repos on ${GH_LAST} lists the org's connection" ;;
+      *) bad "the far host lists nothing for ${GH_ORG}: ${GH_LIST:0:200}" ;;
+    esac
+
+    # A second org inherits none of it, on any host.
+    GH_OTHER=$(api "${LIVE_IPS[0]}" POST /v1/api-keys \
+      "{\"org_id\":\"${GH_ORG}-other\",\"scopes\":[\"deploy\"]}" | jf key)
+    if [ -z "$GH_OTHER" ]; then
+      bad "could not mint a second org's key"
+    else
+      GH_STOLEN=$(curl -s -m 60 -X POST "http://${GH_LAST}:8080/v1/plan" \
+        -H "Authorization: Bearer ${GH_OTHER}" -H 'Content-Type: application/json' \
+        -d '{"repo":"gate/webjs-app","ref":"abc1234"}' 2>/dev/null)
+      case "$GH_STOLEN" in
+        *repo_not_connected*) ok "another org is still refused the same repository" ;;
+        *) bad "a second org fetched a repository it never connected: ${GH_STOLEN:0:200}" ;;
+      esac
+    fi
+  fi
+
   # Disarm. The rig goes back to having no GitHub App, so nothing below and
   # no later run inherits a fleet pointed at a stand-in that is gone.
   for ip in "${LIVE_IPS[@]}"; do

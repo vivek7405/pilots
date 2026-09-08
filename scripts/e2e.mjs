@@ -2812,6 +2812,116 @@ async function dataRouteAssertions() {
         `the next does not name the tar: ${json?.next}`);
     });
 
+    // --- Which repositories an org may name --------------------------------
+    //
+    // The fleet's App holds an installation token for every repository it is
+    // installed on, so something has to tie a caller to the one it named or a
+    // tenant key could build another tenant's private source and exec into the
+    // image. That something is a repo_links row, read from local state.
+    //
+    // Both refusals below are observable on a fleet with NO App, and that is
+    // deliberate rather than convenient: the claim is checked BEFORE the host
+    // asks whether it could have fetched the repository at all, so the same
+    // caller gets the same answer on every fleet. The two admin keys the
+    // battery and the CLI hold are unaffected -- the steps above prove it, by
+    // reaching the 503 with no connection anywhere.
+
+    const repoOrg = `org_repo_${tag}`;
+    const repoName = `acme/e2e-${tag}`;
+    let repoKey = null;
+
+    await step('a deploy-scoped key is minted for an org with no repository', async () => {
+      const mint = await request('/v1/api-keys', {
+        method: 'POST', body: { org_id: repoOrg, scopes: ['deploy'] },
+      });
+      assert(mint.status === 201, `minting a key returned ${mint.status}: ${mint.text}`);
+      repoKey = mint.json.key;
+    });
+
+    if (repoKey) {
+      await step('naming an unconnected repository is a 403 that says how to connect it', async () => {
+        for (const path of ['/v1/plan', '/v1/builds']) {
+          const { status, json } = await request(path, {
+            method: 'POST', key: repoKey, body: { repo: repoName, ref: 'main' },
+          });
+          assert(status === 403, `${path}: expected 403, got ${status}: ${JSON.stringify(json)}`);
+          assert(json?.code === 'repo_not_connected', `${path}: code = ${json?.code}`);
+          assert((json?.next ?? '').includes('/v1/repos'),
+            `${path}: the next does not name the connect route: ${json?.next}`);
+        }
+      });
+
+      // A service is a standing order to build a repository on every push to
+      // it, so it asks the same question. Without this a tenant could point a
+      // service at a private repository and be handed its source on the
+      // owner's next commit.
+      await step('a service may not name an unconnected repository either', async () => {
+        const { status, json } = await request('/v1/services', {
+          method: 'POST', key: repoKey,
+          body: {
+            name: `hijack-${tag}`, app: `hijack-${tag}`, replicas: 1,
+            repo: repoName, branch: 'main', autodeploy: true,
+          },
+        });
+        assert(status === 403, `expected 403, got ${status}: ${JSON.stringify(json)}`);
+        assert(json?.code === 'repo_not_connected', `code = ${json?.code}`);
+      });
+
+      await step('connecting a repository needs an admin key', async () => {
+        const { status, json } = await request('/v1/repos', {
+          method: 'POST', key: repoKey, body: { repo: repoName },
+        });
+        assert(status === 403, `expected 403, got ${status}: ${JSON.stringify(json)}`);
+        assert(json?.code === 'scope_required', `code = ${json?.code}`);
+      });
+
+      await step('an admin key connects the repository for that org', async () => {
+        const { status, json } = await request(`/v1/repos?org=${repoOrg}`, {
+          method: 'POST', body: { repo: repoName.toUpperCase() },
+        });
+        assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
+        // Lowercased on the way in: GitHub names are case-insensitive, so two
+        // spellings must not be two claims.
+        assert(json?.repo === repoName.toLowerCase(), `repo = ${json?.repo}`);
+        assert(json?.org_id === repoOrg, `org_id = ${json?.org_id}`);
+        assert(json?.connected_at > 0, `connected_at = ${json?.connected_at}`);
+      });
+
+      await step('the connected org now gets past the claim, and reads its own list', async () => {
+        // 503 rather than 200 because this fleet has no App: the claim was
+        // accepted and the route got as far as the fetch it cannot make. The
+        // fetch itself is the fleet gate's, against its stand-in GitHub.
+        const { status, json } = await request('/v1/plan', {
+          method: 'POST', key: repoKey, body: { repo: repoName, ref: 'main' },
+        });
+        assert(status === 503, `expected 503, got ${status}: ${JSON.stringify(json)}`);
+        assert(json?.code === 'not_configured', `code = ${json?.code}`);
+
+        const list = await request('/v1/repos', { key: repoKey });
+        assert(list.status === 200, `list: expected 200, got ${list.status}`);
+        const repos = list.json?.repos ?? [];
+        assert(repos.length === 1 && repos[0].repo === repoName.toLowerCase(),
+          `the org's list is ${JSON.stringify(repos)}`);
+      });
+
+      await step('another org inherits none of that claim', async () => {
+        const mint = await request('/v1/api-keys', {
+          method: 'POST', body: { org_id: `org_repo_other_${tag}`, scopes: ['deploy'] },
+        });
+        assert(mint.status === 201, `minting a key returned ${mint.status}`);
+
+        const { status, json } = await request('/v1/builds', {
+          method: 'POST', key: mint.json.key, body: { repo: repoName, ref: 'main' },
+        });
+        assert(status === 403, `expected 403, got ${status}: ${JSON.stringify(json)}`);
+        assert(json?.code === 'repo_not_connected', `code = ${json?.code}`);
+
+        const list = await request('/v1/repos', { key: mint.json.key });
+        assert((list.json?.repos ?? []).length === 0,
+          `a second org sees ${JSON.stringify(list.json?.repos)}`);
+      });
+    }
+
     // --- PATCH /v1/services/{id} and its releases ---------------------------
 
     await step('a service is created for the patch battery', async () => {
