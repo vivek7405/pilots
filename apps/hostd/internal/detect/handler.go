@@ -43,6 +43,7 @@ type Stager interface {
 // running other tenants' microVMs. The builder stages under the cache root for
 // exactly this reason, and the plan route stages beside it. Empty falls back
 // to the process temp dir, which is what a test wants.
+//
 // st answers whether the caller's org may have this fleet fetch a repository
 // it named. The STORE and not a copy of the rule: api.AllowRepo is the one
 // place that question is answered, and a second implementation here would be

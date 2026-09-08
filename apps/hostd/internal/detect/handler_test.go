@@ -311,6 +311,7 @@ func linkedStore(t *testing.T, org, repo string) state.Store {
 	if err != nil {
 		t.Fatalf("state.Open: %v", err)
 	}
+	t.Cleanup(func() { _ = st.Close() })
 	if err := st.PutRepoLink(context.Background(), &state.RepoLink{
 		OrgID: org, Repo: repo, ConnectedAt: 1,
 	}); err != nil {
