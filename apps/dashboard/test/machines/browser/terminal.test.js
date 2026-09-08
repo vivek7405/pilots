@@ -397,3 +397,73 @@ suite('machine-terminal in line mode', () => {
     host.remove();
   });
 });
+
+/**
+ * An idle shell gives the machine back too.
+ *
+ * Hiding the tab is one way to stop using a terminal; leaving it open on a
+ * desk is the other, and the machine cannot tell them apart: an open exec
+ * stream is traffic either way, and it kept a machine awake for as long as
+ * the page existed. Measured on a real fleet: a service replica reported
+ * "online since 42 minutes" under a terminal nobody had typed into.
+ *
+ * Driven through `idle-release-ms`. Counterfactual: never arm the idle timer
+ * and the first test below still finds an open socket.
+ */
+suite('machine-terminal and an idle shell', () => {
+  setup(() => {
+    sockets = [];
+    globalThis.WebSocket = FakeSocket;
+    globalThis.WebSocket.OPEN = 1;
+  });
+
+  teardown(async () => {
+    document.body.innerHTML = '';
+    await new Promise((r) => setTimeout(r, 20));
+    globalThis.WebSocket = RealWebSocket;
+  });
+
+  async function mountIdle(ms) {
+    const host = document.createElement('div');
+    host.style.cssText = 'width:640px;height:320px';
+    document.body.appendChild(host);
+    const el = document.createElement('machine-terminal');
+    el.setAttribute('machine-id', 'm-1');
+    el.setAttribute('idle-release-ms', String(ms));
+    host.appendChild(el);
+    await until(() => sockets.length > 0);
+    await el.updateComplete;
+    return { el, host, socket: sockets[0] };
+  }
+
+  test('a shell with no keystroke and no output past the limit is released', async () => {
+    const { el, host, socket } = await mountIdle(60);
+    await until(() => socket.readyState === 3);
+    await el.updateComplete;
+    assert.equal(el.status, 'released', `status says why: ${el.status}`);
+    assert.equal(sockets.length, 1, 'and nothing reconnected on its own');
+    host.remove();
+  });
+
+  test('output arriving keeps the shell alive', async () => {
+    const { el, host, socket } = await mountIdle(80);
+    // A build printing a line every so often is not idle, however long it runs.
+    for (let i = 0; i < 4; i += 1) {
+      await new Promise((r) => setTimeout(r, 40));
+      socket.deliver({ type: 'data', data: btoa('still going\n') });
+    }
+    assert.equal(socket.readyState, 1, 'the shell was never dropped while it was talking');
+    assert.equal(el.status, 'open');
+    host.remove();
+  });
+
+  test('a keystroke on a released shell starts a new one', async () => {
+    const { el, host, socket } = await mountIdle(60);
+    await until(() => socket.readyState === 3);
+    el.onKey('l');
+    await until(() => sockets.length === 2);
+    assert.includes(String(sockets[1].url), '/api/machines/m-1/terminal', 'the same machine, again');
+    assert.equal(sockets[1].sent.filter((m) => m.type === 'data').length, 0, 'the waking keystroke itself is not sent');
+    host.remove();
+  });
+});
