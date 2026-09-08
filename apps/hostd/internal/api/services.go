@@ -266,7 +266,7 @@ func (d Deps) handleListServices(w http.ResponseWriter, r *http.Request) {
 	for _, svc := range rows {
 		// The same rule `visible` applies, over the owners already resolved.
 		owner, found := owners[svc.ID]
-		if narrow && !(found && org != "" && owner == org) {
+		if !visibleTo(owner, found, org, narrow) {
 			continue
 		}
 		row := d.serviceToAPI(svc, owner)

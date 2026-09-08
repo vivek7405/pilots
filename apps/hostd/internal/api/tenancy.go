@@ -172,10 +172,19 @@ func actingOrg(r *http.Request) string {
 // not be handed every unowned object on the fleet.
 func (d Deps) visible(r *http.Request, id, org string, narrow bool) (owner string, ok bool) {
 	owner, found := d.tenancy().OrgOf(r.Context(), id)
+	return owner, visibleTo(owner, found, org, narrow)
+}
+
+// visibleTo is that rule over an owner someone has ALREADY resolved.
+//
+// A list resolves every row's owner once to group siblings; without this it
+// restated the rule inline to filter from that map, and two copies of a
+// tenancy rule are two places for it to drift.
+func visibleTo(owner string, found bool, org string, narrow bool) bool {
 	if !narrow {
-		return owner, true
+		return true
 	}
-	return owner, found && org != "" && owner == org
+	return found && org != "" && owner == org
 }
 
 // ownedBuild resolves a build the caller is allowed to name.
