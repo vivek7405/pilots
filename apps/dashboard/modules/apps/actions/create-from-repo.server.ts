@@ -92,6 +92,22 @@ export async function createFromRepo(formData: FormData) {
       secretEnv[key] = value;
     }
 
+    // Record the connection ON THE FLEET, before anything is created from it.
+    //
+    // The row below in this app's own database is what the service page
+    // renders; it is not, and cannot be, an authorization record: hostd cannot
+    // read this database, and the data plane may not depend on this app
+    // (ARCHITECTURE.md invariant 2). hostd keeps its own `repo_links` row and
+    // reads it from its local replica on every `{repo, ref}` build.
+    //
+    // Without this call the deploy would still work -- this app holds an admin
+    // key, which may name any repository -- and the org's OWN key would then
+    // be refused the repository it just deployed from, by `pilot deploy`, by
+    // an agent, by anything that is not this process. First, and not after the
+    // service exists, so a fleet that refuses the connection refuses before
+    // there is anything to clean up.
+    await client.repos.connect(repo);
+
     const create: CreateServiceRequest = {
       name,
       app,

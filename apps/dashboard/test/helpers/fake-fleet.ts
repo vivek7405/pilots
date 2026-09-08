@@ -68,6 +68,8 @@ export interface FleetData {
   execHold: boolean;
   /** Set to make `services.create` refuse, the way a taken name does. */
   createServiceError: Error | null;
+  /** Set to make `repos.connect` refuse, the way an unclaimable repo does. */
+  connectError: Error | null;
 }
 
 export interface FakeFleet {
@@ -112,6 +114,7 @@ export function makeFakeFleet(): FakeFleet {
     execResizes: [],
     execHold: false,
     createServiceError: null,
+    connectError: null,
   };
 
   const reset = () => {
@@ -134,6 +137,7 @@ export function makeFakeFleet(): FakeFleet {
     state.execResizes.length = 0;
     state.execHold = false;
     state.createServiceError = null;
+    state.connectError = null;
   };
 
   const notFound = (what: string) => {
@@ -159,6 +163,18 @@ export function makeFakeFleet(): FakeFleet {
       if (state.planQueue.length > 0) return state.planQueue.shift();
       if (!state.plan) throw new Error('fake fleet: set data.plan first');
       return state.plan;
+    },
+    repos: {
+      /** `POST /v1/repos`: the claim hostd reads before it fetches anything. */
+      connect: async (repo: string) => {
+        record('repos.connect', repo);
+        if (state.connectError) throw state.connectError;
+        return { repo, org_id: 'org_1', connected_at: 1 };
+      },
+      list: async () => {
+        record('repos.list');
+        return [];
+      },
     },
     builds: {
       createFromRepo: async (ref: unknown, opts: unknown) => {

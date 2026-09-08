@@ -65,6 +65,11 @@ afterEach(() => {
   app.fleet.data.plan = null;
   app.fleet.data.planQueue.length = 0;
   app.fleet.data.planError = null;
+  // Cleared here and not only in the test that sets it: a refusal left behind
+  // is a refusal every later test in this file inherits, and the failure lands
+  // on whichever assertion happens to run next rather than where it came from.
+  app.fleet.data.connectError = null;
+  app.fleet.data.createServiceError = null;
 });
 
 after(() => {
@@ -218,6 +223,51 @@ test('a one-step plan starts the build, creates the service as the org, and land
   assert.ok(builds.some((b) => b.jobId === 'bld-fake' && b.serviceId === 'svc-new' && b.repo === 'acme/shop'), 'the build is recorded');
   const conns = await db.query.repoConnections.findMany();
   assert.ok(conns.some((c) => c.serviceId === 'svc-new' && c.repo === 'acme/shop' && c.autodeploy), 'the repository is connected');
+
+  // And connected ON THE FLEET, which is a different record for a different
+  // reader. hostd cannot read this database and the data plane may not depend
+  // on this app, so the row above is what the service page renders and never
+  // an authorization record; hostd keeps its own, and reads it from its local
+  // replica on every {repo, ref} build. Without this call the deploy still
+  // works -- this app holds an admin key -- and the visitor's OWN key is then
+  // refused the repository they just deployed from, by `pilot deploy` and by
+  // any agent.
+  const methods = app.fleet.calls.map((c) => c.method);
+  const connected = app.fleet.calls.find((c) => c.method === 'repos.connect');
+  assert.ok(connected, `the repository was never connected on the fleet: ${methods.join(', ')}`);
+  assert.deepEqual(connected.args, ['acme/shop']);
+  assert.ok(
+    methods.indexOf('repos.connect') < methods.indexOf('services.create'),
+    'the claim is recorded before anything is created from it',
+  );
+});
+
+// The connection is recorded ON THE FLEET, not only in this app's database.
+//
+// hostd cannot read this database and the data plane may not depend on this
+// app, so the `repo_connections` row above is a rendering record and never an
+// authorization one. Without the fleet call the deploy still works -- this app
+// holds an admin key -- and the visitor's OWN key is then refused the very
+// repository they just deployed from, by `pilot deploy` and by any agent.
+//
+// Counterfactual: drop `client.repos.connect(repo)` from the action and this
+// fails, while every other test in this file keeps passing.
+// A fleet that refuses the connection refuses before there is anything to
+// clean up: no service, no build, and the engine's own words on the page.
+test('a refused connection creates nothing', async () => {
+  stubInstallations({ id: 1, login: 'acme' });
+  app.fleet.calls.length = 0;
+  app.fleet.data.plan = ONE_STEP;
+  app.fleet.data.connectError = new PilotsError('this org has no claim on acme/shop', {
+    status: 403,
+    code: 'repo_not_connected',
+    next: 'connect it first',
+  });
+
+  const res = await create({});
+  assert.equal(res.status, 403);
+  assert.ok(!app.fleet.calls.some((c) => c.method === 'services.create'), 'no service was created');
+  assert.ok(!app.fleet.calls.some((c) => c.method === 'builds.createFromRepo'), 'no build was started');
 });
 
 // The ORDER of the two fleet calls, which is only observable when the second
