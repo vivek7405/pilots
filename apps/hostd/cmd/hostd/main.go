@@ -509,7 +509,8 @@ func run() error {
 		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink, HugePages: cfg.HugePages,
 		StoreVersion: storeVersion(store),
 		Builds:       builder, Rollout: rollout, Domain: cfg.WorkloadDomain, URL: publicURL,
-		Peers: peerLookup(f), PeerToken: api.PeerTokenFor(cfg.AgentTokenSecret),
+		APIHostname: cfg.APIHostname,
+		Peers:       peerLookup(f), PeerToken: api.PeerTokenFor(cfg.AgentTokenSecret),
 		Tenancy: tenancy, MachineCPU: machineCPU, BuildGate: &quota.HostGate{},
 		// The key the boot path already holds, handed to the API too. Without
 		// this line every service create and patch carrying secret_env is

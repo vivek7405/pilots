@@ -35,6 +35,12 @@ type Deps struct {
 	Rollout Rollout
 	// Domain is the fleet's domain, for rendering a service's URL.
 	Domain string
+	// APIHostname is the control API's own hostname, the one label a tenant
+	// may not take. A service holding it would own a URL it could never be
+	// reached at, because dispatch claims that hostname before the workload
+	// suffix check. Empty means "api." + Domain, the same default
+	// machines.Options takes.
+	APIHostname string
 	// URL is the scheme and port every machine and service URL is rendered
 	// with. See PublicURL; the zero value is the production shape.
 	URL PublicURL
