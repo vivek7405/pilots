@@ -52,26 +52,9 @@ type Template struct {
 	// manifest written before page size was recorded, which is treated the
 	// same way.
 	PageSizeKiB int `json:"page_size_kib"`
-	// RootfsFingerprint is the golden rootfs the memory image was captured
-	// from (size and mtime). A template whose rootfs has since been replaced
-	// holds a memory image of the OLD guest agent, and nothing else checks:
-	// replacing golden.ext4 used to change nothing until an operator cleared
-	// two caches by hand.
-	RootfsFingerprint string `json:"rootfs_fingerprint,omitempty"`
 }
 
 // pageSizeKiB is the guest page size this host photographs templates at.
-// rootfsFingerprint identifies the golden rootfs file cheaply: size and
-// modification time, which every replacement of the file changes. Hashing
-// two gigabytes at every start would cost more than the check is worth.
-func (m *Manager) rootfsFingerprint() string {
-	st, err := os.Stat(m.opts.FCConfig.TemplateRootfs)
-	if err != nil {
-		return ""
-	}
-	return fmt.Sprintf("%d-%d", st.Size(), st.ModTime().Unix())
-}
-
 func (m *Manager) pageSizeKiB() int {
 	if m.opts.FCConfig.HugePages {
 		return 2048
@@ -125,25 +108,15 @@ func (m *Manager) EnsureTemplate(ctx context.Context) (*Template, error) {
 	defer templateOnce.Unlock()
 
 	// Already local and complete.
-	stale := false
 	if t, err := m.loadTemplate(); err == nil {
-		if t.RootfsFingerprint == m.rootfsFingerprint() {
-			return t, nil
-		}
-		// The rootfs under the template changed (or predates the check):
-		// its memory image holds a guest agent nobody runs any more. Skip
-		// the fleet row too -- it was published from the same image -- and
-		// rebuild, which republishes under the same id.
-		slog.Warn("golden rootfs changed since the template was captured; rebuilding the template",
-			"vendor", m.opts.Vendor, "was", t.RootfsFingerprint, "now", m.rootfsFingerprint())
-		stale = true
+		return t, nil
 	}
-	if !stale {
-		if t, err := m.adoptFleetTemplate(ctx); err == nil {
-			return t, nil
-		} else if !errors.Is(err, state.ErrNotFound) {
-			return nil, err
-		}
+
+	// The fleet has one; pull what this host is missing.
+	if t, err := m.adoptFleetTemplate(ctx); err == nil {
+		return t, nil
+	} else if !errors.Is(err, state.ErrNotFound) {
+		return nil, err
 	}
 
 	slog.Info("no golden template in this vendor pool; building one", "vendor", m.opts.Vendor)
@@ -207,10 +180,9 @@ func (m *Manager) adoptFleetTemplate(ctx context.Context) (*Template, error) {
 	// loudly on the snapshot itself, which is the right place for it -- a
 	// page size guessed into the manifest would be believed instead.
 	t := &Template{
-		SnapKey:           filepath.Join("template", uuid.NewString(), fc.SnapFile),
-		CreatedAt:         time.Now().Unix(),
-		PageSizeKiB:       m.pageSizeKiB(),
-		RootfsFingerprint: m.rootfsFingerprint(),
+		SnapKey:     row.SnapKey,
+		CreatedAt:   row.CreatedAt,
+		PageSizeKiB: m.pageSizeKiB(),
 	}
 	if t.MemBuildID, err = uuid.Parse(row.MemBuildID); err != nil {
 		return nil, fmt.Errorf("machines: fleet template has an unusable memory build %q: %w",
