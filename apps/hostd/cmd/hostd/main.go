@@ -403,6 +403,10 @@ func run() error {
 		Domain: cfg.WorkloadDomain,
 		HostID: cfg.HostID,
 		Store:  store,
+		// On a single box this reads the local SQLite store; a store error
+		// there means the host itself is broken, and the router has nothing
+		// better to say than public. On a fleet the cache below replaces it,
+		// so the request path holds no query at all -- see routerOpts.URLAuthOf.
 		URLAuthOf: func(ctx context.Context, id string) string {
 			u, err := store.GetURLAuth(ctx, id)
 			if err != nil || u == nil || u.Mode == "" {
@@ -452,6 +456,12 @@ func run() error {
 		// The hot path reads the subscription cache, not the agent.
 		routerOpts.Lookup = f.cache.MachineByName
 		routerOpts.Service = f.cache.ServiceReplicas
+		// Who may reach a URL, from the same replica the rest of the hot path
+		// reads. A live query here would have a failure mode whose only two
+		// answers are serving a gated URL to anyone or refusing a public one.
+		routerOpts.URLAuthOf = func(_ context.Context, id string) string {
+			return f.cache.URLAuth(id)
+		}
 	}
 	rtr := router.New(routerOpts)
 

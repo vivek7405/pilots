@@ -117,7 +117,11 @@ compose fragment on the ordinary primitives, not a product tier. See
    `Authorization: Bearer` -- 401 with a `WWW-Authenticate: Bearer` without
    one, 403 with another org's. A promoted machine follows its service's
    mode. The router reads the mode, the tenancy row and the key row from its
-   own local replica (rule 2 holds). Set at create, changed with
+   own local replica (rule 2 holds) -- on a fleet the mode is materialized
+   into the subscription cache beside the machine and service maps, so the
+   request path holds no query and therefore no failure mode: a live read
+   there could only answer a store error by serving a gated URL to anyone or
+   refusing a public one. Set at create, changed with
    `PATCH /v1/machines/{id}` or the service PATCH, shown by `pilot url`.
 
 6. **A memory image never crosses the CPU-vendor boundary; the fleet may mix

@@ -53,6 +53,7 @@ type cacheServer struct {
 	tenancyRows    []string
 	revocationRows []string
 	hostCPURows    []string
+	urlAuthRows    []string
 	machineCPURows []string
 
 	machineChanges    chan string
@@ -62,6 +63,7 @@ type cacheServer struct {
 	revocationChanges chan string
 	hostCPUChanges    chan string
 	machineCPUChanges chan string
+	urlAuthChanges    chan string
 	subscribes        atomic.Int32
 }
 
@@ -89,12 +91,16 @@ func startCache(t *testing.T, s *cacheServer) *Cache {
 	if s.machineCPUChanges == nil {
 		s.machineCPUChanges = make(chan string)
 	}
+	if s.urlAuthChanges == nil {
+		s.urlAuthChanges = make(chan string)
+	}
 
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		body := make([]byte, r.ContentLength)
 		_, _ = r.Body.Read(body)
 		isHostCPU := strings.Contains(string(body), "FROM host_cpu")
 		isMachineCPU := strings.Contains(string(body), "FROM machine_cpu")
+		isURLAuth := strings.Contains(string(body), "FROM url_auth")
 		isHosts := strings.Contains(string(body), "FROM hosts")
 		isServices := strings.Contains(string(body), "FROM services")
 		isTenancy := strings.Contains(string(body), "FROM tenancy")
@@ -107,6 +113,12 @@ func startCache(t *testing.T, s *cacheServer) *Cache {
 			for _, row := range s.hostCPURows {
 				flushLine(w, `{"row":[1,`+row+`]}`)
 			}
+		} else if isURLAuth {
+			flushLine(w, `{"columns":["id","kind","mode"]}`)
+			for _, row := range s.urlAuthRows {
+				flushLine(w, `{"row":[1,`+row+`]}`)
+			}
+			flushLine(w, `{"eoq":{"time":0.1}}`)
 		} else if isMachineCPU {
 			flushLine(w, `{"columns":["id","kind","vendor","last_start","last_start_at"]}`)
 			for _, row := range s.machineCPURows {
@@ -146,6 +158,8 @@ func startCache(t *testing.T, s *cacheServer) *Cache {
 			ch = s.hostCPUChanges
 		case isMachineCPU:
 			ch = s.machineCPUChanges
+		case isURLAuth:
+			ch = s.urlAuthChanges
 		case isTenancy:
 			ch = s.tenancyChanges
 		case isRevocations:
@@ -353,6 +367,12 @@ func TestCacheRebuildsWhenItsSubscriptionIsGone(t *testing.T) {
 		}
 		if strings.Contains(string(body), "FROM machine_cpu") {
 			flushLine(w, `{"columns":["id","kind","vendor","last_start","last_start_at"]}`)
+			flushLine(w, `{"eoq":{"time":0,"change_id":1}}`)
+			<-r.Context().Done()
+			return
+		}
+		if strings.Contains(string(body), "FROM url_auth") {
+			flushLine(w, `{"columns":["id","kind","mode"]}`)
 			flushLine(w, `{"eoq":{"time":0,"change_id":1}}`)
 			<-r.Context().Done()
 			return
@@ -646,4 +666,22 @@ func ids(rows []state.Machine) []string {
 		out = append(out, m.ID)
 	}
 	return out
+}
+
+// The router reads url_auth on every request it serves, so it comes from the
+// cache rather than a query: a live read there has a failure mode whose only
+// two answers are serving a gated URL to anyone or refusing a public one.
+// Absent means no row, which is public -- what every URL was before the mode
+// existed.
+func TestCacheAnswersURLAuthFromMemory(t *testing.T) {
+	cache := startCache(t, &cacheServer{
+		urlAuthRows: []string{`["m-gated","machine","org"]`},
+	})
+
+	if got := cache.URLAuth("m-gated"); got != "org" {
+		t.Errorf("a gated machine reads %q, want org", got)
+	}
+	if got := cache.URLAuth("m-never-seen"); got != "public" {
+		t.Errorf("an object with no row reads %q, want public", got)
+	}
 }
