@@ -151,6 +151,13 @@ func Execute(ctx context.Context, getenv config.Env, args []string) int {
 	if errors.As(err, &exit) {
 		return exit.Code
 	}
+	// The reader of stdout went away: `pilot machines ls | head -3`, a `grep
+	// -q` that has seen enough. Nothing is printed and the code is the one a
+	// shell already reports for it, because "nobody was listening" must not
+	// read as "the fleet said no".
+	if out.IsEPIPE(err) {
+		return out.ExitCodeEPIPE
+	}
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return 130 // 128 + SIGINT
 	}

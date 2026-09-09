@@ -10,7 +10,6 @@ import (
 
 	"github.com/vivek7405/pilots/cli/internal/cli"
 	"github.com/vivek7405/pilots/cli/internal/config"
-	"github.com/vivek7405/pilots/cli/internal/out"
 )
 
 func main() {
@@ -39,5 +38,3 @@ func main() {
 	}
 	os.Exit(code)
 }
-
-var _ = out.ExitCodeEPIPE
