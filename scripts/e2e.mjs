@@ -372,6 +372,38 @@ async function lifecycleAssertions() {
       assert(pulled.equals(payload), `the pulled file differs: ${pulled.length} bytes back, ${payload.length} sent`);
     });
 
+    // #100: any TCP port inside a machine, from localhost, through the CLI.
+    // A server bound to 127.0.0.1 in the guest is unreachable by the URL
+    // (which serves 8080 only), so getting bytes from it proves the tunnel
+    // and not the router.
+    await step('pilot proxy reaches a port inside the machine that the URL cannot', async () => {
+      const { spawn } = await import('node:child_process');
+      await exec(id, 'nohup python3 -m http.server 9911 --bind 127.0.0.1 --directory /tmp >/tmp/hs.log 2>&1 & sleep 1; echo started');
+      const proxy = spawn(CLI_ARGV0[0], [...CLI_ARGV0.slice(1), 'proxy', '19911:9911', '-m', id],
+        { env: { ...process.env, PILOT_API: API, PILOT_API_KEY: KEY }, stdio: ['ignore', 'pipe', 'pipe'] });
+      let stderr = '';
+      proxy.stderr.on('data', (c) => { stderr += c; });
+      try {
+        let last = null;
+        const deadline = Date.now() + 30_000;
+        while (Date.now() < deadline) {
+          try {
+            const res = await fetch('http://127.0.0.1:19911/', { signal: AbortSignal.timeout(3000) });
+            last = { status: res.status, body: await res.text() };
+            if (res.status === 200) break;
+          } catch (err) {
+            last = { status: 0, body: String(err.message) };
+          }
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        assert(last && last.status === 200, `through the tunnel: ${JSON.stringify(last)}; proxy said: ${stderr.slice(0, 200)}`);
+        assert(/Directory listing|<html/i.test(last.body), `not the guest's server: ${last.body.slice(0, 80)}`);
+      } finally {
+        proxy.kill('SIGTERM');
+        await exec(id, 'pkill -f "http.server 9911" || true');
+      }
+    });
+
     await step('a non-zero exit is reported, not thrown away', async () => {
       const { status, json } = await request(`/v1/machines/${id}/exec`, {
         method: 'POST', body: { cmd: 'exit 42', user: 'root' },

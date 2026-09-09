@@ -41,6 +41,8 @@ type Manager interface {
 	// returned only before anything was written (a wake that failed, a machine
 	// that is not running); once the upgrade has been attempted it is nil.
 	ExecStream(w http.ResponseWriter, r *http.Request, machineID string) error
+	// TCPStream carries one TCP connection to a port inside the machine.
+	TCPStream(w http.ResponseWriter, r *http.Request, machineID string, port int) error
 	// LogTail is Logs from a byte offset, for a follow. nil, nil when nothing
 	// new has been written. It reads the file and nothing else: a follow polls
 	// it twice a second, and whether the machine still exists is asked far

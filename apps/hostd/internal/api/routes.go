@@ -184,6 +184,8 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("DELETE /v1/machines/{id}", d.handleDestroyMachine)
 	mux.HandleFunc("POST /v1/machines/{id}/exec", d.handleExec)
 	mux.HandleFunc("GET /v1/machines/{id}/exec/stream", d.handleExecStream)
+	// One TCP connection to a port inside the machine, for `pilot proxy`.
+	mux.HandleFunc("GET /v1/machines/{id}/tcp/{port}", d.handleTCPStream)
 	// The sprites alias, name-keyed: see handleSpriteExec.
 	mux.HandleFunc("GET /v1/sprites/{name}/exec", d.handleSpriteExec)
 	mux.HandleFunc("GET /v1/machines/{id}/logs", d.handleLogs)

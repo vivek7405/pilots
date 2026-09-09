@@ -106,6 +106,7 @@ func NewRoot(getenv config.Env) *cobra.Command {
 		InGroup(newConsoleCmd(env), "sandbox"),
 		InGroup(newExecCmd(env), "sandbox"),
 		InGroup(newFileCmd(env), "sandbox"),
+		InGroup(newProxyCmd(env), "sandbox"),
 		InGroup(newDeployCmd(env, getenv), "deploy"),
 		InGroup(newServicesCmd(env), "deploy"),
 		InGroup(newPromoteCmd(env), "deploy"),

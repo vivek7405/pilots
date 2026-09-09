@@ -148,3 +148,5 @@ func (f *fakeManager) MachineVolume(context.Context, string) (*MachineVolume, er
 }
 
 func (f *fakeManager) CollectMetrics() { f.collected++ }
+
+func (f *fakeManager) TCPStream(http.ResponseWriter, *http.Request, string, int) error { return nil }
