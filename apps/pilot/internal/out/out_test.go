@@ -134,3 +134,18 @@ func TestTableRefusesToRunInJSONMode(t *testing.T) {
 		t.Error("Table must refuse in JSON mode")
 	}
 }
+
+// A key/value listing passes empty headers, and must not get a blank line
+// above its first row for them.
+func TestTableSkipsAnAllEmptyHeader(t *testing.T) {
+	w, o, _ := newTest()
+	if err := w.Table([]string{"", ""}, [][]string{{"NAME", "x"}, {"ID", "y"}}); err != nil {
+		t.Fatal(err)
+	}
+	if strings.HasPrefix(o.String(), "\n") || strings.HasPrefix(o.String(), " ") {
+		t.Errorf("a blank header line was printed: %q", o.String())
+	}
+	if !strings.HasPrefix(o.String(), "NAME  x\n") {
+		t.Errorf("first row is wrong: %q", o.String())
+	}
+}

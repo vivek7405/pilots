@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -21,6 +22,9 @@ type Env struct {
 	APIURL config.Resolved
 	APIKey config.Resolved
 	Org    config.Resolved
+
+	// Yes answers every confirmation, for scripts and agents.
+	Yes bool
 
 	client *pilots.Client
 }
@@ -67,6 +71,7 @@ func NewRoot(getenv config.Env) *cobra.Command {
 				return err
 			}
 			env.APIURL, env.APIKey, env.Org = url, key, org
+			env.Yes = flagYes
 			env.W = out.New(flagJSON)
 			return nil
 		},
@@ -92,8 +97,10 @@ func NewRoot(getenv config.Env) *cobra.Command {
 	})
 
 	root.AddCommand(
-		InGroup(newWhoamiCmd(env), "account"),
 		InGroup(newMachinesCmd(env), "sandbox"),
+		InGroup(newConsoleCmd(env), "sandbox"),
+		InGroup(newExecCmd(env), "sandbox"),
+		InGroup(newWhoamiCmd(env), "account"),
 	)
 
 	UseHelp(root)
@@ -108,6 +115,15 @@ func Execute(ctx context.Context, getenv config.Env, args []string) int {
 	err := root.ExecuteContext(ctx)
 	if err == nil {
 		return 0
+	}
+	// A remote command's own status is not a CLI failure: the program that
+	// ran has already said whatever it had to say, so nothing is printed.
+	var exit *ExitError
+	if errors.As(err, &exit) {
+		return exit.Code
+	}
+	if errors.Is(ctx.Err(), context.Canceled) {
+		return 130 // 128 + SIGINT
 	}
 	w := out.New(false)
 	w.WriteError(err)
@@ -177,69 +193,6 @@ func joinScopes(s []string) string {
 		out += ", " + x
 	}
 	return out
-}
-
-func newMachinesCmd(env *Env) *cobra.Command {
-	c := &cobra.Command{
-		Use:     "machines",
-		Aliases: []string{"machine", "m"},
-		Short:   "create and drive machines",
-	}
-	Describe(c, Doc{
-		What: "A machine is one Firecracker microVM: its own kernel, its own disk,\n" +
-			"its own URL. It is the only primitive here. Left alone it is a\n" +
-			"sandbox; promoted it is a production service replica.",
-		Related: []string{
-			"pilot promote   turn a machine into a service, keeping its URL",
-			"pilot deploy    build a directory and run it as a service",
-		},
-	})
-	c.AddCommand(newMachinesListCmd(env))
-	return c
-}
-
-func newMachinesListCmd(env *Env) *cobra.Command {
-	c := &cobra.Command{
-		Use:     "list",
-		Aliases: []string{"ls"},
-		Short:   "list machines",
-		Args:    cobra.NoArgs,
-		RunE: func(c *cobra.Command, _ []string) error {
-			client, err := env.Client()
-			if err != nil {
-				return err
-			}
-			machines, err := client.Machines.List(c.Context())
-			if err != nil {
-				return err
-			}
-			if env.W.JSON {
-				return env.W.JSONValue(machines)
-			}
-			rows := make([][]string, 0, len(machines))
-			for _, m := range machines {
-				rows = append(rows, []string{m.Name, m.State, m.HostID, m.URL, m.ID})
-			}
-			if len(rows) == 0 {
-				// An empty list is an answer, not an error, and it goes to
-				// stderr so `| wc -l` still reads zero rows.
-				env.W.Notef("no machines in %s", orgLabel(env))
-				return nil
-			}
-			return env.W.Table([]string{"NAME", "STATE", "HOST", "URL", "ID"}, rows)
-		},
-	}
-	Describe(c, Doc{
-		When: "To see what exists. For what a single machine is doing, including\n" +
-			"its console, use `pilot machines info`.",
-		Examples: []string{
-			"pilot machines ls",
-			"pilot m ls",
-			"# every field, for a script",
-			"pilot machines ls --json | jq -r '.[] | .name'",
-		},
-	})
-	return c
 }
 
 func orgLabel(env *Env) string {

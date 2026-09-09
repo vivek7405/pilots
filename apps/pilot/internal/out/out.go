@@ -80,7 +80,11 @@ func (w *Writer) Table(headers []string, rows [][]string) error {
 		}
 		b.WriteByte('\n')
 	}
-	writeRow(headers)
+	// A key/value listing passes empty headers; printing them would put a
+	// blank line above the first row.
+	if strings.TrimSpace(strings.Join(headers, "")) != "" {
+		writeRow(headers)
+	}
 	for _, r := range rows {
 		writeRow(r)
 	}
