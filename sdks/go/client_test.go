@@ -368,3 +368,64 @@ func TestCreateFromRepoPostsTheRefAsJSON(t *testing.T) {
 		t.Errorf("result = %q, want rootfs_1", got)
 	}
 }
+
+// The 403 a caller gets for naming an unconnected repository says to POST
+// /v1/repos. These two are what a Go caller told that can actually call, so
+// the path, the method and the body are asserted rather than assumed.
+func TestConnectRepoPostsTheRepositoryAndReadsItBack(t *testing.T) {
+	var seenPath, seenMethod string
+	var body []byte
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		seenPath, seenMethod = r.URL.Path, r.Method
+		body, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_ = json.NewEncoder(w).Encode(RepoLinkResponse{
+			Repo: "acme/shop", OrgID: "org_2", ConnectedAt: 42,
+		})
+	})
+
+	link, err := c.ConnectRepo(context.Background(), "acme/shop")
+	if err != nil {
+		t.Fatalf("ConnectRepo: %v", err)
+	}
+	if seenMethod != http.MethodPost || seenPath != "/v1/repos" {
+		t.Errorf("called %s %s", seenMethod, seenPath)
+	}
+	if string(body) != `{"repo":"acme/shop"}` {
+		t.Errorf("body = %q", body)
+	}
+	if link.Repo != "acme/shop" || link.OrgID != "org_2" || link.ConnectedAt != 42 {
+		t.Errorf("link = %+v", link)
+	}
+}
+
+// Never nil on success: a caller rendering "no repositories connected" should
+// not have to tell an empty fleet from a broken one.
+func TestListReposUnwrapsAndIsNeverNil(t *testing.T) {
+	empty := true
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/repos" || r.Method != http.MethodGet {
+			t.Errorf("called %s %s", r.Method, r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if empty {
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		_ = json.NewEncoder(w).Encode(RepoLinkListResponse{
+			Repos: []RepoLinkResponse{{Repo: "acme/shop", OrgID: "org_2", ConnectedAt: 1}},
+		})
+	})
+
+	repos, err := c.ListRepos(context.Background())
+	if err != nil || repos == nil || len(repos) != 0 {
+		t.Fatalf("ListRepos on an empty fleet = %#v, %v", repos, err)
+	}
+
+	empty = false
+	repos, err = c.ListRepos(context.Background())
+	if err != nil || len(repos) != 1 || repos[0].Repo != "acme/shop" {
+		t.Fatalf("ListRepos = %#v, %v", repos, err)
+	}
+}
