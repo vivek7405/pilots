@@ -400,7 +400,9 @@ async function lifecycleAssertions() {
         assert(/Directory listing|<html/i.test(last.body), `not the guest's server: ${last.body.slice(0, 80)}`);
       } finally {
         proxy.kill('SIGTERM');
-        await exec(id, 'pkill -f "http.server 9911" || true');
+        // The bracket keeps the pattern from matching this shell's own
+        // command line, which is how `pkill -f` kills the process running it.
+        await exec(id, 'pkill -f "[h]ttp.server 9911" || true');
       }
     });
 
@@ -5191,9 +5193,17 @@ async function tenancyAssertions() {
         } finally {
           await request(`/v1/machines/${gated.json.id}`, { method: 'DELETE' });
         }
-        // The machine the rest of this block uses is public, and stays so.
-        const plain = await viaRouter(new URL(machine.url).host, '/', 20_000);
-        assert(plain.status !== 401 && plain.status !== 403, `a public URL must not be gated, got ${plain.status}`);
+        // And a machine with no mode recorded is public, which is what every
+        // URL was before url_auth existed.
+        const open = await request('/v1/machines', { method: 'POST', body: { vcpus: 1, mem_mib: 512 } });
+        assert(open.status === 201, `create public: ${open.status}`);
+        try {
+          assert((open.json.url_auth ?? 'public') === 'public', `a machine with no mode reads ${open.json.url_auth}`);
+          const plain = await viaRouter(new URL(open.json.url).host, '/', 20_000);
+          assert(plain.status !== 401 && plain.status !== 403, `a public URL must not be gated, got ${plain.status}`);
+        } finally {
+          await request(`/v1/machines/${open.json.id}`, { method: 'DELETE' });
+        }
       });
 
       await step('a machine created by one org is invisible to another', async () => {
@@ -5355,8 +5365,12 @@ async function agentDeployAssertions(REFLINK) {
 
     await step('`pilot mcp` starts and offers exactly the tools the README lists', async () => {
       const transport = new StdioClientTransport({
-        command: process.execPath,
-        args: [CLI_BIN, 'mcp'],
+        // The CLI under test, spawned the way a shell would: the Go binary
+        // runs itself, the TypeScript entry runs under this node. Hardcoding
+        // node here ran `node <go binary> mcp`, which node fails to parse as
+        // JavaScript and the client reports as "Connection closed".
+        command: CLI_ARGV0[0],
+        args: [...CLI_ARGV0.slice(1), 'mcp'],
         env: { PATH: process.env.PATH, PILOT_API_URL: API, PILOT_API_KEY: KEY },
         stderr: 'pipe',
       });
