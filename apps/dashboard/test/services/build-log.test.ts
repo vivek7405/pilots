@@ -18,6 +18,7 @@ import { asUser, bootApp, signInAs } from '../helpers/app.ts';
 import type { TestApp } from '../helpers/app.ts';
 import type { Service } from '@pilots/sdk';
 import { verdictOf, failureText } from '#modules/services/components/build-log.ts';
+import { awaitsRelease } from '#modules/services/utils/build-follow.ts';
 
 let app: TestApp;
 let cookie: string;
@@ -107,6 +108,70 @@ test('a refused deploy keeps the engine s words, never a bare status', () => {
   // A build that failed on its own has no `next`, and must not grow an empty
   // one or trailing whitespace.
   assert.equal(failureText({ error: 'exit status 1', code: 'build_failed' }), 'exit status 1 (build_failed)');
+});
+
+test('a build older than the running deployment is a log to read, not one to wait on', () => {
+  // Every historical build carries a Follow link, and a finished build's log
+  // REPLAYS its terminal `deployed` line. Acted on, that bounces the reader
+  // out of the log they opened, announcing a deployment from days ago -- and
+  // the log they asked for cannot be read at all.
+  const build = { createdAt: new Date(10_000_000) };
+  assert.equal(awaitsRelease(build, { created_at: 20_000 }), false, 'the deployment is newer than the build');
+  assert.equal(awaitsRelease(build, { created_at: 9_000 }), true, 'the build is newer, so its release is still to come');
+  assert.equal(awaitsRelease(build, undefined), true, 'a service with no deployment yet is the first-deploy case');
+  assert.equal(awaitsRelease(undefined, { created_at: 20_000 }), false, 'nothing is being followed');
+});
+
+test('the tab waits on a fresh build and only shows the log of an old one', async () => {
+  const { db } = await import('#db/connection.server.ts');
+  const { builds } = await import('#db/schema.server.ts');
+
+  await db
+    .insert(builds)
+    .values({ orgId: org, serviceId: 'svc-old', jobId: 'bld-old', repo: 'acme/shop', ref: 'main', startedBy: 1 })
+    .run();
+  const now = Math.floor(Date.now() / 1000);
+  app.fleet.data.services.push({
+    id: 'svc-old',
+    name: 'old',
+    org_id: org,
+    app: 'shop',
+    replicas: 1,
+    release_id: 'rel-now',
+  } as unknown as Service);
+  // The deployment running now was cut AFTER that build row, which is the
+  // shape of every build in the history list.
+  app.fleet.data.releases['svc-old'] = [
+    { id: 'rel-now', service_id: 'svc-old', healthy: true, created_at: now + 600, rootfs_build_id: 'img-1' },
+  ] as never;
+
+  const res = await app.handle(
+    new Request('http://localhost/services/svc-old?tab=deployments&build=bld-old', asUser(cookie)),
+  );
+  const body = await res.text();
+  const element = body.slice(body.indexOf('<build-log'), body.indexOf('</build-log>'));
+  assert.ok(element.includes('build-id="bld-old"'), 'the log of the build asked for is still rendered');
+  assert.ok(!/\bautodeploy\b/.test(element), 'an old build is not waited on');
+  assert.ok(element.includes('release-id="rel-now"'), 'the element is told which deployment the page already shows');
+  assert.match(body, /older than the deployment running now/, 'the heading says what this log is');
+});
+
+test('the deployment is readable without the build log, which is what the fallback needs', async () => {
+  // A build's log lives on the ONE host that ran it, and this app reaches the
+  // fleet at a hostname every host answers -- so a 404 there says "not on
+  // this host", not "nothing was deployed". `<build-log>` therefore falls
+  // back to the service, whose release row is replicated to every host. This
+  // is that contract: the id the element compares against `release-id`, from
+  // a route that never touches the build.
+  const res = await app.handle(new Request('http://localhost/api/services/svc-old', asUser(cookie)));
+  assert.equal(res.status, 200);
+  const service = (await res.json()) as { release_id?: string };
+  assert.equal(service.release_id, 'rel-now');
+
+  // And it stays scoped: another org's service is a 404 here too, so the
+  // fallback cannot be pointed at a deployment that is not the visitor's.
+  const foreign = await app.handle(new Request('http://localhost/api/services/svc-x', asUser(cookie)));
+  assert.equal(foreign.status, 404);
 });
 
 test('a build someone else owns is not followed even when named', async () => {

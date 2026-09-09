@@ -2494,33 +2494,82 @@ print(sum(1 for m in json.load(sys.stdin) if m.get('service_id') == '${DV_SVC}')
         && ok "the release has one replica, not two" \
         || bad "the service has ${DV_REPS} replicas after one deploy"
 
-      # The verdict in the RECORDED log, which is the only thing a browser
-      # that reattaches can read. A log that closed when the image was
-      # published would end on the image and never mention the release.
-      DV_LAST=$(curl -sf -m 30 "http://${DV_BUILDER}:8080/v1/builds/${DV_BID}/logs" -H "$AUTH" 2>/dev/null | tail -1)
-      case "$DV_LAST" in
-        *"\"release\":\"${DV_REL}\""*) ok "the build log's last line carries the release" ;;
-        "") bad "the build log is empty on the host that ran it" ;;
-        *) bad "the build log's last line does not carry the release: ${DV_LAST}" ;;
-      esac
+      # WHERE the build's log is, which on a fleet is the whole point.
+      #
+      # A build that carries a deploy is forwarded to the service's arbiter --
+      # the one host allowed to write its rows -- so it does NOT run where the
+      # POST landed, and hostd answers a log request from its own memory with
+      # no forward. Exactly one host holds it; every other answers 404. A
+      # client that treats that 404 as "nothing was deployed" is wrong on a
+      # fleet of more than one, which is why <build-log> falls back to the
+      # release row rather than trusting the log to be reachable.
+      DV_HOLDERS=""
+      DV_MISSES=0
+      for ip in "${LIVE_IPS[@]}"; do
+        DV_CODE=$(curl -s -m 30 -o "${DV_TMP}/log-${ip}" -w '%{http_code}' \
+          "http://${ip}:8080/v1/builds/${DV_BID}/logs" -H "$AUTH" 2>/dev/null)
+        case "$DV_CODE" in
+          200) DV_HOLDERS="${DV_HOLDERS}${ip} " ;;
+          404) DV_MISSES=$((DV_MISSES + 1)) ;;
+          *) bad "${ip} answered ${DV_CODE} for the build log, want 200 or 404" ;;
+        esac
+      done
+      DV_RUNNER=$(echo "$DV_HOLDERS" | awk '{print $1}')
+      if [ "$(echo "$DV_HOLDERS" | wc -w)" = 1 ]; then
+        ok "one host holds the build log (${DV_RUNNER}); ${DV_MISSES} answer 404, as a host-local log does"
+      else
+        bad "the build log is on hosts [${DV_HOLDERS}], want exactly one"
+      fi
+
+      # The verdict in the RECORDED log, on the host that has it. A log closed
+      # when the image was published would end on the image and never mention
+      # the release the hold exists to carry.
+      if [ -n "$DV_RUNNER" ]; then
+        DV_LAST=$(tail -1 "${DV_TMP}/log-${DV_RUNNER}" 2>/dev/null)
+        case "$DV_LAST" in
+          *"\"release\":\"${DV_REL}\""*) ok "the build log's last line carries the release" ;;
+          "") bad "the build log is empty on the host that ran it" ;;
+          *) bad "the build log's last line does not carry the release: ${DV_LAST}" ;;
+        esac
+      fi
+
+      # The fallback's own contract: the deployment is readable from EVERY
+      # host, log or no log. This is what a browser that reached the wrong
+      # host reads instead, and it is the reason a host-local log is a
+      # nuisance rather than a lost deploy.
+      DV_EVERYWHERE=0
+      for ip in "${LIVE_IPS[@]}"; do
+        DV_SEES=$(api "$ip" GET "/v1/services/${DV_SVC}" 2>/dev/null | jf release_id)
+        if [ "$DV_SEES" = "$DV_REL" ]; then
+          DV_EVERYWHERE=$((DV_EVERYWHERE + 1))
+        else
+          bad "${ip} reports release_id ${DV_SEES:-empty}, want ${DV_REL}"
+        fi
+      done
+      [ "$DV_EVERYWHERE" = "${#LIVE_IPS[@]}" ] \
+        && ok "all ${DV_EVERYWHERE} live hosts name ${DV_REL} as the deployment" \
+        || bad "only ${DV_EVERYWHERE} of ${#LIVE_IPS[@]} hosts name the deployment"
     fi
+    # Everything below is about the host that actually RAN the build, which
+    # the arbiter forward means is not necessarily the one posted to.
+    [ -n "${DV_RUNNER:-}" ] || DV_RUNNER="$DV_BUILDER"
 
     # What the host kept. A build's work directory is removed on every path
     # out, including the one where the client left, and a held log must not
     # wedge hostd.
     if [ -n "$DV_BID" ]; then
-      DV_WORK=$($SSH "root@$DV_BUILDER" "ls -d /var/cache/pilots/builds-work/${DV_BID} 2>/dev/null" 2>/dev/null | tr -d '[:space:]')
+      DV_WORK=$($SSH "root@$DV_RUNNER" "ls -d /var/cache/pilots/builds-work/${DV_BID} 2>/dev/null" 2>/dev/null | tr -d '[:space:]')
       [ -z "$DV_WORK" ] \
-        && ok "the build's work directory is gone from ${DV_BUILDER}" \
-        || bad "${DV_BUILDER} kept ${DV_WORK} after the build ended"
+        && ok "the build's work directory is gone from ${DV_RUNNER}" \
+        || bad "${DV_RUNNER} kept ${DV_WORK} after the build ended"
     fi
-    DV_PANIC=$($SSH "root@$DV_BUILDER" "journalctl -u hostd --since '${DV_SINCE}' --no-pager 2>/dev/null | grep -c 'panic:'" 2>/dev/null | tr -d '[:space:]')
+    DV_PANIC=$($SSH "root@$DV_RUNNER" "journalctl -u hostd --since '${DV_SINCE}' --no-pager 2>/dev/null | grep -c 'panic:'" 2>/dev/null | tr -d '[:space:]')
     [ "${DV_PANIC:-1}" = 0 ] \
       && ok "hostd logged no panic while deploying for a client that had gone" \
       || bad "hostd panicked ${DV_PANIC} times during the abandoned build"
-    wait_serving "$DV_BUILDER" 30 \
-      && ok "${DV_BUILDER} is still serving" \
-      || bad "${DV_BUILDER} stopped serving after the abandoned build"
+    wait_serving "$DV_RUNNER" 30 \
+      && ok "${DV_RUNNER} is still serving" \
+      || bad "${DV_RUNNER} stopped serving after the abandoned build"
 
     # Leave the rig as it was found: the replicas go, the service row is
     # harmless and every other section's cleanup does the same.

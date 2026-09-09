@@ -2389,6 +2389,12 @@ async function deployOnVerdictAssertions() {
     if (!release) return;
 
     await step('the service points at that release, and reading the log again cuts no second one', async () => {
+      // The service row, not the build log, is the durable witness. A log is
+      // held by the ONE host that ran the build -- and a build that carries a
+      // deploy runs on the service's arbiter, which is not the host a client
+      // chose -- so this row is what a client that reached any other host
+      // reads instead. gate.sh section 22 asserts the other side of that on a
+      // real fleet; here it is the contract that the row carries the release.
       const { json: after } = await request(`/v1/services/${svc.id}`);
       assert(after?.release_id === release.id,
         `the service points at ${after?.release_id}, want ${release.id}`);

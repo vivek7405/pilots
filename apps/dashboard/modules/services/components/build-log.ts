@@ -18,6 +18,17 @@
  * health gate afterwards. With scripting off the page shows the raw log link
  * and the Deploy form takes the image id by hand, so the verdict is never
  * lost.
+ *
+ * THE LOG IS NOT THE ONLY WITNESS, and it must not be. A build's log lives on
+ * the host that ran it: hostd answers `GET /v1/builds/{id}/logs` from its own
+ * memory and 404s for a build it does not have, while this app reaches the
+ * fleet at a hostname every host answers, so on a fleet of more than one the
+ * log is a coin toss. The RELEASE is a replicated row, readable from any host,
+ * so whenever the log cannot deliver a verdict -- it was not there, the
+ * connection ended early, the host restarted -- the element watches
+ * `GET /api/services/<id>` for a release that is not the one the page rendered
+ * with. Nothing here ever POSTs a deploy: a second rollout is precisely what
+ * the server-side verdict exists to make impossible.
  */
 import { WebComponent, html, prop, navigate } from '@webjsdev/core';
 import { createRef, ref } from '@webjsdev/core/directives';
@@ -26,6 +37,17 @@ import { badgeClass } from '#components/ui/badge.ts';
 import { cn } from '#lib/utils/cn.ts';
 
 const PANE = 'h-72 overflow-auto rounded-md border border-border bg-muted p-3 text-meta font-mono whitespace-pre-wrap';
+
+/**
+ * How the release row is watched when the log cannot deliver the verdict.
+ *
+ * The ceiling is a rollout's own worst case, not a guess: a deploy boots a
+ * replica, gates it for the health check's grace -- routinely minutes -- and
+ * restores the rest from its snapshot. Giving up sooner would report "no
+ * deployment" for one that is simply still gating.
+ */
+const RELEASE_POLL_MS = 3_000;
+const WAIT_FOR_RELEASE_MS = 10 * 60_000;
 
 export interface Line {
   step?: string;
@@ -71,10 +93,21 @@ export function failureText(line: Line): string {
 export class BuildLog extends WebComponent({
   buildId: prop(String, { attribute: 'build-id' }),
   serviceId: prop(String, { attribute: 'service-id' }),
-  /** This build was started with a deploy attached, so a release is coming. */
+  /**
+   * A release from this build is still to come, so the element waits for it
+   * and moves the reader onto it. False for a build older than the deployment
+   * running now: its log replays a `release` line that was acted on long ago,
+   * and acting on it again would bounce the reader out of the log they asked
+   * to read.
+   */
   autodeploy: prop(Boolean),
   /** Where a finished deploy lands. Empty means the service page. */
   back: prop(String),
+  /**
+   * The deployment the page rendered with. Anything else is new, and nothing
+   * equal to it is: it is already on the screen behind this log.
+   */
+  releaseId: prop(String, { attribute: 'release-id' }),
   status: prop(String, { state: true }),
   failure: prop(String, { state: true }),
 }) {
@@ -89,6 +122,7 @@ export class BuildLog extends WebComponent({
     this.buildId = '';
     this.serviceId = '';
     this.back = '';
+    this.releaseId = '';
     this.autodeploy = false;
     this.status = 'connecting';
     this.failure = '';
@@ -111,7 +145,15 @@ export class BuildLog extends WebComponent({
     try {
       const res = await fetch(`/api/builds/${this.buildId}/logs?follow=1`, { signal: this.controller.signal });
       if (!res.ok || !res.body) {
-        this.status = `unavailable (${res.status})`;
+        // A build's log lives on the host that ran it, and this request lands
+        // on whichever host answered. A 404 here says "not on this host", not
+        // "your deploy failed" -- and a build that carries a deploy runs on
+        // the service's arbiter, which is a host the browser never chose. So
+        // the release is watched for where it actually is: a replicated row.
+        this.status = this.autodeploy ? 'deploying' : `unavailable (${res.status})`;
+        if (!this.autodeploy) return;
+        this.appendText(`this build's log is on another host; watching for the deployment instead`);
+        await this.awaitRelease();
         return;
       }
       this.status = 'building';
@@ -127,24 +169,52 @@ export class BuildLog extends WebComponent({
       }
       if (carry) this.take(carry);
       if (this.status === 'building') this.status = 'ended';
-      // A stream that ended after the image and before any release. Usually a
-      // build started by a version of this app that deployed from the browser,
-      // so no release is coming -- but the same thing is seen when the host
-      // restarted mid-rollout, or when the log ended for its own reasons while
-      // the rollout carried on. What is observed is only that this connection
-      // ended first, so that is all this says: claiming "no deploy" and
-      // pointing at the Deploy form would invite a SECOND release for a
-      // rollout that may still be running, which is the thing this shape
-      // exists to make impossible.
-      if (this.autodeploy && this.built && this.status === 'deploying') {
-        this.status = 'built';
-        this.failure =
-          `The image ${this.built} was built, but this connection ended before a release did. ` +
-          'Check the deployments below; if none was cut, deploy the image with the form.';
-      }
+      // A stream that ended after the image and before any release. What is
+      // observed is only that this connection ended first: the rollout may
+      // still be running, the host may have restarted, the build may predate
+      // the deploy travelling with it. So the release row is asked, rather
+      // than any of that being claimed -- and never the Deploy form, which
+      // would invite a SECOND release for a rollout still in flight.
+      if (this.autodeploy && this.status === 'deploying') await this.awaitRelease();
     } catch (err) {
       if ((err as Error).name !== 'AbortError') this.status = 'disconnected';
     }
+  }
+
+  /**
+   * The deployment, from the replicated row when the log could not say.
+   *
+   * The service's release id is readable from any host, which is the point:
+   * the log is held by one host and this app talks to whichever answers. A
+   * release that is not the one the page rendered with is this build's, and
+   * the reader is moved onto it exactly as a `release` line would have.
+   *
+   * It only ever READS. A poll that gave up and posted a deploy would be the
+   * double rollout this whole shape removes, arrived at from the other side.
+   */
+  private async awaitRelease() {
+    const deadline = Date.now() + WAIT_FOR_RELEASE_MS;
+    while (Date.now() < deadline && !this.left) {
+      await new Promise((r) => setTimeout(r, RELEASE_POLL_MS));
+      if (this.controller?.signal.aborted) return;
+      try {
+        const res = await fetch(`/api/services/${this.serviceId}`, { signal: this.controller?.signal });
+        if (!res.ok) continue;
+        const service = (await res.json()) as { release_id?: string };
+        if (service.release_id && service.release_id !== this.releaseId) {
+          this.status = 'deployed';
+          this.land();
+          return;
+        }
+      } catch (err) {
+        if ((err as Error).name === 'AbortError') return;
+      }
+    }
+    if (this.left) return;
+    this.status = 'built';
+    this.failure =
+      'The image was built, and no deployment has appeared yet. ' +
+      'The deployments below are the record; reload to see one that arrives later.';
   }
 
   private take(raw: string) {
@@ -176,7 +246,13 @@ export class BuildLog extends WebComponent({
     // than rolling it out again.
     if (verdict.kind === 'deployed') {
       this.status = 'deployed';
-      this.land();
+      // Only a release the page does not already show. A log replays, so this
+      // line arrives again on every reload of a finished build -- and moving
+      // the reader for a deployment that is already on the screen behind them
+      // announces news that is not news. `autodeploy` is the other half: a
+      // build older than the running deployment is a log to read, not a
+      // deploy to follow.
+      if (this.autodeploy && verdict.text !== this.releaseId) this.land();
     }
   }
 
