@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/vivek7405/pilots/hostd/internal/quota"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -71,7 +72,11 @@ func deployServerWith(t *testing.T, roll Rollout, builds ...BuildRunner) http.Ha
 		t.Fatalf("PutTenancy: %v", err)
 	}
 
-	deps := Deps{HostID: "host-test", Store: st, Machines: newFakeManager(), Rollout: roll}
+	// A real gate, not the nil one that admits everything: a build that
+	// carries a deploy stays in its handler for the rollout too, and whether
+	// it holds a build slot across that is only visible with a gate present.
+	deps := Deps{HostID: "host-test", Store: st, Machines: newFakeManager(), Rollout: roll,
+		BuildGate: &quota.HostGate{}}
 	if len(builds) > 0 {
 		deps.Builds = builds[0]
 	}

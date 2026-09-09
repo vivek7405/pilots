@@ -3,6 +3,8 @@ package api
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
 // A build that names a service deploys it ON THE HOST, once, whether or not
@@ -38,13 +42,27 @@ type deployingBuilder struct {
 	// result is the rootfs build id the build produces; err fails it instead.
 	result string
 	err    error
+	// minted counts the ids handed out, so a second build in one test gets an
+	// id of its own.
+	minted int
 }
 
 func newDeployingBuilder(result string) *deployingBuilder {
 	return &deployingBuilder{result: result, started: make(chan struct{}, 1)}
 }
 
-func (b *deployingBuilder) NewBuildID() string { return "bld-deploy" }
+// NewBuildID names the first build bld-deploy, so a test can read its log by
+// name, and numbers the ones after it: two builds sharing an id would share a
+// log and an owner row.
+func (b *deployingBuilder) NewBuildID() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.minted++
+	if b.minted == 1 {
+		return "bld-deploy"
+	}
+	return fmt.Sprintf("bld-deploy-%d", b.minted)
+}
 
 func (b *deployingBuilder) StartBuild(_ context.Context, id string, r io.Reader,
 	emit func(BuildLogLine)) (string, error) {
@@ -276,6 +294,72 @@ func TestAFailedBuildThatAskedToDeployNeverReachesTheRollout(t *testing.T) {
 	}
 	if _, released := b.state(); !released {
 		t.Error("a failed build left its log held; every follower waits forever")
+	}
+}
+
+// blockingRollout stops inside Deploy until it is let go, which is what a
+// rollout waiting out a health grace looks like from the outside.
+type blockingRollout struct {
+	recordingRollout
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (r *blockingRollout) Deploy(ctx context.Context, serviceID, build string,
+	knobs json.RawMessage) (*state.Release, error) {
+
+	close(r.entered)
+	<-r.release
+	return r.recordingRollout.Deploy(ctx, serviceID, build, knobs)
+}
+
+// A rollout is not a build, and must not hold a build's slot.
+//
+// The gate bounds concurrent BUILDS per org on this host, and a build that
+// carries a deploy now stays in the handler for the rollout as well -- a
+// health grace of minutes. Held across that, the default of two slots means
+// two deploying services refuse every further build with "quota exceeded,
+// builds" while nothing at all is building.
+func TestARolloutDoesNotHoldTheBuildsSlot(t *testing.T) {
+	b := newDeployingBuilder("img-1")
+	roll := &blockingRollout{entered: make(chan struct{}), release: make(chan struct{})}
+	h := deployServerWith(t, roll, b)
+
+	// One slot, so a slot held a moment too long is the difference between a
+	// 200 and a 429 rather than a race nobody sees.
+	if rec := doJSON(t, h, "PUT", "/v1/quotas/org_1", json.RawMessage(
+		`{"max_machines":20,"max_vcpus":40,"max_mem_mib":65536,"max_volume_gib":100,"max_builds":1}`,
+	)); rec.Code != http.StatusOK {
+		t.Fatalf("setting the build quota: %d (%s)", rec.Code, rec.Body.String())
+	}
+
+	deploying := make(chan int, 1)
+	go func() {
+		req := httptest.NewRequest("POST", "/v1/builds?deploy=svc_1", bytes.NewReader([]byte("tar-bytes")))
+		req.Header.Set("Authorization", "Bearer "+testKey)
+		req.Header.Set("Content-Type", "application/x-tar")
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		deploying <- rec.Code
+	}()
+	<-roll.entered
+
+	// The image exists and the rollout is waiting. The org's one build slot
+	// belongs to the next build, not to this one's deploy.
+	second := postBuild(t, h, "/v1/builds")
+	if second.Code == http.StatusTooManyRequests {
+		t.Fatalf("a rollout in flight refused the next build: %s", second.Body.String())
+	}
+	if second.Code != http.StatusOK {
+		t.Fatalf("the second build got %d, want 200 (%s)", second.Code, second.Body.String())
+	}
+
+	close(roll.release)
+	if code := <-deploying; code != http.StatusOK {
+		t.Fatalf("the deploying build got %d, want 200", code)
+	}
+	if roll.deploys != 1 {
+		t.Fatalf("the rollout ran %d times, want 1", roll.deploys)
 	}
 }
 
