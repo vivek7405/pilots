@@ -165,6 +165,101 @@ func TestConnectingARepoThatIsNotOwnerNameIs400(t *testing.T) {
 	}
 }
 
+// Two orgs whose ids differ only in case must not share a claim.
+//
+// The row is keyed by `lower(org)/lower(repo)`, so `Org_A` and `org_a` fold to
+// one id, and org ids are free-form at POST /v1/api-keys. Without comparing
+// the row that came back, the second org's GetRepoLink succeeds against the
+// first org's row and it inherits a claim it never made.
+func TestAClaimIsNotSharedByOrgsThatDifferOnlyInCase(t *testing.T) {
+	fb := &fakeBuilder{}
+	stager := &fakeStager{}
+	_, st, fake := newTestServerWithManager(t)
+	h := Routes(Deps{HostID: "host-test", Store: st, Machines: fake, Builds: fb, Repos: stager})
+
+	tenantKey(t, st, "pilot_upperorg", "Org_A", "deploy")
+	if err := st.PutRepoLink(context.Background(), &state.RepoLink{
+		OrgID: "org_a", Repo: "acme/private", ConnectedAt: 1,
+	}); err != nil {
+		t.Fatalf("PutRepoLink: %v", err)
+	}
+
+	rec := postJSON(t, h, "/v1/builds", "pilot_upperorg", `{"repo":"acme/private","ref":"main"}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("got %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+	if len(stager.seen) != 0 {
+		t.Errorf("a case-folded org id inherited another org's claim: %v", stager.seen)
+	}
+}
+
+// A key whose row carries no org is handed nothing, rather than the fleet.
+//
+// `ListRepoLinks(ctx, "")` is the ADMIN query -- every row for every org --
+// and a non-admin caller reaches it with an empty org because listOrg narrows
+// to a value it does not check. No mint path writes such a key today; this is
+// the same guard mayAccess takes, one route later.
+func TestAnOrglessKeyIsHandedNoRepoLinks(t *testing.T) {
+	h, st := newTestServer(t)
+	tenantKey(t, st, "pilot_noorgkey", "", "deploy")
+	for _, l := range []state.RepoLink{
+		{OrgID: "org_2", Repo: "acme/mine", ConnectedAt: 1},
+		{OrgID: "org_3", Repo: "other/theirs", ConnectedAt: 2},
+	} {
+		if err := st.PutRepoLink(context.Background(), &l); err != nil {
+			t.Fatalf("PutRepoLink: %v", err)
+		}
+	}
+
+	rec := do(t, h, "GET", "/v1/repos", "pilot_noorgkey")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var list RepoLinkListResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode: %v (%s)", err, rec.Body.String())
+	}
+	if len(list.Repos) != 0 {
+		t.Errorf("a key with no org was handed %+v -- every org's connections", list.Repos)
+	}
+}
+
+// `repo` is an authorization key on the service routes too: it keys the row
+// AllowRepo reads, it is reflected into that refusal, and it is what
+// serviceFor matches deliveries against. So its shape is checked here exactly
+// as it is on the build route.
+func TestAServiceRepoThatIsNotOwnerNameIs400(t *testing.T) {
+	h, st := newTestServer(t)
+	tenantKey(t, st, "pilot_shapekey", "org_2", "deploy")
+
+	for _, repo := range []string{"owner", "owner/../app", "x/y?z", "owner/name/extra", "o/r#f"} {
+		body := `{"name":"svc","app":"svc","replicas":1,"repo":"` + repo + `"}`
+		rec := postJSON(t, h, "/v1/services", "pilot_shapekey", body)
+		if rec.Code != http.StatusBadRequest {
+			t.Errorf("create %q: got %d, want 400: %s", repo, rec.Code, rec.Body.String())
+		}
+	}
+
+	// And on the patch, where the same string reaches the same places. The
+	// service is created with an admin key, which needs no claim.
+	created := postJSON(t, h, "/v1/services", testKey, `{"name":"patchme","app":"patchme","replicas":1}`)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("creating the service to patch: %d %s", created.Code, created.Body.String())
+	}
+	var svc Service
+	if err := json.Unmarshal(created.Body.Bytes(), &svc); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	rec := doJSON(t, h, "PATCH", "/v1/services/"+svc.ID, map[string]any{"repo": "owner/../app"})
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("patch: got %d, want 400: %s", rec.Code, rec.Body.String())
+	}
+	// The disconnect still works: giving a repository up is never refused.
+	if rec := doJSON(t, h, "PATCH", "/v1/services/"+svc.ID, map[string]any{"repo": ""}); rec.Code != http.StatusOK {
+		t.Errorf("disconnect: got %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+}
+
 // A service is a standing order to build a repository on every push to it
 // (internal/github, serviceFor), so pointing one at a repository asks the same
 // question a build asks, and gets the same answer.

@@ -39,11 +39,25 @@ func AllowRepo(w http.ResponseWriter, r *http.Request, st state.Store, repo stri
 	}
 	org := actingOrg(r)
 	if org != "" && st != nil {
-		_, err := st.GetRepoLink(r.Context(), org, repo)
-		if err == nil {
+		got, err := st.GetRepoLink(r.Context(), org, repo)
+		// The ROW is what answers, not the fact that a row came back. The key
+		// it was read by is `lower(org) + "/" + lower(repo)` (state.RepoLinkID),
+		// and neither half is a validated shape everywhere it is written: org
+		// ids are free-form at POST /v1/api-keys, so `Org_A` and `org_a` fold
+		// to one id and the second org would inherit a claim it never made,
+		// and an unvalidated repo makes the separator ambiguous -- org `acme`
+		// with repo `shop/thing` keys the same row as org `acme/shop` with
+		// repo `thing`. Comparing what came back costs one string compare and
+		// closes both, whatever else is or is not validated upstream.
+		if err == nil && got != nil && got.OrgID == org {
 			return true
 		}
-		if !errors.Is(err, state.ErrNotFound) {
+		// A row that came back for another org is NOT a store failure: it is a
+		// refusal, and it falls through to the 403 below. Only a real error
+		// that is not "no such row" is the store failing to answer -- checking
+		// err alone here would hand writeMapped a nil and panic on the very
+		// case this comparison exists for.
+		if err != nil && !errors.Is(err, state.ErrNotFound) {
 			// A store that cannot answer is not an authorisation to proceed.
 			// Fail closed: the alternative is that a wedged replica hands one
 			// tenant another tenant's private source.
@@ -129,9 +143,19 @@ func (d Deps) handleConnectRepo(w http.ResponseWriter, r *http.Request) {
 	// Read back rather than echo: the write is ON CONFLICT DO NOTHING, so the
 	// row that is there may be older than this request, and the caller should
 	// be told when the connection was actually made.
-	if got, err := d.Store.GetRepoLink(r.Context(), org, req.Repo); err == nil {
-		link = got
+	//
+	// The error is SURFACED, not swallowed, which is the whole point of
+	// reading back: a swallowed one would answer 201 carrying this request's
+	// own time.Now() for a row written days ago -- precisely the wrong answer,
+	// with nothing saying so. A 500 here costs nothing, because the write
+	// above already happened and the row is write-once: the retry this asks
+	// for is a no-op that then reports the stored time.
+	got, err := d.Store.GetRepoLink(r.Context(), org, req.Repo)
+	if err != nil {
+		writeMapped(w, err)
+		return
 	}
+	link = got
 	writeJSON(w, http.StatusCreated, RepoLinkResponse{
 		Repo: link.Repo, OrgID: link.OrgID, ConnectedAt: link.ConnectedAt,
 	})
@@ -144,6 +168,16 @@ func (d Deps) handleConnectRepo(w http.ResponseWriter, r *http.Request) {
 // list nobody but an operator can read makes the refusal unactionable.
 func (d Deps) handleListRepos(w http.ResponseWriter, r *http.Request) {
 	org, narrow := listOrg(r)
+	if narrow && org == "" {
+		// A key whose row carries no org must not be handed the fleet's, for
+		// the reason mayAccess refuses one (tenancy.go): an empty org matches
+		// nothing, and `ListRepoLinks(ctx, "")` is the ADMIN query -- every
+		// row on every org, which is a customer list. No mint path writes an
+		// org-less key today, so this is defence in depth; it is also one
+		// line, and every sibling read already takes it.
+		writeJSON(w, http.StatusOK, RepoLinkListResponse{Repos: []RepoLinkResponse{}})
+		return
+	}
 	if !narrow {
 		org = "" // an admin with no ?org= sees every connection on the fleet
 	}
