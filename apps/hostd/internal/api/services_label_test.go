@@ -117,6 +117,31 @@ func TestCreateMintsASuffixWhenTheNameIsTaken(t *testing.T) {
 		}
 	})
 
+	// A tombstone still holds its name. machines.ensureNameFree will not hand
+	// it out either, and on a store that keeps tombstones the router matches
+	// the destroyed row before it ever reaches a service address -- so a
+	// service minted onto that label would own an address that never resolves.
+	t.Run("held by a destroyed machine", func(t *testing.T) {
+		h, st := labelServer(t)
+		if err := st.PutMachine(context.Background(), &state.Machine{
+			ID: "m_1", Name: "shop", HostID: "host-test", State: state.StateDestroyed,
+		}); err != nil {
+			t.Fatalf("PutMachine: %v", err)
+		}
+
+		rec := doJSON(t, h, "POST", "/v1/services", map[string]any{
+			"name": "shop", "app": "storefront", "replicas": 1,
+		})
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("got %d, want 201: %s", rec.Code, rec.Body)
+		}
+		got := createdService(t, rec.Body)
+		host := strings.TrimPrefix(strings.TrimPrefix(got.URL, "https://"), "http://")
+		if !suffixed.MatchString(host) {
+			t.Errorf("url host = %q, want shop with a four-character suffix", host)
+		}
+	})
+
 	t.Run("held by another service", func(t *testing.T) {
 		h, _ := labelServer(t)
 		// s_1 already holds "web".

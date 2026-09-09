@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-
-	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
 // labelAttempts is how many suffixed labels the allocator tries before giving
@@ -121,9 +119,17 @@ func (d Deps) allocateLabel(ctx context.Context, name, explicit string) (string,
 // takenLabels is every label the router could already resolve.
 //
 // Both namespaces, because resolve reads both: a machine name first and then a
-// service address. A destroyed machine is excluded for the reason every other
-// read excludes it, its row is a tombstone; a service with no address holds
-// nothing.
+// service address. A service with no address holds nothing.
+//
+// A machine row is taken whatever its state, tombstone included. Excluding a
+// destroyed one here would be a rule this package holds alone:
+// machines.ensureNameFree scans the same rows without excluding it, and the
+// router's store path matches a machine row before it ever reaches a service
+// address. On a store that keeps tombstones -- the single-box SQLite one; the
+// corrosion store filters them out of ListMachines already -- a label minted
+// over a destroyed machine's name would be a permanent address that resolves
+// to the tombstone and never to the service. Where the store does filter,
+// this loop never sees the row and the rule costs nothing.
 func (d Deps) takenLabels(ctx context.Context) (map[string]bool, error) {
 	taken := map[string]bool{}
 
@@ -132,7 +138,7 @@ func (d Deps) takenLabels(ctx context.Context) (map[string]bool, error) {
 		return nil, err
 	}
 	for _, m := range rows {
-		if m.State != state.StateDestroyed && m.Name != "" {
+		if m.Name != "" {
 			taken[m.Name] = true
 		}
 	}
