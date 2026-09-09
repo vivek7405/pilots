@@ -468,7 +468,7 @@ func runPreDeploy(ctx context.Context, env *Env, client *pilots.Client, app stri
 	}
 	off, no := "off", false
 	m, err := client.Machines.Create(ctx, pilots.CreateMachineRequest{
-		Name: fmt.Sprintf("%s-%s-predeploy-%d", app, step.Name, time.Now().Unix()),
+		Name:  fmt.Sprintf("%s-%s-predeploy-%d", app, step.Name, time.Now().Unix()),
 		Image: rootfs, App: app, Env: step.Env, SecretEnv: sealed,
 		Knobs: &pilots.KnobsPatch{AutoStop: &off, AutoStart: &no},
 	})

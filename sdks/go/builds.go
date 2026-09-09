@@ -29,6 +29,9 @@ type BuildStream struct {
 	Lines iter.Seq2[BuildLogLine, error]
 
 	seen []BuildLogLine
+	// drained is set once the response body has been read to its end, after
+	// which Lines replays seen rather than touching the closed body.
+	drained bool
 }
 
 // BuildOptions is what a build may be asked for beyond its context.
@@ -107,7 +110,19 @@ func (b *Builds) Logs(ctx context.Context, id string, follow bool) (*BuildStream
 func newBuildStream(res *http.Response, id string) *BuildStream {
 	bs := &BuildStream{ID: id}
 	bs.Lines = func(yield func(BuildLogLine, error) bool) {
-		defer res.Body.Close()
+		// A caller that ranged Lines to render progress and then asks Result
+		// for the verdict must not reopen a body the first pass closed, so a
+		// second range replays what the first one saw. That is what makes
+		// "iterate, then Result()" and "Result() alone" both work.
+		if bs.drained {
+			for _, line := range bs.seen {
+				if !yield(line, nil) {
+					return
+				}
+			}
+			return
+		}
+		defer func() { bs.drained = true; res.Body.Close() }()
 		scanner := bufio.NewScanner(res.Body)
 		// A build log line carries a whole compiler error; the default 64 KiB
 		// ceiling would turn one long line into a silent truncation.
