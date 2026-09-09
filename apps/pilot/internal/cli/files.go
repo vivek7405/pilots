@@ -169,7 +169,11 @@ func pullFiles(ctx context.Context, client *pilots.Client, id, src, dest string)
 		} else {
 			target = filepath.Join(dest, filepath.FromSlash(name))
 		}
-		if !strings.HasPrefix(filepath.Clean(target), filepath.Clean(dest)) {
+		// filepath.Join has already cleaned the path, so a `..` in the
+		// archive resolves BEFORE this check: a bare HasPrefix would let
+		// dest=/tmp/out accept /tmp/outside. Rel is the containment test.
+		if rel, rerr := filepath.Rel(filepath.Clean(dest), filepath.Clean(target)); rerr != nil ||
+			rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 			return out.Failf("the archive tried to escape the destination", "refusing %s", name)
 		}
 		switch hdr.Typeflag {

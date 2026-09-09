@@ -29,7 +29,7 @@ func (m *Machines) Get(ctx context.Context, id string) (*Machine, error) {
 // Update changes who may reach the machine's URL.
 func (m *Machines) Update(ctx context.Context, id string, req UpdateMachineRequest) (*Machine, error) {
 	var out Machine
-	if err := m.c.do(ctx, http.MethodPatch, "/v1/machines/"+id, req, &out); err != nil {
+	if err := m.c.do(ctx, http.MethodPatch, "/v1/machines/"+url.PathEscape(id), req, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
