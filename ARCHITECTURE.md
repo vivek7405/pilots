@@ -1053,7 +1053,9 @@ all — is a line in the build's log carrying the same `error`, `code` and `next
 a `POST /v1/services/:id/deploy` would have answered with, because the log is
 where a build's verdict is read. The build is forwarded to the service's
 arbiter, since that is the one host allowed to write the service's rows, and the
-build's log is HELD open across the rollout so a follower sees it. `GET /v1/services` derives each service's `depends_on` at read time,
+build's log is HELD open across the rollout so a follower sees it.
+
+`GET /v1/services` derives each service's `depends_on` at read time,
 from the `<name>.internal` addresses in BOTH halves of its environment, and
 stores it nowhere: a name is not a value, and a `depends_on` column would be a
 column added to a populated table.
