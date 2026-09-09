@@ -26,6 +26,26 @@ const accepted = { step: 'bld-1', stream: 'status', line: 'build accepted', ts: 
 const running = { step: 'FROM alpine', stream: 'stdout', line: 'pulling', ts: 2 }
 const ok = { step: 'bld-1', stream: 'status', line: 'build succeeded', result: 'rootfs-xyz', ts: 3 }
 const failed = { step: 'bld-1', stream: 'status', line: 'build failed', error: 'exit status 1', ts: 3 }
+// The two verdicts a build that was asked to deploy can end on. The release is
+// cut by the HOST, so both of these are lines rather than a status the client
+// had to go and ask for.
+const deployed = {
+  step: 'bld-1',
+  stream: 'status',
+  line: 'deployed rel-7',
+  result: 'rootfs-xyz',
+  release: 'rel-7',
+  ts: 4,
+}
+const refusedDeploy = {
+  step: 'bld-1',
+  stream: 'status',
+  line: 'deploy refused',
+  error: 'the health gate never passed',
+  code: 'health_gate_failed',
+  next: "read the replica's console: pilot machines logs m_9",
+  ts: 4,
+}
 
 async function withFake(
   route: (res: ServerResponse) => Promise<void> | void,
@@ -122,6 +142,41 @@ test('the upload is sent as a tar, and logs asks to follow', async () => {
       assert.equal(replay.buildId, 'bld-1')
       await replay.result()
       assert.equal(fake.requests[1]!.query.get('follow'), '1')
+    },
+  )
+})
+
+test('a build carries the deploy it is for, and comes back with the release', async () => {
+  // The intent travels WITH the build: the host cuts the release on the
+  // verdict, so a caller that walks away mid-build still ends with one and two
+  // watchers of one build still produce one rollout.
+  await withFake(
+    (res) => drip(res, [accepted, deployed], 1),
+    async (client, fake) => {
+      const build = await client.builds.create('a-tar', { deploy: 'svc-1' })
+      // Still the image id, because a caller reading the verdict as "the last
+      // line's result" must not break because the build also deployed.
+      assert.equal(await build.result(), 'rootfs-xyz')
+      assert.equal(build.release, 'rel-7')
+      assert.equal(fake.requests[0]!.query.get('deploy'), 'svc-1')
+    },
+  )
+})
+
+test('a deploy refused after the build reaches the reader with the engine s words', async () => {
+  await withFake(
+    (res) => drip(res, [accepted, refusedDeploy], 1),
+    async (client) => {
+      const build = await client.builds.create('a-tar', { deploy: 'svc-1' })
+      const err = await build.result().then(
+        () => null,
+        (e: unknown) => e as BuildFailedError,
+      )
+      assert.ok(err instanceof BuildFailedError, 'a refused deploy read as a success')
+      const last = err.lines[err.lines.length - 1]!
+      assert.equal(last.code, 'health_gate_failed')
+      assert.match(last.next ?? '', /pilot machines logs m_9/)
+      assert.equal(build.release, undefined)
     },
   )
 })

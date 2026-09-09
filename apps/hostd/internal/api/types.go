@@ -260,6 +260,17 @@ type BuildLogLine struct {
 	// list ErrorResponse.Code draws from, so a consumer that reads the log
 	// instead of the status branches on the same value.
 	Code string `json:"code,omitempty"`
+	// Release is the deployment cut from this image, on the terminal line of
+	// a build whose request named a service to deploy
+	// (POST /v1/builds?deploy=<service>). Its presence is what says the
+	// release exists: the build's own `result` says only that the image does.
+	Release string `json:"release,omitempty"`
+	// Next is the step the reader can take, on a terminal failure line, the
+	// same field ErrorResponse.Next carries. A deploy refused after the image
+	// was built -- a health gate that never passed, most of all -- has to
+	// reach the person with the engine's own words, and the log is the only
+	// place a build's verdict is read from.
+	Next string `json:"next,omitempty"`
 }
 
 // HealthCheck gates a rollout: a new release takes traffic only once healthy.

@@ -136,6 +136,19 @@ export interface BuildLogLine {
   result?: string
   /** The stable code on a terminal failure line, `build_failed`. */
   code?: string
+  /**
+   * The deployment cut from this image, on the last line of a build whose
+   * request named a service to deploy (`{ deploy }`). Its presence is what
+   * says the release exists: `result` says only that the image does.
+   */
+  release?: string
+  /**
+   * The reader's next step, on a terminal failure line. A deploy refused
+   * after the image was built -- a health gate that never passed, above all
+   * -- reaches the reader through the log, so it carries the same `next` the
+   * deploy route would have answered with.
+   */
+  next?: string
 }
 
 export interface HealthCheck {

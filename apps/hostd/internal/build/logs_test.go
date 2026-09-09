@@ -2,6 +2,7 @@ package build
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -118,4 +119,89 @@ func TestLogStoreForgetsOldBuilds(t *testing.T) {
 			t.Errorf("build %s was evicted early", id)
 		}
 	}
+}
+
+// A held log outlives the build that wrote it, because the interesting part
+// of a deploying build happens after the image exists.
+//
+// Without the hold, Build's `defer log.Close()` releases every follower the
+// instant the image is published: the browser watching the build would see the
+// image id and never the release it became, nor the health gate's refusal to
+// cut one. That is the client-side deploy's failure moved one layer down.
+func TestAHeldLogStaysOpenUntilItIsReleased(t *testing.T) {
+	l := newLog()
+	l.Hold()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, live := l.Follow(ctx)
+
+	l.Close() // the build ends; the deploy has not happened yet
+	l.Append(api.BuildLogLine{Line: "deployed rel_1", Release: "rel_1"})
+
+	select {
+	case got, ok := <-live:
+		if !ok {
+			t.Fatal("the follower was released when the build ended, before the release was cut")
+		}
+		if got.Release != "rel_1" {
+			t.Fatalf("the follower got %+v, want the release line", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the line appended after the build never arrived")
+	}
+
+	l.Release()
+	select {
+	case _, ok := <-live:
+		if ok {
+			t.Fatal("a line arrived after the log was released")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Release never let the follower go")
+	}
+}
+
+// The hold is taken before the build, so the build must not replace the log it
+// was taken on. It did, once: logStore.create always made a new Log, and the
+// hold -- with every follower on it -- went to the one the build threw away.
+func TestABuildReusesALogHeldBeforeIt(t *testing.T) {
+	s := newLogStore(4)
+	held := s.create("bld-1")
+	held.Hold()
+
+	if again := s.create("bld-1"); again != held {
+		t.Fatal("the build replaced the log that was held for it")
+	}
+}
+
+// A held log survives the store's eviction, because the only way to end a
+// hold is by id: Builder.ReleaseLog looks the log up, so an evicted one is a
+// hold nobody can release. Close already no-ops on it, so every follower waits
+// on a channel that is never closed, and the release the hold exists to record
+// is dropped. A deploying build holds its log across the rollout -- minutes of
+// health grace -- which is long enough for a limit's worth of later builds to
+// walk past it.
+func TestAHeldLogIsNotEvicted(t *testing.T) {
+	s := newLogStore(2)
+	held := s.create("bld-held")
+	held.Hold()
+
+	for i := range 8 {
+		s.create(fmt.Sprintf("bld-%d", i))
+	}
+
+	got, ok := s.get("bld-held")
+	if !ok {
+		t.Fatal("the held log was evicted, so nothing can release it")
+	}
+	if got != held {
+		t.Fatal("the store kept a different log under the held id")
+	}
+	// The unheld ones are still bounded.
+	if len(s.logs) > 3 {
+		t.Fatalf("the store kept %d logs; the limit is 2 plus the hold", len(s.logs))
+	}
+
+	held.Release()
 }

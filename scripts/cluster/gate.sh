@@ -2417,6 +2417,171 @@ print(det[0].get('framework', ''))
   rm -rf "$GH_TMP"
 fi
 
+say "22. A build whose client is killed still cuts exactly one release"
+# The browser used to decide this. It followed the build stream, saw the image
+# id and posted the deploy itself, so a closed tab was a successful build with
+# NOTHING deployed -- silently -- and two tabs open on one build were two
+# rollouts of the same image. The intent now travels with the build
+# (`POST /v1/builds?deploy=<service>`) and the host cuts the release.
+#
+# The e2e battery asserts what a client can see (deployOnVerdictAssertions in
+# scripts/e2e.mjs). This is the half that needs a shell: the client is KILLED
+# rather than politely cancelled, the release is read from a host that did not
+# build it, and the host that did is checked for what it kept -- a held build
+# log has to release its followers, and a build's work directory has to be
+# gone whether or not anyone was watching.
+if [ "${#LIVE_IPS[@]}" -lt 2 ]; then
+  bad "need two live hosts to read a release from a host that did not build it; have ${#LIVE_IPS[@]}"
+else
+  DV_BUILDER="${LIVE_IPS[0]}"
+  DV_READER="${LIVE_IPS[1]}"
+  DV_SINCE=$(date -u '+%Y-%m-%d %H:%M:%S')
+  DV_TAG="dv$$"
+  DV_SVC=$(api "$DV_BUILDER" POST /v1/services \
+    "{\"name\":\"verdict-${DV_TAG}\",\"app\":\"gate-verdict-${DV_TAG}\",\"replicas\":1,\"health\":{\"type\":\"cmd\",\"test\":[\"CMD-SHELL\",\"true\"],\"grace\":60,\"interval\":2,\"healthy_threshold\":1}}" \
+    | jf id)
+  if [ -z "$DV_SVC" ]; then
+    bad "could not create a service on ${DV_BUILDER} to deploy into"
+  else
+    ok "created service ${DV_SVC} on ${DV_BUILDER}"
+
+    DV_TMP=$(mktemp -d)
+    printf 'FROM alpine:3.20\nRUN echo %s > /etc/pilots-verdict\nCMD ["/bin/sh", "-c", "while true; do sleep 3600; done"]\n' \
+      "$DV_TAG" > "${DV_TMP}/Dockerfile"
+
+    # -m 5 IS the test. curl is gone seconds into a build that takes minutes,
+    # which is the closed tab, the lost session, the shut laptop lid. The id
+    # comes out of the headers, which have already arrived: the response
+    # starts before the build does.
+    tar -cf - -C "$DV_TMP" Dockerfile \
+      | curl -s -m 5 -D "${DV_TMP}/headers" -o /dev/null -X POST \
+          "http://${DV_BUILDER}:8080/v1/builds?deploy=${DV_SVC}" \
+          -H "$AUTH" -H 'Content-Type: application/x-tar' --data-binary @- >/dev/null 2>&1
+    DV_BID=$(awk 'tolower($1) ~ /^x-pilot-build-id:/ {print $2}' "${DV_TMP}/headers" 2>/dev/null | tr -d '\r')
+    [ -n "$DV_BID" ] \
+      && ok "the build ${DV_BID} was accepted and its client is gone" \
+      || bad "no X-Pilot-Build-Id came back, so nothing can be followed up"
+
+    # From the OTHER host: a release is a replicated row, and the host that
+    # built has no special standing in reading it back.
+    DV_REL=""
+    for _ in $(seq 1 150); do
+      DV_REL=$(api "$DV_READER" GET "/v1/services/${DV_SVC}/releases" 2>/dev/null | python3 -c "
+import sys, json
+try:
+    rows = json.load(sys.stdin)
+except Exception:
+    rows = []
+print(rows[0]['id'] if rows else '')" 2>/dev/null)
+      [ -n "$DV_REL" ] && break
+      sleep 4
+    done
+    if [ -z "$DV_REL" ]; then
+      bad "no release was cut for ${DV_SVC}: a build nobody watched deployed nothing"
+    else
+      ok "${DV_READER} sees release ${DV_REL}, cut with no client attached"
+
+      DV_N=$(api "$DV_READER" GET "/v1/services/${DV_SVC}/releases" 2>/dev/null \
+        | python3 -c "import sys, json; print(len(json.load(sys.stdin)))" 2>/dev/null)
+      [ "${DV_N:-0}" = 1 ] \
+        && ok "exactly one release exists" \
+        || bad "${DV_N} releases exist for one build; a deploy ran more than once"
+
+      DV_REPS=$(api "$DV_READER" GET /v1/machines 2>/dev/null | python3 -c "
+import sys, json
+print(sum(1 for m in json.load(sys.stdin) if m.get('service_id') == '${DV_SVC}'))" 2>/dev/null)
+      [ "${DV_REPS:-0}" = 1 ] \
+        && ok "the release has one replica, not two" \
+        || bad "the service has ${DV_REPS} replicas after one deploy"
+
+      # WHERE the build's log is, which on a fleet is the whole point.
+      #
+      # A build that carries a deploy is forwarded to the service's arbiter --
+      # the one host allowed to write its rows -- so it does NOT run where the
+      # POST landed, and hostd answers a log request from its own memory with
+      # no forward. Exactly one host holds it; every other answers 404. A
+      # client that treats that 404 as "nothing was deployed" is wrong on a
+      # fleet of more than one, which is why <build-log> falls back to the
+      # release row rather than trusting the log to be reachable.
+      DV_HOLDERS=""
+      DV_MISSES=0
+      for ip in "${LIVE_IPS[@]}"; do
+        DV_CODE=$(curl -s -m 30 -o "${DV_TMP}/log-${ip}" -w '%{http_code}' \
+          "http://${ip}:8080/v1/builds/${DV_BID}/logs" -H "$AUTH" 2>/dev/null)
+        case "$DV_CODE" in
+          200) DV_HOLDERS="${DV_HOLDERS}${ip} " ;;
+          404) DV_MISSES=$((DV_MISSES + 1)) ;;
+          *) bad "${ip} answered ${DV_CODE} for the build log, want 200 or 404" ;;
+        esac
+      done
+      DV_RUNNER=$(echo "$DV_HOLDERS" | awk '{print $1}')
+      if [ "$(echo "$DV_HOLDERS" | wc -w)" = 1 ]; then
+        ok "one host holds the build log (${DV_RUNNER}); ${DV_MISSES} answer 404, as a host-local log does"
+      else
+        bad "the build log is on hosts [${DV_HOLDERS}], want exactly one"
+      fi
+
+      # The verdict in the RECORDED log, on the host that has it. A log closed
+      # when the image was published would end on the image and never mention
+      # the release the hold exists to carry.
+      if [ -n "$DV_RUNNER" ]; then
+        DV_LAST=$(tail -1 "${DV_TMP}/log-${DV_RUNNER}" 2>/dev/null)
+        case "$DV_LAST" in
+          *"\"release\":\"${DV_REL}\""*) ok "the build log's last line carries the release" ;;
+          "") bad "the build log is empty on the host that ran it" ;;
+          *) bad "the build log's last line does not carry the release: ${DV_LAST}" ;;
+        esac
+      fi
+
+      # The fallback's own contract: the deployment is readable from EVERY
+      # host, log or no log. This is what a browser that reached the wrong
+      # host reads instead, and it is the reason a host-local log is a
+      # nuisance rather than a lost deploy.
+      DV_EVERYWHERE=0
+      for ip in "${LIVE_IPS[@]}"; do
+        DV_SEES=$(api "$ip" GET "/v1/services/${DV_SVC}" 2>/dev/null | jf release_id)
+        if [ "$DV_SEES" = "$DV_REL" ]; then
+          DV_EVERYWHERE=$((DV_EVERYWHERE + 1))
+        else
+          bad "${ip} reports release_id ${DV_SEES:-empty}, want ${DV_REL}"
+        fi
+      done
+      [ "$DV_EVERYWHERE" = "${#LIVE_IPS[@]}" ] \
+        && ok "all ${DV_EVERYWHERE} live hosts name ${DV_REL} as the deployment" \
+        || bad "only ${DV_EVERYWHERE} of ${#LIVE_IPS[@]} hosts name the deployment"
+    fi
+    # Everything below is about the host that actually RAN the build, which
+    # the arbiter forward means is not necessarily the one posted to.
+    [ -n "${DV_RUNNER:-}" ] || DV_RUNNER="$DV_BUILDER"
+
+    # What the host kept. A build's work directory is removed on every path
+    # out, including the one where the client left, and a held log must not
+    # wedge hostd.
+    if [ -n "$DV_BID" ]; then
+      DV_WORK=$($SSH "root@$DV_RUNNER" "ls -d /var/cache/pilots/builds-work/${DV_BID} 2>/dev/null" 2>/dev/null | tr -d '[:space:]')
+      [ -z "$DV_WORK" ] \
+        && ok "the build's work directory is gone from ${DV_RUNNER}" \
+        || bad "${DV_RUNNER} kept ${DV_WORK} after the build ended"
+    fi
+    DV_PANIC=$($SSH "root@$DV_RUNNER" "journalctl -u hostd --since '${DV_SINCE}' --no-pager 2>/dev/null | grep -c 'panic:'" 2>/dev/null | tr -d '[:space:]')
+    [ "${DV_PANIC:-1}" = 0 ] \
+      && ok "hostd logged no panic while deploying for a client that had gone" \
+      || bad "hostd panicked ${DV_PANIC} times during the abandoned build"
+    wait_serving "$DV_RUNNER" 30 \
+      && ok "${DV_RUNNER} is still serving" \
+      || bad "${DV_RUNNER} stopped serving after the abandoned build"
+
+    # Leave the rig as it was found: the replicas go, the service row is
+    # harmless and every other section's cleanup does the same.
+    for m in $(api "$DV_READER" GET /v1/machines 2>/dev/null | python3 -c "
+import sys, json
+print(' '.join(m['id'] for m in json.load(sys.stdin) if m.get('service_id') == '${DV_SVC}'))" 2>/dev/null); do
+      api "$DV_BUILDER" DELETE "/v1/machines/${m}" >/dev/null 2>&1
+    done
+    rm -rf "$DV_TMP"
+  fi
+fi
+
 say "Result"
 echo "  ${PASS} passed, ${FAIL} failed"
 echo

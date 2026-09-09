@@ -164,7 +164,7 @@ func TestBuildStreamYieldsLinesAsTheyArrive(t *testing.T) {
 		flusher.Flush()
 	})
 
-	build, err := c.Builds.Create(context.Background(), strings.NewReader("a-tar"))
+	build, err := c.Builds.Create(context.Background(), strings.NewReader("a-tar"), BuildOptions{})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestResultReadsTheLastLineAsTheVerdict(t *testing.T) {
 
 	t.Run("success", func(t *testing.T) {
 		c := newTestClient(t, ndjson(`{"line":"step","ts":1}`, `{"line":"ok","result":"rootfs-xyz","ts":2}`))
-		build, err := c.Builds.Create(context.Background(), strings.NewReader(""))
+		build, err := c.Builds.Create(context.Background(), strings.NewReader(""), BuildOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -211,7 +211,7 @@ func TestResultReadsTheLastLineAsTheVerdict(t *testing.T) {
 
 	t.Run("failure under a 200", func(t *testing.T) {
 		c := newTestClient(t, ndjson(`{"line":"step","ts":1}`, `{"line":"failed","error":"exit status 1","ts":2}`))
-		build, err := c.Builds.Create(context.Background(), strings.NewReader(""))
+		build, err := c.Builds.Create(context.Background(), strings.NewReader(""), BuildOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -227,7 +227,7 @@ func TestResultReadsTheLastLineAsTheVerdict(t *testing.T) {
 
 	t.Run("no verdict at all", func(t *testing.T) {
 		c := newTestClient(t, ndjson(`{"line":"step","ts":1}`))
-		build, err := c.Builds.Create(context.Background(), strings.NewReader(""))
+		build, err := c.Builds.Create(context.Background(), strings.NewReader(""), BuildOptions{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -344,7 +344,7 @@ func TestCreateFromRepoPostsTheRefAsJSON(t *testing.T) {
 		_, _ = w.Write([]byte(`{"step":"bld_1","stream":"status","line":"build succeeded","result":"rootfs_1"}` + "\n"))
 	})
 
-	bs, err := c.Builds.CreateFromRepo(context.Background(), RepoRef{Repo: "o/r", Ref: "abc123"}, "shop")
+	bs, err := c.Builds.CreateFromRepo(context.Background(), RepoRef{Repo: "o/r", Ref: "abc123"}, BuildOptions{App: "shop"})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}

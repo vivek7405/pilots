@@ -273,7 +273,7 @@ value outside that closes the socket with 1008 rather than being clamped.
 ## Builds
 
 ```go
-build, err := c.Builds.Create(ctx, contextTar)
+build, err := c.Builds.Create(ctx, contextTar, pilots.BuildOptions{})
 for line, err := range build.Lines {
 	if err != nil {
 		log.Fatal(err)
@@ -294,10 +294,25 @@ runs. The status code therefore cannot be the verdict: the last line is.
 error and when the stream ended with no verdict at all.
 
 ```go
-build, err := c.Builds.CreateFromRepo(ctx, pilots.RepoRef{Repo: "you/shop", Ref: "main"}, "shop")
+build, err := c.Builds.CreateFromRepo(ctx,
+	pilots.RepoRef{Repo: "you/shop", Ref: "main"}, pilots.BuildOptions{App: "shop"})
 ```
 
 `CreateFromRepo` builds a repository by naming it. The host fetches the ref
 through the fleet's GitHub App, plans it, and builds the one step a plan may
 produce. A plan with more than one step is refused with `plan_multi_service`,
 readable at the build's own log.
+
+```go
+build, err := c.Builds.Create(ctx, contextTar, pilots.BuildOptions{Deploy: "svc_1"})
+rootfsBuildID, err := build.Result()
+release := build.Release() // the deployment the HOST cut from that image
+```
+
+`Deploy` asks the host to cut that service a release from the image, on the
+build's verdict, exactly once. Nothing on this side of the connection decides
+whether it happens: a caller that walks away mid-build still ends with a
+release, and two callers watching one build still produce one rollout. A
+refusal after the image exists -- a health gate that never passed, most of all
+-- arrives as the log's last line, carrying the same `error`, `code` and `next`
+`POST /v1/services/{id}/deploy` would have answered with.

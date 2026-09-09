@@ -43,6 +43,33 @@ func (b *Builder) RecordRefusal(id string, line api.BuildLogLine) {
 	log.Close()
 }
 
+// The builder can carry a build through to the release it was asked for: see
+// Log.Hold. Asserted here rather than left to a type assertion at the call
+// site, because api.handleBuild takes that interface optionally and a builder
+// that quietly stopped satisfying it would deploy with nobody able to watch.
+var _ api.BuildLogHolder = (*Builder)(nil)
+
+// HoldLog keeps a build's log open past the build itself, for a caller that
+// will append the verdict of what it did with the image. Called BEFORE
+// StartBuild, because the build creates the log it writes to.
+func (b *Builder) HoldLog(id string) { b.logs.create(id).Hold() }
+
+// RecordLine appends a line to a build's log, where every follower of
+// GET /v1/builds/{id}/logs reads it. For the lines that come after the build:
+// the builder records its own.
+func (b *Builder) RecordLine(id string, line api.BuildLogLine) {
+	if log, ok := b.logs.get(id); ok {
+		log.Append(line)
+	}
+}
+
+// ReleaseLog ends a hold and lets the build's followers go.
+func (b *Builder) ReleaseLog(id string) {
+	if log, ok := b.logs.get(id); ok {
+		log.Release()
+	}
+}
+
 // BuildLog returns a build's recorded output and, when following, a channel of
 // what comes after it.
 //

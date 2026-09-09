@@ -325,6 +325,8 @@ POST   /v1/machines/:id/checkpoints  {comment?} → {id, seq}
 GET    /v1/machines/:id/checkpoints  list
 POST   /v1/checkpoints/:id/restore   in-place restore
 POST   /v1/builds                    {dockerfile-context tar} → streamed structured log → {rootfs_build_id}
+       ?deploy=<service>             …and cut that service a release from the image,
+                                     on this host, once (the last line carries `release`)
 POST   /v1/services                  {name, release|build, replicas, health, domain?,
                                      volume?}; volume is create-only and pins
                                      replicas to one
@@ -1035,7 +1037,36 @@ through the fleet's GitHub App and plans it, using the same `Stage` and
 `ContextOf` in `internal/github` that a push runs, so **no client has to hold
 repository bytes** and there is one copy of the fetch, the root strip and the
 recipe placement. A fleet with no App answers 503 `not_configured` and names
-the tar. `GET /v1/services` derives each service's `depends_on` at read time,
+the tar.
+
+**The deploy intent travels with the build.** `POST /v1/builds?deploy=<service>`
+means "build this, and if it works, cut that service a release from it". The
+host that ran the build cuts the release itself, on the verdict, exactly once,
+and the log's last line carries `release`. Nothing on the other end of the
+connection decides anything: a client that hung up, a browser tab that was
+closed, a laptop that shut its lid, and two tabs watching one build all produce
+the same single rollout. The build ALREADY outlives its connection
+(`context.WithoutCancel`), so a client-side verdict was the one weak link left
+in an otherwise server-side path — and it failed silently, as a successful build
+with nothing deployed. A refusal after the image exists — the health gate above
+all — is a line in the build's log carrying the same `error`, `code` and `next`
+a `POST /v1/services/:id/deploy` would have answered with, because the log is
+where a build's verdict is read. The build is forwarded to the service's
+arbiter, since that is the one host allowed to write the service's rows, and the
+build's log is HELD open across the rollout so a follower sees it.
+
+A build's log is **host-local**, and the release row is not. `GET /v1/builds/
+{id}/logs` is answered from the memory of the host that ran the build and 404s
+anywhere else — there is no forward, because nothing records which host holds a
+build and a `host_id` on `tenancy` would be a column added to a populated table.
+Since the forward above moves a deploying build to the arbiter, the host a
+client chose is routinely not the host with the log. So the log is the fast
+witness and never the only one: the release the build cut is an ordinary
+replicated row, readable from every host, and a client that cannot reach the log
+watches `GET /v1/services/{id}` for it instead. The dashboard's `<build-log>`
+does exactly that.
+
+`GET /v1/services` derives each service's `depends_on` at read time,
 from the `<name>.internal` addresses in BOTH halves of its environment, and
 stores it nowhere: a name is not a value, and a `depends_on` column would be a
 column added to a populated table.

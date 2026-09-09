@@ -15,6 +15,7 @@ import { deployService } from '#modules/services/actions/deploy-service.server.t
 import { rollbackService } from '#modules/services/actions/rollback-service.server.ts';
 import { machineStateSince } from '#modules/machines/utils/ui/status-line.ts';
 import { currentReplicas } from '#modules/services/utils/replicas.ts';
+import { awaitsRelease } from '#modules/services/utils/build-follow.ts';
 import '#modules/machines/components/live-machine-state.ts';
 import { badgeClass } from '#components/ui/badge.ts';
 import { buttonClass } from '#components/ui/button.ts';
@@ -40,6 +41,7 @@ export function deploymentsTab({ detail, back, errors, build }: TabProps): Templ
   const builds = detail.builds ?? [];
   const following = build ? builds.find((b) => b.jobId === build) : undefined;
   const current = releases.find((r) => r.id === service.release_id);
+  const awaiting = awaitsRelease(following, current);
   const rollbackTarget = releases.filter((r) => r.healthy && r.id !== service.release_id)[0];
   const running = replicas.filter((m) => m.state === 'running').length;
   const answering = replicas.filter((m) => m.state === 'running' || m.state === 'suspended').length;
@@ -49,11 +51,20 @@ export function deploymentsTab({ detail, back, errors, build }: TabProps): Templ
       ${following
         ? html`<section>
             ${sectionHeading(
-              'Building',
-              html`The image is being built from <span class="font-mono">${following.repo}@${following.ref}</span>. When it
-              succeeds it is deployed and this page moves to the new deployment.`,
+              awaiting ? 'Building' : 'Build log',
+              awaiting
+                ? html`The image is being built from <span class="font-mono">${following.repo}@${following.ref}</span>. When
+                  it succeeds it is deployed and this page moves to the new deployment.`
+                : html`The build of <span class="font-mono">${following.repo}@${following.ref}</span>, as it happened. This
+                  one is older than the deployment running now.`,
             )}
-            <build-log build-id=${following.jobId} service-id=${service.id} back=${back} autodeploy></build-log>
+            <build-log
+              build-id=${following.jobId}
+              service-id=${service.id}
+              back=${back}
+              release-id=${service.release_id ?? ''}
+              ?autodeploy=${awaiting}
+            ></build-log>
             <p class="m-0 mt-2 text-meta text-muted-foreground">
               With scripting off, the last line of the raw log carries the image id; the Deploy form below takes it.
             </p>

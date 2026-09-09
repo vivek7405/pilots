@@ -31,9 +31,24 @@ type BuildStream struct {
 	seen []BuildLogLine
 }
 
+// BuildOptions is what a build may be asked for beyond its context.
+//
+// Deploy names a service to cut a release for from the image. The HOST does
+// that, on the build's verdict, exactly once -- so a caller that walks away
+// mid-build still ends with a release, and two callers watching one build
+// still produce one rollout. The release's id arrives on the last log line,
+// as BuildLogLine.Release.
+type BuildOptions struct {
+	// App groups the services a plan produces. Repository builds only.
+	App string
+	// Deploy is the service id to cut a release for from the image.
+	Deploy string
+}
+
 // Create uploads a build context (a tar) and streams the build.
-func (b *Builds) Create(ctx context.Context, contextTar io.Reader) (*BuildStream, error) {
-	req, err := b.c.request(ctx, http.MethodPost, "/v1/builds", contextTar)
+func (b *Builds) Create(ctx context.Context, contextTar io.Reader, opts BuildOptions) (*BuildStream, error) {
+	req, err := b.c.request(ctx, http.MethodPost,
+		query("/v1/builds", [2]string{"deploy", opts.Deploy}), contextTar)
 	if err != nil {
 		return nil, err
 	}
@@ -52,11 +67,9 @@ func (b *Builds) Create(ctx context.Context, contextTar io.Reader) (*BuildStream
 // The stream is the one Create returns, so a caller reads the verdict the same
 // way. A plan with more than one step is refused with plan_multi_service and
 // the refusal is readable at the build's log, exactly as a push's is.
-func (b *Builds) CreateFromRepo(ctx context.Context, ref RepoRef, app string) (*BuildStream, error) {
-	path := "/v1/builds"
-	if app != "" {
-		path = query(path, [2]string{"app", app})
-	}
+func (b *Builds) CreateFromRepo(ctx context.Context, ref RepoRef, opts BuildOptions) (*BuildStream, error) {
+	path := query("/v1/builds",
+		[2]string{"app", opts.App}, [2]string{"deploy", opts.Deploy})
 	body, err := json.Marshal(ref)
 	if err != nil {
 		return nil, fmt.Errorf("pilots: encoding the repository: %w", err)
@@ -143,6 +156,18 @@ func (b *BuildStream) Result() (string, error) {
 		return last.Result, nil
 	}
 	return "", &BuildFailed{ID: b.ID, Reason: "the build stream ended without a verdict", Lines: b.seen}
+}
+
+// Release is the deployment this build was cut into, once the stream has been
+// read.
+//
+// Non-empty only for a build whose request named a service to deploy: the
+// host cuts that release itself and puts its id on the last line.
+func (b *BuildStream) Release() string {
+	if len(b.seen) == 0 {
+		return ""
+	}
+	return b.seen[len(b.seen)-1].Release
 }
 
 // textLines yields each non-empty line of a response body as it arrives.

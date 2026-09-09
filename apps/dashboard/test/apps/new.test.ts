@@ -204,7 +204,9 @@ test('a one-step plan starts the build, creates the service as the org, and land
 
   assert.ok(app.fleet.calls.some((c) => c.method === 'as' && c.args[0] === org), 'acted as the visitor org');
   const build = app.fleet.calls.find((c) => c.method === 'builds.createFromRepo')!;
-  assert.deepEqual(build.args, [{ repo: 'acme/shop', ref: 'main' }, { app: 'shop' }]);
+  // The deploy travels WITH the build: hostd cuts the release on the verdict,
+  // so a closed tab is still a release and two tabs are still one rollout.
+  assert.deepEqual(build.args, [{ repo: 'acme/shop', ref: 'main' }, { app: 'shop', deploy: 'svc-new' }]);
   const created = app.fleet.calls.find((c) => c.method === 'services.create')!;
   assert.deepEqual(created.args[0], {
     name: 'web',

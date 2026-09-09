@@ -295,11 +295,17 @@ export class Builds {
    *
    * No client deadline: the whole point of the stream is that the build
    * outlives the request that started it.
+   *
+   * `deploy` names a service to cut a release for from the image. The HOST
+   * does that, on the verdict, exactly once -- so a caller that walks away
+   * mid-build still ends with a release, and two callers watching one build
+   * still produce one rollout. See `BuildLogLine.release`.
    */
-  async create(tar: BodyInit): Promise<BuildStream> {
+  async create(tar: BodyInit, opts: { deploy?: string } = {}): Promise<BuildStream> {
     const res = await this.http.send('POST', '/v1/builds', {
       raw: tar,
       contentType: 'application/x-tar',
+      ...(opts.deploy ? { query: { deploy: opts.deploy } } : {}),
       timeoutMs: null,
     })
     return new BuildStream(res)
@@ -312,12 +318,16 @@ export class Builds {
    *
    * The stream is the one `create` returns, so a caller reads the verdict the
    * same way. A plan with more than one step is refused with
-   * `plan_multi_service`, readable at the build's own log.
+   * `plan_multi_service`, readable at the build's own log. `deploy` is what
+   * `create` takes it for.
    */
-  async createFromRepo(ref: RepoRef, opts: { app?: string } = {}): Promise<BuildStream> {
+  async createFromRepo(ref: RepoRef, opts: { app?: string; deploy?: string } = {}): Promise<BuildStream> {
+    const query: Record<string, string> = {}
+    if (opts.app) query.app = opts.app
+    if (opts.deploy) query.deploy = opts.deploy
     const res = await this.http.send('POST', '/v1/builds', {
       body: ref,
-      ...(opts.app ? { query: { app: opts.app } } : {}),
+      ...(Object.keys(query).length > 0 ? { query } : {}),
       timeoutMs: null,
     })
     return new BuildStream(res)

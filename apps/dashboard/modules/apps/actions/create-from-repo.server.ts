@@ -144,7 +144,14 @@ export async function createFromRepo(formData: FormData) {
     const service = await client.services.create(create);
 
     // Start the build and let the stream go: hostd continues without us.
-    const stream = await client.builds.createFromRepo({ repo, ref }, { app });
+    //
+    // The deploy travels WITH the build. hostd cuts the release on the
+    // verdict, so nothing about whether this app is still running, or how many
+    // tabs are watching the log, decides whether the service gets one. The
+    // browser used to post the deploy itself when it saw the image id, which
+    // made a closed tab a successful build that released nothing and two tabs
+    // two rollouts of one image.
+    const stream = await client.builds.createFromRepo({ repo, ref }, { app, deploy: service.id });
     const jobId = stream.buildId;
     await stream.close();
 

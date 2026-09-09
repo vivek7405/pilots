@@ -55,6 +55,19 @@ func TestEveryWriteErrorUsesAListedCode(t *testing.T) {
 			return perr
 		}
 		ast.Inspect(f, func(n ast.Node) bool {
+			// An ErrorResponse built as a literal rather than written through
+			// WriteError -- mapError does this, so that one mapping can feed
+			// both a status and a build-log line. Without this branch those
+			// codes left the closed list the moment they stopped being
+			// WriteError arguments.
+			if lit, ok := n.(*ast.CompositeLit); ok && isErrorResponse(lit.Type) {
+				name, isName := errorResponseCode(lit)
+				if isName && !known[constOf[name]] {
+					t.Errorf("%s: ErrorResponse carries the code %s, which is not in Codes",
+						fset.Position(lit.Pos()), name)
+				}
+				return true
+			}
 			call, ok := n.(*ast.CallExpr)
 			if !ok || !isWriteError(call.Fun) || len(call.Args) < 3 {
 				return true
@@ -86,6 +99,50 @@ func TestEveryWriteErrorUsesAListedCode(t *testing.T) {
 	if calls < 30 {
 		t.Fatalf("only %d WriteError calls found under internal/; the sweep moved?", calls)
 	}
+}
+
+// isErrorResponse reports whether a composite literal is an ErrorResponse,
+// spelled bare or qualified.
+func isErrorResponse(t ast.Expr) bool {
+	switch e := t.(type) {
+	case *ast.Ident:
+		return e.Name == "ErrorResponse"
+	case *ast.SelectorExpr:
+		return e.Sel.Name == "ErrorResponse"
+	}
+	return false
+}
+
+// errorResponseCode reads the Code field of an ErrorResponse literal, and
+// whether it names something this test can check. A bare identifier that is
+// not a Code<Name> is a parameter being passed through -- WriteError's own
+// body is the one that does that, and its call sites are checked above.
+func errorResponseCode(lit *ast.CompositeLit) (string, bool) {
+	for _, el := range lit.Elts {
+		kv, ok := el.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		key, ok := kv.Key.(*ast.Ident)
+		if !ok || key.Name != "Code" {
+			continue
+		}
+		name, ok := codeArg(kv.Value)
+		if !ok {
+			return "", false
+		}
+		// A string literal is always checked, and always fails: constOf has
+		// no entry for it, so it reports as not in Codes, which is what a
+		// hand-spelled code should do.
+		if _, isLit := kv.Value.(*ast.BasicLit); isLit {
+			return name, true
+		}
+		if !strings.HasPrefix(name, "Code") {
+			return "", false
+		}
+		return name, true
+	}
+	return "", false
 }
 
 func isWriteError(fun ast.Expr) bool {
