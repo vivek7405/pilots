@@ -217,8 +217,11 @@ func driveTerminal(env *Env, stream *pilots.ExecStream, stdinFd, stdoutFd int, s
 					if i > 0 {
 						_, _ = stream.Stdin.Write(chunk[:i])
 					}
-					_ = stream.Detach()
+					// Say "detaching" BEFORE closing the stream: closing ends
+					// the output copy too, and the main loop must read that
+					// as a detach rather than as a stream that died.
 					close(detached)
+					_ = stream.Detach()
 					return
 				}
 				if _, werr := stream.Stdin.Write(chunk); werr != nil {
@@ -234,13 +237,16 @@ func driveTerminal(env *Env, stream *pilots.ExecStream, stdinFd, stdoutFd int, s
 	outDone := make(chan struct{})
 	go func() { _, _ = io.Copy(os.Stdout, stream.Stdout); close(outDone) }()
 
+	<-outDone
+	// The output copy ends for one of two reasons: the session ended, or we
+	// detached and closed the stream ourselves. The detach signal is raised
+	// before the close, so it is readable here without a race.
 	select {
 	case <-detached:
-		<-outDone
 		term.Restore(stdinFd, oldState)
-		env.W.Notef("\ndetached; the session keeps running. `pilot attach` returns to it")
+		env.W.Notef("\r\ndetached; the session keeps running. `pilot attach` returns to it")
 		return nil
-	case <-outDone:
+	default:
 	}
 	code, err := stream.Wait()
 	if err != nil {
