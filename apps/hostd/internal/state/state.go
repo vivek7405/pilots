@@ -1667,9 +1667,21 @@ func CurrentReplicas(svc Service, rows []Machine) []Machine {
 	}
 	out := make([]Machine, 0, len(rows))
 	for _, m := range rows {
-		if m.ServiceID == svc.ID && m.ReleaseID == svc.ReleaseID && m.State != StateDestroyed {
+		if IsCurrentReplica(svc, m) {
 			out = append(out, m)
 		}
 	}
 	return out
+}
+
+// IsCurrentReplica is the rule CurrentReplicas applies, for a caller holding a
+// map rather than a slice.
+//
+// Exported so the subscription cache can filter its own machine map in place:
+// the router asks it on every request to a service address, and materialising
+// a slice of every machine in the fleet to hand to CurrentReplicas would put
+// one fleet-sized allocation on the routing hot path.
+func IsCurrentReplica(svc Service, m Machine) bool {
+	return svc.ReleaseID != "" && m.ServiceID == svc.ID &&
+		m.ReleaseID == svc.ReleaseID && m.State != StateDestroyed
 }

@@ -143,10 +143,12 @@ func (r *Router) resolve(ctx context.Context, host string) (*Target, error) {
 
 	// A local read. This is the whole point: routing must not depend on any
 	// other host being reachable.
+	//
+	// A failed read is NOT returned here. The service branch below answers
+	// from the subscription cache, which needs no store at all, and a store
+	// that is briefly unwell must not turn a live service address into a 404.
+	// The error is kept and returned only if nothing else resolves.
 	rows, err := r.opts.Store.ListMachines(ctx)
-	if err != nil {
-		return nil, err
-	}
 	for _, row := range rows {
 		if row.Name != name && row.Domain != strings.ToLower(host) {
 			continue
@@ -170,6 +172,9 @@ func (r *Router) resolve(ctx context.Context, host string) (*Target, error) {
 		return &Target{Machine: m, Port: port}, nil
 	}
 
+	if err != nil {
+		return nil, err
+	}
 	return nil, fmt.Errorf("router: no machine named %q", name)
 }
 
@@ -195,18 +200,35 @@ func (e *noReplicaError) Error() string {
 // matters is that both pick the lowest id, so a duplicated address routes the
 // same way on a host whose subscription has the rows and one whose has not.
 func (r *Router) serviceByLabel(ctx context.Context, label string) (state.Service, []state.Machine, bool) {
+	// What the cache had, kept for the paths below that cannot better it. A
+	// service the cache knows is a 503 rather than a 404 even when the store
+	// read that follows fails, because its address is real either way.
+	var (
+		cached   state.Service
+		cachedOK bool
+	)
 	if r.opts.Service != nil {
 		if svc, replicas, ok := r.opts.Service(label); ok {
-			return svc, replicas, true
+			if len(replicas) > 0 {
+				return svc, replicas, true
+			}
+			// The address is in the cache and no machine of its current
+			// release is. That is the honest answer for a service never
+			// deployed, and a false 503 on a host whose machines subscription
+			// is behind the release flip -- the two tables are delivered by
+			// separate subscriptions and nothing orders them against each
+			// other. So the store, which is read at the moment it is asked,
+			// gets the last word.
+			cached, cachedOK = svc, true
 		}
 	}
 	if label == "" || r.opts.Store == nil {
-		return state.Service{}, nil, false
+		return cached, nil, cachedOK
 	}
 
 	services, err := r.opts.Store.ListServices(ctx)
 	if err != nil {
-		return state.Service{}, nil, false
+		return cached, nil, cachedOK
 	}
 	var (
 		found   state.Service
@@ -222,12 +244,12 @@ func (r *Router) serviceByLabel(ctx context.Context, label string) (state.Servic
 		}
 	}
 	if matches == 0 {
-		return state.Service{}, nil, false
+		return cached, nil, cachedOK
 	}
 
 	rows, err := r.opts.Store.ListMachines(ctx)
 	if err != nil {
-		return state.Service{}, nil, false
+		return found, nil, true
 	}
 	return found, state.CurrentReplicas(found, rows), true
 }

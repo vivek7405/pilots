@@ -713,11 +713,17 @@ func (c *Cache) ServiceReplicas(label string) (state.Service, []state.Machine, b
 			"address", label, "matches", matches, "routing_to", found.ID)
 	}
 
-	rows := make([]state.Machine, 0, len(c.machines))
+	// Filtered in place rather than through state.CurrentReplicas: this runs
+	// on the routing hot path, and copying every machine in the fleet into a
+	// slice to hand over would be one fleet-sized allocation per request. The
+	// rule is still the one rule, asked a row at a time.
+	var replicas []state.Machine
 	for _, m := range c.machines {
-		rows = append(rows, m)
+		if state.IsCurrentReplica(found, m) {
+			replicas = append(replicas, m)
+		}
 	}
-	return found, state.CurrentReplicas(found, rows), true
+	return found, replicas, true
 }
 
 // Machines returns every live machine, ordered by id.

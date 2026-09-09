@@ -198,3 +198,62 @@ func TestAServiceAddressTakesThePortPrefixForm(t *testing.T) {
 		t.Errorf("routed to %q port %d, want m-1 port 3000", target.Machine.ID, target.Port)
 	}
 }
+
+// The cache holding the service and none of its machines is not proof the
+// service has none. machines and services arrive on two subscriptions and
+// nothing orders one against the other, so a host can hold the flipped
+// release_id before it holds the machines that release created. Answering 503
+// there would take a live service down on that host for as long as the lag
+// lasts, when the local store -- read at the moment it is asked -- has the
+// rows.
+func TestAReplicaLessCacheHitFallsBackToTheStore(t *testing.T) {
+	r := New(Options{
+		Domain: "pilotrun.app", HostID: "host-a",
+		Store: &stubStore{
+			services: []state.Service{{ID: "s-1", Domain: "shop", ReleaseID: "rel-2"}},
+			machines: []state.Machine{
+				{ID: "m-new", ServiceID: "s-1", ReleaseID: "rel-2", HostID: "host-a", State: machines.StateRunning},
+			},
+		},
+		// The service row, with the release the store already agrees on, and
+		// not one machine of it.
+		Service: func(label string) (state.Service, []state.Machine, bool) {
+			if label != "shop" {
+				return state.Service{}, nil, false
+			}
+			return state.Service{ID: "s-1", Domain: "shop", ReleaseID: "rel-2"}, nil, true
+		},
+	})
+
+	target, err := r.resolve(context.Background(), "shop.pilotrun.app")
+	if err != nil {
+		t.Fatalf("a lagging cache turned a live service into an error: %v", err)
+	}
+	if target.Machine.ID != "m-new" {
+		t.Errorf("routed to %q, want the store's m-new", target.Machine.ID)
+	}
+}
+
+// The other half of the same rule: when the store agrees there is nothing to
+// serve, the answer is still 503 rather than 404. The address is real.
+func TestAReplicaLessServiceStaysA503AfterTheStoreAgrees(t *testing.T) {
+	r := New(Options{
+		Domain: "pilotrun.app", HostID: "host-a",
+		Store: &stubStore{services: []state.Service{{ID: "s-1", Domain: "shop", ReleaseID: ""}}},
+		Service: func(label string) (state.Service, []state.Machine, bool) {
+			if label != "shop" {
+				return state.Service{}, nil, false
+			}
+			return state.Service{ID: "s-1", Domain: "shop"}, nil, true
+		},
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://shop.pilotrun.app/", nil)
+	req.Host = "shop.pilotrun.app"
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("answered %d, want 503", rec.Code)
+	}
+}
