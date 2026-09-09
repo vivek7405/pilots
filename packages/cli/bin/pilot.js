@@ -35,4 +35,35 @@ process.on('warning', (warning) => {
   for (const listener of defaultWarningListeners) listener.call(process, warning)
 })
 
-await import('../src/main.ts')
+// The reader of stdout can go away first: `pilot machines ls | head -1`, a
+// `grep -q` that has seen enough, a `less` the operator quit. So can the
+// reader of stderr: `pilot deploy 2>&1 | head -20` puts both on one pipe, and
+// progress lines go to stderr, so that is the stream hit first. Node disables
+// the default SIGPIPE disposition at startup and reports the failed write as
+// an `error` event on the stream instead, so with no listener that is an
+// unhandled event -- a stack trace on stderr and exit 1. Both halves break a
+// promise made a few lines up: stderr carries the server's body or a CLI
+// diagnostic and nothing else, and exit 1 means the fleet refused, not that
+// nobody was listening.
+//
+// 141 is 128 + SIGPIPE, the code a shell already reports for the left side of
+// `seq 1 100000 | head -1`. Exiting rather than swallowing the error is what
+// ends a `pilot logs --follow` whose reader is gone, instead of leaving it
+// streaming from the fleet into a closed pipe. Every other stream error is
+// rethrown and keeps today's behaviour.
+for (const stream of [process.stdout, process.stderr]) {
+  stream.on('error', (err) => {
+    if (err.code === 'EPIPE') process.exit(141)
+    throw err
+  })
+}
+
+// Calling `run()` explicitly, rather than importing this module for a
+// side effect it decides to perform, is what makes the CLI work under the
+// name it is installed as. `npm install -g` links `<prefix>/bin/pilot` to
+// this file, and Node does not resolve argv[1] through that symlink: a
+// module that sniffed `process.argv[1]` for `pilot.js` saw `/usr/bin/pilot`
+// and silently did nothing, exit 0. The entry point is the one place that
+// knows it is an entry point, so the decision belongs here.
+const { run } = await import('../src/main.ts')
+await run()
