@@ -341,10 +341,17 @@ type CreateServiceRequest struct {
 	// DeployRequest.
 	Knobs  *Knobs       `json:"knobs,omitempty"`
 	Health *HealthCheck `json:"health,omitempty"`
-	// Domain is the subdomain label under the fleet's domain. Empty means the
-	// service mints no route rows -- legal, and reachable by peers over
-	// <name>.internal instead.
-	Domain       string `json:"domain,omitempty"`
+	// Domain is the subdomain label under the fleet's domain. Empty means one
+	// is minted from the name: the name itself when it is free, else the name
+	// and a four-character suffix. Set it to ask for an exact label, which is
+	// taken literally or refused -- never adjusted, because an address a
+	// caller hard codes must be the one they asked for.
+	Domain string `json:"domain,omitempty"`
+	// Private mints no address at all. The service is reachable by peers over
+	// <name>.internal, and its replicas keep their own machine URLs the way
+	// every machine does; what it does not get is a stable address of its own.
+	// Create-only: an address, once minted, is permanent.
+	Private      bool   `json:"private,omitempty"`
 	CustomDomain string `json:"custom_domain,omitempty"`
 	// Volume is create-only: a volume swap is a data migration, not a
 	// configuration change, and nothing here copies data between volumes, so
@@ -430,6 +437,12 @@ type UpdateServiceRequest struct {
 	Repo       *string           `json:"repo,omitempty"`
 	Branch     *string           `json:"branch,omitempty"`
 	Autodeploy *bool             `json:"autodeploy,omitempty"`
+	// Domain gives an address to a service that has none. It is the one way a
+	// service created before addresses were minted, or one created private,
+	// can get one. Accepted exactly once: a service that already has an
+	// address is a 409 and an empty string is a 400, because URLs are
+	// permanent and neither changing nor removing one is expressible.
+	Domain *string `json:"domain,omitempty"`
 }
 
 // Volume is persistent, per-write-durable storage: one filesystem in object

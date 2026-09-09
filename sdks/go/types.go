@@ -230,9 +230,15 @@ type CreateServiceRequest struct {
 	// belongs. A patch for the same reason every other request's is.
 	Knobs  *KnobsPatch  `json:"knobs,omitempty"`
 	Health *HealthCheck `json:"health,omitempty"`
-	// Domain is the subdomain label under the fleet's domain. Empty means the
-	// service mints no route rows and is reachable over <name>.internal only.
-	Domain       string `json:"domain,omitempty"`
+	// Domain is the subdomain label under the fleet's domain. Empty means one
+	// is minted from the name: the name itself when it is free, else the name
+	// and a four-character suffix. Set it to ask for an exact label, which is
+	// taken literally or refused, never adjusted.
+	Domain string `json:"domain,omitempty"`
+	// Private mints no address at all. The service is reachable by peers over
+	// <name>.internal, and its replicas keep their own machine URLs the way
+	// every machine does. Create-only: an address, once minted, is permanent.
+	Private      bool   `json:"private,omitempty"`
 	CustomDomain string `json:"custom_domain,omitempty"`
 	// Volume is create-only: a volume swap is a data migration, not a
 	// configuration change, so the update route does not take it. Requires
@@ -429,6 +435,11 @@ type UpdateServiceRequest struct {
 	Repo       *string           `json:"repo,omitempty"`
 	Branch     *string           `json:"branch,omitempty"`
 	Autodeploy *bool             `json:"autodeploy,omitempty"`
+	// Domain gives an address to a service that has none, which is the only
+	// way one created before addresses were minted, or one created private,
+	// can get one. Accepted exactly once: a service that already has an
+	// address is a 409 and an empty string a 400, because URLs are permanent.
+	Domain *string `json:"domain,omitempty"`
 }
 
 type CreateAPIKeyRequest struct {

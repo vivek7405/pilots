@@ -222,7 +222,19 @@ export interface CreateServiceRequest {
    */
   knobs?: KnobsPatch
   health?: HealthCheck
+  /**
+   * The subdomain label under the fleet's domain. Empty means one is minted
+   * from the name: the name itself when it is free, else the name and a
+   * four-character suffix. Set it to ask for an exact label, which is taken
+   * literally or refused, never adjusted.
+   */
   domain?: string
+  /**
+   * Mints no address at all. The service is reachable by peers over
+   * <name>.internal, and its replicas keep their own machine URLs the way
+   * every machine does. Create-only: an address, once minted, is permanent.
+   */
+  private?: boolean
   custom_domain?: string
   /**
    * Create-only: a volume swap is a data migration, not a configuration
@@ -418,6 +430,13 @@ export interface UpdateServiceRequest {
   repo?: string
   branch?: string
   autodeploy?: boolean
+  /**
+   * Gives an address to a service that has none, which is the only way one
+   * created before addresses were minted, or one created private, can get
+   * one. Accepted exactly once: a service that already has an address is a
+   * 409 and an empty string a 400, because URLs are permanent.
+   */
+  domain?: string
 }
 
 export interface CreateAPIKeyRequest {
