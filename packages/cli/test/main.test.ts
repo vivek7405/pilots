@@ -9,7 +9,7 @@
 
 import { strict as assert } from 'node:assert'
 import { execFile, spawn } from 'node:child_process'
-import { mkdtemp, symlink } from 'node:fs/promises'
+import { mkdtemp, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
@@ -46,11 +46,15 @@ test('the bin runs under the name it is installed as, not only as pilot.js', asy
   // to run by matching argv[1] against `pilot.js` therefore exited 0 with no
   // output for every global install, with the whole battery green.
   const dir = await mkdtemp(join(tmpdir(), 'pilot-bin-'))
-  const link = join(dir, 'pilot')
-  await symlink(BIN, link)
+  try {
+    const link = join(dir, 'pilot')
+    await symlink(BIN, link)
 
-  const { stdout } = await run(process.execPath, [link, '--version'])
-  assert.match(stdout.trim(), /^\d+\.\d+\.\d+$/)
+    const { stdout } = await run(process.execPath, [link, '--version'])
+    assert.match(stdout.trim(), /^\d+\.\d+\.\d+$/)
+  } finally {
+    await rm(dir, { recursive: true, force: true })
+  }
 })
 
 test('a reader that closes stdout early ends the run quietly, with 141', async () => {

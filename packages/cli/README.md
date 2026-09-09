@@ -93,7 +93,7 @@ Diagnostics, prompts and errors always go to stderr.
 | `1` | any failure |
 | the remote code | `pilot machines exec` and `pilot console`, which exit with the command's own status |
 | `130` | interrupted |
-| `141` | the reader of stdout went away first, as in `pilot machines ls \| head -1`; the code a shell reports for `SIGPIPE` |
+| `141` | the reader of stdout or stderr went away first, as in `pilot machines ls \| head -1`; the code a shell reports for `SIGPIPE` |
 
 An error from the fleet is rendered twice over. Under `--json` the server's body
 reaches stderr **unchanged**, so it can be compared byte for byte with what the
