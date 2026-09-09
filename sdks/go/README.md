@@ -130,6 +130,19 @@ through the fleet's GitHub App, the same path a push takes, so a caller that
 holds no repository bytes can still plan. A fleet with no App configured answers
 `not_configured` and says to send a tar instead.
 
+```go
+link, err := c.ConnectRepo(ctx, "you/shop")   // admin-scoped, once per org
+repos, err := c.ListRepos(ctx)                // what this org may name
+```
+
+Naming a repository needs a claim on it. An org that has none gets `403` with
+code `repo_not_connected` from both `PlanRepo` and the `{repo, ref}` build, and
+`ConnectRepo` is what records the claim -- admin-scoped, because the proof that
+an org controls a repository is held at GitHub rather than in the request.
+`ListRepos` needs only the org's own key, so a refused caller can see what it
+IS connected to. The claim is write-once: connecting twice answers the
+connection that is already there.
+
 ## Errors
 
 ```go

@@ -304,31 +304,6 @@ var RepoSlug = regexp.MustCompile(`^[A-Za-z0-9._-]{1,100}/[A-Za-z0-9._-]{1,100}$
 // is recorded under the build id and has to be readable at its log.
 func (d Deps) parseRepoRef(w http.ResponseWriter, r *http.Request) (RepoRef, bool) {
 	var ref RepoRef
-	if d.Repos == nil {
-		// 503 and not 501: the route exists and works on a fleet whose hosts
-		// carry an App. Naming the tar is what makes this actionable without
-		// an operator, since every client that can build can send one.
-		WriteError(w, http.StatusServiceUnavailable, CodeNotConfigured,
-			"this fleet has no GitHub App, so it cannot fetch a repository",
-			"send a tar of the directory, or set PILOT_GITHUB_APP_ID and PILOT_GITHUB_APP_KEY on every host", nil)
-		return ref, false
-	}
-	// ADMIN ONLY, for now. Nothing here ties the caller's org to the
-	// repository: the App's installation token can fetch every repository the
-	// fleet's App is installed on, so a tenant key naming one would read
-	// another tenant's source through the fleet's credential and then exec
-	// into the image. A push cannot: it is a signed delivery about a
-	// repository, resolved to the service rows that name it.
-	//
-	// The gate is the fail-closed half of that until an org-to-repository
-	// record exists in state for this to check. The dashboard and the CLI's
-	// deploy both hold an admin-scoped key, so it costs them nothing.
-	if !IsAdmin(r.Context()) {
-		WriteError(w, http.StatusForbidden, CodeScopeRequired,
-			"naming a repository needs an admin-scoped key on this fleet",
-			"send a tar of the directory instead, or use a key with scope admin", nil)
-		return ref, false
-	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&ref); err != nil {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest,
 			"reading the repository: "+err.Error(), NextBadBody, nil)
@@ -344,6 +319,28 @@ func (d Deps) parseRepoRef(w http.ResponseWriter, r *http.Request) (RepoRef, boo
 		WriteError(w, http.StatusBadRequest, CodeBadRequest,
 			"repo must be owner/name",
 			`send {"repo":"owner/name","ref":"main"}`, nil)
+		return ref, false
+	}
+	// Whether this ORG may have the fleet fetch this repository, answered from
+	// local state (AllowRepo, repos.go). It replaces the admin-only gate that
+	// stood here: the App's installation token can fetch every repository the
+	// fleet's App is installed on, so something has to tie the caller to the
+	// one it named, and now something does.
+	//
+	// BEFORE the no-App check below, and deliberately: a caller with no claim
+	// on a repository is refused whether or not this fleet could have fetched
+	// it, and the refusal then says the same thing on every fleet rather than
+	// depending on how the host is configured.
+	if !AllowRepo(w, r, d.Store, ref.Repo) {
+		return ref, false
+	}
+	if d.Repos == nil {
+		// 503 and not 501: the route exists and works on a fleet whose hosts
+		// carry an App. Naming the tar is what makes this actionable without
+		// an operator, since every client that can build can send one.
+		WriteError(w, http.StatusServiceUnavailable, CodeNotConfigured,
+			"this fleet has no GitHub App, so it cannot fetch a repository",
+			"send a tar of the directory, or set PILOT_GITHUB_APP_ID and PILOT_GITHUB_APP_KEY on every host", nil)
 		return ref, false
 	}
 	return ref, true

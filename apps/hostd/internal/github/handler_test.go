@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -415,6 +416,57 @@ func TestAPushWithNoOwningOrgStillBuilds(t *testing.T) {
 	}
 	if !builds.started {
 		t.Error("the build did not run")
+	}
+}
+
+// A service that names a repository its org holds no claim on is LOGGED and
+// still built, and both halves of that are the decision.
+//
+// `services.repo` was ungated before repo_links existed, so every row written
+// until then is grandfathered: it keeps its standing order to build that
+// repository on every commit, and the checks on the create and the patch close
+// the door only for rows written from now on. Refusing them instead would stop
+// every autodeploy on the fleet the moment a host upgrades, since no existing
+// row has a claim, so the fleet keeps building them and names each one once
+// per push for an operator to reconcile.
+//
+// Counterfactual: make warnUnclaimed refuse, and "still built" fails; drop it,
+// and the fleet builds a grandfathered row with nothing anywhere saying so.
+func TestAnUnclaimedRepositoryIsLoggedAndStillBuilt(t *testing.T) {
+	builds := &recordingBuilds{}
+	d := pushDeps(t, tarballOf(t, "webjs"), builds)
+	svc := &state.Service{ID: "svc_1", Repo: "gate/webjs-app", Autodeploy: true}
+
+	var logged bytes.Buffer
+	restore := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logged, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(restore) })
+
+	d.warnUnclaimed(context.Background(), svc, "org_1", "gate/webjs-app")
+	if !strings.Contains(logged.String(), "svc_1") || !strings.Contains(logged.String(), "gate/webjs-app") {
+		t.Errorf("the warning does not name the service and the repository: %s", logged.String())
+	}
+
+	// The build runs regardless: this path is a signed delivery, not a request
+	// from a tenant, and the claim is not what authorizes it.
+	if _, _, err := d.buildRef(context.Background(), pushEvent(), "abc1234", "shop", "org_1"); err != nil {
+		t.Fatalf("buildRef: %v", err)
+	}
+	if !builds.started {
+		t.Error("a grandfathered push stopped building; that would break every fleet on upgrade")
+	}
+
+	// And a claimed repository says nothing, or the warning is noise on every
+	// push the fleet serves and nobody reads it.
+	logged.Reset()
+	if err := d.Store.PutRepoLink(context.Background(), &state.RepoLink{
+		OrgID: "org_1", Repo: "gate/webjs-app", ConnectedAt: 1,
+	}); err != nil {
+		t.Fatalf("PutRepoLink: %v", err)
+	}
+	d.warnUnclaimed(context.Background(), svc, "org_1", "gate/webjs-app")
+	if logged.Len() != 0 {
+		t.Errorf("a claimed repository warned anyway: %s", logged.String())
 	}
 }
 

@@ -29,6 +29,12 @@ const (
 	CodePlanMultiService = "plan_multi_service"
 	CodeBuildFailed      = "build_failed"
 	CodeHealthGateFailed = "health_gate_failed"
+	// CodeRepoNotConnected is the 403 a caller gets for naming a repository
+	// its org has no claim on. Its own code and not scope_required, which is
+	// what the admin-only gate it replaces answered: the remedy is to connect
+	// the repository, not to hold a wider key, and a client that branches on
+	// codes has to be able to tell those two apart.
+	CodeRepoNotConnected = "repo_not_connected"
 )
 
 // Codes is the closed list, for the test that guards it and for the docs page
@@ -38,7 +44,7 @@ var Codes = []string{
 	CodeConflict, CodeVolumeInUse, CodeQuotaExceeded, CodeNotConfigured,
 	CodeNotImplemented, CodeUnavailable, CodeInternal, CodePlanUnsupported,
 	CodeComposeInvalid, CodeUnknownFramework, CodePlanMultiService,
-	CodeBuildFailed, CodeHealthGateFailed,
+	CodeBuildFailed, CodeHealthGateFailed, CodeRepoNotConnected,
 }
 
 // NextNotFound is the only next a 404 may carry. It is deliberately generic:

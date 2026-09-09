@@ -443,6 +443,28 @@ type RevokeResponse struct {
 	RevokedAt int64  `json:"revoked_at"`
 }
 
+// ConnectRepoRequest ties a repository to an org, which is what lets that
+// org's own keys name it in a {repo, ref} build or plan. Admin-scoped: the
+// proof that an org controls a repository is held at GitHub, so the connection
+// is asserted by a party that can prove it and recorded once.
+//
+// The org is not in the body. It comes from the key, or from ?org= on an admin
+// key, as it does on every other create.
+type ConnectRepoRequest struct {
+	Repo string `json:"repo"`
+}
+
+// RepoLinkResponse is one connection between an org and a repository.
+type RepoLinkResponse struct {
+	Repo        string `json:"repo"`
+	OrgID       string `json:"org_id"`
+	ConnectedAt int64  `json:"connected_at"`
+}
+
+type RepoLinkListResponse struct {
+	Repos []RepoLinkResponse `json:"repos"`
+}
+
 type QuotaResponse struct {
 	OrgID        string `json:"org_id"`
 	MaxMachines  int    `json:"max_machines"`
@@ -618,6 +640,9 @@ var wireTypes = []any{
 	CreateAPIKeyRequest{},
 	APIKeyResponse{},
 	RevokeResponse{},
+	ConnectRepoRequest{},
+	RepoLinkResponse{},
+	RepoLinkListResponse{},
 	QuotaResponse{},
 	QuotaExceededResponse{},
 	UsageTotals{},

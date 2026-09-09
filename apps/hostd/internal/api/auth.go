@@ -56,6 +56,21 @@ func WithAdminPrincipal(ctx context.Context) context.Context {
 	return context.WithValue(ctx, principalKey, principal{Scopes: []string{ScopeAdmin}})
 }
 
+// WithTenantPrincipal returns a context carrying an ordinary org-scoped
+// caller, the counterpart to WithAdminPrincipal.
+//
+// Same reason that one is exported: the principal type is unexported, so a
+// package mounted behind this middleware -- internal/detect serves POST
+// /v1/plan -- has no other way to build the context a handler is really given.
+// Without it those tests could only ever exercise the admin path, which is
+// exactly the path the repository rule does NOT gate.
+func WithTenantPrincipal(ctx context.Context, orgID string, scopes ...string) context.Context {
+	if len(scopes) == 0 {
+		scopes = []string{ScopeDeploy}
+	}
+	return context.WithValue(ctx, principalKey, principal{OrgID: orgID, Scopes: scopes})
+}
+
 // IsAdmin reports whether the caller may act across orgs. Admin is the ops
 // org's key: it sees every row, including rows created before tenancy
 // existed, and it is the only scope that may mint or revoke a key.
@@ -97,6 +112,11 @@ var scopePrefixes = []struct {
 	{"/v1/hosts", ScopeMachines},
 	{"/v1/whoami", ScopeMachines},
 	{"/v1/builds", ScopeDeploy},
+	// A deploy-scoped key READS its own connections here, because a caller
+	// refused a {repo, ref} build has to be able to see what it is connected
+	// to. Writing one is admin-scoped, checked in handleConnectRepo rather
+	// than in this table, which cannot express "this method, not that one".
+	{"/v1/repos", ScopeDeploy},
 	{"/v1/services", ScopeDeploy},
 	{"/v1/domains", ScopeDeploy},
 	{"/v1/api-keys", ScopeAdmin},

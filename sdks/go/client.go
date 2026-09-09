@@ -191,6 +191,44 @@ func (c *Client) PlanRepo(ctx context.Context, ref RepoRef, app string) (*Compos
 	return &out, c.do(ctx, http.MethodPost, path, json.RawMessage(body), &out)
 }
 
+// ConnectRepo ties a repository to an org, which is what lets that org's own
+// key name it in a {repo, ref} build or plan.
+//
+// ADMIN-SCOPED: the proof that an org controls a repository is held at GitHub,
+// so the connection is asserted once by a party that can prove it and hostd
+// records it. The org is the one this client acts as -- from the key, or from
+// the org this client was built with -- never a field in the body.
+//
+// Idempotent: the row is write-once, so connecting twice answers the
+// connection that is already there rather than moving it.
+//
+// It exists because the 403 a caller gets for naming an unconnected repository
+// says to POST /v1/repos, and a Go caller told to do that needs something to
+// call. See Client.ListRepos for the read.
+func (c *Client) ConnectRepo(ctx context.Context, repo string) (*RepoLinkResponse, error) {
+	body, err := json.Marshal(ConnectRepoRequest{Repo: repo})
+	if err != nil {
+		return nil, fmt.Errorf("pilots: encoding the repository: %w", err)
+	}
+	var out RepoLinkResponse
+	return &out, c.do(ctx, http.MethodPost, "/v1/repos", json.RawMessage(body), &out)
+}
+
+// ListRepos returns the repositories this client's org may name.
+//
+// Readable with a deploy-scoped key, unlike ConnectRepo: a caller refused a
+// build has to be able to see what it IS connected to. Never nil on success.
+func (c *Client) ListRepos(ctx context.Context) ([]RepoLinkResponse, error) {
+	var out RepoLinkListResponse
+	if err := c.do(ctx, http.MethodGet, "/v1/repos", nil, &out); err != nil {
+		return nil, err
+	}
+	if out.Repos == nil {
+		return []RepoLinkResponse{}, nil
+	}
+	return out.Repos, nil
+}
+
 // request builds an authenticated request. body may be nil.
 //
 // The org narrowing is applied HERE rather than at each call site, because it

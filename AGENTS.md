@@ -90,7 +90,8 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
 1. **Single-writer.** A host writes ONLY rows describing its own machines.
    The sanctioned exceptions are deterministic-owner operations (name
    allocation and self-heal claims of a *provably dead* host's machines) and
-   the write-once rows in `tenancy` and `api_key_revocations`, plus
+   the write-once rows in `tenancy`, `api_key_revocations` and
+   `repo_links`, plus
    `api_keys` and `org_quotas` on an admin-scoped request. Violating this
    does not error — it corrupts state silently through CRDT merges. A row is
    only safe for "any host" to write when it is written once, or has one

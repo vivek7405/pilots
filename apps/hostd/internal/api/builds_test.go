@@ -924,7 +924,16 @@ func TestATarStillBuildsWhenAStagerIsConfigured(t *testing.T) {
 //
 // Sending a tar is unaffected, which is the point: the gate is on naming, not
 // on building.
-func TestNamingARepositoryNeedsAnAdminKey(t *testing.T) {
+// The rule that replaced the admin-only gate: a tenant key may name a
+// repository its org is CONNECTED to, and no other.
+//
+// This test used to assert the gate PR #88 put here -- "naming a repository
+// needs an admin key" -- which shut the hole by making the whole {repo, ref}
+// path operator-only. The hole is the same one: the App's installation token
+// reaches every repository the fleet's App is installed on, so without a claim
+// a tenant could build another tenant's private source and exec into the
+// image. What changed is that the claim is now a row rather than a scope.
+func TestNamingARepositoryNeedsAClaimOnIt(t *testing.T) {
 	fb := &fakeBuilder{}
 	stager := &fakeStager{}
 	_, st, fake := newTestServerWithManager(t)
@@ -933,17 +942,95 @@ func TestNamingARepositoryNeedsAnAdminKey(t *testing.T) {
 	const tenant = "pilot_tenantkey"
 	sum := sha256.Sum256([]byte(tenant))
 	if err := st.PutAPIKey(context.Background(), &state.APIKey{
-		Hash: hex.EncodeToString(sum[:]), OrgID: "org_2", Scopes: "builds",
+		Hash: hex.EncodeToString(sum[:]), OrgID: "org_2", Scopes: "deploy",
 	}); err != nil {
 		t.Fatalf("PutAPIKey: %v", err)
+	}
+
+	// No claim on record: refused, with the code and the next step a client
+	// can act on. Not scope_required -- holding a wider key is not the remedy.
+	rec := postJSON(t, h, "/v1/builds", tenant, `{"repo":"acme/private","ref":"main"}`)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("unconnected: got %d, want 403: %s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"repo_not_connected"`) {
+		t.Errorf("unconnected: body = %s, want repo_not_connected", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "/v1/repos") {
+		t.Errorf("the refusal does not say how to connect it: %s", rec.Body.String())
+	}
+	if fb.started != 0 {
+		t.Errorf("a refused caller reached the builder")
+	}
+	// And nothing about the refusal is recorded: a tenancy row gossips to
+	// every host, and a client retrying a repository it may not have would
+	// otherwise write one per attempt.
+	if n := countTenancy(t, st); n != 0 {
+		t.Errorf("a refused build wrote %d tenancy rows", n)
+	}
+
+	// Connected, by the same org, and the build runs on a key with no admin
+	// scope at all -- which is the product change this row buys.
+	if err := st.PutRepoLink(context.Background(), &state.RepoLink{
+		OrgID: "org_2", Repo: "acme/private", ConnectedAt: 1,
+	}); err != nil {
+		t.Fatalf("PutRepoLink: %v", err)
+	}
+	rec = postJSON(t, h, "/v1/builds", tenant, `{"repo":"acme/private","ref":"main"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("connected: got %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if len(stager.seen) != 1 {
+		t.Errorf("the connected build did not reach the stager: %v", stager.seen)
+	}
+}
+
+// Another org's connection is not this org's. The rows are keyed by the pair
+// precisely so that a repository can be connected twice without either claim
+// leaking into the other.
+func TestOneOrgsRepoClaimDoesNotCarryToAnother(t *testing.T) {
+	fb := &fakeBuilder{}
+	stager := &fakeStager{}
+	_, st, fake := newTestServerWithManager(t)
+	h := Routes(Deps{HostID: "host-test", Store: st, Machines: fake, Builds: fb, Repos: stager})
+
+	const tenant = "pilot_othertenant"
+	sum := sha256.Sum256([]byte(tenant))
+	if err := st.PutAPIKey(context.Background(), &state.APIKey{
+		Hash: hex.EncodeToString(sum[:]), OrgID: "org_3", Scopes: "deploy",
+	}); err != nil {
+		t.Fatalf("PutAPIKey: %v", err)
+	}
+	if err := st.PutRepoLink(context.Background(), &state.RepoLink{
+		OrgID: "org_2", Repo: "acme/private", ConnectedAt: 1,
+	}); err != nil {
+		t.Fatalf("PutRepoLink: %v", err)
 	}
 
 	rec := postJSON(t, h, "/v1/builds", tenant, `{"repo":"acme/private","ref":"main"}`)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("got %d, want 403: %s", rec.Code, rec.Body.String())
 	}
-	if fb.started != 0 {
-		t.Errorf("a refused caller reached the builder")
+	if len(stager.seen) != 0 {
+		t.Errorf("another org's claim staged the repository: %v", stager.seen)
+	}
+}
+
+// An admin key keeps working across orgs, here as everywhere else on this API.
+// The fleet's own tooling holds one, so a change that broke this would take
+// the dashboard and `pilot deploy` with it.
+func TestAnAdminKeyStillNamesAnyRepository(t *testing.T) {
+	fb := &fakeBuilder{}
+	stager := &fakeStager{}
+	_, st, fake := newTestServerWithManager(t)
+	h := Routes(Deps{HostID: "host-test", Store: st, Machines: fake, Builds: fb, Repos: stager})
+
+	rec := postJSON(t, h, "/v1/builds", testKey, `{"repo":"acme/nobody-connected","ref":"main"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if len(stager.seen) != 1 {
+		t.Errorf("the admin build did not reach the stager: %v", stager.seen)
 	}
 }
 

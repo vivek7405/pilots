@@ -12,6 +12,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/build"
 	"github.com/vivek7405/pilots/hostd/internal/compose"
+	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
 // Stager stages a repository the fleet's GitHub App can read, returning the
@@ -42,13 +43,18 @@ type Stager interface {
 // running other tenants' microVMs. The builder stages under the cache root for
 // exactly this reason, and the plan route stages beside it. Empty falls back
 // to the process temp dir, which is what a test wants.
-func Handler(root string, repos Stager) http.HandlerFunc {
+//
+// st answers whether the caller's org may have this fleet fetch a repository
+// it named. The STORE and not a copy of the rule: api.AllowRepo is the one
+// place that question is answered, and a second implementation here would be
+// a second thing to keep in step with the build route.
+func Handler(root string, repos Stager, st state.Store) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// A repository named rather than sent. The host fetches the bytes
 		// through the fleet's GitHub App, the path a push takes, so a caller
 		// holding only an App JWT can plan.
 		if isJSON(r) {
-			dir, ok := stageRepo(w, r, repos)
+			dir, ok := stageRepo(w, r, repos, st)
 			if !ok {
 				return
 			}
@@ -93,27 +99,7 @@ func isJSON(r *http.Request) bool {
 
 // stageRepo decodes a RepoRef and fetches it, writing the refusal itself when
 // it cannot. The caller removes the returned directory.
-func stageRepo(w http.ResponseWriter, r *http.Request, repos Stager) (string, bool) {
-	if repos == nil {
-		// 503 and not 501: the route exists and works on a fleet whose hosts
-		// carry an App. Naming the tar is what makes this actionable without
-		// an operator, since every client that can plan can also send one.
-		api.WriteError(w, http.StatusServiceUnavailable, api.CodeNotConfigured,
-			"this fleet has no GitHub App, so it cannot fetch a repository",
-			"send a tar of the directory, or set PILOT_GITHUB_APP_ID and PILOT_GITHUB_APP_KEY on every host", nil)
-		return "", false
-	}
-	// ADMIN ONLY, as on /v1/builds and for the same reason: the App's token
-	// can fetch every repository the fleet's App is installed on, and nothing
-	// here ties this caller's org to the one it named. Planning leaks a
-	// private repository's shape rather than its source, which is a smaller
-	// hole than building it, but it is the same hole.
-	if !api.IsAdmin(r.Context()) {
-		api.WriteError(w, http.StatusForbidden, api.CodeScopeRequired,
-			"naming a repository needs an admin-scoped key on this fleet",
-			"send a tar of the directory instead, or use a key with scope admin", nil)
-		return "", false
-	}
+func stageRepo(w http.ResponseWriter, r *http.Request, repos Stager, st state.Store) (string, bool) {
 	var ref api.RepoRef
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&ref); err != nil {
 		api.WriteError(w, http.StatusBadRequest, api.CodeBadRequest,
@@ -132,6 +118,22 @@ func stageRepo(w http.ResponseWriter, r *http.Request, repos Stager) (string, bo
 		api.WriteError(w, http.StatusBadRequest, api.CodeBadRequest,
 			"repo must be owner/name",
 			`send {"repo":"owner/name","ref":"main"}`, nil)
+		return "", false
+	}
+	// The same question the build route asks, asked by the same function.
+	// Planning leaks a private repository's SHAPE rather than its source,
+	// which is a smaller hole than building it -- but it is the same hole, so
+	// it gets the same answer rather than a weaker one.
+	if !api.AllowRepo(w, r, st, ref.Repo) {
+		return "", false
+	}
+	if repos == nil {
+		// 503 and not 501: the route exists and works on a fleet whose hosts
+		// carry an App. Naming the tar is what makes this actionable without
+		// an operator, since every client that can plan can also send one.
+		api.WriteError(w, http.StatusServiceUnavailable, api.CodeNotConfigured,
+			"this fleet has no GitHub App, so it cannot fetch a repository",
+			"send a tar of the directory, or set PILOT_GITHUB_APP_ID and PILOT_GITHUB_APP_KEY on every host", nil)
 		return "", false
 	}
 	dir, err := repos.Stage(r.Context(), ref.Repo, ref.Ref)

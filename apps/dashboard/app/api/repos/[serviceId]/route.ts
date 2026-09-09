@@ -19,7 +19,7 @@ import { db } from '#db/connection.server.ts';
 import { repoConnections } from '#db/schema.server.ts';
 import { fleet } from '#modules/fleet/client.server.ts';
 import { assertOwned, fleetErrorResponse } from '#modules/fleet/org-filter.server.ts';
-import { installationFor } from '#modules/github/installations.server.ts';
+import { claimRepo } from '#modules/github/claim.server.ts';
 import { isRepoSlug } from '#modules/domains/hostname.ts';
 import { invalidResponse, isResponse, jsonBody, notFoundResponse, orgOr401, readJson, str } from '#modules/http/guards.server.ts';
 
@@ -61,17 +61,28 @@ export async function PUT(req: Request, { params }: RouteHandlerContext): Promis
     if (!branch) fieldErrors.branch = 'A branch is required';
     if (Object.keys(fieldErrors).length) return invalidResponse(fieldErrors);
 
+    // The fleet CLAIM first, then the engine's fields, then the local row.
+    //
+    // hostd keeps its own `repo_links` row per (org, repository) and reads it
+    // before it will fetch a repository by name. Every surface in this app that
+    // connects a repository writes it through claimRepo -- this route, the
+    // action behind the service page's form, and the deploy wizard -- because a
+    // surface that skips it leaves the page saying "connected" while the org's
+    // own key is refused that repository by `pilot deploy` and by every agent.
+    //
+    // installation_id stays null, and the connect still succeeds, for an owner
+    // the App is not installed on: that is this route's deliberate behaviour
+    // and the page renders its install link off exactly that null. No CLAIM is
+    // written in that case, because a claim is write-once with no disconnect
+    // and must never name an account the fleet was not given.
+    let claim;
     try {
       if (!assertOwned(ctx.org.id, await fleet.services.get(params.serviceId))) return notFoundResponse('service');
+      claim = await claimRepo(ctx.org.id, repo);
       await fleet.services.patch(params.serviceId, { repo, branch, autodeploy });
     } catch (err) {
       return fleetErrorResponse(err);
     }
-
-    // Null when the App is not installed on this owner (or not configured on
-    // this fleet at all). The page renders the install link off exactly that.
-    const installation = await installationFor(repo.split('/')[0]);
-
     await db
       .insert(repoConnections)
       .values({
@@ -80,12 +91,12 @@ export async function PUT(req: Request, { params }: RouteHandlerContext): Promis
         repo,
         branch,
         autodeploy,
-        installationId: installation?.id ?? null,
+        installationId: claim.installationId,
         connectedBy: ctx.user.id,
       })
       .onConflictDoUpdate({
         target: repoConnections.serviceId,
-        set: { repo, branch, autodeploy, installationId: installation?.id ?? null, updatedAt: new Date() },
+        set: { repo, branch, autodeploy, installationId: claim.installationId, updatedAt: new Date() },
       });
 
     return jsonBody({
@@ -93,7 +104,7 @@ export async function PUT(req: Request, { params }: RouteHandlerContext): Promis
       repo,
       branch,
       autodeploy,
-      installation_id: installation?.id ?? null,
+      installation_id: claim.installationId,
     });
   });
 }

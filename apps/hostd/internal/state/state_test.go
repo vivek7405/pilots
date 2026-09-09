@@ -507,6 +507,55 @@ func TestTenancyIsWriteOnce(t *testing.T) {
 	}
 }
 
+// A repo link is write-once for the reason a tenancy row is: nothing else
+// makes it safe for ANY host to write one. If a second write could change the
+// org, two hosts racing could hand a repository to a tenant neither named.
+func TestRepoLinkIsWriteOnceAndPerOrg(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+
+	if err := s.PutRepoLink(ctx, &RepoLink{OrgID: "org_1", Repo: "acme/shop", ConnectedAt: 10}); err != nil {
+		t.Fatalf("PutRepoLink: %v", err)
+	}
+	if err := s.PutRepoLink(ctx, &RepoLink{OrgID: "org_1", Repo: "acme/shop", ConnectedAt: 20}); err != nil {
+		t.Fatalf("PutRepoLink again: %v", err)
+	}
+	got, err := s.GetRepoLink(ctx, "org_1", "acme/shop")
+	if err != nil {
+		t.Fatalf("GetRepoLink: %v", err)
+	}
+	if got.ConnectedAt != 10 {
+		t.Errorf("connected_at moved to %d; the row must be write-once", got.ConnectedAt)
+	}
+
+	// Case does not make a second repository: GitHub names are
+	// case-insensitive, so `Acme/Shop` is the same claim.
+	if _, err := s.GetRepoLink(ctx, "org_1", "Acme/Shop"); err != nil {
+		t.Errorf("a differently-cased spelling reads as unconnected: %v", err)
+	}
+
+	// Another org holds no claim from this row. Keyed by the PAIR, so a
+	// repository may be connected twice without either claim leaking.
+	if _, err := s.GetRepoLink(ctx, "org_2", "acme/shop"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("org_2 inherited org_1's claim: %v", err)
+	}
+	if err := s.PutRepoLink(ctx, &RepoLink{OrgID: "org_2", Repo: "acme/shop", ConnectedAt: 30}); err != nil {
+		t.Fatalf("PutRepoLink for a second org: %v", err)
+	}
+	if _, err := s.GetRepoLink(ctx, "org_1", "acme/shop"); err != nil {
+		t.Errorf("the second org's connect displaced the first: %v", err)
+	}
+
+	mine, err := s.ListRepoLinks(ctx, "org_1")
+	if err != nil || len(mine) != 1 || mine[0].Repo != "acme/shop" {
+		t.Errorf("ListRepoLinks(org_1) = %+v, %v", mine, err)
+	}
+	all, err := s.ListRepoLinks(ctx, "")
+	if err != nil || len(all) != 2 {
+		t.Errorf("ListRepoLinks(all) = %+v, %v", all, err)
+	}
+}
+
 // Revoking never deletes the key row: a delete racing a replica that still
 // carries the insert loses through the merge, and the credential comes back.
 func TestRevocationIsATombstone(t *testing.T) {

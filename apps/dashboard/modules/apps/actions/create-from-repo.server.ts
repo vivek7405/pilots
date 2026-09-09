@@ -19,7 +19,7 @@ import { PilotsError } from '@pilots/sdk';
 import type { CreateServiceRequest } from '@pilots/sdk';
 import { requireOrg } from '#modules/auth/session.server.ts';
 import { fleetAs } from '#modules/fleet/client.server.ts';
-import { installationFor } from '#modules/github/installations.server.ts';
+import { claimRepo } from '#modules/github/claim.server.ts';
 import { isRepoSlug } from '#modules/domains/hostname.ts';
 import { db } from '#db/connection.server.ts';
 import { builds, repoConnections } from '#db/schema.server.ts';
@@ -92,6 +92,33 @@ export async function createFromRepo(formData: FormData) {
       secretEnv[key] = value;
     }
 
+    // Record the connection ON THE FLEET, before anything is created from it.
+    //
+    // The row below in this app's own database is what the service page
+    // renders; it is not, and cannot be, an authorization record: hostd cannot
+    // read this database, and the data plane may not depend on this app
+    // (ARCHITECTURE.md invariant 2). hostd keeps its own `repo_links` row and
+    // reads it from its local replica on every `{repo, ref}` build.
+    //
+    // Without this call the deploy would still work -- this app holds an admin
+    // key, which may name any repository -- and the org's OWN key would then
+    // be refused the repository it just deployed from, by `pilot deploy`, by
+    // an agent, by anything that is not this process. First, and not after the
+    // service exists, so a fleet that refuses the connection refuses before
+    // there is anything to clean up.
+    //
+    // Through claimRepo, which is the one place this app claims anything: it
+    // refuses to write a claim for an owner the fleet's App is not installed
+    // on. That is what stops a signed-in visitor typing any `owner/name` and
+    // walking away with a permanent grant -- `repo_links` rows are write-once
+    // and there is no disconnect. It does NOT prove this visitor administers
+    // the repository; see claim.server.ts for exactly what it does and does
+    // not buy. Refused here rather than "connected optimistically", because a
+    // deploy from a repository the fleet cannot read fails at the build
+    // anyway, and the claim would outlive the failure.
+    const claim = await claimRepo(ctx.org.id, repo);
+    if (!claim.claimed) return { success: false, status: 422, error: claim.reason };
+
     const create: CreateServiceRequest = {
       name,
       app,
@@ -125,7 +152,9 @@ export async function createFromRepo(formData: FormData) {
       .insert(builds)
       .values({ orgId: ctx.org.id, serviceId: service.id, jobId, repo, ref, startedBy: ctx.user.id })
       .run();
-    const installation = await installationFor(repo.split('/')[0]).catch(() => null);
+    // The installation the claim above already resolved, rather than a second
+    // lookup: two reads of one fact are two chances to disagree about it, and
+    // the row this writes is what renders the install link.
     await db
       .insert(repoConnections)
       .values({
@@ -134,12 +163,12 @@ export async function createFromRepo(formData: FormData) {
         repo,
         branch: ref,
         autodeploy: true,
-        installationId: installation?.id ?? null,
+        installationId: claim.installationId,
         connectedBy: ctx.user.id,
       })
       .onConflictDoUpdate({
         target: repoConnections.serviceId,
-        set: { repo, branch: ref, autodeploy: true, installationId: installation?.id ?? null, updatedAt: new Date() },
+        set: { repo, branch: ref, autodeploy: true, installationId: claim.installationId, updatedAt: new Date() },
       })
       .run();
 

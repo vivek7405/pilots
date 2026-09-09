@@ -506,6 +506,31 @@ type RevokeResponse struct {
 	RevokedAt int64  `json:"revoked_at"`
 }
 
+// ConnectRepoRequest ties a repository to an org, which is what lets that
+// org's own keys name it in a {repo, ref} build or plan.
+//
+// The org is NOT in the body. It comes from the key, or from ?org= on an admin
+// key, exactly as it does on every other create -- naming it twice would be
+// two answers to one question, and the one in the body would be the one no
+// scope check ever saw.
+type ConnectRepoRequest struct {
+	Repo string `json:"repo"` // owner/name
+}
+
+// RepoLinkResponse is one connection, as GET /v1/repos lists it and as
+// POST /v1/repos echoes it back.
+type RepoLinkResponse struct {
+	Repo        string `json:"repo"`
+	OrgID       string `json:"org_id"`
+	ConnectedAt int64  `json:"connected_at"`
+}
+
+// RepoLinkListResponse is never null, so a client rendering "no repositories
+// connected" does not have to tell an empty fleet from a broken one.
+type RepoLinkListResponse struct {
+	Repos []RepoLinkResponse `json:"repos"`
+}
+
 // QuotaResponse is one org's limits, and also the PUT body minus updated_at.
 type QuotaResponse struct {
 	OrgID        string `json:"org_id"`

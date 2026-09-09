@@ -19,6 +19,7 @@ import type {
   ComposePlan,
   ComposePlanResponse,
   ComposeRequest,
+  ConnectRepoRequest,
   CreateAPIKeyRequest,
   CreateMachineRequest,
   CreateServiceRequest,
@@ -34,6 +35,8 @@ import type {
   PromoteRequest,
   QuotaResponse,
   Release,
+  RepoLinkListResponse,
+  RepoLinkResponse,
   RepoRef,
   RevokeResponse,
   Service,
@@ -58,6 +61,7 @@ export class PilotsClient {
   readonly volumes: Volumes
   readonly hosts: Hosts
   readonly apiKeys: APIKeys
+  readonly repos: Repos
   readonly quotas: Quotas
   readonly usage: Usage
   readonly compose: Compose
@@ -72,6 +76,7 @@ export class PilotsClient {
     this.volumes = new Volumes(this.http)
     this.hosts = new Hosts(this.http)
     this.apiKeys = new APIKeys(this.http)
+    this.repos = new Repos(this.http)
     this.quotas = new Quotas(this.http)
     this.usage = new Usage(this.http)
     this.compose = new Compose(this.http)
@@ -467,6 +472,32 @@ export class APIKeys {
 
   list(org: string): Promise<APIKeyResponse[]> {
     return this.http.json<APIKeyResponse[]>('GET', '/v1/api-keys', { query: { org } })
+  }
+}
+
+/**
+ * Which repositories an org may have the fleet fetch.
+ *
+ * The record `POST /v1/builds` and `POST /v1/plan` consult before fetching a
+ * repository by name. `connect` needs an admin-scoped key -- the proof that an
+ * org controls a repository is held at GitHub, not in a request -- while
+ * `list` and the build itself need only the org's own key.
+ */
+export class Repos {
+  private readonly http: Http
+
+  constructor(http: Http) {
+    this.http = http
+  }
+
+  /** Idempotent: the row is write-once, so connecting twice is one connection. */
+  connect(repo: string): Promise<RepoLinkResponse> {
+    return this.http.json<RepoLinkResponse>('POST', '/v1/repos', { body: { repo } satisfies ConnectRepoRequest })
+  }
+
+  async list(): Promise<RepoLinkResponse[]> {
+    const res = await this.http.json<RepoLinkListResponse>('GET', '/v1/repos')
+    return res.repos ?? []
   }
 }
 

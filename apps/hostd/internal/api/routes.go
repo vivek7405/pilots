@@ -266,6 +266,12 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("GET /v1/hosts", d.handleListHosts)
 	mux.HandleFunc("GET /v1/whoami", d.handleWhoami)
 
+	// Which repositories an org may have this fleet fetch. The connect is
+	// admin-scoped inside the handler and the list is not; see repos.go for
+	// why the two halves differ.
+	mux.HandleFunc("POST /v1/repos", d.handleConnectRepo)
+	mux.HandleFunc("GET /v1/repos", d.handleListRepos)
+
 	// Tenancy administration. Admin-scoped, and served by every host from its
 	// own replica: the dashboard is a guest on the platform and cannot reach
 	// its host directly, so minting a key is an ordinary public API call.
