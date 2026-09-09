@@ -376,11 +376,11 @@ Runs the MCP server on stdio. Add it to any MCP client:
 }
 ```
 
-Twenty-six tools: `build`, `build_logs`, `checkpoint`, `create_machine`,
+Twenty-four tools: `build`, `build_logs`, `checkpoint`, `create_machine`,
 `deploy`, `destroy_machine`, `diagnose`, `docs`, `domains`, `exec`,
 `exec_stream`, `generate_dockerfile`, `init`, `list_machines`,
-`list_services`, `logs`, `plan`, `promote`, `pull_file`, `push_file`,
-`releases`, `restore`, `rollback`, `service`, `status`, `volumes`.
+`list_services`, `logs`, `plan`, `promote`, `releases`, `restore`,
+`rollback`, `service`, `status`, `volumes`.
 
 `deploy` with `dir` is the one call: it plans the directory on the host, builds
 each service, deploys, waits for the health gate and answers with the URLs.
