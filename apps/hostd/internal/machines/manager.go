@@ -545,6 +545,16 @@ func (m *Manager) releaseService(ctx context.Context, row *state.Machine) error 
 			return nil
 		}
 	}
+	// The side tables keyed on the service id go first, for the reason the
+	// machine's own do: a replicated store resolves this row's writer by
+	// reading the service row, and a row left behind is gossiped to every
+	// host forever for a service that no longer exists.
+	if err := m.opts.Store.DeleteLabels(ctx, row.ServiceID); err != nil {
+		return fmt.Errorf("delete service labels %s: %w", row.ServiceID, err)
+	}
+	if err := m.opts.Store.DeleteURLAuth(ctx, row.ServiceID); err != nil {
+		return fmt.Errorf("delete service url auth %s: %w", row.ServiceID, err)
+	}
 	if err := m.opts.Store.DeleteService(ctx, row.ServiceID); err != nil {
 		return fmt.Errorf("delete service %s: %w", row.ServiceID, err)
 	}
