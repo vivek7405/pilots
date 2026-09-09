@@ -107,7 +107,15 @@ func NewRoot(getenv config.Env) *cobra.Command {
 		InGroup(newLogsCmd(env), "inspect"),
 		InGroup(newVolumesCmd(env), "storage"),
 		InGroup(newDomainsCmd(env), "storage"),
+		InGroup(newSecretsCmd(env, getenv), "storage"),
+		InGroup(newLoginCmd(env, getenv), "account"),
+		InGroup(newLogoutCmd(env, getenv), "account"),
 		InGroup(newWhoamiCmd(env), "account"),
+		InGroup(newUseCmd(env), "account"),
+		InGroup(newAPICmd(env), "help"),
+		InGroup(newDoctorCmd(env, getenv), "help"),
+		InGroup(newUpgradeCmd(env), "help"),
+		InGroup(newVersionCmd(env), "help"),
 	)
 
 	UseHelp(root)

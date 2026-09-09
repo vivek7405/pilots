@@ -52,6 +52,7 @@ func TestReadsTheFileTheTypeScriptCLIWrites(t *testing.T) {
 	written := `{
   "api_key": "pilot_abc",
   "api_url": "http://api.example:8080",
+  "org_id": "acme",
   "secrets": { "mini-crm": { "db-password": "s3cret" } }
 }`
 	if err := os.WriteFile(filepath.Join(dir, "pilots", "credentials"), []byte(written), 0o600); err != nil {
@@ -67,6 +68,10 @@ func TestReadsTheFileTheTypeScriptCLIWrites(t *testing.T) {
 	}
 	if creds.APIURL != "http://api.example:8080" {
 		t.Errorf("api_url: got %q", creds.APIURL)
+	}
+	// login writes org_id; a struct without the field would drop it on save.
+	if creds.OrgID != "acme" {
+		t.Errorf("org_id: got %q", creds.OrgID)
 	}
 	if len(creds.Secrets) == 0 {
 		t.Error("secrets were dropped")

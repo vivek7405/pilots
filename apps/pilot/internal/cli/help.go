@@ -48,6 +48,11 @@ var groups = []Group{
 
 // groupOf reads the group a command declared through its annotations.
 func groupOf(c *cobra.Command) string {
+	// cobra adds its completion command at Execute time, after the tree was
+	// grouped, so it is placed here rather than left under "Other".
+	if c.Name() == "completion" {
+		return "help"
+	}
 	if c.Annotations == nil {
 		return ""
 	}

@@ -30,6 +30,7 @@ const DefaultAPIURL = "http://api.pilots.localhost:8080"
 type Credentials struct {
 	APIKey  string          `json:"api_key"`
 	APIURL  string          `json:"api_url,omitempty"`
+	OrgID   string          `json:"org_id,omitempty"`
 	Secrets json.RawMessage `json:"secrets,omitempty"`
 }
 
