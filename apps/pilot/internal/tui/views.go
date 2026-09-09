@@ -14,7 +14,7 @@ import (
 func (m *Model) View() tea.View {
 	var content string
 	switch {
-	case m.width == 0:
+	case m.width == 0 || m.height == 0:
 		content = "starting…"
 	case m.help:
 		content = m.viewHelp()
@@ -33,86 +33,131 @@ func (m *Model) View() tea.View {
 			content = m.overlay(content, m.viewConfirm())
 		}
 	}
-	v := tea.NewView(content)
+	v := tea.NewView(fitScreen(content, m.width, m.height))
 	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
 	v.WindowTitle = "pilot"
 	return v
 }
 
-// chrome is the top line and the bottom line every screen shares: where you
-// are, when the fleet was last read, and what the keys do.
+// titleBar is the top line: where you are, and when the fleet was last read.
 func (m *Model) titleBar(where string) string {
 	left := m.st.Title.Render("pilot") + "  " + m.st.Muted.Render(where)
-	age := "no data yet"
+	// An action in flight is the most important thing on the line: a
+	// checkpoint takes seconds, and without this the keypress looks dead.
+	if m.busy != "" {
+		return m.spread(left, m.st.Warn.Render("⟳ "+m.busy+"…"))
+	}
+	right := "no data yet"
 	if !m.snap.At.IsZero() {
-		age = "read " + m.snap.At.Format("15:04:05")
+		right = "read " + m.snap.At.Format("15:04:05")
 	}
 	if m.snap.Err != nil {
-		age = m.st.Bad.Render("fleet unreachable: " + short(m.snap.Err.Error(), 50))
+		return m.spread(left, m.st.Bad.Render("fleet unreachable"))
 	}
-	gap := max(1, m.width-lipgloss.Width(left)-lipgloss.Width(age))
-	return left + strings.Repeat(" ", gap) + m.st.Muted.Render(age)
+	return m.spread(left, m.st.Muted.Render(right))
 }
 
+// spread puts left and right on one line exactly m.width wide, dropping the
+// right half rather than wrapping when there is no room for both.
+func (m *Model) spread(left, right string) string {
+	lw, rw := lipgloss.Width(left), lipgloss.Width(right)
+	if lw+rw+1 > m.width {
+		return fitLine(left, m.width)
+	}
+	return left + strings.Repeat(" ", m.width-lw-rw) + right
+}
+
+// helpLine is the bottom line: the keys, and the last action's result. Pairs
+// are dropped from the right when the terminal is too narrow for all of them,
+// so the most important keys survive a small window.
 func (m *Model) helpLine(pairs ...string) string {
+	// A result stays up for six seconds; a FAILURE stays until the next key,
+	// because the one message a person must not miss is the one that says
+	// the thing they asked for did not happen.
+	flash := ""
+	if m.flash != "" && (m.failed || time.Since(m.flashAt) < 6*time.Second) {
+		style := m.st.OK
+		if m.failed {
+			style = m.st.Bad
+		} else if !strings.HasPrefix(m.flash, "✓") {
+			style = m.st.Warn
+		}
+		flash = style.Render(m.flash)
+	}
+	budget := m.width
+	if flash != "" {
+		budget -= lipgloss.Width(flash) + 2
+	}
 	var b strings.Builder
 	for i := 0; i+1 < len(pairs); i += 2 {
-		if i > 0 {
-			b.WriteString("  ")
+		part := m.st.Key.Render(pairs[i]) + " " + m.st.Help.Render(pairs[i+1])
+		sep := ""
+		if b.Len() > 0 {
+			sep = "  "
 		}
-		b.WriteString(m.st.Key.Render(pairs[i]) + " " + m.st.Help.Render(pairs[i+1]))
+		if lipgloss.Width(b.String())+lipgloss.Width(sep+part) > budget {
+			break
+		}
+		b.WriteString(sep + part)
 	}
-	line := b.String()
-	if m.flash != "" && time.Since(m.flashAt) < 4*time.Second {
-		flash := m.st.Warn.Render(m.flash)
-		gap := max(1, m.width-lipgloss.Width(line)-lipgloss.Width(flash))
-		line += strings.Repeat(" ", gap) + flash
+	if flash == "" {
+		return fitLine(b.String(), m.width)
 	}
-	return line
+	return m.spread(b.String(), flash)
 }
 
 func (m *Model) viewDashboard() string {
 	title := m.titleBar("dashboard")
 	hosts := m.viewHosts()
 	tabs := m.viewTabs()
-	var body string
-	if m.tab == tabMachines {
-		body = m.viewMachinesTable()
-	} else {
-		body = m.viewServicesTable()
-	}
-	// The table takes what is left, so it never pushes the help line off.
-	used := lipgloss.Height(title) + lipgloss.Height(hosts) + lipgloss.Height(tabs) + 2
-	body = clampHeight(body, max(3, m.height-used))
-	help := m.helpLine("↑↓", "move", "tab", "machines/services", "enter", "open", "c", "console", "L", "logs", "s/w", "suspend/wake", "?", "all keys", "q", "quit")
+	help := m.helpLine("↑↓", "move", "tab", "switch", "enter", "open", "c", "console", "L", "logs", "?", "keys", "q", "quit")
+
+	// Whatever is left after the fixed chrome is the list's, and the list
+	// scrolls inside exactly that many lines.
+	chrome := lipgloss.Height(title) + lipgloss.Height(hosts) + lipgloss.Height(tabs) + lipgloss.Height(help)
+	body := m.viewTable(max(1, m.height-chrome))
 	return lipgloss.JoinVertical(lipgloss.Left, title, hosts, tabs, body, help)
 }
 
-// viewHosts is the cards row: one per host, plus the fleet's own minute of
-// history. What the API reports is free CPU and memory and liveness, so
-// that is what the cards show.
+// viewHosts is the cards row. It is dropped entirely on a short terminal:
+// the list is what the screen is for.
 func (m *Model) viewHosts() string {
-	if len(m.snap.Hosts) == 0 {
-		return m.st.Panel.Width(m.width - 2).Render(m.st.Muted.Render("no hosts reported yet"))
+	if m.height < 14 {
+		return ""
 	}
-	var cpuHist, memHist, runHist []float64
+	if len(m.snap.Hosts) == 0 {
+		return fitLine(m.st.Muted.Render("  no hosts reported yet"), m.width)
+	}
+	var cpuHist, runHist []float64
 	for _, h := range m.history {
 		cpuHist = append(cpuHist, float64(h.CPUFree))
-		memHist = append(memHist, float64(h.MemFree))
 		runHist = append(runHist, float64(h.Running))
 	}
 	n := len(m.snap.Hosts) + 1
-	cardW := max(18, (m.width-n*3)/n)
+	cardW := (m.width / n) - 3
+	if cardW < 16 {
+		// Too narrow for a card per host: one summary line instead.
+		var running int
+		for _, mc := range m.snap.Machines {
+			if mc.State == "running" {
+				running++
+			}
+		}
+		return fitLine(m.st.Muted.Render(fmt.Sprintf("  %d hosts · %d of %d machines running",
+			len(m.snap.Hosts), running, len(m.snap.Machines))), m.width)
+	}
 	var cards []string
 	for _, h := range m.snap.Hosts {
 		alive := m.st.OK.Render("● alive")
 		if !h.Alive {
 			alive = m.st.Bad.Render("● down")
 		}
-		body := fmt.Sprintf("%s  %s\n%s\n%s",
-			m.st.Title.Render(h.ID), alive,
-			m.st.Muted.Render(fmt.Sprintf("cpu free %d · mem free %s", h.CPUFree, mib(h.MemFreeMiB))),
-			m.st.Muted.Render(short(h.CPUVendor, cardW-4)))
+		body := fitBlock(strings.Join([]string{
+			m.st.Title.Render(h.ID) + "  " + alive,
+			m.st.Muted.Render(fmt.Sprintf("cpu free %d", h.CPUFree)),
+			m.st.Muted.Render("mem free " + mib(h.MemFreeMiB)),
+		}, "\n"), cardW)
 		cards = append(cards, m.st.Panel.Width(cardW).Render(body))
 	}
 	var running int
@@ -121,17 +166,20 @@ func (m *Model) viewHosts() string {
 			running++
 		}
 	}
-	trend := fmt.Sprintf("%s  %s\n%s %s\n%s %s",
-		m.st.Title.Render("fleet"), m.st.Muted.Render(fmt.Sprintf("%d running of %d", running, len(m.snap.Machines))),
-		m.st.Muted.Render("cpu "), m.st.OK.Render(sparkline(cpuHist, cardW-6)),
-		m.st.Muted.Render("run "), m.st.Warn.Render(sparkline(runHist, cardW-6)))
+	trend := fitBlock(strings.Join([]string{
+		m.st.Title.Render("fleet") + "  " + m.st.Muted.Render(fmt.Sprintf("%d/%d up", running, len(m.snap.Machines))),
+		m.st.Muted.Render("cpu ") + m.st.OK.Render(sparkline(cpuHist, cardW-6)),
+		m.st.Muted.Render("run ") + m.st.Warn.Render(sparkline(runHist, cardW-6)),
+	}, "\n"), cardW)
 	cards = append(cards, m.st.Panel.Width(cardW).Render(trend))
-	_ = memHist
-	return lipgloss.JoinHorizontal(lipgloss.Top, cards...)
+	return fitBlock(lipgloss.JoinHorizontal(lipgloss.Top, cards...), m.width)
 }
 
 func (m *Model) viewTabs() string {
-	names := []string{fmt.Sprintf("machines %d", len(m.snap.Machines)), fmt.Sprintf("services %d", len(m.snap.Services))}
+	names := []string{
+		fmt.Sprintf("machines %d", len(m.snap.Machines)),
+		fmt.Sprintf("services %d", len(m.snap.Services)),
+	}
 	var parts []string
 	for i, n := range names {
 		if tab(i) == m.tab {
@@ -140,75 +188,134 @@ func (m *Model) viewTabs() string {
 			parts = append(parts, m.st.Muted.Render(" "+n+" "))
 		}
 	}
-	return strings.Join(parts, " ")
+	left := strings.Join(parts, " ")
+	from, to := m.lastFrom, m.lastTo
+	return m.spread(left, m.st.Muted.Render(scrollHint(from, to, m.rows())))
 }
 
-func (m *Model) viewMachinesTable() string {
+// viewTable draws the selected tab's rows into h lines: one header plus the
+// slice of rows the window says is visible, with the cursor kept on screen.
+func (m *Model) viewTable(h int) string {
+	if m.tab == tabMachines {
+		return m.viewMachinesTable(h)
+	}
+	return m.viewServicesTable(h)
+}
+
+func (m *Model) viewMachinesTable(h int) string {
 	if len(m.snap.Machines) == 0 {
 		return m.st.Muted.Render("  no machines. `pilot machines create` makes one.")
 	}
-	nameW, stateW := 4, 9
+	rowsFit := max(1, h-1) // one line for the header
+	from, to := m.list.slice(len(m.snap.Machines), rowsFit, m.cursor)
+	m.lastFrom, m.lastTo = from, to
+
+	nameW := 4
 	for _, mc := range m.snap.Machines {
 		nameW = max(nameW, len(mc.Name))
 	}
-	nameW = min(nameW, 28)
-	urlW := max(10, m.width-nameW-stateW-8-2-6)
-	header := m.st.Header.Render(fmt.Sprintf("  %-*s  %-*s  %-*s  %s", nameW, "NAME", stateW, "STATE", urlW, "URL", "HOST"))
-	rows := []string{header}
-	for i, mc := range m.snap.Machines {
-		line := fmt.Sprintf("%-*s  %s  %-*s  %s",
-			nameW, short(mc.Name, nameW),
-			m.st.stateStyle(mc.State).Render(fmt.Sprintf("%-*s", stateW, mc.State)),
-			urlW, short(trimHost(mc.URL), urlW), mc.HostID)
-		if i == m.cursor {
-			line = m.st.Selected.Render("▶ " + line)
-		} else {
-			line = "  " + line
-		}
-		rows = append(rows, line)
+	nameW = min(nameW, 26)
+	const stateW = 9
+	hostW := 6
+	for _, mc := range m.snap.Machines {
+		hostW = max(hostW, len(mc.HostID))
 	}
-	return strings.Join(rows, "\n")
+	hostW = min(hostW, 12)
+	// Two for the cursor, two spaces between each of the four columns.
+	urlW := m.width - 2 - nameW - stateW - hostW - 6
+	if urlW < 8 {
+		urlW = 8
+	}
+
+	lines := []string{m.st.Header.Render(fitLine(fmt.Sprintf("  %-*s  %-*s  %-*s  %s",
+		nameW, "NAME", stateW, "STATE", hostW, "HOST", "URL"), m.width))}
+	for i := from; i < to; i++ {
+		mc := &m.snap.Machines[i]
+		line := fmt.Sprintf("%-*s  %s  %-*s  %-*s",
+			nameW, trunc(mc.Name, nameW),
+			m.st.stateStyle(mc.State).Render(fmt.Sprintf("%-*s", stateW, mc.State)),
+			hostW, trunc(mc.HostID, hostW),
+			urlW, trunc(trimHost(mc.URL), urlW))
+		if i == m.cursor {
+			lines = append(lines, m.st.Selected.Render(fitLine("▶ "+line, m.width)))
+		} else {
+			lines = append(lines, fitLine("  "+line, m.width))
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
-func (m *Model) viewServicesTable() string {
+func (m *Model) viewServicesTable(h int) string {
 	if len(m.snap.Services) == 0 {
 		return m.st.Muted.Render("  no services. `pilot deploy` makes one from a directory.")
 	}
+	rowsFit := max(1, h-1)
+	from, to := m.list.slice(len(m.snap.Services), rowsFit, m.cursor)
+	m.lastFrom, m.lastTo = from, to
+
 	nameW := 4
 	for _, s := range m.snap.Services {
 		nameW = max(nameW, len(s.Name))
 	}
 	nameW = min(nameW, 24)
-	urlW := max(10, m.width-nameW-10-2-6-16)
-	header := m.st.Header.Render(fmt.Sprintf("  %-*s  %-9s  %-*s  %s", nameW, "NAME", "REPLICAS", urlW, "URL", "RELEASE"))
-	rows := []string{header}
-	for i, s := range m.snap.Services {
-		running, total := replicasOf(m.snap, &s)
+	const repW = 8
+	urlW := m.width - 2 - nameW - repW - 4
+	if urlW < 8 {
+		urlW = 8
+	}
+
+	lines := []string{m.st.Header.Render(fitLine(fmt.Sprintf("  %-*s  %-*s  %s",
+		nameW, "NAME", repW, "REPLICAS", "URL"), m.width))}
+	for i := from; i < to; i++ {
+		s := &m.snap.Services[i]
+		running, _ := replicasOf(m.snap, s)
 		rep := fmt.Sprintf("%d/%d", running, s.Replicas)
-		repStyle := m.st.OK
+		style := m.st.OK
 		if running < s.Replicas {
-			repStyle = m.st.Warn
+			style = m.st.Warn
 		}
 		if s.Replicas > 0 && running == 0 {
-			repStyle = m.st.Bad
+			style = m.st.Bad
 		}
-		_ = total
 		url := s.CustomDomain
 		if url == "" {
 			url = trimHost(s.URL)
 		}
 		if url == "" {
-			url = m.st.Muted.Render("(private)")
+			url = "(private)"
 		}
-		line := fmt.Sprintf("%-*s  %s  %-*s  %s", nameW, short(s.Name, nameW), repStyle.Render(fmt.Sprintf("%-9s", rep)), urlW, short(url, urlW), short(s.ReleaseID, 14))
+		line := fmt.Sprintf("%-*s  %s  %-*s",
+			nameW, trunc(s.Name, nameW),
+			style.Render(fmt.Sprintf("%-*s", repW, rep)),
+			urlW, trunc(url, urlW))
 		if i == m.cursor {
-			line = m.st.Selected.Render("▶ " + line)
+			lines = append(lines, m.st.Selected.Render(fitLine("▶ "+line, m.width)))
 		} else {
-			line = "  " + line
+			lines = append(lines, fitLine("  "+line, m.width))
 		}
-		rows = append(rows, line)
 	}
-	return strings.Join(rows, "\n")
+	return strings.Join(lines, "\n")
+}
+
+// kvPanel renders label/value rows inside the panel border, scrolled by the
+// detail window so a machine with more facts than the terminal has lines is
+// still readable.
+func (m *Model) kvPanel(rows [][2]string, h int) string {
+	inner := max(1, h-2) // the panel's own border
+	from, to := m.detail.slice(len(rows), inner, 0)
+	if from > 0 || to < len(rows) {
+		// The detail screens have no cursor, so the window is driven by the
+		// scroll keys alone; slice(…, 0) would have snapped it back to the
+		// top, so take the raw offset instead.
+		from = m.detail.off
+		to = min(len(rows), from+inner)
+	}
+	var lines []string
+	for _, r := range rows[from:to] {
+		lines = append(lines, fmt.Sprintf("%s  %s", m.st.Muted.Render(fmt.Sprintf("%-12s", r[0])), r[1]))
+	}
+	body := fitBlock(strings.Join(lines, "\n"), max(1, m.width-4))
+	return m.st.Focus.Width(m.width - 2).Render(body)
 }
 
 func (m *Model) viewMachine() string {
@@ -221,14 +328,19 @@ func (m *Model) viewMachine() string {
 	if urlAuth == "" {
 		urlAuth = "public"
 	}
-	kv := [][2]string{
-		{"state", mc.State}, {"url", mc.URL}, {"url auth", urlAuth}, {"id", mc.ID}, {"host", mc.HostID},
+	rows := [][2]string{
+		{"state", m.st.stateStyle(mc.State).Render(mc.State)},
+		{"url", mc.URL},
+		{"url auth", urlAuth},
+		{"id", mc.ID},
+		{"host", mc.HostID},
 		{"size", fmt.Sprintf("%d vCPU, %s", mc.VCPUs, mib(mc.MemMiB))},
 		{"created", time.Unix(mc.CreatedAt, 0).Local().Format("2006-01-02 15:04")},
-		{"auto stop", mc.Knobs.AutoStop}, {"auto start", strconv.FormatBool(mc.Knobs.AutoStart)},
+		{"auto stop", mc.Knobs.AutoStop},
+		{"auto start", strconv.FormatBool(mc.Knobs.AutoStart)},
 	}
 	if mc.App != "" {
-		kv = append(kv, [2]string{"app", mc.App})
+		rows = append(rows, [2]string{"app", mc.App})
 	}
 	if len(mc.Labels) > 0 {
 		keys := make([]string, 0, len(mc.Labels))
@@ -240,24 +352,16 @@ func (m *Model) viewMachine() string {
 		for _, k := range keys {
 			parts = append(parts, k+"="+mc.Labels[k])
 		}
-		kv = append(kv, [2]string{"labels", strings.Join(parts, " ")})
+		rows = append(rows, [2]string{"labels", strings.Join(parts, " ")})
 	}
 	if mc.ServiceID != "" {
-		kv = append(kv, [2]string{"service", mc.ServiceID}, [2]string{"release", mc.ReleaseID})
+		rows = append(rows, [2]string{"service", mc.ServiceID}, [2]string{"release", mc.ReleaseID})
 	}
 	if mc.VolumeID != "" {
-		kv = append(kv, [2]string{"volume", mc.VolumeID})
+		rows = append(rows, [2]string{"volume", mc.VolumeID})
 	}
-	var lines []string
-	for _, p := range kv {
-		v := p[1]
-		if p[0] == "state" {
-			v = m.st.stateStyle(v).Render(v)
-		}
-		lines = append(lines, fmt.Sprintf("%s  %s", m.st.Muted.Render(fmt.Sprintf("%-10s", p[0])), v))
-	}
-	panel := m.st.Focus.Width(m.width - 2).Render(strings.Join(lines, "\n"))
-	help := m.helpLine("c", "console", "L", "logs", "s", "suspend", "w", "wake", "S", "stop", "T", "start", "K", "checkpoint", "P", "promote", "D", "destroy", "esc", "back")
+	help := m.helpLine("c", "console", "L", "logs", "s/w", "suspend/wake", "K", "checkpoint", "P", "promote", "D", "destroy", "esc", "back")
+	panel := m.kvPanel(rows, max(3, m.height-lipgloss.Height(title)-lipgloss.Height(help)))
 	return lipgloss.JoinVertical(lipgloss.Left, title, panel, help)
 }
 
@@ -268,75 +372,113 @@ func (m *Model) viewService() string {
 	}
 	title := m.titleBar("service " + s.Name)
 	running, _ := replicasOf(m.snap, s)
-	kv := [][2]string{
-		{"url", s.URL}, {"id", s.ID}, {"app", s.App},
+	urlAuth := s.URLAuth
+	if urlAuth == "" {
+		urlAuth = "public"
+	}
+	rows := [][2]string{
+		{"url", serviceAddress(s)},
+		{"url auth", urlAuth},
+		{"id", s.ID},
+		{"app", s.App},
 		{"replicas", fmt.Sprintf("%d running of %d wanted", running, s.Replicas)},
 		{"release", s.ReleaseID},
 		{"created", time.Unix(s.CreatedAt, 0).Local().Format("2006-01-02 15:04")},
 	}
-	if s.CustomDomain != "" {
-		kv = append(kv, [2]string{"domain", s.CustomDomain})
-	}
 	if s.Health != nil {
-		kv = append(kv, [2]string{"health", s.Health.Type + " " + s.Health.Path})
+		rows = append(rows, [2]string{"health", s.Health.Type + " " + s.Health.Path})
 	}
 	if s.Repo != "" {
-		kv = append(kv, [2]string{"repo", s.Repo + "@" + s.Branch})
+		rows = append(rows, [2]string{"repo", s.Repo + "@" + s.Branch})
 	}
-	var lines []string
-	for _, p := range kv {
-		lines = append(lines, fmt.Sprintf("%s  %s", m.st.Muted.Render(fmt.Sprintf("%-10s", p[0])), p[1]))
-	}
-	lines = append(lines, "", m.st.Header.Render("REPLICAS"))
+	rows = append(rows, [2]string{"", ""})
 	for _, mc := range m.snap.Machines {
 		if mc.ServiceID == s.ID {
-			lines = append(lines, fmt.Sprintf("  %s  %s  %s", m.st.stateStyle(mc.State).Render(fmt.Sprintf("%-9s", mc.State)), mc.Name, m.st.Muted.Render(mc.ID)))
+			rows = append(rows, [2]string{"replica", m.st.stateStyle(mc.State).Render(fmt.Sprintf("%-9s", mc.State)) + " " + mc.Name})
 		}
 	}
-	panel := m.st.Focus.Width(m.width - 2).Render(strings.Join(lines, "\n"))
-	help := m.helpLine("+/-", "replicas", "R", "rollback", "esc", "back")
+	help := m.helpLine("+/-", "replicas", "R", "rollback", "↑↓", "scroll", "esc", "back")
+	panel := m.kvPanel(rows, max(3, m.height-lipgloss.Height(title)-lipgloss.Height(help)))
 	return lipgloss.JoinVertical(lipgloss.Left, title, panel, help)
 }
 
+// viewLogs scrolls: the window holds an offset into the log's lines, pinned
+// to the end while following and released the moment you scroll up.
 func (m *Model) viewLogs() string {
 	name := m.logFor
 	if m.machine != nil {
 		name = m.machine.Name
 	}
-	follow := "following"
+	follow := m.st.OK.Render("following")
 	if !m.logAuto {
-		follow = "paused"
+		follow = m.st.Warn.Render("paused")
 	}
 	title := m.titleBar(fmt.Sprintf("logs %s · %s", name, follow))
-	body := clampHeight(tailText(m.logText, max(3, m.height-4)), max(3, m.height-4))
-	help := m.helpLine("f", "follow on/off", "esc", "back")
-	return lipgloss.JoinVertical(lipgloss.Left, title, m.st.Panel.Width(m.width-2).Render(body), help)
+	help := m.helpLine("↑↓", "line", "PgUp/PgDn", "page", "g/G", "top/end", "f", "follow", "esc", "back")
+
+	inner := max(1, m.height-lipgloss.Height(title)-lipgloss.Height(help)-2)
+	lines := strings.Split(strings.TrimRight(m.logText, "\n"), "\n")
+	// Following pins the window to the end; otherwise the offset stands.
+	if m.logAuto {
+		m.logWin.off = max(0, len(lines)-inner)
+	}
+	from, to := m.logWin.off, 0
+	if from > max(0, len(lines)-inner) {
+		from = max(0, len(lines)-inner)
+		m.logWin.off = from
+	}
+	to = min(len(lines), from+inner)
+	body := fitBlock(strings.Join(lines[from:to], "\n"), max(1, m.width-4))
+	panel := m.st.Panel.Width(m.width - 2).Render(body)
+	if hint := scrollHint(from, to, len(lines)); hint != "" {
+		title = m.spread(m.st.Title.Render("pilot")+"  "+m.st.Muted.Render(fmt.Sprintf("logs %s · %s", name, follow)),
+			m.st.Muted.Render(hint))
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, title, panel, help)
 }
 
 func (m *Model) viewConfirm() string {
-	body := m.confirm.Question + "\n\n" + m.st.Key.Render("y") + m.st.Help.Render(" yes    ") + m.st.Key.Render("any other key") + m.st.Help.Render(" no")
+	body := fitBlock(m.confirm.Question, min(m.width-6, 66)) + "\n\n" +
+		m.st.Key.Render("y") + m.st.Help.Render(" yes    ") +
+		m.st.Key.Render("any other key") + m.st.Help.Render(" no")
 	return m.st.Focus.Width(min(m.width-4, 70)).Render(body)
 }
 
 func (m *Model) viewHelp() string {
 	rows := [][2]string{
-		{"↑ ↓ j k", "move"}, {"tab / ← →", "switch machines and services"}, {"enter", "open the selected row"},
-		{"c", "open a console on the machine (returns here after)"}, {"L", "logs"},
-		{"s / w", "suspend / wake"}, {"S / T", "stop / start"}, {"K", "checkpoint"}, {"P", "promote to a service"},
-		{"D", "destroy (asks first)"}, {"+ / -", "scale a service"}, {"R", "roll a service back (asks first)"},
-		{"r", "refresh now"}, {"?", "this help"}, {"q / esc", "back, or quit from the dashboard"},
+		{"↑ ↓ j k", "move"},
+		{"PgUp PgDn", "page"},
+		{"g / G", "top / end"},
+		{"tab ← →", "machines ↔ services"},
+		{"enter", "open the selected row"},
+		{"c", "console (returns here on exit)"},
+		{"L", "logs"},
+		{"s / w", "suspend / wake"},
+		{"S / T", "stop / start"},
+		{"K", "checkpoint"},
+		{"P", "promote to a service"},
+		{"D", "destroy (asks first)"},
+		{"+ / -", "scale a service"},
+		{"R", "roll back (asks first)"},
+		{"r", "refresh now"},
+		{"?", "this help"},
+		{"q esc", "back, or quit"},
 	}
 	var lines []string
 	for _, r := range rows {
-		lines = append(lines, fmt.Sprintf("%s  %s", m.st.Key.Render(fmt.Sprintf("%-12s", r[0])), r[1]))
+		lines = append(lines, fmt.Sprintf("%s  %s", m.st.Key.Render(fmt.Sprintf("%-11s", r[0])), r[1]))
 	}
-	panel := m.st.Focus.Width(min(m.width-4, 72)).Render(m.st.Title.Render("keys") + "\n\n" + strings.Join(lines, "\n"))
+	inner := max(1, m.height-4)
+	if len(lines) > inner {
+		lines = lines[:inner]
+	}
+	panel := m.st.Focus.Width(min(m.width-4, 60)).Render(
+		m.st.Title.Render("keys") + "\n\n" + strings.Join(lines, "\n"))
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, panel)
 }
 
-// overlay centres a box over a screen. Text underneath is not dimmed: a
-// dashboard that goes grey every time it asks a question is a dashboard
-// that flickers.
+// overlay centres a box over a screen, keeping the screen's own lines where
+// the box does not cover them.
 func (m *Model) overlay(under, box string) string {
 	placed := lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 	underLines := strings.Split(under, "\n")
@@ -349,20 +491,18 @@ func (m *Model) overlay(under, box string) string {
 	return strings.Join(boxLines, "\n")
 }
 
-func clampHeight(s string, h int) string {
-	lines := strings.Split(s, "\n")
-	if len(lines) > h {
-		lines = lines[:h]
+// trunc cuts a plain (unstyled) cell to n columns.
+func trunc(s string, n int) string {
+	if n <= 0 {
+		return ""
 	}
-	return strings.Join(lines, "\n")
-}
-
-func tailText(s string, n int) string {
-	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
-	if len(lines) > n {
-		lines = lines[len(lines)-n:]
+	if len(s) <= n {
+		return s
 	}
-	return strings.Join(lines, "\n")
+	if n == 1 {
+		return "…"
+	}
+	return s[:n-1] + "…"
 }
 
 func mib(n int) string {

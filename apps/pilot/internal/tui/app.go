@@ -52,9 +52,14 @@ type logsMsg struct {
 	text string
 	err  error
 }
+
+// actionMsg is how an action reports back. Detail is what actually happened
+// -- the checkpoint's id, the release rolled back to -- because "done" alone
+// leaves a person wondering what it did.
 type actionMsg struct {
-	what string
-	err  error
+	what   string
+	detail string
+	err    error
 }
 
 const refreshEvery = 2 * time.Second
@@ -72,9 +77,16 @@ type Model struct {
 
 	screen  screen
 	tab     tab
-	cursor  int // row in the current tab's list
+	cursor  int    // row in the current tab's list
+	list    window // the list's scroll offset
+	detail  window // the machine/service panel's scroll offset
+	logWin  window // the log's scroll offset
 	snap    snapshot
 	history []hostSample
+
+	// lastFrom/lastTo are what the table drew, so the tab line can say
+	// "showing 12-31 of 40" without recomputing the window.
+	lastFrom, lastTo int
 
 	// Detail screens.
 	machine *pilots.Machine
@@ -83,16 +95,18 @@ type Model struct {
 	logFor  string
 	logAuto bool
 
-	// Overlays.
+	// Overlays and feedback.
 	confirm *confirmation
 	help    bool
+	// busy is an action in flight, shown the moment a key is pressed so a
+	// slow one (a checkpoint takes seconds) never looks like a dead keypress.
+	busy    string
 	flash   string
 	flashAt time.Time
+	failed  bool
 
 	exit Exit
 	quit bool
-
-	mu sync.Mutex
 }
 
 type hostSample struct {
@@ -110,7 +124,7 @@ type confirmation struct {
 // New builds the model. The first snapshot is fetched on Init so the first
 // frame already has content rather than a spinner.
 func New(ctx context.Context, client *pilots.Client) *Model {
-	return &Model{client: client, ctx: ctx, st: newStyles(newPalette(true)), logAuto: true}
+	return &Model{ctx: ctx, client: client, st: newStyles(newPalette(true)), logAuto: true}
 }
 
 func (m *Model) Init() tea.Cmd {
@@ -151,9 +165,17 @@ func (m *Model) fetchLogs(id string) tea.Cmd {
 	}
 }
 
-func (m *Model) act(what string, fn func(context.Context) error) tea.Cmd {
+// act runs one action, reporting what happened. The caller says what it is
+// in the present tense ("checkpoint web") so the in-flight line reads as
+// "checkpointing" and the result as "checkpoint web: ck-1234".
+func (m *Model) act(what string, fn func(context.Context) (string, error)) tea.Cmd {
 	ctx := m.ctx
-	return func() tea.Msg { return actionMsg{what: what, err: fn(ctx)} }
+	m.busy = what
+	m.flash = ""
+	return func() tea.Msg {
+		detail, err := fn(ctx)
+		return actionMsg{what: what, detail: detail, err: err}
+	}
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -186,21 +208,33 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case actionMsg:
+		m.busy = ""
+		m.failed = msg.err != nil
 		if msg.err != nil {
-			m.setFlash(fmt.Sprintf("%s failed: %v", msg.what, msg.err))
+			m.setFlash("✗ " + msg.what + ": " + oneLine(msg.err.Error()))
+		} else if msg.detail != "" {
+			m.setFlash("✓ " + msg.what + ": " + msg.detail)
 		} else {
-			m.setFlash(msg.what + " done")
+			m.setFlash("✓ " + msg.what)
 		}
 		return m, m.fetch()
+	case tea.MouseWheelMsg:
+		return m.wheel(msg)
 	case tea.KeyPressMsg:
 		return m.key(msg)
 	}
 	return m, nil
 }
 
-func (m *Model) setFlash(s string) {
-	m.flash, m.flashAt = s, time.Now()
+func oneLine(s string) string {
+	s = strings.ReplaceAll(s, "\n", " ")
+	if len(s) > 120 {
+		s = s[:119] + "…"
+	}
+	return s
 }
+
+func (m *Model) setFlash(s string) { m.flash, m.flashAt = s, time.Now() }
 
 // record keeps a minute of host samples for the sparklines.
 func (m *Model) record() {
@@ -269,6 +303,43 @@ func (m *Model) selectedService() *pilots.Service {
 	return &m.snap.Services[m.cursor]
 }
 
+// page is how many rows a PgUp/PgDn moves: the visible body, less a line of
+// overlap so you keep your place.
+func (m *Model) page() int { return max(1, m.height-8) }
+
+// wheel scrolls whichever screen is showing.
+func (m *Model) wheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
+	up := strings.Contains(msg.String(), "up")
+	step := 3
+	if !up {
+		step = -3
+	}
+	switch m.screen {
+	case screenLogs:
+		m.logAuto = false
+		m.logWin.scrollBy(-step, len(strings.Split(m.logText, "\n")), max(1, m.height-5))
+	case screenMachine, screenService:
+		m.detail.scrollBy(-step, 64, max(1, m.height-4))
+	default:
+		m.moveCursor(-step)
+	}
+	return m, nil
+}
+
+func (m *Model) moveCursor(delta int) {
+	n := m.rows()
+	if n == 0 {
+		return
+	}
+	m.cursor += delta
+	if m.cursor < 0 {
+		m.cursor = 0
+	}
+	if m.cursor > n-1 {
+		m.cursor = n - 1
+	}
+}
+
 func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	k := msg.String()
 
@@ -281,6 +352,7 @@ func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, run()
 		default:
 			m.confirm = nil
+			m.setFlash("cancelled")
 			return m, nil
 		}
 	}
@@ -297,6 +369,7 @@ func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.help = true
 		return m, nil
 	case "r":
+		m.setFlash("refreshing…")
 		return m, m.fetch()
 	}
 
@@ -320,27 +393,27 @@ func (m *Model) keyDashboard(k string) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "tab", "right", "l":
 		m.tab = (m.tab + 1) % 2
-		m.cursor = 0
+		m.cursor, m.list.off = 0, 0
 	case "shift+tab", "left", "h":
 		m.tab = (m.tab + 1) % 2
-		m.cursor = 0
+		m.cursor, m.list.off = 0, 0
 	case "up", "k":
-		if m.cursor > 0 {
-			m.cursor--
-		}
+		m.moveCursor(-1)
 	case "down", "j":
-		if m.cursor < m.rows()-1 {
-			m.cursor++
-		}
+		m.moveCursor(1)
+	case "pgup", "ctrl+u":
+		m.moveCursor(-m.page())
+	case "pgdown", "ctrl+d", " ":
+		m.moveCursor(m.page())
 	case "g", "home":
 		m.cursor = 0
 	case "G", "end":
 		m.cursor = max(0, m.rows()-1)
 	case "enter":
 		if mc := m.selectedMachine(); mc != nil {
-			m.machine, m.screen = mc, screenMachine
+			m.machine, m.screen, m.detail.off = mc, screenMachine, 0
 		} else if s := m.selectedService(); s != nil {
-			m.service, m.screen = s, screenService
+			m.service, m.screen, m.detail.off = s, screenService, 0
 		}
 	case "L":
 		if mc := m.selectedMachine(); mc != nil {
@@ -366,6 +439,10 @@ func (m *Model) keyMachine(k string) (tea.Model, tea.Cmd) {
 	switch k {
 	case "q", "esc", "backspace":
 		m.screen, m.machine = screenDashboard, nil
+	case "up", "k":
+		m.detail.scrollBy(-1, 64, max(1, m.height-4))
+	case "down", "j":
+		m.detail.scrollBy(1, 64, max(1, m.height-4))
 	case "L", "enter":
 		return m, m.openLogs(m.machine.ID)
 	case "c":
@@ -381,13 +458,21 @@ func (m *Model) keyService(k string) (tea.Model, tea.Cmd) {
 	switch k {
 	case "q", "esc", "backspace":
 		m.screen, m.service = screenDashboard, nil
+	case "up", "k":
+		m.detail.scrollBy(-1, 64, max(1, m.height-4))
+	case "down", "j":
+		m.detail.scrollBy(1, 64, max(1, m.height-4))
 	default:
 		return m.serviceAction(k, m.service)
 	}
 	return m, nil
 }
 
+// keyLogs scrolls the log. Any upward movement stops following, because a
+// log that yanks you back to the bottom while you are reading is useless.
 func (m *Model) keyLogs(k string) (tea.Model, tea.Cmd) {
+	lines := len(strings.Split(strings.TrimRight(m.logText, "\n"), "\n"))
+	h := max(1, m.height-5)
 	switch k {
 	case "q", "esc", "backspace":
 		if m.machine != nil {
@@ -395,53 +480,115 @@ func (m *Model) keyLogs(k string) (tea.Model, tea.Cmd) {
 		} else {
 			m.screen = screenDashboard
 		}
-		m.logFor = ""
+		m.logFor, m.logAuto = "", true
+	case "up", "k":
+		m.logAuto = false
+		m.logWin.scrollBy(-1, lines, h)
+	case "down", "j":
+		m.logWin.scrollBy(1, lines, h)
+		if m.logWin.atBottom(lines, h) {
+			m.logAuto = true
+		}
+	case "pgup", "ctrl+u":
+		m.logAuto = false
+		m.logWin.scrollBy(-h, lines, h)
+	case "pgdown", "ctrl+d", " ":
+		m.logWin.scrollBy(h, lines, h)
+		if m.logWin.atBottom(lines, h) {
+			m.logAuto = true
+		}
+	case "g", "home":
+		m.logAuto = false
+		m.logWin.off = 0
+	case "G", "end":
+		m.logAuto = true
+		m.logWin.off = max(0, lines-h)
 	case "f":
 		m.logAuto = !m.logAuto
+		if m.logAuto {
+			m.logWin.off = max(0, lines-h)
+		}
 	}
 	return m, nil
 }
 
 func (m *Model) openLogs(id string) tea.Cmd {
 	m.screen, m.logFor, m.logText = screenLogs, id, "loading…"
+	m.logAuto, m.logWin.off = true, 0
 	return m.fetchLogs(id)
 }
 
-// machineAction maps a key to a lifecycle change. Destroy asks first: it is
-// the one action here with nothing to undo.
+// machineAction maps a key to a lifecycle change. Every one reports what it
+// did; the two with nothing to undo ask first.
 func (m *Model) machineAction(k string, mc *pilots.Machine) (tea.Model, tea.Cmd) {
 	client := m.client
-	id, name := mc.ID, mc.Name
+	id, name, state := mc.ID, mc.Name, mc.State
+	// Some actions only make sense in some states, and the fleet answers a
+	// doomed one with a bare 404. Saying which state it is in, and which key
+	// gets there, beats relaying that.
+	refuse := func(msg string) (tea.Model, tea.Cmd) {
+		m.failed = false
+		m.setFlash(msg)
+		return m, nil
+	}
 	switch k {
 	case "s":
-		return m, m.act("suspend "+name, func(ctx context.Context) error { return client.Machines.Suspend(ctx, id) })
+		if state == "suspended" {
+			return refuse(name + " is already suspended")
+		}
+		return m, m.act("suspend "+name, func(ctx context.Context) (string, error) {
+			return "", client.Machines.Suspend(ctx, id)
+		})
 	case "w":
-		return m, m.act("wake "+name, func(ctx context.Context) error { return client.Machines.Wake(ctx, id) })
+		if state == "running" {
+			return refuse(name + " is already running")
+		}
+		return m, m.act("wake "+name, func(ctx context.Context) (string, error) {
+			return "", client.Machines.Wake(ctx, id)
+		})
 	case "S":
-		return m, m.act("stop "+name, func(ctx context.Context) error { return client.Machines.Stop(ctx, id) })
+		return m, m.act("stop "+name, func(ctx context.Context) (string, error) {
+			return "", client.Machines.Stop(ctx, id)
+		})
 	case "T":
-		return m, m.act("start "+name, func(ctx context.Context) error { return client.Machines.Start(ctx, id) })
+		return m, m.act("start "+name, func(ctx context.Context) (string, error) {
+			return "", client.Machines.Start(ctx, id)
+		})
 	case "K":
-		return m, m.act("checkpoint "+name, func(ctx context.Context) error {
-			_, err := client.Machines.Checkpoint(ctx, id, "from pilot tui")
-			return err
+		// A checkpoint photographs live memory, so the machine has to be
+		// running: hostd answers 404 otherwise, which reads as "no such
+		// machine" and sends you looking for the wrong thing.
+		if state != "running" {
+			return refuse(fmt.Sprintf("%s is %s; a checkpoint needs it running — press w to wake it first", name, state))
+		}
+		return m, m.act("checkpoint "+name, func(ctx context.Context) (string, error) {
+			cp, err := client.Machines.Checkpoint(ctx, id, "from pilot tui")
+			if err != nil {
+				return "", err
+			}
+			return cp.ID, nil
 		})
 	case "P":
 		m.confirm = &confirmation{
-			Question: fmt.Sprintf("promote %s to a service? Its URL stays the same.", name),
+			Question: fmt.Sprintf("Promote %s to a service?\nIts URL does not change, and every link to it keeps working.", name),
 			Run: func() tea.Cmd {
-				return m.act("promote "+name, func(ctx context.Context) error {
-					_, err := client.Machines.Promote(ctx, id, pilots.PromoteRequest{Replicas: 1})
-					return err
+				return m.act("promote "+name, func(ctx context.Context) (string, error) {
+					s, err := client.Machines.Promote(ctx, id, pilots.PromoteRequest{Replicas: 1})
+					if err != nil {
+						return "", err
+					}
+					return s.Name + " (" + s.ID + ")", nil
 				})
 			},
 		}
 	case "D":
 		m.confirm = &confirmation{
-			Question: fmt.Sprintf("destroy %s? Its disk, checkpoints and URL are gone for good.", name),
+			Question: fmt.Sprintf("Destroy %s?\nIts disk, its checkpoints and its URL are gone for good.", name),
 			Run: func() tea.Cmd {
 				m.screen, m.machine = screenDashboard, nil
-				return m.act("destroy "+name, func(ctx context.Context) error { return client.Machines.Destroy(ctx, id) })
+				return m.act("destroy "+name, func(ctx context.Context) (string, error) {
+					return "", client.Machines.Destroy(ctx, id)
+				})
 			},
 		}
 	}
@@ -454,28 +601,32 @@ func (m *Model) serviceAction(k string, s *pilots.Service) (tea.Model, tea.Cmd) 
 	switch k {
 	case "R":
 		m.confirm = &confirmation{
-			Question: fmt.Sprintf("roll %s back to its previous healthy release? This changes what is serving.", name),
+			Question: fmt.Sprintf("Roll %s back to its previous healthy release?\nThis changes what is serving.", name),
 			Run: func() tea.Cmd {
-				return m.act("rollback "+name, func(ctx context.Context) error {
-					_, err := client.Services.Rollback(ctx, id)
-					return err
+				return m.act("rollback "+name, func(ctx context.Context) (string, error) {
+					r, err := client.Services.Rollback(ctx, id)
+					if err != nil {
+						return "", err
+					}
+					return "now on " + r.ID, nil
 				})
 			},
 		}
 	case "+", "=":
 		n := s.Replicas + 1
-		return m, m.act(fmt.Sprintf("scale %s to %d", name, n), func(ctx context.Context) error {
+		return m, m.act(fmt.Sprintf("scale %s to %d", name, n), func(ctx context.Context) (string, error) {
 			_, err := client.Services.Patch(ctx, id, pilots.UpdateServiceRequest{Replicas: &n})
-			return err
+			return "", err
 		})
 	case "-", "_":
 		if s.Replicas == 0 {
+			m.setFlash(name + " is already at zero replicas")
 			return m, nil
 		}
 		n := s.Replicas - 1
-		return m, m.act(fmt.Sprintf("scale %s to %d", name, n), func(ctx context.Context) error {
+		return m, m.act(fmt.Sprintf("scale %s to %d", name, n), func(ctx context.Context) (string, error) {
 			_, err := client.Services.Patch(ctx, id, pilots.UpdateServiceRequest{Replicas: &n})
-			return err
+			return "", err
 		})
 	}
 	return m, nil
@@ -507,15 +658,17 @@ func replicasOf(snap snapshot, s *pilots.Service) (running, total int) {
 	return
 }
 
-func short(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n-1] + "…"
-}
-
 func trimHost(url string) string {
 	url = strings.TrimPrefix(url, "https://")
 	url = strings.TrimPrefix(url, "http://")
 	return url
+}
+
+// serviceAddress is the hostname a person would open: the custom domain
+// when there is one, else the platform address.
+func serviceAddress(s *pilots.Service) string {
+	if s.CustomDomain != "" {
+		return s.CustomDomain
+	}
+	return trimHost(s.URL)
 }
