@@ -127,15 +127,20 @@ export class BuildLog extends WebComponent({
       }
       if (carry) this.take(carry);
       if (this.status === 'building') this.status = 'ended';
-      // A stream that ended after the image and before any release. The build
-      // carried no deploy intent -- it was started by a version of this app
-      // that deployed from the browser, and its release is nobody's now -- so
-      // say so, with the image id the Deploy form below takes.
+      // A stream that ended after the image and before any release. Usually a
+      // build started by a version of this app that deployed from the browser,
+      // so no release is coming -- but the same thing is seen when the host
+      // restarted mid-rollout, or when the log ended for its own reasons while
+      // the rollout carried on. What is observed is only that this connection
+      // ended first, so that is all this says: claiming "no deploy" and
+      // pointing at the Deploy form would invite a SECOND release for a
+      // rollout that may still be running, which is the thing this shape
+      // exists to make impossible.
       if (this.autodeploy && this.built && this.status === 'deploying') {
         this.status = 'built';
         this.failure =
-          `The image ${this.built} was built, but this build carried no deploy. ` +
-          'Deploy it with the form below.';
+          `The image ${this.built} was built, but this connection ended before a release did. ` +
+          'Check the deployments below; if none was cut, deploy the image with the form.';
       }
     } catch (err) {
       if ((err as Error).name !== 'AbortError') this.status = 'disconnected';
