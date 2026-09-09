@@ -37,6 +37,13 @@ before(async () => {
       { id: 'svc-web', name: 'web', org_id: org, app: 'gallery', replicas: 1, url: 'https://web.example', release_id: 'rel-w', depends_on: ['api'], knobs: {}, autodeploy: false, created_at: 1 },
       { id: 'svc-api', name: 'api', org_id: org, app: 'gallery', replicas: 1, url: 'https://api.example', release_id: 'rel-a', volume_id: 'vol-1', knobs: {}, autodeploy: false, created_at: 2 },
       { id: 'svc-other', name: 'other', org_id: org, app: 'shop', replicas: 1, knobs: {}, autodeploy: false, created_at: 3 },
+      // Their own app, so the gallery canvas keeps the layout its own
+      // assertions pin. No url of its own: created private, or from before
+      // addresses were minted. The instance still has one, and the card has to
+      // say whose it is showing.
+      { id: 'svc-quiet', name: 'quiet', org_id: org, app: 'quiet-app', replicas: 1, release_id: 'rel-q', knobs: {}, autodeploy: false, created_at: 4 },
+      // Nothing at all: no address and no instance carrying one.
+      { id: 'svc-blank', name: 'blank', org_id: org, app: 'quiet-app', replicas: 0, knobs: {}, autodeploy: false, created_at: 5 },
     ] as unknown as Service[]),
   );
   app.fleet.data.releases['svc-web'] = [
@@ -48,6 +55,7 @@ before(async () => {
     ...([
       { id: 'm-web', name: 'web-1', state: 'running', org_id: org, host_id: 'h-1', service_id: 'svc-web', release_id: 'rel-w' },
       { id: 'm-api', name: 'api-1', state: 'running', org_id: org, host_id: 'h-1', service_id: 'svc-api', release_id: 'rel-a', volume_id: 'vol-1' },
+      { id: 'm-quiet', name: 'quiet-1', state: 'running', org_id: org, host_id: 'h-1', service_id: 'svc-quiet', release_id: 'rel-q', url: 'https://quiet-1.example' },
     ] as unknown as Machine[]),
   );
   app.fleet.data.volumes.push({ id: 'vol-1', name: 'app-data', org_id: org, size_gib: 10, mount_path: '/data', machine_id: 'm-api' } as unknown as Volume);
@@ -61,6 +69,23 @@ async function page(path: string): Promise<{ status: number; body: string }> {
   const res = await app.handle(new Request(`http://localhost${path}`, asUser(cookie)));
   return { status: res.status, body: await res.text() };
 }
+
+// A service with no address of its own falls back to its instance's, which the
+// next deploy replaces. Showing that address unlabelled is what made a moving
+// URL look like the app's own, so the label is the fix and the assertion.
+test('a service with no address shows its instance address, labelled as the instance', async () => {
+  const { body } = await page('/apps/quiet-app');
+  assert.match(body, /instance quiet-1\.example/, 'the instance address is labelled');
+  assert.match(body, /It changes on the next deploy/, 'and says what that costs');
+  // A service with its own address is never labelled: it does not move.
+  const gallery = await page('/apps/gallery');
+  assert.doesNotMatch(gallery.body, /instance web\.example/);
+});
+
+test('a service with no address and no instance says so plainly', async () => {
+  const { body } = await page('/apps/quiet-app');
+  assert.match(body, /No URL yet/);
+});
 
 test('the canvas is drawn by the server: one card per service, one arrow per edge, storage on the mounting card', async () => {
   const { status, body } = await page('/apps/gallery');

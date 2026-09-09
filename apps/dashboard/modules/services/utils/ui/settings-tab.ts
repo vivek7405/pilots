@@ -10,6 +10,7 @@ import type { TemplateResult } from '@webjsdev/core';
 import type { DomainResponse } from '@pilots/sdk';
 import type { TabProps } from '#modules/services/utils/tabs.ts';
 import { patchService } from '#modules/services/actions/patch-service.server.ts';
+import { setAddress } from '#modules/services/actions/set-address.server.ts';
 import { connectRepo } from '#modules/github/actions/connect-repo.server.ts';
 import { disconnectRepo } from '#modules/github/actions/disconnect-repo.server.ts';
 import { addDomain } from '#modules/domains/actions/add-domain.server.ts';
@@ -116,6 +117,34 @@ export function settingsTab({ detail, back, errors }: TabProps): TemplateResult 
               </form>
             `}
       </section>
+
+      ${service.url
+        ? ''
+        : html`<section>
+            ${sectionHeading(
+              'Address',
+              'This service has no address of its own, so only its instances are reachable and that changes with every deploy. Give it one, once: an address cannot be changed afterwards.',
+            )}
+            <form action=${setAddress} class=${formRowClass()}>
+              <input type="hidden" name="service" value=${service.id}>
+              <input type="hidden" name="back" value=${back}>
+              ${field({
+                id: 'domain',
+                label: 'Address',
+                hint: 'Becomes <address>.pilotrun.app',
+                error: errors.fieldErrors?.domain,
+                control: html`<input
+                  id="domain"
+                  name="domain"
+                  value=${service.name}
+                  required
+                  aria-invalid=${errors.fieldErrors?.domain ? 'true' : 'false'}
+                  class=${cn(inputClass(), 'font-mono')}
+                >`,
+              })}
+              <button type="submit" class=${buttonClass({ variant: 'outline' })}>Set address</button>
+            </form>
+          </section>`}
 
       <section>
         ${sectionHeading(
