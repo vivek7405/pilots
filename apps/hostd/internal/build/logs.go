@@ -96,6 +96,14 @@ func (l *Log) Release() {
 	l.close()
 }
 
+// isHeld reports whether a hold is outstanding. Read by the store, which must
+// not evict a log somebody is still going to Release.
+func (l *Log) isHeld() bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.held
+}
+
 // close is Close's body, under the lock both callers already hold.
 func (l *Log) close() {
 	if l.done {
@@ -187,9 +195,29 @@ func (s *logStore) create(id string) *Log {
 	s.order = append(s.order, id)
 	// Bounded: hostd is long-lived and would otherwise hold every build it has
 	// ever run for the life of the process.
+	//
+	// A HELD log is skipped rather than evicted. Its holder releases it by id
+	// (Builder.ReleaseLog), so an evicted one is a hold nobody can end: Close
+	// already no-ops on it, Release is never reached, and every follower of
+	// GET /v1/builds/{id}/logs waits on a channel that is never closed. A
+	// build that carries a deploy holds its log across the rollout -- minutes
+	// of health grace -- which is long enough for the limit's worth of later
+	// builds to walk past it. Holds are bounded by the build gate, so this
+	// cannot grow without bound.
 	for len(s.order) > s.limit {
-		delete(s.logs, s.order[0])
-		s.order = s.order[1:]
+		evicted := false
+		for i, id := range s.order {
+			if l, ok := s.logs[id]; ok && l.isHeld() {
+				continue
+			}
+			delete(s.logs, id)
+			s.order = append(s.order[:i], s.order[i+1:]...)
+			evicted = true
+			break
+		}
+		if !evicted {
+			break
+		}
 	}
 	return l
 }
