@@ -16,20 +16,21 @@ import (
 
 func newConsoleCmd(env *Env) *cobra.Command {
 	c := &cobra.Command{
-		Use:     "console <machine> [-- command...]",
+		Use:     "console [machine] [-- command...]",
 		Aliases: []string{"c"},
 		Short:   "an interactive shell on a machine",
-		Args:    cobra.MinimumNArgs(1),
+		Args:    cobra.ArbitraryArgs,
 		RunE: func(c *cobra.Command, args []string) error {
 			client, err := env.Client()
 			if err != nil {
 				return err
 			}
-			m, err := resolveMachine(c.Context(), client, args[0])
+			name, argv := splitAtDash(c, args)
+			m, err := machineArg(c, env, client, name)
 			if err != nil {
 				return err
 			}
-			return runConsole(c, env, client, m.ID, args[1:])
+			return runConsole(c, env, client, m.ID, argv)
 		},
 	}
 	Describe(c, Doc{

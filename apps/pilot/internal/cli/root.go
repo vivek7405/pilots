@@ -25,6 +25,8 @@ type Env struct {
 
 	// Yes answers every confirmation, for scripts and agents.
 	Yes bool
+	// Select asks for the machine from a list instead of an argument.
+	Select bool
 
 	client *pilots.Client
 }
@@ -57,6 +59,7 @@ func NewRoot(getenv config.Env) *cobra.Command {
 		flagOrg    string
 		flagJSON   bool
 		flagYes    bool
+		flagSelect bool
 	)
 	env := &Env{}
 
@@ -72,6 +75,7 @@ func NewRoot(getenv config.Env) *cobra.Command {
 			}
 			env.APIURL, env.APIKey, env.Org = url, key, org
 			env.Yes = flagYes
+			env.Select = flagSelect
 			env.W = out.New(flagJSON)
 			return nil
 		},
@@ -88,6 +92,7 @@ func NewRoot(getenv config.Env) *cobra.Command {
 	pf.StringVarP(&flagOrg, "org", "o", "", "act as this organization")
 	pf.BoolVar(&flagJSON, "json", false, "print the answer as JSON on stdout, errors on stderr")
 	pf.BoolVarP(&flagYes, "yes", "y", false, "answer yes to every confirmation; for scripts and agents")
+	pf.BoolVarP(&flagSelect, "select", "s", false, "pick the machine from a list instead of naming it")
 
 	Describe(root, Doc{
 		What: "pilots runs sandboxes and production services on ONE primitive. A\n" +

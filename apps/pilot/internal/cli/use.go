@@ -44,15 +44,41 @@ func contextMachine() (name, path string) {
 }
 
 // machineArg is the machine a command should act on: the argument if one was
-// given, else the .pilot context, else a refusal that says how to name one.
-func machineArg(args []string) (string, error) {
-	if len(args) > 0 && args[0] != "" {
-		return args[0], nil
+// given, else a picker under -s/--select, else the .pilot context, else a
+// refusal that says how to name one. The order matters: an explicit argument
+// always wins, and --select is an explicit request to choose.
+func machineArg(c *cobra.Command, env *Env, client *pilots.Client, arg string) (*pilots.Machine, error) {
+	if arg != "" {
+		return resolveMachine(c.Context(), client, arg)
 	}
-	if name, _ := contextMachine(); name != "" {
-		return name, nil
+	if env.Select {
+		return pickMachine(c, env, client)
 	}
-	return "", out.Failf("name a machine, or run `pilot use <machine>` in this directory", "no machine given and no .pilot context here")
+	if name, path := contextMachine(); name != "" {
+		m, err := resolveMachine(c.Context(), client, name)
+		if err != nil {
+			return nil, out.Failf(fmt.Sprintf("%s names %s; run `pilot use` to pick another or `pilot use --unset`", path, name), "%v", err)
+		}
+		return m, nil
+	}
+	return nil, out.Failf("name a machine, pass -s to pick one, or run `pilot use <machine>` in this directory", "no machine given and no .pilot context here")
+}
+
+// splitAtDash separates a machine argument from a command that follows `--`.
+// `pilot x scratch -- npm test` names the machine; `pilot x -- npm test`
+// does not, and takes it from --select or the .pilot context. cobra strips
+// the `--` and reports where it was, which is how the two are told apart.
+func splitAtDash(c *cobra.Command, args []string) (machine string, argv []string) {
+	dash := c.ArgsLenAtDash()
+	switch {
+	case dash == 0:
+		return "", args
+	case dash > 0:
+		return args[0], args[dash:]
+	case len(args) > 0:
+		return args[0], args[1:]
+	}
+	return "", nil
 }
 
 func newUseCmd(env *Env) *cobra.Command {

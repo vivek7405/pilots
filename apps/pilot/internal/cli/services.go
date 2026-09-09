@@ -47,7 +47,11 @@ func newServicesCmd(env *Env) *cobra.Command {
 }
 
 func newServicesListCmd(env *Env) *cobra.Command {
-	var app string
+	var (
+		app       string
+		watchList bool
+		rate      int
+	)
 	c := &cobra.Command{
 		Use:     "list",
 		Aliases: []string{"ls"},
@@ -58,38 +62,46 @@ func newServicesListCmd(env *Env) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			services, err := client.Services.List(c.Context())
-			if err != nil {
-				return err
-			}
-			if app != "" {
-				kept := services[:0]
-				for _, s := range services {
-					if s.App == app {
-						kept = append(kept, s)
+			render := func() error {
+				services, err := client.Services.List(c.Context())
+				if err != nil {
+					return err
+				}
+				if app != "" {
+					kept := services[:0]
+					for _, s := range services {
+						if s.App == app {
+							kept = append(kept, s)
+						}
 					}
+					services = kept
 				}
-				services = kept
-			}
-			if env.W.JSON {
-				if services == nil {
-					services = []pilots.Service{}
+				if env.W.JSON {
+					if services == nil {
+						services = []pilots.Service{}
+					}
+					return env.W.JSONValue(services)
 				}
-				return env.W.JSONValue(services)
+				if len(services) == 0 {
+					env.W.Notef("no services in %s", orgLabel(env))
+					return nil
+				}
+				rows := make([][]string, 0, len(services))
+				for i := range services {
+					s := &services[i]
+					rows = append(rows, []string{s.Name, s.App, strconv.Itoa(s.Replicas), serviceAddress(s), s.ID})
+				}
+				return env.W.Table([]string{"NAME", "APP", "REPLICAS", "URL", "ID"}, rows)
 			}
-			if len(services) == 0 {
-				env.W.Notef("no services in %s", orgLabel(env))
-				return nil
+			if watchList {
+				return watch(c, env, rate, render)
 			}
-			rows := make([][]string, 0, len(services))
-			for i := range services {
-				s := &services[i]
-				rows = append(rows, []string{s.Name, s.App, strconv.Itoa(s.Replicas), serviceAddress(s), s.ID})
-			}
-			return env.W.Table([]string{"NAME", "APP", "REPLICAS", "URL", "ID"}, rows)
+			return render()
 		},
 	}
 	c.Flags().StringVar(&app, "app", "", "only services in this app")
+	c.Flags().BoolVarP(&watchList, "watch", "w", false, "re-render as services change")
+	c.Flags().IntVar(&rate, "rate", 2, "seconds between renders under --watch")
 	Describe(c, Doc{
 		Examples: []string{
 			"pilot services ls",
@@ -409,6 +421,10 @@ func newPromoteCmd(env *Env) *cobra.Command {
 }
 
 func newStatusCmd(env *Env) *cobra.Command {
+	var (
+		watchStatus bool
+		rate        int
+	)
 	c := &cobra.Command{
 		Use:   "status",
 		Short: "hosts in the fleet and machines by state",
@@ -418,38 +434,46 @@ func newStatusCmd(env *Env) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			ctx := c.Context()
-			hosts, err := client.Hosts.List(ctx)
-			if err != nil {
-				return err
+			render := func() error {
+				ctx := c.Context()
+				hosts, err := client.Hosts.List(ctx)
+				if err != nil {
+					return err
+				}
+				machines, err := client.Machines.List(ctx)
+				if err != nil {
+					return err
+				}
+				counts := map[string]int{}
+				for _, m := range machines {
+					counts[m.State]++
+				}
+				if env.W.JSON {
+					return env.W.JSONValue(map[string]any{"hosts": hosts, "machines": counts, "total": len(machines)})
+				}
+				hostRows := make([][]string, 0, len(hosts))
+				for _, h := range hosts {
+					hostRows = append(hostRows, []string{h.ID, strconv.FormatBool(h.Alive), strconv.Itoa(h.CPUFree), strconv.Itoa(h.MemFreeMiB), orDash(h.CPUVendor)})
+				}
+				if err := env.W.Table([]string{"HOST", "ALIVE", "CPU FREE", "MEM FREE MIB", "CPU"}, hostRows); err != nil {
+					return err
+				}
+				env.W.Linef("")
+				var stateRows [][]string
+				for _, st := range []string{"creating", "running", "suspended", "stopped", "error"} {
+					stateRows = append(stateRows, []string{st, strconv.Itoa(counts[st])})
+				}
+				stateRows = append(stateRows, []string{"total", strconv.Itoa(len(machines))})
+				return env.W.Table([]string{"STATE", "MACHINES"}, stateRows)
 			}
-			machines, err := client.Machines.List(ctx)
-			if err != nil {
-				return err
+			if watchStatus {
+				return watch(c, env, rate, render)
 			}
-			counts := map[string]int{}
-			for _, m := range machines {
-				counts[m.State]++
-			}
-			if env.W.JSON {
-				return env.W.JSONValue(map[string]any{"hosts": hosts, "machines": counts, "total": len(machines)})
-			}
-			hostRows := make([][]string, 0, len(hosts))
-			for _, h := range hosts {
-				hostRows = append(hostRows, []string{h.ID, strconv.FormatBool(h.Alive), strconv.Itoa(h.CPUFree), strconv.Itoa(h.MemFreeMiB), orDash(h.CPUVendor)})
-			}
-			if err := env.W.Table([]string{"HOST", "ALIVE", "CPU FREE", "MEM FREE MIB", "CPU"}, hostRows); err != nil {
-				return err
-			}
-			env.W.Linef("")
-			var stateRows [][]string
-			for _, st := range []string{"creating", "running", "suspended", "stopped", "error"} {
-				stateRows = append(stateRows, []string{st, strconv.Itoa(counts[st])})
-			}
-			stateRows = append(stateRows, []string{"total", strconv.Itoa(len(machines))})
-			return env.W.Table([]string{"STATE", "MACHINES"}, stateRows)
+			return render()
 		},
 	}
+	c.Flags().BoolVarP(&watchStatus, "watch", "w", false, "re-render as the fleet changes")
+	c.Flags().IntVar(&rate, "rate", 5, "seconds between renders under --watch")
 	Describe(c, Doc{
 		When: "First, when something is wrong: a host that is not alive explains a\n" +
 			"machine that will not wake, and a pile of `error` machines is worth a\n" +

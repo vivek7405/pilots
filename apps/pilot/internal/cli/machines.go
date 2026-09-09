@@ -82,7 +82,11 @@ func newMachinesCmd(env *Env) *cobra.Command {
 }
 
 func newMachinesListCmd(env *Env) *cobra.Command {
-	var prefix string
+	var (
+		prefix    string
+		watchList bool
+		rate      int
+	)
 	c := &cobra.Command{
 		Use:     "list",
 		Aliases: []string{"ls"},
@@ -93,39 +97,47 @@ func newMachinesListCmd(env *Env) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			machines, err := client.Machines.List(c.Context())
-			if err != nil {
-				return err
-			}
-			if prefix != "" {
-				kept := machines[:0]
-				for _, m := range machines {
-					if strings.HasPrefix(m.Name, prefix) {
-						kept = append(kept, m)
+			render := func() error {
+				machines, err := client.Machines.List(c.Context())
+				if err != nil {
+					return err
+				}
+				if prefix != "" {
+					kept := machines[:0]
+					for _, m := range machines {
+						if strings.HasPrefix(m.Name, prefix) {
+							kept = append(kept, m)
+						}
 					}
+					machines = kept
 				}
-				machines = kept
-			}
-			if env.W.JSON {
-				if machines == nil {
-					machines = []pilots.Machine{}
+				if env.W.JSON {
+					if machines == nil {
+						machines = []pilots.Machine{}
+					}
+					return env.W.JSONValue(machines)
 				}
-				return env.W.JSONValue(machines)
+				rows := make([][]string, 0, len(machines))
+				for i := range machines {
+					rows = append(rows, machineRow(&machines[i]))
+				}
+				if len(rows) == 0 {
+					// An empty list is an answer, not an error; it goes to
+					// stderr so `| wc -l` still counts zero rows.
+					env.W.Notef("no machines in %s", orgLabel(env))
+					return nil
+				}
+				return env.W.Table(machineHeaders, rows)
 			}
-			rows := make([][]string, 0, len(machines))
-			for i := range machines {
-				rows = append(rows, machineRow(&machines[i]))
+			if watchList {
+				return watch(c, env, rate, render)
 			}
-			if len(rows) == 0 {
-				// An empty list is an answer, not an error; it goes to
-				// stderr so `| wc -l` still counts zero rows.
-				env.W.Notef("no machines in %s", orgLabel(env))
-				return nil
-			}
-			return env.W.Table(machineHeaders, rows)
+			return render()
 		},
 	}
 	c.Flags().StringVar(&prefix, "prefix", "", "only machines whose name starts with this")
+	c.Flags().BoolVarP(&watchList, "watch", "w", false, "re-render as machines change")
+	c.Flags().IntVar(&rate, "rate", 2, "seconds between renders under --watch")
 	Describe(c, Doc{
 		When: "To see what exists. For one machine in detail, `pilot machines info`.",
 		Examples: []string{
@@ -216,15 +228,15 @@ func newMachinesCreateCmd(env *Env) *cobra.Command {
 
 func newMachinesInfoCmd(env *Env) *cobra.Command {
 	c := &cobra.Command{
-		Use:   "info <machine>",
+		Use:   "info [machine]",
 		Short: "everything about one machine",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			client, err := env.Client()
 			if err != nil {
 				return err
 			}
-			m, err := resolveMachine(c.Context(), client, args[0])
+			m, err := machineArg(c, env, client, first(args))
 			if err != nil {
 				return err
 			}
@@ -273,16 +285,16 @@ func newMachinesInfoCmd(env *Env) *cobra.Command {
 func newMachinesDestroyCmd(env *Env) *cobra.Command {
 	var force bool
 	c := &cobra.Command{
-		Use:     "destroy <machine>",
+		Use:     "destroy [machine]",
 		Aliases: []string{"rm", "delete"},
 		Short:   "destroy a machine",
-		Args:    cobra.ExactArgs(1),
+		Args:    cobra.MaximumNArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			client, err := env.Client()
 			if err != nil {
 				return err
 			}
-			m, err := resolveMachine(c.Context(), client, args[0])
+			m, err := machineArg(c, env, client, first(args))
 			if err != nil {
 				return err
 			}
@@ -293,6 +305,13 @@ func newMachinesDestroyCmd(env *Env) *cobra.Command {
 			}
 			if err := client.Machines.Destroy(c.Context(), m.ID); err != nil {
 				return err
+			}
+			// A .pilot that names the destroyed machine would send every
+			// later command at a machine that no longer exists.
+			if name, path := contextMachine(); name == m.Name || name == m.ID {
+				if os.Remove(path) == nil {
+					env.W.Notef("removed %s, which named it", path)
+				}
 			}
 			if env.W.JSON {
 				return env.W.JSONValue(map[string]string{"destroyed": m.ID})
@@ -327,15 +346,15 @@ func newMachinesDestroyCmd(env *Env) *cobra.Command {
 // only in the verb and the SDK call.
 func newMachinesLifecycleCmd(env *Env, verb, short, method, how string) *cobra.Command {
 	c := &cobra.Command{
-		Use:   verb + " <machine>",
+		Use:   verb + " [machine]",
 		Short: short,
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			client, err := env.Client()
 			if err != nil {
 				return err
 			}
-			m, err := resolveMachine(c.Context(), client, args[0])
+			m, err := machineArg(c, env, client, first(args))
 			if err != nil {
 				return err
 			}
@@ -375,16 +394,20 @@ func newMachinesExecCmd(env *Env) *cobra.Command {
 		noStdin  bool
 	)
 	c := &cobra.Command{
-		Use:     "exec <machine> -- <command> [args...]",
+		Use:     "exec [machine] -- <command> [args...]",
 		Aliases: []string{"x"},
 		Short:   "run a command on a machine and get its output",
-		Args:    cobra.MinimumNArgs(2),
+		Args:    cobra.ArbitraryArgs,
 		RunE: func(c *cobra.Command, args []string) error {
 			client, err := env.Client()
 			if err != nil {
 				return err
 			}
-			m, err := resolveMachine(c.Context(), client, args[0])
+			name, argv := splitAtDash(c, args)
+			if len(argv) == 0 {
+				return out.Failf("put the command after --: pilot x scratch -- ls -la", "no command to run")
+			}
+			m, err := machineArg(c, env, client, name)
 			if err != nil {
 				return err
 			}
@@ -393,9 +416,9 @@ func newMachinesExecCmd(env *Env) *cobra.Command {
 				return err
 			}
 			if tty {
-				return runConsole(c, env, client, m.ID, args[1:])
+				return runConsole(c, env, client, m.ID, argv)
 			}
-			return runExec(c, env, client, m.ID, args[1:], pilots.ExecStreamOptions{
+			return runExec(c, env, client, m.ID, argv, pilots.ExecStreamOptions{
 				Dir: dir, Env: vars, Stdin: !noStdin,
 			})
 		},
@@ -459,15 +482,15 @@ func runExec(c *cobra.Command, env *Env, client *pilots.Client, id string, argv 
 func newMachinesLogsCmd(env *Env) *cobra.Command {
 	var follow bool
 	c := &cobra.Command{
-		Use:   "logs <machine>",
+		Use:   "logs [machine]",
 		Short: "a machine's console output",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			client, err := env.Client()
 			if err != nil {
 				return err
 			}
-			m, err := resolveMachine(c.Context(), client, args[0])
+			m, err := machineArg(c, env, client, first(args))
 			if err != nil {
 				return err
 			}
@@ -507,15 +530,15 @@ func newMachinesLogsCmd(env *Env) *cobra.Command {
 func newMachinesCheckpointCmd(env *Env) *cobra.Command {
 	var comment string
 	c := &cobra.Command{
-		Use:   "checkpoint <machine>",
+		Use:   "checkpoint [machine]",
 		Short: "save a point-in-time snapshot of a machine",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			client, err := env.Client()
 			if err != nil {
 				return err
 			}
-			m, err := resolveMachine(c.Context(), client, args[0])
+			m, err := machineArg(c, env, client, first(args))
 			if err != nil {
 				return err
 			}
@@ -552,15 +575,15 @@ func newMachinesCheckpointCmd(env *Env) *cobra.Command {
 
 func newMachinesCheckpointsCmd(env *Env) *cobra.Command {
 	c := &cobra.Command{
-		Use:   "checkpoints <machine>",
+		Use:   "checkpoints [machine]",
 		Short: "list a machine's checkpoints",
-		Args:  cobra.ExactArgs(1),
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			client, err := env.Client()
 			if err != nil {
 				return err
 			}
-			m, err := resolveMachine(c.Context(), client, args[0])
+			m, err := machineArg(c, env, client, first(args))
 			if err != nil {
 				return err
 			}
