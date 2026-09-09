@@ -8,7 +8,7 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { mkdtemp, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -51,4 +51,25 @@ test('the bin runs under the name it is installed as, not only as pilot.js', asy
 
   const { stdout } = await run(process.execPath, [link, '--version'])
   assert.match(stdout.trim(), /^\d+\.\d+\.\d+$/)
+})
+
+test('a reader that closes stdout early ends the run quietly, with 141', async () => {
+  // `completion bash` is the vehicle on purpose. It writes once and returns,
+  // so the `error` event Node delivers on the NEXT tick still gets to run.
+  // `--version` and `--help` are not vehicles: commander calls process.exit
+  // synchronously after its write, the process is gone before the event
+  // fires, and a case built on either passes against an entry point with no
+  // listener at all. Destroying the read end before the child has started
+  // Node puts the first write on a closed pipe, which takes the pipe buffer
+  // and the size of the output out of the test.
+  const child = spawn(process.execPath, [BIN, 'completion', 'bash'], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  child.stdout.destroy()
+  let stderr = ''
+  child.stderr.on('data', (chunk) => (stderr += chunk))
+  const code = await new Promise((resolve) => child.on('close', resolve))
+
+  assert.equal(code, 141, `stderr was: ${stderr.slice(0, 400)}`)
+  assert.equal(stderr, '')
 })

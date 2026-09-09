@@ -35,6 +35,25 @@ process.on('warning', (warning) => {
   for (const listener of defaultWarningListeners) listener.call(process, warning)
 })
 
+// The reader of stdout can go away first: `pilot machines ls | head -1`, a
+// `grep -q` that has seen enough, a `less` the operator quit. Node disables
+// the default SIGPIPE disposition at startup and reports the failed write as
+// an `error` event on the stream instead, so with no listener that is an
+// unhandled event -- a stack trace on stderr and exit 1. Both halves break a
+// promise made a few lines up: stderr carries the server's body or a CLI
+// diagnostic and nothing else, and exit 1 means the fleet refused, not that
+// nobody was listening.
+//
+// 141 is 128 + SIGPIPE, the code a shell already reports for the left side of
+// `seq 1 100000 | head -1`. Exiting rather than swallowing the error is what
+// ends a `pilot logs --follow` whose reader is gone, instead of leaving it
+// streaming from the fleet into a closed pipe. Every other stream error is
+// rethrown and keeps today's behaviour.
+process.stdout.on('error', (err) => {
+  if (err.code === 'EPIPE') process.exit(141)
+  throw err
+})
+
 // Calling `run()` explicitly, rather than importing this module for a
 // side effect it decides to perform, is what makes the CLI work under the
 // name it is installed as. `npm install -g` links `<prefix>/bin/pilot` to
