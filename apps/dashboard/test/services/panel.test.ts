@@ -43,6 +43,18 @@ before(async () => {
     autodeploy: false,
     created_at: 1,
   } as unknown as Service);
+  // A service with no address of its own: created private, or from before
+  // addresses were minted. The only one the Address form is offered to.
+  app.fleet.data.services.push({
+    id: 'svc-quiet',
+    name: 'quiet',
+    org_id: org,
+    replicas: 1,
+    release_id: 'rel-q',
+    knobs: {},
+    autodeploy: false,
+    created_at: 2,
+  } as unknown as Service);
   app.fleet.data.releases['svc-web'] = [
     { id: 'rel-w', service_id: 'svc-web', healthy: true, created_at: NOW_SEC - 3600, rootfs_build_id: 'bld-w' },
     { id: 'rel-w0', service_id: 'svc-web', healthy: true, created_at: NOW_SEC - 86_400, rootfs_build_id: 'bld-w0' },
@@ -87,6 +99,48 @@ test('?tab=settings renders the Instances form and only that tab', async () => {
   assert.match(body, /name="replicas"/);
   assert.match(body, /Domains/);
   assert.ok(!body.includes('data-current-deployment'), 'only the selected tab renders');
+});
+
+// The form exists only where it can do something. A service that already has
+// an address cannot be given another, so offering the field there would be a
+// control whose only outcome is a 409.
+test('the Address form is offered only to a service with no address', async () => {
+  const withAddress = await page('/services/svc-web?tab=settings');
+  assert.doesNotMatch(withAddress.body, /name="domain"[^>]*value="web"/);
+
+  const without = await page('/services/svc-quiet?tab=settings');
+  assert.match(without.body, /name="domain"/);
+  assert.match(without.body, /Set address/);
+  assert.match(without.body, /an address cannot be changed afterwards/);
+});
+
+test('setting an address patches the service with the label alone', async () => {
+  app.fleet.calls.length = 0;
+  const res = await submitForm(
+    app.handle,
+    '/services/svc-quiet?tab=settings',
+    { service: 'svc-quiet', domain: 'quiet', back: '/services/svc-quiet?tab=settings' },
+    { cookies: cookie, match: 'Set address' },
+  );
+  assert.equal(res.status, 303);
+  assert.deepEqual(
+    app.fleet.calls.find((c) => c.method === 'services.patch')!.args,
+    ['svc-quiet', { domain: 'quiet' }],
+  );
+});
+
+// A label that cannot be a hostname is refused here rather than sent, so the
+// person sees the rule instead of the fleet's 400.
+test('an address that is not a DNS label never reaches the fleet', async () => {
+  app.fleet.calls.length = 0;
+  const res = await submitForm(
+    app.handle,
+    '/services/svc-quiet?tab=settings',
+    { service: 'svc-quiet', domain: 'Not A Label', back: '/services/svc-quiet?tab=settings' },
+    { cookies: cookie, match: 'Set address' },
+  );
+  assert.equal(res.status, 422, 'the form re-renders with the error');
+  assert.equal(app.fleet.calls.find((c) => c.method === 'services.patch'), undefined);
 });
 
 test('a form returns to the tab it was on', async () => {

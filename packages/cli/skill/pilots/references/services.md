@@ -13,7 +13,9 @@ MCP: `list_services`, then `service` with `{ "service": "web" }`.
 
 ## What happens
 
-A service is one or more machines behind a URL that never changes. A deploy builds a rootfs, creates a release, starts a replica from it, and lets the release take traffic only once the replica has passed its health check. That gate is why a broken deploy does not take the previous one down.
+A service is one or more machines behind a URL that never changes. That URL is `<name>.<fleet domain>`, minted when the service is created, and a request to it reaches whatever machines the current release has, so a deploy replaces every replica without moving the address. A service that has nothing to serve on 8080, a database for instance, asks for no address with `private: true` on the API or `x-pilots.private: true` in a compose file; peers still reach it at `<name>.internal`.
+
+A deploy builds a rootfs, creates a release, starts a replica from it, and lets the release take traffic only once the replica has passed its health check. That gate is why a broken deploy does not take the previous one down.
 
 ## The tools
 

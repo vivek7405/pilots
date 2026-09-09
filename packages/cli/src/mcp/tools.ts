@@ -268,6 +268,10 @@ export function registerTools(server: McpServer, client: PilotsClient): void {
         app: z.string().optional(),
         port: z.number().int().optional().describe('sets PORT in the service environment'),
         domain: z.string().optional(),
+        private: z
+          .boolean()
+          .optional()
+          .describe('mint no address; peers still reach it at <name>.internal'),
         custom_domain: z.string().optional(),
         health: z
           .object({
@@ -633,6 +637,7 @@ function applyOverrides(plan: ComposePlan, args: DeployOverrides): void {
   if (args.health) step.health = args.health
   if (args.replicas !== undefined) step.replicas = args.replicas
   if (args.domain) step.domain = args.domain
+  if (args.private) step.private = true
   if (args.custom_domain) step.custom_domain = args.custom_domain
   if (args.secret_env) {
     // A value, not a reference: the compose path resolves `secret://` names
@@ -651,6 +656,7 @@ interface DeployOverrides {
   secret_env?: Record<string, string> | undefined
   replicas?: number | undefined
   domain?: string | undefined
+  private?: boolean | undefined
   custom_domain?: string | undefined
 }
 
@@ -713,6 +719,7 @@ interface DeployArgs {
   app?: string | undefined
   port?: number | undefined
   domain?: string | undefined
+  private?: boolean | undefined
   custom_domain?: string | undefined
   health?: HealthCheck | undefined
   env?: Record<string, string> | undefined
@@ -748,6 +755,7 @@ async function deployService(
       ...(args.replicas !== undefined ? { replicas: args.replicas } : {}),
       ...(args.health ? { health: args.health } : {}),
       ...(args.domain ? { domain: args.domain } : {}),
+      ...(args.private ? { private: true } : {}),
       ...(args.custom_domain ? { custom_domain: args.custom_domain } : {}),
       ...(env ? { env } : {}),
       ...(args.secret_env ? { secret_env: args.secret_env } : {}),

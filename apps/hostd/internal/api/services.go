@@ -76,12 +76,25 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, "name is required", "pass name", nil)
 		return
 	}
+	// Two ways of saying opposite things about the same field. Refused rather
+	// than resolved by precedence, because either guess silently gives the
+	// caller a service that is not the one they asked for.
+	if req.Private && req.Domain != "" {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest,
+			"private and domain contradict: a private service has no address",
+			"drop one of them", nil)
+		return
+	}
 
 	// A service nothing can ever wake is refused rather than silently
 	// redefined as "stopped". No domain means no request can route to it and
 	// no app means no peer can resolve it by name to wake it either -- with
 	// zero replicas it would sit there costing nothing and doing nothing, and
 	// become a support ticket six months later.
+	//
+	// Reachable now only with private: true, since every other service is
+	// given an address below. That is exactly the service this describes, so
+	// the rule and its message are unchanged.
 	if req.Replicas == 0 && req.Domain == "" && req.App == "" {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, "a service with "+
 			"no domain, no app and no running replicas can never be reached or "+
@@ -174,6 +187,22 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 		Machines: req.Replicas, VCPUs: req.Replicas, MemMiB: req.Replicas * 512,
 	}) {
 		return
+	}
+
+	// The address, decided here and never again: at create for every service
+	// that is not private, and otherwise only through a patch on a service
+	// that has none. Nothing in the deploy path allocates, so a rollout adds
+	// no write and no read to what is already the hot path.
+	//
+	// After the quota check so a refused create allocates nothing, and before
+	// the row is built so a refused label writes nothing.
+	if !req.Private {
+		label, aerr := d.allocateLabel(r.Context(), req.Name, req.Domain)
+		if aerr != nil {
+			aerr.write(w)
+			return
+		}
+		req.Domain = label
 	}
 
 	svc := &state.Service{
@@ -363,8 +392,26 @@ func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
 		writeMapped(w, err)
 		return
 	}
+	// An address is validated and claimed with the same reads a create uses,
+	// which need the store, so it happens here rather than inside the pure
+	// merge below. Only when the service has none: giving one that has an
+	// address another is the 409 applyServicePatch returns.
+	if req.Domain != nil && *req.Domain != "" && svc.Domain == "" {
+		label, aerr := d.allocateLabel(r.Context(), svc.Name, *req.Domain)
+		if aerr != nil {
+			aerr.write(w)
+			return
+		}
+		req.Domain = &label
+	}
+
 	before := svc.Replicas
 	if err := d.applyServicePatch(svc, volumeID, req); err != nil {
+		if errors.Is(err, errAddressSet) {
+			WriteError(w, http.StatusConflict, CodeConflict, err.Error(),
+				"add a custom domain instead", nil)
+			return
+		}
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(), NextBadBody, nil)
 		return
 	}
@@ -455,6 +502,18 @@ func (d Deps) applyServicePatch(svc *state.Service, volumeID string, req UpdateS
 	}
 	if req.Autodeploy != nil {
 		svc.Autodeploy = *req.Autodeploy
+	}
+	if req.Domain != nil {
+		switch {
+		case *req.Domain == "":
+			return errors.New("an address cannot be removed: URLs are permanent")
+		case svc.Domain != "":
+			return errAddressSet
+		}
+		// Validated and claimed by handleUpdateService before this runs, for
+		// the same reason a create allocates before it builds the row: the
+		// check needs the store and this function is a pure merge.
+		svc.Domain = *req.Domain
 	}
 
 	// The create-time rule, applied to the merged row. Scaling a routable

@@ -28,6 +28,19 @@ func machineRowInApp(id, name, hostID, machineState, app string, slot int) strin
 		id, name, hostID, machineState, name, app, slot)
 }
 
+// machineRowForService renders a service replica: the columns a router cares
+// about are the service id and the release it belongs to.
+func machineRowForService(id, hostID, machineState, serviceID, releaseID string) string {
+	return fmt.Sprintf(
+		`["%s","%s","%s","%s","","",1,512,"%s.pilotrun.app","",8080,3001,"","","","","","","%s","%s","",0,0,0]`,
+		id, id, hostID, machineState, id, serviceID, releaseID)
+}
+
+// serviceRow renders one service as the subscription's five columns.
+func serviceRow(id, name, app, domain, releaseID string) string {
+	return fmt.Sprintf(`["%s","%s","%s","%s","%s"]`, id, name, app, domain, releaseID)
+}
+
 func hostRow(id, addr string, lastSeen int64) string {
 	return fmt.Sprintf(`["%s","%s","pk-%s","203.0.113.1",8,4096,%d]`, id, addr, id, lastSeen)
 }
@@ -110,7 +123,7 @@ func startCache(t *testing.T, s *cacheServer) *Cache {
 				flushLine(w, `{"row":[1,`+row+`]}`)
 			}
 		} else if isServices {
-			flushLine(w, `{"columns":["id","name","app"]}`)
+			flushLine(w, `{"columns":["id","name","app","domain","release_id"]}`)
 			for _, row := range s.serviceRows {
 				flushLine(w, `{"row":[1,`+row+`]}`)
 			}
@@ -547,4 +560,90 @@ func TestTheCacheStampsVendorsOntoLiveHosts(t *testing.T) {
 	if !ok || row.LastStart != "cold_boot" || row.LastStartAt != 42 {
 		t.Errorf("MachineCPU = %+v/%v, want the cold_boot row", row, ok)
 	}
+}
+
+// A service's address is permanent and a deploy replaces its machines, so the
+// cache has to follow the release flip rather than the machines. The flip is
+// one CAS on the service row, and this is the assertion that every host's
+// routing follows it as soon as the row arrives.
+func TestServiceReplicasFollowsTheReleaseFlip(t *testing.T) {
+	changes := make(chan string)
+	cache := startCache(t, &cacheServer{
+		machineRows: []string{
+			machineRowForService("m-old", "host-a", "running", "s-1", "rel-1"),
+			machineRowForService("m-new", "host-a", "running", "s-1", "rel-2"),
+		},
+		serviceRows:    []string{serviceRow("s-1", "shop", "storefront", "shop", "rel-1")},
+		hostRows:       []string{hostRow("host-a", "fdcc::1", time.Now().Unix())},
+		serviceChanges: changes,
+	})
+
+	svc, replicas, ok := cache.ServiceReplicas("shop")
+	if !ok {
+		t.Fatal("a service address did not resolve")
+	}
+	if svc.ID != "s-1" {
+		t.Fatalf("resolved to service %q, want s-1", svc.ID)
+	}
+	if len(replicas) != 1 || replicas[0].ID != "m-old" {
+		t.Fatalf("replicas = %v, want only m-old before the flip", ids(replicas))
+	}
+
+	changes <- `{"change":["update",1,` + serviceRow("s-1", "shop", "storefront", "shop", "rel-2") + `,2]}`
+
+	waitFor(t, func() bool {
+		_, replicas, ok := cache.ServiceReplicas("shop")
+		return ok && len(replicas) == 1 && replicas[0].ID == "m-new"
+	}, "the release flip to move routing to the new machines")
+}
+
+// The same collision MachineByName already handles, on the other namespace:
+// corrosion cannot enforce uniqueness, so every host has to pick the same
+// service for one address or the URL means two different things.
+func TestServiceReplicasLowestIdWinsADuplicatedLabel(t *testing.T) {
+	cache := startCache(t, &cacheServer{
+		machineRows: []string{
+			machineRowForService("m-zzz", "host-a", "running", "s-zzz", "rel-1"),
+			machineRowForService("m-aaa", "host-a", "running", "s-aaa", "rel-1"),
+		},
+		serviceRows: []string{
+			serviceRow("s-zzz", "shop", "", "shop", "rel-1"),
+			serviceRow("s-aaa", "shop", "", "shop", "rel-1"),
+		},
+		hostRows: []string{hostRow("host-a", "fdcc::1", time.Now().Unix())},
+	})
+
+	for i := 0; i < 20; i++ {
+		svc, replicas, ok := cache.ServiceReplicas("shop")
+		if !ok {
+			t.Fatal("a duplicated address stopped resolving entirely")
+		}
+		if svc.ID != "s-aaa" {
+			t.Fatalf("resolved to %s; every host must pick the lowest id", svc.ID)
+		}
+		if len(replicas) != 1 || replicas[0].ID != "m-aaa" {
+			t.Fatalf("replicas = %v, want the lowest-id service's machine", ids(replicas))
+		}
+	}
+}
+
+// A private service holds no address, and an empty label must not match it.
+// Nothing routes to "" but the router asks about whatever a hostname carried.
+func TestServiceReplicasIgnoresAnEmptyAddress(t *testing.T) {
+	cache := startCache(t, &cacheServer{
+		serviceRows: []string{serviceRow("s-1", "hidden", "", "", "rel-1")},
+		hostRows:    []string{hostRow("host-a", "fdcc::1", time.Now().Unix())},
+	})
+
+	if _, _, ok := cache.ServiceReplicas(""); ok {
+		t.Error("an empty address resolved to a private service")
+	}
+}
+
+func ids(rows []state.Machine) []string {
+	out := make([]string, 0, len(rows))
+	for _, m := range rows {
+		out = append(out, m.ID)
+	}
+	return out
 }

@@ -82,16 +82,24 @@ export function servicePanel(detail: ServiceDetail, tab: Tab, ctx: PanelContext 
           </h2>
           <div class="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-meta text-muted-foreground">
             ${(() => {
-              // A service with a domain has a stable URL; one without still has
-              // a routable instance URL. Show whichever exists so the panel is
-              // never a dead end.
-              const liveUrl = service.url || current.find((r) => r.url)?.url || '';
-              return liveUrl
-                ? html`<span class="flex items-center gap-1">
-                    <a href=${liveUrl} rel="noopener" class="truncate">${liveUrl}</a>
-                    <copy-button value=${liveUrl} label="URL"></copy-button>
-                  </span>`
-                : html`<span>No URL yet</span>`;
+              // Every service created now has an address of its own. This
+              // fallback is for a private service and for one that predates
+              // minted addresses, and it says whose address it is showing:
+              // the instance's, which the next deploy replaces.
+              const ownUrl = service.url || '';
+              const instanceUrl = ownUrl ? '' : current.find((r) => r.url)?.url || '';
+              const address = ownUrl || instanceUrl;
+              if (!address) return html`<span>No URL yet</span>`;
+              return html`<span
+                class="flex items-center gap-1"
+                title=${instanceUrl
+                  ? "This is the current instance's address. It changes on the next deploy; set an address in Settings."
+                  : ''}
+              >
+                ${instanceUrl ? html`<span>instance</span>` : ''}
+                <a href=${address} rel="noopener" class="truncate">${address}</a>
+                <copy-button value=${address} label="URL"></copy-button>
+              </span>`;
             })()}
             <!--
               Only the CURRENT release is handed over: serviceHealth looks up

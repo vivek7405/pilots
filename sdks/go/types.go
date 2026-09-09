@@ -230,9 +230,15 @@ type CreateServiceRequest struct {
 	// belongs. A patch for the same reason every other request's is.
 	Knobs  *KnobsPatch  `json:"knobs,omitempty"`
 	Health *HealthCheck `json:"health,omitempty"`
-	// Domain is the subdomain label under the fleet's domain. Empty means the
-	// service mints no route rows and is reachable over <name>.internal only.
-	Domain       string `json:"domain,omitempty"`
+	// Domain is the subdomain label under the fleet's domain. Empty means one
+	// is minted from the name: the name itself when it is free, else the name
+	// and a four-character suffix. Set it to ask for an exact label, which is
+	// taken literally or refused, never adjusted.
+	Domain string `json:"domain,omitempty"`
+	// Private mints no address at all. The service is reachable by peers over
+	// <name>.internal, and its replicas keep their own machine URLs the way
+	// every machine does. Create-only: an address, once minted, is permanent.
+	Private      bool   `json:"private,omitempty"`
 	CustomDomain string `json:"custom_domain,omitempty"`
 	// Volume is create-only: a volume swap is a data migration, not a
 	// configuration change, so the update route does not take it. Requires
@@ -429,6 +435,11 @@ type UpdateServiceRequest struct {
 	Repo       *string           `json:"repo,omitempty"`
 	Branch     *string           `json:"branch,omitempty"`
 	Autodeploy *bool             `json:"autodeploy,omitempty"`
+	// Domain gives an address to a service that has none, which is the only
+	// way one created before addresses were minted, or one created private,
+	// can get one. Accepted exactly once: a service that already has an
+	// address is a 409 and an empty string a 400, because URLs are permanent.
+	Domain *string `json:"domain,omitempty"`
 }
 
 type CreateAPIKeyRequest struct {
@@ -552,10 +563,13 @@ type ComposeStep struct {
 	// A patch: a step's knobs are whatever the compose file spelled out, and
 	// they are spread straight onto a DeployRequest, so the fields the file
 	// left out must stay absent rather than arrive as zeros.
-	Knobs        *KnobsPatch `json:"knobs,omitempty"`
-	Domain       string      `json:"domain,omitempty"`
-	CustomDomain string      `json:"custom_domain,omitempty"`
-	PreDeploy    string      `json:"pre_deploy,omitempty"`
+	Knobs  *KnobsPatch `json:"knobs,omitempty"`
+	Domain string      `json:"domain,omitempty"`
+	// Private asks for no address at all. A service without it is given one
+	// from its name, so this is how a database says it has nothing to serve.
+	Private      bool   `json:"private,omitempty"`
+	CustomDomain string `json:"custom_domain,omitempty"`
+	PreDeploy    string `json:"pre_deploy,omitempty"`
 }
 
 type ComposePlan struct {

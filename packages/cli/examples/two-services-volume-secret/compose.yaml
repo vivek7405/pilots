@@ -16,6 +16,10 @@ services:
     volumes:
       # The rootfs is replaced by the next release. This is not.
       - pgdata:/var/lib/postgresql/data
+    x-pilots:
+      # No public address. web reaches it at postgres.internal:5432, and a
+      # database has nothing to answer on 8080.
+      private: true
 
 volumes:
   pgdata:

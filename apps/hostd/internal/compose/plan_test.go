@@ -886,3 +886,61 @@ services:
 		t.Errorf("order = %s, want a,m,z", got)
 	}
 }
+
+// A database has nothing to serve on 8080, so it should not be handed a public
+// address just because every other service gets one.
+func TestXPilotsPrivateReachesThePlan(t *testing.T) {
+	plan, perr, err := Compile(context.Background(), Request{Compose: `
+name: shop
+services:
+  web:
+    image: nginx
+  db:
+    image: postgres
+    x-pilots:
+      private: true
+`})
+	if err != nil || perr != nil {
+		t.Fatalf("compile: err=%v planErr=%+v", err, perr)
+	}
+
+	byName := map[string]Step{}
+	for _, s := range plan.Steps {
+		byName[s.Name] = s
+	}
+	if !byName["db"].Private {
+		t.Error("x-pilots.private did not reach the plan")
+	}
+	if byName["web"].Private {
+		t.Error("a service that said nothing was made private")
+	}
+}
+
+// Both keys describe the same address and they disagree. Guessing either way
+// gives the caller a service that is not the one the file describes.
+func TestXPilotsPrivateAndDomainContradict(t *testing.T) {
+	_, perr, err := Compile(context.Background(), Request{Compose: `
+name: shop
+services:
+  db:
+    image: postgres
+    x-pilots:
+      private: true
+      domain: db
+`})
+	if err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	if perr == nil {
+		t.Fatal("a file asking for private and an address was accepted")
+	}
+	var found bool
+	for _, u := range perr.Unsupported {
+		if u.Service == "db" && u.Key == "x-pilots.private" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("the 400 does not name the contradiction: %+v", perr.Unsupported)
+	}
+}

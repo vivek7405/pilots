@@ -139,17 +139,13 @@ export function createDeployCommand(): Command {
       printTable([
         header,
         ...result.services.map((s) => {
-          // An empty column reads as a failed deploy. It is not: a service gets
-          // a URL only when it has a domain, and the replicas answer at their
-          // own machine URLs either way.
-          // Named for the path actually taken: a directory deployed with no
-          // compose file has no compose file to put x-pilots.domain in, and
-          // sending someone to edit one that does not exist is worse than
-          // saying nothing.
-          const setDomain = file
-            ? `set x-pilots.domain in the compose file, or pilot domains add <host> --service ${s.name}`
-            : `pilot domains add <host> --service ${s.name}`
-          const url = s.url || `(no domain: ${setDomain})`
+          // An empty column reads as a failed deploy. It is not: every service
+          // is given an address when it is created, so one without a URL asked
+          // to be private, or predates minted addresses. Either way it is
+          // reachable by peers under its own name, which is the useful thing
+          // to print. The old text sent people to set x-pilots.domain, which
+          // is now advice for a problem they do not have.
+          const url = s.url || `(private: peers reach it at ${s.name}.internal)`
           return wait ? [s.name, url] : [s.name, s.release_id, url]
         }),
       ])

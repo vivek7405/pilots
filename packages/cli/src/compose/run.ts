@@ -341,6 +341,7 @@ async function upsertService(
       replicas: step.replicas,
       ...(step.health ? { health: step.health } : {}),
       ...(step.domain ? { domain: step.domain } : {}),
+      ...(step.private ? { private: true } : {}),
       ...(step.custom_domain ? { custom_domain: step.custom_domain } : {}),
       ...(volumeId ? { volume: volumeId } : {}),
       ...(step.env ? { env: step.env } : {}),

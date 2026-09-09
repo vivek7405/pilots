@@ -364,6 +364,13 @@ getent hosts api.pilots.localhost        # ::1  api.pilots.localhost
 | `127.0.0.1:8080` | the control API (same listener) |
 | `<name>.pilots.localhost:8080` | that machine's port 8080 |
 | `<port>-<name>.pilots.localhost:8080` | that machine's `<port>` |
+| `<label>.pilots.localhost:8080` | that service's current release, port 8080 |
+| `<port>-<label>.pilots.localhost:8080` | that service's `<port>` |
+
+A machine name and a service address share one namespace, and a machine name
+wins. A service answers at the label minted from its name when it was created;
+before its first deploy the same address answers 503 rather than 404, because
+the address is already permanent and only the release is missing.
 
 TLS is off, so every URL is `http://...:8080` and no certificate, Cloudflare
 token or ACME email is involved anywhere. The API reports exactly that: the

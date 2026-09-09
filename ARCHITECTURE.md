@@ -61,12 +61,19 @@ compose fragment on the ordinary primitives, not a product tier. See
      machines. Enforced in review; violations corrupt silently.
    - **Deterministic ownership** for anything needing uniqueness or an
      actor: `hash(key) mod live_hosts` (name allocation, self-heal slices).
+     What machine names and service addresses actually do today is the
+     cheaper half of that shape: a local read of both namespaces before the
+     single-writer row is written, plus a deterministic lowest-id tie-break
+     at read time for the cross-host race a local read cannot prevent.
 4. **S3 is the only truth for machine state.** Hetzner Object Storage
    (S3-compatible, path-style; internal eu-central traffic is free — compute
    must live in FSN1/NBG1). Local NVMe is strictly a cache; the design test
    is "wipe any host's disk; nothing is lost."
 5. **URLs are permanent.** `<name>.pilotrun.app` for every workload (sandbox
-   AND service — one apex, because promote must not change URLs);
+   AND service — one apex, because promote must not change URLs). A service's
+   label is minted from its name when it is created, and a request to it is
+   routed to whatever machines its CURRENT release has, so a blue/green
+   deploy replaces every replica without moving the address;
    `<port>-<name>.pilotrun.app` for arbitrary ports; `pilots.run` for the
    dashboard ONLY (user code must never share the dashboard apex — a guest
    on the same apex could set cookies scoped to it). `pilotrun.app` is
@@ -328,12 +335,18 @@ POST   /v1/builds                    {dockerfile-context tar} → streamed struc
        ?deploy=<service>             …and cut that service a release from the image,
                                      on this host, once (the last line carries `release`)
 POST   /v1/services                  {name, release|build, replicas, health, domain?,
-                                     volume?}; volume is create-only and pins
-                                     replicas to one
+                                     private?, volume?}; volume is create-only
+                                     and pins replicas to one. An empty domain
+                                     mints one from the name (a four-character
+                                     suffix when the name is taken); private
+                                     mints none
 GET    /v1/services                  list
 GET    /v1/services/:id              info
 PATCH  /v1/services/:id              {replicas?, health?, env?, secret_env?, repo?,
-                                     branch?, autodeploy?}; env and secret_env
+                                     branch?, autodeploy?, domain?}; domain is
+                                     accepted once, on a service that has none
+                                     (409 on one that has, 400 on an empty
+                                     string); env and secret_env
                                      REPLACE the stored map, and env, secret_env
                                      and replicas take effect at the NEXT deploy;
                                      knobs are refused with a 400 naming the field

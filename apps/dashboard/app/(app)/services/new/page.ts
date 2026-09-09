@@ -190,7 +190,7 @@ export default async function NewAppPage({ searchParams, actionData }: PageProps
                       ${field({
                         id: 'domain',
                         label: 'Address',
-                        hint: 'Becomes <address>.pilotrun.app',
+                        hint: 'Becomes <address>.pilotrun.app; leave it empty to use the service name',
                         error: fieldErrors.domain,
                         control: html`<input id="domain" name="domain" value=${step.name} class=${cn(inputClass(), 'font-mono')}>`,
                       })}

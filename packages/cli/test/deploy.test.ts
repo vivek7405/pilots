@@ -713,7 +713,7 @@ test('an empty URL says why, and the JSON keeps the empty string', async () => {
   try {
     const human = await pilot(env, ['deploy'])
     assert.equal(human.code, 0, human.stderr)
-    assert.match(human.stdout, /\(no domain: set x-pilots\.domain/)
+    assert.match(human.stdout, /\(private: peers reach it at web\.internal\)/)
     assert.match(human.stderr, /pilot machines ls --app shop/)
 
     const asJSON = await pilot(env, ['--json', 'deploy'])
@@ -918,8 +918,33 @@ test('the empty-URL advice matches the path the deploy took', async () => {
   try {
     const res = await pilot(env, ['deploy'], dir)
     assert.equal(res.code, 0, res.stderr)
-    assert.match(res.stdout, /\(no domain: pilot domains add <host> --service /)
+    assert.match(res.stdout, /\(private: peers reach it at web\.internal\)/)
     assert.doesNotMatch(res.stdout, /x-pilots\.domain/)
+  } finally {
+    await api.close()
+  }
+})
+
+// A database has nothing to serve on 8080, so a compose file can ask for no
+// address. The flag has to survive the whole walk from the plan to the create,
+// or the file says one thing and the service does another.
+test('x-pilots.private reaches the create request', async () => {
+  const api = await startFakeAPI()
+  const p = plan()
+  ;(p.steps[0] as Record<string, unknown>).private = true
+  withPlan(api, p)
+  const env = loggedIn(api.url, { shop: { database_url: 'x' } })
+  try {
+    const res = await pilot(env, ['--json', 'deploy'])
+    assert.equal(res.code, 0, res.stderr)
+
+    const created = api.all('POST', '/v1/services').map((r) => JSON.parse(r.body) as Record<string, unknown>)
+    const byName = new Map(created.map((c) => [c.name as string, c]))
+    assert.equal(byName.get('postgres')?.private, true, 'the private step asked for no address')
+    assert.equal('domain' in (byName.get('postgres') ?? {}), false, 'and named no address')
+    // Every other service is untouched: private is per service, not per file.
+    assert.equal('private' in (byName.get('web') ?? {}), false)
+    assert.equal('private' in (byName.get('worker') ?? {}), false)
   } finally {
     await api.close()
   }

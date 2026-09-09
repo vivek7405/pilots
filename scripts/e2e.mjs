@@ -1696,9 +1696,12 @@ async function serviceAssertions() {
   // Silently redefining it as "stopped" is how it becomes a support ticket six
   // months later.
   await step('a service with no domain, no app and no replicas is refused', async () => {
+    // private: true is what makes this shape reachable at all now. Every other
+    // service is given an address at create, so the only service nothing can
+    // reach is one that asked for none.
     const { status, json } = await request('/v1/services', {
       method: 'POST',
-      body: { name: `unwakeable-${tag}`, replicas: 0 },
+      body: { name: `unwakeable-${tag}`, replicas: 0, private: true },
     });
     assert(status === 400, `expected 400, got ${status}: ${JSON.stringify(json)}`);
     const why = (json?.error ?? '').toLowerCase();
@@ -1706,8 +1709,22 @@ async function serviceAssertions() {
       `the refusal does not say why it cannot be woken: ${json?.error}`);
   });
 
-  // A service with a command health check and NO domain is a first-class
-  // case: a database ships one and routes nowhere.
+  // The other half of the same rule: a service that asks for no address gets
+  // none, and is still a service. A database is the case this exists for.
+  let hidden;
+  await step('a service that asks for no address gets none', async () => {
+    const { status, json } = await request('/v1/services', {
+      method: 'POST',
+      body: { name: `hidden-${tag}`, app: `e2e-svc-${tag}`, replicas: 1, private: true },
+    });
+    assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
+    assert(!json.url, `a private service was given the url ${json.url}`);
+    hidden = json;
+    created.push(json.id);
+  });
+
+  // A service with a command health check and NO domain of its own asked for:
+  // a database ships one, and it still gets an address like everything else.
   let svc;
   await step('a service with a CMD-SHELL health check and no domain is created', async () => {
     const { status, json } = await request('/v1/services', {
@@ -1719,6 +1736,11 @@ async function serviceAssertions() {
     });
     assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
     assert(json.id, 'no service id');
+    // It named no domain, so one was minted from its name. Nothing listens on
+    // 8080 behind it, and that is the app's business rather than the fleet's.
+    assertOpenableURL(json.url, 'the default address');
+    assert(new URL(json.url).hostname.startsWith(`db-${tag}.`),
+      `the minted address is ${json.url}, want it to start with db-${tag}.`);
     svc = json;
   });
 
@@ -2039,6 +2061,155 @@ async function serviceAssertions() {
     assert(k.auto_stop === 'suspend', `auto_stop is ${k.auto_stop}, want suspend`);
     assert(k.auto_start === true, `auto_start is ${k.auto_start}, want true`);
   });
+
+  // ---------------------------------------------------------------------
+  // The issue this whole surface exists for: a service created with no domain
+  // answers at its own name, and a deploy does not move that address.
+  //
+  // Before this existed the first request below was a 404: a service domain
+  // was rendered into the API response and routed nowhere, so the address the
+  // dashboard showed was whichever instance happened to be serving, and a
+  // blue/green deploy replaces that instance every time.
+  // ---------------------------------------------------------------------
+  if (webBuild) {
+    let site;
+    let siteHost = '';
+    let firstReplica = '';
+
+    await step('a service created with no domain is given its own name as an address', async () => {
+      const { status, json } = await request('/v1/services', {
+        method: 'POST',
+        body: {
+          name: `site-${tag}`, app: `e2e-svc-${tag}`, replicas: 1,
+          health: { type: 'http', path: '/', grace: 60 },
+        },
+      });
+      assert(status === 201, `create: ${status} ${JSON.stringify(json)}`);
+      assertOpenableURL(json.url, 'the minted service address');
+      siteHost = new URL(json.url).host;
+      assert(siteHost.startsWith(`site-${tag}.`),
+        `the address is ${siteHost}, want it to start with site-${tag}.`);
+      site = json;
+      created.push(json.id);
+    });
+
+    if (site) {
+      // Not a 404. The address exists and is permanent; what it does not have
+      // yet is anything to serve, and those are different facts to a caller.
+      await step('the address answers 503 before the first deploy, not 404', async () => {
+        const res = await viaRouter(siteHost, '/', 20_000);
+        assert(res.status === 503,
+          `expected 503 before any deploy, got ${res.status}: ${res.text.slice(0, 200)}`);
+        assert(res.text.includes('no release yet'),
+          `the 503 does not say why: ${res.text.slice(0, 200)}`);
+      });
+
+      await step('the address serves the first release', async () => {
+        const dep = await request(`/v1/services/${site.id}/deploy`, {
+          method: 'POST', body: { build: webBuild },
+        });
+        assert(dep.status === 200, `deploy: ${dep.status} ${JSON.stringify(dep.json)}`);
+
+        const res = await viaRouter(siteHost, '/');
+        assert(res.status === 200, `expected 200, got ${res.status}: ${res.text.slice(0, 200)}`);
+
+        const reps = await replicasOf(site.id);
+        assert(reps.length === 1, `deploy made ${reps.length} replicas, want 1`);
+        firstReplica = reps[0].id;
+      });
+
+      // The counterfactual for the whole issue. The instance is replaced and
+      // the address is not, which is exactly the pair that used to disagree.
+      await step('a second deploy replaces the instance and keeps the address', async () => {
+        const dep = await request(`/v1/services/${site.id}/deploy`, {
+          method: 'POST', body: { build: webBuild },
+        });
+        assert(dep.status === 200, `redeploy: ${dep.status} ${JSON.stringify(dep.json)}`);
+
+        await waitFor(async () => {
+          const reps = await replicasOf(site.id);
+          return reps.some((m) => m.id !== firstReplica && m.state === 'running');
+        }, { timeoutMs: 180_000, what: 'the new release to have a running replica' });
+
+        const after = await request(`/v1/services/${site.id}`);
+        assert(after.json.url === site.url,
+          `the address moved: ${site.url} became ${after.json.url}`);
+
+        const res = await viaRouter(siteHost, '/');
+        assert(res.status === 200,
+          `the address stopped serving after a redeploy: ${res.status} ${res.text.slice(0, 200)}`);
+      });
+
+      // The port-prefix form addresses any port without the platform knowing
+      // it in advance, and it must work for a service label as it does for a
+      // machine name.
+      await step('the port-prefix form addresses a service label too', async () => {
+        const res = await viaRouter(`8080-${siteHost}`, '/');
+        assert(res.status === 200,
+          `8080-<label> gave ${res.status}: ${res.text.slice(0, 200)}`);
+      });
+    }
+
+    // Both allocators scan both namespaces, so a service named after a machine
+    // is given a suffixed address rather than taking the machine's URL.
+    await step('a service named after a machine gets a suffixed address', async () => {
+      const mach = await request('/v1/machines', {
+        method: 'POST',
+        body: { name: `taken-${tag}`, vcpus: 1, mem_mib: 256 },
+      });
+      assert(mach.status === 201, `create machine: ${mach.status} ${JSON.stringify(mach.json)}`);
+      created.push(mach.json.id);
+
+      const { status, json } = await request('/v1/services', {
+        method: 'POST',
+        body: { name: `taken-${tag}`, app: `e2e-svc-${tag}`, replicas: 1 },
+      });
+      assert(status === 201, `create service: ${status} ${JSON.stringify(json)}`);
+      const host = new URL(json.url).host;
+      assert(new RegExp(`^taken-${tag}-[a-z0-9]{4}\\.`).test(host),
+        `the address is ${host}, want taken-${tag} with a four-character suffix`);
+      created.push(json.id);
+
+      // And the machine still owns the label it was named with.
+      const res = await viaRouter(new URL(mach.json.url).host, '/', 20_000);
+      assert(res.status !== 404,
+        `the machine lost its own URL to a service: ${res.status}`);
+    });
+
+    await step('an explicit address that is taken is refused', async () => {
+      const { status, json } = await request('/v1/services', {
+        method: 'POST',
+        body: { name: `dup-${tag}`, app: `e2e-svc-${tag}`, replicas: 1, domain: `site-${tag}` },
+      });
+      assert(status === 409, `expected 409, got ${status}: ${JSON.stringify(json)}`);
+      assert(json?.code === 'conflict', `expected code conflict, got ${json?.code}`);
+    });
+
+    // A service created before addresses were minted, or one created private,
+    // can be given one exactly once.
+    if (hidden) {
+      await step('a service with no address is given one, once', async () => {
+        const first = await request(`/v1/services/${hidden.id}`, {
+          method: 'PATCH', body: { domain: `late-${tag}` },
+        });
+        assert(first.status === 200, `patch: ${first.status} ${JSON.stringify(first.json)}`);
+        assert(new URL(first.json.url).host.startsWith(`late-${tag}.`),
+          `the address is ${first.json.url}, want late-${tag}`);
+
+        const second = await request(`/v1/services/${hidden.id}`, {
+          method: 'PATCH', body: { domain: `other-${tag}` },
+        });
+        assert(second.status === 409,
+          `a second address gave ${second.status}, want 409: URLs are permanent`);
+
+        const removed = await request(`/v1/services/${hidden.id}`, {
+          method: 'PATCH', body: { domain: '' },
+        });
+        assert(removed.status === 400,
+          `removing an address gave ${removed.status}, want 400`);
+      });
+    }
+  }
 
   if (web && webReplica) {
     // The count and the floor are different numbers. Only the floor moved: the
@@ -5341,6 +5512,16 @@ async function agentDeployAssertions(REFLINK) {
       const svc = await client.callTool({ name: 'service', arguments: { service: webID } });
       assert(!svc.isError, `service failed: ${toolText(svc)}`);
       assert(!toolText(svc).includes(`pw-${tag}`), 'the sealed secret was readable from the API');
+
+      // x-pilots.private on postgres, all the way from the file to the row:
+      // the database gets no address and the web service does. A database with
+      // a public URL would only be a hostname that times out.
+      const fromAPI = await request('/v1/services');
+      const byName = (n) => (fromAPI.json ?? []).find((x) => x.id === out.services.find((y) => y.name === n)?.id);
+      assert(!byName('postgres')?.url,
+        `postgres was given the url ${byName('postgres')?.url} despite x-pilots.private`);
+      assert(byName('web')?.url,
+        'web was given no url, but only postgres asked to be private');
     });
 
     await step('init is short, and docs answers with a reference', async () => {

@@ -1,8 +1,11 @@
 package machines
 
 import (
+	"context"
 	"strings"
 	"testing"
+
+	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
 func TestValidateNameAcceptsUsableLabels(t *testing.T) {
@@ -141,5 +144,37 @@ func TestTheReservedNameFollowsTheConfiguredAPIHostname(t *testing.T) {
 				t.Errorf("%q was refused: %v", tc.machine, err)
 			}
 		})
+	}
+}
+
+// A machine named after a service's address does not merely collide with it:
+// the router tries machine names BEFORE service addresses, so the machine
+// would take the service's URL away from every host at once. URLs are
+// permanent, so the create has to be the thing that fails.
+func TestEnsureNameFreeSeesServiceAddresses(t *testing.T) {
+	store, err := state.Open(":memory:")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := store.PutService(ctx, &state.Service{
+		ID: "s_1", Name: "shop", Domain: "shop",
+	}); err != nil {
+		t.Fatalf("PutService: %v", err)
+	}
+
+	m := &Manager{opts: Options{Store: store, HostID: "host-test"}}
+	err = m.ensureNameFree(ctx, "shop")
+	if err == nil {
+		t.Fatal("a machine was allowed to take a service's address")
+	}
+	if !strings.Contains(err.Error(), "service's address") {
+		t.Errorf("error does not say what it collided with: %v", err)
+	}
+
+	if err := m.ensureNameFree(ctx, "other"); err != nil {
+		t.Errorf("a free name was refused: %v", err)
 	}
 }
