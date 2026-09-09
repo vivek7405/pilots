@@ -405,7 +405,8 @@ type imageFacts struct {
 	// dirLinks maps each directory the image reaches only through a symlink
 	// to the real directory behind it, e.g. "sbin" -> "usr/sbin" on any
 	// usr-merged image. Keys and values are cleaned, root-relative, and carry
-	// no trailing slash.
+	// no trailing slash. Values are fully resolved -- a link to a link is
+	// collapsed here, so resolve never has to follow one twice.
 	dirLinks map[string]string
 }
 
@@ -488,16 +489,31 @@ func scanImage(tarPath string) (imageFacts, error) {
 		}
 	}
 
-	for name, target := range links {
-		// An absolute target resolves against the image root; a relative one
-		// against the directory the link itself sits in.
-		resolved := target
-		if !strings.HasPrefix(target, "/") {
-			resolved = path.Dir(name) + "/" + target
+	// Classified to a fixed point, because a link may point at another link:
+	// with /usr/sbin -> bin and /sbin -> usr/sbin, /sbin is only a directory
+	// link once /usr/sbin is known to be one. Map iteration order is random,
+	// so a single pass would classify that pair or not depending on the run.
+	// Bounded, so a cycle in a hostile image cannot spin here.
+	for round := 0; round < 8; round++ {
+		grew := false
+		for name, target := range links {
+			if _, done := facts.dirLinks[name]; done {
+				continue
+			}
+			// An absolute target resolves against the image root; a relative
+			// one against the directory the link itself sits in.
+			resolved := target
+			if !strings.HasPrefix(target, "/") {
+				resolved = path.Dir(name) + "/" + target
+			}
+			resolved = facts.resolve(strings.TrimPrefix(path.Clean("/"+resolved), "/"))
+			if dirs[resolved] {
+				facts.dirLinks[name] = resolved
+				grew = true
+			}
 		}
-		resolved = strings.TrimPrefix(path.Clean("/"+resolved), "/")
-		if dirs[resolved] {
-			facts.dirLinks[name] = resolved
+		if !grew {
+			break
 		}
 	}
 	return facts, nil

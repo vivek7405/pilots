@@ -596,6 +596,30 @@ func TestFixupsResolveThroughAUsrMergedSbin(t *testing.T) {
 	}
 }
 
+// A link that points at another link resolves the whole way. Contrived on
+// purpose -- no shipping image does this -- but the alternative is a single
+// hop that silently stops halfway and fails the pack exactly as before.
+func TestFixupsResolveChainedDirectorySymlinks(t *testing.T) {
+	tarPath := filepath.Join(t.TempDir(), "rootfs.tar")
+	writeTar(t, tarPath, []tar.Header{
+		{Name: "usr/", Typeflag: tar.TypeDir, Mode: 0o755},
+		{Name: "usr/bin/", Typeflag: tar.TypeDir, Mode: 0o755},
+		{Name: "usr/sbin", Typeflag: tar.TypeSymlink, Linkname: "bin", Mode: 0o777},
+		{Name: "sbin", Typeflag: tar.TypeSymlink, Linkname: "usr/sbin", Mode: 0o777},
+	}, nil)
+
+	img, err := scanImage(tarPath)
+	if err != nil {
+		t.Fatalf("scanImage: %v", err)
+	}
+	if err := applyFixups(tarPath, Fixups{AgentBinary: stageAgent(t)}, img); err != nil {
+		t.Fatalf("applyFixups: %v", err)
+	}
+	if h := tarNames(t, tarPath)["usr/bin/init"]; h == nil || h.Linkname != AgentPathInImage {
+		t.Errorf("init stopped part way along the chain: %v", h)
+	}
+}
+
 // A symlink is only followed when it points at a directory. Ubuntu ships
 // /etc/resolv.conf as a symlink to a file under /run, and following that
 // would write the nameserver fixup into a directory the image does not have
