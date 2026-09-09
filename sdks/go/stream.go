@@ -336,14 +336,28 @@ type stdinWriter struct {
 	ctx  context.Context
 }
 
+// stdinChunk is the most stdin one frame carries. The guest agent and every
+// hop in between read with the websocket library's default limit of 32 KiB,
+// and a larger message is not split for them: the read fails, the agent's
+// frame loop ends, and the process sees EOF mid-stream. A 70 KiB file pushed
+// as one Write did exactly that. Half the limit leaves room for the frame
+// byte and for a hop that sets a smaller one.
+const stdinChunk = 16 << 10
+
 func (w *stdinWriter) Write(p []byte) (int, error) {
-	frame := make([]byte, 0, len(p)+1)
-	frame = append(frame, FrameStdin)
-	frame = append(frame, p...)
-	if err := w.conn.Write(w.ctx, websocket.MessageBinary, frame); err != nil {
-		return 0, err
+	written := 0
+	for len(p) > 0 {
+		n := min(len(p), stdinChunk)
+		frame := make([]byte, 0, n+1)
+		frame = append(frame, FrameStdin)
+		frame = append(frame, p[:n]...)
+		if err := w.conn.Write(w.ctx, websocket.MessageBinary, frame); err != nil {
+			return written, err
+		}
+		written += n
+		p = p[n:]
 	}
-	return len(p), nil
+	return written, nil
 }
 
 func (w *stdinWriter) Close() error {
