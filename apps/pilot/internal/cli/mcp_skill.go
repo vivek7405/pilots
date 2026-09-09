@@ -30,6 +30,11 @@ func skillRoot(getenv config.Env) string {
 			if hasSkill(filepath.Join(dir, ".agents", "skills", "pilots")) {
 				return filepath.Join(dir, ".agents", "skills", "pilots")
 			}
+			// Working inside the pilots checkout itself, wherever the binary
+			// was built.
+			if hasSkill(filepath.Join(dir, "packages", "cli", "skill", "pilots")) {
+				return filepath.Join(dir, "packages", "cli", "skill", "pilots")
+			}
 			parent := filepath.Dir(dir)
 			if parent == dir {
 				break
@@ -96,7 +101,8 @@ func skillPages(root string) []skillPage {
 // topics is what `docs` accepts, derived from the pages rather than listed
 // twice.
 func topics(root string) []string {
-	var out []string
+	// Never nil: an agent reading `topics` gets a list, not JSON null.
+	out := []string{}
 	for _, p := range skillPages(root) {
 		if strings.HasPrefix(p.Name, "references/") {
 			out = append(out, strings.TrimSuffix(strings.TrimPrefix(p.Name, "references/"), ".md"))
