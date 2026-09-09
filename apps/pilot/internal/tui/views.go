@@ -217,8 +217,12 @@ func (m *Model) viewMachine() string {
 		return m.viewDashboard()
 	}
 	title := m.titleBar("machine " + mc.Name)
+	urlAuth := mc.URLAuth
+	if urlAuth == "" {
+		urlAuth = "public"
+	}
 	kv := [][2]string{
-		{"state", mc.State}, {"url", mc.URL}, {"id", mc.ID}, {"host", mc.HostID},
+		{"state", mc.State}, {"url", mc.URL}, {"url auth", urlAuth}, {"id", mc.ID}, {"host", mc.HostID},
 		{"size", fmt.Sprintf("%d vCPU, %s", mc.VCPUs, mib(mc.MemMiB))},
 		{"created", time.Unix(mc.CreatedAt, 0).Local().Format("2006-01-02 15:04")},
 		{"auto stop", mc.Knobs.AutoStop}, {"auto start", strconv.FormatBool(mc.Knobs.AutoStart)},

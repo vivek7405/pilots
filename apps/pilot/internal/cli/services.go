@@ -134,6 +134,7 @@ func newServicesInfoCmd(env *Env) *cobra.Command {
 				{"ID", s.ID},
 				{"APP", s.App},
 				{"URL", serviceAddress(s)},
+				{"URL AUTH", orPublic(s.URLAuth)},
 				{"REPLICAS", strconv.Itoa(s.Replicas)},
 				{"RELEASE", orDash(s.ReleaseID)},
 				{"CREATED", unixTime(s.CreatedAt)},

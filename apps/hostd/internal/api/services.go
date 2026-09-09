@@ -79,6 +79,10 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	// Two ways of saying opposite things about the same field. Refused rather
 	// than resolved by precedence, because either guess silently gives the
 	// caller a service that is not the one they asked for.
+	if req.URLAuth != "" && req.URLAuth != URLAuthPublic && req.URLAuth != URLAuthOrg {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "url_auth must be public or org", "pass url_auth: public, or url_auth: org", nil)
+		return
+	}
 	if req.Private && req.Domain != "" {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest,
 			"private and domain contradict: a private service has no address",
@@ -290,6 +294,12 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if req.URLAuth == URLAuthOrg {
+		if err := d.Store.PutURLAuth(r.Context(), &state.URLAuth{ID: svc.ID, Kind: "service", Mode: URLAuthOrg, UpdatedAt: time.Now().Unix()}); err != nil {
+			writeMapped(w, err)
+			return
+		}
+	}
 	out := d.serviceToAPI(*svc, req.OrgID)
 	if volume != nil {
 		out.VolumeID = volume.ID
@@ -333,6 +343,7 @@ func (d Deps) handleListServices(w http.ResponseWriter, r *http.Request) {
 		row.VolumeID = mounts[svc.ID]
 		row.DependsOn = d.dependsOn(svc, groups[siblingKey{org: owner, app: svc.App}])
 		row.Labels = d.labelsOf(r.Context(), svc.ID)
+		row.URLAuth = d.urlAuthOf(r.Context(), svc.ID)
 		out = append(out, row)
 	}
 	if want := labelFilter(r); len(want) > 0 {
@@ -430,6 +441,16 @@ func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
 		}
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(), NextBadBody, nil)
 		return
+	}
+	if req.URLAuth != nil {
+		if *req.URLAuth != URLAuthPublic && *req.URLAuth != URLAuthOrg {
+			WriteError(w, http.StatusBadRequest, CodeBadRequest, "url_auth must be public or org", "pass url_auth: public, or url_auth: org", nil)
+			return
+		}
+		if err := d.Store.PutURLAuth(r.Context(), &state.URLAuth{ID: svc.ID, Kind: "service", Mode: *req.URLAuth, UpdatedAt: time.Now().Unix()}); err != nil {
+			writeMapped(w, err)
+			return
+		}
 	}
 	// A replica is a machine, so a scale-up is admitted against the same
 	// limits the create was admitted against. Nothing downstream would catch

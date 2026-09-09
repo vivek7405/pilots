@@ -76,6 +76,13 @@ export interface Machine {
   last_start_at?: number
   /** Labels attached at create, for finding the machine again. */
   labels?: Record<string, string>
+  /** Who may reach the URL: 'public' (the default) or 'org'. */
+  url_auth?: 'public' | 'org'
+}
+
+/** PATCH /v1/machines/{id}: who may reach the URL. */
+export interface UpdateMachineRequest {
+  url_auth?: 'public' | 'org'
 }
 
 export interface CreateMachineRequest {
@@ -97,6 +104,8 @@ export interface CreateMachineRequest {
   env?: Record<string, string>
   secret_env?: Record<string, string>
   labels?: Record<string, string>
+  /** Who may reach the URL: 'public' (the default) or 'org'. */
+  url_auth?: 'public' | 'org'
 }
 
 export interface ExecRequest {
@@ -199,6 +208,8 @@ export interface Service {
   created_at: number
   /** Labels attached at create, or copied from the machine promote made it from. */
   labels?: Record<string, string>
+  /** Who may reach the URL: 'public' (the default) or 'org'. */
+  url_auth?: 'public' | 'org'
 }
 
 /**
@@ -249,6 +260,10 @@ export interface CreateServiceRequest {
   volume?: string
   env?: Record<string, string>
   secret_env?: Record<string, string>
+  /** Labels attached at create, for finding it again. */
+  labels?: Record<string, string>
+  /** Who may reach the URL: 'public' (the default) or 'org'. */
+  url_auth?: 'public' | 'org'
   repo?: string
   branch?: string
   autodeploy?: boolean
@@ -432,7 +447,6 @@ export interface UpdateServiceRequest {
   health?: HealthCheck
   env?: Record<string, string>
   secret_env?: Record<string, string>
-  labels?: Record<string, string>
   repo?: string
   branch?: string
   autodeploy?: boolean
@@ -443,6 +457,8 @@ export interface UpdateServiceRequest {
    * 409 and an empty string a 400, because URLs are permanent.
    */
   domain?: string
+  /** Who may reach the address: 'public' or 'org'. */
+  url_auth?: 'public' | 'org'
 }
 
 export interface CreateAPIKeyRequest {

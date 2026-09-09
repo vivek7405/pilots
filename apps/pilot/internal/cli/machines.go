@@ -190,6 +190,7 @@ func newMachinesCreateCmd(env *Env) *cobra.Command {
 		req         pilots.CreateMachineRequest
 		envPairs    []string
 		labelPairs  []string
+		urlAuth     string
 		skipConsole bool
 	)
 	c := &cobra.Command{
@@ -210,6 +211,10 @@ func newMachinesCreateCmd(env *Env) *cobra.Command {
 			if req.Labels, err = parseEnv(labelPairs); err != nil {
 				return err
 			}
+			if urlAuth != "" && urlAuth != pilots.URLAuthPublic && urlAuth != pilots.URLAuthOrg {
+				return out.Failf("pass --url-auth public or --url-auth org", "--url-auth %q is not a mode", urlAuth)
+			}
+			req.URLAuth = urlAuth
 			m, err := client.Machines.Create(c.Context(), req)
 			if err != nil {
 				return err
@@ -242,6 +247,7 @@ func newMachinesCreateCmd(env *Env) *cobra.Command {
 	f.StringArrayVar(&envPairs, "env", nil, "an environment variable, KEY=value (repeatable)")
 	f.StringVar(&req.Volume, "volume", "", "attach this volume")
 	f.StringArrayVar(&labelPairs, "label", nil, "a label to find it by later, key=value (repeatable); `ls --label` filters on them")
+	f.StringVar(&urlAuth, "url-auth", "", "who may reach the URL: public (default) or org, which needs an API key of the org")
 	f.BoolVar(&skipConsole, "skip-console", false, "exit after creating instead of opening a console")
 	Describe(c, Doc{
 		What: "A create is a restore from a golden template, not a boot, which is\n" +
@@ -288,6 +294,7 @@ func newMachinesInfoCmd(env *Env) *cobra.Command {
 				{"ID", m.ID},
 				{"STATE", m.State},
 				{"URL", m.URL},
+				{"URL AUTH", orPublic(m.URLAuth)},
 				{"HOST", m.HostID},
 				{"SIZE", fmt.Sprintf("%d vCPU, %d MiB", m.VCPUs, m.MemMiB)},
 				{"CREATED", unixTime(m.CreatedAt)},

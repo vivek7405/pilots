@@ -149,6 +149,7 @@ func (d Deps) siblingsOf(ctx context.Context, rows []state.Service) (map[sibling
 // must not take a service page down with it.
 func (d Deps) withEdges(ctx context.Context, out *Service, svc state.Service, owner string) {
 	out.Labels = d.labelsOf(ctx, svc.ID)
+	out.URLAuth = d.urlAuthOf(ctx, svc.ID)
 	if svc.App == "" || owner == "" {
 		return
 	}

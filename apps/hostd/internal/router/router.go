@@ -76,6 +76,16 @@ type Options struct {
 	// Optional; nil, and a miss, fall back to Store.ListServices and
 	// Store.ListMachines.
 	Service func(label string) (state.Service, []state.Machine, bool)
+
+	// URLAuthOf says who may reach an object's URL: "public" or "org".
+	// Nothing recorded is public. Reads local state only (rule 2).
+	URLAuthOf func(ctx context.Context, id string) string
+	// OrgOf is the owning org of a machine or service, from the local
+	// tenancy replica.
+	OrgOf func(ctx context.Context, id string) (string, bool)
+	// KeyOrg resolves a bearer API key to its org, or false: unknown,
+	// revoked, malformed.
+	KeyOrg func(ctx context.Context, key string) (string, bool)
 }
 
 // Router proxies inbound requests to machines, waking them if needed.
@@ -389,6 +399,9 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		http.Error(w, "unknown host", http.StatusNotFound)
 		return
 	}
+	if !r.allowed(w, req, target) {
+		return
+	}
 	r.serveOrForward(w, req, target)
 }
 
@@ -453,4 +466,48 @@ func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, slot *netns.S
 		http.Error(w, "machine unreachable", http.StatusBadGateway)
 	}
 	proxy.ServeHTTP(w, req)
+}
+
+// allowed enforces url_auth on a resolved target. Public is the default and
+// costs one local read. Org asks for an API key of the owning org in an
+// Authorization: Bearer header: no key is 401 with a WWW-Authenticate so a
+// client knows what to send, a key of another org is 403. The mode is the
+// service's when the machine is a replica, else the machine's own, so a
+// promoted machine follows its service.
+func (r *Router) allowed(w http.ResponseWriter, req *http.Request, t *Target) bool {
+	if r.opts.URLAuthOf == nil {
+		return true
+	}
+	ctx := req.Context()
+	subject := t.Machine.ID
+	if t.Machine.ServiceID != "" {
+		subject = t.Machine.ServiceID
+	}
+	if r.opts.URLAuthOf(ctx, subject) != "org" {
+		return true
+	}
+	key := ""
+	if h := req.Header.Get("Authorization"); h != "" {
+		if scheme, token, ok := strings.Cut(h, " "); ok && strings.EqualFold(scheme, "bearer") {
+			key = token
+		}
+	}
+	unauthorized := func() bool {
+		w.Header().Set("WWW-Authenticate", `Bearer realm="pilots"`)
+		http.Error(w, "this URL is reachable with an API key of its org", http.StatusUnauthorized)
+		return false
+	}
+	if key == "" || r.opts.KeyOrg == nil || r.opts.OrgOf == nil {
+		return unauthorized()
+	}
+	org, ok := r.opts.KeyOrg(ctx, key)
+	if !ok {
+		return unauthorized()
+	}
+	owner, ok := r.opts.OrgOf(ctx, subject)
+	if !ok || owner != org {
+		http.Error(w, "this URL belongs to another org", http.StatusForbidden)
+		return false
+	}
+	return true
 }

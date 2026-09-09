@@ -8,6 +8,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -398,9 +400,35 @@ func run() error {
 	}
 
 	routerOpts := router.Options{
-		Domain:  cfg.WorkloadDomain,
-		HostID:  cfg.HostID,
-		Store:   store,
+		Domain: cfg.WorkloadDomain,
+		HostID: cfg.HostID,
+		Store:  store,
+		URLAuthOf: func(ctx context.Context, id string) string {
+			u, err := store.GetURLAuth(ctx, id)
+			if err != nil || u == nil || u.Mode == "" {
+				return api.URLAuthPublic
+			}
+			return u.Mode
+		},
+		OrgOf: func(ctx context.Context, id string) (string, bool) {
+			t, err := store.GetTenancy(ctx, id)
+			if err != nil {
+				return "", false
+			}
+			return t.OrgID, true
+		},
+		KeyOrg: func(ctx context.Context, key string) (string, bool) {
+			sum := sha256.Sum256([]byte(key))
+			hash := hex.EncodeToString(sum[:])
+			rec, err := store.GetAPIKeyByHash(ctx, hash)
+			if err != nil {
+				return "", false
+			}
+			if revoked, err := store.IsRevoked(ctx, hash); err != nil || revoked {
+				return "", false
+			}
+			return rec.OrgID, true
+		},
 		Manager: mgr,
 		SlotFor: mgr.SlotFor,
 	}

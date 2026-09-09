@@ -135,16 +135,16 @@ function assertOpenableURL(url, what) {
 // workload Host to the router, so this is the public wake path rather than an
 // internal one. node:http rather than fetch because the Host header is the
 // whole point of the request.
-async function viaRouter(hostname, path = '/', timeoutMs = 120_000) {
+async function viaRouter(hostname, path = '/', timeoutMs = 120_000, headers = {}) {
   const { hostname: apiHost, port } = new URL(API);
   const http = await import('node:http');
   return await new Promise((resolve) => {
     const req = http.request(
-      { host: apiHost, port: port || 80, path, method: 'GET', headers: { Host: hostname }, timeout: timeoutMs },
+      { host: apiHost, port: port || 80, path, method: 'GET', headers: { Host: hostname, ...headers }, timeout: timeoutMs },
       (res) => {
         let body = '';
         res.on('data', (c) => { body += c; });
-        res.on('end', () => resolve({ status: res.statusCode, body }));
+        res.on('end', () => resolve({ status: res.statusCode, body, headers: res.headers }));
       },
     );
     req.on('timeout', () => { req.destroy(); resolve({ status: 0, body: 'timeout' }); });
@@ -5076,6 +5076,41 @@ async function tenancyAssertions() {
     // be able to see, read or destroy.
     let id = null;
     try {
+      // #101: who may reach a URL. Public is the default and what every URL
+      // was before url_auth existed; org makes the router ask for an API key
+      // of the owning org. The mode is a side table read locally, so the
+      // data plane still depends on nothing but its own replica.
+      await step('an org-only URL asks for a key of its org, and a public one does not', async () => {
+        const gated = await request('/v1/machines', { method: 'POST', body: { vcpus: 1, mem_mib: 512, url_auth: 'org' } });
+        assert(gated.status === 201, `create gated: ${gated.status} ${JSON.stringify(gated.json)}`);
+        assert(gated.json.url_auth === 'org', `url_auth did not come back: ${JSON.stringify(gated.json.url_auth)}`);
+        try {
+          const host = new URL(gated.json.url).host;
+          const anon = await viaRouter(host, '/', 20_000);
+          assert(anon.status === 401, `no key should be 401, got ${anon.status}: ${anon.body.slice(0, 80)}`);
+          assert(/bearer/i.test(anon.headers?.['www-authenticate'] ?? ''), 'a 401 must say Bearer in WWW-Authenticate');
+          const ours = await viaRouter(host, '/', 60_000, { Authorization: `Bearer ${KEY}` });
+          assert(ours.status !== 401 && ours.status !== 403, `the owning org's key was refused: ${ours.status}`);
+          const theirs = await viaRouter(host, '/', 20_000, { Authorization: `Bearer ${secondKey}` });
+          assert(theirs.status === 403, `another org's key should be 403, got ${theirs.status}`);
+          const bogus = await viaRouter(host, '/', 20_000, { Authorization: 'Bearer pilot_nope' });
+          assert(bogus.status === 401, `an unknown key should be 401, got ${bogus.status}`);
+
+          const opened = await request(`/v1/machines/${gated.json.id}`, { method: 'PATCH', body: { url_auth: 'public' } });
+          assert(opened.status === 200 && opened.json.url_auth === 'public', `PATCH to public: ${opened.status} ${JSON.stringify(opened.json)}`);
+          const now = await viaRouter(host, '/', 20_000);
+          assert(now.status !== 401 && now.status !== 403, `public again should not be gated, got ${now.status}`);
+
+          const bad = await request(`/v1/machines/${gated.json.id}`, { method: 'PATCH', body: { url_auth: 'friends' } });
+          assert(bad.status === 400, `a made-up mode must be refused, got ${bad.status}`);
+        } finally {
+          await request(`/v1/machines/${gated.json.id}`, { method: 'DELETE' });
+        }
+        // The machine the rest of this block uses is public, and stays so.
+        const plain = await viaRouter(new URL(machine.url).host, '/', 20_000);
+        assert(plain.status !== 401 && plain.status !== 403, `a public URL must not be gated, got ${plain.status}`);
+      });
+
       await step('a machine created by one org is invisible to another', async () => {
         const created = await request('/v1/machines', {
           method: 'POST',

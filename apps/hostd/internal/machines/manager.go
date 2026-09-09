@@ -505,6 +505,9 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	if err := m.opts.Store.DeleteLabels(ctx, id); err != nil {
 		errs = append(errs, fmt.Errorf("delete labels row: %w", err))
 	}
+	if err := m.opts.Store.DeleteURLAuth(ctx, id); err != nil {
+		errs = append(errs, fmt.Errorf("delete url auth row: %w", err))
+	}
 	if err := m.opts.Store.DeleteMachine(ctx, id); err != nil {
 		errs = append(errs, fmt.Errorf("delete row: %w", err))
 	}

@@ -405,3 +405,14 @@ CREATE TABLE IF NOT EXISTS machine_labels (    -- writer: the host that writes t
   labels     TEXT,     -- json object, string -> string
   updated_at INTEGER
 );
+
+-- Who may reach an object's URL. Absent means public, which is what every
+-- URL was before this table existed; `org` means the router asks for an API
+-- key of the owning org. Keyed and written like machine_labels: the object's
+-- id, by the host that writes its row, so the merge has one writer.
+CREATE TABLE IF NOT EXISTS url_auth (          -- writer: the host that writes the object row it describes
+  id         TEXT NOT NULL PRIMARY KEY,        -- machine or service id
+  kind       TEXT,     -- machine|service
+  mode       TEXT,     -- public|org
+  updated_at INTEGER
+);

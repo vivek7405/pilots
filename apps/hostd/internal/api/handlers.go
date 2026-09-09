@@ -59,10 +59,11 @@ type Manager interface {
 // orgID is passed in rather than looked up here: a list endpoint already knows
 // every row's owner from the pass it made to filter them, and re-asking per
 // row would turn one lookup into N.
-func (d Deps) toAPI(row state.Machine, orgID string, cpu state.MachineCPU, labels map[string]string) Machine {
+func (d Deps) toAPI(row state.Machine, orgID string, cpu state.MachineCPU, labels map[string]string, urlAuth string) Machine {
 	return Machine{
-		Labels: labels,
-		ID:     row.ID, Name: row.Name, HostID: row.HostID, State: row.State,
+		Labels:  labels,
+		URLAuth: urlAuth,
+		ID:      row.ID, Name: row.Name, HostID: row.HostID, State: row.State,
 		OrgID:        orgID,
 		Knobs:        ParseKnobs(row.KindKnobs),
 		ImageRef:     row.ImageRef,
@@ -79,6 +80,55 @@ func (d Deps) toAPI(row state.Machine, orgID string, cpu state.MachineCPU, label
 		LastStart:    cpu.LastStart,
 		LastStartAt:  cpu.LastStartAt,
 	}
+}
+
+// urlAuthOf reads who may reach an object's URL; nothing recorded is public,
+// which is what every URL was before the table existed.
+func (d Deps) urlAuthOf(ctx context.Context, id string) string {
+	u, err := d.Store.GetURLAuth(ctx, id)
+	if err != nil || u == nil || u.Mode == "" {
+		return URLAuthPublic
+	}
+	return u.Mode
+}
+
+func validURLAuth(mode string) bool {
+	return mode == "" || mode == URLAuthPublic || mode == URLAuthOrg
+}
+
+func orDefaultMode(mode string) string {
+	if mode == "" {
+		return URLAuthPublic
+	}
+	return mode
+}
+
+// handleUpdateMachine is PATCH /v1/machines/{id}: the one thing a machine
+// changes after create is who may reach its URL.
+func (d Deps) handleUpdateMachine(w http.ResponseWriter, r *http.Request) {
+	row, ok := d.ownedMachine(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	var req UpdateMachineRequest
+	if err := decodeBody(r, &req); err != nil {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "bad request body", NextBadBody, nil)
+		return
+	}
+	if req.URLAuth == nil {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "nothing to change", "pass url_auth: public, or url_auth: org", nil)
+		return
+	}
+	if *req.URLAuth != URLAuthPublic && *req.URLAuth != URLAuthOrg {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "url_auth must be public or org", "pass url_auth: public, or url_auth: org", nil)
+		return
+	}
+	if err := d.Store.PutURLAuth(r.Context(), &state.URLAuth{ID: row.ID, Kind: "machine", Mode: *req.URLAuth, UpdatedAt: time.Now().Unix()}); err != nil {
+		writeMapped(w, err)
+		return
+	}
+	owner, _ := d.tenancy().OrgOf(r.Context(), row.ID)
+	writeJSON(w, http.StatusOK, d.toAPI(*row, owner, d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), *req.URLAuth))
 }
 
 // labelsOf reads an object's labels, and reads "none recorded" as none.
@@ -210,6 +260,10 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if !validURLAuth(req.URLAuth) {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "url_auth must be public or org", "pass url_auth: public, or url_auth: org", nil)
+		return
+	}
 	if !d.checkQuota(w, r, quota.Delta{
 		Machines: 1,
 		VCPUs:    orDefault(req.VCPUs, 1),
@@ -229,7 +283,13 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, http.StatusCreated, d.toAPI(*row, req.OrgID, d.startOf(r.Context(), row.ID), req.Labels))
+	if req.URLAuth == URLAuthOrg {
+		if err := d.Store.PutURLAuth(r.Context(), &state.URLAuth{ID: row.ID, Kind: "machine", Mode: URLAuthOrg, UpdatedAt: time.Now().Unix()}); err != nil {
+			writeMapped(w, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusCreated, d.toAPI(*row, req.OrgID, d.startOf(r.Context(), row.ID), req.Labels, orDefaultMode(req.URLAuth)))
 }
 
 // orDefault mirrors the machine manager's own defaulting, so the quota check
@@ -260,7 +320,7 @@ func (d Deps) handleListMachines(w http.ResponseWriter, r *http.Request) {
 		if !matchesLabels(labels, want) {
 			continue
 		}
-		out = append(out, d.toAPI(row, owner, d.startOf(r.Context(), row.ID), labels))
+		out = append(out, d.toAPI(row, owner, d.startOf(r.Context(), row.ID), labels, d.urlAuthOf(r.Context(), row.ID)))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -271,7 +331,7 @@ func (d Deps) handleGetMachine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), row.ID)
-	writeJSON(w, http.StatusOK, d.toAPI(*row, owner, d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID)))
+	writeJSON(w, http.StatusOK, d.toAPI(*row, owner, d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), d.urlAuthOf(r.Context(), row.ID)))
 }
 
 func (d Deps) handleDestroyMachine(w http.ResponseWriter, r *http.Request) {
@@ -453,7 +513,7 @@ func (d Deps) handleRedeploy(w http.ResponseWriter, r *http.Request) {
 		writeMapped(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, d.toAPI(*row, OrgID(r.Context()), d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID)))
+	writeJSON(w, http.StatusOK, d.toAPI(*row, OrgID(r.Context()), d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), d.urlAuthOf(r.Context(), row.ID)))
 }
 
 func (d Deps) handleCreateCheckpoint(w http.ResponseWriter, r *http.Request) {
@@ -510,7 +570,7 @@ func (d Deps) handleRestoreCheckpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), row.ID)
-	writeJSON(w, http.StatusOK, d.toAPI(*row, owner, d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID)))
+	writeJSON(w, http.StatusOK, d.toAPI(*row, owner, d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), d.urlAuthOf(r.Context(), row.ID)))
 }
 
 // handleCheckpointStatus lets a caller learn when a checkpoint became durable.

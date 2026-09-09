@@ -107,11 +107,25 @@ type Machine struct {
 	// Labels were attached at create, for finding the machine again; they
 	// are not changed later.
 	Labels map[string]string `json:"labels,omitempty"`
+	// URLAuth is who may reach the URL: "public" (the default) or "org", which
+	// makes the router ask for an API key of the owning org.
+	URLAuth string `json:"url_auth,omitempty"`
 }
 
 // CreateMachineRequest creates a machine from exactly one source: a built
 // image, a template, or a checkpoint. Creating from a template is a restore,
 // not a boot -- that is what makes create instant.
+// URL auth modes. Public is what every URL was before url_auth existed.
+const (
+	URLAuthPublic = "public"
+	URLAuthOrg    = "org"
+)
+
+// UpdateMachineRequest is the one thing a machine changes after create.
+type UpdateMachineRequest struct {
+	URLAuth *string `json:"url_auth,omitempty"`
+}
+
 type CreateMachineRequest struct {
 	Name       string `json:"name,omitempty"` // generated when empty
 	Image      string `json:"image,omitempty"`
@@ -164,7 +178,8 @@ type CreateMachineRequest struct {
 	// fleet key, and a key on every laptop is not fleet infrastructure.
 	SecretEnv map[string]string `json:"secret_env,omitempty"`
 	// Labels to attach, key -> value; a filter on list finds them again.
-	Labels map[string]string `json:"labels,omitempty"`
+	Labels  map[string]string `json:"labels,omitempty"`
+	URLAuth string            `json:"url_auth,omitempty"` // public|org; default public
 
 	// OrgID is the tenant this machine belongs to, filled from the
 	// authenticated key. `json:"-"` is load-bearing: a client that could set
@@ -332,6 +347,7 @@ type Service struct {
 	Branch     string            `json:"branch,omitempty"`
 	Autodeploy bool              `json:"autodeploy"`
 	Labels     map[string]string `json:"labels,omitempty"`
+	URLAuth    string            `json:"url_auth,omitempty"`
 	CreatedAt  int64             `json:"created_at"`
 }
 
@@ -370,6 +386,7 @@ type CreateServiceRequest struct {
 	// fleet key to do it.
 	SecretEnv map[string]string `json:"secret_env,omitempty"`
 	Labels    map[string]string `json:"labels,omitempty"`
+	URLAuth   string            `json:"url_auth,omitempty"` // public|org; default public
 
 	Repo       string `json:"repo,omitempty"`
 	Branch     string `json:"branch,omitempty"`
@@ -450,6 +467,8 @@ type UpdateServiceRequest struct {
 	// address is a 409 and an empty string is a 400, because URLs are
 	// permanent and neither changing nor removing one is expressible.
 	Domain *string `json:"domain,omitempty"`
+	// URLAuth changes who may reach the address: "public" or "org".
+	URLAuth *string `json:"url_auth,omitempty"`
 }
 
 // Volume is persistent, per-write-durable storage: one filesystem in object

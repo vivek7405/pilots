@@ -1481,3 +1481,48 @@ func (s *Store) DeleteLabels(ctx context.Context, id string) error {
 	}
 	return nil
 }
+
+func (s *Store) PutURLAuth(ctx context.Context, u *state.URLAuth, opts ...state.WriteOption) error {
+	auth := state.ResolveAuth(opts)
+	if u.Kind == "service" {
+		if err := s.assertServiceWriter(ctx, u.ID); err != nil {
+			return err
+		}
+	} else if err := s.assertMachineOwner(ctx, u.ID, auth); err != nil {
+		return err
+	}
+	_, err := s.client.Exec(ctx, `
+		INSERT INTO url_auth (id, kind, mode, updated_at) VALUES (?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, mode=excluded.mode, updated_at=excluded.updated_at`,
+		u.ID, u.Kind, u.Mode, u.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put url auth %q: %w", u.ID, err)
+	}
+	return nil
+}
+
+func (s *Store) GetURLAuth(ctx context.Context, id string) (*state.URLAuth, error) {
+	rows, err := s.client.Query(ctx, `SELECT id, kind, mode, updated_at FROM url_auth WHERE id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, state.ErrNotFound
+	}
+	var u state.URLAuth
+	if err := rows.Scan(&u.ID, &u.Kind, &u.Mode, &u.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &u, nil
+}
+
+func (s *Store) DeleteURLAuth(ctx context.Context, id string) error {
+	if _, err := s.client.Exec(ctx, `DELETE FROM url_auth WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("state: delete url auth %q: %w", id, err)
+	}
+	return nil
+}

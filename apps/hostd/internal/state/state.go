@@ -227,6 +227,14 @@ type Labels struct {
 	UpdatedAt int64
 }
 
+// URLAuth is who may reach a machine's or a service's URL.
+type URLAuth struct {
+	ID        string
+	Kind      string // machine|service
+	Mode      string // public|org
+	UpdatedAt int64
+}
+
 type MachineCPU struct {
 	ID          string
 	Kind        string
@@ -463,6 +471,13 @@ type Store interface {
 	// DeleteLabels drops the row for an object being removed, before the
 	// object row itself for the same reason DeleteMachineCPU is.
 	DeleteLabels(ctx context.Context, id string) error
+	// PutURLAuth records who may reach an object's URL: "public" or "org".
+	// Same writer and check as PutLabels.
+	PutURLAuth(ctx context.Context, u *URLAuth, opts ...WriteOption) error
+	// GetURLAuth returns ErrNotFound when nothing is recorded, which the
+	// router reads as public -- what every URL was before the table existed.
+	GetURLAuth(ctx context.Context, id string) (*URLAuth, error)
+	DeleteURLAuth(ctx context.Context, id string) error
 
 	PutCheckpoint(ctx context.Context, c *Checkpoint) error
 	ListCheckpoints(ctx context.Context, machineID string) ([]Checkpoint, error)
@@ -984,6 +999,37 @@ func (s *sqliteStore) GetLabels(ctx context.Context, id string) (*Labels, error)
 func (s *sqliteStore) DeleteLabels(ctx context.Context, id string) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM machine_labels WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("state: delete labels %q: %w", id, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) PutURLAuth(ctx context.Context, u *URLAuth, _ ...WriteOption) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO url_auth (id, kind, mode, updated_at) VALUES (?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, mode=excluded.mode, updated_at=excluded.updated_at`,
+		u.ID, u.Kind, u.Mode, u.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put url auth %q: %w", u.ID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) GetURLAuth(ctx context.Context, id string) (*URLAuth, error) {
+	var u URLAuth
+	err := s.db.QueryRowContext(ctx, `SELECT id, kind, mode, updated_at FROM url_auth WHERE id = ?`, id).
+		Scan(&u.ID, &u.Kind, &u.Mode, &u.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get url auth %q: %w", id, err)
+	}
+	return &u, nil
+}
+
+func (s *sqliteStore) DeleteURLAuth(ctx context.Context, id string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM url_auth WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("state: delete url auth %q: %w", id, err)
 	}
 	return nil
 }
