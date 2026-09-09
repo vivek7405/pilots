@@ -13,7 +13,7 @@ import { repoConnections } from '#db/schema.server.ts';
 import { requireOrg } from '#modules/auth/session.server.ts';
 import { fleet } from '#modules/fleet/client.server.ts';
 import { assertOwned } from '#modules/fleet/org-filter.server.ts';
-import { installationFor } from '#modules/github/installations.server.ts';
+import { claimRepo } from '#modules/github/claim.server.ts';
 import { isRepoSlug } from '#modules/domains/hostname.ts';
 import { backTo } from '#modules/services/utils/back.ts';
 
@@ -28,16 +28,34 @@ export async function connectRepo(formData: FormData) {
 
   if (!isRepoSlug(repo)) return { success: false, fieldErrors: { repo: 'Use owner/name' } };
 
+  // The fleet CLAIM first, then the engine's fields, then the local row.
+  //
+  // Three surfaces in this app connect a repository -- this action, the JSON
+  // route behind it, and the deploy wizard -- and every one of them has to
+  // write hostd's `repo_links` row, or the same product action leaves two
+  // different fleet states: the page says "connected", the webhook autodeploys,
+  // and the org's OWN key is refused that repository by `pilot deploy` and by
+  // every agent. That is what claimRepo is for, and it is also where the
+  // ownership check lives.
+  //
+  // An owner the App is not installed on connects ANYWAY here, with no claim
+  // and a null installation id, because that is this surface's existing and
+  // deliberate behaviour: the page renders the install link off exactly that
+  // null. What it must not do is mint a permanent claim on an account the
+  // fleet was never given -- claims are write-once and there is no disconnect
+  // -- so the claim waits until the App is installed and the person connects
+  // again.
+  let claim;
   try {
     if (!assertOwned(ctx.org.id, await fleet.services.get(id))) {
       return { success: false, error: 'No such service.', status: 404 };
     }
+    claim = await claimRepo(ctx.org.id, repo);
     await fleet.services.patch(id, { repo, branch, autodeploy });
   } catch (err) {
     return { success: false, error: `Connect refused: ${(err as Error).message}`, status: 502 };
   }
 
-  const installation = await installationFor(repo.split('/')[0]);
   await db
     .insert(repoConnections)
     .values({
@@ -46,12 +64,12 @@ export async function connectRepo(formData: FormData) {
       repo,
       branch,
       autodeploy,
-      installationId: installation?.id ?? null,
+      installationId: claim.installationId,
       connectedBy: ctx.user.id,
     })
     .onConflictDoUpdate({
       target: repoConnections.serviceId,
-      set: { repo, branch, autodeploy, installationId: installation?.id ?? null, updatedAt: new Date() },
+      set: { repo, branch, autodeploy, installationId: claim.installationId, updatedAt: new Date() },
     });
 
   return { success: true, redirect: backTo(formData, `/services/${id}`, 'connected') };

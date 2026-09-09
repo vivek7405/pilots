@@ -252,6 +252,33 @@ test('a one-step plan starts the build, creates the service as the org, and land
 //
 // Counterfactual: drop `client.repos.connect(repo)` from the action and this
 // fails, while every other test in this file keeps passing.
+// A claim is PERMANENT -- `repo_links` rows are write-once and hostd has no
+// disconnect -- and this app connects under an ADMIN key, so hostd's own admin
+// check never refuses what is asked here. Without a check of its own, a
+// signed-in visitor could type any `owner/name` and walk away with a standing
+// grant on someone else's private repository.
+//
+// The check is that the fleet's App is installed on the owner. It does not
+// prove this visitor administers the repository -- that needs user-scoped
+// OAuth -- but it stops a claim naming an account the fleet was never given.
+//
+// Counterfactual: drop the claimRepo guard and this returns 303.
+test('an owner the App is not installed on is refused, and claims nothing', async () => {
+  stubInstallations({ id: 1, login: 'acme' });
+  app.fleet.calls.length = 0;
+  app.fleet.data.plan = ONE_STEP;
+
+  // `nope` has no installation, and the page's own render already refuses it,
+  // so the form is rendered for `acme` and submitted with the other name --
+  // which is exactly the request a visitor can make by hand.
+  const res = await create({ repo: 'nope/shop' });
+  assert.equal(res.status, 422);
+  assert.match(await res.text(), /not installed on nope/);
+  assert.ok(!app.fleet.calls.some((c) => c.method === 'repos.connect'), 'nothing was claimed');
+  assert.ok(!app.fleet.calls.some((c) => c.method === 'services.create'), 'no service was created');
+  assert.ok(!app.fleet.calls.some((c) => c.method === 'builds.createFromRepo'), 'no build was started');
+});
+
 // A fleet that refuses the connection refuses before there is anything to
 // clean up: no service, no build, and the engine's own words on the page.
 test('a refused connection creates nothing', async () => {
