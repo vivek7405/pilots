@@ -135,16 +135,16 @@ function assertOpenableURL(url, what) {
 // workload Host to the router, so this is the public wake path rather than an
 // internal one. node:http rather than fetch because the Host header is the
 // whole point of the request.
-async function viaRouter(hostname, path = '/', timeoutMs = 120_000) {
+async function viaRouter(hostname, path = '/', timeoutMs = 120_000, headers = {}) {
   const { hostname: apiHost, port } = new URL(API);
   const http = await import('node:http');
   return await new Promise((resolve) => {
     const req = http.request(
-      { host: apiHost, port: port || 80, path, method: 'GET', headers: { Host: hostname }, timeout: timeoutMs },
+      { host: apiHost, port: port || 80, path, method: 'GET', headers: { Host: hostname, ...headers }, timeout: timeoutMs },
       (res) => {
         let body = '';
         res.on('data', (c) => { body += c; });
-        res.on('end', () => resolve({ status: res.statusCode, body }));
+        res.on('end', () => resolve({ status: res.statusCode, body, headers: res.headers }));
       },
     );
     req.on('timeout', () => { req.destroy(); resolve({ status: 0, body: 'timeout' }); });
@@ -272,6 +272,43 @@ async function lifecycleAssertions() {
     machine = json;
   });
 
+  // #103: labels set at create come back on every answer, filter a list, and
+  // follow the machine through promote. They live in a side table, never a
+  // column on machines (rule 6), so the create is the one write.
+  await step('labels set at create are returned, filter a list, and survive promote', async () => {
+    const tag = Math.random().toString(36).slice(2, 8);
+    const created = await request('/v1/machines', {
+      method: 'POST', body: { vcpus: 1, mem_mib: 512, labels: { task: `t-${tag}`, tier: 'sandbox' } },
+    });
+    assert(created.status === 201, `create: ${created.status} ${JSON.stringify(created.json)}`);
+    assert(created.json.labels?.task === `t-${tag}` && created.json.labels?.tier === 'sandbox',
+      `labels did not come back on create: ${JSON.stringify(created.json.labels)}`);
+    try {
+      const got = await request(`/v1/machines/${created.json.id}`);
+      assert(got.json.labels?.task === `t-${tag}`, `labels missing on GET: ${JSON.stringify(got.json.labels)}`);
+
+      const hit = await request(`/v1/machines?label=task=t-${tag}`);
+      assert(hit.status === 200 && hit.json.length === 1 && hit.json[0].id === created.json.id,
+        `?label= should find exactly the labelled machine: ${hit.status} ${hit.json.length}`);
+      const both = await request(`/v1/machines?label=task=t-${tag}&label=tier=sandbox`);
+      assert(both.json.length === 1, `two labels must both match: got ${both.json.length}`);
+      const miss = await request(`/v1/machines?label=task=t-${tag}&label=tier=prod`);
+      assert(miss.json.length === 0, `a label that does not match must exclude: got ${miss.json.length}`);
+      const unlabelled = await request(`/v1/machines?label=task=t-${tag}`);
+      assert(!unlabelled.json.some((m) => m.id === machine.id), 'the unlabelled machine leaked into the filter');
+
+      const promoted = await request(`/v1/machines/${created.json.id}/promote`, { method: 'POST', body: { replicas: 1 } });
+      assert(promoted.status === 200, `promote: ${promoted.status} ${JSON.stringify(promoted.json)}`);
+      assert(promoted.json.labels?.task === `t-${tag}`,
+        `promote must carry the labels onto the service: ${JSON.stringify(promoted.json.labels)}`);
+      const svcs = await request(`/v1/services?label=task=t-${tag}`);
+      assert(svcs.json.length === 1 && svcs.json[0].id === promoted.json.id,
+        `?label= on services should find the promoted one: ${svcs.json.length}`);
+    } finally {
+      await request(`/v1/machines/${created.json.id}`, { method: 'DELETE' });
+    }
+  });
+
   if (!machine) {
     console.log('  ! create failed; skipping the rest of the lifecycle');
     return;
@@ -303,6 +340,123 @@ async function lifecycleAssertions() {
       const [cwd, envVar] = out.split('\n');
       assert(cwd === '/tmp', `cwd = ${cwd}`);
       assert(envVar === 'present', `env = ${envVar}`);
+    });
+
+    // #99: files move over the same exec stream, as a tar in both
+    // directions. A binary file with every byte value is the case that
+    // catches a stream, a shell or a tar that is not 8-bit clean.
+    await step('a binary file survives a push and a pull through the CLI', async () => {
+      const { execFile } = await import('node:child_process');
+      const { createHash, randomBytes } = await import('node:crypto');
+      const { mkdtempSync, writeFileSync, readFileSync } = await import('node:fs');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+      const dir = mkdtempSync(join(tmpdir(), 'pilot-e2e-file-'));
+      const payload = Buffer.concat([randomBytes(64 * 1024), Buffer.from(Array.from({ length: 256 }, (_, i) => i))]);
+      const local = join(dir, 'payload.bin');
+      writeFileSync(local, payload);
+      const cli = (args) => new Promise((resolve) => {
+        execFile(CLI_ARGV0[0], [...CLI_ARGV0.slice(1), ...args],
+          { env: { ...process.env, PILOT_API: API, PILOT_API_KEY: KEY }, timeout: 120_000 },
+          (error, stdout, stderr) => resolve({ code: error?.code ?? (error ? 1 : 0), stdout, stderr }));
+      });
+      const push = await cli(['file', 'push', local, `${id}:/tmp/e2e/payload.bin`]);
+      assert(push.code === 0, `push exited ${push.code}: ${push.stderr}`);
+      const remoteSum = (await exec(id, 'sha256sum /tmp/e2e/payload.bin')).split(' ')[0];
+      const localSum = createHash('sha256').update(payload).digest('hex');
+      assert(remoteSum === localSum, `the machine holds ${remoteSum}, the file is ${localSum}`);
+      const back = join(dir, 'back.bin');
+      const pull = await cli(['file', 'pull', `${id}:/tmp/e2e/payload.bin`, back]);
+      assert(pull.code === 0, `pull exited ${pull.code}: ${pull.stderr}`);
+      const pulled = readFileSync(back);
+      assert(pulled.equals(payload), `the pulled file differs: ${pulled.length} bytes back, ${payload.length} sent`);
+    });
+
+    // #100: any TCP port inside a machine, from localhost, through the CLI.
+    // A server bound to 127.0.0.1 in the guest is unreachable by the URL
+    // (which serves 8080 only), so getting bytes from it proves the tunnel
+    // and not the router.
+    await step('pilot proxy reaches a port inside the machine that the URL cannot', async () => {
+      const { spawn } = await import('node:child_process');
+      await exec(id, 'nohup python3 -m http.server 9911 --bind 127.0.0.1 --directory /tmp >/tmp/hs.log 2>&1 & sleep 1; echo started');
+      const proxy = spawn(CLI_ARGV0[0], [...CLI_ARGV0.slice(1), 'proxy', '19911:9911', '-m', id],
+        { env: { ...process.env, PILOT_API: API, PILOT_API_KEY: KEY }, stdio: ['ignore', 'pipe', 'pipe'] });
+      let stderr = '';
+      proxy.stderr.on('data', (c) => { stderr += c; });
+      try {
+        let last = null;
+        const deadline = Date.now() + 30_000;
+        while (Date.now() < deadline) {
+          try {
+            const res = await fetch('http://127.0.0.1:19911/', { signal: AbortSignal.timeout(3000) });
+            last = { status: res.status, body: await res.text() };
+            if (res.status === 200) break;
+          } catch (err) {
+            last = { status: 0, body: String(err.message) };
+          }
+          await new Promise((r) => setTimeout(r, 500));
+        }
+        assert(last && last.status === 200, `through the tunnel: ${JSON.stringify(last)}; proxy said: ${stderr.slice(0, 200)}`);
+        assert(/Directory listing|<html/i.test(last.body), `not the guest's server: ${last.body.slice(0, 80)}`);
+      } finally {
+        proxy.kill('SIGTERM');
+        // The bracket keeps the pattern from matching this shell's own
+        // command line, which is how `pkill -f` kills the process running it.
+        await exec(id, 'pkill -f "[h]ttp.server 9911" || true');
+      }
+    });
+
+    // #102: a terminal session outlives the connection that opened it. The
+    // client here is the raw protocol -- a tty exec stream, closed without
+    // ceremony, the way a dropped link closes one -- and what it typed is
+    // still there for the next client that attaches.
+    await step('a console session survives its client leaving, and attach replays what it missed', async () => {
+      const marker = `e2e-session-${Math.random().toString(36).slice(2, 8)}`;
+      const protocols = [`authorization.bearer.${KEY}`];
+      const frames = (ws, ms) => new Promise((resolve) => {
+        const chunks = [];
+        let sessionId = '';
+        ws.addEventListener('message', async (ev) => {
+          if (typeof ev.data === 'string') {
+            try { const m = JSON.parse(ev.data); if (m.type === 'session') sessionId = m.id; } catch {}
+            return;
+          }
+          const buf = Buffer.from(await ev.data.arrayBuffer());
+          if (buf[0] === 1) chunks.push(buf.subarray(1)); // stdout frame
+        });
+        setTimeout(() => resolve({ text: Buffer.concat(chunks).toString('utf8'), sessionId }), ms);
+      });
+      const open = (path) => new Promise((resolve, reject) => {
+        const ws = new WebSocket(WS_API + path, protocols);
+        ws.addEventListener('open', () => resolve(ws));
+        ws.addEventListener('error', (e) => reject(new Error(`ws ${path}: ${e.message ?? 'error'}`)));
+      });
+      const stdin = (ws, s) => ws.send(Buffer.concat([Buffer.from([0]), Buffer.from(s)]));
+
+      const first = await open(`/v1/machines/${id}/exec/stream?cmd=/bin/sh&tty=true&stdin=true&rows=24&cols=80`);
+      const seen = frames(first, 2500);
+      setTimeout(() => stdin(first, `echo ${marker}; sleep 60\n`), 800);
+      const { sessionId } = await seen;
+      assert(sessionId, 'the agent must announce the session id in its first frames');
+      first.close(); // the link drops; the shell must not die with it
+      await new Promise((r) => setTimeout(r, 800));
+
+      const listed = await request(`/v1/machines/${id}/sessions`);
+      assert(listed.status === 200, `sessions: ${listed.status}`);
+      const live = listed.json.find((s) => s.id === sessionId);
+      assert(live && !live.ended, `the session should still be live: ${JSON.stringify(listed.json)}`);
+      assert(live.attached === false, 'nobody is attached once the client left');
+
+      const again = await open(`/v1/machines/${id}/attach/${sessionId}?tty=true`);
+      const replay = await frames(again, 2000);
+      assert(replay.text.includes(marker), `attach did not replay the scrollback: ${JSON.stringify(replay.text.slice(-200))}`);
+      stdin(again, '\x03exit\n');
+      await new Promise((r) => setTimeout(r, 1500));
+      again.close();
+
+      const after = await request(`/v1/machines/${id}/sessions`);
+      const ended = after.json.find((s) => s.id === sessionId);
+      assert(ended && ended.ended, `exit should end the session: ${JSON.stringify(after.json)}`);
     });
 
     await step('a non-zero exit is reported, not thrown away', async () => {
@@ -5009,6 +5163,49 @@ async function tenancyAssertions() {
     // be able to see, read or destroy.
     let id = null;
     try {
+      // #101: who may reach a URL. Public is the default and what every URL
+      // was before url_auth existed; org makes the router ask for an API key
+      // of the owning org. The mode is a side table read locally, so the
+      // data plane still depends on nothing but its own replica.
+      await step('an org-only URL asks for a key of its org, and a public one does not', async () => {
+        const gated = await request('/v1/machines', { method: 'POST', body: { vcpus: 1, mem_mib: 512, url_auth: 'org' } });
+        assert(gated.status === 201, `create gated: ${gated.status} ${JSON.stringify(gated.json)}`);
+        assert(gated.json.url_auth === 'org', `url_auth did not come back: ${JSON.stringify(gated.json.url_auth)}`);
+        try {
+          const host = new URL(gated.json.url).host;
+          const anon = await viaRouter(host, '/', 20_000);
+          assert(anon.status === 401, `no key should be 401, got ${anon.status}: ${anon.body.slice(0, 80)}`);
+          assert(/bearer/i.test(anon.headers?.['www-authenticate'] ?? ''), 'a 401 must say Bearer in WWW-Authenticate');
+          const ours = await viaRouter(host, '/', 60_000, { Authorization: `Bearer ${KEY}` });
+          assert(ours.status !== 401 && ours.status !== 403, `the owning org's key was refused: ${ours.status}`);
+          const theirs = await viaRouter(host, '/', 20_000, { Authorization: `Bearer ${secondKey}` });
+          assert(theirs.status === 403, `another org's key should be 403, got ${theirs.status}`);
+          const bogus = await viaRouter(host, '/', 20_000, { Authorization: 'Bearer pilot_nope' });
+          assert(bogus.status === 401, `an unknown key should be 401, got ${bogus.status}`);
+
+          const opened = await request(`/v1/machines/${gated.json.id}`, { method: 'PATCH', body: { url_auth: 'public' } });
+          assert(opened.status === 200 && opened.json.url_auth === 'public', `PATCH to public: ${opened.status} ${JSON.stringify(opened.json)}`);
+          const now = await viaRouter(host, '/', 20_000);
+          assert(now.status !== 401 && now.status !== 403, `public again should not be gated, got ${now.status}`);
+
+          const bad = await request(`/v1/machines/${gated.json.id}`, { method: 'PATCH', body: { url_auth: 'friends' } });
+          assert(bad.status === 400, `a made-up mode must be refused, got ${bad.status}`);
+        } finally {
+          await request(`/v1/machines/${gated.json.id}`, { method: 'DELETE' });
+        }
+        // And a machine with no mode recorded is public, which is what every
+        // URL was before url_auth existed.
+        const open = await request('/v1/machines', { method: 'POST', body: { vcpus: 1, mem_mib: 512 } });
+        assert(open.status === 201, `create public: ${open.status}`);
+        try {
+          assert((open.json.url_auth ?? 'public') === 'public', `a machine with no mode reads ${open.json.url_auth}`);
+          const plain = await viaRouter(new URL(open.json.url).host, '/', 20_000);
+          assert(plain.status !== 401 && plain.status !== 403, `a public URL must not be gated, got ${plain.status}`);
+        } finally {
+          await request(`/v1/machines/${open.json.id}`, { method: 'DELETE' });
+        }
+      });
+
       await step('a machine created by one org is invisible to another', async () => {
         const created = await request('/v1/machines', {
           method: 'POST',
@@ -5106,7 +5303,13 @@ async function tenancyAssertions() {
 // structured at all.
 // ---------------------------------------------------------------------------
 
-const CLI_BIN = new URL('../packages/cli/bin/pilot.js', import.meta.url).pathname;
+// The CLI under test. PILOT_BIN names the Go binary (apps/pilot); without it
+// the TypeScript entry point runs under this node, which is how the battery
+// drove the CLI before the rewrite. Both are exercised through the same
+// assertions, so a divergence between them is a failure here, not a surprise
+// for whoever swaps ~/.local/bin/pilot.
+const CLI_BIN = process.env.PILOT_BIN || new URL('../packages/cli/bin/pilot.js', import.meta.url).pathname;
+const CLI_ARGV0 = process.env.PILOT_BIN ? [CLI_BIN] : [process.execPath, CLI_BIN];
 const DJANGO_FIXTURE = new URL('../packages/cli/test/fixtures/django-app', import.meta.url).pathname;
 const WEBJS_FIXTURE = new URL('../packages/cli/test/fixtures/webjs-app', import.meta.url).pathname;
 const WORKSPACE_FIXTURE = new URL('../packages/cli/test/fixtures/workspace-app', import.meta.url).pathname;
@@ -5116,7 +5319,7 @@ const MCP_TOOLS = [
   'build', 'build_logs', 'checkpoint', 'create_machine', 'deploy',
   'destroy_machine', 'diagnose', 'docs', 'domains', 'exec',
   'exec_stream', 'generate_dockerfile', 'init', 'list_machines', 'list_services',
-  'logs', 'plan', 'promote', 'releases', 'restore',
+  'logs', 'plan', 'promote', 'pull_file', 'push_file', 'releases', 'restore',
   'rollback', 'service', 'status', 'volumes',
 ];
 
@@ -5162,8 +5365,12 @@ async function agentDeployAssertions(REFLINK) {
 
     await step('`pilot mcp` starts and offers exactly the tools the README lists', async () => {
       const transport = new StdioClientTransport({
-        command: process.execPath,
-        args: [CLI_BIN, 'mcp'],
+        // The CLI under test, spawned the way a shell would: the Go binary
+        // runs itself, the TypeScript entry runs under this node. Hardcoding
+        // node here ran `node <go binary> mcp`, which node fails to parse as
+        // JavaScript and the client reports as "Connection closed".
+        command: CLI_ARGV0[0],
+        args: [...CLI_ARGV0.slice(1), 'mcp'],
         env: { PATH: process.env.PATH, PILOT_API_URL: API, PILOT_API_KEY: KEY },
         stderr: 'pipe',
       });
@@ -5479,7 +5686,7 @@ async function agentDeployAssertions(REFLINK) {
       // here is the environment override, which is what a CI runner uses.
       const { execFile } = await import('node:child_process');
       const run = (args, env) => new Promise((resolve) => {
-        execFile(process.execPath, [CLI_BIN, ...args],
+        execFile(CLI_ARGV0[0], [...CLI_ARGV0.slice(1), ...args],
           { env, timeout: 900_000, maxBuffer: 16 * 1024 * 1024 },
           (error, stdout, stderr) => resolve({ code: error?.code ?? (error ? 1 : 0), stdout, stderr }));
       });

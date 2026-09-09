@@ -81,10 +81,25 @@ type Machine struct {
 	// disk and volume, and loses everything that was in memory.
 	LastStart   string `json:"last_start,omitempty"`
 	LastStartAt int64  `json:"last_start_at,omitempty"`
+	// Labels were attached at create, for finding the machine again.
+	Labels map[string]string `json:"labels,omitempty"`
+	// URLAuth is who may reach the URL: "public" (the default) or "org".
+	URLAuth string `json:"url_auth,omitempty"`
 }
 
 // CreateMachineRequest creates a machine from exactly one source: a built
 // image, a template, or a checkpoint.
+// URL auth modes.
+const (
+	URLAuthPublic = "public"
+	URLAuthOrg    = "org"
+)
+
+// UpdateMachineRequest is PATCH /v1/machines/{id}: who may reach the URL.
+type UpdateMachineRequest struct {
+	URLAuth *string `json:"url_auth,omitempty"`
+}
+
 type CreateMachineRequest struct {
 	Name       string `json:"name,omitempty"` // generated when empty
 	Image      string `json:"image,omitempty"`
@@ -109,6 +124,8 @@ type CreateMachineRequest struct {
 	// fleet key before any row is written. secret:// references are resolved
 	// client-side, before the request is built.
 	SecretEnv map[string]string `json:"secret_env,omitempty"`
+	Labels    map[string]string `json:"labels,omitempty"`
+	URLAuth   string            `json:"url_auth,omitempty"` // public|org; default public
 }
 
 // ExecRequest runs a command inside a machine, buffered.
@@ -217,6 +234,9 @@ type Service struct {
 	Branch     string `json:"branch,omitempty"`
 	Autodeploy bool   `json:"autodeploy"`
 	CreatedAt  int64  `json:"created_at"`
+	// Labels were attached at create, or copied from the machine promote made it from.
+	Labels  map[string]string `json:"labels,omitempty"`
+	URLAuth string            `json:"url_auth,omitempty"`
 }
 
 type CreateServiceRequest struct {
@@ -246,6 +266,8 @@ type CreateServiceRequest struct {
 	Volume     string            `json:"volume,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 	SecretEnv  map[string]string `json:"secret_env,omitempty"`
+	Labels     map[string]string `json:"labels,omitempty"`
+	URLAuth    string            `json:"url_auth,omitempty"` // public|org; default public
 	Repo       string            `json:"repo,omitempty"`
 	Branch     string            `json:"branch,omitempty"`
 	Autodeploy bool              `json:"autodeploy,omitempty"`
@@ -440,6 +462,8 @@ type UpdateServiceRequest struct {
 	// can get one. Accepted exactly once: a service that already has an
 	// address is a 409 and an empty string a 400, because URLs are permanent.
 	Domain *string `json:"domain,omitempty"`
+	// URLAuth changes who may reach the address: "public" or "org".
+	URLAuth *string `json:"url_auth,omitempty"`
 }
 
 type CreateAPIKeyRequest struct {
@@ -632,6 +656,7 @@ type RepoRef struct {
 // ENCODING of one, which hostd receives as a json.RawMessage. It is held to
 // Knobs by TestKnobsPatchCoversEveryKnob instead.
 var wireTypes = []any{
+	UpdateMachineRequest{},
 	Knobs{},
 	Machine{},
 	CreateMachineRequest{},

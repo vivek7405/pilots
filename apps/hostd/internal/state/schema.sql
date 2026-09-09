@@ -392,3 +392,27 @@ CREATE TABLE IF NOT EXISTS machine_cpu (       -- writer: the host that writes t
   last_start_at INTEGER,
   updated_at    INTEGER
 );
+
+-- Labels a caller attached at create, for finding an object again: an agent
+-- running twenty sandboxes for one task has only name prefixes otherwise.
+-- Keyed like machine_cpu: the id of the machine or service the labels
+-- describe, written by the host that writes that object's row, and written
+-- ONCE at create so the CRDT merge has nothing to corrupt. A side table
+-- rather than a column on machines or services, which have rows (rule 6).
+CREATE TABLE IF NOT EXISTS machine_labels (    -- writer: the host that writes the object row it describes (write-once)
+  id         TEXT NOT NULL PRIMARY KEY,        -- machine or service id
+  kind       TEXT,     -- machine|service
+  labels     TEXT,     -- json object, string -> string
+  updated_at INTEGER
+);
+
+-- Who may reach an object's URL. Absent means public, which is what every
+-- URL was before this table existed; `org` means the router asks for an API
+-- key of the owning org. Keyed and written like machine_labels: the object's
+-- id, by the host that writes its row, so the merge has one writer.
+CREATE TABLE IF NOT EXISTS url_auth (          -- writer: the host that writes the object row it describes
+  id         TEXT NOT NULL PRIMARY KEY,        -- machine or service id
+  kind       TEXT,     -- machine|service
+  mode       TEXT,     -- public|org
+  updated_at INTEGER
+);

@@ -8,6 +8,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -398,9 +400,39 @@ func run() error {
 	}
 
 	routerOpts := router.Options{
-		Domain:  cfg.WorkloadDomain,
-		HostID:  cfg.HostID,
-		Store:   store,
+		Domain: cfg.WorkloadDomain,
+		HostID: cfg.HostID,
+		Store:  store,
+		// On a single box this reads the local SQLite store; a store error
+		// there means the host itself is broken, and the router has nothing
+		// better to say than public. On a fleet the cache below replaces it,
+		// so the request path holds no query at all -- see routerOpts.URLAuthOf.
+		URLAuthOf: func(ctx context.Context, id string) string {
+			u, err := store.GetURLAuth(ctx, id)
+			if err != nil || u == nil || u.Mode == "" {
+				return api.URLAuthPublic
+			}
+			return u.Mode
+		},
+		OrgOf: func(ctx context.Context, id string) (string, bool) {
+			t, err := store.GetTenancy(ctx, id)
+			if err != nil {
+				return "", false
+			}
+			return t.OrgID, true
+		},
+		KeyOrg: func(ctx context.Context, key string) (string, bool) {
+			sum := sha256.Sum256([]byte(key))
+			hash := hex.EncodeToString(sum[:])
+			rec, err := store.GetAPIKeyByHash(ctx, hash)
+			if err != nil {
+				return "", false
+			}
+			if revoked, err := store.IsRevoked(ctx, hash); err != nil || revoked {
+				return "", false
+			}
+			return rec.OrgID, true
+		},
 		Manager: mgr,
 		SlotFor: mgr.SlotFor,
 	}
@@ -424,6 +456,12 @@ func run() error {
 		// The hot path reads the subscription cache, not the agent.
 		routerOpts.Lookup = f.cache.MachineByName
 		routerOpts.Service = f.cache.ServiceReplicas
+		// Who may reach a URL, from the same replica the rest of the hot path
+		// reads. A live query here would have a failure mode whose only two
+		// answers are serving a gated URL to anyone or refusing a public one.
+		routerOpts.URLAuthOf = func(_ context.Context, id string) string {
+			return f.cache.URLAuth(id)
+		}
 	}
 	rtr := router.New(routerOpts)
 

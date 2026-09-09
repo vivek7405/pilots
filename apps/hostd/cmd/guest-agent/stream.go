@@ -88,6 +88,12 @@ func handleExecStream(w http.ResponseWriter, r *http.Request) {
 	// Detached from the HTTP request context: the command should outlive the
 	// handler's own lifetime bookkeeping and end only when it exits or the
 	// socket closes.
+	// A terminal outlives its connection: see sessions.go. Everything below
+	// is the piped, non-tty stream, whose life is its connection's.
+	if tty {
+		serveTTYSession(conn, argv, q, rows, cols)
+		return
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

@@ -26,6 +26,15 @@ func (m *Machines) Get(ctx context.Context, id string) (*Machine, error) {
 	return &out, m.c.do(ctx, http.MethodGet, "/v1/machines/"+url.PathEscape(id), nil, &out)
 }
 
+// Update changes who may reach the machine's URL.
+func (m *Machines) Update(ctx context.Context, id string, req UpdateMachineRequest) (*Machine, error) {
+	var out Machine
+	if err := m.c.do(ctx, http.MethodPatch, "/v1/machines/"+url.PathEscape(id), req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 func (m *Machines) Destroy(ctx context.Context, id string) error {
 	return m.c.do(ctx, http.MethodDelete, "/v1/machines/"+url.PathEscape(id), nil, nil)
 }

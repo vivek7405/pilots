@@ -148,3 +148,11 @@ func (f *fakeManager) MachineVolume(context.Context, string) (*MachineVolume, er
 }
 
 func (f *fakeManager) CollectMetrics() { f.collected++ }
+
+func (f *fakeManager) TCPStream(http.ResponseWriter, *http.Request, string, int) error { return nil }
+
+func (f *fakeManager) SessionsJSON(context.Context, string) ([]byte, error) { return []byte("[]"), nil }
+func (f *fakeManager) AttachStream(http.ResponseWriter, *http.Request, string, string) error {
+	return nil
+}
+func (f *fakeManager) KillSession(context.Context, string, string) error { return nil }

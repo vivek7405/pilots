@@ -79,6 +79,13 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	// Two ways of saying opposite things about the same field. Refused rather
 	// than resolved by precedence, because either guess silently gives the
 	// caller a service that is not the one they asked for.
+	if req.URLAuth != "" && req.URLAuth != URLAuthPublic && req.URLAuth != URLAuthOrg {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "url_auth must be public or org", "pass url_auth: public, or url_auth: org", nil)
+		return
+	}
+	if !checkLabels(w, req.Labels) {
+		return
+	}
 	if req.Private && req.Domain != "" {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest,
 			"private and domain contradict: a private service has no address",
@@ -284,10 +291,27 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 		writeMapped(w, err)
 		return
 	}
+	if len(req.Labels) > 0 {
+		if err := d.Store.PutLabels(r.Context(), &state.Labels{ID: svc.ID, Kind: "service", Labels: req.Labels, UpdatedAt: time.Now().Unix()}); err != nil {
+			writeMapped(w, err)
+			return
+		}
+	}
+	if req.URLAuth == URLAuthOrg {
+		if err := d.Store.PutURLAuth(r.Context(), &state.URLAuth{ID: svc.ID, Kind: "service", Mode: URLAuthOrg, UpdatedAt: time.Now().Unix()}); err != nil {
+			writeMapped(w, err)
+			return
+		}
+	}
 	out := d.serviceToAPI(*svc, req.OrgID)
 	if volume != nil {
 		out.VolumeID = volume.ID
 	}
+	// Echoed, the way the machine create echoes them: a client that reads
+	// url_auth back from the create to confirm the service is gated would
+	// otherwise be told "public" about a service that is not.
+	out.Labels = req.Labels
+	out.URLAuth = orDefaultMode(req.URLAuth)
 	writeJSON(w, http.StatusCreated, out)
 }
 
@@ -326,7 +350,18 @@ func (d Deps) handleListServices(w http.ResponseWriter, r *http.Request) {
 		row := d.serviceToAPI(svc, owner)
 		row.VolumeID = mounts[svc.ID]
 		row.DependsOn = d.dependsOn(svc, groups[siblingKey{org: owner, app: svc.App}])
+		row.Labels = d.labelsOf(r.Context(), svc.ID)
+		row.URLAuth = d.urlAuthOf(r.Context(), svc.ID)
 		out = append(out, row)
+	}
+	if want := labelFilter(r); len(want) > 0 {
+		kept := out[:0]
+		for _, s := range out {
+			if matchesLabels(s.Labels, want) {
+				kept = append(kept, s)
+			}
+		}
+		out = kept
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -414,6 +449,16 @@ func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
 		}
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(), NextBadBody, nil)
 		return
+	}
+	if req.URLAuth != nil {
+		if *req.URLAuth != URLAuthPublic && *req.URLAuth != URLAuthOrg {
+			WriteError(w, http.StatusBadRequest, CodeBadRequest, "url_auth must be public or org", "pass url_auth: public, or url_auth: org", nil)
+			return
+		}
+		if err := d.Store.PutURLAuth(r.Context(), &state.URLAuth{ID: svc.ID, Kind: "service", Mode: *req.URLAuth, UpdatedAt: time.Now().Unix()}); err != nil {
+			writeMapped(w, err)
+			return
+		}
 	}
 	// A replica is a machine, so a scale-up is admitted against the same
 	// limits the create was admitted against. Nothing downstream would catch
@@ -674,6 +719,25 @@ func (d Deps) handlePromote(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeMapped(w, err)
 		return
+	}
+	// The machine's labels are the service's now: promote changes the
+	// lifecycle, not the identity, and a label is how a caller finds it.
+	if l := d.labelsOf(r.Context(), r.PathValue("id")); len(l) > 0 {
+		if err := d.Store.PutLabels(r.Context(), &state.Labels{ID: svc.ID, Kind: "service", Labels: l, UpdatedAt: time.Now().Unix()}); err != nil {
+			writeMapped(w, err)
+			return
+		}
+	}
+	// And so is who may reach its URL. The URL does not change across a
+	// promote, so neither may the answer to "who may reach it": without this
+	// an org-gated sandbox becomes a public service the moment it is
+	// promoted, and every replica the service gains afterwards -- which
+	// carries no mode of its own -- would be reachable by anyone.
+	if mode := d.urlAuthOf(r.Context(), r.PathValue("id")); mode == URLAuthOrg {
+		if err := d.Store.PutURLAuth(r.Context(), &state.URLAuth{ID: svc.ID, Kind: "service", Mode: mode, UpdatedAt: time.Now().Unix()}); err != nil {
+			writeMapped(w, err)
+			return
+		}
 	}
 	volumeID, verr := d.volumeOf(r.Context(), svc.ID)
 	if verr != nil {

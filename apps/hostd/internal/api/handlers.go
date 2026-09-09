@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/quota"
@@ -40,6 +41,12 @@ type Manager interface {
 	// returned only before anything was written (a wake that failed, a machine
 	// that is not running); once the upgrade has been attempted it is nil.
 	ExecStream(w http.ResponseWriter, r *http.Request, machineID string) error
+	// TCPStream carries one TCP connection to a port inside the machine.
+	TCPStream(w http.ResponseWriter, r *http.Request, machineID string, port int) error
+	// Terminal sessions, answered by the guest agent.
+	SessionsJSON(ctx context.Context, machineID string) ([]byte, error)
+	AttachStream(w http.ResponseWriter, r *http.Request, machineID, session string) error
+	KillSession(ctx context.Context, machineID, session string) error
 	// LogTail is Logs from a byte offset, for a follow. nil, nil when nothing
 	// new has been written. It reads the file and nothing else: a follow polls
 	// it twice a second, and whether the machine still exists is asked far
@@ -58,9 +65,11 @@ type Manager interface {
 // orgID is passed in rather than looked up here: a list endpoint already knows
 // every row's owner from the pass it made to filter them, and re-asking per
 // row would turn one lookup into N.
-func (d Deps) toAPI(row state.Machine, orgID string, cpu state.MachineCPU) Machine {
+func (d Deps) toAPI(row state.Machine, orgID string, cpu state.MachineCPU, labels map[string]string, urlAuth string) Machine {
 	return Machine{
-		ID: row.ID, Name: row.Name, HostID: row.HostID, State: row.State,
+		Labels:  labels,
+		URLAuth: urlAuth,
+		ID:      row.ID, Name: row.Name, HostID: row.HostID, State: row.State,
 		OrgID:        orgID,
 		Knobs:        ParseKnobs(row.KindKnobs),
 		ImageRef:     row.ImageRef,
@@ -77,6 +86,115 @@ func (d Deps) toAPI(row state.Machine, orgID string, cpu state.MachineCPU) Machi
 		LastStart:    cpu.LastStart,
 		LastStartAt:  cpu.LastStartAt,
 	}
+}
+
+// urlAuthOf reads who may reach an object's URL; nothing recorded is public,
+// which is what every URL was before the table existed.
+func (d Deps) urlAuthOf(ctx context.Context, id string) string {
+	u, err := d.Store.GetURLAuth(ctx, id)
+	if err != nil || u == nil || u.Mode == "" {
+		return URLAuthPublic
+	}
+	return u.Mode
+}
+
+func validURLAuth(mode string) bool {
+	return mode == "" || mode == URLAuthPublic || mode == URLAuthOrg
+}
+
+// Label bounds. A labels map goes into a CRDT table replicated to every host
+// and cached in each one's memory, so its size is fleet-wide cost rather than
+// one row's: a caller that attached a megabyte of them (the body limit, and
+// nothing below it said otherwise) would gossip that megabyte to the whole
+// fleet for as long as the object lives.
+const (
+	maxLabels      = 32
+	maxLabelKey    = 64
+	maxLabelValue  = 256
+	labelsTooLarge = "at most 32 labels, keys up to 64 bytes and values up to 256"
+)
+
+// checkLabels refuses a labels map that is outside those bounds. An empty key
+// goes with them: `?label=k=v` cannot express one, so it could never be
+// matched again.
+func checkLabels(w http.ResponseWriter, labels map[string]string) bool {
+	if len(labels) > maxLabels {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest,
+			fmt.Sprintf("%d labels is too many", len(labels)), labelsTooLarge, nil)
+		return false
+	}
+	for k, v := range labels {
+		if k == "" || len(k) > maxLabelKey || len(v) > maxLabelValue {
+			WriteError(w, http.StatusBadRequest, CodeBadRequest,
+				fmt.Sprintf("label %q is not within the limits", k), labelsTooLarge, nil)
+			return false
+		}
+	}
+	return true
+}
+
+func orDefaultMode(mode string) string {
+	if mode == "" {
+		return URLAuthPublic
+	}
+	return mode
+}
+
+// handleUpdateMachine is PATCH /v1/machines/{id}: the one thing a machine
+// changes after create is who may reach its URL.
+func (d Deps) handleUpdateMachine(w http.ResponseWriter, r *http.Request) {
+	row, ok := d.ownedMachine(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	var req UpdateMachineRequest
+	if err := decodeBody(r, &req); err != nil {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "bad request body", NextBadBody, nil)
+		return
+	}
+	if req.URLAuth == nil {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "nothing to change", "pass url_auth: public, or url_auth: org", nil)
+		return
+	}
+	if *req.URLAuth != URLAuthPublic && *req.URLAuth != URLAuthOrg {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "url_auth must be public or org", "pass url_auth: public, or url_auth: org", nil)
+		return
+	}
+	if err := d.Store.PutURLAuth(r.Context(), &state.URLAuth{ID: row.ID, Kind: "machine", Mode: *req.URLAuth, UpdatedAt: time.Now().Unix()}); err != nil {
+		writeMapped(w, err)
+		return
+	}
+	owner, _ := d.tenancy().OrgOf(r.Context(), row.ID)
+	writeJSON(w, http.StatusOK, d.toAPI(*row, owner, d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), *req.URLAuth))
+}
+
+// labelsOf reads an object's labels, and reads "none recorded" as none.
+func (d Deps) labelsOf(ctx context.Context, id string) map[string]string {
+	l, err := d.Store.GetLabels(ctx, id)
+	if err != nil || l == nil {
+		return nil
+	}
+	return l.Labels
+}
+
+// labelFilter is the ?label=k=v query, repeatable; every pair must match.
+func labelFilter(r *http.Request) map[string]string {
+	want := map[string]string{}
+	for _, kv := range r.URL.Query()["label"] {
+		if k, v, ok := strings.Cut(kv, "="); ok && k != "" {
+			want[k] = v
+		}
+	}
+	return want
+}
+
+func matchesLabels(have, want map[string]string) bool {
+	for k, v := range want {
+		if have[k] != v {
+			return false
+		}
+	}
+	return true
 }
 
 func toAPICheckpoint(c state.Checkpoint) Checkpoint {
@@ -179,6 +297,13 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if !validURLAuth(req.URLAuth) {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "url_auth must be public or org", "pass url_auth: public, or url_auth: org", nil)
+		return
+	}
+	if !checkLabels(w, req.Labels) {
+		return
+	}
 	if !d.checkQuota(w, r, quota.Delta{
 		Machines: 1,
 		VCPUs:    orDefault(req.VCPUs, 1),
@@ -192,7 +317,19 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 		writeMapped(w, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, d.toAPI(*row, req.OrgID, d.startOf(r.Context(), row.ID)))
+	if len(req.Labels) > 0 {
+		if err := d.Store.PutLabels(r.Context(), &state.Labels{ID: row.ID, Kind: "machine", Labels: req.Labels, UpdatedAt: time.Now().Unix()}); err != nil {
+			writeMapped(w, err)
+			return
+		}
+	}
+	if req.URLAuth == URLAuthOrg {
+		if err := d.Store.PutURLAuth(r.Context(), &state.URLAuth{ID: row.ID, Kind: "machine", Mode: URLAuthOrg, UpdatedAt: time.Now().Unix()}); err != nil {
+			writeMapped(w, err)
+			return
+		}
+	}
+	writeJSON(w, http.StatusCreated, d.toAPI(*row, req.OrgID, d.startOf(r.Context(), row.ID), req.Labels, orDefaultMode(req.URLAuth)))
 }
 
 // orDefault mirrors the machine manager's own defaulting, so the quota check
@@ -212,13 +349,18 @@ func (d Deps) handleListMachines(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	org, narrow := listOrg(r)
+	want := labelFilter(r)
 	out := make([]Machine, 0, len(rows))
 	for _, row := range rows {
 		owner, ok := d.visible(r, row.ID, org, narrow)
 		if !ok {
 			continue
 		}
-		out = append(out, d.toAPI(row, owner, d.startOf(r.Context(), row.ID)))
+		labels := d.labelsOf(r.Context(), row.ID)
+		if !matchesLabels(labels, want) {
+			continue
+		}
+		out = append(out, d.toAPI(row, owner, d.startOf(r.Context(), row.ID), labels, d.urlAuthOf(r.Context(), row.ID)))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -229,7 +371,7 @@ func (d Deps) handleGetMachine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), row.ID)
-	writeJSON(w, http.StatusOK, d.toAPI(*row, owner, d.startOf(r.Context(), row.ID)))
+	writeJSON(w, http.StatusOK, d.toAPI(*row, owner, d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), d.urlAuthOf(r.Context(), row.ID)))
 }
 
 func (d Deps) handleDestroyMachine(w http.ResponseWriter, r *http.Request) {
@@ -411,7 +553,7 @@ func (d Deps) handleRedeploy(w http.ResponseWriter, r *http.Request) {
 		writeMapped(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, d.toAPI(*row, OrgID(r.Context()), d.startOf(r.Context(), row.ID)))
+	writeJSON(w, http.StatusOK, d.toAPI(*row, OrgID(r.Context()), d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), d.urlAuthOf(r.Context(), row.ID)))
 }
 
 func (d Deps) handleCreateCheckpoint(w http.ResponseWriter, r *http.Request) {
@@ -468,7 +610,7 @@ func (d Deps) handleRestoreCheckpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), row.ID)
-	writeJSON(w, http.StatusOK, d.toAPI(*row, owner, d.startOf(r.Context(), row.ID)))
+	writeJSON(w, http.StatusOK, d.toAPI(*row, owner, d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), d.urlAuthOf(r.Context(), row.ID)))
 }
 
 // handleCheckpointStatus lets a caller learn when a checkpoint became durable.

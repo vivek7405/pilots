@@ -180,9 +180,16 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("POST /v1/machines", d.handleCreateMachine)
 	mux.HandleFunc("GET /v1/machines", d.handleListMachines)
 	mux.HandleFunc("GET /v1/machines/{id}", d.handleGetMachine)
+	mux.HandleFunc("PATCH /v1/machines/{id}", d.handleUpdateMachine)
 	mux.HandleFunc("DELETE /v1/machines/{id}", d.handleDestroyMachine)
 	mux.HandleFunc("POST /v1/machines/{id}/exec", d.handleExec)
 	mux.HandleFunc("GET /v1/machines/{id}/exec/stream", d.handleExecStream)
+	// One TCP connection to a port inside the machine, for `pilot proxy`.
+	mux.HandleFunc("GET /v1/machines/{id}/tcp/{port}", d.handleTCPStream)
+	// Terminal sessions that outlive their connection: list, attach, end.
+	mux.HandleFunc("GET /v1/machines/{id}/sessions", d.handleListSessions)
+	mux.HandleFunc("GET /v1/machines/{id}/attach/{session}", d.handleAttachSession)
+	mux.HandleFunc("POST /v1/machines/{id}/sessions/{session}/kill", d.handleKillSession)
 	// The sprites alias, name-keyed: see handleSpriteExec.
 	mux.HandleFunc("GET /v1/sprites/{name}/exec", d.handleSpriteExec)
 	mux.HandleFunc("GET /v1/machines/{id}/logs", d.handleLogs)

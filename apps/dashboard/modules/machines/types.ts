@@ -44,4 +44,16 @@ export interface Machine {
   release_id?: string;
   /** The app group a service belongs to, which is what `<name>.internal` resolves within. */
   app?: string;
+  /**
+   * Labels attached at create, for finding a machine again: an agent running
+   * twenty sandboxes for one task has only name prefixes otherwise. The list's
+   * text filter matches them as `key=value`.
+   */
+  labels?: Record<string, string>;
+  /**
+   * Who may reach the URL: `public` (the default, and what every URL was
+   * before the mode existed) or `org`, which makes the router demand an API
+   * key of the owning org. Absent means public.
+   */
+  url_auth?: 'public' | 'org';
 }

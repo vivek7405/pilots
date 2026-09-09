@@ -313,19 +313,35 @@ func trackedPIDs() map[int]bool {
 	return out
 }
 
-// A client that goes away takes its terminal with it.
+// A tty stream is a session that OUTLIVES its client (sessions.go). Closing
+// the connection detaches; the shell keeps running, and killing the session
+// is what ends it. This is the opposite of a non-tty stream, whose life is
+// its connection's, and it is what `pilot attach` reconnects to.
 //
-// A pipe stream ends itself: the deferred stdin close delivers EOF and the
-// command exits. A terminal has no such end, and a shell waiting for input
-// writes nothing, so without an explicit cancel the output pump parks on the
-// PTY master forever -- and with it the handler, the connection and the shell,
-// one set per closed browser tab.
-//
-// Counterfactual: drop the cancel in the read loop and this test fails on the
-// poll below, because the handler never returns and never untracks its PID.
-func TestClosingATTYStreamEndsTheShell(t *testing.T) {
+// Counterfactual: run the tty branch under the connection's context again
+// and the shell dies on CloseNow, so the kill below finds nothing and the
+// "still alive after the client left" check fails.
+func TestATTYSessionOutlivesItsClientAndDiesOnKill(t *testing.T) {
 	before := trackedPIDs()
-	conn, _ := dialStream(t, "tty=true&cmd=sh&cmd=-c&cmd=read+x")
+	conn, ctx := dialStream(t, "tty=true&cmd=sh&cmd=-c&cmd=read+x")
+
+	// The agent announces the session id in a text frame; read until we see it.
+	var sessionID string
+	for sessionID == "" {
+		typ, data, err := conn.Read(ctx)
+		if err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		if typ == websocket.MessageText {
+			var msg struct {
+				Type string `json:"type"`
+				ID   string `json:"id"`
+			}
+			if json.Unmarshal(data, &msg) == nil && msg.Type == "session" {
+				sessionID = msg.ID
+			}
+		}
+	}
 
 	var pid int
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
@@ -343,13 +359,24 @@ func TestClosingATTYStreamEndsTheShell(t *testing.T) {
 		t.Fatal("the shell never started")
 	}
 
+	// The client leaves. The shell must NOT die with it.
 	conn.CloseNow()
+	time.Sleep(500 * time.Millisecond)
+	if !trackedPIDs()[pid] {
+		t.Fatal("the shell died when its client left; a session must outlive the connection")
+	}
+	s, ok := lookupSession(sessionID)
+	if !ok {
+		t.Fatalf("session %s was forgotten while still running", sessionID)
+	}
 
+	// Killing the session ends the process.
+	s.kill()
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
 		if !trackedPIDs()[pid] {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("the handler never returned: the shell outlived the client that asked for it")
+	t.Fatal("the shell survived a kill")
 }

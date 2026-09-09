@@ -51,6 +51,11 @@ type Cache struct {
 	// on it.
 	hostCPU    map[string]state.HostCPU
 	machineCPU map[string]state.MachineCPU
+	// urlAuth is who may reach each object's URL. The router reads it on
+	// EVERY request it serves, so it is a map here rather than a query: a
+	// store read on that path has a failure mode, and the only two answers
+	// to it are serving a gated URL anonymously or refusing a public one.
+	urlAuth map[string]state.URLAuth
 	// revoked is the set of killed key hashes, checked on every request. Held
 	// as a set because nothing reads the revocation time on this path.
 	revoked map[string]struct{}
@@ -167,6 +172,17 @@ func NewCache(ctx context.Context, client *Client) (*Cache, error) {
 		hostCPU.Close()
 		return nil, err
 	}
+	urlAuth, err := c.subscribeURLAuth(ctx)
+	if err != nil {
+		machines.Close()
+		hosts.Close()
+		services.Close()
+		tenancy.Close()
+		revocations.Close()
+		hostCPU.Close()
+		machineCPU.Close()
+		return nil, err
+	}
 
 	c.mu.Lock()
 	c.ready = true
@@ -179,6 +195,7 @@ func NewCache(ctx context.Context, client *Client) (*Cache, error) {
 	go c.follow(ctx, revocations, "api_key_revocations", c.subscribeRevocations)
 	go c.follow(ctx, hostCPU, "host_cpu", c.subscribeHostCPU)
 	go c.follow(ctx, machineCPU, "machine_cpu", c.subscribeMachineCPU)
+	go c.follow(ctx, urlAuth, "url_auth", c.subscribeURLAuth)
 	return c, nil
 }
 
@@ -214,6 +231,33 @@ func (c *Cache) subscribeHostCPU(ctx context.Context) (*Subscription, error) {
 }
 
 // subscribeMachineCPU materializes which vendor photographed each memory image.
+func (c *Cache) subscribeURLAuth(ctx context.Context) (*Subscription, error) {
+	sub, err := c.client.Subscribe(ctx, `SELECT id, kind, mode FROM url_auth`)
+	if err != nil {
+		return nil, err
+	}
+
+	fresh := map[string]state.URLAuth{}
+	rows := sub.Rows()
+	for rows.Next() {
+		var u state.URLAuth
+		if err := rows.Scan(&u.ID, &u.Kind, &u.Mode); err != nil {
+			sub.Close()
+			return nil, err
+		}
+		fresh[u.ID] = u
+	}
+	if err := rows.Err(); err != nil {
+		sub.Close()
+		return nil, err
+	}
+
+	c.mu.Lock()
+	c.urlAuth = fresh
+	c.mu.Unlock()
+	return sub, nil
+}
+
 func (c *Cache) subscribeMachineCPU(ctx context.Context) (*Subscription, error) {
 	sub, err := c.client.Subscribe(ctx,
 		`SELECT id, kind, vendor, last_start, last_start_at FROM machine_cpu`)
@@ -542,6 +586,18 @@ func (c *Cache) apply(table string, change Change) {
 		}
 		c.hostCPU[h.HostID] = h
 
+	case "url_auth":
+		var u state.URLAuth
+		if err := change.Scan(&u.ID, &u.Kind, &u.Mode); err != nil {
+			slog.Error("cluster cache could not read a url auth change", "err", err)
+			return
+		}
+		if change.Kind == ChangeDelete {
+			delete(c.urlAuth, u.ID)
+			return
+		}
+		c.urlAuth[u.ID] = u
+
 	case "machine_cpu":
 		var m state.MachineCPU
 		if err := change.Scan(&m.ID, &m.Kind, &m.Vendor, &m.LastStart, &m.LastStartAt); err != nil {
@@ -591,6 +647,19 @@ func (c *Cache) MachineVendor(id string) string {
 }
 
 // MachineCPU returns the whole recorded row, for the API's last_start fields.
+// URLAuth is who may reach an object's URL, from memory. Absent means the
+// object has no row, which is public -- what every URL was before the mode
+// existed.
+func (c *Cache) URLAuth(id string) string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	u, ok := c.urlAuth[id]
+	if !ok || u.Mode == "" {
+		return "public"
+	}
+	return u.Mode
+}
+
 func (c *Cache) MachineCPU(id string) (state.MachineCPU, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
