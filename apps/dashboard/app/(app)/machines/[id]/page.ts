@@ -51,6 +51,15 @@ export default async function MachinePage({ params }: PageProps) {
           <dd class="m-0 font-mono">${machine.id}</dd>
           <dt class="text-muted-foreground">URL</dt>
           <dd class="m-0">${machine.url ? html`<a href=${machine.url} rel="noopener">${machine.url}</a>` : '-'}</dd>
+          <dt class="text-muted-foreground">Labels</dt>
+          <dd class="m-0 font-mono">${
+            Object.keys(machine.labels ?? {}).length
+              ? Object.entries(machine.labels ?? {})
+                  .sort(([a], [b]) => a.localeCompare(b))
+                  .map(([k, v]) => `${k}=${v}`)
+                  .join(' ')
+              : '-'
+          }</dd>
         </dl>
       </div>
     </div>

@@ -219,7 +219,10 @@ class MachineList extends WebComponent({
       if (this.chip !== 'all' && this.chipOf(m) !== this.chip) return false;
       if (this.host && m.host_id !== this.host) return false;
       if (needle) {
-        const haystack = `${m.name ?? ''} ${m.id} ${m.state} ${m.host_id ?? ''} ${m.url ?? ''}`.toLowerCase();
+        // Labels join the haystack as k=v, so typing `team=a` filters on
+        // them the way `pilot machines ls --label team=a` does.
+        const labels = Object.entries(m.labels ?? {}).map(([k, v]) => `${k}=${v}`).join(' ');
+        const haystack = `${m.name ?? ''} ${m.id} ${m.state} ${m.host_id ?? ''} ${m.url ?? ''} ${labels}`.toLowerCase();
         if (!haystack.includes(needle)) return false;
       }
       return true;
