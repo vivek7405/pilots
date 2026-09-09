@@ -87,6 +87,9 @@ type Model struct {
 	// lastFrom/lastTo are what the table drew, so the tab line can say
 	// "showing 12-31 of 40" without recomputing the window.
 	lastFrom, lastTo int
+	// detailRows is how many rows the detail panel last drew, so a scroll key
+	// clamps against the real length instead of a guess.
+	detailRows int
 
 	// Detail screens.
 	machine *pilots.Machine
@@ -319,7 +322,7 @@ func (m *Model) wheel(msg tea.MouseWheelMsg) (tea.Model, tea.Cmd) {
 		m.logAuto = false
 		m.logWin.scrollBy(-step, len(strings.Split(m.logText, "\n")), max(1, m.height-5))
 	case screenMachine, screenService:
-		m.detail.scrollBy(-step, 64, max(1, m.height-4))
+		m.detail.scrollBy(-step, m.detailRows, max(1, m.height-4))
 	default:
 		m.moveCursor(-step)
 	}
@@ -440,9 +443,9 @@ func (m *Model) keyMachine(k string) (tea.Model, tea.Cmd) {
 	case "q", "esc", "backspace":
 		m.screen, m.machine = screenDashboard, nil
 	case "up", "k":
-		m.detail.scrollBy(-1, 64, max(1, m.height-4))
+		m.detail.scrollBy(-1, m.detailRows, max(1, m.height-4))
 	case "down", "j":
-		m.detail.scrollBy(1, 64, max(1, m.height-4))
+		m.detail.scrollBy(1, m.detailRows, max(1, m.height-4))
 	case "L", "enter":
 		return m, m.openLogs(m.machine.ID)
 	case "c":
@@ -459,9 +462,9 @@ func (m *Model) keyService(k string) (tea.Model, tea.Cmd) {
 	case "q", "esc", "backspace":
 		m.screen, m.service = screenDashboard, nil
 	case "up", "k":
-		m.detail.scrollBy(-1, 64, max(1, m.height-4))
+		m.detail.scrollBy(-1, m.detailRows, max(1, m.height-4))
 	case "down", "j":
-		m.detail.scrollBy(1, 64, max(1, m.height-4))
+		m.detail.scrollBy(1, m.detailRows, max(1, m.height-4))
 	default:
 		return m.serviceAction(k, m.service)
 	}

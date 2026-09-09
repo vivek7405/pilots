@@ -302,14 +302,20 @@ func (m *Model) viewServicesTable(h int) string {
 // still readable.
 func (m *Model) kvPanel(rows [][2]string, h int) string {
 	inner := max(1, h-2) // the panel's own border
-	from, to := m.detail.slice(len(rows), inner, 0)
-	if from > 0 || to < len(rows) {
-		// The detail screens have no cursor, so the window is driven by the
-		// scroll keys alone; slice(…, 0) would have snapped it back to the
-		// top, so take the raw offset instead.
-		from = m.detail.off
-		to = min(len(rows), from+inner)
+	// The detail screens have no cursor, so the window is the scroll keys'
+	// offset, clamped -- NOT window.slice, which takes a cursor and would
+	// reset the offset to 0 as a side effect on every render, leaving j/k and
+	// the wheel with nothing to show for themselves.
+	m.detailRows = len(rows)
+	from := m.detail.off
+	if from > len(rows)-inner {
+		from = len(rows) - inner
 	}
+	if from < 0 {
+		from = 0
+	}
+	m.detail.off = from
+	to := min(len(rows), from+inner)
 	var lines []string
 	for _, r := range rows[from:to] {
 		lines = append(lines, fmt.Sprintf("%s  %s", m.st.Muted.Render(fmt.Sprintf("%-12s", r[0])), r[1]))
