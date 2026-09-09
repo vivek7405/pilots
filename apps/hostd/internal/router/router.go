@@ -11,8 +11,10 @@ package router
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httputil"
@@ -68,6 +70,12 @@ type Options struct {
 	// (a row the subscription has not delivered yet, or a custom domain),
 	// fall back to Store.ListMachines.
 	Lookup func(name string) (state.Machine, bool)
+
+	// Service resolves a service address to its current release's replicas
+	// from the in-memory replica, as Lookup does for a machine name.
+	// Optional; nil, and a miss, fall back to Store.ListServices and
+	// Store.ListMachines.
+	Service func(label string) (state.Service, []state.Machine, bool)
 }
 
 // Router proxies inbound requests to machines, waking them if needed.
@@ -148,7 +156,111 @@ func (r *Router) resolve(ctx context.Context, host string) (*Target, error) {
 		// only where the request is then served. See serveOrForward.
 		return &Target{Machine: row, Port: port}, nil
 	}
+
+	// Then a service address. A machine name wins, which is why this runs
+	// after the loop above: the two live in one namespace, and the .internal
+	// resolver breaks the same tie the same way. Both allocators refuse a
+	// name the other holds, so a collision here means a cross-host race, not
+	// an ordinary create.
+	if svc, replicas, ok := r.serviceByLabel(ctx, name); ok {
+		m, ok := pickReplica(replicas, r.opts.HostID)
+		if !ok {
+			return nil, &noReplicaError{label: name, service: svc.ID}
+		}
+		return &Target{Machine: m, Port: port}, nil
+	}
+
 	return nil, fmt.Errorf("router: no machine named %q", name)
+}
+
+// noReplicaError is a service whose address resolves but which has nothing to
+// serve from: it has never been deployed, or its current release has no
+// machine left. It is NOT an unknown host, and answering 404 for it would tell
+// the caller their URL is wrong when the URL is right and permanent.
+type noReplicaError struct {
+	label   string
+	service string
+}
+
+func (e *noReplicaError) Error() string {
+	return fmt.Sprintf("router: service %q (%s) has no machine on its current release",
+		e.label, e.service)
+}
+
+// serviceByLabel resolves a service address to its current replicas, from the
+// subscription cache when there is one and from a local store read otherwise.
+//
+// The store fallback repeats the cache's tie-break rather than sharing it: the
+// cache holds a map and this holds a slice, and the rule is two lines. What
+// matters is that both pick the lowest id, so a duplicated address routes the
+// same way on a host whose subscription has the rows and one whose has not.
+func (r *Router) serviceByLabel(ctx context.Context, label string) (state.Service, []state.Machine, bool) {
+	if r.opts.Service != nil {
+		if svc, replicas, ok := r.opts.Service(label); ok {
+			return svc, replicas, true
+		}
+	}
+	if label == "" || r.opts.Store == nil {
+		return state.Service{}, nil, false
+	}
+
+	services, err := r.opts.Store.ListServices(ctx)
+	if err != nil {
+		return state.Service{}, nil, false
+	}
+	var (
+		found   state.Service
+		matches int
+	)
+	for _, svc := range services {
+		if svc.Domain != label {
+			continue
+		}
+		matches++
+		if matches == 1 || svc.ID < found.ID {
+			found = svc
+		}
+	}
+	if matches == 0 {
+		return state.Service{}, nil, false
+	}
+
+	rows, err := r.opts.Store.ListMachines(ctx)
+	if err != nil {
+		return state.Service{}, nil, false
+	}
+	return found, state.CurrentReplicas(found, rows), true
+}
+
+// pickReplica chooses which of a service's current replicas serves a request.
+//
+// A running replica on this host first, so a request that arrived here is
+// served here rather than forwarded over the mesh. Then any running one. Then
+// any at all, which is how a service whose replicas are suspended gets woken:
+// the wake happens in ensureAwake, holding the request, exactly as it does for
+// a machine reached by its own name.
+//
+// The choice among equals is random rather than first-match, so a service with
+// several replicas spreads its load. The .internal resolver shuffles for the
+// same reason.
+func pickReplica(replicas []state.Machine, hostID string) (state.Machine, bool) {
+	var local, running, any []state.Machine
+	for _, m := range replicas {
+		switch {
+		case m.State == machines.StateRunning && m.HostID == hostID:
+			local = append(local, m)
+		case m.State == machines.StateRunning:
+			running = append(running, m)
+		default:
+			any = append(any, m)
+		}
+	}
+	for _, tier := range [][]state.Machine{local, running, any} {
+		if len(tier) > 0 {
+			return tier[rand.IntN(len(tier))], true
+		}
+	}
+	return state.Machine{}, false
 }
 
 // machineIDByName resolves the alias's path segment for forwarding.
@@ -244,6 +356,14 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	target, err := r.resolve(ctx, req.Host)
 	if err != nil {
+		// A service that exists but has nothing to serve is not an unknown
+		// host. Its address is permanent and correct; it has simply never
+		// been deployed, so it is 503 and the body says which.
+		var noReplica *noReplicaError
+		if errors.As(err, &noReplica) {
+			http.Error(w, "service has no release yet", http.StatusServiceUnavailable)
+			return
+		}
 		http.Error(w, "unknown host", http.StatusNotFound)
 		return
 	}

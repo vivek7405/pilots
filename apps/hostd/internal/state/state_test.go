@@ -618,3 +618,38 @@ func TestQuotaRoundTrips(t *testing.T) {
 		t.Errorf("read back %+v, want %+v", got, want)
 	}
 }
+
+// A blue/green deploy stops the previous release's machines but keeps them for
+// a rollback, so "this service's machines" is the wrong question for routing.
+// The right one is "this service's machines on this release", and the
+// tombstone has to be filtered too or a destroyed replica is routable.
+func TestCurrentReplicasFiltersByReleaseAndTombstone(t *testing.T) {
+	svc := Service{ID: "s-1", ReleaseID: "rel-2"}
+	rows := []Machine{
+		{ID: "m-previous", ServiceID: "s-1", ReleaseID: "rel-1", State: "stopped"},
+		{ID: "m-current", ServiceID: "s-1", ReleaseID: "rel-2", State: "running"},
+		{ID: "m-gone", ServiceID: "s-1", ReleaseID: "rel-2", State: StateDestroyed},
+		{ID: "m-other", ServiceID: "s-2", ReleaseID: "rel-2", State: "running"},
+	}
+
+	got := CurrentReplicas(svc, rows)
+	if len(got) != 1 || got[0].ID != "m-current" {
+		names := make([]string, 0, len(got))
+		for _, m := range got {
+			names = append(names, m.ID)
+		}
+		t.Errorf("CurrentReplicas = %v, want only m-current", names)
+	}
+}
+
+// A service that has never been deployed has no release, and every machine row
+// carrying an empty release_id would otherwise match it. That is how a service
+// with no deploy would route to some other service's half-built replica.
+func TestCurrentReplicasIsEmptyBeforeTheFirstRelease(t *testing.T) {
+	svc := Service{ID: "s-1"}
+	rows := []Machine{{ID: "m-1", ServiceID: "s-1", State: "running"}}
+
+	if got := CurrentReplicas(svc, rows); len(got) != 0 {
+		t.Errorf("CurrentReplicas = %v, want nothing before the first release", got)
+	}
+}

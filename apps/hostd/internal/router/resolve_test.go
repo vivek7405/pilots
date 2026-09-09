@@ -11,10 +11,21 @@ import (
 type stubStore struct {
 	state.Store
 	machines []state.Machine
+	services []state.Service
+	// servicesPanic proves the subscription cache was consulted instead of
+	// the store, the way crosshost_test.go does it for Lookup.
+	servicesPanic bool
 }
 
 func (s *stubStore) ListMachines(context.Context) ([]state.Machine, error) {
 	return s.machines, nil
+}
+
+func (s *stubStore) ListServices(context.Context) ([]state.Service, error) {
+	if s.servicesPanic {
+		panic("the store was read for a service the cache already answered")
+	}
+	return s.services, nil
 }
 
 // TouchMachine is a no-op: serveLocally records activity in a goroutine, and

@@ -31,10 +31,13 @@ type Cache struct {
 	mu       sync.RWMutex
 	machines map[string]state.Machine
 	hosts    map[string]state.Host
-	// services carries ONLY id, name and app -- what .internal needs to turn a
-	// service name into its replicas. Deliberately not the whole row: a
-	// service holds the sealed environment, and a second in-memory copy of
-	// every app's secrets on every host is a cost with no reader.
+	// services carries ONLY id, name, app, domain and release_id -- what
+	// .internal needs to turn a service name into its replicas, plus what the
+	// router needs to turn a service ADDRESS into them: domain is the routing
+	// key a URL carries, and release_id selects the current release's
+	// machines out of the ones kept for rollback. Deliberately not the whole
+	// row: a service holds the sealed environment, and a second in-memory
+	// copy of every app's secrets on every host is a cost with no reader.
 	services map[string]state.Service
 	// tenancy answers "which org owns this id" on every authenticated read.
 	// A subscription rather than a query: org scoping runs on the API's hot
@@ -375,11 +378,12 @@ func (c *Cache) subscribeHosts(ctx context.Context) (*Subscription, error) {
 	return sub, nil
 }
 
-// subscribeServices materializes the name half of .internal.
+// subscribeServices materializes the name half of .internal and the address
+// half of the router.
 //
-// Three columns, not the whole row. See the services field on Cache.
+// Five columns, not the whole row. See the services field on Cache.
 func (c *Cache) subscribeServices(ctx context.Context) (*Subscription, error) {
-	sub, err := c.client.Subscribe(ctx, `SELECT id, name, app FROM services`)
+	sub, err := c.client.Subscribe(ctx, `SELECT id, name, app, domain, release_id FROM services`)
 	if err != nil {
 		return nil, err
 	}
@@ -388,7 +392,7 @@ func (c *Cache) subscribeServices(ctx context.Context) (*Subscription, error) {
 	rows := sub.Rows()
 	for rows.Next() {
 		var svc state.Service
-		if err := rows.Scan(&svc.ID, &svc.Name, &svc.App); err != nil {
+		if err := rows.Scan(&svc.ID, &svc.Name, &svc.App, &svc.Domain, &svc.ReleaseID); err != nil {
 			sub.Close()
 			return nil, err
 		}
@@ -504,7 +508,7 @@ func (c *Cache) apply(table string, change Change) {
 
 	case "services":
 		var svc state.Service
-		if err := change.Scan(&svc.ID, &svc.Name, &svc.App); err != nil {
+		if err := change.Scan(&svc.ID, &svc.Name, &svc.App, &svc.Domain, &svc.ReleaseID); err != nil {
 			slog.Error("cluster cache could not read a service change", "err", err)
 			return
 		}
@@ -666,6 +670,54 @@ func (c *Cache) MachineByName(name string) (state.Machine, bool) {
 			"name", name, "matches", matches, "routing_to", found.ID)
 	}
 	return found, true
+}
+
+// ServiceReplicas resolves a service address to the machines that may serve it.
+//
+// The tie-break is MachineByName's, for MachineByName's reason: corrosion
+// cannot enforce uniqueness, so two hosts that disagree during a membership
+// change can each mint the same label on a different service. Every host must
+// still send that URL to the same service, so the lowest id wins and it is
+// logged, because it means an address was allocated twice.
+//
+// A machine name beats a service address; that precedence lives in the router,
+// which tries MachineByName first, and matches what the .internal resolver
+// does with the same collision.
+func (c *Cache) ServiceReplicas(label string) (state.Service, []state.Machine, bool) {
+	if label == "" {
+		return state.Service{}, nil, false
+	}
+
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	var (
+		found   state.Service
+		matches int
+	)
+	for _, svc := range c.services {
+		if svc.Domain != label {
+			continue
+		}
+		matches++
+		if matches == 1 || svc.ID < found.ID {
+			found = svc
+		}
+	}
+	if matches == 0 {
+		return state.Service{}, nil, false
+	}
+	if matches > 1 {
+		slog.Error("two services share an address; routing to the lowest id. An "+
+			"address was allocated twice, which means two hosts disagreed about who owned it",
+			"address", label, "matches", matches, "routing_to", found.ID)
+	}
+
+	rows := make([]state.Machine, 0, len(c.machines))
+	for _, m := range c.machines {
+		rows = append(rows, m)
+	}
+	return found, state.CurrentReplicas(found, rows), true
 }
 
 // Machines returns every live machine, ordered by id.

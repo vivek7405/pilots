@@ -1652,3 +1652,24 @@ func LiveHosts(hosts []Host) []Host {
 	}
 	return out
 }
+
+// CurrentReplicas is the machines a request to a service's address may reach:
+// this service's, on its current release, not a tombstone.
+//
+// A deploy is blue/green, so the previous release's machines are stopped but
+// kept for a rollback. They must never be routed, or a service's address would
+// answer from the release it was just moved off. Filtering on release_id is
+// also what makes the cutover atomic for routing: the flip is one CAS on the
+// service row, and every host's next resolve follows it.
+func CurrentReplicas(svc Service, rows []Machine) []Machine {
+	if svc.ReleaseID == "" {
+		return nil
+	}
+	out := make([]Machine, 0, len(rows))
+	for _, m := range rows {
+		if m.ServiceID == svc.ID && m.ReleaseID == svc.ReleaseID && m.State != StateDestroyed {
+			out = append(out, m)
+		}
+	}
+	return out
+}

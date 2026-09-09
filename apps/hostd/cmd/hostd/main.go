@@ -423,6 +423,7 @@ func run() error {
 		}
 		// The hot path reads the subscription cache, not the agent.
 		routerOpts.Lookup = f.cache.MachineByName
+		routerOpts.Service = f.cache.ServiceReplicas
 	}
 	rtr := router.New(routerOpts)
 
