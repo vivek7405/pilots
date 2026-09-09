@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/metrics"
@@ -200,7 +201,14 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	defer d.BuildGate.Release(org)
+	// Released as soon as the BUILD is over, not when the handler is. A build
+	// that carries a deploy stays in this handler for the rollout as well --
+	// a health grace of minutes -- and a slot held across that refuses the
+	// org's next build with "quota exceeded, builds" while nothing is
+	// building. The defer is the early-exit paths; the explicit call below is
+	// the one that matters, and OnceFunc makes the pair safe.
+	releaseGate := sync.OnceFunc(func() { d.BuildGate.Release(org) })
+	defer releaseGate()
 
 	// The build's owner, recorded before ANY branch below can hand the id out.
 	// GET /v1/builds/{id}/logs is scoped by tenancy, so a refusal recorded
@@ -352,6 +360,9 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 	})
 
 	buildID, err := d.Builds.StartBuild(bctx, id, contextTar, write)
+	// The build is over either way; what follows is a rollout, which is not a
+	// build and must not hold a build's slot.
+	releaseGate()
 	if err == nil && ownerErr != nil {
 		err = fmt.Errorf("cannot record the image's owner: %w", ownerErr)
 	}
