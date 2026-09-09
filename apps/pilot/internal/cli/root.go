@@ -100,6 +100,11 @@ func NewRoot(getenv config.Env) *cobra.Command {
 		InGroup(newMachinesCmd(env), "sandbox"),
 		InGroup(newConsoleCmd(env), "sandbox"),
 		InGroup(newExecCmd(env), "sandbox"),
+		InGroup(newServicesCmd(env), "deploy"),
+		InGroup(newPromoteCmd(env), "deploy"),
+		InGroup(newStatusCmd(env), "inspect"),
+		InGroup(newVolumesCmd(env), "storage"),
+		InGroup(newDomainsCmd(env), "storage"),
 		InGroup(newWhoamiCmd(env), "account"),
 	)
 
