@@ -1055,6 +1055,17 @@ where a build's verdict is read. The build is forwarded to the service's
 arbiter, since that is the one host allowed to write the service's rows, and the
 build's log is HELD open across the rollout so a follower sees it.
 
+A build's log is **host-local**, and the release row is not. `GET /v1/builds/
+{id}/logs` is answered from the memory of the host that ran the build and 404s
+anywhere else — there is no forward, because nothing records which host holds a
+build and a `host_id` on `tenancy` would be a column added to a populated table.
+Since the forward above moves a deploying build to the arbiter, the host a
+client chose is routinely not the host with the log. So the log is the fast
+witness and never the only one: the release the build cut is an ordinary
+replicated row, readable from every host, and a client that cannot reach the log
+watches `GET /v1/services/{id}` for it instead. The dashboard's `<build-log>`
+does exactly that.
+
 `GET /v1/services` derives each service's `depends_on` at read time,
 from the `<name>.internal` addresses in BOTH halves of its environment, and
 stores it nowhere: a name is not a value, and a `depends_on` column would be a
