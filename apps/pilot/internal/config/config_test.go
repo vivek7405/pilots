@@ -171,6 +171,15 @@ func TestPrecedenceFlagBeatsEnvBeatsFileBeatsDefault(t *testing.T) {
 		t.Errorf("source: got %q", url.Source)
 	}
 
+	// PILOT_API is the name the e2e battery and the runbook use.
+	url, _, _, err = Resolve(envFrom(map[string]string{"XDG_CONFIG_HOME": dir, "PILOT_API": "http://alias:8080"}), "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if url.Value != "http://alias:8080" || url.Source != "PILOT_API" {
+		t.Errorf("PILOT_API: got %q from %q", url.Value, url.Source)
+	}
+
 	// The flag beats the environment.
 	url, key, _, err = Resolve(envFrom(withEnv), "http://flag:8080", "from-flag", "")
 	if err != nil {

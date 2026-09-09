@@ -159,6 +159,10 @@ func Resolve(env Env, flagURL, flagKey, flagOrg string) (url, key, org Resolved,
 		url = Resolved{flagURL, "--api-url"}
 	case env("PILOT_API_URL") != "":
 		url = Resolved{env("PILOT_API_URL"), "PILOT_API_URL"}
+	case env("PILOT_API") != "":
+		// The e2e battery and the runbook say PILOT_API; the TS CLI only ever
+		// read PILOT_API_URL, and the two agreed by luck of the default.
+		url = Resolved{env("PILOT_API"), "PILOT_API"}
 	case creds != nil && creds.APIURL != "":
 		url = Resolved{creds.APIURL, Source(path)}
 	default:

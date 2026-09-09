@@ -305,6 +305,36 @@ async function lifecycleAssertions() {
       assert(envVar === 'present', `env = ${envVar}`);
     });
 
+    // #99: files move over the same exec stream, as a tar in both
+    // directions. A binary file with every byte value is the case that
+    // catches a stream, a shell or a tar that is not 8-bit clean.
+    await step('a binary file survives a push and a pull through the CLI', async () => {
+      const { execFile } = await import('node:child_process');
+      const { createHash, randomBytes } = await import('node:crypto');
+      const { mkdtempSync, writeFileSync, readFileSync } = await import('node:fs');
+      const { tmpdir } = await import('node:os');
+      const { join } = await import('node:path');
+      const dir = mkdtempSync(join(tmpdir(), 'pilot-e2e-file-'));
+      const payload = Buffer.concat([randomBytes(64 * 1024), Buffer.from(Array.from({ length: 256 }, (_, i) => i))]);
+      const local = join(dir, 'payload.bin');
+      writeFileSync(local, payload);
+      const cli = (args) => new Promise((resolve) => {
+        execFile(CLI_ARGV0[0], [...CLI_ARGV0.slice(1), ...args],
+          { env: { ...process.env, PILOT_API: API, PILOT_API_KEY: KEY }, timeout: 120_000 },
+          (error, stdout, stderr) => resolve({ code: error?.code ?? (error ? 1 : 0), stdout, stderr }));
+      });
+      const push = await cli(['file', 'push', local, `${id}:/tmp/e2e/payload.bin`]);
+      assert(push.code === 0, `push exited ${push.code}: ${push.stderr}`);
+      const remoteSum = (await exec(id, 'sha256sum /tmp/e2e/payload.bin')).split(' ')[0];
+      const localSum = createHash('sha256').update(payload).digest('hex');
+      assert(remoteSum === localSum, `the machine holds ${remoteSum}, the file is ${localSum}`);
+      const back = join(dir, 'back.bin');
+      const pull = await cli(['file', 'pull', `${id}:/tmp/e2e/payload.bin`, back]);
+      assert(pull.code === 0, `pull exited ${pull.code}: ${pull.stderr}`);
+      const pulled = readFileSync(back);
+      assert(pulled.equals(payload), `the pulled file differs: ${pulled.length} bytes back, ${payload.length} sent`);
+    });
+
     await step('a non-zero exit is reported, not thrown away', async () => {
       const { status, json } = await request(`/v1/machines/${id}/exec`, {
         method: 'POST', body: { cmd: 'exit 42', user: 'root' },
@@ -5106,7 +5136,13 @@ async function tenancyAssertions() {
 // structured at all.
 // ---------------------------------------------------------------------------
 
-const CLI_BIN = new URL('../packages/cli/bin/pilot.js', import.meta.url).pathname;
+// The CLI under test. PILOT_BIN names the Go binary (apps/pilot); without it
+// the TypeScript entry point runs under this node, which is how the battery
+// drove the CLI before the rewrite. Both are exercised through the same
+// assertions, so a divergence between them is a failure here, not a surprise
+// for whoever swaps ~/.local/bin/pilot.
+const CLI_BIN = process.env.PILOT_BIN || new URL('../packages/cli/bin/pilot.js', import.meta.url).pathname;
+const CLI_ARGV0 = process.env.PILOT_BIN ? [CLI_BIN] : [process.execPath, CLI_BIN];
 const DJANGO_FIXTURE = new URL('../packages/cli/test/fixtures/django-app', import.meta.url).pathname;
 const WEBJS_FIXTURE = new URL('../packages/cli/test/fixtures/webjs-app', import.meta.url).pathname;
 const WORKSPACE_FIXTURE = new URL('../packages/cli/test/fixtures/workspace-app', import.meta.url).pathname;
@@ -5116,7 +5152,7 @@ const MCP_TOOLS = [
   'build', 'build_logs', 'checkpoint', 'create_machine', 'deploy',
   'destroy_machine', 'diagnose', 'docs', 'domains', 'exec',
   'exec_stream', 'generate_dockerfile', 'init', 'list_machines', 'list_services',
-  'logs', 'plan', 'promote', 'releases', 'restore',
+  'logs', 'plan', 'promote', 'pull_file', 'push_file', 'releases', 'restore',
   'rollback', 'service', 'status', 'volumes',
 ];
 
@@ -5479,7 +5515,7 @@ async function agentDeployAssertions(REFLINK) {
       // here is the environment override, which is what a CI runner uses.
       const { execFile } = await import('node:child_process');
       const run = (args, env) => new Promise((resolve) => {
-        execFile(process.execPath, [CLI_BIN, ...args],
+        execFile(CLI_ARGV0[0], [...CLI_ARGV0.slice(1), ...args],
           { env, timeout: 900_000, maxBuffer: 16 * 1024 * 1024 },
           (error, stdout, stderr) => resolve({ code: error?.code ?? (error ? 1 : 0), stdout, stderr }));
       });

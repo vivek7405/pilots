@@ -605,6 +605,48 @@ func (d mcpDeps) registerTools(s *mcp.Server) {
 			}, constant("fix the app and deploy again, or rollback"))
 		})
 
+	type pushIn struct {
+		Machine string `json:"machine" jsonschema:"a machine id or name"`
+		Src     string `json:"src" jsonschema:"a local file or directory"`
+		Dest    string `json:"dest" jsonschema:"the path it lands at on the machine"`
+	}
+	mcp.AddTool(s, &mcp.Tool{Name: "push_file", Title: "Copy a file into a machine",
+		Description: "Copy a local file or directory into a machine at dest, over the exec stream. " +
+			"A directory lands as dest itself. Next: exec to use it."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in pushIn) (*mcp.CallToolResult, any, error) {
+			return wrap(func() (any, error) {
+				m, err := resolveMachine(ctx, client, in.Machine)
+				if err != nil {
+					return nil, err
+				}
+				if err := pushFiles(ctx, client, m.ID, in.Src, in.Dest); err != nil {
+					return nil, err
+				}
+				return map[string]string{"machine": m.ID, "dest": in.Dest}, nil
+			}, constant("exec on the machine to use it"))
+		})
+
+	type pullIn struct {
+		Machine string `json:"machine" jsonschema:"a machine id or name"`
+		Src     string `json:"src" jsonschema:"a file or directory on the machine"`
+		Dest    string `json:"dest" jsonschema:"where it lands locally; an existing directory receives it inside"`
+	}
+	mcp.AddTool(s, &mcp.Tool{Name: "pull_file", Title: "Copy a file out of a machine",
+		Description: "Copy a file or directory out of a machine to a local path, over the exec stream. " +
+			"For a log, `logs` is cheaper; this is for build output, data files, anything you want on disk here."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in pullIn) (*mcp.CallToolResult, any, error) {
+			return wrap(func() (any, error) {
+				m, err := resolveMachine(ctx, client, in.Machine)
+				if err != nil {
+					return nil, err
+				}
+				if err := pullFiles(ctx, client, m.ID, in.Src, in.Dest); err != nil {
+					return nil, err
+				}
+				return map[string]string{"machine": m.ID, "src": in.Src, "dest": in.Dest}, nil
+			}, constant(""))
+		})
+
 	mcp.AddTool(s, &mcp.Tool{Name: "init", Title: "Read this first",
 		Description: "READ THIS FIRST. The pilots mental model in under sixty lines: one primitive, the one-call " +
 			"deploy, what every result and error carries, and the doc index. " +
