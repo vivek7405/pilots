@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -178,7 +179,12 @@ WantedBy=multi-user.target
 // Later entries win. tar semantics are last-write-wins on extraction and
 // mke2fs follows them, so an image that ships its own /etc/resolv.conf or
 // /sbin/init is overridden rather than conflicting.
-func applyFixups(tarPath string, f Fixups, hasSystemd bool) error {
+//
+// Every appended path is resolved through the image's own directory symlinks
+// first -- see imageFacts.resolve. Writing sbin/init verbatim into a
+// usr-merged image fails the whole pack.
+func applyFixups(tarPath string, f Fixups, img imageFacts) error {
+	hasSystemd := img.hasSystemd
 	// Truncate the archive's end-of-file marker before appending, or every
 	// appended entry sits after a terminator and is simply never read. This
 	// fails silently in the worst possible way: the image builds, boots, and
@@ -208,7 +214,8 @@ func applyFixups(tarPath string, f Fixups, hasSystemd bool) error {
 	}
 	for _, d := range dirs {
 		if err := tw.WriteHeader(&tar.Header{
-			Name: d, Typeflag: tar.TypeDir, Mode: 0o755, ModTime: time.Now(),
+			Name: img.resolve(d), Typeflag: tar.TypeDir, Mode: 0o755,
+			ModTime: time.Now(),
 		}); err != nil {
 			return fmt.Errorf("build: write %s: %w", d, err)
 		}
@@ -254,7 +261,7 @@ func applyFixups(tarPath string, f Fixups, hasSystemd bool) error {
 	// base image legitimately has no /etc/sysctl.d.
 	for _, dir := range []string{"etc/sysctl.d"} {
 		if err := tw.WriteHeader(&tar.Header{
-			Name: dir + "/", Typeflag: tar.TypeDir, Mode: 0o755,
+			Name: img.resolve(dir + "/"), Typeflag: tar.TypeDir, Mode: 0o755,
 			ModTime: time.Now(),
 		}); err != nil {
 			return fmt.Errorf("build: mkdir %s: %w", dir, err)
@@ -263,7 +270,7 @@ func applyFixups(tarPath string, f Fixups, hasSystemd bool) error {
 
 	for _, file := range files {
 		if err := tw.WriteHeader(&tar.Header{
-			Name: file.name, Typeflag: tar.TypeReg, Mode: file.mode,
+			Name: img.resolve(file.name), Typeflag: tar.TypeReg, Mode: file.mode,
 			Size: int64(len(file.data)), ModTime: time.Now(),
 		}); err != nil {
 			return fmt.Errorf("build: write %s: %w", file.name, err)
@@ -299,8 +306,8 @@ func applyFixups(tarPath string, f Fixups, hasSystemd bool) error {
 	}
 	for _, l := range links {
 		if err := tw.WriteHeader(&tar.Header{
-			Name: l.name, Typeflag: tar.TypeSymlink, Linkname: l.target,
-			Mode: 0o777, ModTime: time.Now(),
+			Name: img.resolve(l.name), Typeflag: tar.TypeSymlink,
+			Linkname: l.target, Mode: 0o777, ModTime: time.Now(),
 		}); err != nil {
 			return fmt.Errorf("build: link %s: %w", l.name, err)
 		}
@@ -385,34 +392,115 @@ func roundUpToBlock(n int64) int64 {
 	return n
 }
 
-// tarHasSystemd reports whether the built image carries systemd.
+// imageFacts is what the fixups need to know about the image they are about
+// to be appended to. Both facts are read from the archive rather than guessed
+// from the base image name, and both are gathered in one pass.
+type imageFacts struct {
+	// hasSystemd decides which set of fixups applies. An image with systemd
+	// boots it as PID 1 and the agent runs as a unit; an image without one --
+	// node:alpine, distroless, anything a real Dockerfile actually uses --
+	// gets the agent as PID 1 instead.
+	hasSystemd bool
+
+	// dirLinks maps each directory the image reaches only through a symlink
+	// to the real directory behind it, e.g. "sbin" -> "usr/sbin" on any
+	// usr-merged image. Keys and values are cleaned, root-relative, and carry
+	// no trailing slash.
+	dirLinks map[string]string
+}
+
+// resolve rewrites an appended path through the image's directory symlinks.
 //
-// Decides which set of fixups applies, so it is read from the archive rather
-// than guessed from the base image name. An image with systemd boots it as
-// PID 1 and the agent runs as a unit; an image without one -- node:alpine,
-// distroless, anything a real Dockerfile actually uses -- gets the agent as
-// PID 1 instead.
-func tarHasSystemd(tarPath string) (bool, error) {
+// mke2fs will not create a child inside a symlink. e2fsprogs' libarchive
+// reader looks the parent up with ext2fs_namei and stops at the link:
+//
+//	ext2fs_symlink: Ext2 inode is not a directory while creating symlink "init"
+//	mke2fs: Operation not permitted while populating file system
+//
+// Debian and Ubuntu have been usr-merged for years -- /sbin is a symlink to
+// usr/sbin -- so appending sbin/init verbatim fails the pack for most of the
+// base images real Dockerfiles are built on, minutes after the image itself
+// built cleanly. Writing at usr/sbin/init instead lands the same file at the
+// same path, because /sbin/init still resolves through the image's own link.
+//
+// Only a symlink whose target is a directory in the image is followed. That
+// distinction is load-bearing: Ubuntu ships /etc/resolv.conf as a symlink to
+// a file under /run, and following THAT would write the fixup into a
+// directory the image does not have.
+func (img imageFacts) resolve(name string) string {
+	if len(img.dirLinks) == 0 {
+		return name
+	}
+	trailing := strings.HasSuffix(name, "/")
+	var out string
+	for _, part := range strings.Split(strings.TrimSuffix(name, "/"), "/") {
+		if out == "" {
+			out = part
+		} else {
+			out += "/" + part
+		}
+		if target, ok := img.dirLinks[out]; ok {
+			out = target
+		}
+	}
+	if trailing {
+		out += "/"
+	}
+	return out
+}
+
+// scanImage reads the facts the fixups need out of a flattened image tarball.
+//
+// One pass for both, because the directory symlinks cannot be classified
+// until every directory entry has been seen: a symlink is only followed when
+// its target is a directory, and the target may appear anywhere in the
+// archive, before or after the link itself.
+func scanImage(tarPath string) (imageFacts, error) {
 	f, err := os.Open(tarPath)
 	if err != nil {
-		return false, fmt.Errorf("build: open %s: %w", tarPath, err)
+		return imageFacts{}, fmt.Errorf("build: open %s: %w", tarPath, err)
 	}
 	defer f.Close()
+
+	facts := imageFacts{dirLinks: map[string]string{}}
+	dirs := map[string]bool{}
+	links := map[string]string{}
 
 	tr := tar.NewReader(f)
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
-			return false, nil
+			break
 		}
 		if err != nil {
-			return false, fmt.Errorf("build: read %s: %w", tarPath, err)
+			return imageFacts{}, fmt.Errorf("build: read %s: %w", tarPath, err)
 		}
-		name := strings.TrimPrefix(filepath.Clean("/"+h.Name), "/")
+		// tar names are always slash-separated, whatever the host is.
+		name := strings.TrimPrefix(path.Clean("/"+h.Name), "/")
+		switch h.Typeflag {
+		case tar.TypeDir:
+			dirs[name] = true
+		case tar.TypeSymlink:
+			links[name] = h.Linkname
+		}
 		if name == "lib/systemd/systemd" || name == "usr/lib/systemd/systemd" {
-			return true, nil
+			facts.hasSystemd = true
 		}
 	}
+
+	for name, target := range links {
+		// An absolute target resolves against the image root; a relative one
+		// against the directory the link itself sits in.
+		resolved := target
+		if !strings.HasPrefix(target, "/") {
+			resolved = path.Dir(name) + "/" + target
+		}
+		resolved = strings.TrimPrefix(path.Clean("/"+resolved), "/")
+		if dirs[resolved] {
+			facts.dirLinks[name] = resolved
+		}
+	}
+	return facts, nil
 }
 
 // imageSizeMiB picks how big the ext4 has to be.

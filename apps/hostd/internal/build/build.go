@@ -295,7 +295,7 @@ func (b *Builder) buildImage(ctx context.Context, tarPath, imagePath string, sta
 		return fmt.Errorf("build: the build produced no filesystem: %w", err)
 	}
 
-	hasSystemd, err := tarHasSystemd(tarPath)
+	img, err := scanImage(tarPath)
 	if err != nil {
 		return err
 	}
@@ -309,7 +309,7 @@ func (b *Builder) buildImage(ctx context.Context, tarPath, imagePath string, sta
 		// here costs them nothing: the responder answers .internal and
 		// forwards everything else upstream.
 		Nameservers: []string{netns.TapHostIP},
-	}, hasSystemd); err != nil {
+	}, img); err != nil {
 		return err
 	}
 

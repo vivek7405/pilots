@@ -93,7 +93,7 @@ func TestFixupsAreActuallyReadableAfterAppending(t *testing.T) {
 
 	if err := applyFixups(tarPath, Fixups{
 		AgentBinary: stageAgent(t), AgentToken: "placeholder",
-	}, false); err != nil {
+	}, imageFacts{}); err != nil {
 		t.Fatalf("applyFixups: %v", err)
 	}
 
@@ -127,10 +127,11 @@ func TestInitTargetDependsOnWhetherTheImageHasSystemd(t *testing.T) {
 	writeTar(t, withoutSystemd, []tar.Header{
 		{Name: "bin/node", Typeflag: tar.TypeReg, Mode: 0o755},
 	}, map[string]string{"bin/node": "x"})
-	if has, err := tarHasSystemd(withoutSystemd); err != nil || has {
-		t.Fatalf("tarHasSystemd = %v, %v; want false", has, err)
+	plain, err := scanImage(withoutSystemd)
+	if err != nil || plain.hasSystemd {
+		t.Fatalf("scanImage hasSystemd = %v, %v; want false", plain.hasSystemd, err)
 	}
-	if err := applyFixups(withoutSystemd, Fixups{AgentBinary: agent}, false); err != nil {
+	if err := applyFixups(withoutSystemd, Fixups{AgentBinary: agent}, plain); err != nil {
 		t.Fatal(err)
 	}
 	if got := tarNames(t, withoutSystemd)["sbin/init"]; got == nil ||
@@ -142,10 +143,11 @@ func TestInitTargetDependsOnWhetherTheImageHasSystemd(t *testing.T) {
 	writeTar(t, withSystemd, []tar.Header{
 		{Name: "lib/systemd/systemd", Typeflag: tar.TypeReg, Mode: 0o755},
 	}, map[string]string{"lib/systemd/systemd": "x"})
-	if has, err := tarHasSystemd(withSystemd); err != nil || !has {
-		t.Fatalf("tarHasSystemd = %v, %v; want true", has, err)
+	systemd, err := scanImage(withSystemd)
+	if err != nil || !systemd.hasSystemd {
+		t.Fatalf("scanImage hasSystemd = %v, %v; want true", systemd.hasSystemd, err)
 	}
-	if err := applyFixups(withSystemd, Fixups{AgentBinary: agent}, true); err != nil {
+	if err := applyFixups(withSystemd, Fixups{AgentBinary: agent}, systemd); err != nil {
 		t.Fatal(err)
 	}
 	got := tarNames(t, withSystemd)
@@ -177,7 +179,7 @@ func TestResolvConfIsWrittenAfterTheBuild(t *testing.T) {
 
 	if err := applyFixups(tarPath, Fixups{
 		AgentBinary: stageAgent(t), Nameservers: []string{"9.9.9.9"},
-	}, false); err != nil {
+	}, imageFacts{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -244,7 +246,7 @@ func TestPackProducesAnExt4WithOwnershipIntact(t *testing.T) {
 
 	if err := applyFixups(tarPath, Fixups{
 		AgentBinary: stageAgent(t), AgentToken: GuestAgentPlaceholderToken,
-	}, false); err != nil {
+	}, imageFacts{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -321,7 +323,7 @@ func TestFixupsSurviveAnEntryThatEndsInZeros(t *testing.T) {
 		{Name: "data.bin", Typeflag: tar.TypeReg, Mode: 0o644},
 	}, map[string]string{"data.bin": string(body)})
 
-	if err := applyFixups(tarPath, Fixups{AgentBinary: stageAgent(t)}, false); err != nil {
+	if err := applyFixups(tarPath, Fixups{AgentBinary: stageAgent(t)}, imageFacts{}); err != nil {
 		t.Fatalf("applyFixups: %v", err)
 	}
 
@@ -384,7 +386,7 @@ func TestFixupsCarryTheStartSpecIntoTheImage(t *testing.T) {
 	spec := ParseStartSpec("FROM node:24-alpine\nWORKDIR /app\nEXPOSE 3000\nCMD [\"node\",\"server.js\"]\n")
 	if err := applyFixups(tarPath, Fixups{
 		AgentBinary: stageAgent(t), Start: spec,
-	}, false); err != nil {
+	}, imageFacts{}); err != nil {
 		t.Fatalf("applyFixups: %v", err)
 	}
 
@@ -450,7 +452,7 @@ func TestPackViaDirectoryKeepsOwnershipUnderFakeroot(t *testing.T) {
 
 	if err := applyFixups(tarPath, Fixups{
 		AgentBinary: stageAgent(t), AgentToken: GuestAgentPlaceholderToken,
-	}, false); err != nil {
+	}, imageFacts{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -538,5 +540,89 @@ func TestABuiltImageResolvesThroughTheGateway(t *testing.T) {
 	}
 	if got := (Fixups{Nameservers: []string{"9.9.9.9"}}).resolvConf(); !strings.Contains(got, "9.9.9.9") {
 		t.Errorf("an explicit nameserver was dropped: %q", got)
+	}
+}
+
+// Debian and Ubuntu are usr-merged: /sbin is a symlink to usr/sbin. mke2fs
+// will not create a child inside a symlink -- e2fsprogs' libarchive reader
+// looks the parent up with ext2fs_namei and stops at the link -- so appending
+// sbin/init verbatim failed the pack with "Ext2 inode is not a directory
+// while creating symlink" for postgres:17, python:3.12-slim, and every other
+// base image real Dockerfiles are built on. It surfaced minutes after the
+// image itself had built cleanly, naming nothing the user had done.
+//
+// The fixup has to be written at the real directory instead. /sbin/init still
+// resolves inside the guest, through the image's own link.
+func TestFixupsResolveThroughAUsrMergedSbin(t *testing.T) {
+	tarPath := filepath.Join(t.TempDir(), "rootfs.tar")
+	writeTar(t, tarPath, []tar.Header{
+		{Name: "usr/", Typeflag: tar.TypeDir, Mode: 0o755},
+		{Name: "usr/sbin/", Typeflag: tar.TypeDir, Mode: 0o755},
+		// The link comes BEFORE its target here on purpose: a real image
+		// orders entries however BuildKit flattened them, so classifying it
+		// cannot depend on having seen usr/sbin first.
+		{Name: "sbin", Typeflag: tar.TypeSymlink, Linkname: "usr/sbin", Mode: 0o777},
+		{Name: "etc/", Typeflag: tar.TypeDir, Mode: 0o755},
+	}, nil)
+
+	img, err := scanImage(tarPath)
+	if err != nil {
+		t.Fatalf("scanImage: %v", err)
+	}
+	if got := img.dirLinks["sbin"]; got != "usr/sbin" {
+		t.Fatalf("dirLinks[sbin] = %q, want usr/sbin", got)
+	}
+
+	if err := applyFixups(tarPath, Fixups{
+		AgentBinary: stageAgent(t), AgentToken: "placeholder",
+	}, img); err != nil {
+		t.Fatalf("applyFixups: %v", err)
+	}
+
+	got := tarNames(t, tarPath)
+	if h := got["usr/sbin/init"]; h == nil || h.Linkname != AgentPathInImage {
+		t.Errorf("init was not written behind the symlink: %v", h)
+	}
+	// Writing it at sbin/init is the bug: mke2fs refuses that entry and the
+	// whole pack fails, so it must not be there at all.
+	for _, name := range []string{"sbin/init", "sbin/", "sbin"} {
+		if h := got[name]; h != nil && h.Typeflag != tar.TypeSymlink {
+			t.Errorf("%s was appended into a symlinked directory", name)
+		}
+	}
+	// Everything that does not go through a link is untouched.
+	if _, ok := got["opt/pilot-agent/guest-agent"]; !ok {
+		t.Error("the agent moved; only the linked paths should be rewritten")
+	}
+}
+
+// A symlink is only followed when it points at a directory. Ubuntu ships
+// /etc/resolv.conf as a symlink to a file under /run, and following that
+// would write the nameserver fixup into a directory the image does not have
+// -- turning one failed pack into another.
+func TestFixupsDoNotFollowAFileSymlink(t *testing.T) {
+	tarPath := filepath.Join(t.TempDir(), "rootfs.tar")
+	writeTar(t, tarPath, []tar.Header{
+		{Name: "etc/", Typeflag: tar.TypeDir, Mode: 0o755},
+		{Name: "etc/resolv.conf", Typeflag: tar.TypeSymlink,
+			Linkname: "../run/systemd/resolve/stub-resolv.conf", Mode: 0o777},
+	}, nil)
+
+	img, err := scanImage(tarPath)
+	if err != nil {
+		t.Fatalf("scanImage: %v", err)
+	}
+	if len(img.dirLinks) != 0 {
+		t.Fatalf("a file symlink was taken for a directory: %v", img.dirLinks)
+	}
+
+	if err := applyFixups(tarPath, Fixups{
+		AgentBinary: stageAgent(t), Nameservers: []string{"9.9.9.9"},
+	}, img); err != nil {
+		t.Fatalf("applyFixups: %v", err)
+	}
+	got := tarNames(t, tarPath)
+	if h := got["etc/resolv.conf"]; h == nil || h.Typeflag != tar.TypeReg {
+		t.Fatalf("etc/resolv.conf is %v, want the appended regular file", h)
 	}
 }
