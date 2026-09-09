@@ -43,6 +43,7 @@ var groups = []Group{
 	{"inspect", "See what is happening"},
 	{"storage", "State that outlives a machine"},
 	{"account", "Fleet, keys and context"},
+	{"agents", "For agents"},
 	{"help", "Help and troubleshooting"},
 }
 
