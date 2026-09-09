@@ -650,3 +650,35 @@ func TestFixupsDoNotFollowAFileSymlink(t *testing.T) {
 		t.Fatalf("etc/resolv.conf is %v, want the appended regular file", h)
 	}
 }
+
+// A flattened image carries every layer's entry for a path, in order, and the
+// last one wins -- which is the whole reason the fixups are appended rather
+// than merged. So a base image whose /sbin is a symlink, rebased by a later
+// layer that makes it a real directory, must NOT be treated as usr-merged:
+// resolving there would write the fixups away from a directory the image
+// really has.
+func TestADirectoryThatReplacesASymlinkIsNotALink(t *testing.T) {
+	tarPath := filepath.Join(t.TempDir(), "rootfs.tar")
+	writeTar(t, tarPath, []tar.Header{
+		{Name: "usr/", Typeflag: tar.TypeDir, Mode: 0o755},
+		{Name: "usr/sbin/", Typeflag: tar.TypeDir, Mode: 0o755},
+		{Name: "sbin", Typeflag: tar.TypeSymlink, Linkname: "usr/sbin", Mode: 0o777},
+		// A later layer replaces the link with the real thing.
+		{Name: "sbin/", Typeflag: tar.TypeDir, Mode: 0o755},
+	}, nil)
+
+	img, err := scanImage(tarPath)
+	if err != nil {
+		t.Fatalf("scanImage: %v", err)
+	}
+	if _, ok := img.dirLinks["sbin"]; ok {
+		t.Fatalf("a directory that replaced a symlink is still classified as one: %v", img.dirLinks)
+	}
+
+	if err := applyFixups(tarPath, Fixups{AgentBinary: stageAgent(t)}, img); err != nil {
+		t.Fatalf("applyFixups: %v", err)
+	}
+	if h := tarNames(t, tarPath)["sbin/init"]; h == nil || h.Linkname != AgentPathInImage {
+		t.Errorf("init did not land in the real /sbin: %v", h)
+	}
+}

@@ -184,7 +184,6 @@ WantedBy=multi-user.target
 // first -- see imageFacts.resolve. Writing sbin/init verbatim into a
 // usr-merged image fails the whole pack.
 func applyFixups(tarPath string, f Fixups, img imageFacts) error {
-	hasSystemd := img.hasSystemd
 	// Truncate the archive's end-of-file marker before appending, or every
 	// appended entry sits after a terminator and is simply never read. This
 	// fails silently in the worst possible way: the image builds, boots, and
@@ -208,16 +207,19 @@ func applyFixups(tarPath string, f Fixups, img imageFacts) error {
 	}
 
 	dirs := []string{"etc/", "sbin/", "opt/", "opt/pilot-agent/", "etc/pilot-agent/"}
-	if hasSystemd {
+	if img.hasSystemd {
 		dirs = append(dirs, "etc/systemd/", "etc/systemd/system/",
 			"etc/systemd/system/multi-user.target.wants/")
 	}
 	for _, d := range dirs {
+		// Named by where it is actually written, not by where it was asked
+		// for: on a usr-merged image those differ, and that difference is
+		// the whole subject of this change.
+		at := img.resolve(d)
 		if err := tw.WriteHeader(&tar.Header{
-			Name: img.resolve(d), Typeflag: tar.TypeDir, Mode: 0o755,
-			ModTime: time.Now(),
+			Name: at, Typeflag: tar.TypeDir, Mode: 0o755, ModTime: time.Now(),
 		}); err != nil {
-			return fmt.Errorf("build: write %s: %w", d, err)
+			return fmt.Errorf("build: write %s: %w", at, err)
 		}
 	}
 
@@ -245,7 +247,7 @@ func applyFixups(tarPath string, f Fixups, img imageFacts) error {
 		{"etc/sysctl.d/60-pilots-guest.conf", 0o644,
 			[]byte("vm.compaction_proactiveness = 0\n")},
 	}
-	if hasSystemd {
+	if img.hasSystemd {
 		files = append(files,
 			struct {
 				name string
@@ -260,28 +262,29 @@ func applyFixups(tarPath string, f Fixups, img imageFacts) error {
 	// fails the whole pack with "cannot find directory ... to create". A slim
 	// base image legitimately has no /etc/sysctl.d.
 	for _, dir := range []string{"etc/sysctl.d"} {
+		at := img.resolve(dir + "/")
 		if err := tw.WriteHeader(&tar.Header{
-			Name: img.resolve(dir + "/"), Typeflag: tar.TypeDir, Mode: 0o755,
-			ModTime: time.Now(),
+			Name: at, Typeflag: tar.TypeDir, Mode: 0o755, ModTime: time.Now(),
 		}); err != nil {
-			return fmt.Errorf("build: mkdir %s: %w", dir, err)
+			return fmt.Errorf("build: mkdir %s: %w", at, err)
 		}
 	}
 
 	for _, file := range files {
+		at := img.resolve(file.name)
 		if err := tw.WriteHeader(&tar.Header{
-			Name: img.resolve(file.name), Typeflag: tar.TypeReg, Mode: file.mode,
+			Name: at, Typeflag: tar.TypeReg, Mode: file.mode,
 			Size: int64(len(file.data)), ModTime: time.Now(),
 		}); err != nil {
-			return fmt.Errorf("build: write %s: %w", file.name, err)
+			return fmt.Errorf("build: write %s: %w", at, err)
 		}
 		if _, err := tw.Write(file.data); err != nil {
-			return fmt.Errorf("build: write %s: %w", file.name, err)
+			return fmt.Errorf("build: write %s: %w", at, err)
 		}
 	}
 
 	links := []struct{ name, target string }{}
-	if hasSystemd {
+	if img.hasSystemd {
 		// The kernel boots /sbin/init; systemd lives elsewhere in the image.
 		links = append(links,
 			struct{ name, target string }{"sbin/init", "/lib/systemd/systemd"},
@@ -305,11 +308,12 @@ func applyFixups(tarPath string, f Fixups, img imageFacts) error {
 			struct{ name, target string }{"sbin/init", AgentPathInImage})
 	}
 	for _, l := range links {
+		at := img.resolve(l.name)
 		if err := tw.WriteHeader(&tar.Header{
-			Name: img.resolve(l.name), Typeflag: tar.TypeSymlink,
-			Linkname: l.target, Mode: 0o777, ModTime: time.Now(),
+			Name: at, Typeflag: tar.TypeSymlink, Linkname: l.target,
+			Mode: 0o777, ModTime: time.Now(),
 		}); err != nil {
-			return fmt.Errorf("build: link %s: %w", l.name, err)
+			return fmt.Errorf("build: link %s: %w", at, err)
 		}
 	}
 	return nil
@@ -452,10 +456,12 @@ func (img imageFacts) resolve(name string) string {
 
 // scanImage reads the facts the fixups need out of a flattened image tarball.
 //
-// One pass for both, because the directory symlinks cannot be classified
-// until every directory entry has been seen: a symlink is only followed when
-// its target is a directory, and the target may appear anywhere in the
-// archive, before or after the link itself.
+// One pass for both, and necessarily a FULL one: a symlink is only followed
+// when its target is a directory, and the target may appear anywhere in the
+// archive, before or after the link itself. That is a change from stopping at
+// the first systemd hit, and it costs almost nothing -- tar's reader skips
+// payloads with Seek over an *os.File, so this reads headers, and the two
+// maps below are locals freed on return.
 func scanImage(tarPath string) (imageFacts, error) {
 	f, err := os.Open(tarPath)
 	if err != nil {
@@ -481,8 +487,14 @@ func scanImage(tarPath string) (imageFacts, error) {
 		switch h.Typeflag {
 		case tar.TypeDir:
 			dirs[name] = true
+			// Later entries win, here as everywhere else in a tar: a layer
+			// that replaces a symlink with a real directory has to
+			// un-classify the link, or the fixups are written away from a
+			// directory the image really has.
+			delete(links, name)
 		case tar.TypeSymlink:
 			links[name] = h.Linkname
+			delete(dirs, name)
 		}
 		if name == "lib/systemd/systemd" || name == "usr/lib/systemd/systemd" {
 			facts.hasSystemd = true
