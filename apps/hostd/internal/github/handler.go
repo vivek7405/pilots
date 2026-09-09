@@ -142,7 +142,10 @@ func (d Deps) onPush(ctx context.Context, ev Event) error {
 		return nil
 	}
 
-	build, step, err := d.buildRef(ctx, ev, ev.After, svc.App, d.orgOf(ctx, svc.ID))
+	org := d.orgOf(ctx, svc.ID)
+	d.warnUnclaimed(ctx, svc, org, ev.Repository.FullName)
+
+	build, step, err := d.buildRef(ctx, ev, ev.After, svc.App, org)
 	if err != nil {
 		return err
 	}
@@ -453,6 +456,36 @@ func (d Deps) orgOf(ctx context.Context, serviceID string) string {
 		return t.OrgID
 	}
 	return ""
+}
+
+// warnUnclaimed logs a service that autodeploys a repository its org holds no
+// claim on. It NEVER refuses, and that is the decision, not an oversight.
+//
+// A push is a signed delivery about a repository, resolved to the service rows
+// that name it; it is not a request from a tenant, so `repo_links` is not what
+// authorizes it and consulting it here would be a second, weaker gate on a
+// path that already has a strong one. What this catches is the OTHER half:
+// `services.repo` was ungated before repo_links existed, so every row written
+// until then is grandfathered -- it keeps its standing order to build that
+// repository into its owner's machine on every commit, and the check on the
+// create and the patch closes the door only for rows written from now on.
+//
+// Refusing them instead would stop every autodeploy on the fleet the moment a
+// host upgrades, since no existing row has a claim; writing claims for them
+// would mint permissions nobody proved. So the fleet keeps building them and
+// says so once per push, naming the service, the org and the repository, which
+// is what an operator needs to reconcile the set by hand. ARCHITECTURE.md
+// records that pre-existing rows are trusted.
+func (d Deps) warnUnclaimed(ctx context.Context, svc *state.Service, org, repo string) {
+	if org == "" || repo == "" {
+		return
+	}
+	if link, err := d.Store.GetRepoLink(ctx, org, repo); err == nil && link != nil && link.OrgID == org {
+		return
+	}
+	slog.Warn("autodeploying a repository this org holds no claim on; it predates repo_links "+
+		"and is trusted. Connect it (POST /v1/repos) or disconnect the service",
+		"service", svc.ID, "org", org, "repo", repo)
 }
 
 // refuse records a refusal where a person can read it and returns it as an

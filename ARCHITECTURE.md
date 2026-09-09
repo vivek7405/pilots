@@ -246,6 +246,20 @@ CREATE TABLE api_key_revocations (hash TEXT PRIMARY KEY, revoked_at INTEGER);
 -- App installation, bound to an org by the dashboard's install callback) and
 -- hostd cannot check it from a request. There is no disconnect yet -- removing
 -- a link is tombstone-shaped, like a revocation, and wants its own table.
+--
+-- PRE-EXISTING services.repo ROWS ARE TRUSTED, and that is a decision rather
+-- than an omission. `services.repo` was ungated before this table existed, so
+-- a row written until then names a repository with no claim behind it and
+-- keeps its standing order to build it on every push. The push path does not
+-- consult repo_links at all: a push is a GitHub-signed delivery resolved to
+-- the service rows that name a repository, not a request from a tenant, and a
+-- second, weaker gate there would authorize nothing the signature does not.
+-- Refusing those rows on upgrade would stop every autodeploy on the fleet at
+-- once, since none of them has a claim, and writing claims for them would mint
+-- permissions nobody proved. So they keep building, and each is logged once
+-- per push naming the service, the org and the repository (internal/github,
+-- warnUnclaimed) for an operator to reconcile by hand. Every row written from
+-- now on carries a claim: the create and the patch both check one.
 CREATE TABLE repo_links (id TEXT PRIMARY KEY,  -- <org_id>/<owner>/<name>
                        org_id TEXT,
                        repo TEXT,        -- owner/name, lowercased
