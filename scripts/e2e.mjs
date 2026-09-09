@@ -2155,7 +2155,7 @@ async function serviceAssertions() {
     await step('a service named after a machine gets a suffixed address', async () => {
       const mach = await request('/v1/machines', {
         method: 'POST',
-        body: { name: `taken-${tag}`, image: 'alpine:3', vcpus: 1, mem_mib: 256 },
+        body: { name: `taken-${tag}`, vcpus: 1, mem_mib: 256 },
       });
       assert(mach.status === 201, `create machine: ${mach.status} ${JSON.stringify(mach.json)}`);
       created.push(mach.json.id);
