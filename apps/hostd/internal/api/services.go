@@ -304,6 +304,11 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	if volume != nil {
 		out.VolumeID = volume.ID
 	}
+	// Echoed, the way the machine create echoes them: a client that reads
+	// url_auth back from the create to confirm the service is gated would
+	// otherwise be told "public" about a service that is not.
+	out.Labels = req.Labels
+	out.URLAuth = orDefaultMode(req.URLAuth)
 	writeJSON(w, http.StatusCreated, out)
 }
 
@@ -716,6 +721,17 @@ func (d Deps) handlePromote(w http.ResponseWriter, r *http.Request) {
 	// lifecycle, not the identity, and a label is how a caller finds it.
 	if l := d.labelsOf(r.Context(), r.PathValue("id")); len(l) > 0 {
 		if err := d.Store.PutLabels(r.Context(), &state.Labels{ID: svc.ID, Kind: "service", Labels: l, UpdatedAt: time.Now().Unix()}); err != nil {
+			writeMapped(w, err)
+			return
+		}
+	}
+	// And so is who may reach its URL. The URL does not change across a
+	// promote, so neither may the answer to "who may reach it": without this
+	// an org-gated sandbox becomes a public service the moment it is
+	// promoted, and every replica the service gains afterwards -- which
+	// carries no mode of its own -- would be reachable by anyone.
+	if mode := d.urlAuthOf(r.Context(), r.PathValue("id")); mode == URLAuthOrg {
+		if err := d.Store.PutURLAuth(r.Context(), &state.URLAuth{ID: svc.ID, Kind: "service", Mode: mode, UpdatedAt: time.Now().Unix()}); err != nil {
 			writeMapped(w, err)
 			return
 		}

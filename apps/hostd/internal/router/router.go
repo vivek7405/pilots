@@ -471,20 +471,27 @@ func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, slot *netns.S
 // allowed enforces url_auth on a resolved target. Public is the default and
 // costs one local read. Org asks for an API key of the owning org in an
 // Authorization: Bearer header: no key is 401 with a WWW-Authenticate so a
-// client knows what to send, a key of another org is 403. The mode is the
-// service's when the machine is a replica, else the machine's own, so a
-// promoted machine follows its service.
+// client knows what to send, a key of another org is 403.
+//
+// BOTH the machine's own mode and its service's are read, and org on either
+// gates. Reading only the service's would leave the mode unenforced for most
+// machines: machines.provisionService mints a service row for EVERY machine
+// created with an app or an environment, so `--url-auth org` on
+// `pilot machines create api --env PORT=8080` would be written under the
+// machine id, looked up under the service id, and silently serve the sandbox
+// to anyone with the URL. Reading only the machine's would miss the replicas
+// a service gained after promote, which never carried a mode of their own.
 func (r *Router) allowed(w http.ResponseWriter, req *http.Request, t *Target) bool {
 	if r.opts.URLAuthOf == nil {
 		return true
 	}
 	ctx := req.Context()
 	subject := t.Machine.ID
-	if t.Machine.ServiceID != "" {
+	if r.opts.URLAuthOf(ctx, subject) != urlAuthOrg {
+		if t.Machine.ServiceID == "" || r.opts.URLAuthOf(ctx, t.Machine.ServiceID) != urlAuthOrg {
+			return true
+		}
 		subject = t.Machine.ServiceID
-	}
-	if r.opts.URLAuthOf(ctx, subject) != "org" {
-		return true
 	}
 	key := ""
 	if h := req.Header.Get("Authorization"); h != "" {
@@ -509,5 +516,15 @@ func (r *Router) allowed(w http.ResponseWriter, req *http.Request, t *Target) bo
 		http.Error(w, "this URL belongs to another org", http.StatusForbidden)
 		return false
 	}
+	// The header was for the router, and the router has read it. Passing it on
+	// would hand a fleet-wide API key of the org to whatever the machine runs
+	// -- including a sandbox an agent is working in, which is the case this
+	// mode exists for.
+	req.Header.Del("Authorization")
 	return true
 }
+
+// urlAuthOrg is the url_auth mode that gates a URL on an API key of the owning
+// org. The string is the API's (api.URLAuthOrg), spelled again here because the
+// router does not import that package.
+const urlAuthOrg = "org"
