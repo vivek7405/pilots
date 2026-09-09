@@ -92,6 +92,9 @@ func main() {
 	mux.HandleFunc("GET /exec/stream", requireAuth(handleExecStream))
 	mux.HandleFunc("GET /terminal", requireAuth(handleTerminal))
 	mux.HandleFunc("GET /tcp/{port}", requireAuth(handleTCP))
+	mux.HandleFunc("GET /sessions", requireAuth(handleSessions))
+	mux.HandleFunc("GET /attach", requireAuth(handleAttach))
+	mux.HandleFunc("POST /sessions/{id}/kill", requireAuth(handleKillSession))
 
 	srv := &http.Server{
 		Addr:              ":" + port,

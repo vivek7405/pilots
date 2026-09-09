@@ -404,6 +404,59 @@ async function lifecycleAssertions() {
       }
     });
 
+    // #102: a terminal session outlives the connection that opened it. The
+    // client here is the raw protocol -- a tty exec stream, closed without
+    // ceremony, the way a dropped link closes one -- and what it typed is
+    // still there for the next client that attaches.
+    await step('a console session survives its client leaving, and attach replays what it missed', async () => {
+      const marker = `e2e-session-${Math.random().toString(36).slice(2, 8)}`;
+      const protocols = [`authorization.bearer.${KEY}`];
+      const frames = (ws, ms) => new Promise((resolve) => {
+        const chunks = [];
+        let sessionId = '';
+        ws.addEventListener('message', async (ev) => {
+          if (typeof ev.data === 'string') {
+            try { const m = JSON.parse(ev.data); if (m.type === 'session') sessionId = m.id; } catch {}
+            return;
+          }
+          const buf = Buffer.from(await ev.data.arrayBuffer());
+          if (buf[0] === 1) chunks.push(buf.subarray(1)); // stdout frame
+        });
+        setTimeout(() => resolve({ text: Buffer.concat(chunks).toString('utf8'), sessionId }), ms);
+      });
+      const open = (path) => new Promise((resolve, reject) => {
+        const ws = new WebSocket(WS_API + path, protocols);
+        ws.addEventListener('open', () => resolve(ws));
+        ws.addEventListener('error', (e) => reject(new Error(`ws ${path}: ${e.message ?? 'error'}`)));
+      });
+      const stdin = (ws, s) => ws.send(Buffer.concat([Buffer.from([0]), Buffer.from(s)]));
+
+      const first = await open(`/v1/machines/${id}/exec/stream?cmd=/bin/sh&tty=true&stdin=true&rows=24&cols=80`);
+      const seen = frames(first, 2500);
+      setTimeout(() => stdin(first, `echo ${marker}; sleep 60\n`), 800);
+      const { sessionId } = await seen;
+      assert(sessionId, 'the agent must announce the session id in its first frames');
+      first.close(); // the link drops; the shell must not die with it
+      await new Promise((r) => setTimeout(r, 800));
+
+      const listed = await request(`/v1/machines/${id}/sessions`);
+      assert(listed.status === 200, `sessions: ${listed.status}`);
+      const live = listed.json.find((s) => s.id === sessionId);
+      assert(live && !live.ended, `the session should still be live: ${JSON.stringify(listed.json)}`);
+      assert(live.attached === false, 'nobody is attached once the client left');
+
+      const again = await open(`/v1/machines/${id}/attach/${sessionId}?tty=true`);
+      const replay = await frames(again, 2000);
+      assert(replay.text.includes(marker), `attach did not replay the scrollback: ${JSON.stringify(replay.text.slice(-200))}`);
+      stdin(again, '\x03exit\n');
+      await new Promise((r) => setTimeout(r, 1500));
+      again.close();
+
+      const after = await request(`/v1/machines/${id}/sessions`);
+      const ended = after.json.find((s) => s.id === sessionId);
+      assert(ended && ended.ended, `exit should end the session: ${JSON.stringify(after.json)}`);
+    });
+
     await step('a non-zero exit is reported, not thrown away', async () => {
       const { status, json } = await request(`/v1/machines/${id}/exec`, {
         method: 'POST', body: { cmd: 'exit 42', user: 'root' },

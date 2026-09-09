@@ -43,6 +43,10 @@ type Manager interface {
 	ExecStream(w http.ResponseWriter, r *http.Request, machineID string) error
 	// TCPStream carries one TCP connection to a port inside the machine.
 	TCPStream(w http.ResponseWriter, r *http.Request, machineID string, port int) error
+	// Terminal sessions, answered by the guest agent.
+	SessionsJSON(ctx context.Context, machineID string) ([]byte, error)
+	AttachStream(w http.ResponseWriter, r *http.Request, machineID, session string) error
+	KillSession(ctx context.Context, machineID, session string) error
 	// LogTail is Logs from a byte offset, for a follow. nil, nil when nothing
 	// new has been written. It reads the file and nothing else: a follow polls
 	// it twice a second, and whether the machine still exists is asked far

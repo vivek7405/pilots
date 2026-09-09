@@ -42,3 +42,18 @@ MCP: `create_machine` with `{ "name": "scratch" }`, then `exec` with `{ "machine
 - Do not create a machine to deploy an app. `deploy` makes the machines a service needs.
 - Do not treat a non-zero exit as a broken tool. A `grep` that found nothing exits 1.
 - Do not destroy a machine without asking the user. It is irreversible and it takes every checkpoint with it.
+
+## Files, ports and sessions from the CLI
+
+- `pilot file push <local> <machine>:<dest>` / `pilot file pull <machine>:<src> <local>` /
+  `pilot file edit <machine>:<path>` move files over the exec stream; a binary file
+  survives the round trip byte for byte.
+- `pilot proxy <port>|<local:remote>...` reaches any TCP port inside a machine from
+  localhost (Postgres, a debugger, ssh via `-W host:port` as a ProxyCommand). The URL
+  serves 8080 over HTTP only; proxy is for everything else.
+- A console is a session that outlives its connection: `ctrl-\` detaches, `pilot attach`
+  returns and replays what was printed meanwhile, `pilot sessions ls` lists them,
+  `pilot sessions kill` ends one.
+- `pilot url [target]` shows a URL's auth mode; `pilot url update --auth org` makes it
+  require an API key of the org; `--label k=v` on create and `ls --label` find machines again.
+- `pilot use <machine>` sets a directory-local default so none of these need a name.

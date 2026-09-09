@@ -1,10 +1,7 @@
 package cli
 
 import (
-	"io"
 	"os"
-	"os/signal"
-	"syscall"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -89,44 +86,7 @@ func runConsole(c *cobra.Command, env *Env, client *pilots.Client, id string, ar
 	if err != nil {
 		return err
 	}
-	defer stream.Close()
-
-	// Raw mode for the duration, restored on every exit path: a terminal left
-	// raw is one the operator has to `reset` blind.
-	oldState, err := term.MakeRaw(stdinFd)
-	if err != nil {
-		return err
-	}
-	defer term.Restore(stdinFd, oldState)
-
-	// A window change is forwarded, so full-screen programs in the guest
-	// re-lay out. SIGWINCH is delivered on this goroutine's channel until the
-	// stream ends.
-	winch := make(chan os.Signal, 1)
-	signal.Notify(winch, syscall.SIGWINCH)
-	defer signal.Stop(winch)
-	go func() {
-		for range winch {
-			if c, r, err := term.GetSize(stdoutFd); err == nil {
-				_ = stream.Resize(uint16(c), uint16(r))
-			}
-		}
-	}()
-
-	go func() {
-		_, _ = io.Copy(stream.Stdin, os.Stdin)
-		_ = stream.Stdin.Close()
-	}()
-	outDone := make(chan struct{})
-	go func() { _, _ = io.Copy(os.Stdout, stream.Stdout); close(outDone) }()
-
-	code, err := stream.Wait()
-	<-outDone
-	if err != nil {
-		return err
-	}
-	if code != 0 {
-		return &ExitError{Code: code}
-	}
-	return nil
+	// Raw mode, window size, ctrl-\ to detach: the same loop `pilot attach`
+	// runs, because a console IS a session from its first frame.
+	return driveTerminal(env, stream, stdinFd, stdoutFd, "")
 }

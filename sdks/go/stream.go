@@ -66,6 +66,9 @@ type ExecStream struct {
 	mu   sync.Mutex
 	code int
 	err  error
+	// sessionID is the terminal session behind a TTY stream, announced by
+	// the agent in its first frames.
+	sessionID string
 }
 
 // ExecStream opens a websocket and streams a command's output frame by frame.
@@ -194,8 +197,16 @@ func (s *ExecStream) read(ctx context.Context, stdout, stderr *io.PipeWriter) {
 			var msg struct {
 				Type     string `json:"type"`
 				ExitCode int    `json:"exit_code"`
+				ID       string `json:"id"`
 			}
-			if json.Unmarshal(data, &msg) == nil && msg.Type == "exit" {
+			_ = json.Unmarshal(data, &msg)
+			if msg.Type == "session" {
+				s.mu.Lock()
+				s.sessionID = msg.ID
+				s.mu.Unlock()
+				continue
+			}
+			if msg.Type == "exit" {
 				s.mu.Lock()
 				if s.code < 0 {
 					s.code = msg.ExitCode
