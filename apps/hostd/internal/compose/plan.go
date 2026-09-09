@@ -150,10 +150,13 @@ type Step struct {
 	// Knobs is the replica lifecycle policy, filled only when the file spelled
 	// at least one of the four keys out. The same struct the deploy carries,
 	// so the field names both sides write are one declaration.
-	Knobs        *api.Knobs `json:"knobs,omitempty"`
-	Domain       string     `json:"domain,omitempty"`
-	CustomDomain string     `json:"custom_domain,omitempty"`
-	PreDeploy    string     `json:"pre_deploy,omitempty"`
+	Knobs  *api.Knobs `json:"knobs,omitempty"`
+	Domain string     `json:"domain,omitempty"`
+	// Private asks for no address at all. A service without it is given one
+	// from its name, so this is how a database says it has nothing to serve.
+	Private      bool   `json:"private,omitempty"`
+	CustomDomain string `json:"custom_domain,omitempty"`
+	PreDeploy    string `json:"pre_deploy,omitempty"`
 }
 
 // Plan is the ordered result: the app, and its services in dependency order.
@@ -197,6 +200,7 @@ const unsupportedError = "compose file has unsupported keys"
 // by pilot add postgres, and whatever a later CLI adds.
 type xPilots struct {
 	Domain             string  `mapstructure:"domain"`
+	Private            bool    `mapstructure:"private"`
 	CustomDomain       string  `mapstructure:"custom_domain"`
 	AutoStop           *string `mapstructure:"auto_stop"`
 	AutoStart          *bool   `mapstructure:"auto_start"`
@@ -260,6 +264,13 @@ func Compile(ctx context.Context, req Request) (*Plan, *PlanError, error) {
 	}
 
 	if bad := validate(project.Services); len(bad) > 0 {
+		return nil, &PlanError{Error: unsupportedError, Code: api.CodePlanUnsupported,
+			Next: "remove or replace each listed key; every one is named", Unsupported: bad}, nil
+	}
+	// Two x-pilots keys saying opposite things about one address. Reported
+	// the way an unsupported key is, so a file with several mistakes gets one
+	// 400 listing all of them rather than one per attempt.
+	if bad := contradictoryAddresses(project.Services); len(bad) > 0 {
 		return nil, &PlanError{Error: unsupportedError, Code: api.CodePlanUnsupported,
 			Next: "remove or replace each listed key; every one is named", Unsupported: bad}, nil
 	}
@@ -719,6 +730,29 @@ func validate(services types.Services) []Unsupported {
 	return out
 }
 
+// contradictoryAddresses finds a service asking to be private AND naming an
+// address. Neither answer is safe to guess: serving a service that asked to be
+// private is worse than a refusal, and refusing to serve one that named an
+// address is the bug this whole surface exists to fix.
+func contradictoryAddresses(services types.Services) []Unsupported {
+	var out []Unsupported
+	for name, svc := range services {
+		var x xPilots
+		if _, err := svc.Extensions.Get("x-pilots", &x); err != nil {
+			continue
+		}
+		if !x.Private || x.Domain == "" {
+			continue
+		}
+		out = append(out, Unsupported{
+			Service: name, Key: "x-pilots.private",
+			Message: "private and domain contradict; drop one",
+		})
+	}
+	sortUnsupported(out)
+	return out
+}
+
 func sortUnsupported(u []Unsupported) {
 	sort.Slice(u, func(i, j int) bool {
 		if u[i].Service != u[j].Service {
@@ -750,6 +784,7 @@ func toStep(name string, svc types.ServiceConfig) (Step, error) {
 		DependsOn:    slices.Sorted(maps.Keys(svc.DependsOn)),
 		Knobs:        knobs,
 		Domain:       x.Domain,
+		Private:      x.Private,
 		CustomDomain: x.CustomDomain,
 		PreDeploy:    x.PreDeploy,
 	}

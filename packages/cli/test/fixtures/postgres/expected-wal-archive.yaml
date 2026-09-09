@@ -25,5 +25,6 @@ services:
       retries: 5
     x-pilots:
       durable_volume: false # data dir local, WAL shipped to the pgarchive volume every 60s (RPO 60s)
+      private: true
 volumes:
   pgarchive: {}

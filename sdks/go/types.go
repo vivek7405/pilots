@@ -563,10 +563,13 @@ type ComposeStep struct {
 	// A patch: a step's knobs are whatever the compose file spelled out, and
 	// they are spread straight onto a DeployRequest, so the fields the file
 	// left out must stay absent rather than arrive as zeros.
-	Knobs        *KnobsPatch `json:"knobs,omitempty"`
-	Domain       string      `json:"domain,omitempty"`
-	CustomDomain string      `json:"custom_domain,omitempty"`
-	PreDeploy    string      `json:"pre_deploy,omitempty"`
+	Knobs  *KnobsPatch `json:"knobs,omitempty"`
+	Domain string      `json:"domain,omitempty"`
+	// Private asks for no address at all. A service without it is given one
+	// from its name, so this is how a database says it has nothing to serve.
+	Private      bool   `json:"private,omitempty"`
+	CustomDomain string `json:"custom_domain,omitempty"`
+	PreDeploy    string `json:"pre_deploy,omitempty"`
 }
 
 type ComposePlan struct {

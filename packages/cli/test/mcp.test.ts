@@ -417,6 +417,28 @@ test('deploy creates a service, waits for the release and returns the URL', asyn
   }
 })
 
+// An agent deploying a database needs the same way out of the default address
+// that a compose file has, or its only option is to accept a URL that will
+// never answer.
+test('deploy forwards private, and names no address with it', async () => {
+  const api = await startFakeAPI()
+  const { client, close } = await connect(serverEnv(api.url))
+  try {
+    const result = await client.callTool({
+      name: 'deploy',
+      arguments: { name: 'gate-db', build: 'rootfs_1', app: 'gate', private: true },
+    })
+    assert.equal(result.isError, undefined, textOf(result))
+
+    const body = JSON.parse(api.find('POST', '/v1/services')!.body) as Record<string, unknown>
+    assert.equal(body.private, true)
+    assert.equal('domain' in body, false)
+  } finally {
+    await close()
+    await api.close()
+  }
+})
+
 test('restore is in place: the machine keeps its id and URL', async () => {
   const api = await startFakeAPI()
   const machine = fakeMachine({ id: 'm_keep', name: 'box' })

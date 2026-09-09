@@ -566,6 +566,11 @@ export interface ComposeStep {
    */
   knobs?: KnobsPatch
   domain?: string
+  /**
+   * Asks for no address at all. A service without it is given one from its
+   * name, so this is how a database says it has nothing to serve.
+   */
+  private?: boolean
   custom_domain?: string
   pre_deploy?: string
 }

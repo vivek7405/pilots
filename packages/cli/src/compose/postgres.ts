@@ -69,7 +69,10 @@ export function postgresFragment(opts: { durableVolume?: boolean } = {}): Fragme
           timeout: '5s',
           retries: 5,
         },
-        'x-pilots': { durable_volume: true },
+        // private: a database serves 5432 to its peers over .internal and has
+        // nothing to answer on 8080, so a public address would only be a URL
+        // that times out.
+        'x-pilots': { durable_volume: true, private: true },
       },
       volumes: { pgdata: {} },
       files: {},
@@ -103,7 +106,8 @@ export function postgresFragment(opts: { durableVolume?: boolean } = {}): Fragme
         timeout: '5s',
         retries: 5,
       },
-      'x-pilots': { durable_volume: false },
+      // private for the reason the durable-volume mode gives above.
+      'x-pilots': { durable_volume: false, private: true },
     },
     volumes: { pgarchive: {} },
     files: {
