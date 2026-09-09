@@ -102,6 +102,37 @@ func validURLAuth(mode string) bool {
 	return mode == "" || mode == URLAuthPublic || mode == URLAuthOrg
 }
 
+// Label bounds. A labels map goes into a CRDT table replicated to every host
+// and cached in each one's memory, so its size is fleet-wide cost rather than
+// one row's: a caller that attached a megabyte of them (the body limit, and
+// nothing below it said otherwise) would gossip that megabyte to the whole
+// fleet for as long as the object lives.
+const (
+	maxLabels      = 32
+	maxLabelKey    = 64
+	maxLabelValue  = 256
+	labelsTooLarge = "at most 32 labels, keys up to 64 bytes and values up to 256"
+)
+
+// checkLabels refuses a labels map that is outside those bounds. An empty key
+// goes with them: `?label=k=v` cannot express one, so it could never be
+// matched again.
+func checkLabels(w http.ResponseWriter, labels map[string]string) bool {
+	if len(labels) > maxLabels {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest,
+			fmt.Sprintf("%d labels is too many", len(labels)), labelsTooLarge, nil)
+		return false
+	}
+	for k, v := range labels {
+		if k == "" || len(k) > maxLabelKey || len(v) > maxLabelValue {
+			WriteError(w, http.StatusBadRequest, CodeBadRequest,
+				fmt.Sprintf("label %q is not within the limits", k), labelsTooLarge, nil)
+			return false
+		}
+	}
+	return true
+}
+
 func orDefaultMode(mode string) string {
 	if mode == "" {
 		return URLAuthPublic
@@ -268,6 +299,9 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 
 	if !validURLAuth(req.URLAuth) {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, "url_auth must be public or org", "pass url_auth: public, or url_auth: org", nil)
+		return
+	}
+	if !checkLabels(w, req.Labels) {
 		return
 	}
 	if !d.checkQuota(w, r, quota.Delta{

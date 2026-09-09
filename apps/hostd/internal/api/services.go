@@ -83,6 +83,9 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, "url_auth must be public or org", "pass url_auth: public, or url_auth: org", nil)
 		return
 	}
+	if !checkLabels(w, req.Labels) {
+		return
+	}
 	if req.Private && req.Domain != "" {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest,
 			"private and domain contradict: a private service has no address",
