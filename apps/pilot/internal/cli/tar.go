@@ -98,6 +98,37 @@ func mightBeReincluded(rel string, rules []ignoreRule) bool {
 // every target), and paths sorted so the same tree packs to the same bytes,
 // which is what lets the fleet's layer cache hit.
 func tarDirectory(dir string) ([]byte, error) {
+	return tarDirectoryWith(dir, nil)
+}
+
+// tarFiles packs literal files with no directory behind them: a plan whose
+// step carries a generated Dockerfile and no build context.
+func tarFiles(files map[string]string) ([]byte, error) {
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	names := make([]string, 0, len(files))
+	for n := range files {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		if err := tw.WriteHeader(&tar.Header{Name: n, Mode: 0o644, Size: int64(len(files[n]))}); err != nil {
+			return nil, err
+		}
+		if _, err := io.WriteString(tw, files[n]); err != nil {
+			return nil, err
+		}
+	}
+	if err := tw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// tarDirectoryWith packs dir, then writes extra files over it: a Dockerfile
+// the plan generated or amended replaces the one on disk, because the plan's
+// version is the one the fleet decided to build.
+func tarDirectoryWith(dir string, extra map[string]string) ([]byte, error) {
 	var rules []ignoreRule
 	if raw, err := os.ReadFile(filepath.Join(dir, ".dockerignore")); err == nil {
 		rules = parseDockerignore(string(raw))
@@ -159,6 +190,9 @@ func tarDirectory(dir string) ([]byte, error) {
 	var buf bytes.Buffer
 	tw := tar.NewWriter(&buf)
 	for _, e := range entries {
+		if _, replaced := extra[e.rel]; replaced {
+			continue
+		}
 		hdr, err := tar.FileInfoHeader(e.info, e.link)
 		if err != nil {
 			return nil, err
@@ -186,6 +220,19 @@ func tarDirectory(dir string) ([]byte, error) {
 			if err != nil {
 				return nil, err
 			}
+		}
+	}
+	extraNames := make([]string, 0, len(extra))
+	for n := range extra {
+		extraNames = append(extraNames, n)
+	}
+	sort.Strings(extraNames)
+	for _, n := range extraNames {
+		if err := tw.WriteHeader(&tar.Header{Name: n, Mode: 0o644, Size: int64(len(extra[n]))}); err != nil {
+			return nil, err
+		}
+		if _, err := io.WriteString(tw, extra[n]); err != nil {
+			return nil, err
 		}
 	}
 	if err := tw.Close(); err != nil {
