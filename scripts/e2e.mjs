@@ -272,6 +272,43 @@ async function lifecycleAssertions() {
     machine = json;
   });
 
+  // #103: labels set at create come back on every answer, filter a list, and
+  // follow the machine through promote. They live in a side table, never a
+  // column on machines (rule 6), so the create is the one write.
+  await step('labels set at create are returned, filter a list, and survive promote', async () => {
+    const tag = Math.random().toString(36).slice(2, 8);
+    const created = await request('/v1/machines', {
+      method: 'POST', body: { vcpus: 1, mem_mib: 512, labels: { task: `t-${tag}`, tier: 'sandbox' } },
+    });
+    assert(created.status === 201, `create: ${created.status} ${JSON.stringify(created.json)}`);
+    assert(created.json.labels?.task === `t-${tag}` && created.json.labels?.tier === 'sandbox',
+      `labels did not come back on create: ${JSON.stringify(created.json.labels)}`);
+    try {
+      const got = await request(`/v1/machines/${created.json.id}`);
+      assert(got.json.labels?.task === `t-${tag}`, `labels missing on GET: ${JSON.stringify(got.json.labels)}`);
+
+      const hit = await request(`/v1/machines?label=task=t-${tag}`);
+      assert(hit.status === 200 && hit.json.length === 1 && hit.json[0].id === created.json.id,
+        `?label= should find exactly the labelled machine: ${hit.status} ${hit.json.length}`);
+      const both = await request(`/v1/machines?label=task=t-${tag}&label=tier=sandbox`);
+      assert(both.json.length === 1, `two labels must both match: got ${both.json.length}`);
+      const miss = await request(`/v1/machines?label=task=t-${tag}&label=tier=prod`);
+      assert(miss.json.length === 0, `a label that does not match must exclude: got ${miss.json.length}`);
+      const unlabelled = await request(`/v1/machines?label=task=t-${tag}`);
+      assert(!unlabelled.json.some((m) => m.id === machine.id), 'the unlabelled machine leaked into the filter');
+
+      const promoted = await request(`/v1/machines/${created.json.id}/promote`, { method: 'POST', body: { replicas: 1 } });
+      assert(promoted.status === 200, `promote: ${promoted.status} ${JSON.stringify(promoted.json)}`);
+      assert(promoted.json.labels?.task === `t-${tag}`,
+        `promote must carry the labels onto the service: ${JSON.stringify(promoted.json.labels)}`);
+      const svcs = await request(`/v1/services?label=task=t-${tag}`);
+      assert(svcs.json.length === 1 && svcs.json[0].id === promoted.json.id,
+        `?label= on services should find the promoted one: ${svcs.json.length}`);
+    } finally {
+      await request(`/v1/machines/${created.json.id}`, { method: 'DELETE' });
+    }
+  });
+
   if (!machine) {
     console.log('  ! create failed; skipping the rest of the lifecycle');
     return;

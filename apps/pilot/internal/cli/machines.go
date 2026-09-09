@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -37,6 +38,33 @@ func parseEnv(pairs []string) (map[string]string, error) {
 		env[k] = v
 	}
 	return env, nil
+}
+
+// hasLabels reports whether every wanted label is present with that value.
+func hasLabels(have, want map[string]string) bool {
+	for k, v := range want {
+		if have[k] != v {
+			return false
+		}
+	}
+	return true
+}
+
+// labelList renders labels as k=v pairs in a stable order.
+func labelList(labels map[string]string) string {
+	if len(labels) == 0 {
+		return "-"
+	}
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		parts = append(parts, k+"="+labels[k])
+	}
+	return strings.Join(parts, " ")
 }
 
 func unixTime(t int64) string {
@@ -83,9 +111,10 @@ func newMachinesCmd(env *Env) *cobra.Command {
 
 func newMachinesListCmd(env *Env) *cobra.Command {
 	var (
-		prefix    string
-		watchList bool
-		rate      int
+		prefix     string
+		labelPairs []string
+		watchList  bool
+		rate       int
 	)
 	c := &cobra.Command{
 		Use:     "list",
@@ -97,17 +126,22 @@ func newMachinesListCmd(env *Env) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			want, err := parseEnv(labelPairs)
+			if err != nil {
+				return err
+			}
 			render := func() error {
 				machines, err := client.Machines.List(c.Context())
 				if err != nil {
 					return err
 				}
-				if prefix != "" {
+				if prefix != "" || len(want) > 0 {
 					kept := machines[:0]
 					for _, m := range machines {
-						if strings.HasPrefix(m.Name, prefix) {
-							kept = append(kept, m)
+						if !strings.HasPrefix(m.Name, prefix) || !hasLabels(m.Labels, want) {
+							continue
 						}
+						kept = append(kept, m)
 					}
 					machines = kept
 				}
@@ -136,6 +170,7 @@ func newMachinesListCmd(env *Env) *cobra.Command {
 		},
 	}
 	c.Flags().StringVar(&prefix, "prefix", "", "only machines whose name starts with this")
+	c.Flags().StringArrayVar(&labelPairs, "label", nil, "only machines carrying this label, key=value (repeatable; all must match)")
 	c.Flags().BoolVarP(&watchList, "watch", "w", false, "re-render as machines change")
 	c.Flags().IntVar(&rate, "rate", 2, "seconds between renders under --watch")
 	Describe(c, Doc{
@@ -154,6 +189,7 @@ func newMachinesCreateCmd(env *Env) *cobra.Command {
 	var (
 		req         pilots.CreateMachineRequest
 		envPairs    []string
+		labelPairs  []string
 		skipConsole bool
 	)
 	c := &cobra.Command{
@@ -169,6 +205,9 @@ func newMachinesCreateCmd(env *Env) *cobra.Command {
 				req.Name = args[0]
 			}
 			if req.Env, err = parseEnv(envPairs); err != nil {
+				return err
+			}
+			if req.Labels, err = parseEnv(labelPairs); err != nil {
 				return err
 			}
 			m, err := client.Machines.Create(c.Context(), req)
@@ -202,6 +241,7 @@ func newMachinesCreateCmd(env *Env) *cobra.Command {
 	f.StringVar(&req.Cmd, "cmd", "", "the start command, overriding the image")
 	f.StringArrayVar(&envPairs, "env", nil, "an environment variable, KEY=value (repeatable)")
 	f.StringVar(&req.Volume, "volume", "", "attach this volume")
+	f.StringArrayVar(&labelPairs, "label", nil, "a label to find it by later, key=value (repeatable); `ls --label` filters on them")
 	f.BoolVar(&skipConsole, "skip-console", false, "exit after creating instead of opening a console")
 	Describe(c, Doc{
 		What: "A create is a restore from a golden template, not a boot, which is\n" +
@@ -255,6 +295,9 @@ func newMachinesInfoCmd(env *Env) *cobra.Command {
 			}
 			if m.App != "" {
 				rows = append(rows, []string{"APP", m.App})
+			}
+			if len(m.Labels) > 0 {
+				rows = append(rows, []string{"LABELS", labelList(m.Labels)})
 			}
 			if m.ImageRef != "" {
 				rows = append(rows, []string{"IMAGE", m.ImageRef})

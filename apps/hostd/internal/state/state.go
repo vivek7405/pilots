@@ -218,6 +218,15 @@ const (
 
 // MachineCPU records which CPU vendor photographed a memory image, and -- for a
 // machine -- how that machine last started.
+// Labels is what a caller attached to a machine or a service at create.
+// Kind says which, because the ids share one table.
+type Labels struct {
+	ID        string
+	Kind      string // machine|service
+	Labels    map[string]string
+	UpdatedAt int64
+}
+
 type MachineCPU struct {
 	ID          string
 	Kind        string
@@ -444,6 +453,16 @@ type Store interface {
 	// write order: a replicated store resolves the writer by reading that row,
 	// so deleting that row first makes this unauthorizable.
 	DeleteMachineCPU(ctx context.Context, id string) error
+	// PutLabels records the labels a machine or service was created with.
+	// Written once, by the host that writes the object row, under the same
+	// owner check; a replicated store refuses any other writer.
+	PutLabels(ctx context.Context, l *Labels, opts ...WriteOption) error
+	// GetLabels returns ErrNotFound when none were recorded, which callers
+	// read as "no labels" rather than as a failure.
+	GetLabels(ctx context.Context, id string) (*Labels, error)
+	// DeleteLabels drops the row for an object being removed, before the
+	// object row itself for the same reason DeleteMachineCPU is.
+	DeleteLabels(ctx context.Context, id string) error
 
 	PutCheckpoint(ctx context.Context, c *Checkpoint) error
 	ListCheckpoints(ctx context.Context, machineID string) ([]Checkpoint, error)
@@ -926,6 +945,45 @@ func (s *sqliteStore) GetMachineCPU(ctx context.Context, id string) (*MachineCPU
 func (s *sqliteStore) DeleteMachineCPU(ctx context.Context, id string) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM machine_cpu WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("state: delete machine cpu %q: %w", id, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) PutLabels(ctx context.Context, l *Labels, _ ...WriteOption) error {
+	raw, err := json.Marshal(l.Labels)
+	if err != nil {
+		return fmt.Errorf("state: labels for %q: %w", l.ID, err)
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO machine_labels (id, kind, labels, updated_at) VALUES (?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, labels=excluded.labels, updated_at=excluded.updated_at`,
+		l.ID, l.Kind, string(raw), l.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put labels %q: %w", l.ID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) GetLabels(ctx context.Context, id string) (*Labels, error) {
+	var l Labels
+	var raw string
+	err := s.db.QueryRowContext(ctx, `SELECT id, kind, labels, updated_at FROM machine_labels WHERE id = ?`, id).
+		Scan(&l.ID, &l.Kind, &raw, &l.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get labels %q: %w", id, err)
+	}
+	if err := json.Unmarshal([]byte(raw), &l.Labels); err != nil {
+		return nil, fmt.Errorf("state: labels %q are not a JSON object: %w", id, err)
+	}
+	return &l, nil
+}
+
+func (s *sqliteStore) DeleteLabels(ctx context.Context, id string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM machine_labels WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("state: delete labels %q: %w", id, err)
 	}
 	return nil
 }

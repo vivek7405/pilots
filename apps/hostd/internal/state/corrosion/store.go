@@ -2,6 +2,7 @@ package corrosion
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -1423,4 +1424,60 @@ func (s *Store) Version(ctx context.Context) (int64, error) {
 		}
 	}
 	return v, rows.Err()
+}
+
+// PutLabels: the writer is the host that writes the object row, checked
+// the way PutMachineCPU checks it. Written once at create in practice; the
+// upsert is for a retry of the same create, not for a later change.
+func (s *Store) PutLabels(ctx context.Context, l *state.Labels, opts ...state.WriteOption) error {
+	auth := state.ResolveAuth(opts)
+	if l.Kind == "service" {
+		if err := s.assertServiceWriter(ctx, l.ID); err != nil {
+			return err
+		}
+	} else if err := s.assertMachineOwner(ctx, l.ID, auth); err != nil {
+		return err
+	}
+	raw, err := json.Marshal(l.Labels)
+	if err != nil {
+		return fmt.Errorf("state: labels for %q: %w", l.ID, err)
+	}
+	_, err = s.client.Exec(ctx, `
+		INSERT INTO machine_labels (id, kind, labels, updated_at) VALUES (?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, labels=excluded.labels, updated_at=excluded.updated_at`,
+		l.ID, l.Kind, string(raw), l.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put labels %q: %w", l.ID, err)
+	}
+	return nil
+}
+
+func (s *Store) GetLabels(ctx context.Context, id string) (*state.Labels, error) {
+	rows, err := s.client.Query(ctx, `SELECT id, kind, labels, updated_at FROM machine_labels WHERE id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, state.ErrNotFound
+	}
+	var l state.Labels
+	var raw string
+	if err := rows.Scan(&l.ID, &l.Kind, &raw, &l.UpdatedAt); err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal([]byte(raw), &l.Labels); err != nil {
+		return nil, fmt.Errorf("state: labels %q are not a JSON object: %w", id, err)
+	}
+	return &l, nil
+}
+
+func (s *Store) DeleteLabels(ctx context.Context, id string) error {
+	if _, err := s.client.Exec(ctx, `DELETE FROM machine_labels WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("state: delete labels %q: %w", id, err)
+	}
+	return nil
 }

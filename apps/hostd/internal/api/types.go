@@ -104,6 +104,9 @@ type Machine struct {
 	// loses memory; this field is how a client tells it from a resume.
 	LastStart   string `json:"last_start,omitempty"`
 	LastStartAt int64  `json:"last_start_at,omitempty"`
+	// Labels were attached at create, for finding the machine again; they
+	// are not changed later.
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // CreateMachineRequest creates a machine from exactly one source: a built
@@ -160,6 +163,8 @@ type CreateMachineRequest struct {
 	// HERE rather than in the client: a client that sealed would need the
 	// fleet key, and a key on every laptop is not fleet infrastructure.
 	SecretEnv map[string]string `json:"secret_env,omitempty"`
+	// Labels to attach, key -> value; a filter on list finds them again.
+	Labels map[string]string `json:"labels,omitempty"`
 
 	// OrgID is the tenant this machine belongs to, filled from the
 	// authenticated key. `json:"-"` is load-bearing: a client that could set
@@ -322,11 +327,12 @@ type Service struct {
 	// VolumeID is the volume every replica of this service mounts. A service
 	// with one runs one replica, because a volume is mounted by exactly one
 	// machine.
-	VolumeID   string `json:"volume_id,omitempty"`
-	Repo       string `json:"repo,omitempty"`
-	Branch     string `json:"branch,omitempty"`
-	Autodeploy bool   `json:"autodeploy"`
-	CreatedAt  int64  `json:"created_at"`
+	VolumeID   string            `json:"volume_id,omitempty"`
+	Repo       string            `json:"repo,omitempty"`
+	Branch     string            `json:"branch,omitempty"`
+	Autodeploy bool              `json:"autodeploy"`
+	Labels     map[string]string `json:"labels,omitempty"`
+	CreatedAt  int64             `json:"created_at"`
 }
 
 type CreateServiceRequest struct {
@@ -363,6 +369,7 @@ type CreateServiceRequest struct {
 	// before any row is written -- never by the client, which would need the
 	// fleet key to do it.
 	SecretEnv map[string]string `json:"secret_env,omitempty"`
+	Labels    map[string]string `json:"labels,omitempty"`
 
 	Repo       string `json:"repo,omitempty"`
 	Branch     string `json:"branch,omitempty"`

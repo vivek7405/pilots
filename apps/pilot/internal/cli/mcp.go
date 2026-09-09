@@ -131,6 +131,7 @@ func (d mcpDeps) registerTools(s *mcp.Server) {
 		App        string            `json:"app,omitempty"`
 		Cmd        string            `json:"cmd,omitempty" jsonschema:"the start command, overriding the image"`
 		Env        map[string]string `json:"env,omitempty"`
+		Labels     map[string]string `json:"labels,omitempty" jsonschema:"labels to find it by later; list_machines filters on them"`
 	}
 	mcp.AddTool(s, &mcp.Tool{Name: "create_machine", Title: "Create a machine",
 		Description: "Create a microVM. A create is a restore from a template rather than a boot, so it is fast. " +
@@ -139,25 +140,26 @@ func (d mcpDeps) registerTools(s *mcp.Server) {
 			return wrap(func() (any, error) {
 				return client.Machines.Create(ctx, pilots.CreateMachineRequest{
 					Name: in.Name, Image: in.Image, Template: in.Template, Checkpoint: in.Checkpoint,
-					VCPUs: in.VCPUs, MemMiB: in.MemMiB, App: in.App, Cmd: in.Cmd, Env: in.Env,
+					VCPUs: in.VCPUs, MemMiB: in.MemMiB, App: in.App, Cmd: in.Cmd, Env: in.Env, Labels: in.Labels,
 				})
 			}, constant("exec on the returned id"))
 		})
 
 	type listIn struct {
-		App string `json:"app,omitempty"`
+		App    string            `json:"app,omitempty"`
+		Labels map[string]string `json:"labels,omitempty" jsonschema:"only machines carrying every one of these labels"`
 	}
 	mcp.AddTool(s, &mcp.Tool{Name: "list_machines", Title: "List machines",
-		Description: "Every machine this API key can see, optionally narrowed to one app."},
+		Description: "Every machine this API key can see, optionally narrowed to one app or to machines carrying given labels."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in listIn) (*mcp.CallToolResult, any, error) {
 			return wrap(func() (any, error) {
 				all, err := client.Machines.List(ctx)
-				if err != nil || in.App == "" {
+				if err != nil || (in.App == "" && len(in.Labels) == 0) {
 					return all, err
 				}
 				kept := []pilots.Machine{}
 				for _, m := range all {
-					if m.App == in.App {
+					if (in.App == "" || m.App == in.App) && hasLabels(m.Labels, in.Labels) {
 						kept = append(kept, m)
 					}
 				}

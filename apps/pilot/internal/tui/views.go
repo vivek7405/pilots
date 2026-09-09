@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -224,6 +225,18 @@ func (m *Model) viewMachine() string {
 	}
 	if mc.App != "" {
 		kv = append(kv, [2]string{"app", mc.App})
+	}
+	if len(mc.Labels) > 0 {
+		keys := make([]string, 0, len(mc.Labels))
+		for k := range mc.Labels {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			parts = append(parts, k+"="+mc.Labels[k])
+		}
+		kv = append(kv, [2]string{"labels", strings.Join(parts, " ")})
 	}
 	if mc.ServiceID != "" {
 		kv = append(kv, [2]string{"service", mc.ServiceID}, [2]string{"release", mc.ReleaseID})

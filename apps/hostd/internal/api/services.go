@@ -284,6 +284,12 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 		writeMapped(w, err)
 		return
 	}
+	if len(req.Labels) > 0 {
+		if err := d.Store.PutLabels(r.Context(), &state.Labels{ID: svc.ID, Kind: "service", Labels: req.Labels, UpdatedAt: time.Now().Unix()}); err != nil {
+			writeMapped(w, err)
+			return
+		}
+	}
 	out := d.serviceToAPI(*svc, req.OrgID)
 	if volume != nil {
 		out.VolumeID = volume.ID
@@ -326,7 +332,17 @@ func (d Deps) handleListServices(w http.ResponseWriter, r *http.Request) {
 		row := d.serviceToAPI(svc, owner)
 		row.VolumeID = mounts[svc.ID]
 		row.DependsOn = d.dependsOn(svc, groups[siblingKey{org: owner, app: svc.App}])
+		row.Labels = d.labelsOf(r.Context(), svc.ID)
 		out = append(out, row)
+	}
+	if want := labelFilter(r); len(want) > 0 {
+		kept := out[:0]
+		for _, s := range out {
+			if matchesLabels(s.Labels, want) {
+				kept = append(kept, s)
+			}
+		}
+		out = kept
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -674,6 +690,14 @@ func (d Deps) handlePromote(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeMapped(w, err)
 		return
+	}
+	// The machine's labels are the service's now: promote changes the
+	// lifecycle, not the identity, and a label is how a caller finds it.
+	if l := d.labelsOf(r.Context(), r.PathValue("id")); len(l) > 0 {
+		if err := d.Store.PutLabels(r.Context(), &state.Labels{ID: svc.ID, Kind: "service", Labels: l, UpdatedAt: time.Now().Unix()}); err != nil {
+			writeMapped(w, err)
+			return
+		}
 	}
 	volumeID, verr := d.volumeOf(r.Context(), svc.ID)
 	if verr != nil {

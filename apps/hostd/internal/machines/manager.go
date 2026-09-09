@@ -502,6 +502,9 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	if err := m.opts.Store.DeleteMachineCPU(ctx, id); err != nil {
 		errs = append(errs, fmt.Errorf("delete cpu row: %w", err))
 	}
+	if err := m.opts.Store.DeleteLabels(ctx, id); err != nil {
+		errs = append(errs, fmt.Errorf("delete labels row: %w", err))
+	}
 	if err := m.opts.Store.DeleteMachine(ctx, id); err != nil {
 		errs = append(errs, fmt.Errorf("delete row: %w", err))
 	}

@@ -74,6 +74,8 @@ export interface Machine {
    */
   last_start?: 'restore' | 'boot' | 'cold_boot'
   last_start_at?: number
+  /** Labels attached at create, for finding the machine again. */
+  labels?: Record<string, string>
 }
 
 export interface CreateMachineRequest {
@@ -94,6 +96,7 @@ export interface CreateMachineRequest {
   release?: string
   env?: Record<string, string>
   secret_env?: Record<string, string>
+  labels?: Record<string, string>
 }
 
 export interface ExecRequest {
@@ -194,6 +197,8 @@ export interface Service {
   branch?: string
   autodeploy: boolean
   created_at: number
+  /** Labels attached at create, or copied from the machine promote made it from. */
+  labels?: Record<string, string>
 }
 
 /**
@@ -427,6 +432,7 @@ export interface UpdateServiceRequest {
   health?: HealthCheck
   env?: Record<string, string>
   secret_env?: Record<string, string>
+  labels?: Record<string, string>
   repo?: string
   branch?: string
   autodeploy?: boolean

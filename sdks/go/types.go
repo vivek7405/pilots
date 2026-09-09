@@ -81,6 +81,8 @@ type Machine struct {
 	// disk and volume, and loses everything that was in memory.
 	LastStart   string `json:"last_start,omitempty"`
 	LastStartAt int64  `json:"last_start_at,omitempty"`
+	// Labels were attached at create, for finding the machine again.
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 // CreateMachineRequest creates a machine from exactly one source: a built
@@ -109,6 +111,7 @@ type CreateMachineRequest struct {
 	// fleet key before any row is written. secret:// references are resolved
 	// client-side, before the request is built.
 	SecretEnv map[string]string `json:"secret_env,omitempty"`
+	Labels    map[string]string `json:"labels,omitempty"`
 }
 
 // ExecRequest runs a command inside a machine, buffered.
@@ -217,6 +220,8 @@ type Service struct {
 	Branch     string `json:"branch,omitempty"`
 	Autodeploy bool   `json:"autodeploy"`
 	CreatedAt  int64  `json:"created_at"`
+	// Labels were attached at create, or copied from the machine promote made it from.
+	Labels map[string]string `json:"labels,omitempty"`
 }
 
 type CreateServiceRequest struct {
@@ -246,6 +251,7 @@ type CreateServiceRequest struct {
 	Volume     string            `json:"volume,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 	SecretEnv  map[string]string `json:"secret_env,omitempty"`
+	Labels     map[string]string `json:"labels,omitempty"`
 	Repo       string            `json:"repo,omitempty"`
 	Branch     string            `json:"branch,omitempty"`
 	Autodeploy bool              `json:"autodeploy,omitempty"`

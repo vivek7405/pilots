@@ -148,6 +148,7 @@ func (d Deps) siblingsOf(ctx context.Context, rows []state.Service) (map[sibling
 // are a drawing; the service is the answer, and a canvas that cannot be drawn
 // must not take a service page down with it.
 func (d Deps) withEdges(ctx context.Context, out *Service, svc state.Service, owner string) {
+	out.Labels = d.labelsOf(ctx, svc.ID)
 	if svc.App == "" || owner == "" {
 		return
 	}
