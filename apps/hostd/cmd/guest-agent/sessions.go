@@ -148,21 +148,25 @@ func (s *session) attach(conn *websocket.Conn) {
 	defer cancel()
 	fw := &frameWriter{conn: conn, ctx: ctx}
 
+	// The scrollback is replayed UNDER the session lock, with the client
+	// already installed. Replaying it after the unlock would race the PTY
+	// reader, which takes the same lock to append and then writes to whatever
+	// client it found: on a session that is still printing, the new client
+	// sees a live chunk before the history that precedes it.
 	s.mu.Lock()
 	prevConn := s.clientConn
 	s.client, s.clientConn = fw, conn
 	s.Attached = true
-	ring := append([]byte(nil), s.ring...)
 	ended, code := s.Ended, s.ExitCode
+	_ = fw.writeText(fmt.Appendf(nil, `{"type":"session","id":%q}`, s.ID))
+	if len(s.ring) > 0 {
+		_ = fw.write(frameStdout, s.ring)
+	}
 	s.mu.Unlock()
 	if prevConn != nil {
 		_ = prevConn.Close(websocket.StatusNormalClosure, "attached elsewhere")
 	}
 
-	_ = fw.writeText(fmt.Appendf(nil, `{"type":"session","id":%q}`, s.ID))
-	if len(ring) > 0 {
-		_ = fw.write(frameStdout, ring)
-	}
 	if ended {
 		writeExit(fw, code)
 		_ = conn.Close(websocket.StatusNormalClosure, "")
@@ -265,9 +269,15 @@ func handleSessions(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-// handleAttach is GET /attach?session=<id>.
+// handleAttach is GET /attach?session=<id>&rows=&cols=.
+//
+// The window is resized to the ARRIVING terminal's, because a session is
+// attached to from a different terminal than it was opened in as a matter of
+// course -- another laptop, a wider window -- and a full-screen program drawn
+// to the old size is unreadable until something happens to raise SIGWINCH.
 func handleAttach(w http.ResponseWriter, r *http.Request) {
-	s, ok := lookupSession(r.URL.Query().Get("session"))
+	q := r.URL.Query()
+	s, ok := lookupSession(q.Get("session"))
 	if !ok {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "no such session"})
 		return
@@ -278,6 +288,11 @@ func handleAttach(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer conn.CloseNow()
+	rows, rowsOK := winDim(q.Get("rows"), 0)
+	cols, colsOK := winDim(q.Get("cols"), 0)
+	if rowsOK && colsOK && rows > 0 && cols > 0 {
+		resizePTY(s.ptmx, cols, rows)
+	}
 	s.attach(conn)
 }
 

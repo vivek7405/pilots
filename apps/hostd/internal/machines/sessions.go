@@ -97,7 +97,15 @@ func (m *Manager) AttachStream(w http.ResponseWriter, r *http.Request, machineID
 	proxy.Director = func(out *http.Request) {
 		out.URL.Scheme, out.URL.Host, out.Host = target.Scheme, target.Host, target.Host
 		out.URL.Path, out.URL.RawPath = "/attach", ""
-		out.URL.RawQuery = "session=" + url.QueryEscape(session)
+		// rows and cols travel with it: the agent resizes the session's
+		// window to the terminal that is arriving, and dropping them here
+		// left a reattached full-screen program drawn to the old size.
+		q := url.Values{"session": {session}}
+		if in := r.URL.Query(); in.Get("rows") != "" && in.Get("cols") != "" {
+			q.Set("rows", in.Get("rows"))
+			q.Set("cols", in.Get("cols"))
+		}
+		out.URL.RawQuery = q.Encode()
 		out.Header.Del("Sec-WebSocket-Protocol")
 		out.Header.Set("Authorization", "Bearer "+m.token(machineID))
 	}
