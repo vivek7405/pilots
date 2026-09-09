@@ -86,13 +86,15 @@ type Doc struct {
 	Notes string
 }
 
-// docs holds each command's teaching material, keyed by its full path, so a
-// command's implementation is not buried under a page of prose.
-var docs = map[string]Doc{}
+// docs holds each command's teaching material, keyed by the command itself, so
+// a command's implementation is not buried under a page of prose. Keyed by
+// pointer rather than by CommandPath because Describe runs before the command
+// is attached to its parent, when its path is still just its own name.
+var docs = map[*cobra.Command]Doc{}
 
 // Describe attaches teaching material to a command.
 func Describe(c *cobra.Command, d Doc) *cobra.Command {
-	docs[c.CommandPath()] = d
+	docs[c] = d
 	return c
 }
 
@@ -118,7 +120,7 @@ func writeSection(w io.Writer, heading, body string) {
 // rootHelp prints the grouped command map.
 func rootHelp(c *cobra.Command, w io.Writer) {
 	fmt.Fprintf(w, "%s\n\n", c.Short)
-	if d, ok := docs[c.CommandPath()]; ok {
+	if d, ok := docs[c]; ok {
 		writeSection(w, "What pilots is", d.What)
 	}
 	fmt.Fprintf(w, "Usage\n%s%s\n\n", indent, "pilot [flags] <command> [arguments]")
@@ -188,7 +190,7 @@ func commandLabel(c *cobra.Command) string {
 func commandHelp(c *cobra.Command, w io.Writer) {
 	fmt.Fprintf(w, "pilot %s - %s\n\n", c.CommandPath()[len("pilot "):], c.Short)
 
-	d := docs[c.CommandPath()]
+	d := docs[c]
 	writeSection(w, "What it is", d.What)
 	writeSection(w, "When to use it", d.When)
 	writeSection(w, "How it works", d.How)
