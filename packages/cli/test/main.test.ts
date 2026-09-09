@@ -9,6 +9,8 @@
 
 import { strict as assert } from 'node:assert'
 import { execFile } from 'node:child_process'
+import { mkdtemp, symlink } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { test } from 'node:test'
 import { promisify } from 'node:util'
@@ -35,4 +37,18 @@ test('an unknown command exits 1 with the error on stderr', async () => {
       return true
     },
   )
+})
+
+test('the bin runs under the name it is installed as, not only as pilot.js', async () => {
+  // Every other case here spawns `bin/pilot.js` by path, which is the one way
+  // a user never runs it: `npm install -g` links `<prefix>/bin/pilot` to this
+  // file and Node leaves argv[1] as that symlink. A CLI that decided whether
+  // to run by matching argv[1] against `pilot.js` therefore exited 0 with no
+  // output for every global install, with the whole battery green.
+  const dir = await mkdtemp(join(tmpdir(), 'pilot-bin-'))
+  const link = join(dir, 'pilot')
+  await symlink(BIN, link)
+
+  const { stdout } = await run(process.execPath, [link, '--version'])
+  assert.match(stdout.trim(), /^\d+\.\d+\.\d+$/)
 })

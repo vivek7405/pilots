@@ -87,9 +87,3 @@ export async function run(argv: string[] = process.argv): Promise<void> {
     fail(attachHint(err, program.opts() as GlobalOptions))
   }
 }
-
-// `bin/pilot.js` imports this module for its side effect. Guarding on argv
-// rather than running unconditionally keeps the module importable by tests.
-if (process.argv[1]?.endsWith('pilot.js') || process.env.PILOT_CLI_RUN === '1') {
-  await run()
-}

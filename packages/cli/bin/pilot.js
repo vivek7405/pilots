@@ -35,4 +35,12 @@ process.on('warning', (warning) => {
   for (const listener of defaultWarningListeners) listener.call(process, warning)
 })
 
-await import('../src/main.ts')
+// Calling `run()` explicitly, rather than importing this module for a
+// side effect it decides to perform, is what makes the CLI work under the
+// name it is installed as. `npm install -g` links `<prefix>/bin/pilot` to
+// this file, and Node does not resolve argv[1] through that symlink: a
+// module that sniffed `process.argv[1]` for `pilot.js` saw `/usr/bin/pilot`
+// and silently did nothing, exit 0. The entry point is the one place that
+// knows it is an entry point, so the decision belongs here.
+const { run } = await import('../src/main.ts')
+await run()
