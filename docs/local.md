@@ -545,9 +545,32 @@ kills any running hostd and wipes `/var/lib/pilots/machines`,
 
 ## 9b. The fleet rig, and how big to make it
 
-Everything above is one host on your workstation. The rig is the other shape:
-N Ubuntu VMs on a libvirt NAT bridge, each running the identical stack, which
-is what `scripts/cluster/gate.sh` asserts against.
+**You probably do not want this.** Everything above -- `scripts/local-host.sh`
+-- IS pilots running locally: hostd on your workstation, SQLite instead of
+Corrosion, no mesh, and **no VMs at all**. That is the path for building on
+pilots, running a sandbox, or driving the CLI. It is small:
+
+| | measured on this machine |
+|---|---|
+| hostd | 27 MiB resident |
+| Corrosion | not running (SQLite) |
+| an idle default machine (512 MiB, 1 vCPU) | ~3 MiB resident |
+| the golden rootfs | 2 GiB apparent, 478 MiB on disk (sparse) |
+
+A machine's `mem_mib` is a ceiling, not an allocation: guest memory is faulted
+in on demand through the uffd handler, which is why a running 512 MiB machine
+shows single-digit RSS.
+
+The **rig** below is a different thing: a test fixture for the properties that
+only exist across hosts -- rescue, gossip, arbitration -- and the only thing
+that runs `scripts/cluster/gate.sh`. It is N Ubuntu VMs on a libvirt NAT
+bridge, each running the identical stack.
+
+It is not cheap, and it cannot be. Firecracker runs **nested** inside those
+VMs, and a guest's memory is resident in its host, so the default rig asks for
+**30 GiB of RAM, 12 vCPUs and 120 GiB of disk**. If that is more than you
+have, you are not locked out of anything except the fleet gate -- run
+`local-host.sh` instead.
 
 ```sh
 scripts/cluster/cluster-up.sh          # define and start the VMs
@@ -592,22 +615,16 @@ need a spare host refuse out loud rather than quietly passing -- section 22
 answers `need two live hosts to read a release from a host that did not build
 it`. `NODES=1` is for proving the pipeline works, not for the gate.
 
-**The gate grows the fleet by one, deliberately.** Section 11 asserts that one
-command turns a new IP into a serving host, so after a gate run the fleet is
-one bigger and `cluster.env` records it. That is why a rig can report four
-hosts when you asked for three.
+**The gate grows the fleet by one and puts it back.** Section 11 asserts that
+one command turns a new IP into a serving host, so mid-run the fleet is one
+bigger. An `EXIT` trap destroys that host and restores `NODES` / `NODE_IPS`
+afterwards, because a VM nobody counts rejoins the mesh on its next boot and
+gossips rows for machines that no longer exist -- which once cost a long run
+of Phase 5 failures that were blamed on the code.
 
-Tearing that down takes the same `NODES` you want removed, because
-`cluster-down.sh` loops `1..$NODES` and so inherits the default 3:
-
-```sh
-NODES=4 scripts/cluster/cluster-down.sh   # after a gate run grew the fleet
-```
-
-A bare `cluster-down.sh` on a four-host rig removes the first three, deletes
-`cluster.env`, and leaves `pilots-host-4` defined in libvirt with no state file
-naming it. `sudo virsh list --all` is how you find one of those; a stray node
-is harmless but it holds its disk.
+`scripts/cluster/cluster-down.sh` removes every `pilots-host-*` domain libvirt
+knows about, whatever `NODES` says, so it collects a stray host however one
+came to be there.
 
 **The rig and the single host share one object store.** Both use the bucket at
 `$PILOT_S3_ENDPOINT`, so running `local-host.sh` and a bootstrapped rig at the
