@@ -890,7 +890,15 @@ func (d mcpDeps) deployBuild(ctx context.Context, in deployIn) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	release, err := d.client.Services.Deploy(ctx, service.ID, pilots.DeployRequest{Build: in.Build})
+	deploy := pilots.DeployRequest{Build: in.Build}
+	if in.Schedules != nil {
+		// The same rule applyOverrides states for the dir form: an argument
+		// accepted and quietly dropped is the worst outcome available. An
+		// explicit empty list clears the previous release's crons.
+		list := in.Schedules
+		deploy.Knobs = &pilots.KnobsPatch{Schedules: &list}
+	}
+	release, err := d.client.Services.Deploy(ctx, service.ID, deploy)
 	if err != nil {
 		return nil, err
 	}
