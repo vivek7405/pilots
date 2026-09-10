@@ -173,6 +173,64 @@ jobs:
           path: /tmp/pilots-dev-vm-*.log
           if-no-files-found: ignore
 
+  # The pin is only worth having if something checks it, and until now the
+  # only thing that did ran at a tag. So the committed hash drifted away from
+  # what the tree builds and nobody found out until a rig could not be
+  # bootstrapped: host-bootstrap.sh refuses an image that does not match the
+  # pin, and no local rebuild reproduced it.
+  #
+  # Verifying on every change to the inputs is what makes the pin a fact
+  # rather than a hope, and it is a stronger check than building twice on one
+  # machine: it asserts that a DIFFERENT machine reproduces the hash committed
+  # from a developer laptop. Path-filtered because it is a four-minute build,
+  # and only these inputs can change the image.
+  rootfs-pin:
+    name: golden rootfs reproduces its pin
+    if: "!startsWith(github.ref, 'refs/tags/v')"
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - id: touched
+        run: |
+          # A push with one commit has no before/after range to diff on the
+          # first build of a branch, so fall back to "assume touched" rather
+          # than skipping the check on a diff that could not be computed.
+          if git rev-parse HEAD~1 >/dev/null 2>&1; then
+            if git diff --name-only HEAD~1 HEAD | grep -qE \
+              '^(scripts/rootfs/|scripts/build-golden-rootfs\.sh|apps/hostd/cmd/guest-agent/)'; then
+              echo "ok=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "ok=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.touched.outputs.ok == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: apps/hostd/go.sum
+      # Read the pin BEFORE the build, for the same reason the tag job does:
+      # build-golden-rootfs.sh rewrites the file as its last step, so checking
+      # it afterwards compares the image with itself and passes on any input.
+      - if: steps.touched.outputs.ok == 'true'
+        run: git show "${GITHUB_SHA}:scripts/rootfs/golden.ext4.sha256" > /tmp/pinned.sha256
+      - if: steps.touched.outputs.ok == 'true'
+        run: scripts/build-golden-rootfs.sh
+      - if: steps.touched.outputs.ok == 'true'
+        name: the rootfs this tree builds is the one committed
+        run: |
+          sha256sum -c /tmp/pinned.sha256 || {
+            echo "::error::This tree does not build the image committed in"
+            echo "::error::scripts/rootfs/golden.ext4.sha256. Either the change"
+            echo "::error::altered the image and the pin was not refreshed"
+            echo "::error::(rerun scripts/build-golden-rootfs.sh and commit the"
+            echo "::error::.sha256), or the build stopped being reproducible."
+            exit 1
+          }
+
   # The golden rootfs, built at a tag and pinned.
   #
   # It is built HERE and not on a fleet host because the route is

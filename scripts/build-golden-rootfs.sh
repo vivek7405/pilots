@@ -18,6 +18,30 @@ SIZE_MB="${SIZE_MB:-2048}"
 OUT="${OUT:-scripts/rootfs/golden.ext4}"
 IMAGE="${IMAGE:-pilots-golden-rootfs}"
 
+# The three knobs that make the image byte-reproducible, and therefore make
+# the pin in golden.ext4.sha256 mean something.
+#
+# Without them the same tree produces a different image every run, and
+# host-bootstrap.sh's pin check -- which refuses to ship anything that does
+# not match -- becomes a check that can never pass. It stopped a rig being
+# bootstrapped from a clean checkout: committed pin, image on disk and fresh
+# rebuild were three different hashes.
+#
+# All three are load-bearing; each was verified by building twice and diffing:
+#   -U            without it mke2fs picks a random filesystem UUID per run
+#   hash_seed     without it the directory hash seed is random, even with -U
+#   SOURCE_DATE_EPOCH  without it the superblock carries this run's clock
+#
+# The epoch also clamps the inode timestamps, so the file mtimes that come out
+# of `docker export` do not have to be normalised by hand -- an image whose
+# files were dated 2030 built to the same bytes. The value is a constant and
+# not `date +%s`: reproducible has to mean across time, not within one run.
+# Changing the image's CONTENT changes the hash regardless, which is the point.
+: "${SOURCE_DATE_EPOCH:=1700000000}"
+FS_UUID="${FS_UUID:-6f696c70-7473-4000-8000-676f6c64656e}"
+FS_HASH_SEED="${FS_HASH_SEED:-70696c6f-7473-4000-8000-736565646564}"
+export SOURCE_DATE_EPOCH
+
 STAGED_BIN="scripts/rootfs/guest-agent"
 TAR="$(mktemp -t pilots-rootfs-XXXXXX.tar)"
 ROOT="$(mktemp -d -t pilots-rootfs-XXXXXX)"
@@ -48,7 +72,13 @@ docker export "$CID" -o "$TAR"
 
 echo "==> packing ext4 (${SIZE_MB}M)"
 rm -f "$OUT"
-TAR="$TAR" ROOT="$ROOT" OUT="$OUT" SIZE_MB="$SIZE_MB" fakeroot sh -euc '
+# SOURCE_DATE_EPOCH and the two fixed ids are passed EXPLICITLY: the body
+# below is a separate shell, so exporting them out here is not enough to be
+# sure they arrive -- and if they silently did not, the build would still
+# succeed and just stop being reproducible.
+TAR="$TAR" ROOT="$ROOT" OUT="$OUT" SIZE_MB="$SIZE_MB" \
+  SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" FS_UUID="$FS_UUID" \
+  FS_HASH_SEED="$FS_HASH_SEED" fakeroot sh -euc '
   tar -xf "$TAR" -C "$ROOT"
 
   # Docker bind-mounts /etc/resolv.conf during build, so it cannot be written
@@ -66,7 +96,8 @@ TAR="$TAR" ROOT="$ROOT" OUT="$OUT" SIZE_MB="$SIZE_MB" fakeroot sh -euc '
   ln -sf /lib/systemd/systemd "$ROOT/sbin/init"
   rm -f "$ROOT/.dockerenv"
 
-  mke2fs -q -F -t ext4 -b 4096 -d "$ROOT" "$OUT" "${SIZE_MB}M"
+  mke2fs -q -F -t ext4 -b 4096 -U "$FS_UUID" -E hash_seed="$FS_HASH_SEED" \
+    -d "$ROOT" "$OUT" "${SIZE_MB}M"
 '
 
 sha256sum "$OUT" > "$OUT.sha256"
