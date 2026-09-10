@@ -543,6 +543,94 @@ kills any running hostd and wipes `/var/lib/pilots/machines`,
 `/var/lib/pilots/jailer` and `/var/cache/pilots`. Do not run it while
 `local-host.sh` is up with machines you care about.
 
+## 9b. The fleet rig, and how big to make it
+
+**You probably do not want this.** Everything above -- `scripts/local-host.sh`
+-- IS pilots running locally: hostd on your workstation, SQLite instead of
+Corrosion, no mesh, and **no VMs at all**. That is the path for building on
+pilots, running a sandbox, or driving the CLI. It is small:
+
+| | measured on this machine |
+|---|---|
+| hostd | 27 MiB resident |
+| Corrosion | not running (SQLite) |
+| an idle default machine (512 MiB, 1 vCPU) | ~3 MiB resident |
+| the golden rootfs | 2 GiB apparent, 478 MiB on disk (sparse) |
+
+A machine's `mem_mib` is a ceiling, not an allocation: guest memory is faulted
+in on demand through the uffd handler, which is why a running 512 MiB machine
+shows single-digit RSS.
+
+The **rig** below is a different thing: a test fixture for the properties that
+only exist across hosts -- rescue, gossip, arbitration -- and the only thing
+that runs `scripts/cluster/gate.sh`. It is N Ubuntu VMs on a libvirt NAT
+bridge, each running the identical stack.
+
+It is not cheap, and it cannot be. Firecracker runs **nested** inside those
+VMs, and a guest's memory is resident in its host, so the default rig asks for
+**30 GiB of RAM, 12 vCPUs and 120 GiB of disk**. If that is more than you
+have, you are not locked out of anything except the fleet gate -- run
+`local-host.sh` instead.
+
+```sh
+scripts/cluster/cluster-up.sh          # define and start the VMs
+scripts/cluster/cluster-bootstrap.sh   # turn them into a pilots fleet
+```
+
+**The size is yours to choose, with `NODES`:**
+
+```sh
+NODES=1 scripts/cluster/cluster-up.sh   # prove the pipeline with one
+NODES=5 scripts/cluster/cluster-up.sh   # or any count
+```
+
+**Three is the default** (`scripts/cluster/config.sh`), and it is the number
+the gate needs rather than a number someone liked: one host to kill, and two
+survivors that have to agree on which of them rescues what. `NODES=2` cannot
+express that disagreement and `NODES=1` cannot express a rescue at all.
+
+The default applies to **every** run, not just the first. `cluster-up.sh`
+writes `NODES=` into `scripts/cluster/cluster.env` but never reads it back --
+it pulls only `NODE_IPS` out of that file, on purpose, because sourcing it
+would silently override the `NODES` you just passed. So `NODES=5` once and a
+bare `cluster-up.sh` next time gives you three again. What DOES persist is
+`NODE_IPS`: a powered-off node keeps the address it will come back on.
+
+The other per-node knobs are overridable the same way, and the memory one
+matters because Firecracker runs NESTED inside these VMs -- a guest's memory
+is resident in its host, and its host is one of these:
+
+| | default | |
+|---|---|---|
+| `NODES` | 3 | VMs in the fleet |
+| `NODE_RAM_GB` | 10 | so `NODES=3` wants 30 GiB free |
+| `NODE_VCPUS` | 4 | |
+| `NODE_DISK_GB` | 40 | |
+| `NET_SUBNET` | `192.168.124` | the object store must be reachable at `.1` |
+| `NODE_PREFIX` | `pilots-host` | libvirt domain names |
+
+**A smaller rig runs less of the gate, and says so.** `gate.sh` is written
+against the fleet it finds rather than a hard-coded three, but sections that
+need a spare host refuse out loud rather than quietly passing -- section 22
+answers `need two live hosts to read a release from a host that did not build
+it`. `NODES=1` is for proving the pipeline works, not for the gate.
+
+**The gate grows the fleet by one and puts it back.** Section 11 asserts that
+one command turns a new IP into a serving host, so mid-run the fleet is one
+bigger. An `EXIT` trap destroys that host and restores `NODES` / `NODE_IPS`
+afterwards, because a VM nobody counts rejoins the mesh on its next boot and
+gossips rows for machines that no longer exist -- which once cost a long run
+of Phase 5 failures that were blamed on the code.
+
+`scripts/cluster/cluster-down.sh` removes every `pilots-host-*` domain libvirt
+knows about, whatever `NODES` says, so it collects a stray host however one
+came to be there.
+
+**The rig and the single host share one object store.** Both use the bucket at
+`$PILOT_S3_ENDPOINT`, so running `local-host.sh` and a bootstrapped rig at the
+same time is two independent fleets writing the same bucket. Stop one before
+starting the other.
+
 ## 10. Start over
 
 A machine's namespace is named after the machine, so there is no prefix to
