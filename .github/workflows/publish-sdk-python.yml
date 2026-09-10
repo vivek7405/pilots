@@ -1,0 +1,39 @@
+name: publish pilots-sdk
+
+# Tag-driven, so a release is a deliberate act rather than a side effect of a
+# merge. The FIRST publish needs the project to exist on PyPI with this
+# workflow registered as a trusted publisher; every later version comes from
+# here, with no token stored anywhere.
+on:
+  push:
+    tags:
+      - 'sdk-python-v*'
+  workflow_dispatch:
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    environment: pypi
+    permissions:
+      contents: read
+      # Trusted publishing: PyPI mints a short-lived token from this token,
+      # so the repository holds no long-lived credential.
+      id-token: write
+    defaults:
+      run:
+        working-directory: sdks/python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      # The tests run before the publish, not after: a yanked release is a
+      # far worse thing to need than a red build. The adk extra is installed
+      # so the adapter's tool objects are really built.
+      - run: uv run --extra dev --extra adk pytest -q
+      - run: uv run --extra dev ruff check .
+      - run: uv run --extra dev mypy src
+      - run: uv build
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: sdks/python/dist

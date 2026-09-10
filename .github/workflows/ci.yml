@@ -61,6 +61,25 @@ jobs:
       - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - run: go test ./...
 
+  python-sdk:
+    name: python (sdk)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: sdks/python
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      # The drift test parses apps/hostd/internal/api, so it is this job that
+      # catches a wire change landing without the Python mirror. The adk extra
+      # is installed so the seven ADK tool objects are really built rather
+      # than skipped.
+      - run: uv run --extra dev --extra adk pytest -q
+      - run: uv run --extra dev ruff check .
+      - run: uv run --extra dev mypy src
+
   ts:
     name: node
     runs-on: ubuntu-24.04
