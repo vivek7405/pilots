@@ -697,7 +697,6 @@ async function lifecycleAssertions() {
           `${JSON.stringify(knobs)}: the refusal must carry a code and a next: ${JSON.stringify(json)}`);
         assert(`${json.error} ${json.next}`.includes(word),
           `${JSON.stringify(knobs)}: the refusal should mention ${word}: ${JSON.stringify(json)}`);
-        if (status === 201) await request(`/v1/machines/${json.id}`, { method: 'DELETE' });
       }
     });
 
