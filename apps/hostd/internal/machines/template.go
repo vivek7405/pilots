@@ -54,6 +54,12 @@ type Template struct {
 	PageSizeKiB int `json:"page_size_kib"`
 }
 
+// rejected reports whether this template is the one a restore just proved
+// unusable. The empty key rejects nothing, which is the ordinary path.
+func (t *Template) rejected(snapKey string) bool {
+	return snapKey != "" && t.SnapKey == snapKey
+}
+
 // pageSizeKiB is the guest page size this host photographs templates at.
 func (m *Manager) pageSizeKiB() int {
 	if m.opts.FCConfig.HugePages {
@@ -104,18 +110,32 @@ var templateOnce sync.Mutex
 // The order is therefore: what this host already has, then what the fleet
 // says, then build one.
 func (m *Manager) EnsureTemplate(ctx context.Context) (*Template, error) {
+	return m.ensureTemplate(ctx, "")
+}
+
+// ensureTemplate is EnsureTemplate with a snapshot key that has been PROVEN
+// unusable -- its vmstate object was not there when a restore reached for it.
+//
+// Nothing local or gossiped can tell us that: loadTemplate checks the build
+// headers on this disk and adoptFleetTemplate trusts the row it reads, and
+// both are satisfied by a manifest whose snapshot has since been deleted. The
+// only evidence is the failed restore, so the create path hands it back here
+// and both sources are made to skip it. Without that, discarding the manifest
+// and re-deriving returns the same unusable template and the retry fails
+// exactly as the first attempt did.
+func (m *Manager) ensureTemplate(ctx context.Context, reject string) (*Template, error) {
 	templateOnce.Lock()
 	defer templateOnce.Unlock()
 
 	// Already local and complete.
-	if t, err := m.loadTemplate(); err == nil {
+	if t, err := m.loadTemplate(); err == nil && !t.rejected(reject) {
 		return t, nil
 	}
 
 	// The fleet has one; pull what this host is missing.
-	if t, err := m.adoptFleetTemplate(ctx); err == nil {
+	if t, err := m.adoptFleetTemplate(ctx); err == nil && !t.rejected(reject) {
 		return t, nil
-	} else if !errors.Is(err, state.ErrNotFound) {
+	} else if err != nil && !errors.Is(err, state.ErrNotFound) {
 		return nil, err
 	}
 
@@ -139,7 +159,7 @@ func (m *Manager) EnsureTemplate(ctx context.Context) (*Template, error) {
 		return nil, fmt.Errorf("machines: publish the golden template: %w", err)
 	}
 
-	if winner, err := m.adoptFleetTemplate(ctx); err == nil {
+	if winner, err := m.adoptFleetTemplate(ctx); err == nil && !winner.rejected(reject) {
 		if winner.MemBuildID != t.MemBuildID {
 			slog.Info("another host of this vendor published a golden template first; adopting it",
 				"vendor", m.opts.Vendor, "ours", t.MemBuildID, "theirs", winner.MemBuildID)
@@ -292,6 +312,17 @@ func (m *Manager) saveTemplate(t *Template) error {
 		return err
 	}
 	return os.Rename(tmp, filepath.Join(m.templateRoot(), templateFile))
+}
+
+// discardTemplate drops this host's cached manifest so the next ensureTemplate
+// re-derives one. Absence is the only way to say "re-derive": the manifest is
+// what loadTemplate reads, and a manifest that is present is believed.
+func (m *Manager) discardTemplate() {
+	path := filepath.Join(m.templateRoot(), templateFile)
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		slog.Warn("could not discard the unusable template manifest",
+			"path", path, "err", err)
+	}
 }
 
 // buildTemplate boots one machine, lets it settle, and snapshots it.
