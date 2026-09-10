@@ -742,7 +742,10 @@ async function lifecycleAssertions() {
       const { status, json } = await request('/v1/machines', {
         method: 'POST', body: { knobs: { schedules: [
           { cron: '* * * * *', path: '/hit' },
-          { cron: '* * * * *', cmd: 'date +%s >> /root/cron.log' },
+          // /tmp, not /root: a cmd schedule runs as the app user (uid 1000),
+          // the same default `exec` has, and that user cannot write /root.
+          // The first run of this step wrote there and exited 1 every minute.
+          { cron: '* * * * *', cmd: 'date +%s >> /tmp/cron.log' },
         ] } },
       });
       assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
@@ -754,7 +757,7 @@ async function lifecycleAssertions() {
 
         // Two minute boundaries pass; both jobs fire on each.
         await waitFor(async () => {
-          const n = await exec(cronId, 'wc -l < /root/cron.log 2>/dev/null || echo 0');
+          const n = await exec(cronId, 'wc -l < /tmp/cron.log 2>/dev/null || echo 0');
           return Number(n) >= 2;
         }, { timeoutMs: 140_000, everyMs: 5_000, what: 'the cmd schedule to fire twice' });
         const hits = await exec(cronId, 'cat /root/hits 2>/dev/null || true');
