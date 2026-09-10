@@ -562,6 +562,11 @@ func run() error {
 		Plan:    detect.Handler(filepath.Join(cfg.CacheRoot(), "plan-work"), planStager(stager), store),
 		Lookup:  machineByName(f),
 		GitHub:  github.Handler(ghDeps),
+		// The hosted MCP endpoint dials this process back on its plain
+		// listener, and names the dashboard as the place a keyless client
+		// logs in.
+		SelfURL:      api.LoopbackURL(cfg.ListenAddr),
+		DashboardURL: dashboardURL(cfg),
 	}
 	if stager != nil {
 		deps.Repos = stager
@@ -641,6 +646,16 @@ func run() error {
 	shutCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 	defer cancel()
 	return srv.Shutdown(shutCtx)
+}
+
+// dashboardURL is the dashboard's origin, or "" on a fleet that has none.
+// The scheme follows the fleet's: a dashboard served by this fleet has a
+// certificate exactly when the API does.
+func dashboardURL(cfg *config.Config) string {
+	if cfg.DashboardDomain == "" {
+		return ""
+	}
+	return publicURLFor(cfg).Of(cfg.DashboardDomain)
 }
 
 // dispatch sends workload hostnames to the router and everything else to the
