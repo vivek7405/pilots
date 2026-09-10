@@ -257,6 +257,10 @@ func handleSessions(w http.ResponseWriter, _ *http.Request) {
 	}
 	sessions.mu.Unlock()
 	sort.Slice(list, func(i, j int) bool { return list[i].CreatedAt.Before(list[j].CreatedAt) })
+	// busy is read from the process tree (busy.go), once for every session
+	// and outside the session locks: the scan walks /proc and must not hold
+	// up the PTY reader.
+	busy := busySessions(procRoot)
 	out := make([]map[string]any, 0, len(list))
 	for _, s := range list {
 		s.mu.Lock()
@@ -269,9 +273,7 @@ func handleSessions(w http.ResponseWriter, _ *http.Request) {
 			"ended": ended, "exit_code": s.ExitCode,
 		}
 		s.mu.Unlock()
-		// busy is read from the process tree (busy.go), outside the session
-		// lock: the scan walks /proc and must not hold up the PTY reader.
-		entry["busy"] = !ended && leader != 0 && sessionBusy(leader)
+		entry["busy"] = !ended && leader != 0 && busy[leader]
 		out = append(out, entry)
 	}
 	writeJSON(w, http.StatusOK, out)

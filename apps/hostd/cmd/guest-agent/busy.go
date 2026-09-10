@@ -32,28 +32,46 @@ var procRoot = "/proc"
 
 // sessionBusy reports whether any process other than the leader itself is
 // alive in the session led by leader.
-func sessionBusy(leader int) bool {
-	for _, pid := range sessionMembers(procRoot, leader) {
-		if pid != leader {
-			return true
+func sessionBusy(leader int) bool { return busySessions(procRoot)[leader] }
+
+// busySessions is one pass over the process table: the session ids that have
+// at least one member besides their own leader. handleSessions asks once and
+// answers every session from the result, rather than walking /proc once per
+// session.
+func busySessions(root string) map[int]bool {
+	busy := map[int]bool{}
+	eachProcess(root, func(pid, sid int) {
+		if pid != sid {
+			busy[sid] = true
 		}
-	}
-	return false
+	})
+	return busy
 }
 
 // sessionMembers lists the pids whose session id is sid.
+func sessionMembers(root string, sid int) []int {
+	var members []int
+	eachProcess(root, func(pid, got int) {
+		if got == sid {
+			members = append(members, pid)
+		}
+	})
+	return members
+}
+
+// eachProcess calls fn with the pid and session id of every readable entry
+// under root.
 //
 // A read that fails for one entry -- the process exited between the listing
 // and the read, or it is not ours to read -- skips that entry rather than
 // failing the scan: a session with one unreadable member is still described
 // correctly by its readable ones, and a scan that errors would have to answer
 // "not busy", which is the answer that suspends a working machine.
-func sessionMembers(root string, sid int) []int {
+func eachProcess(root string, fn func(pid, sid int)) {
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return nil
+		return
 	}
-	var members []int
 	for _, e := range entries {
 		pid, err := strconv.Atoi(e.Name())
 		if err != nil {
@@ -63,11 +81,10 @@ func sessionMembers(root string, sid int) []int {
 		if err != nil {
 			continue
 		}
-		if got, ok := statSessionID(string(raw)); ok && got == sid {
-			members = append(members, pid)
+		if sid, ok := statSessionID(string(raw)); ok {
+			fn(pid, sid)
 		}
 	}
-	return members
 }
 
 // statSessionID reads the session id, field 6, out of one /proc/<pid>/stat
