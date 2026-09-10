@@ -14,7 +14,7 @@ Monorepo:
 | `apps/dashboard/` | webjs: accounts, API keys, UI (deployed on pilots itself) |
 | `apps/website/` | webjs: the marketing site |
 | `packages/cli/` | `pilot` CLI and the MCP server |
-| `packages/cli/skill/` | the agent skill: `SKILL.md` plus nine reference pages, shipped in the npm package and served as `pilots-docs://` resources |
+| `agents/` | the agent package: the skill (`SKILL.md` plus nine reference pages, embedded into hostd and `pilot`, served as `pilots-docs://` resources), the Claude Code plugin, the portable Agent Plugin, and the shared MCP toolset |
 | `sdks/js/`, `sdks/go/` | `@pilots/sdk` (npm) and `github.com/vivek7405/pilots/sdks/go` |
 | `scripts/` | one-shot bash: host bootstrap, golden rootfs, e2e battery |
 

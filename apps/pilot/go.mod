@@ -4,9 +4,12 @@ go 1.26.0
 
 replace github.com/vivek7405/pilots/sdks/go => ../../sdks/go
 
+replace github.com/vivek7405/pilots/agents => ../../agents
+
 require (
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	github.com/spf13/cobra v1.10.2
+	github.com/vivek7405/pilots/agents v0.0.0-00010101000000-000000000000
 	github.com/vivek7405/pilots/sdks/go v0.0.0-00010101000000-000000000000
 	golang.org/x/term v0.46.0
 )

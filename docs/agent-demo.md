@@ -45,7 +45,7 @@ from a JSON config, so no code is written for the demo:
 ```
 mcphost --config ./mcphost.json \
   --model ollama:qwen3:8b-q4_K_M \
-  --system-prompt-file packages/cli/skill/pilots/SKILL.md
+  --system-prompt-file agents/skills/pilots/SKILL.md
 ```
 
 ## The prompt
@@ -77,7 +77,7 @@ record the fix below under a dated heading.
 
 ```
 script -q -c 'mcphost --config ./mcphost.json --model ollama:qwen3:8b-q4_K_M \
-  --system-prompt-file packages/cli/skill/pilots/SKILL.md' /tmp/agent-demo.log
+  --system-prompt-file agents/skills/pilots/SKILL.md' /tmp/agent-demo.log
 ```
 
 Attach the transcript to the pull request that closes the issue.

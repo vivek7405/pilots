@@ -14,6 +14,7 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/vivek7405/pilots/agents"
 	pilots "github.com/vivek7405/pilots/sdks/go"
 
 	"github.com/vivek7405/pilots/cli/internal/config"
@@ -36,7 +37,7 @@ type mcpDeps struct {
 	client *pilots.Client
 	getenv config.Env
 	env    *Env
-	skill  string
+	pages  []agents.Page
 }
 
 func buildMCPServer(d mcpDeps) *mcp.Server {
@@ -655,7 +656,7 @@ func (d mcpDeps) registerTools(s *mcp.Server) {
 			"Call it once at the start of any pilots task. Read-only."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, _ noIn) (*mcp.CallToolResult, any, error) {
 			return wrap(func() (any, error) {
-				return map[string]any{"primer": primer, "topics": topics(d.skill)}, nil
+				return map[string]any{"primer": primer, "topics": topics(d.pages)}, nil
 			}, constant("deploy with dir, once you know the directory"))
 		})
 
@@ -670,14 +671,14 @@ func (d mcpDeps) registerTools(s *mcp.Server) {
 		func(ctx context.Context, _ *mcp.CallToolRequest, in docsIn) (*mcp.CallToolResult, any, error) {
 			return wrap(func() (any, error) {
 				if in.Query != "" {
-					return map[string]any{"query": in.Query, "matches": searchTopics(d.skill, in.Query)}, nil
+					return map[string]any{"query": in.Query, "matches": searchTopics(d.pages, in.Query)}, nil
 				}
 				if in.Topic == "" {
-					return map[string]any{"topics": topics(d.skill)}, nil
+					return map[string]any{"topics": topics(d.pages)}, nil
 				}
-				text, ok := readTopic(d.skill, in.Topic)
+				text, ok := readTopic(d.pages, in.Topic)
 				if !ok {
-					return nil, fmt.Errorf("no such topic %s; the topics are %s", in.Topic, strings.Join(topics(d.skill), ", "))
+					return nil, fmt.Errorf("no such topic %s; the topics are %s", in.Topic, strings.Join(topics(d.pages), ", "))
 				}
 				return map[string]any{"topic": in.Topic, "text": text}, nil
 			}, constant(""))
@@ -685,17 +686,13 @@ func (d mcpDeps) registerTools(s *mcp.Server) {
 }
 
 func (d mcpDeps) registerSkill(s *mcp.Server) {
-	for _, page := range skillPages(d.skill) {
+	for _, page := range d.pages {
 		uri := "pilots-docs://" + page.Name
-		path := page.Path
+		body := page.Body
 		s.AddResource(&mcp.Resource{URI: uri, Name: page.Name, Title: page.Name,
 			Description: "The pilots skill: " + page.Name, MIMEType: "text/markdown"},
 			func(_ context.Context, _ *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-				raw, err := os.ReadFile(path)
-				if err != nil {
-					return nil, err
-				}
-				return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: uri, MIMEType: "text/markdown", Text: string(raw)}}}, nil
+				return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: uri, MIMEType: "text/markdown", Text: body}}}, nil
 			})
 	}
 }

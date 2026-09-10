@@ -50,7 +50,7 @@ test('init writes the skill, both MCP configs and the AGENTS.md stanza', async (
   assert.ok(existsSync(join(dir, '.agents', 'skills', 'pilots', 'SKILL.md')))
   assert.ok(existsSync(join(dir, '.agents', 'skills', 'pilots', 'references', 'deploy.md')))
 
-  for (const path of ['.claude.json', join('.cursor', 'mcp.json')]) {
+  for (const path of ['.mcp.json', join('.cursor', 'mcp.json')]) {
     const config = JSON.parse(readFileSync(join(dir, path), 'utf8')) as {
       mcpServers: { pilots: { command: string; args: string[] } }
     }
@@ -81,14 +81,14 @@ test('a second init changes nothing and says so', async () => {
 test('init keeps another MCP server and the rest of AGENTS.md', async () => {
   const dir = scratch('pilot-init-merge-')
   writeFileSync(
-    join(dir, '.claude.json'),
+    join(dir, '.mcp.json'),
     JSON.stringify({ mcpServers: { other: { command: 'other-server' } }, somethingElse: 1 }),
   )
   writeFileSync(join(dir, 'AGENTS.md'), '# House rules\n\nRun the tests.\n')
 
   await pilot(['init'], dir)
 
-  const config = JSON.parse(readFileSync(join(dir, '.claude.json'), 'utf8')) as {
+  const config = JSON.parse(readFileSync(join(dir, '.mcp.json'), 'utf8')) as {
     mcpServers: Record<string, unknown>
     somethingElse: number
   }
@@ -105,7 +105,7 @@ test('init keeps another MCP server and the rest of AGENTS.md', async () => {
 
 test('init refuses an MCP config that does not parse rather than guessing', async () => {
   const dir = scratch('pilot-init-broken-')
-  writeFileSync(join(dir, '.claude.json'), '{ not json')
+  writeFileSync(join(dir, '.mcp.json'), '{ not json')
 
   const res = await pilot(['init'], dir)
   assert.equal(res.code, 1)

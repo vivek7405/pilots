@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/vivek7405/pilots/agents"
 	"github.com/vivek7405/pilots/cli/internal/config"
 	"github.com/vivek7405/pilots/cli/internal/out"
 )
@@ -26,7 +27,7 @@ func newMCPCmd(env *Env, getenv config.Env) *cobra.Command {
 			}
 			// Every diagnostic to stderr: stdout is the protocol channel.
 			slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
-			return runMCP(c.Context(), mcpDeps{client: client, getenv: getenv, env: env, skill: skillRoot(getenv)})
+			return runMCP(c.Context(), mcpDeps{client: client, getenv: getenv, env: env, pages: loadSkill(skillRoot(getenv))})
 		},
 	}
 	Describe(c, Doc{
@@ -34,8 +35,10 @@ func newMCPCmd(env *Env, getenv config.Env) *cobra.Command {
 			"checkpoint, diagnose and the rest, plus the pilots skill as resources\n" +
 			"under pilots-docs:// and a `deploy` prompt. Every result carries\n" +
 			"`next`; every error carries `code`, `next` and `details`.",
-		How: "`pilot init` registers it in a repository's .claude.json and\n" +
-			".cursor/mcp.json as {\"type\":\"stdio\",\"command\":\"pilot\",\"args\":[\"mcp\"]}.\n" +
+		How: "`pilot init` registers it in a repository's .mcp.json (Claude Code)\n" +
+			"and .cursor/mcp.json as {\"type\":\"stdio\",\"command\":\"pilot\",\"args\":[\"mcp\"]}.\n" +
+			"`pilot mcp install <harness>` writes the hosted form, https://<api>/mcp\n" +
+			"with the key, for Codex, OpenCode, Cursor and the rest.\n" +
 			"The key, fleet and org come from the same places every other command\n" +
 			"uses, so `pilot login` once is enough for the agent too.",
 		Examples: []string{
@@ -66,11 +69,9 @@ func newInitCmd(env *Env, getenv config.Env) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			source := skillRoot(getenv)
-			if source == "" {
-				return out.Failf("run from the pilots checkout, or `pilot skill install` first",
-					"the pilots skill is not in this installation")
-			}
+			// The embedded pages when no copy is on disk, so an installed
+			// binary never needs a checkout.
+			pages := loadSkill(skillRoot(getenv))
 			var done, skipped []string
 			record := func(what string, changed bool) {
 				if changed {
@@ -79,12 +80,12 @@ func newInitCmd(env *Env, getenv config.Env) *cobra.Command {
 					skipped = append(skipped, what)
 				}
 			}
-			changed, err := copySkill(source, filepath.Join(dir, ".agents", "skills", "pilots"))
+			changed, err := copySkill(pages, filepath.Join(dir, ".agents", "skills", "pilots"))
 			if err != nil {
 				return err
 			}
 			record(".agents/skills/pilots", changed)
-			for _, rel := range []string{".claude.json", ".cursor/mcp.json"} {
+			for _, rel := range []string{".mcp.json", ".cursor/mcp.json"} {
 				changed, err := mergeMCPConfig(filepath.Join(dir, filepath.FromSlash(rel)))
 				if err != nil {
 					return err
@@ -120,28 +121,11 @@ func newInitCmd(env *Env, getenv config.Env) *cobra.Command {
 	return c
 }
 
-func copySkill(source, target string) (bool, error) {
+func copySkill(pages []agents.Page, target string) (bool, error) {
 	if hasSkill(target) {
 		return false, nil
 	}
-	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-		return false, err
-	}
-	return true, filepath.Walk(source, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, _ := filepath.Rel(source, path)
-		dst := filepath.Join(target, rel)
-		if info.IsDir() {
-			return os.MkdirAll(dst, 0o755)
-		}
-		raw, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(dst, raw, 0o644)
-	})
+	return true, writeSkill(pages, target)
 }
 
 func mergeMCPConfig(path string) (bool, error) {
@@ -204,18 +188,14 @@ func newSkillCmd(env *Env, getenv config.Env) *cobra.Command {
 			if home == "" {
 				home, _ = os.UserHomeDir()
 			}
-			// The lookup starts from a directory with no .agents above it, so
-			// a repository's own copy is never what gets installed globally.
-			source := skillRoot(getenv)
-			if source == "" {
-				return out.Failf("run from the pilots checkout", "the pilots skill is not in this installation")
-			}
+			// The embedded pages, never a repository's edited copy: this is
+			// the global install, and one team's edits must not become
+			// everyone's. Rewritten every time, so an upgraded binary
+			// upgrades the skill.
 			share := filepath.Join(home, ".local", "share", "pilots", "skill")
-			if !hasSkill(share) || source != share {
-				_ = os.RemoveAll(share)
-				if _, err := copySkill(source, share); err != nil {
-					return err
-				}
+			_ = os.RemoveAll(share)
+			if err := writeSkill(agents.Pages(), share); err != nil {
+				return err
 			}
 			target := filepath.Join(home, ".claude", "skills", "pilots")
 			if st, err := os.Lstat(target); err == nil {
@@ -238,9 +218,10 @@ func newSkillCmd(env *Env, getenv config.Env) *cobra.Command {
 		},
 	}
 	Describe(install, Doc{
-		How: "Copies the pages to ~/.local/share/pilots/skill, so an installed\n" +
-			"binary has them without a checkout, and links ~/.claude/skills/pilots\n" +
-			"at that copy so Claude Code loads them everywhere.",
+		How: "Writes the pages this binary embeds to ~/.local/share/pilots/skill\n" +
+			"and links ~/.claude/skills/pilots at that copy so Claude Code loads\n" +
+			"them everywhere. The Claude Code plugin is the other way to get\n" +
+			"them: /plugin marketplace add vivek7405/pilots.",
 		Examples: []string{"pilot skill install"},
 	})
 	root.AddCommand(install)
