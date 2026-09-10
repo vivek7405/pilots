@@ -7,6 +7,7 @@
   "workspaces": [
     "apps/dashboard",
     "apps/website",
+    "apps/vscode",
     "packages/*",
     "sdks/js"
   ],
@@ -26,8 +27,9 @@
     "test:cli": "npm run build:sdk-js && npm test --workspace=packages/cli",
     "test:dashboard": "npm run build:sdk-js && npm run check --workspace=apps/dashboard && npm run typecheck --workspace=apps/dashboard && npm run test:server --workspace=apps/dashboard",
     "test:dashboard:browser": "npm run test:browser --workspace=apps/dashboard",
-    "test": "npm run vet:hostd && npm run test:hostd && npm run vet:sdk-go && npm run test:sdk-go && npm run test:sdk-js && npm run test:sdk-python && npm run test:cli && npm run test:website && npm run test:dashboard && npm run test:e2e",
+    "test": "npm run vet:hostd && npm run test:hostd && npm run vet:sdk-go && npm run test:sdk-go && npm run test:sdk-js && npm run test:sdk-python && npm run test:cli && npm run test:vscode && npm run test:website && npm run test:dashboard && npm run test:e2e",
     "test:sdk-python": "cd sdks/python && uv run --extra dev pytest -q",
-    "lint:sdk-python": "cd sdks/python && uv run --extra dev ruff check . && uv run --extra dev mypy src"
+    "lint:sdk-python": "cd sdks/python && uv run --extra dev ruff check . && uv run --extra dev mypy src",
+    "test:vscode": "npm run build:sdk-js && npm test --workspace=apps/vscode && npm run typecheck --workspace=apps/vscode"
   }
 }

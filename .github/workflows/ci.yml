@@ -101,6 +101,21 @@ jobs:
       # Skips cleanly without PILOTS_E2E=1; this asserts the skip path works.
       - run: npm run test:e2e
 
+  vscode:
+    name: vscode extension
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm install
+      # The extension imports @pilots/sdk, which publishes out of dist/, so
+      # the SDK builds first exactly as the CLI job needs it to.
+      - run: npm run build:sdk-js
+      - run: npm test --workspace=apps/vscode
+      - run: npm run typecheck --workspace=apps/vscode
+
   website:
     name: website
     runs-on: ubuntu-24.04

@@ -24,7 +24,9 @@ from typing import Any, Literal, TypeVar, get_args, get_origin, get_type_hints
 
 T = TypeVar("T")
 
-MachineState = Literal["creating", "running", "suspended", "stopped", "error"]
+#: The six states hostd writes. ``destroyed`` is a tombstone rather than a
+#: deleted row, so a client listing machines filters it out itself.
+MachineState = Literal["creating", "running", "suspended", "stopped", "error", "destroyed"]
 URLAuth = Literal["public", "org"]
 
 #: A PARTIAL lifecycle policy: the shape a REQUEST carries. Omit a key to

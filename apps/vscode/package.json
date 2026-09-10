@@ -1,0 +1,68 @@
+{
+  "name": "pilots-vscode",
+  "displayName": "pilots",
+  "description": "Edit a pilots machine's filesystem in your workspace, open a terminal in it, and create or destroy one without leaving the editor.",
+  "version": "0.1.0",
+  "license": "Apache-2.0",
+  "publisher": "pilots",
+  "private": true,
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vivek7405/pilots.git",
+    "directory": "apps/vscode"
+  },
+  "engines": {
+    "vscode": "^1.85.0",
+    "node": ">=22"
+  },
+  "categories": ["Other"],
+  "keywords": ["pilots", "sandbox", "firecracker", "remote", "microvm"],
+  "activationEvents": ["onFileSystem:pilot"],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "pilots.setToken", "title": "pilots: Set API Token" },
+      { "command": "pilots.open", "title": "pilots: Open Machine" },
+      { "command": "pilots.create", "title": "pilots: Create Machine" },
+      { "command": "pilots.terminal", "title": "pilots: Open Terminal" },
+      { "command": "pilots.destroy", "title": "pilots: Destroy Machine" },
+      { "command": "pilots.refresh", "title": "pilots: Refresh Files" },
+      { "command": "pilots.download", "title": "Download to Local" }
+    ],
+    "menus": {
+      "explorer/context": [
+        { "command": "pilots.download", "when": "resourceScheme == pilot", "group": "7_modification" }
+      ],
+      "editor/title/context": [{ "command": "pilots.download", "when": "resourceScheme == pilot" }]
+    },
+    "configuration": {
+      "title": "pilots",
+      "properties": {
+        "pilots.apiUrl": {
+          "type": "string",
+          "default": "",
+          "description": "The fleet's API URL. Empty uses PILOT_API_URL, then https://api.pilotrun.app."
+        },
+        "pilots.home": {
+          "type": "string",
+          "default": "/home/pilot",
+          "description": "The directory a machine opens at."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "tsc -p .",
+    "typecheck": "tsc -p . --noEmit",
+    "test": "node --test 'test/**/*.test.ts'",
+    "package": "npm run build && npx --yes @vscode/vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "@pilots/sdk": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "@types/vscode": "^1.85.0",
+    "typescript": "~5.9.3"
+  }
+}

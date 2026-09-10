@@ -13,8 +13,16 @@
  * match the Go, and let the test say when that is done.
  */
 
-/** A machine's lifecycle state (`Machine.state`). */
-export type MachineState = 'creating' | 'running' | 'suspended' | 'stopped' | 'error'
+/**
+ * A machine's lifecycle state (`Machine.state`).
+ *
+ * The six hostd writes, from `internal/state/schema.sql`. `destroyed` is one
+ * of them and is NOT a deleted row: a delete racing a replica that still
+ * carries the insert loses through the merge and the machine comes back, so a
+ * destroyed machine is a tombstone with a state. A client listing machines
+ * therefore has to filter it out itself.
+ */
+export type MachineState = 'creating' | 'running' | 'suspended' | 'stopped' | 'error' | 'destroyed'
 
 /** Per-machine lifecycle policy. A sandbox and a service differ only here. */
 export interface Knobs {
