@@ -18,38 +18,61 @@ SIZE_MB="${SIZE_MB:-2048}"
 OUT="${OUT:-scripts/rootfs/golden.ext4}"
 IMAGE="${IMAGE:-pilots-golden-rootfs}"
 
-# The three knobs that make the image byte-reproducible, and therefore make
-# the pin in golden.ext4.sha256 mean something.
+# Three knobs aimed at making the image byte-reproducible, so that rebuilding
+# it is idempotent and the pin in golden.ext4.sha256 can mean something.
 #
-# Without them the same tree produces a different image every run, and
-# host-bootstrap.sh's pin check -- which refuses to ship anything that does
-# not match -- becomes a check that can never pass. It stopped a rig being
-# bootstrapped from a clean checkout: committed pin, image on disk and fresh
-# rebuild were three different hashes.
+#   -U                 mke2fs otherwise picks a random filesystem UUID
+#   -E hash_seed=      the directory hash seed is otherwise random, even with -U
+#   SOURCE_DATE_EPOCH  the superblock and inodes otherwise carry this run's clock
 #
-# All three are load-bearing; each was verified by building twice and diffing:
-#   -U            without it mke2fs picks a random filesystem UUID per run
-#   hash_seed     without it the directory hash seed is random, even with -U
-#   SOURCE_DATE_EPOCH  without it the superblock carries this run's clock
+# READ THIS BEFORE TRUSTING THE RESULT. The third one depends on the mke2fs
+# doing the work, and older builds ignore it entirely: 1.47.4 honours it,
+# 1.47.0 -- which is what Ubuntu 24.04 and therefore GitHub's runners ship --
+# does not, so on those the image still varies run to run. Measured in a
+# ubuntu:24.04 container, not inferred from a changelog.
 #
-# The epoch also clamps the inode timestamps, so the file mtimes that come out
-# of `docker export` do not have to be normalised by hand -- an image whose
-# files were dated 2030 built to the same bytes. The value is a constant and
-# not `date +%s`: reproducible has to mean across time, not within one run.
-# Changing the image's CONTENT changes the hash regardless, which is the point.
+# So the script PROBES rather than assumes, below, and says so when its
+# toolchain cannot deliver. A build that quietly stopped being reproducible
+# would put us back where this started: a pin that asserts nothing while
+# host-bootstrap.sh still hard-fails anyone whose image does not match it.
 #
-# The scope of the guarantee, because it is narrower than it looks: the same
-# tree on the same TOOLCHAIN builds the same bytes. A different e2fsprogs
-# lays the filesystem out differently and a different Go builds a different
-# agent, so a CI runner and a developer laptop do not agree -- measured, not
-# assumed. That is enough to make a rebuild idempotent, which is what was
-# missing. It is NOT enough to make the committed pin mean the same thing on
-# another machine; that needs the toolchain pinned too, or the image
-# published and downloaded rather than rebuilt. See #108.
+# Making this hold everywhere means pinning the toolchain -- running the pack
+# inside a container with a known e2fsprogs -- which also gets reproducibility
+# ACROSS machines, something no combination of flags here can. That is not in
+# this change; see #108.
 : "${SOURCE_DATE_EPOCH:=1700000000}"
 FS_UUID="${FS_UUID:-6f696c70-7473-4000-8000-676f6c64656e}"
 FS_HASH_SEED="${FS_HASH_SEED:-70696c6f-7473-4000-8000-736565646564}"
 export SOURCE_DATE_EPOCH
+
+# Does THIS mke2fs actually produce the same bytes twice? Two 1 MiB
+# filesystems over an empty directory, a second apart so a clock that leaks in
+# has moved. Costs about a tenth of a second and turns a silent property into
+# a stated one.
+reproducible_mke2fs() {
+  local d a b
+  d="$(mktemp -d)"
+  mkdir -p "$d/root"
+  mke2fs -q -F -t ext4 -b 4096 -U "$FS_UUID" -E hash_seed="$FS_HASH_SEED" \
+    -d "$d/root" "$d/a.img" 1M 2>/dev/null || { rm -rf "$d"; return 1; }
+  sleep 1
+  mke2fs -q -F -t ext4 -b 4096 -U "$FS_UUID" -E hash_seed="$FS_HASH_SEED" \
+    -d "$d/root" "$d/b.img" 1M 2>/dev/null || { rm -rf "$d"; return 1; }
+  a="$(sha256sum < "$d/a.img")"; b="$(sha256sum < "$d/b.img")"
+  rm -rf "$d"
+  [ "$a" = "$b" ]
+}
+
+if reproducible_mke2fs; then
+  echo "==> mke2fs is reproducible here; the pin this writes is meaningful"
+else
+  echo "==> WARNING: this mke2fs ($(mke2fs -V 2>&1 | head -1)) does not honour" >&2
+  echo "    SOURCE_DATE_EPOCH, so the image it packs differs run to run and" >&2
+  echo "    the hash written to ${OUT}.sha256 is good only for THIS build." >&2
+  echo "    Every host you ship this image to still gets identical bytes --" >&2
+  echo "    host-bootstrap.sh copies one file -- but a rebuild will not" >&2
+  echo "    reproduce the pin. e2fsprogs 1.47.4 honours it; 1.47.0 does not." >&2
+fi
 
 STAGED_BIN="scripts/rootfs/guest-agent"
 TAR="$(mktemp -t pilots-rootfs-XXXXXX.tar)"
