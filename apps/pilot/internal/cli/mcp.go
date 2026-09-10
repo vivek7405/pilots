@@ -134,7 +134,8 @@ func (d mcpDeps) registerTools(s *mcp.Server) {
 		Labels     map[string]string `json:"labels,omitempty" jsonschema:"labels to find it by later; list_machines filters on them"`
 		// Seconds rather than a duration string: the API's own unit, so the
 		// value an agent reads back from the machine is the value it sent.
-		IdleTimeout int `json:"idle_timeout,omitempty" jsonschema:"seconds of quiet before the machine suspends, 1..3600 (default 60); set it for a daemon nothing connects to"`
+		IdleTimeout int               `json:"idle_timeout,omitempty" jsonschema:"seconds of quiet before the machine suspends, 1..3600 (default 60); set it for a daemon nothing connects to"`
+		Schedules   []pilots.Schedule `json:"schedules,omitempty" jsonschema:"cron jobs: each is {cron, path} to GET a path on the machine on that schedule (five fields, UTC, or @hourly/@daily/@weekly/@monthly), or {cron, cmd} to run a command in it; the machine is woken for it"`
 	}
 	mcp.AddTool(s, &mcp.Tool{Name: "create_machine", Title: "Create a machine",
 		Description: "Create a microVM. A create is a restore from a template rather than a boot, so it is fast. " +
@@ -146,8 +147,14 @@ func (d mcpDeps) registerTools(s *mcp.Server) {
 					Name: in.Name, Image: in.Image, Template: in.Template, Checkpoint: in.Checkpoint,
 					VCPUs: in.VCPUs, MemMiB: in.MemMiB, App: in.App, Cmd: in.Cmd, Env: in.Env, Labels: in.Labels,
 				}
-				if in.IdleTimeout != 0 {
-					req.Knobs = &pilots.KnobsPatch{IdleTimeout: pilots.Ptr(in.IdleTimeout)}
+				if in.IdleTimeout != 0 || len(in.Schedules) > 0 {
+					req.Knobs = &pilots.KnobsPatch{}
+					if in.IdleTimeout != 0 {
+						req.Knobs.IdleTimeout = pilots.Ptr(in.IdleTimeout)
+					}
+					if len(in.Schedules) > 0 {
+						req.Knobs.Schedules = &in.Schedules
+					}
 				}
 				return client.Machines.Create(ctx, req)
 			}, constant("exec on the returned id"))
@@ -766,6 +773,7 @@ type deployIn = struct {
 	Env          map[string]string   `json:"env,omitempty"`
 	SecretEnv    map[string]string   `json:"secret_env,omitempty"`
 	Replicas     int                 `json:"replicas,omitempty"`
+	Schedules    []pilots.Schedule   `json:"schedules,omitempty" jsonschema:"cron jobs for the service: {cron, path} GETs the path on a replica on that schedule (five fields, UTC, or @hourly/@daily/@weekly/@monthly), {cron, cmd} runs a command; a webjs app declares these in its own package.json webjs.crons instead"`
 }
 
 // applyOverrides: a health or replicas passed alongside dir and then quietly
@@ -795,6 +803,9 @@ func applyOverrides(plan *pilots.ComposePlan, in deployIn) error {
 	}
 	if in.CustomDomain != "" {
 		given = append(given, "custom_domain")
+	}
+	if in.Schedules != nil {
+		given = append(given, "schedules")
 	}
 	if len(given) == 0 {
 		return nil
@@ -831,6 +842,16 @@ func applyOverrides(plan *pilots.ComposePlan, in deployIn) error {
 	}
 	if in.CustomDomain != "" {
 		step.CustomDomain = in.CustomDomain
+	}
+	if in.Schedules != nil {
+		// Onto whatever the plan already carries (a webjs app's own crons,
+		// for one), replacing only the schedules: an explicit empty list is
+		// how a caller clears them.
+		if step.Knobs == nil {
+			step.Knobs = &pilots.KnobsPatch{}
+		}
+		list := in.Schedules
+		step.Knobs.Schedules = &list
 	}
 	if in.SecretEnv != nil {
 		return errors.New("secret_env with dir is not supported: put secret:// references in a compose file, or deploy with name and build")

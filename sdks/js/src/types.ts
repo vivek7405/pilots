@@ -24,6 +24,23 @@ export interface Knobs {
   soft_limit: number
   /** Seconds of quiet before the machine suspends, 1..3600 (default 60). */
   idle_timeout: number
+  /**
+   * The machine's cron jobs; absent means none. On a deploy an absent key
+   * inherits the previous release's and an explicit `[]` clears them.
+   */
+  schedules?: Schedule[]
+}
+
+/**
+ * One cron job: a five-field expression (UTC; or `@hourly`, `@daily`,
+ * `@weekly`, `@monthly`) and exactly one of a path the host GETs on the
+ * machine or a command it runs in it. A GET carries the `X-Pilot-Cron`
+ * header, which cannot arrive from outside the fleet.
+ */
+export interface Schedule {
+  cron: string
+  path?: string
+  cmd?: string
 }
 
 /**

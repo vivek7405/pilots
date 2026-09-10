@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -52,7 +53,7 @@ func TestDecodeKnobsMergesOntoDefaults(t *testing.T) {
 			if err != nil {
 				t.Fatalf("DecodeKnobs: %v", err)
 			}
-			if got != tc.want {
+			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("got %+v, want %+v", got, tc.want)
 			}
 		})
@@ -64,8 +65,50 @@ func TestDecodeKnobsEmptyInputIsDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DecodeKnobs(nil): %v", err)
 	}
-	if got != DefaultKnobs() {
+	if !reflect.DeepEqual(got, DefaultKnobs()) {
 		t.Errorf("got %+v, want the defaults", got)
+	}
+}
+
+// A schedule is a cron the matcher accepts and exactly one target; the whole
+// list is bounded. Each refusal names the entry so a compose file or a
+// package.json can be fixed in one pass.
+func TestDecodeKnobsValidatesSchedules(t *testing.T) {
+	good := `{"schedules":[{"cron":"0 5 * * *","path":"/jobs/digest"},{"cron":"@hourly","cmd":"./tick"}]}`
+	k, err := DecodeKnobs(json.RawMessage(good))
+	if err != nil {
+		t.Fatalf("a valid schedule list was refused: %v", err)
+	}
+	if len(k.Schedules) != 2 || k.Schedules[0].Path != "/jobs/digest" || k.Schedules[1].Cmd != "./tick" {
+		t.Errorf("schedules = %+v", k.Schedules)
+	}
+	if k.AutoStart != true || k.IdleTimeout != DefaultIdleTimeoutSeconds {
+		t.Errorf("a schedules-only object zeroed its neighbours: %+v", k)
+	}
+
+	for _, tc := range []struct{ raw, want string }{
+		{`{"schedules":[{"cron":"0 5 * * *"}]}`, "needs a path"},
+		{`{"schedules":[{"cron":"0 5 * * *","path":"/a","cmd":"b"}]}`, "both"},
+		{`{"schedules":[{"cron":"0 5 * * *","path":"jobs"}]}`, "must start with /"},
+		{`{"schedules":[{"cron":"every day","path":"/a"}]}`, "5 fields"},
+		{`{"schedules":[{"cron":"0 5 * * *","path":"/a"},{"cron":"bad","cmd":"x"}]}`, "schedules[1]"},
+	} {
+		_, err := DecodeKnobs(json.RawMessage(tc.raw))
+		if err == nil || !errors.Is(err, ErrInvalidKnobs) || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want ErrInvalidKnobs mentioning %q", tc.raw, err, tc.want)
+		}
+	}
+
+	many := `{"schedules":[` + strings.Repeat(`{"cron":"* * * * *","path":"/x"},`, MaxSchedules) + `{"cron":"* * * * *","path":"/x"}]}`
+	if _, err := DecodeKnobs(json.RawMessage(many)); err == nil || !strings.Contains(err.Error(), "more than") {
+		t.Errorf("%d schedules were accepted: %v", MaxSchedules+1, err)
+	}
+
+	// An explicit empty list is a valid way to say "none", and it is not the
+	// same value as absent: the deploy merge relies on the difference.
+	k, err = DecodeKnobs(json.RawMessage(`{"schedules":[]}`))
+	if err != nil || k.Schedules == nil || len(k.Schedules) != 0 {
+		t.Errorf("schedules: [] should decode to an empty, non-nil list: %+v, %v", k.Schedules, err)
 	}
 }
 

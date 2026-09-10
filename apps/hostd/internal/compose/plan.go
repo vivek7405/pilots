@@ -211,10 +211,24 @@ type xPilots struct {
 	// ("30m", "90s"), or a bare number of seconds. `any` because YAML hands
 	// the first over as a string and the second as an int, and mapstructure
 	// refuses to put an int into a *string.
-	IdleTimeout any    `mapstructure:"idle_timeout"`
-	SizeGiB     int    `mapstructure:"size_gib"`
-	PreDeploy   string `mapstructure:"pre_deploy"`
-	App         string `mapstructure:"app"` // top-level only
+	IdleTimeout any `mapstructure:"idle_timeout"`
+	// Schedules are the service's cron jobs. A list that is present but
+	// empty is meaningful: it clears whatever the previous release's replicas
+	// carried, where an absent key inherits (see api.Knobs.Schedules). A
+	// pointer, because mapstructure decodes an empty YAML list into a nil
+	// slice and the difference between "[]" and "not there" is the point.
+	Schedules *[]xSchedule `mapstructure:"schedules"`
+	SizeGiB   int          `mapstructure:"size_gib"`
+	PreDeploy string       `mapstructure:"pre_deploy"`
+	App       string       `mapstructure:"app"` // top-level only
+}
+
+// xSchedule is one x-pilots.schedules entry, api.Schedule spelled for
+// mapstructure.
+type xSchedule struct {
+	Cron string `mapstructure:"cron"`
+	Path string `mapstructure:"path"`
+	Cmd  string `mapstructure:"cmd"`
 }
 
 // Compile returns the plan, or a PlanError the caller answers 400 with, or an
@@ -774,6 +788,15 @@ func toStep(name string, svc types.ServiceConfig) (Step, error) {
 	if _, err := svc.Extensions.Get("x-pilots", &x); err != nil {
 		return Step{}, fmt.Errorf("compose: %s: x-pilots: %w", name, err)
 	}
+	// `schedules: []` arrives from the loader as a nil list under a present
+	// key, and mapstructure leaves the pointer nil for that -- which would
+	// read as absent. Present-but-empty is the one spelling that clears a
+	// deploy's inherited crons, so it is recovered from the raw map.
+	if raw, _ := svc.Extensions["x-pilots"].(map[string]any); x.Schedules == nil {
+		if _, present := raw["schedules"]; present {
+			x.Schedules = &[]xSchedule{}
+		}
+	}
 	knobs, err := knobsFrom(name, x)
 	if err != nil {
 		return Step{}, err
@@ -1018,10 +1041,27 @@ func resourceLimits(svc types.ServiceConfig) *types.Resource {
 // auto_start: false, and a replica that suspends and then refuses to wake is a
 // permanently dead URL earned by setting one unrelated field.
 func knobsFrom(name string, x xPilots) (*api.Knobs, error) {
-	if x.AutoStop == nil && x.AutoStart == nil && x.MinMachinesRunning == nil && x.SoftLimit == nil && x.IdleTimeout == nil {
+	if x.AutoStop == nil && x.AutoStart == nil && x.MinMachinesRunning == nil && x.SoftLimit == nil && x.IdleTimeout == nil && x.Schedules == nil {
 		return nil, nil
 	}
 	k := api.DefaultKnobs()
+	if x.Schedules != nil {
+		// Present, possibly empty: an empty list is how a file says "no
+		// crons any more", and it must reach the deploy as [] rather than
+		// as nothing, or the previous release's schedules are inherited.
+		k.Schedules = make([]api.Schedule, 0, len(*x.Schedules))
+		for i, s := range *x.Schedules {
+			sched := api.Schedule{Cron: s.Cron, Path: s.Path, Cmd: s.Cmd}
+			if err := sched.Validate(); err != nil {
+				return nil, fmt.Errorf("compose: %s: x-pilots.schedules[%d] %v", name, i, err)
+			}
+			k.Schedules = append(k.Schedules, sched)
+		}
+		if len(k.Schedules) > api.MaxSchedules {
+			return nil, fmt.Errorf("compose: %s: x-pilots.schedules has %d entries, more than the %d a machine may carry",
+				name, len(k.Schedules), api.MaxSchedules)
+		}
+	}
 	if x.IdleTimeout != nil {
 		secs, err := idleTimeoutSeconds(x.IdleTimeout)
 		if err != nil {

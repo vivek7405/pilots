@@ -35,6 +35,8 @@ MCP: `deploy` with `{ "dir": "<absolute path>" }`. Nothing else is required.
 
 Every recipe sets `PORT=8080`, exposes 8080 and reads `$PORT`. The router dials 8080.
 
+A webjs app's `package.json` may carry `"webjs": { "crons": [{ "path": "/jobs/digest", "schedule": "0 5 * * *" }] }`; the plan turns those into the service's schedules (services.md), so a cron needs no compose file and nothing pilots-specific.
+
 ## Monorepos
 
 A root `package.json` with `workspaces` deploys each workspace directory as a service named after it, built from the repository root with `WORKDIR /app/<dir>`. The install stays at the root, so the lockfile and the hoisted `node_modules` are the ones each workspace expects. A workspace no recipe recognises is skipped and named in the notes.

@@ -17,6 +17,21 @@ A service is one or more machines behind a URL that never changes. That URL is `
 
 A deploy builds a rootfs, creates a release, starts a replica from it, and lets the release take traffic only once the replica has passed its health check. That gate is why a broken deploy does not take the previous one down.
 
+## Scheduled jobs
+
+A cron is a request on a schedule. Declare it and the platform GETs the path at the right minute, waking the machine if it is asleep; the machine sleeps again afterwards, so a job that runs for a minute a day costs a minute a day.
+
+    x-pilots:
+      schedules:
+        - cron: "0 5 * * *"      # five fields, UTC; or @hourly, @daily, @weekly, @monthly
+          path: /jobs/digest
+        - cron: "@hourly"
+          cmd: ./bin/tick         # a command instead, for work with no route
+
+A webjs app needs none of that: it declares crons in its own `package.json` (`"webjs": { "crons": [{ "path": "/jobs/digest", "schedule": "0 5 * * *" }] }`) and `deploy` reads them. Any other framework uses the compose keys above; a sandbox takes `pilot machines create --schedule "0 5 * * * /jobs/digest"`.
+
+What the handler sees is a `GET` carrying `X-Pilot-Cron: <expression>`. The public edge strips that header from every outside request, so `if (!req.headers['x-pilot-cron']) return 403` is the whole check, with no secret to keep. A job can fire twice in rare cases (a host restart inside its minute), so make it idempotent; a job still running when its next minute comes is skipped, not overlapped. One replica fires for a service, however many it has. To remove every cron, deploy with `schedules: []` (or `crons: []`); an absent key keeps the previous release's.
+
 A replica with no traffic suspends and the next request wakes it; that is the default and it costs nothing while asleep. A worker that must keep running with nothing connected to it -- a queue consumer, a scheduler -- keeps one replica resident with `x-pilots: min_machines_running: 1` in its compose entry (or `auto_stop: off`); a replica that should merely wait longer before sleeping sets `idle_timeout: 30m` (up to an hour). The keys are listed in compose.md.
 
 ## The tools

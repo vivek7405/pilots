@@ -991,6 +991,25 @@ storage its snapshot occupies. N-replica: round-robin among healthy replicas,
 them down to `minMachinesRunning`, which defaults to zero; `autoStop: off` on
 a deploy means never.
 
+**Schedules (in hostd):** a machine's cron jobs live in its knobs
+(`schedules: [{cron, path | cmd}]`) and the host that owns the machine fires
+them — `cmd/hostd/schedules.go`, one 10 s loop beside the waker. On an
+expression's minute it makes a `GET path` to `<machine>.<domain>` through the
+router's *internal* handler, which is the same resolve, held wake and proxy a
+visitor's request gets, so a scale-to-zero app runs its cron with nothing
+kept warm for it; `cmd` runs through exec instead. The request carries
+`X-Pilot-Cron`, stripped on the public listener beside `X-Pilot-Forwarded`,
+so an app trusts the header with no shared secret. Ownership is the row's
+single-writer `host_id`, so every fire is local and no leader exists; for a
+service the lowest-id current replica fires and the rest stand down (gating on
+the autoscaler's arbiter was rejected: its live set is a per-host clock
+window, so two hosts can disagree for a minute and both fire). At-least-once:
+fired minutes live in memory, a restart inside a minute may fire again, a
+fire still running when its next minute comes is skipped, and handlers are
+idempotent by convention. Vercel's model, on the wake path that already
+existed; the cron matcher is `internal/cron`, a hundred lines rather than a
+dependency.
+
 **Self-heal:** every hostd heartbeats `hosts.last_seen`; a host silent
 >30s is dead; each survivor rescues the slice
 `hash(machine_id) mod live_hosts == my_index` — recreate from the machine's

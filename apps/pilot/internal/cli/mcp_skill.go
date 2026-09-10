@@ -194,6 +194,8 @@ THE PRIMITIVE
   the first into the second without changing its URL. A quiet machine
   suspends (a freeze; it resumes on the next exec or request); a console
   running a command keeps it up, idle_timeout sets the wait for a daemon.
+  A cron is a GET on a path on a schedule (schedules on create or deploy;
+  webjs.crons in package.json); the host wakes the machine for it.
 
 RULES
   No directory and no repo in the conversation: ask, never invent one.

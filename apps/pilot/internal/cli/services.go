@@ -158,6 +158,9 @@ func newServicesInfoCmd(env *Env) *cobra.Command {
 				[]string{"AUTO STOP", s.Knobs.AutoStop},
 				[]string{"MIN RUNNING", strconv.Itoa(s.Knobs.MinMachinesRunning)},
 			)
+			for _, sched := range s.Knobs.Schedules {
+				rows = append(rows, []string{"SCHEDULE", scheduleLine(sched)})
+			}
 			return env.W.Table([]string{"", ""}, rows)
 		},
 	}

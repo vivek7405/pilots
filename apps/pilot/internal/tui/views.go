@@ -346,6 +346,13 @@ func (m *Model) viewMachine() string {
 		{"auto start", strconv.FormatBool(mc.Knobs.AutoStart)},
 		{"idle timeout", (time.Duration(mc.Knobs.IdleTimeout) * time.Second).String()},
 	}
+	for _, s := range mc.Knobs.Schedules {
+		target := s.Cmd
+		if s.Path != "" {
+			target = "GET " + s.Path
+		}
+		rows = append(rows, [2]string{"schedule", s.Cron + "  " + target})
+	}
 	if mc.App != "" {
 		rows = append(rows, [2]string{"app", mc.App})
 	}

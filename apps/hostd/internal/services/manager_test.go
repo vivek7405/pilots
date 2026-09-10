@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -478,7 +479,7 @@ func TestAReplicaDefaultsToTheMachineDefaults(t *testing.T) {
 	if len(reps) != 1 {
 		t.Fatalf("deploy made %d replicas, want 1", len(reps))
 	}
-	if got := api.ParseKnobs(reps[0].KindKnobs); got != api.DefaultKnobs() {
+	if got := api.ParseKnobs(reps[0].KindKnobs); !reflect.DeepEqual(got, api.DefaultKnobs()) {
 		t.Errorf("replica knobs = %+v, want the machine defaults %+v", got, api.DefaultKnobs())
 	}
 }

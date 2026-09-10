@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/compose"
 )
 
@@ -129,6 +130,9 @@ func Plan(ctx context.Context, dir string, opts Options) (*Result, *compose.Plan
 		step.Build = &compose.Build{Context: "."}
 		step.Dockerfile = recipe.Dockerfile
 		step.Health = recipe.Health
+		if err := applyFrameworkKnobs(&step, recipe.Framework, dir); err != nil {
+			return nil, nil, nil, err
+		}
 		return &Result{
 			Plan: compose.Plan{App: app, Steps: []compose.Step{step}},
 			Detected: []compose.Detected{{
@@ -139,7 +143,11 @@ func Plan(ctx context.Context, dir string, opts Options) (*Result, *compose.Plan
 	}
 
 	// (d) npm workspaces: one service per member the detector recognises.
-	if res := planWorkspaces(dir, app, members); res != nil {
+	res, err := planWorkspaces(dir, app, members)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if res != nil {
 		return res, nil, nil, nil
 	}
 
@@ -153,7 +161,7 @@ func Plan(ctx context.Context, dir string, opts Options) (*Result, *compose.Plan
 // repository: a monorepo with three apps and one unrecognised tools directory
 // should deploy the three, and the skip is named in the first step's notes so
 // nobody discovers it by counting URLs.
-func planWorkspaces(dir, app string, members []string) *Result {
+func planWorkspaces(dir, app string, members []string) (*Result, error) {
 	var steps []compose.Step
 	var detected []compose.Detected
 	var skipped []string
@@ -180,6 +188,9 @@ func planWorkspaces(dir, app string, members []string) *Result {
 		step.Build = &compose.Build{Context: "."}
 		step.Dockerfile = member.Dockerfile
 		step.Health = member.Health
+		if err := applyFrameworkKnobs(&step, member.Framework, filepath.Join(dir, rel)); err != nil {
+			return nil, err
+		}
 		steps = append(steps, step)
 		detected = append(detected, compose.Detected{
 			Service: name, Source: "recipe", Framework: string(member.Framework),
@@ -187,14 +198,35 @@ func planWorkspaces(dir, app string, members []string) *Result {
 		})
 	}
 	if len(steps) == 0 {
-		return nil
+		return nil, nil
 	}
 	if len(skipped) > 0 {
 		detected[0].Notes = append(detected[0].Notes,
 			"no framework was detected in these workspaces, so they are not deployed: "+
 				strings.Join(skipped, ", "))
 	}
-	return &Result{Plan: compose.Plan{App: app, Steps: steps}, Detected: detected}
+	return &Result{Plan: compose.Plan{App: app, Steps: steps}, Detected: detected}, nil
+}
+
+// applyFrameworkKnobs puts onto the step what the framework's own config file
+// declares about lifecycle -- today, a webjs app's crons. Nothing is set when
+// the file says nothing, so a step keeps carrying no knobs and the deploy
+// keeps merging onto the machine defaults exactly as before.
+func applyFrameworkKnobs(step *compose.Step, fw Framework, dir string) error {
+	if fw != FrameworkWebJS {
+		return nil
+	}
+	crons, err := webjsCrons(dir)
+	if err != nil {
+		return err
+	}
+	if crons == nil {
+		return nil
+	}
+	k := api.DefaultKnobs()
+	k.Schedules = crons
+	step.Knobs = &k
+	return nil
 }
 
 // baseStep is a step with the compose planner's own defaults, read through the

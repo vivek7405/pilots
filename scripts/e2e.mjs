@@ -724,6 +724,72 @@ async function lifecycleAssertions() {
       }
     });
 
+    // #110: a cron is a request on a schedule. The owning host GETs the path
+    // (or runs the command) on the expression's minute, waking the machine if
+    // it must, and the GET carries X-Pilot-Cron -- which the public listener
+    // strips from anything arriving from outside, so the app trusts it with
+    // no secret. Everything here is what a client can see: the file the job
+    // writes, the machine's state, and the header as the app received it.
+    await step('a schedule fires on its minute, wakes a suspended machine, and its marker cannot be forged', async () => {
+      const server = [
+        'import http.server',
+        'class H(http.server.BaseHTTPRequestHandler):',
+        '    def do_GET(self):',
+        "        open('/root/hits', 'a').write(self.path + ' ' + (self.headers.get('X-Pilot-Cron') or 'none') + '\\n')",
+        '        self.send_response(200); self.end_headers(); self.wfile.write(b"ok")',
+        '    def log_message(self, *a): pass',
+        "http.server.HTTPServer(('0.0.0.0', 8080), H).serve_forever()",
+      ].join('\n');
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST', body: { knobs: { schedules: [
+          { cron: '* * * * *', path: '/hit' },
+          { cron: '* * * * *', cmd: 'date +%s >> /root/cron.log' },
+        ] } },
+      });
+      assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
+      const cronId = json.id;
+      try {
+        assert(json.knobs.schedules?.length === 2, `schedules = ${JSON.stringify(json.knobs.schedules)}`);
+        await exec(cronId, `printf '%s' '${server.replace(/'/g, `'\\''`)}' > /root/srv.py; setsid python3 /root/srv.py > /root/srv.log 2>&1 < /dev/null &`);
+        await new Promise((r) => setTimeout(r, 1000));
+
+        // Two minute boundaries pass; both jobs fire on each.
+        await waitFor(async () => {
+          const n = await exec(cronId, 'wc -l < /root/cron.log 2>/dev/null || echo 0');
+          return Number(n) >= 2;
+        }, { timeoutMs: 140_000, everyMs: 5_000, what: 'the cmd schedule to fire twice' });
+        const hits = await exec(cronId, 'cat /root/hits 2>/dev/null || true');
+        const cronHits = hits.split('\n').filter((l) => l.startsWith('/hit '));
+        assert(cronHits.length >= 1, `the path schedule never reached the app: ${JSON.stringify(hits)}`);
+        assert(cronHits.every((l) => l === '/hit * * * * *'),
+          `every scheduled GET should carry X-Pilot-Cron with its expression: ${JSON.stringify(cronHits)}`);
+
+        // A suspended machine is woken by its own cron: put it to sleep and
+        // let the next minute do the rest.
+        const susp = await request(`/v1/machines/${cronId}/suspend`, { method: 'POST' });
+        assert(susp.status === 204, `suspend: expected 204, got ${susp.status}`);
+        const before = cronHits.length;
+        await waitFor(async () => {
+          const { json: m } = await request(`/v1/machines/${cronId}`);
+          return m.state === 'running';
+        }, { timeoutMs: 80_000, everyMs: 3_000, what: 'the cron to wake the suspended machine' });
+        await waitFor(async () => {
+          const h = await exec(cronId, 'grep -c "^/hit " /root/hits || echo 0');
+          return Number(h) > before;
+        }, { timeoutMs: 30_000, everyMs: 2_000, what: 'the fire that woke it to reach the app' });
+
+        // The marker cannot arrive from outside: a forged header is stripped
+        // before the app sees the request.
+        const { json: m } = await request(`/v1/machines/${cronId}`);
+        const res = await viaRouter(new URL(m.url).host, '/hit', 30_000, { 'X-Pilot-Cron': 'forged' });
+        assert(res.status === 200, `the app should answer the outside request: ${res.status} ${res.body.slice(0, 100)}`);
+        const last = (await exec(cronId, 'tail -n 1 /root/hits'));
+        assert(last === '/hit none', `a forged X-Pilot-Cron reached the app: ${JSON.stringify(last)}`);
+      } finally {
+        await request(`/v1/machines/${cronId}`, { method: 'DELETE' });
+      }
+    });
+
     await step('a duplicate name is rejected', async () => {
       const { json: mine } = await request(`/v1/machines/${id}`);
       const { status } = await request('/v1/machines', {
@@ -3280,6 +3346,29 @@ async function dataRouteAssertions() {
         'the generated Dockerfile does not declare the port the router dials');
       assert(json.detected[0].health?.path === '/__webjs/ready',
         `health = ${JSON.stringify(json.detected[0].health)}`);
+    });
+
+    // #110: a webjs app's crons live in its own package.json, with Vercel's
+    // field names, and the plan carries them as the step's schedules. Nothing
+    // pilots-specific was written; a bad entry is refused by name.
+    await step('the plan route turns package.json webjs.crons into schedules', async () => {
+      const files = readTree(WEBJS_FIXTURE);
+      const pkg = JSON.parse(files['package.json']);
+      pkg.webjs = { ...(pkg.webjs ?? {}), crons: [{ path: '/jobs/digest', schedule: '0 5 * * *' }, { path: '/jobs/tick', schedule: '@hourly' }] };
+      let res = await postTar('/v1/plan?app=fx', tarball({ ...files, 'package.json': JSON.stringify(pkg) }));
+      let json = await res.json();
+      assert(res.status === 200, `expected 200, got ${res.status}: ${JSON.stringify(json)}`);
+      const schedules = json.plan.steps[0].knobs?.schedules;
+      assert(Array.isArray(schedules) && schedules.length === 2, `schedules = ${JSON.stringify(json.plan.steps[0].knobs)}`);
+      assert(schedules[0].path === '/jobs/digest' && schedules[0].cron === '0 5 * * *', `schedules[0] = ${JSON.stringify(schedules[0])}`);
+      assert(schedules[1].cron === '@hourly', `schedules[1] = ${JSON.stringify(schedules[1])}`);
+      assert(json.plan.steps[0].knobs.auto_start === true, 'the crons zeroed the step\'s other knobs');
+
+      pkg.webjs.crons = [{ path: 'jobs/digest', schedule: 'every day' }];
+      res = await postTar('/v1/plan?app=fx', tarball({ ...files, 'package.json': JSON.stringify(pkg) }));
+      json = await res.json();
+      assert(res.status === 400, `a malformed cron should be a 400, got ${res.status}: ${JSON.stringify(json)}`);
+      assert(JSON.stringify(json).includes('webjs.crons'), `the refusal should name webjs.crons: ${JSON.stringify(json)}`);
     });
 
     await step('a Dockerfile beats a recipe, and a compose file beats both', async () => {

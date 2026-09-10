@@ -11,6 +11,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+
+	"github.com/vivek7405/pilots/hostd/internal/cron"
 )
 
 // Knobs are the per-machine lifecycle policy. There is no sandbox type and no
@@ -30,7 +33,34 @@ type Knobs struct {
 	// forgotten value costs at most an hour per idle cycle, where
 	// auto_stop: off costs forever.
 	IdleTimeout int `json:"idle_timeout"` // seconds, 1..MaxIdleTimeoutSeconds
+	// Schedules are the machine's cron jobs: on each expression's minute the
+	// owning host wakes the machine if it must and either GETs Path on it
+	// through the router or runs Cmd in it. Absent means none. omitempty is
+	// load-bearing for the replica case: a deploy's knobs are merged onto
+	// the previous replica's, so an absent key inherits and an explicit []
+	// clears -- "remove every cron" is spelled schedules: [].
+	Schedules []Schedule `json:"schedules,omitempty"`
 }
+
+// Schedule is one cron job: an expression and exactly one of a path to GET
+// or a command to run.
+//
+// A GET is the framework-agnostic trigger -- every framework has routes and
+// no two share a job syntax -- and it rides the same held wake a visitor's
+// request does, so a scale-to-zero app runs its cron without a machine kept
+// warm for it. The request carries X-Pilot-Cron, which the public listener
+// strips from anything arriving from outside, so a handler can trust it
+// without a shared secret. Cmd is for work with no HTTP surface at all.
+type Schedule struct {
+	Cron string `json:"cron"`           // five fields, UTC; or @hourly/@daily/@weekly/@monthly
+	Path string `json:"path,omitempty"` // GET this path on the machine, e.g. /jobs/digest
+	Cmd  string `json:"cmd,omitempty"`  // or run this command in it
+}
+
+// MaxSchedules bounds how many cron jobs one machine may carry. Twenty is more
+// than any app has asked for and small enough that the per-tick scan over a
+// host's machines stays a scan.
+const MaxSchedules = 20
 
 // The bounds of idle_timeout. Sixty seconds is the default every machine had
 // before the knob existed; an hour is the ceiling a forgotten value is allowed
@@ -64,7 +94,7 @@ func DecodeKnobs(raw json.RawMessage) (Knobs, error) {
 	if err := json.Unmarshal(raw, &k); err != nil {
 		return k, fmt.Errorf("%w: %w", ErrInvalidKnobs, err)
 	}
-	if err := k.validate(); err != nil {
+	if err := k.Validate(); err != nil {
 		return k, fmt.Errorf("%w: %w", ErrInvalidKnobs, err)
 	}
 	return k, nil
@@ -74,10 +104,18 @@ func DecodeKnobs(raw json.RawMessage) (Knobs, error) {
 // 400 rather than storing a value the idle monitor would never act on.
 var ErrInvalidKnobs = errors.New("invalid knobs")
 
-// validate is what a decoded policy must satisfy before it is stored. It runs
-// on the wire path only: ParseKnobs reads what is already stored and must
-// never refuse it.
-func (k Knobs) validate() error {
+// Validate is what a policy must satisfy before it is stored. It runs on the
+// wire path only -- DecodeKnobs, and the compose planner so a refusal names
+// the file: ParseKnobs reads what is already stored and must never refuse it.
+func (k Knobs) Validate() error {
+	if len(k.Schedules) > MaxSchedules {
+		return fmt.Errorf("schedules: %d is more than the %d a machine may carry", len(k.Schedules), MaxSchedules)
+	}
+	for i, s := range k.Schedules {
+		if err := s.Validate(); err != nil {
+			return fmt.Errorf("schedules[%d]: %w", i, err)
+		}
+	}
 	switch k.AutoStop {
 	case "off", "suspend":
 	case "stop":
@@ -96,6 +134,23 @@ func (k Knobs) validate() error {
 	}
 	if k.IdleTimeout < 1 || k.IdleTimeout > MaxIdleTimeoutSeconds {
 		return fmt.Errorf("idle_timeout is %d, want 1..%d seconds", k.IdleTimeout, MaxIdleTimeoutSeconds)
+	}
+	return nil
+}
+
+// Validate checks one schedule: a cron expression the matcher accepts and
+// exactly one target.
+func (s Schedule) Validate() error {
+	if _, err := cron.Parse(s.Cron); err != nil {
+		return err
+	}
+	switch {
+	case s.Path == "" && s.Cmd == "":
+		return errors.New("needs a path to GET or a cmd to run")
+	case s.Path != "" && s.Cmd != "":
+		return errors.New("has both a path and a cmd; a schedule does one thing")
+	case s.Path != "" && !strings.HasPrefix(s.Path, "/"):
+		return fmt.Errorf("path %q must start with /", s.Path)
 	}
 	return nil
 }

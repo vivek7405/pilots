@@ -20,6 +20,17 @@ var (
 			"table. Non-zero and rising means the autoscaler is deciding "+
 			"scale-down on degraded signals.")
 
+	// ScheduleFires counts cron jobs this host fired, and ScheduleFailures
+	// the ones whose GET answered outside 2xx or whose command exited
+	// non-zero or could not run. Two plain counters rather than one with a
+	// result label: the series set stays fixed, and the ratio is the whole
+	// question an operator asks.
+	ScheduleFires = NewCounter(Default, "pilots_schedule_fires_total",
+		"Cron jobs fired by this host, GETs and commands alike.")
+	ScheduleFailures = NewCounter(Default, "pilots_schedule_failures_total",
+		"Cron jobs whose GET answered outside 2xx, or whose command exited "+
+			"non-zero or could not be started.")
+
 	// SessionSignalBlind is 1 while the held-session signal is unreadable.
 	//
 	// Worth its own series because the consequence is specific: while it is

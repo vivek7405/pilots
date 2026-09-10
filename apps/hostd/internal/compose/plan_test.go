@@ -522,6 +522,55 @@ services:
 	}
 }
 
+// Schedules reach the plan as knobs, an empty list is kept (it clears
+// inherited crons on a deploy), and a bad entry is named by index.
+func TestXPilotsSchedulesReachTheKnobs(t *testing.T) {
+	const file = `
+name: shop
+services:
+  web:
+    image: node:24
+    x-pilots:
+      schedules:
+        - cron: "0 5 * * *"
+          path: /jobs/digest
+        - cron: "@hourly"
+          cmd: ./tick
+  worker:
+    image: node:24
+    x-pilots:
+      schedules: []
+`
+	plan, _, err := Compile(context.Background(), Request{Compose: file})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	web := stepNamed(t, plan, "web").Knobs
+	if web == nil || len(web.Schedules) != 2 || web.Schedules[0].Path != "/jobs/digest" || web.Schedules[1].Cmd != "./tick" {
+		t.Errorf("web schedules = %+v", web)
+	}
+	if web != nil && (!web.AutoStart || web.IdleTimeout == 0) {
+		t.Errorf("a schedules-only x-pilots zeroed its neighbours: %+v", web)
+	}
+	worker := stepNamed(t, plan, "worker").Knobs
+	if worker == nil || worker.Schedules == nil || len(worker.Schedules) != 0 {
+		t.Errorf("schedules: [] should reach the plan as an empty list, got %+v", worker)
+	}
+
+	for _, tc := range []struct{ entry, want string }{
+		{`- cron: "0 5 * * *"`, "schedules[0] needs a path"},
+		{`- cron: "soon"` + "\n          path: /x", "schedules[0]"},
+		{`- cron: "0 5 * * *"` + "\n          path: x", "must start with /"},
+		{`- cron: "0 5 * * *"` + "\n          path: /a\n        - cron: nope\n          cmd: x", "schedules[1]"},
+	} {
+		file := "name: shop\nservices:\n  db:\n    image: postgres:17\n    x-pilots:\n      schedules:\n        " + tc.entry + "\n"
+		_, _, err := Compile(context.Background(), Request{Compose: file})
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("entry %q: err = %v, want one mentioning %q", tc.entry, err, tc.want)
+		}
+	}
+}
+
 // "stop" was accepted and silently behaved as suspend, because the idle
 // monitor only checks for "off". Until POST /stop exists it is refused, with
 // the alternative named.

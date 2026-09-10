@@ -233,6 +233,55 @@ func TestAWebJSAppWinsOverAnyOtherSignal(t *testing.T) {
 	}
 }
 
+// A webjs app declares its crons in the config block it already owns, with
+// Vercel's field names, and the plan carries them as the step's knobs. Nothing
+// pilots-specific is written anywhere.
+func TestWebJSCronsReachThePlanAsSchedules(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "package.json", `{"name":"fx","dependencies":{"@webjsdev/core":"1"},
+		"webjs":{"crons":[{"path":"/jobs/digest","schedule":"0 5 * * *"},{"path":"/jobs/tick","schedule":"@hourly"}]}}`)
+	res, planErr, unknown, err := Plan(context.Background(), dir, Options{App: "fx"})
+	mustPlan(t, res, planErr, unknown, err)
+	k := res.Plan.Steps[0].Knobs
+	if k == nil || len(k.Schedules) != 2 || k.Schedules[0].Path != "/jobs/digest" || k.Schedules[0].Cron != "0 5 * * *" || k.Schedules[1].Cron != "@hourly" {
+		t.Fatalf("knobs = %+v, want the two crons as schedules", k)
+	}
+	if !k.AutoStart || k.IdleTimeout == 0 {
+		t.Errorf("the crons zeroed the step's other knobs: %+v", k)
+	}
+
+	// Absent: no knobs at all, exactly as before the key existed.
+	write(t, dir, "package.json", `{"name":"fx","dependencies":{"@webjsdev/core":"1"}}`)
+	res, planErr, unknown, err = Plan(context.Background(), dir, Options{App: "fx"})
+	mustPlan(t, res, planErr, unknown, err)
+	if res.Plan.Steps[0].Knobs != nil {
+		t.Errorf("a package.json with no crons produced knobs: %+v", res.Plan.Steps[0].Knobs)
+	}
+
+	// Present and empty: an empty list, which clears inherited crons on a
+	// deploy rather than leaving them in place.
+	write(t, dir, "package.json", `{"name":"fx","dependencies":{"@webjsdev/core":"1"},"webjs":{"crons":[]}}`)
+	res, planErr, unknown, err = Plan(context.Background(), dir, Options{App: "fx"})
+	mustPlan(t, res, planErr, unknown, err)
+	if k := res.Plan.Steps[0].Knobs; k == nil || k.Schedules == nil || len(k.Schedules) != 0 {
+		t.Errorf("crons: [] should reach the plan as an empty list, got %+v", k)
+	}
+
+	// Malformed: refused, naming the entry, rather than dropped.
+	for _, bad := range []string{
+		`[{"path":"jobs/digest","schedule":"0 5 * * *"}]`,
+		`[{"path":"/x","schedule":"every day"}]`,
+		`[{"schedule":"0 5 * * *"}]`,
+		`"0 5 * * *"`,
+	} {
+		write(t, dir, "package.json", `{"name":"fx","dependencies":{"@webjsdev/core":"1"},"webjs":{"crons":`+bad+`}}`)
+		_, _, _, err := Plan(context.Background(), dir, Options{App: "fx"})
+		if err == nil || !strings.Contains(err.Error(), "webjs.crons") {
+			t.Errorf("crons %s: err = %v, want a refusal naming webjs.crons", bad, err)
+		}
+	}
+}
+
 func TestNextNeedsALockfileAsWellAsAConfig(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "next.config.js", "module.exports = {}")

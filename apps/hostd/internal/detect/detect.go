@@ -25,11 +25,14 @@ package detect
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/vivek7405/pilots/hostd/internal/api"
 )
 
 // Framework is what a directory was recognised as.
@@ -172,6 +175,47 @@ func listing(dir string) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// webjsCrons reads the crons a webjs app declares in its own config block:
+//
+//	"webjs": { "crons": [{ "path": "/jobs/digest", "schedule": "0 5 * * *" }] }
+//
+// The framework's file, the framework's field names (Vercel's, so a Next
+// user's muscle memory carries over), and nothing pilots-specific to add: this
+// is what "zero per-platform config" means for a cron. The result is nil when
+// the key is absent and an empty, non-nil list when it is present and empty --
+// the deploy merges knobs onto the previous release's, and only an explicit
+// empty list clears inherited crons.
+//
+// A malformed entry is an error naming it, not a warning: a cron silently
+// dropped at plan time fires nowhere and nobody is told.
+func webjsCrons(dir string) ([]api.Schedule, error) {
+	pkg := readPackageJSON(dir)
+	block, _ := pkg["webjs"].(map[string]any)
+	raw, ok := block["crons"]
+	if !ok {
+		return nil, nil
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("package.json: webjs.crons must be a list of {path, schedule}")
+	}
+	out := make([]api.Schedule, 0, len(list))
+	for i, item := range list {
+		entry, _ := item.(map[string]any)
+		path, _ := entry["path"].(string)
+		schedule, _ := entry["schedule"].(string)
+		s := api.Schedule{Cron: schedule, Path: path}
+		if err := s.Validate(); err != nil {
+			return nil, fmt.Errorf("package.json: webjs.crons[%d] %v", i, err)
+		}
+		out = append(out, s)
+	}
+	if len(out) > api.MaxSchedules {
+		return nil, fmt.Errorf("package.json: webjs.crons has %d entries, more than the %d a machine may carry", len(out), api.MaxSchedules)
+	}
+	return out, nil
 }
 
 func readPackageJSON(dir string) map[string]any {

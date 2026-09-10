@@ -185,6 +185,40 @@ func newMachinesListCmd(env *Env) *cobra.Command {
 	return c
 }
 
+// parseSchedule reads one --schedule value: the cron expression, then the
+// target. A target starting with / is a path the host GETs on the machine;
+// anything else is a command it runs in it. One flag rather than three,
+// because "0 5 * * * /jobs/digest" is how a person already writes a crontab
+// line, and --cmd on create is taken by the start command.
+func parseSchedule(s string) (pilots.Schedule, error) {
+	fields := strings.Fields(s)
+	var expr string
+	var rest []string
+	switch {
+	case len(fields) >= 2 && strings.HasPrefix(fields[0], "@"):
+		expr, rest = fields[0], fields[1:]
+	case len(fields) >= 6:
+		expr, rest = strings.Join(fields[:5], " "), fields[5:]
+	default:
+		return pilots.Schedule{}, out.Failf(`write it as "<cron> <target>", e.g. --schedule "0 5 * * * /jobs/digest" or --schedule "@hourly ./bin/tick"`,
+			"--schedule %q has no target", s)
+	}
+	target := strings.Join(rest, " ")
+	if strings.HasPrefix(target, "/") {
+		return pilots.Schedule{Cron: expr, Path: target}, nil
+	}
+	return pilots.Schedule{Cron: expr, Cmd: target}, nil
+}
+
+// scheduleLine is a schedule as an info row: the expression, then what it
+// does, in the same order the flag takes them.
+func scheduleLine(s pilots.Schedule) string {
+	if s.Path != "" {
+		return s.Cron + "  GET " + s.Path
+	}
+	return s.Cron + "  " + s.Cmd
+}
+
 func newMachinesCreateCmd(env *Env) *cobra.Command {
 	var (
 		req         pilots.CreateMachineRequest
@@ -192,6 +226,7 @@ func newMachinesCreateCmd(env *Env) *cobra.Command {
 		labelPairs  []string
 		urlAuth     string
 		idleTimeout time.Duration
+		schedules   []string
 		skipConsole bool
 	)
 	c := &cobra.Command{
@@ -221,6 +256,20 @@ func newMachinesCreateCmd(env *Env) *cobra.Command {
 					return out.Failf("pass --idle-timeout between 1s and 1h", "--idle-timeout %s is out of range", idleTimeout)
 				}
 				req.Knobs = &pilots.KnobsPatch{IdleTimeout: pilots.Ptr(int(idleTimeout / time.Second))}
+			}
+			if len(schedules) > 0 {
+				list := make([]pilots.Schedule, 0, len(schedules))
+				for _, s := range schedules {
+					sched, err := parseSchedule(s)
+					if err != nil {
+						return err
+					}
+					list = append(list, sched)
+				}
+				if req.Knobs == nil {
+					req.Knobs = &pilots.KnobsPatch{}
+				}
+				req.Knobs.Schedules = &list
 			}
 			m, err := client.Machines.Create(c.Context(), req)
 			if err != nil {
@@ -256,6 +305,7 @@ func newMachinesCreateCmd(env *Env) *cobra.Command {
 	f.StringArrayVar(&labelPairs, "label", nil, "a label to find it by later, key=value (repeatable); `ls --label` filters on them")
 	f.StringVar(&urlAuth, "url-auth", "", "who may reach the URL: public (default) or org, which needs an API key of the org")
 	f.DurationVar(&idleTimeout, "idle-timeout", 0, "how long it stays up after its last activity before suspending, 1s..1h (default 60s); for a daemon nothing connects to")
+	f.StringArrayVar(&schedules, "schedule", nil, "a cron job, \"<cron> <target>\" (repeatable): five fields or @hourly/@daily/@weekly/@monthly, then a /path the host GETs on the machine or a command it runs in it")
 	f.BoolVar(&skipConsole, "skip-console", false, "exit after creating instead of opening a console")
 	Describe(c, Doc{
 		What: "A create is a restore from a golden template, not a boot, which is\n" +
@@ -332,6 +382,9 @@ func newMachinesInfoCmd(env *Env) *cobra.Command {
 				[]string{"AUTO START", strconv.FormatBool(m.Knobs.AutoStart)},
 				[]string{"IDLE TIMEOUT", (time.Duration(m.Knobs.IdleTimeout) * time.Second).String()},
 			)
+			for _, s := range m.Knobs.Schedules {
+				rows = append(rows, []string{"SCHEDULE", scheduleLine(s)})
+			}
 			return env.W.Table([]string{"", ""}, rows)
 		},
 	}
