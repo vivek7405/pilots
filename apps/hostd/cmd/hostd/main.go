@@ -486,7 +486,9 @@ func run() error {
 
 	// Cron jobs, fired by the host that owns the machine: a GET through the
 	// router's internal handler (the held wake does the rest) or an exec.
-	go runSchedules(ctx, cfg.HostID, cfg.WorkloadDomain, view, rtr.InternalHandler(), mgr)
+	// The scheme is the fleet's (publicURLFor), the same one the machine's
+	// URL is rendered with, so a job sees the proto its visitors do.
+	go runSchedules(ctx, cfg.HostID, cfg.WorkloadDomain, publicURLFor(cfg).Scheme, view, rtr.InternalHandler(), mgr)
 
 	// Custom domains verify on a loop, not only at registration: a CNAME is
 	// almost always set after the domain is registered.

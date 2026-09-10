@@ -41,9 +41,10 @@ import (
 
 const (
 	scheduleInterval = 10 * time.Second
-	// scheduleGETTimeout bounds one fire: long enough for a real job, short
-	// enough that a hung handler cannot pin a goroutine for a day.
-	scheduleGETTimeout    = 15 * time.Minute
+	// scheduleFireTimeout bounds one fire, GET or exec: long enough for a
+	// real job, short enough that a hung handler cannot pin a goroutine for
+	// a day.
+	scheduleFireTimeout   = 15 * time.Minute
 	scheduleExecTimeoutMS = 10 * 60 * 1000
 )
 
@@ -54,9 +55,10 @@ type scheduleExecer interface {
 }
 
 // runSchedules fires due cron jobs for the machines this host owns, until ctx
-// ends.
-func runSchedules(ctx context.Context, hostID, domain string, view fleetView, handler http.Handler, exec scheduleExecer) {
-	s := newScheduler(hostID, domain, view, handler, exec)
+// ends. proto is the scheme a visitor's request arrives on ("https" on a TLS
+// host, "http" otherwise), stamped on each GET as X-Forwarded-Proto.
+func runSchedules(ctx context.Context, hostID, domain, proto string, view fleetView, handler http.Handler, exec scheduleExecer) {
+	s := newScheduler(hostID, domain, proto, view, handler, exec)
 	tick := time.NewTicker(scheduleInterval)
 	defer tick.Stop()
 	for {
@@ -70,10 +72,10 @@ func runSchedules(ctx context.Context, hostID, domain string, view fleetView, ha
 }
 
 type scheduler struct {
-	hostID, domain string
-	view           fleetView
-	handler        http.Handler
-	exec           scheduleExecer
+	hostID, domain, proto string
+	view                  fleetView
+	handler               http.Handler
+	exec                  scheduleExecer
 
 	now   func() time.Time
 	spawn func(func()) // how a fire runs; a test runs it inline
@@ -84,9 +86,9 @@ type scheduler struct {
 	specs   map[string]cron.Spec // expression -> parsed, so a tick parses nothing twice
 }
 
-func newScheduler(hostID, domain string, view fleetView, handler http.Handler, exec scheduleExecer) *scheduler {
+func newScheduler(hostID, domain, proto string, view fleetView, handler http.Handler, exec scheduleExecer) *scheduler {
 	return &scheduler{
-		hostID: hostID, domain: domain, view: view, handler: handler, exec: exec,
+		hostID: hostID, domain: domain, proto: proto, view: view, handler: handler, exec: exec,
 		now:   time.Now,
 		spawn: func(f func()) { go f() },
 		fired: map[string]time.Time{}, running: map[string]bool{}, specs: map[string]cron.Spec{},
@@ -220,7 +222,7 @@ func (s *scheduler) fire(ctx context.Context, j job) {
 }
 
 func (s *scheduler) fireGET(ctx context.Context, j job, start time.Time) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduleGETTimeout)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduleFireTimeout)
 	defer cancel()
 	target := "http://" + j.machine.Name + "." + s.domain + j.schedule.Path
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
@@ -231,12 +233,15 @@ func (s *scheduler) fireGET(ctx context.Context, j job, start time.Time) {
 	}
 	// The forwarding marker is what the internal handler requires of every
 	// caller; the cron marker is what the app reads. Neither can arrive from
-	// outside. The proto is what setEdgeHeaders would have stamped, so an app
-	// building absolute URLs builds the ones its visitors see.
+	// outside. The internal handler does not run setEdgeHeaders, so the two
+	// headers it would have stamped are set here, with the scheme a visitor
+	// actually arrives on: an app building absolute URLs in a job builds the
+	// ones its visitors see, on a TLS host and on a plain one.
 	req.Header.Set(router.ForwardedHeader, s.hostID)
 	req.Header.Set(router.CronHeader, j.schedule.Cron)
 	req.Header.Set("User-Agent", "pilot-cron/1")
-	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Proto", s.proto)
+	req.Header.Set("X-Forwarded-Host", req.Host)
 
 	w := &statusWriter{}
 	s.handler.ServeHTTP(w, req)
@@ -251,7 +256,7 @@ func (s *scheduler) fireGET(ctx context.Context, j job, start time.Time) {
 }
 
 func (s *scheduler) fireExec(ctx context.Context, j job, start time.Time) {
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduleGETTimeout)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduleFireTimeout)
 	defer cancel()
 	res, err := s.exec.Exec(ctx, j.machine.ID, api.ExecRequest{Cmd: j.schedule.Cmd, TimeoutMS: scheduleExecTimeoutMS})
 	took := time.Since(start)

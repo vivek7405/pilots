@@ -54,7 +54,7 @@ func (r *recorder) Exec(_ context.Context, id string, req api.ExecRequest) (*api
 }
 
 func testScheduler(view fleetView, rec *recorder) *scheduler {
-	s := newScheduler("host-a", "pilotrun.app", view, rec, rec)
+	s := newScheduler("host-a", "pilotrun.app", "https", view, rec, rec)
 	s.spawn = func(f func()) { f() } // inline, so a test sees the fire
 	return s
 }
