@@ -121,6 +121,16 @@ func (k Knobs) Validate() error {
 		if err := s.Validate(); err != nil {
 			return fmt.Errorf("schedules[%d]: %w", i, err)
 		}
+		// A path schedule is a request, and a request wakes a machine only
+		// where auto_start says it may. On a machine that suspends and then
+		// refuses to wake, the job cannot run at all: the fire answers 503
+		// every minute for the life of the machine, and nothing about the
+		// create said so. Refusing the combination is how the caller finds
+		// out now rather than from a log nobody reads.
+		if s.Path != "" && k.AutoStop != "off" && !k.AutoStart {
+			return fmt.Errorf("schedules[%d]: a path schedule needs auto_start, "+
+				"or auto_stop: off -- on a machine that suspends and cannot wake it would never run", i)
+		}
 	}
 	switch k.AutoStop {
 	case "off", "suspend":

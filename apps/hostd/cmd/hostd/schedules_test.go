@@ -180,6 +180,36 @@ func TestAFireStillRunningIsNotOverlapped(t *testing.T) {
 	}
 }
 
+// The parse cache holds what the host carries NOW. A sandbox fleet churns,
+// and a map keyed by every expression ever spelled would grow with it; the
+// same sweep is what makes the "does not parse" warning happen once rather
+// than every ten seconds for the life of the machine.
+func TestTheParseCacheIsSweptToWhatTheHostStillCarries(t *testing.T) {
+	rec := &recorder{status: 200}
+	view := &fleetWith{machines: []state.Machine{
+		{ID: "m-1", Name: "a", HostID: "host-a", State: "running",
+			KindKnobs: knobsWith(api.Schedule{Cron: "5 * * * *", Path: "/x"})},
+		{ID: "m-2", Name: "b", HostID: "host-a", State: "running",
+			KindKnobs: `{"schedules":[{"cron":"garbage","path":"/y"}]}`},
+	}}
+	s := testScheduler(view, rec)
+	s.now = atMinute("11:11")
+	s.tick(context.Background())
+	if len(s.specs) != 2 {
+		t.Fatalf("specs = %v, want both expressions parsed once", s.specs)
+	}
+	if p := s.specs["garbage"]; p.ok {
+		t.Error("an expression that does not parse should be cached as a failure, not re-parsed")
+	}
+
+	// Both machines go; so do their expressions.
+	view.machines = nil
+	s.tick(context.Background())
+	if len(s.specs) != 0 {
+		t.Errorf("specs = %v after the machines left; the cache should hold only what the host carries", s.specs)
+	}
+}
+
 func TestAStoredScheduleThatDoesNotParseIsSkippedNotFatal(t *testing.T) {
 	rec := &recorder{status: 200}
 	view := fleetWith{machines: []state.Machine{

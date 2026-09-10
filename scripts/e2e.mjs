@@ -690,6 +690,9 @@ async function lifecycleAssertions() {
         [{ auto_stop: 'sometimes' }, 'auto_stop'],
         [{ idle_timeout: 0 }, 'idle_timeout'],
         [{ idle_timeout: 3601 }, 'idle_timeout'],
+        // A path schedule fires as a request, and a machine that suspends
+        // and cannot wake would answer 503 to every one of them, forever.
+        [{ auto_start: false, schedules: [{ cron: '@hourly', path: '/jobs/tick' }] }, 'auto_start'],
       ]) {
         const { status, json } = await request('/v1/machines', { method: 'POST', body: { knobs } });
         assert(status === 400, `${JSON.stringify(knobs)}: expected 400, got ${status}`);

@@ -83,7 +83,18 @@ type scheduler struct {
 	mu      sync.Mutex
 	fired   map[string]time.Time // job key -> the minute it last fired
 	running map[string]bool      // job key -> a fire is still in flight
-	specs   map[string]cron.Spec // expression -> parsed, so a tick parses nothing twice
+	specs   map[string]parsed    // expression -> its parse, so a tick parses nothing twice
+}
+
+// parsed is one expression's parse, the failure kept as well as the success.
+//
+// Caching the failure is what stops an unparseable stored blob complaining
+// every ten seconds for the life of the machine; the map is swept to what the
+// host carries now, so it cannot grow with every expression a churn of
+// sandboxes has ever spelled.
+type parsed struct {
+	spec cron.Spec
+	ok   bool
 }
 
 func newScheduler(hostID, domain, proto string, view fleetView, handler http.Handler, exec scheduleExecer) *scheduler {
@@ -91,7 +102,7 @@ func newScheduler(hostID, domain, proto string, view fleetView, handler http.Han
 		hostID: hostID, domain: domain, proto: proto, view: view, handler: handler, exec: exec,
 		now:   time.Now,
 		spawn: func(f func()) { go f() },
-		fired: map[string]time.Time{}, running: map[string]bool{}, specs: map[string]cron.Spec{},
+		fired: map[string]time.Time{}, running: map[string]bool{}, specs: map[string]parsed{},
 	}
 }
 
@@ -134,8 +145,17 @@ func (s *scheduler) due(minute time.Time) ([]job, map[string]bool) {
 
 	var jobs []job
 	seen := map[string]bool{}
+	usedExpr := map[string]bool{}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	defer func() {
+		// Forget the expressions no machine on this host spells any more.
+		for expr := range s.specs {
+			if !usedExpr[expr] {
+				delete(s.specs, expr)
+			}
+		}
+	}()
 	for _, m := range machines {
 		if m.HostID != s.hostID || !fireable(m.State) {
 			continue
@@ -150,19 +170,22 @@ func (s *scheduler) due(minute time.Time) ([]job, map[string]bool) {
 		for i, sched := range knobs.Schedules {
 			key := m.ID + "#" + strconv.Itoa(i)
 			seen[key] = true
-			spec, ok := s.specs[sched.Cron]
-			if !ok {
-				var err error
-				if spec, err = cron.Parse(sched.Cron); err != nil {
+			usedExpr[sched.Cron] = true
+			p, cached := s.specs[sched.Cron]
+			if !cached {
+				spec, err := cron.Parse(sched.Cron)
+				p = parsed{spec: spec, ok: err == nil}
+				s.specs[sched.Cron] = p
+				if err != nil {
 					// Validated on the way in, so this is a blob written by
-					// something else. Skip it rather than the whole tick.
+					// something else. Skip it rather than the whole tick, and
+					// say so once: the failure is cached with the success, so
+					// this does not repeat every ten seconds.
 					slog.Warn("a stored schedule does not parse; skipping it",
 						"machine", m.ID, "cron", sched.Cron, "err", err)
-					continue
 				}
-				s.specs[sched.Cron] = spec
 			}
-			if !spec.Matches(minute) || s.fired[key].Equal(minute) {
+			if !p.ok || !p.spec.Matches(minute) || s.fired[key].Equal(minute) {
 				continue
 			}
 			if s.running[key] {

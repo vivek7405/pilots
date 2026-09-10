@@ -37,6 +37,8 @@ An app can declare them in its own config instead, and `deploy` reads it, so a c
 
 Same shape either way, and `vercel.json` is read whatever the app is written in — a Rails or Django service with that file gets its crons too. A webjs app's own block wins where both are present. A sandbox takes `pilot machines create --schedule "0 5 * * * /jobs/digest"`.
 
+A `path` job is an ordinary request, so it needs a machine that can wake: `auto_start: false` together with the default `auto_stop: suspend` is refused at create, because the job could never run. A `cmd` job is not a request and takes neither.
+
 What the handler sees is a `GET` carrying `X-Pilot-Cron: <expression>`. The public edge strips that header from every outside request, so `if (!req.headers['x-pilot-cron']) return 403` is the whole check, with no secret to keep. A job can fire twice in rare cases (a host restart inside its minute), so make it idempotent; a job still running when its next minute comes is skipped, not overlapped. One replica fires for a service, however many it has. To remove every cron, deploy with `schedules: []` (or `crons: []`); an absent key keeps the previous release's.
 
 A replica with no traffic suspends after about 30 seconds of quiet and the next request wakes it; that is the default and it costs nothing while asleep. A worker that must keep running with nothing connected to it -- a queue consumer, a scheduler -- keeps one replica resident with `x-pilots: min_machines_running: 1` in its compose entry (or `auto_stop: off`). The scale-down window is the autoscaler's and is not a knob; `idle_timeout` is the sandbox timer (sandboxes.md). The keys are listed in compose.md.

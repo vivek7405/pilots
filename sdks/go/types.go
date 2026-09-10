@@ -23,7 +23,11 @@ type Knobs struct {
 	// deploy an absent key inherits the previous release's and an explicit
 	// empty list clears them, which is why KnobsPatch carries a pointer to a
 	// slice.
-	Schedules []Schedule `json:"schedules,omitempty"`
+	//
+	// No omitempty, matching hostd: it drops an EMPTY slice as readily as a
+	// nil one, and the difference between the two is the difference between
+	// "no crons, deliberately" and "inherit whatever was there".
+	Schedules []Schedule `json:"schedules"`
 }
 
 // Schedule is one cron job: a five-field expression (UTC; or @hourly, @daily,

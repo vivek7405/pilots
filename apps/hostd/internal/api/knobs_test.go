@@ -125,6 +125,26 @@ func TestDecodeKnobsValidatesSchedules(t *testing.T) {
 		t.Errorf("%d schedules were accepted: %v", MaxSchedules+1, err)
 	}
 
+	// A path schedule fires as a request, and a request wakes a machine only
+	// where auto_start allows it. The combination that can never run is
+	// refused at the door rather than answering 503 every minute forever.
+	unreachable := `{"auto_start":false,"schedules":[{"cron":"@hourly","path":"/jobs/tick"}]}`
+	if _, err := DecodeKnobs(json.RawMessage(unreachable)); err == nil ||
+		!errors.Is(err, ErrInvalidKnobs) || !strings.Contains(err.Error(), "auto_start") {
+		t.Errorf("a path schedule on a machine that cannot wake: err = %v, want one naming auto_start", err)
+	}
+	// The two ways out of it, both legitimate: let it wake, or never let it
+	// sleep. And a cmd schedule is not a request, so it never needed either.
+	for _, raw := range []string{
+		`{"auto_start":true,"schedules":[{"cron":"@hourly","path":"/jobs/tick"}]}`,
+		`{"auto_start":false,"auto_stop":"off","schedules":[{"cron":"@hourly","path":"/jobs/tick"}]}`,
+		`{"auto_start":false,"schedules":[{"cron":"@hourly","cmd":"./tick"}]}`,
+	} {
+		if _, err := DecodeKnobs(json.RawMessage(raw)); err != nil {
+			t.Errorf("%s was refused: %v", raw, err)
+		}
+	}
+
 	// An explicit empty list is a valid way to say "none", and it is not the
 	// same value as absent: the deploy merge relies on the difference.
 	k, err = DecodeKnobs(json.RawMessage(`{"schedules":[]}`))

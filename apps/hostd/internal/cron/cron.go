@@ -90,11 +90,14 @@ func parseField(s string, f field) (bits uint64, star bool, err error) {
 		case item == "*":
 			// */n: every n across the whole range.
 		case strings.Contains(item, "-"):
-			a, b, ok := strings.Cut(item, "-")
+			// Cut always splits here, the case tested for it. A negative
+			// number lands in this branch too and fails on the empty low
+			// half, which is the message it should get.
+			a, b, _ := strings.Cut(item, "-")
 			if lo, err = atoi(a, f); err != nil {
 				return 0, false, err
 			}
-			if hi, err = atoi(b, f); err != nil || !ok {
+			if hi, err = atoi(b, f); err != nil {
 				return 0, false, err
 			}
 			if lo > hi {
