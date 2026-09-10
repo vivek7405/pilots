@@ -118,7 +118,7 @@ func mapError(err error) (int, ErrorResponse) {
 		// details; it is the caller's to fix, so it is a 400 that says how.
 		return http.StatusBadRequest, ErrorResponse{
 			Error: err.Error(), Code: CodeBadRequest,
-			Next: "knobs are auto_stop (off or suspend), auto_start, min_machines_running, soft_limit, idle_timeout (1..3600 seconds)",
+			Next: "knobs are auto_stop (off or suspend), auto_start, min_machines_running, soft_limit, idle_timeout (1..3600 seconds), schedules",
 		}
 	case errors.Is(err, ErrConflict):
 		// 409 rather than 400 or 403: nothing about the request is wrong and
