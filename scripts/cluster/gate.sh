@@ -592,6 +592,42 @@ done
 NEWURL=$(api "$SURVIVOR" GET "/v1/machines/${ID}" | jf url)
 [ "$NEWURL" = "$URL" ] && ok "URL unchanged: ${URL}" || bad "URL changed: ${URL} -> ${NEWURL}"
 
+# EXACTLY one survivor claimed it, which is the whole reason this rig
+# defaults to three nodes rather than two.
+#
+# Nothing hands out the rescue -- there is no control plane to ask (bar 3) --
+# so every surviving host works out for itself whether it is the one to claim
+# a provably dead host's machines. That is the sanctioned exception to the
+# single-writer rule, and the rule's own warning is that breaking it does not
+# error: two hosts both claiming would each write rows describing the same
+# machine and corrupt it silently through CRDT merges.
+#
+# The assertion above cannot see that. It reads the state row, and the row
+# says one host_id whether one host claimed or both did and the last write
+# won. So this counts the Firecrackers instead, on the hosts themselves.
+#
+# On a two-node rig the sole survivor is the only candidate, so it claims
+# everything and every version of this passes -- including one that let every
+# host claim. That is why the count below is a failure and not a skip.
+if [ "$(( ${#IPS[@]} - 1 ))" -lt 2 ]; then
+  bad "need two survivors to assert that only one of them claimed; have $(( ${#IPS[@]} - 1 ))"
+else
+  CLAIMERS=""
+  CLAIMED=0
+  for ip in "${IPS[@]}"; do
+    [ "$ip" = "$OWNER_IP" ] && continue
+    CPID=$(fc_pid "$ip" "$ID")
+    [ -n "$CPID" ] || continue
+    CLAIMED=$((CLAIMED + 1))
+    CLAIMERS="${CLAIMERS}${ip}(pid ${CPID}) "
+  done
+  case "$CLAIMED" in
+    1) ok "exactly one survivor is running it: ${CLAIMERS}" ;;
+    0) bad "the row says ${NEWOWNER} owns it but no survivor is running a Firecracker for it" ;;
+    *) bad "${CLAIMED} survivors are running it at once: ${CLAIMERS}-- both claimed a dead host's machine" ;;
+  esac
+fi
+
 say "10. The rescued machine serves, with its disk intact"
 DEADLINE=$((SECONDS + 120))
 OUT=""
