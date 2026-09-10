@@ -295,6 +295,38 @@ refusal after the image exists -- a health gate that never passed, most of all
 -- arrives as the log's last line, carrying the same `error`, `code` and `next`
 `POST /v1/services/{id}/deploy` would have answered with.
 
+## `@pilots/sdk/tanstack`
+
+pilots as a [TanStack AI](https://tanstack.com/ai) sandbox provider, so an
+agent built there runs its tool calls on a machine.
+
+```ts
+import { pilotsSandbox } from '@pilots/sdk/tanstack'
+
+const sandbox = pilotsSandbox({ apiKey: process.env.PILOT_API_KEY })
+```
+
+`@tanstack/ai-sandbox` is an optional peer: the contract's types are mirrored
+structurally in this module, so the core package keeps its zero dependencies
+and a consumer who never imports this entry point never installs the peer.
+
+Three things about the mapping are worth knowing.
+
+- **A snapshot is a checkpoint, and a restore is in place.** `snapshot()`
+  returns a checkpoint id and `restoreSnapshot()` puts that state back on the
+  same machine, which is what keeps the URL. A restore that created a machine
+  would mint a new address.
+- **`ports.connect()` answers the machine's permanent URL** and opens nothing:
+  a machine already serves one HTTP port on an address that survives suspend,
+  wake, restore and redeploy.
+- **The caller's sandbox id becomes the machine's NAME.** That is what makes
+  the URL reconstructable from run context, and `create` adopts a machine whose
+  name already matches rather than making a second one.
+
+`capabilities()` reports `snapshots`, `durableFilesystem`, `writableStdin` and
+`killableProcesses` true, and `fork` false: cloning one machine's disk into
+another is on the roadmap, and a flag has to say what is true today.
+
 ## `@pilots/sdk/sprites-compat`
 
 A sprites-shaped face over the same client, so a codebase written against the

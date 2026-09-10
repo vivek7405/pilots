@@ -17,6 +17,10 @@
     "./sprites-compat": {
       "types": "./dist/sprites-compat.d.ts",
       "import": "./dist/sprites-compat.js"
+    },
+    "./tanstack": {
+      "types": "./dist/tanstack.d.ts",
+      "import": "./dist/tanstack.js"
     }
   },
   "files": ["dist", "README.md"],
