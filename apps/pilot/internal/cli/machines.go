@@ -200,7 +200,7 @@ func parseSchedule(s string) (pilots.Schedule, error) {
 	case len(fields) >= 6:
 		expr, rest = strings.Join(fields[:5], " "), fields[5:]
 	default:
-		return pilots.Schedule{}, out.Failf(`write it as "<cron> <target>", e.g. --schedule "0 5 * * * /jobs/digest" or --schedule "@hourly ./bin/tick"`,
+		return pilots.Schedule{}, out.Failf(`write it as "<cron> <target>", e.g. --schedule "0 5 * * * /jobs/digest" or --schedule "@hourly date >> /root/ticks"`,
 			"--schedule %q has no target", s)
 	}
 	target := strings.Join(rest, " ")
@@ -305,7 +305,7 @@ func newMachinesCreateCmd(env *Env) *cobra.Command {
 	f.StringArrayVar(&labelPairs, "label", nil, "a label to find it by later, key=value (repeatable); `ls --label` filters on them")
 	f.StringVar(&urlAuth, "url-auth", "", "who may reach the URL: public (default) or org, which needs an API key of the org")
 	f.DurationVar(&idleTimeout, "idle-timeout", 0, "how long it stays up after its last activity before suspending, 1s..1h (default 60s); for a daemon nothing connects to")
-	f.StringArrayVar(&schedules, "schedule", nil, "a cron job, \"<cron> <target>\" (repeatable): five fields or @hourly/@daily/@weekly/@monthly, then a /path the host GETs on the machine or a command it runs in it")
+	f.StringArrayVar(&schedules, "schedule", nil, "a cron job, \"<cron> <target>\" (repeatable): five fields or @hourly/@daily/@weekly/@monthly, then a /path the host GETs on the machine or a command it runs in it (from the user's home; spell paths out)")
 	f.BoolVar(&skipConsole, "skip-console", false, "exit after creating instead of opening a console")
 	Describe(c, Doc{
 		What: "A create is a restore from a golden template, not a boot, which is\n" +

@@ -45,8 +45,8 @@ Everything pilots needs that compose has no word for goes under `x-pilots:` on a
 | `auto_start: true\|false` | wake on a request (default true; `false` is a dead URL) |
 | `min_machines_running` | replicas kept resident, default 0 (scale to zero) |
 | `soft_limit` | concurrent requests per replica before another starts (default 20) |
-| `idle_timeout` | quiet before a replica sleeps, `30m` or seconds, 1s..1h (default 60s) |
-| `schedules` | cron jobs, a list of `{ cron, path }` or `{ cron, cmd }` (services.md); `[]` clears the previous release's |
+| `idle_timeout` | quiet before a machine sleeps, `30m` or seconds, 1s..1h (default 60s); the sandbox timer, carried by a promoted machine -- a service replica's scale-down window is the autoscaler's |
+| `schedules` | cron jobs, a list of `{ cron, path }` or `{ cron, cmd }` (services.md); a `cmd` runs from the app user's home, so use absolute paths; `[]` clears the previous release's |
 | `size_gib` | a volume's size, on the volume |
 | `pre_deploy` | a command run on a throwaway machine before any replica is replaced (a migration) |
 | `app` | top level only: the app name |

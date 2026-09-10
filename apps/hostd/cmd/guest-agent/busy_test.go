@@ -100,10 +100,15 @@ func TestSessionBusyAgainstTheLiveProcessTable(t *testing.T) {
 		t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
 		return cmd
 	}
-	alone := start("sleep", "30")
-	// "; true" keeps sh from exec'ing the sleep in place of itself, which
+	// tail rather than sleep, deliberately: internal/fc's kill test scans
+	// /proc for a detached session-leader named "sleep" that ignores SIGTERM,
+	// and go test runs packages in parallel -- a sleep here was found by that
+	// scan, killed by its SIGTERM, and reported as Kill "returning without
+	// waiting". Two tests must not spawn the same process shape.
+	alone := start("tail", "-f", "/dev/null")
+	// "; true" keeps sh from exec'ing the tail in place of itself, which
 	// would leave the session with one member and no child to count.
-	busy := start("sh", "-c", "sleep 30; true")
+	busy := start("sh", "-c", "tail -f /dev/null; true")
 	time.Sleep(300 * time.Millisecond)
 
 	// The leader is the process whose parent is the setsid we started.
@@ -127,7 +132,7 @@ func TestSessionBusyAgainstTheLiveProcessTable(t *testing.T) {
 		return 0
 	}
 	if l := leaderOf(alone.Process.Pid); l == 0 || sessionBusy(l) {
-		t.Errorf("a lone sleeping leader (pid %d) should not be busy", l)
+		t.Errorf("a lone idling leader (pid %d) should not be busy", l)
 	}
 	if l := leaderOf(busy.Process.Pid); l == 0 || !sessionBusy(l) {
 		t.Errorf("a shell running a child (pid %d) should be busy", l)
