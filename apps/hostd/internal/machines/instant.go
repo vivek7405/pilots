@@ -67,28 +67,34 @@ func (m *Manager) startForRelease(ctx context.Context, row *state.Machine,
 //
 // A create is a restore. The alternative -- booting a kernel -- takes twenty
 // seconds and produces a machine indistinguishable from this one.
+//
+// Retried once against a template whose snapshot turns out to be gone. A
+// manifest is validated against the build headers on this disk and the page
+// size of this host, and neither notices that the vmstate object it names has
+// been deleted from the bucket -- so the manifest is served as good and every
+// create restoring against it fails identically, for as long as the host
+// lives. That is not hypothetical: a rig node kept a manifest across a wipe
+// and answered 500 to every create until its cache was cleared by hand.
+//
+// Reacting to the failure rather than checking before it: a create is on the
+// sub-second budget, so it may not pay an object-storage round trip to rule
+// out a rare condition, and a pre-flight check that blipped would discard a
+// good template and force a minute-long rebuild. This costs nothing when
+// things are healthy, and it also catches the object disappearing AFTER the
+// manifest was last validated, which no pre-flight check can.
 func (m *Manager) createFromTemplate(ctx context.Context, row *state.Machine,
 	token, appCmd string) (*fc.Machine, error) {
-	t, err := m.EnsureTemplate(ctx)
-	if err != nil {
-		return nil, err
+	fcm, slot, err := m.restoreFromTemplate(ctx, row, "")
+	// Every artifact that path fetches belongs to the TEMPLATE -- the machine
+	// is brand new and has none of its own -- so a missing artifact can only
+	// be the template's, and the template is the thing to replace.
+	var missing *templateArtifactMissing
+	if errors.As(err, &missing) {
+		slog.Warn("the golden template names a snapshot that is gone; re-deriving it",
+			"machine", row.ID, "snap_key", missing.snapKey)
+		m.discardTemplate()
+		fcm, slot, err = m.restoreFromTemplate(ctx, row, missing.snapKey)
 	}
-
-	// Pin it. Every image this machine ever writes is a diff against this
-	// template, and the ranges it does not change resolve against the parent
-	// by offset -- so restoring it against a DIFFERENT template returns a
-	// guest stitched from two machines. Which template a host holds is not
-	// fleet-wide: it changes when the golden template is rebuilt, and a host
-	// whose cache was cleared mints its own. Recording it here is what lets
-	// any host restore this machine correctly, forever.
-	row.TemplateMemBuildID = t.MemBuildID.String()
-	row.TemplateRootfsBuildID = t.RootfsBuildID.String()
-
-	fcm, slot, err := m.restoreInstant(ctx, row, fc.Backends{
-		MemBuildID:        t.MemBuildID,
-		RootfsTemplateDir: m.rootfsTemplateDir(t),
-		CacheRoot:         m.buildDir(),
-	}, t.SnapKey)
 	if err != nil {
 		return nil, err
 	}
@@ -119,6 +125,51 @@ func (m *Manager) createFromTemplate(ctx context.Context, row *state.Machine,
 		return nil, fmt.Errorf("deliver env: %w", err)
 	}
 	return fcm, nil
+}
+
+// templateArtifactMissing marks a restore that failed because the golden
+// template's own snapshot was not in object storage, and carries the key so
+// the retry can refuse to be handed it a second time.
+type templateArtifactMissing struct {
+	snapKey string
+	err     error
+}
+
+func (e *templateArtifactMissing) Error() string { return e.err.Error() }
+func (e *templateArtifactMissing) Unwrap() error { return e.err }
+
+// restoreFromTemplate is one attempt: derive a template, pin it to the row,
+// and restore against it, reporting a missing template artifact in a form the
+// caller can retry.
+func (m *Manager) restoreFromTemplate(ctx context.Context, row *state.Machine,
+	reject string) (*fc.Machine, *netns.Slot, error) {
+	t, err := m.ensureTemplate(ctx, reject)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// Pin it. Every image this machine ever writes is a diff against this
+	// template, and the ranges it does not change resolve against the parent
+	// by offset -- so restoring it against a DIFFERENT template returns a
+	// guest stitched from two machines. Which template a host holds is not
+	// fleet-wide: it changes when the golden template is rebuilt, and a host
+	// whose cache was cleared mints its own. Recording it here is what lets
+	// any host restore this machine correctly, forever.
+	row.TemplateMemBuildID = t.MemBuildID.String()
+	row.TemplateRootfsBuildID = t.RootfsBuildID.String()
+
+	fcm, slot, err := m.restoreInstant(ctx, row, fc.Backends{
+		MemBuildID:        t.MemBuildID,
+		RootfsTemplateDir: m.rootfsTemplateDir(t),
+		CacheRoot:         m.buildDir(),
+	}, t.SnapKey)
+	if err != nil {
+		if errors.Is(err, fc.ErrArtifactMissing) {
+			return nil, nil, &templateArtifactMissing{snapKey: t.SnapKey, err: err}
+		}
+		return nil, nil, err
+	}
+	return fcm, slot, nil
 }
 
 // wakeFromSuspend restores a machine from its own last suspend.

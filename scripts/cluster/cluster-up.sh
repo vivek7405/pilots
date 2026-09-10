@@ -209,7 +209,13 @@ if [ "${NEW_ONLY:-0}" != 1 ] && [ "${KEEP_STATE:-0}" != 1 ]; then
             ip netns del "$ns" 2>/dev/null
           done
           pkill -9 firecracker 2>/dev/null
-          rm -rf /var/lib/pilots
+          # Both roots, not just the state one. The golden template manifest
+          # lives under /var/cache/pilots, and a manifest left behind names a
+          # snapshot that is not in the bucket the new fleet uses -- not a
+          # slow first create, it is every create on that host answering 500
+          # for as long as the node lives. S3 is the only truth (AGENTS.md
+          # rule 3), so nothing under the cache is worth keeping across a wipe.
+          rm -rf /var/lib/pilots /var/cache/pilots
         ' >/dev/null 2>&1; then
       echo "  ${ip} wiped"
     else

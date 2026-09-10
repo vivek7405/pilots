@@ -3,6 +3,7 @@ package machines
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -144,5 +145,86 @@ func TestValidateMemMiBAllowsAnOddSizeAt4KiB(t *testing.T) {
 	m := hugePageManager(t, false)
 	if err := m.validateMemMiB(513); err != nil {
 		t.Errorf("513 MiB was refused on a 4KiB host: %v", err)
+	}
+}
+
+// A manifest whose vmstate object has been deleted from the bucket passes
+// every local check there is: the build headers are on this disk and the page
+// size matches, so loadTemplate serves it as good. Nothing local can know
+// otherwise, which is why the create path hands the proven-bad key back and
+// both sources have to skip it. Without that, discarding the manifest and
+// re-deriving returns the same template and the retry fails identically --
+// which is exactly how a rig node came to answer 500 to every create for as
+// long as it lived.
+func TestARejectedTemplateIsNotServedAgain(t *testing.T) {
+	m := hugePageManager(t, true)
+	const gone = "template/deleted-from-the-bucket/snap.bin"
+	tpl := &Template{
+		MemBuildID:    uuid.New(),
+		RootfsBuildID: uuid.New(),
+		SnapKey:       gone,
+		PageSizeKiB:   2048,
+	}
+	writeTemplate(t, m, tpl)
+
+	// Nothing rejected: the manifest is good as far as anything local knows.
+	got, err := m.loadTemplate()
+	if err != nil {
+		t.Fatalf("loadTemplate: %v", err)
+	}
+	if got.rejected("") {
+		t.Error("the empty key rejected a template; it must reject nothing")
+	}
+	if !got.rejected(gone) {
+		t.Fatalf("the template naming %q was not rejected by its own key", gone)
+	}
+	// A different key is somebody else's problem.
+	if got.rejected("template/some-other-one/snap.bin") {
+		t.Error("a template was rejected by a key that is not its own")
+	}
+}
+
+// Re-deriving means re-reading, and the manifest is what loadTemplate reads.
+// A manifest left in place is believed, so discarding it is the only way to
+// say "work it out again".
+func TestDiscardTemplateForcesAReDerive(t *testing.T) {
+	m := hugePageManager(t, true)
+	writeTemplate(t, m, &Template{
+		MemBuildID:    uuid.New(),
+		RootfsBuildID: uuid.New(),
+		SnapKey:       "template/x/snap.bin",
+		PageSizeKiB:   2048,
+	})
+	if _, err := m.loadTemplate(); err != nil {
+		t.Fatalf("loadTemplate before the discard: %v", err)
+	}
+
+	m.discardTemplate()
+
+	if _, err := m.loadTemplate(); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("loadTemplate after the discard = %v, want the manifest to be gone", err)
+	}
+	// Idempotent: a host that never had one must not log or fail differently.
+	m.discardTemplate()
+}
+
+// The retry has to be able to tell the template's own missing artifact from
+// any other error, or it either retries what will never work or fails to
+// retry what would.
+func TestTemplateArtifactMissingUnwrapsToTheSentinel(t *testing.T) {
+	err := error(&templateArtifactMissing{
+		snapKey: "template/x/snap.bin",
+		err:     fmt.Errorf("restore: %w", fc.ErrArtifactMissing),
+	})
+	if !errors.Is(err, fc.ErrArtifactMissing) {
+		t.Error("the wrapper hid the artifact-missing sentinel from errors.Is")
+	}
+	var missing *templateArtifactMissing
+	if !errors.As(err, &missing) || missing.snapKey != "template/x/snap.bin" {
+		t.Errorf("errors.As did not recover the snap key: %+v", missing)
+	}
+	// An unrelated failure must not look like one.
+	if errors.As(errors.New("boom"), &missing) {
+		t.Error("an unrelated error was taken for a missing template artifact")
 	}
 }
