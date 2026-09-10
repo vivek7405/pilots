@@ -2060,7 +2060,7 @@ if [ -n "$H_IP" ]; then
     || bad "host counts went ${EX_BASE} -> ${EX_AFTER}; the exit path leaked"
 fi
 
-say "21. A push deploys, and a repo with two apps is refused where a person can read it"
+say "22. A push deploys, and a repo with two apps is refused where a person can read it"
 # The push path is the one deploy surface with no client on the other end: a
 # delivery lands, ONE host acts, and everything after that is a build log and a
 # journal line. Nothing about that is observable from the public API alone,
@@ -2463,7 +2463,7 @@ print(det[0].get('framework', ''))
   rm -rf "$GH_TMP"
 fi
 
-say "22. A build whose client is killed still cuts exactly one release"
+say "23. A build whose client is killed still cuts exactly one release"
 # The browser used to decide this. It followed the build stream, saw the image
 # id and posted the deploy itself, so a closed tab was a successful build with
 # NOTHING deployed -- silently -- and two tabs open on one build were two
@@ -2628,7 +2628,7 @@ print(' '.join(m['id'] for m in json.load(sys.stdin) if m.get('service_id') == '
   fi
 fi
 
-say "23. A golden template whose snapshot is gone is re-derived, not served"
+say "24. A golden template whose snapshot is gone is re-derived, not served"
 # A manifest naming a vmstate object that is no longer in the bucket passes
 # every check hostd makes: loadTemplate verifies the build headers on that
 # disk and the page size of that host, and neither can see that the snapshot

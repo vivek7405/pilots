@@ -31,6 +31,7 @@ One primitive: a machine. A sandbox and a production replica are the same machin
 | my own hostname | `pilot domains add` | a DNS record with no verification | references/domains.md |
 | find out why the deploy failed | the error's `code`, `next`, `details`, then `diagnose` | re-running the deploy | references/errors.md |
 | logs of a running service | `service` then `logs` on a replica | `exec` with tail | references/services.md |
+| connect an editor or another agent to this fleet | `pilot mcp install <harness>` | pasting a token into a config by hand | references/agents.md |
 
 ## Load only the reference you need
 
@@ -43,6 +44,7 @@ One primitive: a machine. A sandbox and a production replica are the same machin
 | a volume, Postgres | references/volumes.md |
 | a custom domain | references/domains.md |
 | promote | references/promote.md |
+| an MCP client, a plugin, an SDK, a framework adapter | references/agents.md |
 | any error body | references/errors.md |
 | a compose file | references/compose.md |
 

@@ -1379,7 +1379,7 @@ pilots/
                           #   SQLite on a volume at /data, pilots.run as a
                           #   custom domain, one replica
   agents/                 # the agent package, three things in one directory:
-    skills/pilots/        #   the skill: SKILL.md + nine reference pages, the
+    skills/pilots/        #   the skill: SKILL.md + ten reference pages, the
                           #   ONE copy, embedded into hostd and `pilot`, copied
                           #   by `pilot init`, served as pilots-docs:// resources
     mcp/                  #   the MCP toolset both servers register (Go)

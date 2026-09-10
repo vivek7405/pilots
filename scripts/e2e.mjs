@@ -5746,7 +5746,7 @@ async function agentDeployAssertions(REFLINK) {
       assert(lines.length < 60, `the primer is ${lines.length} lines`);
       assert(lines.slice(0, 10).join('\n').includes('deploy'),
         'the one call is not in the first ten lines of the primer');
-      assert(topics.length === 9, `topics = ${JSON.stringify(topics)}`);
+      assert(topics.length === 10, `topics = ${JSON.stringify(topics)}`);
 
       const doc = await client.callTool({ name: 'docs', arguments: { topic: 'deploy' } });
       assert(!doc.isError, `docs failed: ${toolText(doc)}`);
@@ -5754,8 +5754,8 @@ async function agentDeployAssertions(REFLINK) {
         'the deploy reference does not cover the refusal');
 
       const { resources } = await client.listResources();
-      assert(resources.length === 10,
-        `${resources.length} pilots-docs:// resources, want 10`);
+      assert(resources.length === 11,
+        `${resources.length} pilots-docs:// resources, want 11`);
     });
   } finally {
     if (client) {
