@@ -101,6 +101,24 @@ jobs:
       # Skips cleanly without PILOTS_E2E=1; this asserts the skip path works.
       - run: npm run test:e2e
 
+  elixir-sdk:
+    name: elixir (sdk)
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: sdks/elixir
+    steps:
+      - uses: actions/checkout@v4
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: '27'
+          elixir-version: '1.18'
+      - run: mix deps.get
+      # The drift test parses apps/hostd/internal/api/routes.go, so it is this
+      # job that catches a renamed route landing without the client.
+      - run: mix test
+      - run: mix format --check-formatted
+
   vscode:
     name: vscode extension
     runs-on: ubuntu-24.04

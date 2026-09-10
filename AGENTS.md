@@ -80,8 +80,8 @@ packages/cli/      the previous TypeScript `pilot` CLI, kept until apps/pilot
                    is at parity and the swap is made; its skill/ pages are
                    the ones apps/pilot serves
 apps/vscode/       the VS Code extension: a machine as a workspace folder
-sdks/js, go, python  typed clients; each carries a drift test against
-                   apps/hostd/internal/api
+sdks/js, go,       typed clients; each carries a drift test against
+  python, elixir     apps/hostd/internal/api
 scripts/           one-shot bash + the e2e battery
 ARCHITECTURE.md    the design; source of truth
 ```

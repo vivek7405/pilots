@@ -85,10 +85,13 @@ Plugins v1 manifest in the same directory.
 | TypeScript | `npm i @pilots/sdk` | Zero dependencies. Also `@pilots/sdk/tanstack` and `@pilots/sdk/sprites-compat`. |
 | Python | `pip install pilots-sdk` | Extras: `[adk]`, `[openai-agents]`, `[anthropic]`. Also `pilots.sprites_compat`. |
 | Go | `go get github.com/vivek7405/pilots/sdks/go` | One dependency. |
+| Elixir | `{:pilots, "~> 0.1"}` | One dependency. HTTP through OTP's own `:httpc`. |
 
-Each keeps its own copy of the wire types and each has a test that parses
-hostd's Go source and fails when the two disagree, so a field the platform
-added cannot go missing from a client.
+The first three keep their own copy of the wire types, and each has a test
+that parses hostd's Go source and fails when the two disagree, so a field the
+platform added cannot go missing from a client. The Elixir one returns plain
+maps with the server's own keys, so its drift test checks the route table
+instead: a path it calls that hostd no longer serves fails the build.
 
 ## Framework adapters
 

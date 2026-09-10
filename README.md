@@ -17,7 +17,7 @@ Monorepo:
 | `apps/vscode/` | the VS Code extension: a machine as a workspace folder |
 | `packages/cli/` | the previous TypeScript `pilot` CLI, kept until apps/pilot is at parity |
 | `agents/` | the agent package: the skill (`SKILL.md` plus ten reference pages, embedded into hostd and `pilot`, served as `pilots-docs://` resources), the Claude Code plugin, the portable Agent Plugin, and the shared MCP toolset |
-| `sdks/js/`, `sdks/go/`, `sdks/python/` | `@pilots/sdk` (npm), `github.com/vivek7405/pilots/sdks/go`, and `pilots-sdk` (PyPI). Each has a drift test against hostd's own source |
+| `sdks/js/`, `sdks/go/`, `sdks/python/`, `sdks/elixir/` | `@pilots/sdk` (npm), `github.com/vivek7405/pilots/sdks/go`, `pilots-sdk` (PyPI) and `pilots` (Hex). Each has a drift test against hostd's own source |
 | `scripts/` | one-shot bash: host bootstrap, golden rootfs, e2e battery |
 
 Architecture: `ARCHITECTURE.md`.

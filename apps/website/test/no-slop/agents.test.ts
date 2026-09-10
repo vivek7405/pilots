@@ -55,7 +55,9 @@ test('the page uses the same display names as the CLI', () => {
 
 test('an install command is a command, not a sentence', () => {
   for (const s of SDKS) {
-    assert.match(s.install, /^(npm i|pip install|go get) /, `${s.language}: ${s.install}`);
+    // Elixir's install is a dependency tuple rather than a command, which is
+    // how every Elixir README states it and what a reader will paste.
+    assert.match(s.install, /^(npm i|pip install|go get) |^\{:/, `${s.language}: ${s.install}`);
   }
   for (const a of ADAPTERS) {
     assert.match(a.install, /^(npm i|pip install) /, `${a.framework}: ${a.install}`);

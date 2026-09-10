@@ -47,6 +47,7 @@ export const SDKS: Sdk[] = [
   { language: 'TypeScript', install: 'npm i @pilots/sdk', note: 'Zero dependencies. Also ships the TanStack AI sandbox provider.' },
   { language: 'Python', install: 'pip install pilots-sdk', note: 'Two dependencies, and the framework adapters live here.' },
   { language: 'Go', install: 'go get github.com/vivek7405/pilots/sdks/go', note: 'One dependency, the same websocket library hostd speaks.' },
+  { language: 'Elixir', install: '{:pilots, "~> 0.1"}', note: 'One dependency. The HTTP calls go through OTP\'s own httpc.' },
 ];
 
 /** A framework that can run its tool calls on a machine. */
