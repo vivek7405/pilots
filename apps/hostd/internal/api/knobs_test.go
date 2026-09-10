@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 )
 
@@ -20,8 +22,8 @@ func TestDecodeKnobsMergesOntoDefaults(t *testing.T) {
 		want Knobs
 	}{
 		{
-			"only auto_stop", `{"auto_stop":"stop"}`,
-			Knobs{AutoStop: "stop", AutoStart: def.AutoStart, SoftLimit: def.SoftLimit},
+			"only auto_stop", `{"auto_stop":"off"}`,
+			Knobs{AutoStop: "off", AutoStart: def.AutoStart, SoftLimit: def.SoftLimit},
 		},
 		{
 			"only soft_limit", `{"soft_limit":5}`,
@@ -66,6 +68,25 @@ func TestDecodeKnobsEmptyInputIsDefaults(t *testing.T) {
 func TestDecodeKnobsRejectsMalformed(t *testing.T) {
 	if _, err := DecodeKnobs(json.RawMessage(`{"auto_stop":`)); err == nil {
 		t.Error("malformed knobs were accepted")
+	}
+}
+
+// auto_stop names a policy the idle monitor acts on, so a value it does not
+// act on is refused rather than stored. "stop" in particular was accepted and
+// silently behaved as suspend.
+func TestDecodeKnobsRefusesAnAutoStopThatDoesNotExist(t *testing.T) {
+	for _, raw := range []string{`{"auto_stop":"stop"}`, `{"auto_stop":"sometimes"}`} {
+		_, err := DecodeKnobs(json.RawMessage(raw))
+		if err == nil {
+			t.Errorf("%s was accepted", raw)
+			continue
+		}
+		if !errors.Is(err, ErrInvalidKnobs) {
+			t.Errorf("%s: err = %v, want one wrapping ErrInvalidKnobs so the API answers 400", raw, err)
+		}
+	}
+	if _, err := DecodeKnobs(json.RawMessage(`{"auto_stop":"stop"}`)); err == nil || !strings.Contains(err.Error(), "suspend") {
+		t.Errorf("refusing stop should name suspend as the alternative, got %v", err)
 	}
 }
 

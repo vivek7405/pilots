@@ -9,6 +9,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -45,9 +46,39 @@ func DecodeKnobs(raw json.RawMessage) (Knobs, error) {
 		return k, nil
 	}
 	if err := json.Unmarshal(raw, &k); err != nil {
-		return k, fmt.Errorf("api: invalid knobs: %w", err)
+		return k, fmt.Errorf("%w: %w", ErrInvalidKnobs, err)
+	}
+	if err := k.validate(); err != nil {
+		return k, fmt.Errorf("%w: %w", ErrInvalidKnobs, err)
 	}
 	return k, nil
+}
+
+// ErrInvalidKnobs marks a policy the caller spelled wrong, so the API answers
+// 400 rather than storing a value the idle monitor would never act on.
+var ErrInvalidKnobs = errors.New("invalid knobs")
+
+// validate is what a decoded policy must satisfy before it is stored. It runs
+// on the wire path only: ParseKnobs reads what is already stored and must
+// never refuse it.
+func (k Knobs) validate() error {
+	switch k.AutoStop {
+	case "off", "suspend":
+	case "stop":
+		// Accepted before stop existed, and quietly behaving as suspend: the
+		// idle monitor only ever checks for "off". Refusing is honest until
+		// POST /stop is implemented.
+		return errors.New(`auto_stop "stop" is not available yet; use suspend, which is what an idle machine does`)
+	default:
+		return fmt.Errorf("auto_stop is %q, want off or suspend", k.AutoStop)
+	}
+	if k.MinMachinesRunning < 0 {
+		return errors.New("min_machines_running cannot be negative")
+	}
+	if k.SoftLimit < 0 {
+		return errors.New("soft_limit cannot be negative")
+	}
+	return nil
 }
 
 // ParseKnobs reads a machine's stored policy.

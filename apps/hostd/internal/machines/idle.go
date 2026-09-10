@@ -192,7 +192,19 @@ func (m *Manager) shouldSuspend(ctx context.Context, row state.Machine) bool {
 	}
 
 	idleFor := time.Since(time.Unix(row.LastActivity, 0))
-	return idleFor >= DefaultIdleTimeout
+	if idleFor < DefaultIdleTimeout {
+		return false
+	}
+
+	// Last, and only for a machine every signal above has already agreed to
+	// suspend: ask the guest whether a console session is still running a
+	// command. A client that detached took hostd's only view of that session
+	// with it; the guest's process tree is the view that remains. This is the
+	// one step that talks to the guest, which is why it is not the first.
+	if slot, ok := m.SlotFor(row.ID); ok && m.sessionsBusy(ctx, row.ID, slot.AgentAddr()) {
+		return false
+	}
+	return true
 }
 
 // currentRelease is the release a service is serving right now, or "" when

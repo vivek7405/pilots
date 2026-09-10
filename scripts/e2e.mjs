@@ -459,6 +459,75 @@ async function lifecycleAssertions() {
       assert(ended && ended.ended, `exit should end the session: ${JSON.stringify(after.json)}`);
     });
 
+    // #107: a session that is still RUNNING a command keeps its machine awake
+    // after the client has gone. hostd's own view of the session left with the
+    // websocket; the guest reads the process tree instead and reports `busy`,
+    // and the idle monitor asks before it suspends. The counterfactual is the
+    // same session at a bare prompt, which suspends on schedule.
+    //
+    // Two idle windows are waited out here (60 s timer + 10 s tick + slack,
+    // twice), which is what makes this the slowest step in the lifecycle
+    // section; it is also the first assertion the battery makes about the idle
+    // monitor at all.
+    await step('a detached console running a command keeps the machine awake; at a prompt it suspends', async () => {
+      const protocols = [`authorization.bearer.${KEY}`];
+      const open = (path) => new Promise((resolve, reject) => {
+        const ws = new WebSocket(WS_API + path, protocols);
+        ws.addEventListener('open', () => resolve(ws));
+        ws.addEventListener('error', (e) => reject(new Error(`ws ${path}: ${e.message ?? 'error'}`)));
+      });
+      const sessionOf = (ws, ms) => new Promise((resolve) => {
+        let sessionId = '';
+        ws.addEventListener('message', (ev) => {
+          if (typeof ev.data !== 'string') return;
+          try { const m = JSON.parse(ev.data); if (m.type === 'session') sessionId = m.id; } catch {}
+        });
+        setTimeout(() => resolve(sessionId), ms);
+      });
+      const stdin = (ws, s) => ws.send(Buffer.concat([Buffer.from([0]), Buffer.from(s)]));
+      const sessionRow = async (sessionId) => {
+        const { status, json } = await request(`/v1/machines/${id}/sessions`);
+        assert(status === 200, `sessions: ${status}`);
+        return json.find((s) => s.id === sessionId);
+      };
+      const stateOf = async () => (await request(`/v1/machines/${id}`)).json.state;
+      const idleWindow = 80_000;
+
+      const console_ = await open(`/v1/machines/${id}/exec/stream?cmd=/bin/sh&tty=true&stdin=true&rows=24&cols=80`);
+      const opened = sessionOf(console_, 2000);
+      setTimeout(() => stdin(console_, 'sleep 300\n'), 600);
+      const sessionId = await opened;
+      assert(sessionId, 'the agent must announce the session id');
+      console_.close(); // detach: hostd loses the websocket, the guest keeps the shell
+      await new Promise((r) => setTimeout(r, 1000));
+
+      const running = await sessionRow(sessionId);
+      assert(running && !running.ended && running.attached === false, `session should be live and detached: ${JSON.stringify(running)}`);
+      assert(running.busy === true, `a session running sleep should report busy: ${JSON.stringify(running)}`);
+
+      await new Promise((r) => setTimeout(r, idleWindow));
+      assert((await stateOf()) === 'running', 'the machine was suspended under a session that was still running a command');
+
+      // Interrupt the sleep: the shell is back at its prompt, nothing runs.
+      const again = await open(`/v1/machines/${id}/attach/${sessionId}?tty=true`);
+      await new Promise((r) => setTimeout(r, 500));
+      stdin(again, '\x03');
+      await new Promise((r) => setTimeout(r, 800));
+      again.close();
+      await new Promise((r) => setTimeout(r, 1000));
+
+      const prompt = await sessionRow(sessionId);
+      assert(prompt && !prompt.ended, `the shell should survive the interrupt: ${JSON.stringify(prompt)}`);
+      assert(prompt.busy === false, `a shell at its prompt should not report busy: ${JSON.stringify(prompt)}`);
+
+      await new Promise((r) => setTimeout(r, idleWindow));
+      assert((await stateOf()) === 'suspended', 'a machine whose only session sits at a prompt should have suspended');
+
+      // Leave it as the next step expects: awake. exec wakes it on its own.
+      await exec(id, 'true');
+      assert((await stateOf()) === 'running', 'exec should have woken the machine');
+    });
+
     await step('a non-zero exit is reported, not thrown away', async () => {
       const { status, json } = await request(`/v1/machines/${id}/exec`, {
         method: 'POST', body: { cmd: 'exit 42', user: 'root' },

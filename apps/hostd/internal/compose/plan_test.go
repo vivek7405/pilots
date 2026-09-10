@@ -489,6 +489,24 @@ services:
 	}
 }
 
+// "stop" was accepted and silently behaved as suspend, because the idle
+// monitor only checks for "off". Until POST /stop exists it is refused, with
+// the alternative named.
+func TestAutoStopStopIsRefusedUntilItExists(t *testing.T) {
+	const file = `
+name: shop
+services:
+  db:
+    image: postgres:17
+    x-pilots:
+      auto_stop: stop
+`
+	_, _, err := Compile(context.Background(), Request{Compose: file})
+	if err == nil || !strings.Contains(err.Error(), "suspend") {
+		t.Fatalf("err = %v, want a refusal naming suspend", err)
+	}
+}
+
 // One element stays one argument. Splitting on spaces would turn the WAL
 // archive command into five arguments and a shell operator the guest would
 // then run.

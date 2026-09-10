@@ -1018,11 +1018,17 @@ func knobsFrom(name string, x xPilots) (*api.Knobs, error) {
 	k := api.DefaultKnobs()
 	if x.AutoStop != nil {
 		switch *x.AutoStop {
-		case "off", "stop", "suspend":
+		case "off", "suspend":
 			k.AutoStop = *x.AutoStop
+		case "stop":
+			// Accepted here before stop existed, and quietly behaving as
+			// suspend: the idle monitor only ever checks for "off". Refusing
+			// is honest until POST /stop is implemented.
+			return nil, fmt.Errorf("compose: %s: x-pilots.auto_stop \"stop\" is not "+
+				"available yet; use suspend, which is what an idle machine does", name)
 		default:
 			return nil, fmt.Errorf("compose: %s: x-pilots.auto_stop is %q, "+
-				"want off, stop or suspend", name, *x.AutoStop)
+				"want off or suspend", name, *x.AutoStop)
 		}
 	}
 	if x.AutoStart != nil {

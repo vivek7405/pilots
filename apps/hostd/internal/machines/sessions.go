@@ -2,12 +2,14 @@ package machines
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
 )
@@ -123,4 +125,60 @@ func (m *Manager) AttachStream(w http.ResponseWriter, r *http.Request, machineID
 	}
 	proxy.ServeHTTP(w, r)
 	return nil
+}
+
+// sessionProbeTimeout bounds the one call the idle monitor makes into a guest.
+// A guest that cannot answer in this long is not going to, and the monitor
+// must not stall its whole tick on it.
+const sessionProbeTimeout = 2 * time.Second
+
+// sessionsBusy asks the guest whether any of its terminal sessions still has
+// a command running, which the guest reads from its process tree
+// (cmd/guest-agent/busy.go).
+//
+// This is the signal hostd cannot see on its own: it counts a session as
+// activity only while a client is attached, because the websocket is what it
+// has. An agent that starts a build in a console and detaches has a machine
+// that is busy by every reasonable measure and idle by every one hostd can
+// take, and suspending it mid-build is indefensible.
+//
+// It FAILS OPEN: any error -- the guest unreachable, a bad status, a body that
+// does not parse -- is "nothing is busy". That is the opposite of guestLoad
+// in cmd/hostd (blind means held), and both are right. A replica suspended
+// under a live database session loses somebody's transaction, which cannot be
+// taken back; a sandbox suspended when a probe failed is a memory snapshot
+// that resumes exactly where it was the moment anything touches it. The
+// reversible mistake is the one to make.
+//
+// The agent address is a parameter, the way execStreamAt's is, so the probe
+// can be pointed at a fake guest in a test.
+func (m *Manager) sessionsBusy(ctx context.Context, machineID, agentAddr string) bool {
+	ctx, cancel := context.WithTimeout(ctx, sessionProbeTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+agentAddr+"/sessions", nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "Bearer "+m.token(machineID))
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return false
+	}
+	var list []struct {
+		Busy  bool `json:"busy"`
+		Ended bool `json:"ended"`
+	}
+	if err := json.NewDecoder(res.Body).Decode(&list); err != nil {
+		return false
+	}
+	for _, s := range list {
+		if s.Busy && !s.Ended {
+			return true
+		}
+	}
+	return false
 }
