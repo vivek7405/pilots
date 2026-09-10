@@ -62,6 +62,25 @@ func (d Deps) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// The restrictions, validated before anything is minted: a key whose
+	// limits were refused after it existed would be a key that authenticates
+	// with no limits at all.
+	if req.MaxMachines < 0 {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "max_machines cannot be negative",
+			"pass a positive max_machines, or leave it out for no cap", nil)
+		return
+	}
+	if req.ExpiresAt != 0 && req.ExpiresAt <= time.Now().Unix() {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "expires_at is already in the past",
+			"pass a future unix time, or leave it out for a key that lives until it is revoked", nil)
+		return
+	}
+	if len(req.NamePrefix) > 40 {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, "name_prefix is too long",
+			"use a short prefix, at most 40 characters", nil)
+		return
+	}
+
 	key, hash, err := MintKey(d.keySource())
 	if err != nil {
 		WriteError(w, http.StatusInternalServerError, CodeInternal, "could not mint a key: "+err.Error(), NextInternal, nil)
@@ -81,10 +100,29 @@ func (d Deps) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	now := time.Now().Unix()
+
+	// The LIMITS row is written BEFORE the key row, and the order is the
+	// whole safety property: a key that exists without its limits is an
+	// unrestricted key, while limits that exist without a key restrict
+	// nothing and are collected by the same hash if the mint is retried.
+	// Fail in the middle and the caller has no usable key, which is the safe
+	// half of the two.
+	limits := &state.APIKeyLimits{
+		Hash: hash, NamePrefix: req.NamePrefix, MaxMachines: req.MaxMachines,
+		ExpiresAt: req.ExpiresAt, CreatedAt: now,
+	}
+	if limits.Restricted() {
+		if err := d.Store.PutAPIKeyLimits(r.Context(), limits); err != nil {
+			writeMapped(w, err)
+			return
+		}
+	}
+
 	rec := &state.APIKey{
 		Hash: hash, OrgID: req.OrgID,
 		Scopes:    strings.Join(req.Scopes, ","),
-		CreatedAt: time.Now().Unix(),
+		CreatedAt: now,
 	}
 	if err := d.Store.PutAPIKey(r.Context(), rec); err != nil {
 		writeMapped(w, err)
@@ -95,6 +133,7 @@ func (d Deps) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, APIKeyResponse{
 		Key: key, Hash: rec.Hash, OrgID: rec.OrgID,
 		Scopes: req.Scopes, CreatedAt: rec.CreatedAt,
+		NamePrefix: req.NamePrefix, MaxMachines: req.MaxMachines, ExpiresAt: req.ExpiresAt,
 	})
 }
 
@@ -134,6 +173,15 @@ func (d Deps) handleListAPIKeys(w http.ResponseWriter, r *http.Request) {
 		item := APIKeyResponse{
 			Hash: k.Hash, OrgID: k.OrgID,
 			Scopes: splitScopes(k.Scopes), CreatedAt: k.CreatedAt,
+		}
+		// A restricted key says so in the listing. An operator asking what can
+		// reach this org needs to see that a token is limited to an agent's
+		// own machines, not merely that it exists.
+		if l, err := d.Store.GetAPIKeyLimits(r.Context(), k.Hash); err == nil {
+			item.NamePrefix, item.MaxMachines, item.ExpiresAt = l.NamePrefix, l.MaxMachines, l.ExpiresAt
+		} else if !errors.Is(err, state.ErrNotFound) {
+			writeMapped(w, err)
+			return
 		}
 		// Revoked keys stay in the list. An operator asking "what can reach
 		// this org" needs to see that a key was killed, not to find it gone.

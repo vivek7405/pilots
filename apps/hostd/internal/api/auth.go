@@ -9,6 +9,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
@@ -21,6 +22,10 @@ const (
 	// one handler that has to present it again: the hosted MCP endpoint
 	// calls back through the public API as the caller.
 	bearerKey
+	// bearerHashKey carries its sha256, which is what the limits row is
+	// keyed by. Kept rather than recomputed, so a restriction check is a map
+	// lookup instead of a hash on the request path.
+	bearerHashKey
 )
 
 // BearerToken returns the key the request authenticated with, or "" when it
@@ -28,6 +33,13 @@ const (
 func BearerToken(ctx context.Context) string {
 	key, _ := ctx.Value(bearerKey).(string)
 	return key
+}
+
+// BearerHash returns the sha256 of that key, which is what a limits or
+// revocation row is keyed by. Empty for a peer or an exempt path.
+func BearerHash(ctx context.Context) string {
+	hash, _ := ctx.Value(bearerHashKey).(string)
+	return hash
 }
 
 // principal is the authenticated caller. Both halves travel together because
@@ -268,6 +280,27 @@ func WithAuth(d Deps, next http.Handler) http.Handler {
 			return
 		}
 
+		// A key's LIFETIME, checked in the same breath as its revocation and
+		// for the same reason: a credential that outlives what its owner
+		// agreed to is the failure both are here to prevent. A key with no
+		// limits row is unrestricted, which is every operator key.
+		limits, err := d.Store.GetAPIKeyLimits(r.Context(), hash)
+		if err != nil && !errors.Is(err, state.ErrNotFound) {
+			WriteError(w, http.StatusInternalServerError, CodeInternal,
+				"auth lookup failed", NextInternal, nil)
+			return
+		}
+		if expired(limits, time.Now()) {
+			// A 401 rather than a 403: the credential is no longer valid at
+			// all, and a client that sees this should get a new one rather
+			// than ask for a wider scope.
+			w.Header().Set("WWW-Authenticate", d.challenge(r))
+			WriteError(w, http.StatusUnauthorized, CodeUnauthorized,
+				"this token expired",
+				"authorize the application again, or use a token with no expiry", nil)
+			return
+		}
+
 		if need, ok := scopeAllows(rec.Scopes, r.URL.Path); !ok {
 			WriteError(w, http.StatusForbidden, CodeScopeRequired,
 				"scope "+need+" required",
@@ -278,6 +311,7 @@ func WithAuth(d Deps, next http.Handler) http.Handler {
 		ctx := context.WithValue(r.Context(), principalKey,
 			principal{OrgID: rec.OrgID, Scopes: splitScopes(rec.Scopes)})
 		ctx = context.WithValue(ctx, bearerKey, key)
+		ctx = context.WithValue(ctx, bearerHashKey, hash)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }

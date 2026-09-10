@@ -300,6 +300,45 @@ CREATE TABLE IF NOT EXISTS api_key_revocations (  -- writer: any host, on an adm
   revoked_at INTEGER
 );
 
+-- What a RESTRICTED key may do, beyond its scopes.
+--
+-- A key handed to a coding agent through the OAuth consent screen is not the
+-- same thing as the key an operator keeps: the human approving it chose "this
+-- agent, these machines, this long". These three limits are what turn that
+-- choice into something the fleet enforces rather than something the
+-- dashboard merely remembers.
+--
+-- A NEW table rather than columns on api_keys, and that is not a style
+-- preference: api_keys carries rows, and cr-sqlite backfills every row of a
+-- table whose columns change, which is the gossip storm that took fly's fleet
+-- down twice for ~11.5h. A new table backfills nothing.
+--
+-- WRITE-ONCE, keyed by the same hash as the key itself: the limits are chosen
+-- at the moment the key is minted and can never be widened afterwards. That
+-- is what lets any host write the row without a merge being able to corrupt
+-- it, and it is also the security property -- a restriction that could be
+-- edited later is not a restriction.
+--
+-- A key with NO row here is unrestricted, which is every key minted before
+-- this table existed and every key an operator mints from the tokens page.
+-- Reading it is therefore a miss for almost every request, which is why it
+-- rides the same subscription cache the revocation check does.
+CREATE TABLE IF NOT EXISTS api_key_limits (      -- writer: any host, on an admin-scoped request (write-once)
+  hash         TEXT NOT NULL PRIMARY KEY,
+  -- Every machine and service this key names must start with this. Empty
+  -- means no naming restriction.
+  name_prefix  TEXT,
+  -- How many machines carrying that prefix may exist at once. 0 means no cap.
+  -- Counted from the org's own rows at create time rather than tracked as a
+  -- running total, because a count that has to be maintained is a count that
+  -- drifts, and the rows are already local.
+  max_machines INTEGER,
+  -- Unix seconds after which the key authenticates nothing. 0 means it lives
+  -- until it is revoked, which is what every operator key does.
+  expires_at   INTEGER,
+  created_at   INTEGER
+);
+
 -- Per-org limits.
 --
 -- One logical writer -- an admin request -- so unlike the two tables above

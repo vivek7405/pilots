@@ -469,6 +469,17 @@ type UpdateServiceRequest struct {
 type CreateAPIKeyRequest struct {
 	OrgID  string   `json:"org_id"`
 	Scopes []string `json:"scopes"`
+	// The three RESTRICTIONS, all optional and all enforced by the fleet.
+	// NamePrefix is what every machine and service the key names must start
+	// with; MaxMachines caps how many of them may exist at once; ExpiresAt is
+	// unix seconds after which the key authenticates nothing. Absent means
+	// unrestricted, which is what an operator's own key is.
+	//
+	// Write-once with the key: a restriction that could be widened later
+	// would not be one, so a key is minted again rather than edited.
+	NamePrefix  string `json:"name_prefix,omitempty"`
+	MaxMachines int    `json:"max_machines,omitempty"`
+	ExpiresAt   int64  `json:"expires_at,omitempty"`
 }
 
 type APIKeyResponse struct {
@@ -480,6 +491,11 @@ type APIKeyResponse struct {
 	Scopes    []string `json:"scopes"`
 	CreatedAt int64    `json:"created_at"`
 	RevokedAt int64    `json:"revoked_at,omitempty"`
+	// The restrictions this key carries, echoed on the mint and on every
+	// listing. Absent means unrestricted.
+	NamePrefix  string `json:"name_prefix,omitempty"`
+	MaxMachines int    `json:"max_machines,omitempty"`
+	ExpiresAt   int64  `json:"expires_at,omitempty"`
 }
 
 type RevokeResponse struct {

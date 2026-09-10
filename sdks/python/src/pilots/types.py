@@ -353,6 +353,14 @@ class UpdateServiceRequest:
 class CreateAPIKeyRequest:
     org_id: str = ""
     scopes: list[str] = field(default_factory=list)
+    #: What every machine and service this key names must start with. None
+    #: means no naming restriction.
+    name_prefix: str | None = None
+    #: How many machines carrying that prefix may exist at once. None means no cap.
+    max_machines: int | None = None
+    #: Unix seconds after which the key authenticates nothing. None means it
+    #: lives until it is revoked. Write-once with the key.
+    expires_at: int | None = None
 
 
 @dataclass
@@ -364,6 +372,10 @@ class APIKeyResponse:
     scopes: list[str] = field(default_factory=list)
     created_at: int = 0
     revoked_at: int | None = None
+    #: The restrictions this key carries. Absent means unrestricted.
+    name_prefix: str | None = None
+    max_machines: int | None = None
+    expires_at: int | None = None
 
 
 @dataclass

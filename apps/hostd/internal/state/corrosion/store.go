@@ -485,6 +485,43 @@ func (s *Store) GetRevocation(ctx context.Context, hash string) (*state.Revocati
 	return &rv, rows.Err()
 }
 
+// PutAPIKeyLimits records what a restricted key may do, by ADDING a row and
+// never changing one: the limits a human approved when the key was minted are
+// the only limits it ever has, and a write that could widen them later would
+// undo the consent that produced them.
+func (s *Store) PutAPIKeyLimits(ctx context.Context, l *state.APIKeyLimits) error {
+	_, err := s.client.Exec(ctx, `
+		INSERT INTO api_key_limits (hash, name_prefix, max_machines, expires_at, created_at)
+		VALUES (?,?,?,?,?)
+		ON CONFLICT(hash) DO NOTHING`,
+		l.Hash, l.NamePrefix, l.MaxMachines, l.ExpiresAt, l.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put api key limits: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetAPIKeyLimits(ctx context.Context, hash string) (*state.APIKeyLimits, error) {
+	rows, err := s.client.Query(ctx,
+		`SELECT hash, name_prefix, max_machines, expires_at, created_at FROM api_key_limits WHERE hash = ?`, hash)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("state: api key limits: %w", state.ErrNotFound)
+	}
+	var l state.APIKeyLimits
+	if err := rows.Scan(&l.Hash, &l.NamePrefix, &l.MaxMachines, &l.ExpiresAt, &l.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &l, rows.Err()
+}
+
 func (s *Store) IsRevoked(ctx context.Context, hash string) (bool, error) {
 	rows, err := s.client.Query(ctx,
 		`SELECT 1 FROM api_key_revocations WHERE hash = ?`, hash)

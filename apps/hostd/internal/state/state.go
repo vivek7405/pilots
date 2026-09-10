@@ -346,6 +346,34 @@ type APIKey struct {
 	CreatedAt int64
 }
 
+// APIKeyLimits is what a RESTRICTED key may do, beyond its scopes.
+//
+// A key minted through the OAuth consent screen carries the choice the human
+// made there: this agent, these machines, this long. A key with no row is
+// unrestricted, which is every key an operator mints from the tokens page and
+// every key that existed before the table did.
+//
+// Write-once, keyed by the key's own hash: a limit that could be widened
+// later is not a limit. See schema.sql.
+type APIKeyLimits struct {
+	Hash string
+	// NamePrefix is what every machine and service this key names must start
+	// with. Empty means no naming restriction.
+	NamePrefix string
+	// MaxMachines caps how many machines carrying that prefix may exist at
+	// once. 0 means no cap.
+	MaxMachines int
+	// ExpiresAt is when the key stops authenticating, in unix seconds. 0
+	// means it lives until it is revoked.
+	ExpiresAt int64
+	CreatedAt int64
+}
+
+// Restricted reports whether these limits constrain anything at all.
+func (l *APIKeyLimits) Restricted() bool {
+	return l != nil && (l.NamePrefix != "" || l.MaxMachines > 0 || l.ExpiresAt > 0)
+}
+
 // Tenancy names the org that owns one machine, service or volume.
 //
 // A row of its own rather than a column on the object, because adding a
@@ -525,6 +553,16 @@ type Store interface {
 	// for a row scan on every authenticated call to answer a question no
 	// caller there asks would be a cost with no reader.
 	GetRevocation(ctx context.Context, hash string) (*Revocation, error)
+
+	// PutAPIKeyLimits records what a restricted key may do. Write-once in
+	// both drivers, for the reason PutRevocation is: any host may write it
+	// only while nothing can change a value already written, and a limit that
+	// a later write could widen would not be one.
+	PutAPIKeyLimits(ctx context.Context, l *APIKeyLimits) error
+	// GetAPIKeyLimits answers from the local replica. ErrNotFound is the
+	// answer "unrestricted", which is the common case, so this is on the
+	// request path and must never make a network call.
+	GetAPIKeyLimits(ctx context.Context, hash string) (*APIKeyLimits, error)
 
 	// GetQuota returns ErrNotFound when the org has no row, which means the
 	// defaults apply.
@@ -1254,6 +1292,36 @@ func (s *sqliteStore) GetRevocation(ctx context.Context, hash string) (*Revocati
 		return nil, fmt.Errorf("state: get revocation: %w", err)
 	}
 	return &rv, nil
+}
+
+const apiKeyLimitCols = `hash, name_prefix, max_machines, expires_at, created_at`
+
+// PutAPIKeyLimits is DO NOTHING for the reason PutRevocation is, and for one
+// of its own: the limits chosen when a key was minted are the only limits it
+// ever has, so a second write must not be able to widen them.
+func (s *sqliteStore) PutAPIKeyLimits(ctx context.Context, l *APIKeyLimits) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO api_key_limits (`+apiKeyLimitCols+`) VALUES (?,?,?,?,?)
+		ON CONFLICT(hash) DO NOTHING`,
+		l.Hash, l.NamePrefix, l.MaxMachines, l.ExpiresAt, l.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put api key limits: %w", err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) GetAPIKeyLimits(ctx context.Context, hash string) (*APIKeyLimits, error) {
+	row := s.db.QueryRowContext(ctx,
+		`SELECT `+apiKeyLimitCols+` FROM api_key_limits WHERE hash = ?`, hash)
+	var l APIKeyLimits
+	err := row.Scan(&l.Hash, &l.NamePrefix, &l.MaxMachines, &l.ExpiresAt, &l.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get api key limits: %w", err)
+	}
+	return &l, nil
 }
 
 func (s *sqliteStore) IsRevoked(ctx context.Context, hash string) (bool, error) {
