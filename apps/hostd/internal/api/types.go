@@ -18,18 +18,34 @@ import (
 // different knobs. Scale-to-zero (MinMachinesRunning == 0) is valid for
 // production services, exactly as it is on Fly.
 type Knobs struct {
-	AutoStop           string `json:"auto_stop"`            // off|stop|suspend
+	AutoStop           string `json:"auto_stop"`            // off|suspend
 	AutoStart          bool   `json:"auto_start"`           // wake on an inbound request
 	MinMachinesRunning int    `json:"min_machines_running"` // 0 = scale to zero
 	SoftLimit          int    `json:"soft_limit"`           // concurrency before starting another replica
+	// IdleTimeout is how many seconds of quiet the idle monitor waits before
+	// it suspends the machine. The machine's own activity -- a request, an
+	// exec, a session running a command -- restarts the wait, so this is the
+	// lever for work nothing is connected to: a daemon that polls a queue
+	// sets an hour and stays up an hour past its last exec. Capped so a
+	// forgotten value costs at most an hour per idle cycle, where
+	// auto_stop: off costs forever.
+	IdleTimeout int `json:"idle_timeout"` // seconds, 1..MaxIdleTimeoutSeconds
 }
+
+// The bounds of idle_timeout. Sixty seconds is the default every machine had
+// before the knob existed; an hour is the ceiling a forgotten value is allowed
+// to cost, the same bound Sprites puts on its keep-alive tasks.
+const (
+	DefaultIdleTimeoutSeconds = 60
+	MaxIdleTimeoutSeconds     = 3600
+)
 
 // DefaultKnobs is the policy a machine gets when the caller says nothing.
 //
 // The defaults keep a machine REACHABLE and cheap: it suspends when idle and
 // wakes on the next request.
 func DefaultKnobs() Knobs {
-	return Knobs{AutoStop: "suspend", AutoStart: true, SoftLimit: 20}
+	return Knobs{AutoStop: "suspend", AutoStart: true, SoftLimit: 20, IdleTimeout: DefaultIdleTimeoutSeconds}
 }
 
 // DecodeKnobs applies a caller's partial policy on top of the defaults.
@@ -77,6 +93,9 @@ func (k Knobs) validate() error {
 	}
 	if k.SoftLimit < 0 {
 		return errors.New("soft_limit cannot be negative")
+	}
+	if k.IdleTimeout < 1 || k.IdleTimeout > MaxIdleTimeoutSeconds {
+		return fmt.Errorf("idle_timeout is %d, want 1..%d seconds", k.IdleTimeout, MaxIdleTimeoutSeconds)
 	}
 	return nil
 }

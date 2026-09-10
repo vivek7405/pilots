@@ -17,6 +17,8 @@ A service is one or more machines behind a URL that never changes. That URL is `
 
 A deploy builds a rootfs, creates a release, starts a replica from it, and lets the release take traffic only once the replica has passed its health check. That gate is why a broken deploy does not take the previous one down.
 
+A replica with no traffic suspends and the next request wakes it; that is the default and it costs nothing while asleep. A worker that must keep running with nothing connected to it -- a queue consumer, a scheduler -- keeps one replica resident with `x-pilots: min_machines_running: 1` in its compose entry (or `auto_stop: off`); a replica that should merely wait longer before sleeping sets `idle_timeout: 30m` (up to an hour). The keys are listed in compose.md.
+
 ## The tools
 
 | I need to... | Tool | Note |

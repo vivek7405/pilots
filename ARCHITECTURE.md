@@ -969,9 +969,16 @@ proxy — no socat, no per-VM forwarder processes); if running-remote: proxy
 over WireGuard to the owning hostd; if suspended and `autoStart`: **hold the
 connection**, restore locally (or trigger the owner), then proxy. Touch
 `last_activity` on every request AND every exec. Idle monitor suspends when
-BOTH the wall-clock timer (default 60s, per-machine) and concurrency
-(in-flight = 0 against `softLimit`) say idle — exec/WS activity counts, so an
-agent mid-build with zero HTTP traffic is never suspended. That monitor owns
+BOTH the wall-clock timer (the `idle_timeout` knob: default 60s, at most 1h,
+per-machine) and concurrency (in-flight = 0 against `softLimit`) say idle —
+exec/WS activity counts, so an agent mid-build with zero HTTP traffic is
+never suspended — and then, last, only for a machine those two already agreed
+on, asks the guest whether a console session is still running a command: the
+agent answers from its process tree (any process besides the session leader
+with the same session id), because a client that detached took hostd's only
+view of that session with it. That probe fails OPEN — a suspend is a freeze
+that resumes on the next touch, so the reversible mistake is the one to
+make — where the conntrack signal below fails safe. That monitor owns
 sandboxes only. A machine with a release (a rollout's replica or a promoted
 sandbox) is the autoscaler's: the host that HOLDS the replica gives it back
 when its own in-flight count, its held sessions and the row's `last_activity`

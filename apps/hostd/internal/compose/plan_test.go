@@ -489,6 +489,39 @@ services:
 	}
 }
 
+// idle_timeout is spelled the way compose spells durations, and a bare number
+// of seconds is accepted too; both are bounded like the API's knob.
+func TestXPilotsIdleTimeoutReachesTheKnobs(t *testing.T) {
+	const file = `
+name: shop
+services:
+  worker:
+    image: node:24
+    x-pilots:
+      idle_timeout: 30m
+  db:
+    image: postgres:17
+    x-pilots:
+      idle_timeout: 90
+`
+	plan, _, err := Compile(context.Background(), Request{Compose: file})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if got := stepNamed(t, plan, "worker").Knobs; got == nil || got.IdleTimeout != 1800 {
+		t.Errorf("worker idle_timeout = %+v, want 1800s from 30m", got)
+	}
+	if got := stepNamed(t, plan, "db").Knobs; got == nil || got.IdleTimeout != 90 {
+		t.Errorf("db idle_timeout = %+v, want 90 from a bare number", got)
+	}
+	for _, bad := range []string{"2h", "0s", "soon", "-5"} {
+		file := "name: shop\nservices:\n  db:\n    image: postgres:17\n    x-pilots:\n      idle_timeout: " + bad + "\n"
+		if _, _, err := Compile(context.Background(), Request{Compose: file}); err == nil || !strings.Contains(err.Error(), "idle_timeout") {
+			t.Errorf("idle_timeout %s: err = %v, want a refusal naming idle_timeout", bad, err)
+		}
+	}
+}
+
 // "stop" was accepted and silently behaved as suspend, because the idle
 // monitor only checks for "off". Until POST /stop exists it is refused, with
 // the alternative named.

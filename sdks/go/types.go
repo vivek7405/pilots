@@ -14,10 +14,11 @@ import "encoding/json"
 // Knobs is the per-machine lifecycle policy. A sandbox and a production
 // service are the same machine with different knobs.
 type Knobs struct {
-	AutoStop           string `json:"auto_stop"`            // off|stop|suspend
+	AutoStop           string `json:"auto_stop"`            // off|suspend
 	AutoStart          bool   `json:"auto_start"`           // wake on an inbound request
 	MinMachinesRunning int    `json:"min_machines_running"` // 0 = scale to zero
 	SoftLimit          int    `json:"soft_limit"`
+	IdleTimeout        int    `json:"idle_timeout"` // seconds of quiet before suspend, 1..3600
 }
 
 // KnobsPatch is a PARTIAL lifecycle policy: the shape a REQUEST carries.
@@ -42,10 +43,11 @@ type Knobs struct {
 //
 //	pilots.KnobsPatch{SoftLimit: pilots.Ptr(50)}
 type KnobsPatch struct {
-	AutoStop           *string `json:"auto_stop,omitempty"`            // off|stop|suspend
+	AutoStop           *string `json:"auto_stop,omitempty"`            // off|suspend
 	AutoStart          *bool   `json:"auto_start,omitempty"`           // wake on an inbound request
 	MinMachinesRunning *int    `json:"min_machines_running,omitempty"` // 0 = scale to zero
 	SoftLimit          *int    `json:"soft_limit,omitempty"`
+	IdleTimeout        *int    `json:"idle_timeout,omitempty"` // seconds of quiet before suspend, 1..3600
 }
 
 // Ptr returns a pointer to v, so a KnobsPatch field can be set inline.

@@ -31,8 +31,9 @@
 // # x-pilots
 //
 // Per service: domain, custom_domain, pre_deploy, size_gib (the size of every
-// named volume that service declares), and the four replica knobs --
-// min_machines_running, auto_stop, auto_start, soft_limit. Top-level: app.
+// named volume that service declares), and the replica knobs --
+// min_machines_running, auto_stop, auto_start, soft_limit, idle_timeout.
+// Top-level: app.
 // Unknown keys are tolerated rather than refused, so a compose file written for
 // a later CLI still plans here.
 //
@@ -148,7 +149,7 @@ type Step struct {
 	MemMiB     int               `json:"mem_mib"`
 	DependsOn  []string          `json:"depends_on,omitempty"`
 	// Knobs is the replica lifecycle policy, filled only when the file spelled
-	// at least one of the four keys out. The same struct the deploy carries,
+	// at least one of the knob keys out. The same struct the deploy carries,
 	// so the field names both sides write are one declaration.
 	Knobs  *api.Knobs `json:"knobs,omitempty"`
 	Domain string     `json:"domain,omitempty"`
@@ -206,9 +207,14 @@ type xPilots struct {
 	AutoStart          *bool   `mapstructure:"auto_start"`
 	MinMachinesRunning *int    `mapstructure:"min_machines_running"`
 	SoftLimit          *int    `mapstructure:"soft_limit"`
-	SizeGiB            int     `mapstructure:"size_gib"`
-	PreDeploy          string  `mapstructure:"pre_deploy"`
-	App                string  `mapstructure:"app"` // top-level only
+	// IdleTimeout is a duration the way compose spells every other one
+	// ("30m", "90s"), or a bare number of seconds. `any` because YAML hands
+	// the first over as a string and the second as an int, and mapstructure
+	// refuses to put an int into a *string.
+	IdleTimeout any    `mapstructure:"idle_timeout"`
+	SizeGiB     int    `mapstructure:"size_gib"`
+	PreDeploy   string `mapstructure:"pre_deploy"`
+	App         string `mapstructure:"app"` // top-level only
 }
 
 // Compile returns the plan, or a PlanError the caller answers 400 with, or an
@@ -1005,17 +1011,24 @@ func resourceLimits(svc types.ServiceConfig) *types.Resource {
 }
 
 // knobsFrom fills the replica policy from x-pilots, and only when the file
-// spelled at least one of the four keys out.
+// spelled at least one of the knob keys out.
 //
 // Built from the machine defaults rather than from zero, for the reason
 // api.DecodeKnobs exists: a struct assembled from zeros would carry
 // auto_start: false, and a replica that suspends and then refuses to wake is a
 // permanently dead URL earned by setting one unrelated field.
 func knobsFrom(name string, x xPilots) (*api.Knobs, error) {
-	if x.AutoStop == nil && x.AutoStart == nil && x.MinMachinesRunning == nil && x.SoftLimit == nil {
+	if x.AutoStop == nil && x.AutoStart == nil && x.MinMachinesRunning == nil && x.SoftLimit == nil && x.IdleTimeout == nil {
 		return nil, nil
 	}
 	k := api.DefaultKnobs()
+	if x.IdleTimeout != nil {
+		secs, err := idleTimeoutSeconds(x.IdleTimeout)
+		if err != nil {
+			return nil, fmt.Errorf("compose: %s: x-pilots.idle_timeout %v", name, err)
+		}
+		k.IdleTimeout = secs
+	}
 	if x.AutoStop != nil {
 		switch *x.AutoStop {
 		case "off", "suspend":
@@ -1049,6 +1062,32 @@ func knobsFrom(name string, x xPilots) (*api.Knobs, error) {
 		k.SoftLimit = *x.SoftLimit
 	}
 	return &k, nil
+}
+
+// idleTimeoutSeconds reads x-pilots.idle_timeout: a compose duration ("30m")
+// or a number of seconds, bounded the way the API bounds the knob.
+func idleTimeoutSeconds(v any) (int, error) {
+	var secs int
+	switch t := v.(type) {
+	case string:
+		d, err := time.ParseDuration(t)
+		if err != nil {
+			return 0, fmt.Errorf("is %q, want a duration such as 30m or 90s", t)
+		}
+		secs = int(d / time.Second)
+	case int:
+		secs = t
+	case int64:
+		secs = int(t)
+	case float64:
+		secs = int(t)
+	default:
+		return 0, fmt.Errorf("is %v, want a duration such as 30m or a number of seconds", v)
+	}
+	if secs < 1 || secs > api.MaxIdleTimeoutSeconds {
+		return 0, fmt.Errorf("is %ds, want 1s..%ds", secs, api.MaxIdleTimeoutSeconds)
+	}
+	return secs, nil
 }
 
 // kahn orders the steps so that nothing is built before what it depends on.

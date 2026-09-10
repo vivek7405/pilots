@@ -18,10 +18,12 @@ export type MachineState = 'creating' | 'running' | 'suspended' | 'stopped' | 'e
 
 /** Per-machine lifecycle policy. A sandbox and a service differ only here. */
 export interface Knobs {
-  auto_stop: 'off' | 'stop' | 'suspend'
+  auto_stop: 'off' | 'suspend'
   auto_start: boolean
   min_machines_running: number
   soft_limit: number
+  /** Seconds of quiet before the machine suspends, 1..3600 (default 60). */
+  idle_timeout: number
 }
 
 /**

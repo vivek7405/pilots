@@ -32,7 +32,7 @@ func TestAPartialPatchSendsOnlyWhatWasSet(t *testing.T) {
 	// Named individually, because each is its own way to break a machine:
 	// auto_start false is a URL that never wakes, min_machines_running 0
 	// silently removes a warm floor, auto_stop "" is not a policy at all.
-	for _, absent := range []string{"auto_start", "min_machines_running", "auto_stop"} {
+	for _, absent := range []string{"auto_start", "min_machines_running", "auto_stop", "idle_timeout"} {
 		if _, present := knobs[absent]; present {
 			t.Errorf("%s was sent by a caller who never mentioned it", absent)
 		}

@@ -32,6 +32,24 @@ A file that covers the common case:
 2. The plan is an ordered list of steps: build, volume, service, deploy, per service, in dependency order.
 3. Services in the same app find each other at `<name>.internal`, which is why `DATABASE_URL` above points at `postgres.internal`.
 
+## The `x-pilots` keys
+
+Everything pilots needs that compose has no word for goes under `x-pilots:` on a service (or at the top level for `app`). Unknown keys are ignored, so a typo is silent: copy these.
+
+| Key | Meaning |
+| --- | --- |
+| `domain` | the label the URL is minted from (default: the service name) |
+| `private: true` | no URL; peers reach it at `<name>.internal` |
+| `custom_domain` | a hostname you own (domains.md) |
+| `auto_stop: off\|suspend` | `suspend` (default) sleeps an idle replica; `off` never does |
+| `auto_start: true\|false` | wake on a request (default true; `false` is a dead URL) |
+| `min_machines_running` | replicas kept resident, default 0 (scale to zero) |
+| `soft_limit` | concurrent requests per replica before another starts (default 20) |
+| `idle_timeout` | quiet before a replica sleeps, `30m` or seconds, 1s..1h (default 60s) |
+| `size_gib` | a volume's size, on the volume |
+| `pre_deploy` | a command run on a throwaway machine before any replica is replaced (a migration) |
+| `app` | top level only: the app name |
+
 ## The rules
 
 | Rule | Why |

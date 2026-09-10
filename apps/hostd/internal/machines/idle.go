@@ -7,11 +7,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
-// DefaultIdleTimeout is how long a machine must be quiet before it suspends.
-const DefaultIdleTimeout = 60 * time.Second
+// DefaultIdleTimeout is how long a machine must be quiet before it suspends
+// when its knobs say nothing else; the idle_timeout knob is the per-machine
+// value.
+const DefaultIdleTimeout = api.DefaultIdleTimeoutSeconds * time.Second
 
 // idleCheckInterval is how often the monitor looks. Frequent enough that a
 // machine suspends promptly, cheap because it is a local read.
@@ -191,8 +194,16 @@ func (m *Manager) shouldSuspend(ctx context.Context, row state.Machine) bool {
 		return false
 	}
 
+	// The wait is the machine's own. A blob stored before the knob existed
+	// has no idle_timeout and reads as the default through ParseKnobs; a
+	// zero written by an older test fixture is treated the same way rather
+	// than as "suspend the instant it goes quiet".
+	timeout := DefaultIdleTimeout
+	if knobs.IdleTimeout > 0 {
+		timeout = time.Duration(knobs.IdleTimeout) * time.Second
+	}
 	idleFor := time.Since(time.Unix(row.LastActivity, 0))
-	if idleFor < DefaultIdleTimeout {
+	if idleFor < timeout {
 		return false
 	}
 

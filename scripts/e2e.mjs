@@ -681,6 +681,49 @@ async function lifecycleAssertions() {
       }
     });
 
+    // #107: the wait before a quiet machine suspends is the machine's own.
+    // A policy spelled wrong is a 400 that names the alternative rather than a
+    // 500 or a value the monitor never acts on.
+    await step('a wrong lifecycle policy is refused, with the alternative named', async () => {
+      for (const [knobs, word] of [
+        [{ auto_stop: 'stop' }, 'suspend'],
+        [{ auto_stop: 'sometimes' }, 'auto_stop'],
+        [{ idle_timeout: 0 }, 'idle_timeout'],
+        [{ idle_timeout: 3601 }, 'idle_timeout'],
+      ]) {
+        const { status, json } = await request('/v1/machines', { method: 'POST', body: { knobs } });
+        assert(status === 400, `${JSON.stringify(knobs)}: expected 400, got ${status}`);
+        assert(json.code === 'bad_request' && typeof json.next === 'string',
+          `${JSON.stringify(knobs)}: the refusal must carry a code and a next: ${JSON.stringify(json)}`);
+        assert(`${json.error} ${json.next}`.includes(word),
+          `${JSON.stringify(knobs)}: the refusal should mention ${word}: ${JSON.stringify(json)}`);
+        if (status === 201) await request(`/v1/machines/${json.id}`, { method: 'DELETE' });
+      }
+    });
+
+    // The knob is honoured: a machine asked to wait three minutes is still up
+    // where the default would have slept, and asleep once its own wait has
+    // passed. The counterfactual is the default-timeout step above.
+    await step('idle_timeout sets how long a quiet machine stays up', async () => {
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST', body: { knobs: { idle_timeout: 180 } },
+      });
+      assert(status === 201, `expected 201, got ${status}`);
+      const patient = json.id;
+      try {
+        assert(json.knobs.idle_timeout === 180, `idle_timeout = ${json.knobs.idle_timeout}`);
+        assert(json.knobs.auto_start === true, 'a partial knobs object must not zero auto_start');
+        await exec(patient, 'true'); // the last activity the wait counts from
+        await new Promise((r) => setTimeout(r, 80_000));
+        let { json: m } = await request(`/v1/machines/${patient}`);
+        assert(m.state === 'running', `suspended after 80s despite a 180s idle_timeout (state ${m.state})`);
+        await waitFor(async () => (await request(`/v1/machines/${patient}`)).json.state === 'suspended',
+          { timeoutMs: 150_000, everyMs: 5_000, what: 'the machine to suspend once its own wait passed' });
+      } finally {
+        await request(`/v1/machines/${patient}`, { method: 'DELETE' });
+      }
+    });
+
     await step('a duplicate name is rejected', async () => {
       const { json: mine } = await request(`/v1/machines/${id}`);
       const { status } = await request('/v1/machines', {

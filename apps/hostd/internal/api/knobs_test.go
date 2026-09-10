@@ -23,16 +23,20 @@ func TestDecodeKnobsMergesOntoDefaults(t *testing.T) {
 	}{
 		{
 			"only auto_stop", `{"auto_stop":"off"}`,
-			Knobs{AutoStop: "off", AutoStart: def.AutoStart, SoftLimit: def.SoftLimit},
+			Knobs{AutoStop: "off", AutoStart: def.AutoStart, SoftLimit: def.SoftLimit, IdleTimeout: def.IdleTimeout},
 		},
 		{
 			"only soft_limit", `{"soft_limit":5}`,
-			Knobs{AutoStop: def.AutoStop, AutoStart: def.AutoStart, SoftLimit: 5},
+			Knobs{AutoStop: def.AutoStop, AutoStart: def.AutoStart, SoftLimit: 5, IdleTimeout: def.IdleTimeout},
 		},
 		{
 			"only min_machines_running", `{"min_machines_running":2}`,
 			Knobs{AutoStop: def.AutoStop, AutoStart: def.AutoStart,
-				MinMachinesRunning: 2, SoftLimit: def.SoftLimit},
+				MinMachinesRunning: 2, SoftLimit: def.SoftLimit, IdleTimeout: def.IdleTimeout},
+		},
+		{
+			"only idle_timeout", `{"idle_timeout":1800}`,
+			Knobs{AutoStop: def.AutoStop, AutoStart: def.AutoStart, SoftLimit: def.SoftLimit, IdleTimeout: 1800},
 		},
 		{
 			"empty object keeps every default", `{}`, def,
@@ -40,7 +44,7 @@ func TestDecodeKnobsMergesOntoDefaults(t *testing.T) {
 		{
 			// An explicit false must still win: merging cannot mean ignoring.
 			"explicit auto_start false", `{"auto_start":false}`,
-			Knobs{AutoStop: def.AutoStop, AutoStart: false, SoftLimit: def.SoftLimit},
+			Knobs{AutoStop: def.AutoStop, AutoStart: false, SoftLimit: def.SoftLimit, IdleTimeout: def.IdleTimeout},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -87,6 +91,22 @@ func TestDecodeKnobsRefusesAnAutoStopThatDoesNotExist(t *testing.T) {
 	}
 	if _, err := DecodeKnobs(json.RawMessage(`{"auto_stop":"stop"}`)); err == nil || !strings.Contains(err.Error(), "suspend") {
 		t.Errorf("refusing stop should name suspend as the alternative, got %v", err)
+	}
+}
+
+// The timer is bounded on both sides: zero would suspend a machine the moment
+// it went quiet, and more than an hour is the bill a forgotten value is not
+// allowed to run up.
+func TestDecodeKnobsBoundsTheIdleTimeout(t *testing.T) {
+	for _, raw := range []string{`{"idle_timeout":0}`, `{"idle_timeout":-5}`, `{"idle_timeout":3601}`} {
+		if _, err := DecodeKnobs(json.RawMessage(raw)); err == nil || !errors.Is(err, ErrInvalidKnobs) {
+			t.Errorf("%s: err = %v, want ErrInvalidKnobs", raw, err)
+		}
+	}
+	for _, raw := range []string{`{"idle_timeout":1}`, `{"idle_timeout":3600}`} {
+		if _, err := DecodeKnobs(json.RawMessage(raw)); err != nil {
+			t.Errorf("%s: %v, want the bound itself to be accepted", raw, err)
+		}
 	}
 }
 

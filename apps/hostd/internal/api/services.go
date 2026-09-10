@@ -632,7 +632,7 @@ func (d Deps) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	// operator asking for a warm replica and being told it worked.
 	if _, err := DecodeKnobs(req.Knobs); err != nil {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(),
-			"knobs are auto_stop (off or suspend), auto_start, min_machines_running, soft_limit", nil)
+			"knobs are auto_stop (off or suspend), auto_start, min_machines_running, soft_limit, idle_timeout (1..3600 seconds)", nil)
 		return
 	}
 	// The build becomes this service's root filesystem, so it is scoped like

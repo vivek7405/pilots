@@ -15,7 +15,7 @@ MCP: `create_machine` with `{ "name": "scratch" }`, then `exec` with `{ "machine
 
 1. A create is a RESTORE from a template, not a boot, so it is fast and the number is independent of the machine's size.
 2. The machine gets a permanent URL derived from its name. The URL survives suspend, wake, checkpoint, restore and promote.
-3. It suspends when idle and wakes on the next request. A sandbox nobody is using costs nothing.
+3. It suspends after 60 seconds of quiet (`idle_timeout`, up to an hour) and wakes on the next request or exec. A sandbox nobody is using costs nothing. Quiet means no request, no exec, and no console session running a command; see "Background work" below.
 
 ## The tools
 
@@ -57,3 +57,19 @@ MCP: `create_machine` with `{ "name": "scratch" }`, then `exec` with `{ "machine
 - `pilot url [target]` shows a URL's auth mode; `pilot url update --auth org` makes it
   require an API key of the org; `--label k=v` on create and `ls --label` find machines again.
 - `pilot use <machine>` sets a directory-local default so none of these need a name.
+
+## Background work
+
+A suspend is a freeze, not a kill: the memory is snapshotted and every process resumes exactly where it was on the next request, exec or attach. So the question is only what keeps a machine awake, and there are three signals:
+
+- A request or exec in flight, for its whole life. A long silent build under `exec` is never suspended.
+- A console session with a command running, even after you detach. The guest reads its process tree, so a build whose output goes to a file still counts; a shell sitting at its prompt does not. `pilot sessions ls` shows `busy` per session.
+- Guest-to-guest traffic on `.internal`, and open sessions between machines.
+
+What none of them see is a process nothing is connected to: a daemon you started with `setsid`, or a worker that polls an outside queue. For that, set how long the machine waits after its last activity:
+
+    pilot machines create worker --idle-timeout 30m
+
+MCP: `create_machine` with `{ "idle_timeout": 1800 }`. The cap is an hour, so a forgotten value costs at most an hour per idle cycle. A worker that must run forever is a service, not a sandbox: `promote` it, then `x-pilots: min_machines_running: 1` in its compose file keeps one replica resident.
+
+Two things to know: a process that calls `setsid` leaves the session tree by definition, which is why the timeout exists; and a long sleep can drop outbound connections, so a client that resumes after an hour should expect to reconnect.

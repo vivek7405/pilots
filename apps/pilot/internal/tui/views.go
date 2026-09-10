@@ -344,6 +344,7 @@ func (m *Model) viewMachine() string {
 		{"created", time.Unix(mc.CreatedAt, 0).Local().Format("2006-01-02 15:04")},
 		{"auto stop", mc.Knobs.AutoStop},
 		{"auto start", strconv.FormatBool(mc.Knobs.AutoStart)},
+		{"idle timeout", (time.Duration(mc.Knobs.IdleTimeout) * time.Second).String()},
 	}
 	if mc.App != "" {
 		rows = append(rows, [2]string{"app", mc.App})

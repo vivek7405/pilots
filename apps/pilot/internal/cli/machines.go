@@ -191,6 +191,7 @@ func newMachinesCreateCmd(env *Env) *cobra.Command {
 		envPairs    []string
 		labelPairs  []string
 		urlAuth     string
+		idleTimeout time.Duration
 		skipConsole bool
 	)
 	c := &cobra.Command{
@@ -215,6 +216,12 @@ func newMachinesCreateCmd(env *Env) *cobra.Command {
 				return out.Failf("pass --url-auth public or --url-auth org", "--url-auth %q is not a mode", urlAuth)
 			}
 			req.URLAuth = urlAuth
+			if idleTimeout != 0 {
+				if idleTimeout < time.Second || idleTimeout > time.Hour {
+					return out.Failf("pass --idle-timeout between 1s and 1h", "--idle-timeout %s is out of range", idleTimeout)
+				}
+				req.Knobs = &pilots.KnobsPatch{IdleTimeout: pilots.Ptr(int(idleTimeout / time.Second))}
+			}
 			m, err := client.Machines.Create(c.Context(), req)
 			if err != nil {
 				return err
@@ -248,6 +255,7 @@ func newMachinesCreateCmd(env *Env) *cobra.Command {
 	f.StringVar(&req.Volume, "volume", "", "attach this volume")
 	f.StringArrayVar(&labelPairs, "label", nil, "a label to find it by later, key=value (repeatable); `ls --label` filters on them")
 	f.StringVar(&urlAuth, "url-auth", "", "who may reach the URL: public (default) or org, which needs an API key of the org")
+	f.DurationVar(&idleTimeout, "idle-timeout", 0, "how long it stays up after its last activity before suspending, 1s..1h (default 60s); for a daemon nothing connects to")
 	f.BoolVar(&skipConsole, "skip-console", false, "exit after creating instead of opening a console")
 	Describe(c, Doc{
 		What: "A create is a restore from a golden template, not a boot, which is\n" +
@@ -319,7 +327,11 @@ func newMachinesInfoCmd(env *Env) *cobra.Command {
 			if m.CustomDomain != "" {
 				rows = append(rows, []string{"DOMAIN", m.CustomDomain})
 			}
-			rows = append(rows, []string{"AUTO STOP", m.Knobs.AutoStop}, []string{"AUTO START", strconv.FormatBool(m.Knobs.AutoStart)})
+			rows = append(rows,
+				[]string{"AUTO STOP", m.Knobs.AutoStop},
+				[]string{"AUTO START", strconv.FormatBool(m.Knobs.AutoStart)},
+				[]string{"IDLE TIMEOUT", (time.Duration(m.Knobs.IdleTimeout) * time.Second).String()},
+			)
 			return env.W.Table([]string{"", ""}, rows)
 		},
 	}

@@ -132,16 +132,24 @@ func (d mcpDeps) registerTools(s *mcp.Server) {
 		Cmd        string            `json:"cmd,omitempty" jsonschema:"the start command, overriding the image"`
 		Env        map[string]string `json:"env,omitempty"`
 		Labels     map[string]string `json:"labels,omitempty" jsonschema:"labels to find it by later; list_machines filters on them"`
+		// Seconds rather than a duration string: the API's own unit, so the
+		// value an agent reads back from the machine is the value it sent.
+		IdleTimeout int `json:"idle_timeout,omitempty" jsonschema:"seconds of quiet before the machine suspends, 1..3600 (default 60); set it for a daemon nothing connects to"`
 	}
 	mcp.AddTool(s, &mcp.Tool{Name: "create_machine", Title: "Create a machine",
 		Description: "Create a microVM. A create is a restore from a template rather than a boot, so it is fast. " +
-			"The same primitive serves both a throwaway sandbox and a production replica; only the lifecycle knobs differ."},
+			"The same primitive serves both a throwaway sandbox and a production replica; only the lifecycle knobs differ. " +
+			"It suspends after idle_timeout seconds of quiet (default 60) and wakes on the next request or exec; a console session running a command counts as activity."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in createIn) (*mcp.CallToolResult, any, error) {
 			return wrap(func() (any, error) {
-				return client.Machines.Create(ctx, pilots.CreateMachineRequest{
+				req := pilots.CreateMachineRequest{
 					Name: in.Name, Image: in.Image, Template: in.Template, Checkpoint: in.Checkpoint,
 					VCPUs: in.VCPUs, MemMiB: in.MemMiB, App: in.App, Cmd: in.Cmd, Env: in.Env, Labels: in.Labels,
-				})
+				}
+				if in.IdleTimeout != 0 {
+					req.Knobs = &pilots.KnobsPatch{IdleTimeout: pilots.Ptr(in.IdleTimeout)}
+				}
+				return client.Machines.Create(ctx, req)
 			}, constant("exec on the returned id"))
 		})
 
