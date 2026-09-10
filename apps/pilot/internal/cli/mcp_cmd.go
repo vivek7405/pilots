@@ -46,10 +46,12 @@ func newMCPCmd(env *Env, getenv config.Env) *cobra.Command {
 			"pilot mcp             # what the agent runs; not meant for a terminal",
 		},
 		Related: []string{
+			"pilot mcp install     register the server with Claude Code, Codex, Cursor, …",
 			"pilot init            copy the skill in and register the server",
 			"pilot skill install   link the skill into ~/.claude/skills",
 		},
 	})
+	c.AddCommand(newMCPInstallCmd(env, getenv))
 	return c
 }
 
