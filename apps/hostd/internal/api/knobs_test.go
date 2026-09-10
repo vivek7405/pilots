@@ -70,6 +70,27 @@ func TestDecodeKnobsEmptyInputIsDefaults(t *testing.T) {
 	}
 }
 
+// The plan route serialises a step's knobs as this struct, and the CLI reads
+// them back as a patch: an empty list must survive that trip as [] (clear the
+// inherited crons) and a nil one as null (inherit them). omitempty would
+// drop both, and `schedules: []` in a compose file would then inherit exactly
+// what it was written to remove.
+func TestAnEmptySchedulesListSurvivesTheWire(t *testing.T) {
+	k := DefaultKnobs()
+	k.Schedules = []Schedule{}
+	raw, err := MarshalKnobs(k)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(raw, `"schedules":[]`) {
+		t.Errorf("an empty list was dropped from the wire: %s", raw)
+	}
+	raw, _ = MarshalKnobs(DefaultKnobs())
+	if !strings.Contains(raw, `"schedules":null`) {
+		t.Errorf("a nil list should be null, so a patch reads it as absent: %s", raw)
+	}
+}
+
 // A schedule is a cron the matcher accepts and exactly one target; the whole
 // list is bounded. Each refusal names the entry so a compose file or a
 // package.json can be fixed in one pass.

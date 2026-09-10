@@ -25,10 +25,10 @@ export interface Knobs {
   /** Seconds of quiet before the machine suspends, 1..3600 (default 60). */
   idle_timeout: number
   /**
-   * The machine's cron jobs; absent means none. On a deploy an absent key
+   * The machine's cron jobs; `null` means none. On a deploy an absent key
    * inherits the previous release's and an explicit `[]` clears them.
    */
-  schedules?: Schedule[]
+  schedules: Schedule[] | null
 }
 
 /**

@@ -35,11 +35,17 @@ type Knobs struct {
 	IdleTimeout int `json:"idle_timeout"` // seconds, 1..MaxIdleTimeoutSeconds
 	// Schedules are the machine's cron jobs: on each expression's minute the
 	// owning host wakes the machine if it must and either GETs Path on it
-	// through the router or runs Cmd in it. Absent means none. omitempty is
-	// load-bearing for the replica case: a deploy's knobs are merged onto
-	// the previous replica's, so an absent key inherits and an explicit []
-	// clears -- "remove every cron" is spelled schedules: [].
-	Schedules []Schedule `json:"schedules,omitempty"`
+	// through the router or runs Cmd in it. null means none.
+	//
+	// NOT omitempty, and that is load-bearing: a deploy's knobs are merged
+	// onto the previous replica's, so an absent key inherits and an explicit
+	// [] clears -- "remove every cron" is spelled schedules: []. This struct
+	// is what the plan route serialises a step's knobs as, and omitempty
+	// drops an EMPTY slice as readily as a nil one, so `schedules: []` in a
+	// compose file (or `crons: []` in package.json) would reach the CLI as
+	// no key at all and inherit exactly what it was written to remove. nil
+	// marshals as null, which every reader already treats as absent.
+	Schedules []Schedule `json:"schedules"`
 }
 
 // Schedule is one cron job: an expression and exactly one of a path to GET

@@ -19,9 +19,10 @@ type Knobs struct {
 	MinMachinesRunning int    `json:"min_machines_running"` // 0 = scale to zero
 	SoftLimit          int    `json:"soft_limit"`
 	IdleTimeout        int    `json:"idle_timeout"` // seconds of quiet before suspend, 1..3600
-	// Schedules are the machine's cron jobs; absent means none. On a deploy an
-	// absent key inherits the previous release's and an explicit empty list
-	// clears them, which is why KnobsPatch carries a pointer to a slice.
+	// Schedules are the machine's cron jobs; null (nil here) means none. On a
+	// deploy an absent key inherits the previous release's and an explicit
+	// empty list clears them, which is why KnobsPatch carries a pointer to a
+	// slice.
 	Schedules []Schedule `json:"schedules,omitempty"`
 }
 
