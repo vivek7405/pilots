@@ -28,7 +28,14 @@ A cron is a request on a schedule. Declare it and the platform GETs the path at 
         - cron: "@hourly"
           cmd: /app/bin/tick      # a command instead, for work with no route; it runs as the app user from its home, so spell the path out
 
-A webjs app needs none of that: it declares crons in its own `package.json` (`"webjs": { "crons": [{ "path": "/jobs/digest", "schedule": "0 5 * * *" }] }`) and `deploy` reads them. Any other framework uses the compose keys above; a sandbox takes `pilot machines create --schedule "0 5 * * * /jobs/digest"`.
+An app can declare them in its own config instead, and `deploy` reads it, so a cron needs no pilots-specific file at all:
+
+| The app has | Write |
+| --- | --- |
+| a `vercel.json` (Next, Astro, SvelteKit, Nuxt, Remix — anything) | `{ "crons": [{ "path": "/api/digest", "schedule": "0 5 * * *" }] }` |
+| a webjs `package.json` | `"webjs": { "crons": [{ "path": "/jobs/digest", "schedule": "0 5 * * *" }] }` |
+
+Same shape either way, and `vercel.json` is read whatever the app is written in — a Rails or Django service with that file gets its crons too. A webjs app's own block wins where both are present. A sandbox takes `pilot machines create --schedule "0 5 * * * /jobs/digest"`.
 
 What the handler sees is a `GET` carrying `X-Pilot-Cron: <expression>`. The public edge strips that header from every outside request, so `if (!req.headers['x-pilot-cron']) return 403` is the whole check, with no secret to keep. A job can fire twice in rare cases (a host restart inside its minute), so make it idempotent; a job still running when its next minute comes is skipped, not overlapped. One replica fires for a service, however many it has. To remove every cron, deploy with `schedules: []` (or `crons: []`); an absent key keeps the previous release's.
 

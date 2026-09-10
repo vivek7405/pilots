@@ -109,6 +109,11 @@ func Plan(ctx context.Context, dir string, opts Options) (*Result, *compose.Plan
 	if _, err := os.Stat(filepath.Join(dir, "Dockerfile")); err == nil {
 		step := baseStep("web")
 		step.Build = &compose.Build{Context: "."}
+		// Its crons still count. Writing a Dockerfile is a decision about how
+		// the app is built, and says nothing about when its jobs run.
+		if err := applyDeclaredSchedules(&step, FrameworkUnknown, dir); err != nil {
+			return nil, nil, nil, err
+		}
 		return &Result{
 			Plan: compose.Plan{App: app, Steps: []compose.Step{step}},
 			Detected: []compose.Detected{{
@@ -130,7 +135,7 @@ func Plan(ctx context.Context, dir string, opts Options) (*Result, *compose.Plan
 		step.Build = &compose.Build{Context: "."}
 		step.Dockerfile = recipe.Dockerfile
 		step.Health = recipe.Health
-		if err := applyFrameworkKnobs(&step, recipe.Framework, dir); err != nil {
+		if err := applyDeclaredSchedules(&step, recipe.Framework, dir); err != nil {
 			return nil, nil, nil, err
 		}
 		return &Result{
@@ -188,7 +193,7 @@ func planWorkspaces(dir, app string, members []string) (*Result, error) {
 		step.Build = &compose.Build{Context: "."}
 		step.Dockerfile = member.Dockerfile
 		step.Health = member.Health
-		if err := applyFrameworkKnobs(&step, member.Framework, filepath.Join(dir, rel)); err != nil {
+		if err := applyDeclaredSchedules(&step, member.Framework, filepath.Join(dir, rel)); err != nil {
 			return nil, err
 		}
 		steps = append(steps, step)
@@ -208,20 +213,15 @@ func planWorkspaces(dir, app string, members []string) (*Result, error) {
 	return &Result{Plan: compose.Plan{App: app, Steps: steps}, Detected: detected}, nil
 }
 
-// applyFrameworkKnobs puts onto the step what the framework's own config file
-// declares about lifecycle -- today, a webjs app's crons. Nothing is set when
-// the file says nothing, so a step keeps carrying no knobs and the deploy
-// keeps merging onto the machine defaults exactly as before.
-func applyFrameworkKnobs(step *compose.Step, fw Framework, dir string) error {
-	if fw != FrameworkWebJS {
-		return nil
-	}
-	crons, err := webjsCrons(dir)
-	if err != nil {
+// applyDeclaredSchedules puts onto the step the cron jobs the app's own config
+// declares (declaredCrons: vercel.json for anything, package.json's
+// webjs.crons for a webjs app). Nothing is set when neither file says
+// anything, so a step keeps carrying no knobs at all and the deploy keeps
+// merging onto the machine defaults exactly as before.
+func applyDeclaredSchedules(step *compose.Step, fw Framework, dir string) error {
+	crons, err := declaredCrons(dir, fw)
+	if err != nil || crons == nil {
 		return err
-	}
-	if crons == nil {
-		return nil
 	}
 	k := api.DefaultKnobs()
 	k.Schedules = crons

@@ -3350,8 +3350,9 @@ async function dataRouteAssertions() {
         `health = ${JSON.stringify(json.detected[0].health)}`);
     });
 
-    // #110: a webjs app's crons live in its own package.json, with Vercel's
-    // field names, and the plan carries them as the step's schedules. Nothing
+    // #110: an app's crons live in its OWN config -- a webjs app's
+    // package.json, anything else's vercel.json, one shape between them --
+    // and the plan carries them as the step's schedules. Nothing
     // pilots-specific was written; a bad entry is refused by name.
     await step('the plan route turns package.json webjs.crons into schedules', async () => {
       const files = readTree(WEBJS_FIXTURE);
@@ -3371,6 +3372,39 @@ async function dataRouteAssertions() {
       json = await res.json();
       assert(res.status === 400, `a malformed cron should be a 400, got ${res.status}: ${JSON.stringify(json)}`);
       assert(JSON.stringify(json).includes('webjs.crons'), `the refusal should name webjs.crons: ${JSON.stringify(json)}`);
+    });
+
+    // The framework-agnostic half of the same contract. vercel.json is what
+    // Next, Astro, SvelteKit, Nuxt and Remix users already write, and it is
+    // read for ANY app -- here one that brought nothing but a Dockerfile, so
+    // no recipe and no framework are involved at all.
+    await step('the plan route turns vercel.json crons into schedules for any app', async () => {
+      const app = {
+        Dockerfile: 'FROM scratch\n',
+        'vercel.json': JSON.stringify({ crons: [{ path: '/api/digest', schedule: '0 5 * * *' }] }),
+      };
+      let res = await postTar('/v1/plan?app=fx', tarball(app));
+      let json = await res.json();
+      assert(res.status === 200, `expected 200, got ${res.status}: ${JSON.stringify(json)}`);
+      assert(json.detected[0].source === 'dockerfile', `source = ${json.detected[0].source}`);
+      const schedules = json.plan.steps[0].knobs?.schedules;
+      assert(Array.isArray(schedules) && schedules.length === 1 && schedules[0].path === '/api/digest',
+        `schedules = ${JSON.stringify(json.plan.steps[0].knobs)}`);
+
+      // Spelled wrongly in a file that parses: named, not dropped.
+      res = await postTar('/v1/plan?app=fx', tarball({
+        ...app, 'vercel.json': JSON.stringify({ crons: [{ path: 'api/digest', schedule: 'every day' }] }),
+      }));
+      json = await res.json();
+      assert(res.status === 400, `a malformed cron should be a 400, got ${res.status}: ${JSON.stringify(json)}`);
+      assert(JSON.stringify(json).includes('vercel.json'), `the refusal should name vercel.json: ${JSON.stringify(json)}`);
+
+      // A file that does not parse declares nothing readable, and must not
+      // stop an app from shipping.
+      res = await postTar('/v1/plan?app=fx', tarball({ ...app, 'vercel.json': '{ not json' }));
+      json = await res.json();
+      assert(res.status === 200, `an unparseable vercel.json should be ignored, got ${res.status}: ${JSON.stringify(json)}`);
+      assert(!json.plan.steps[0].knobs, `it produced knobs: ${JSON.stringify(json.plan.steps[0].knobs)}`);
     });
 
     await step('a Dockerfile beats a recipe, and a compose file beats both', async () => {

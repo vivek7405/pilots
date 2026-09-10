@@ -773,7 +773,7 @@ type deployIn = struct {
 	Env          map[string]string   `json:"env,omitempty"`
 	SecretEnv    map[string]string   `json:"secret_env,omitempty"`
 	Replicas     int                 `json:"replicas,omitempty"`
-	Schedules    []pilots.Schedule   `json:"schedules,omitempty" jsonschema:"cron jobs for the service: {cron, path} GETs the path on a replica on that schedule (five fields, UTC, or @hourly/@daily/@weekly/@monthly), {cron, cmd} runs a command; a webjs app declares these in its own package.json webjs.crons instead"`
+	Schedules    []pilots.Schedule   `json:"schedules,omitempty" jsonschema:"cron jobs for the service: {cron, path} GETs the path on a replica on that schedule (five fields, UTC, or @hourly/@daily/@weekly/@monthly), {cron, cmd} runs a command; an app that declares its own (vercel.json crons, or package.json webjs.crons) needs none of this"`
 }
 
 // applyOverrides: a health or replicas passed alongside dir and then quietly

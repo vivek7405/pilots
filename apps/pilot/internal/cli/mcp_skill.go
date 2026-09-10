@@ -195,7 +195,7 @@ THE PRIMITIVE
   suspends (a freeze; it resumes on the next exec or request); a console
   running a command keeps it up, idle_timeout sets the wait for a daemon.
   A cron is a GET on a path on a schedule (schedules on create or deploy;
-  webjs.crons in package.json); the host wakes the machine for it.
+  or the app's own vercel.json / webjs.crons); the host wakes it for one.
 
 RULES
   No directory and no repo in the conversation: ask, never invent one.
