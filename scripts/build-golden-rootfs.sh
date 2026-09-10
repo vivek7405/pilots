@@ -37,6 +37,15 @@ IMAGE="${IMAGE:-pilots-golden-rootfs}"
 # files were dated 2030 built to the same bytes. The value is a constant and
 # not `date +%s`: reproducible has to mean across time, not within one run.
 # Changing the image's CONTENT changes the hash regardless, which is the point.
+#
+# The scope of the guarantee, because it is narrower than it looks: the same
+# tree on the same TOOLCHAIN builds the same bytes. A different e2fsprogs
+# lays the filesystem out differently and a different Go builds a different
+# agent, so a CI runner and a developer laptop do not agree -- measured, not
+# assumed. That is enough to make a rebuild idempotent, which is what was
+# missing. It is NOT enough to make the committed pin mean the same thing on
+# another machine; that needs the toolchain pinned too, or the image
+# published and downloaded rather than rebuilt. See #108.
 : "${SOURCE_DATE_EPOCH:=1700000000}"
 FS_UUID="${FS_UUID:-6f696c70-7473-4000-8000-676f6c64656e}"
 FS_HASH_SEED="${FS_HASH_SEED:-70696c6f-7473-4000-8000-736565646564}"
