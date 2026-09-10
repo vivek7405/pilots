@@ -33,7 +33,17 @@ api() { # api <ip> <method> <path> [body]
   fi
 }
 
-jf() { python3 -c "import sys,json;d=json.load(sys.stdin);print(d.get('$1',''))"; }
+# Empty on anything that is not JSON with that key, rather than a traceback.
+# A failing call answers an error body or nothing at all, and a stack trace
+# printed over the top of the assertion that failed is the least useful thing
+# this script could say at exactly the moment it matters most.
+jf() { python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print(''); raise SystemExit
+print(d.get('$1', '') if isinstance(d, dict) else '')"; }
 
 # build_image <ip> <dockerfile> -> the rootfs build id on stdout, or empty.
 #
@@ -2579,6 +2589,98 @@ print(' '.join(m['id'] for m in json.load(sys.stdin) if m.get('service_id') == '
       api "$DV_BUILDER" DELETE "/v1/machines/${m}" >/dev/null 2>&1
     done
     rm -rf "$DV_TMP"
+  fi
+fi
+
+say "23. A golden template whose snapshot is gone is re-derived, not served"
+# A manifest naming a vmstate object that is no longer in the bucket passes
+# every check hostd makes: loadTemplate verifies the build headers on that
+# disk and the page size of that host, and neither can see that the snapshot
+# the restore will reach for has been deleted. So the manifest was served as
+# good and every create restoring against it failed identically, forever:
+#
+#   uffd: handler exited before its socket was listening
+#   s3: not found: fc: artifact missing: template/<id>/snap.bin
+#
+# Found on this rig: cluster-up.sh wiped /var/lib/pilots and called the node
+# wiped, while the manifest lives under /var/cache/pilots, so a re-run kept
+# the previous fleet's manifest. It cost the e2e battery 52 assertions before
+# anyone worked out why. Both halves are fixed -- the wipe takes both roots
+# now -- but the wipe is not the only way an object goes missing, so this
+# asserts the recovery rather than the tidiness.
+#
+# This needs a host shell (AGENTS.md): the condition is a file on a host and
+# the evidence is that host's journal. Nothing about it is visible from the
+# public API until the create either works or does not.
+if [ "${#LIVE_IPS[@]}" -lt 1 ]; then
+  bad "need a live host to break a template on; have ${#LIVE_IPS[@]}"
+else
+  TT_IP="${LIVE_IPS[0]}"
+  TT_MANIFEST=/var/cache/pilots/template/template.json
+  TT_BEFORE=$($SSH "root@$TT_IP" "cat $TT_MANIFEST 2>/dev/null" 2>/dev/null)
+  if [ -z "$TT_BEFORE" ]; then
+    bad "${TT_IP} has no template manifest to break; it has never built one"
+  else
+    ok "${TT_IP} has a golden template to break"
+
+    # Point the manifest at a snapshot that cannot exist, leaving the build
+    # ids and the page size alone so it still passes every LOCAL check. That
+    # is the whole point: the manifest has to look good to the host and be
+    # unusable in fact, which is exactly the state the rig was found in.
+    $SSH "root@$TT_IP" "python3 - <<'PYEOF'
+import json, uuid
+p = '$TT_MANIFEST'
+t = json.load(open(p))
+t['snap_key'] = 'template/%s/snap.bin' % uuid.uuid4()
+json.dump(t, open(p, 'w'), indent=2)
+print(t['snap_key'])
+PYEOF" >/dev/null 2>&1
+
+    TT_BROKEN=$($SSH "root@$TT_IP" "python3 -c \"import json;print(json.load(open('$TT_MANIFEST'))['snap_key'])\"" 2>/dev/null | tr -d '[:space:]')
+    if [ -z "$TT_BROKEN" ]; then
+      bad "could not point ${TT_IP}'s manifest at a missing snapshot"
+    else
+      ok "${TT_IP} now names a snapshot that is not in the bucket"
+      TT_SINCE=$(date -u '+%Y-%m-%d %H:%M:%S')
+
+      # A create is the only thing that reaches for the snapshot, so it is
+      # the only thing that can discover the manifest is unusable.
+      TT_M=$(api "$TT_IP" POST /v1/machines "{\"name\":\"tmpl-heal-$$\"}" | jf id)
+      if [ -z "$TT_M" ]; then
+        bad "the create failed outright; a host with an unusable template must re-derive one, not refuse"
+      else
+        ok "the create succeeded (${TT_M}) despite the template naming a missing snapshot"
+
+        TT_AFTER=$($SSH "root@$TT_IP" "python3 -c \"import json;print(json.load(open('$TT_MANIFEST'))['snap_key'])\"" 2>/dev/null | tr -d '[:space:]')
+        [ -n "$TT_AFTER" ] && [ "$TT_AFTER" != "$TT_BROKEN" ] \
+          && ok "the manifest was re-derived (${TT_BROKEN} is gone from it)" \
+          || bad "the manifest still names the missing snapshot: ${TT_AFTER}"
+
+        # The recovery has to be visible to an operator. A host that silently
+        # rebuilds a minute-long template on a create looks like a hang.
+        TT_LOG=$($SSH "root@$TT_IP" "journalctl -u hostd --since '${TT_SINCE}' --no-pager 2>/dev/null | grep -c 'names a snapshot that is gone'" 2>/dev/null | tr -d '[:space:]')
+        [ "${TT_LOG:-0}" -ge 1 ] \
+          && ok "hostd said why it re-derived the template" \
+          || bad "hostd re-derived the template without saying so; an operator sees only a slow create"
+
+        # And the machine is a real one, not a row. A create returns once the
+        # restore is up, so this is a read rather than a poll -- the same way
+        # every other section checks a fresh machine.
+        [ "$(api "$TT_IP" GET "/v1/machines/${TT_M}" | jf state)" = running ] \
+          && ok "the machine created against the re-derived template is running" \
+          || bad "the machine created against the re-derived template is not running"
+
+        api "$TT_IP" DELETE "/v1/machines/${TT_M}" >/dev/null 2>&1
+      fi
+
+      # A second create must be ordinary: the fix re-derives once, it does not
+      # rebuild on every create forever.
+      TT_M2=$(api "$TT_IP" POST /v1/machines "{\"name\":\"tmpl-heal2-$$\"}" | jf id)
+      [ -n "$TT_M2" ] \
+        && ok "the next create is ordinary again" \
+        || bad "the host did not settle; a second create still fails"
+      [ -n "$TT_M2" ] && api "$TT_IP" DELETE "/v1/machines/${TT_M2}" >/dev/null 2>&1
+    fi
   fi
 fi
 
