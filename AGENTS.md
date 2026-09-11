@@ -80,6 +80,9 @@ packages/cli/      the previous TypeScript `pilot` CLI, kept until apps/pilot
                    is at parity and the swap is made; its skill/ pages are
                    the ones apps/pilot serves
 apps/vscode/       the VS Code extension: a machine as a workspace folder
+apps/nvim/         the Neovim plugin: the same, over a pilot:// URL scheme;
+                   its guest commands are a port of the extension's, so a
+                   fix to one is a fix owed to the other
 sdks/js, go,       typed clients; each carries a drift test against
   python, elixir     apps/hostd/internal/api
 scripts/           one-shot bash + the e2e battery

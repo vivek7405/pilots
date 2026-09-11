@@ -119,6 +119,21 @@ jobs:
       - run: mix test
       - run: mix format --check-formatted
 
+  nvim:
+    name: nvim plugin
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # The suite runs in Neovim itself rather than under busted, because
+      # busted is a luarocks install and a suite that needs one more system
+      # dependency than the plugin does is a suite that eventually gets
+      # skipped. Neovim is already required to USE the plugin.
+      - uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: stable
+      - run: nvim -l apps/nvim/test/run.lua
+
   vscode:
     name: vscode extension
     runs-on: ubuntu-24.04

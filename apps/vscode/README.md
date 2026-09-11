@@ -2,6 +2,11 @@
 
 A machine is a folder you are editing.
 
+For Neovim, `apps/nvim` does the same thing over a `pilot://` URL scheme. Its
+guest commands are a port of this extension's `src/guest.ts`, so a fix to the
+shell quoting, the listing or the payload bound in one is a fix owed to the
+other.
+
 `pilots: Open Machine` adds a `pilot://<name>/<path>` workspace folder, and
 from then on every ordinary thing the editor does happens inside the machine:
 open, edit, save, search, rename, drag a file in. `pilots: Open Terminal` puts
