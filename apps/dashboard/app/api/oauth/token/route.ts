@@ -88,15 +88,29 @@ export async function POST(req: Request): Promise<Response> {
   if (!created.key) return error('server_error', 'the fleet returned no key', 502);
 
   const client = await findClient(clientId);
-  await db.insert(apiKeys).values({
-    orgId: grant.orgId,
-    name: `oauth ${client?.name ?? clientId}`.slice(0, 100),
-    prefix: prefixOf(created.key),
-    hash: created.hash,
-    scopes: grant.scopes,
-    createdBy: grant.userId,
-    clientId,
-  });
+  // The key is ALREADY live on the fleet, so a failure here would leave a
+  // credential nothing can revoke: the tokens page lists this table, and the
+  // code is single-use, so the caller cannot even retry into a clean state.
+  // The key is killed rather than left behind.
+  try {
+    await db.insert(apiKeys).values({
+      orgId: grant.orgId,
+      name: `oauth ${client?.name ?? clientId}`.slice(0, 100),
+      prefix: prefixOf(created.key),
+      hash: created.hash,
+      scopes: grant.scopes,
+      createdBy: grant.userId,
+      clientId,
+    });
+  } catch (err) {
+    try {
+      await fleet.apiKeys.revoke(created.hash);
+    } catch {
+      // Nothing else to do: the answer below is still a refusal, and the key
+      // is recorded nowhere the client can use it from.
+    }
+    return error('server_error', `the token could not be recorded: ${(err as Error).message}`, 500);
+  }
 
   const lifetime = grant.keyExpiresAt ? Math.floor((grant.keyExpiresAt.getTime() - Date.now()) / 1000) : null;
   return jsonBody(
