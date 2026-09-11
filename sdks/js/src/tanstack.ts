@@ -216,10 +216,20 @@ export class PilotsSandboxHandle implements SandboxHandle {
       },
       write: async (path, data) => {
         const bytes = typeof data === 'string' ? new TextEncoder().encode(data) : data
-        const encoded = btoa(String.fromCharCode(...bytes))
+        // Chunked, not spread: `String.fromCharCode(...bytes)` passes one
+        // argument per byte, which overflows the call stack somewhere past
+        // 128 KB and dies with a RangeError naming neither the file nor the
+        // size.
+        let raw = ''
+        for (let at = 0; at < bytes.length; at += 0x8000) {
+          raw += String.fromCharCode(...bytes.subarray(at, at + 0x8000))
+        }
+        const encoded = btoa(raw)
         const target = shellQuote(this.abs(path))
+        // The parent is QUOTED: unquoted, a path with a space makes two wrong
+        // directories and the redirect then fails on the one it meant.
         const res = await this.run(
-          `mkdir -p -- $(dirname ${target}) && printf %s ${shellQuote(encoded)} | base64 -d > ${target}`,
+          `mkdir -p -- "$(dirname -- ${target})" && printf %s ${shellQuote(encoded)} | base64 -d > ${target}`,
         )
         if (res.exitCode !== 0) throw new PilotsError(res.stderr.trim() || `cannot write ${path}`)
       },
@@ -241,7 +251,12 @@ export class PilotsSandboxHandle implements SandboxHandle {
         }))
       },
       mkdir: async (path) => {
-        await this.run(`mkdir -p -- ${shellQuote(this.abs(path))}`)
+        // `cwd: '/'`, not the workdir: this is the call that CREATES the
+        // workdir, and every other exec chdirs into it first. A mkdir that
+        // chdirs into the directory it is about to make fails the fork, exit
+        // 127 with no stderr, and the failure only surfaces on the next call.
+        const res = await this.run(`mkdir -p -- ${shellQuote(this.abs(path))}`, { cwd: '/' })
+        if (res.exitCode !== 0) throw new PilotsError(res.stderr.trim() || `cannot create ${path}`)
       },
       remove: async (path) => {
         await this.run(`rm -rf -- ${shellQuote(this.abs(path))}`)
