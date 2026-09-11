@@ -311,6 +311,13 @@ func applyOverrides(plan *pilots.ComposePlan, in deployIn) error {
 	if in.CustomDomain != "" {
 		given = append(given, "custom_domain")
 	}
+	if in.Private {
+		// Listed like every other override: without it, `deploy {dir,
+		// private: true}` with nothing else set returns below and ships a
+		// PUBLIC service, which is the silent drop this function exists to
+		// prevent.
+		given = append(given, "private")
+	}
 	if len(given) == 0 {
 		return nil
 	}
