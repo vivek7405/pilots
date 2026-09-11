@@ -161,7 +161,10 @@ class MachineSession:
             }
         encoded = base64.b64encode(content.encode()).decode()
         res = self.execute_command(
-            f"mkdir -p -- $(dirname {_quote(path)}) && printf %s {_quote(encoded)} | base64 -d > {_quote(path)}"
+            # The parent is QUOTED: unquoted, `$(dirname '/app/my dir/x')`
+            # word-splits into two directories, neither the one the redirect
+            # below then needs.
+            f'mkdir -p -- "$(dirname -- {_quote(path)})" && printf %s {_quote(encoded)} | base64 -d > {_quote(path)}'
         )
         if res.get("success"):
             return {"success": True, "path": path, "bytes": len(content.encode())}

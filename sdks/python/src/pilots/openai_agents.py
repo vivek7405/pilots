@@ -151,7 +151,10 @@ class PilotsSandboxSession:
         target = self._abs(path)
         encoded = base64.b64encode(raw).decode()
         res = self.exec_sync(
-            f"mkdir -p -- $(dirname {_quote(target)}) && printf %s {_quote(encoded)} | base64 -d > {_quote(target)}"
+            # The parent is QUOTED: unquoted, `$(dirname '/app/my dir/x')`
+            # word-splits into two directories, neither the one the redirect
+            # below then needs.
+            f'mkdir -p -- "$(dirname -- {_quote(target)})" && printf %s {_quote(encoded)} | base64 -d > {_quote(target)}'
         )
         if res.exit_code != 0:
             raise PilotsError(res.stderr.strip() or f"cannot write {path}")

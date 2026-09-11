@@ -225,14 +225,21 @@ class ExecStream:
         return self._code
 
     def output(self, timeout: float | None = None) -> tuple[bytes, bytes, int]:
-        """Drains both pipes and waits: ``(stdout, stderr, exit_code)``."""
+        """Waits for the exit, then drains both pipes: ``(stdout, stderr, exit_code)``.
+
+        The WAIT comes first, and the order is the whole reason ``timeout``
+        means anything: a pipe is only closed by the exit frame or a dropped
+        socket, so draining first blocks forever on a command that is alive and
+        silent -- and ``timeout`` would bound nothing. Once the exit has
+        arrived, both pipes are already at EOF and the reads return at once.
+        """
+        code = self.wait(timeout)
         out_box: list[bytes] = []
         err_box: list[bytes] = []
         t = threading.Thread(target=lambda: err_box.append(self.stderr.read()), daemon=True)
         t.start()
         out_box.append(self.stdout.read())
         t.join()
-        code = self.wait(timeout)
         return out_box[0], err_box[0], code
 
     def write_stdin(self, chunk: bytes | str) -> None:
