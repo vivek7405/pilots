@@ -1,6 +1,7 @@
 {
   "name": "@pilots/cli",
   "version": "0.1.0",
+  "private": true,
   "type": "module",
   "license": "MIT",
   "description": "The pilot CLI and its MCP server: sandboxes and services on one primitive",
