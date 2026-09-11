@@ -500,12 +500,12 @@ func checkHarnesses(getenv config.Env) check {
 // String literals are tracked, so a "http://..." value is not mistaken for a
 // comment -- which is the whole reason this is not a regexp.
 func stripJSONComments(raw []byte) []byte {
-	out := make([]byte, 0, len(raw))
+	buf := make([]byte, 0, len(raw))
 	inString, escaped := false, false
 	for i := 0; i < len(raw); i++ {
 		c := raw[i]
 		if inString {
-			out = append(out, c)
+			buf = append(buf, c)
 			switch {
 			case escaped:
 				escaped = false
@@ -518,7 +518,7 @@ func stripJSONComments(raw []byte) []byte {
 		}
 		if c == '"' {
 			inString = true
-			out = append(out, c)
+			buf = append(buf, c)
 			continue
 		}
 		if c == '/' && i+1 < len(raw) {
@@ -528,7 +528,7 @@ func stripJSONComments(raw []byte) []byte {
 				}
 				// Keep the newline: it separates the tokens around it.
 				if i < len(raw) {
-					out = append(out, '\n')
+					buf = append(buf, '\n')
 				}
 				continue
 			}
@@ -541,7 +541,7 @@ func stripJSONComments(raw []byte) []byte {
 				continue
 			}
 		}
-		out = append(out, c)
+		buf = append(buf, c)
 	}
-	return out
+	return buf
 }
