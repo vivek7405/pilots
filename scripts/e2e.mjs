@@ -1678,6 +1678,104 @@ async function buildAssertions() {
     assert(/this-command-does-not-exist/.test(JSON.stringify(lines)),
       'nothing in the stream names the instruction that failed');
   });
+
+  // A build runs INSIDE a microVM, not on the host. That is the whole of
+  // issue #114, and from the public API it is invisible: a build that
+  // succeeded looks the same either way. The guest kernel is the one piece of
+  // evidence a client can reach, because it is pinned and differs from
+  // whatever the host happens to run.
+  await step('a RUN step executes inside a guest, on the pinned guest kernel', async () => {
+    const res = await postTar('/v1/builds', tarball({
+      'Dockerfile': [
+        'FROM alpine:3.20',
+        'RUN uname -r > /etc/pilots-build-kernel',
+        'RUN cat /etc/pilots-build-kernel',
+      ].join('\n'),
+    }));
+    assert(res.status === 200, `expected 200, got ${res.status}`);
+    const lines = await readNDJSON(res);
+    const image = lines[lines.length - 1]?.result;
+    assert(image, `the build produced no rootfs: ${JSON.stringify(lines.slice(-2))}`);
+
+    const m = await request('/v1/machines', {
+      method: 'POST',
+      body: { name: `e2e-buildkernel-${Date.now()}`, image },
+    });
+    assert(m.status === 201 || m.status === 200, `create from the build: ${m.status}`);
+    const id = m.body.id;
+    try {
+      const out = await exec(id, 'cat /etc/pilots-build-kernel');
+      const buildKernel = (out.stdout || '').trim();
+      assert(buildKernel, 'the build recorded no kernel version');
+      // The pinned guest kernel. A RUN step that ran on the host would have
+      // recorded the host's, which is not this.
+      assert(/^6\.1\./.test(buildKernel),
+        `the RUN step saw kernel ${buildKernel}, which is not the pinned guest kernel`);
+    } finally {
+      await request(`/v1/machines/${id}`, { method: 'DELETE' });
+    }
+  });
+
+  // The daemon lives inside a machine the ORG controls, so it must not be
+  // able to reach anything on the private network -- least of all the object
+  // storage that holds every other tenant's images. Public egress still
+  // works, because a build has to pull a base image.
+  await step('a build reaches the internet and nothing on the private network', async () => {
+    const res = await postTar('/v1/builds', tarball({
+      'Dockerfile': [
+        'FROM alpine:3.20',
+        // Egress works: this is the pull itself plus a name lookup.
+        'RUN getent hosts registry-1.docker.io > /dev/null',
+        // And the private ranges do not. A connect that SUCCEEDS here would
+        // mean a tenant build could reach hostd, corrosion or the bucket.
+        'RUN if nc -z -w2 10.0.0.1 9000; then echo REACHED-PRIVATE; exit 1; fi; true',
+        'RUN if nc -z -w2 192.168.1.1 22; then echo REACHED-PRIVATE; exit 1; fi; true',
+      ].join('\n'),
+    }));
+    assert(res.status === 200, `expected 200, got ${res.status}`);
+    const lines = await readNDJSON(res);
+    assert(!/REACHED-PRIVATE/.test(JSON.stringify(lines)),
+      'a build reached a private network address');
+    assert(lines[lines.length - 1]?.result,
+      `the build failed: ${JSON.stringify(lines.slice(-3))}`);
+  });
+
+  // The builder is the org's machine: fly shows fly-builder-* in the org's
+  // list and lets you destroy it, and so do we. It must also not be counted
+  // against the org's machine quota, since nobody asked for it.
+  await step('the builder machine is visible to the org and destroyable', async () => {
+    const list = await request('/v1/machines');
+    assert(list.status === 200, `list machines: ${list.status}`);
+    const builders = (list.body.machines || list.body || [])
+      .filter((m) => typeof m.name === 'string' && m.name.startsWith('builder-'));
+    assert(builders.length >= 1,
+      'no builder machine is visible after a build; the org cannot see or clear it');
+
+    // Destroying it is allowed, and the next build simply makes another.
+    const victim = builders[0];
+    const del = await request(`/v1/machines/${victim.id}`, { method: 'DELETE' });
+    assert(del.status === 200 || del.status === 204, `destroy the builder: ${del.status}`);
+
+    const again = await postTar('/v1/builds', tarball({
+      'Dockerfile': 'FROM alpine:3.20\nRUN echo recovered > /etc/recovered\n',
+    }));
+    assert(again.status === 200, `rebuild after destroying the builder: ${again.status}`);
+    const lines = await readNDJSON(again);
+    assert(lines[lines.length - 1]?.result,
+      'the next build did not recreate a builder');
+  });
+
+  // A tenant must not be able to mint a machine the platform would then treat
+  // as a builder: the name decides whether the row counts against quota and
+  // whether the idle monitor reaps it after a day.
+  await step('a client cannot take a builder- name', async () => {
+    const res = await request('/v1/machines', {
+      method: 'POST',
+      body: { name: `builder-squat-${Date.now()}` },
+    });
+    assert(res.status >= 400 && res.status < 500,
+      `creating a builder- name returned ${res.status}, want a 4xx refusal`);
+  });
 }
 
 // ---------------------------------------------------------------------------

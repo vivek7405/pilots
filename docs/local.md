@@ -611,7 +611,7 @@ is resident in its host, and its host is one of these:
 
 **A smaller rig runs less of the gate, and says so.** `gate.sh` is written
 against the fleet it finds rather than a hard-coded three, but sections that
-need a spare host refuse out loud rather than quietly passing -- section 22
+need a spare host refuse out loud rather than quietly passing -- section 23
 answers `need two live hosts to read a release from a host that did not build
 it`. `NODES=1` is for proving the pipeline works, not for the gate.
 

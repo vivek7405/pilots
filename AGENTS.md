@@ -173,11 +173,14 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
   is bar 4 as a test rather than a claim.
 - `scripts/cluster/gate.sh` is the fleet battery, a numbered `say` section per
   property, run against the local multi-node rig. It grows monotonically too.
-  Section 21 covers the push path against `scripts/cluster/fake-github.py`,
+  Section 22 covers the push path against `scripts/cluster/fake-github.py`,
   because a delivery has no client on the other end and nothing about it is
-  observable from the public API alone. Section 22 kills a build's client
+  observable from the public API alone. Section 23 kills a build's client
   mid-build and reads the release it still cut from a host that did not build
   it — the shell half of the e2e battery's `deployOnVerdictAssertions`.
+  Section 25 asserts no host runs a build daemon at all, and kills a builder
+  machine mid-build: a build runs inside a microVM, so the wreckage of one
+  belongs to that guest and nothing of it may survive on the host.
 
 **Where a new test belongs** — the split is what can *observe* the assertion:
 
