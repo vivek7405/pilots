@@ -111,6 +111,12 @@ type job struct {
 	machine  state.Machine
 	schedule api.Schedule
 	key      string
+	// publicHost is the name a visitor reaches this app by, stamped as
+	// X-Forwarded-Host: the service's permanent address for a replica, the
+	// machine's own for a sandbox. The GET itself is always addressed to
+	// the machine, which is what keeps a service's fire on the one replica
+	// chosen for it.
+	publicHost string
 }
 
 // tick fires what is due this minute and forgets machines that are gone.
@@ -157,20 +163,36 @@ func (s *scheduler) due(minute time.Time) ([]job, map[string]bool) {
 		}
 	}()
 	for _, m := range machines {
-		if m.HostID != s.hostID || !fireable(m.State) {
+		if m.HostID != s.hostID {
 			continue
 		}
 		knobs := api.ParseKnobs(m.KindKnobs)
 		if len(knobs.Schedules) == 0 {
 			continue
 		}
-		if m.ReleaseID != "" && !firesForService(m, services[m.ServiceID], machines) {
+		// What this host still carries, recorded BEFORE any question of
+		// whether it may fire now. A machine mid-transition (creating, a
+		// wake in progress) keeps its fired record, so coming back inside
+		// the same minute does not fire it a second time.
+		for i, sched := range knobs.Schedules {
+			seen[m.ID+"#"+strconv.Itoa(i)] = true
+			usedExpr[sched.Cron] = true
+		}
+		if !fireable(m.State) {
 			continue
+		}
+		publicHost := m.Name + "." + s.domain
+		if m.ReleaseID != "" {
+			svc := services[m.ServiceID]
+			if !firesForService(m, svc, machines) {
+				continue
+			}
+			if svc.Domain != "" {
+				publicHost = svc.Domain + "." + s.domain
+			}
 		}
 		for i, sched := range knobs.Schedules {
 			key := m.ID + "#" + strconv.Itoa(i)
-			seen[key] = true
-			usedExpr[sched.Cron] = true
 			p, cached := s.specs[sched.Cron]
 			if !cached {
 				spec, err := cron.Parse(sched.Cron)
@@ -198,7 +220,7 @@ func (s *scheduler) due(minute time.Time) ([]job, map[string]bool) {
 			}
 			s.fired[key] = minute
 			s.running[key] = true
-			jobs = append(jobs, job{machine: m, schedule: sched, key: key})
+			jobs = append(jobs, job{machine: m, schedule: sched, key: key, publicHost: publicHost})
 		}
 	}
 	return jobs, seen
@@ -257,14 +279,16 @@ func (s *scheduler) fireGET(ctx context.Context, j job, start time.Time) {
 	// The forwarding marker is what the internal handler requires of every
 	// caller; the cron marker is what the app reads. Neither can arrive from
 	// outside. The internal handler does not run setEdgeHeaders, so the two
-	// headers it would have stamped are set here, with the scheme a visitor
-	// actually arrives on: an app building absolute URLs in a job builds the
-	// ones its visitors see, on a TLS host and on a plain one.
+	// headers it would have stamped are set here with what a visitor's
+	// request carries: the scheme it arrives on, and the name it was sent to
+	// -- the service's permanent address for a replica, never the replica's
+	// own name, which is gone after the next release. An app building
+	// absolute links in a job builds the ones its visitors see.
 	req.Header.Set(router.ForwardedHeader, s.hostID)
 	req.Header.Set(router.CronHeader, j.schedule.Cron)
 	req.Header.Set("User-Agent", "pilot-cron/1")
 	req.Header.Set("X-Forwarded-Proto", s.proto)
-	req.Header.Set("X-Forwarded-Host", req.Host)
+	req.Header.Set("X-Forwarded-Host", j.publicHost)
 
 	w := &statusWriter{}
 	s.handler.ServeHTTP(w, req)

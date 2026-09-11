@@ -213,6 +213,10 @@ func (m *Manager) shouldSuspend(ctx context.Context, row state.Machine) bool {
 	// with it; the guest's process tree is the view that remains. This is the
 	// one step that talks to the guest, which is why it is not the first.
 	if slot, ok := m.SlotFor(row.ID); ok && m.sessionsBusy(ctx, row.ID, slot.AgentAddr()) {
+		// A running command is activity, and activity restarts the wait:
+		// without this touch the machine would suspend on the first tick
+		// after the command ended, not idle_timeout later as promised.
+		m.Touch(ctx, row.ID)
 		return false
 	}
 	return true

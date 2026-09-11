@@ -186,10 +186,13 @@ func newMachinesListCmd(env *Env) *cobra.Command {
 }
 
 // parseSchedule reads one --schedule value: the cron expression, then the
-// target. A target starting with / is a path the host GETs on the machine;
-// anything else is a command it runs in it. One flag rather than three,
-// because "0 5 * * * /jobs/digest" is how a person already writes a crontab
-// line, and --cmd on create is taken by the start command.
+// target. "GET /path" is a request the host makes to the machine; anything
+// else is a command it runs in it. One flag rather than three, because
+// "0 5 * * * GET /jobs/digest" is how a person already writes a crontab line,
+// and --cmd on create is taken by the start command. The GET is spelled out
+// rather than inferred from a leading slash, because a command is spelled
+// with a leading slash as often as not -- /usr/local/bin/backup.sh -- and a
+// job that quietly became a 404 every night is the worst kind of wrong.
 func parseSchedule(s string) (pilots.Schedule, error) {
 	fields := strings.Fields(s)
 	var expr string
@@ -200,14 +203,17 @@ func parseSchedule(s string) (pilots.Schedule, error) {
 	case len(fields) >= 6:
 		expr, rest = strings.Join(fields[:5], " "), fields[5:]
 	default:
-		return pilots.Schedule{}, out.Failf(`write it as "<cron> <target>", e.g. --schedule "0 5 * * * /jobs/digest" or --schedule "@hourly date >> /root/ticks"`,
+		return pilots.Schedule{}, out.Failf(`write it as "<cron> GET /path" or "<cron> <command>", e.g. --schedule "0 5 * * * GET /jobs/digest" or --schedule "@hourly /usr/local/bin/backup.sh"`,
 			"--schedule %q has no target", s)
 	}
-	target := strings.Join(rest, " ")
-	if strings.HasPrefix(target, "/") {
-		return pilots.Schedule{Cron: expr, Path: target}, nil
+	if strings.EqualFold(rest[0], "GET") {
+		if len(rest) != 2 || !strings.HasPrefix(rest[1], "/") {
+			return pilots.Schedule{}, out.Failf(`write it as "<cron> GET /path", one path starting with /`,
+				"--schedule %q: GET takes exactly one path", s)
+		}
+		return pilots.Schedule{Cron: expr, Path: rest[1]}, nil
 	}
-	return pilots.Schedule{Cron: expr, Cmd: target}, nil
+	return pilots.Schedule{Cron: expr, Cmd: strings.Join(rest, " ")}, nil
 }
 
 // scheduleLine is a schedule as an info row: the expression, then what it
@@ -305,7 +311,7 @@ func newMachinesCreateCmd(env *Env) *cobra.Command {
 	f.StringArrayVar(&labelPairs, "label", nil, "a label to find it by later, key=value (repeatable); `ls --label` filters on them")
 	f.StringVar(&urlAuth, "url-auth", "", "who may reach the URL: public (default) or org, which needs an API key of the org")
 	f.DurationVar(&idleTimeout, "idle-timeout", 0, "how long it stays up after its last activity before suspending, 1s..1h (default 60s); for a daemon nothing connects to")
-	f.StringArrayVar(&schedules, "schedule", nil, "a cron job, \"<cron> <target>\" (repeatable): five fields or @hourly/@daily/@weekly/@monthly, then a /path the host GETs on the machine or a command it runs in it (from the user's home; spell paths out)")
+	f.StringArrayVar(&schedules, "schedule", nil, "a cron job (repeatable): five fields or @hourly/@daily/@weekly/@monthly, then \"GET /path\" for a request the host makes to the machine, or a command it runs in it as the app user from its home")
 	f.BoolVar(&skipConsole, "skip-console", false, "exit after creating instead of opening a console")
 	Describe(c, Doc{
 		What: "A create is a restore from a golden template, not a boot, which is\n" +

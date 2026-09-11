@@ -91,6 +91,9 @@ func TestASandboxThisHostOwnsFiresOncePerMinute(t *testing.T) {
 	if got.Header.Get("X-Forwarded-Proto") != "https" {
 		t.Errorf("the app should see the proto its visitors see; got %q", got.Header.Get("X-Forwarded-Proto"))
 	}
+	if got.Header.Get("X-Forwarded-Host") != "scratch.pilotrun.app" {
+		t.Errorf("a sandbox is reached by its own name; X-Forwarded-Host = %q", got.Header.Get("X-Forwarded-Host"))
+	}
 
 	s.now = atMinute("12:06")
 	s.tick(context.Background())
@@ -127,7 +130,7 @@ func TestOnlyTheOwnerFiresAndOnlyForALiveMachine(t *testing.T) {
 func TestTheLowestIdCurrentReplicaFiresForAService(t *testing.T) {
 	rec := &recorder{status: 200}
 	sched := api.Schedule{Cron: "0 5 * * *", Path: "/jobs/digest"}
-	svc := state.Service{ID: "svc-1", ReleaseID: "rel-2"}
+	svc := state.Service{ID: "svc-1", ReleaseID: "rel-2", Domain: "web"}
 	view := fleetWith{
 		services: []state.Service{svc},
 		machines: []state.Machine{
@@ -146,6 +149,14 @@ func TestTheLowestIdCurrentReplicaFiresForAService(t *testing.T) {
 			hosts = append(hosts, g.Host)
 		}
 		t.Errorf("fired on %v, want exactly web-2 (m-0 is superseded, m-1 is in error)", hosts)
+	}
+	// The GET is addressed to the replica, but the app is told the name its
+	// visitors use: the service's permanent address, which outlives the
+	// replica. A digest that links to web-2.pilotrun.app 404s next release.
+	if len(rec.gets) == 1 {
+		if got := rec.gets[0].Header.Get("X-Forwarded-Host"); got != "web.pilotrun.app" {
+			t.Errorf("X-Forwarded-Host = %q, want the service address web.pilotrun.app", got)
+		}
 	}
 
 	// The lowest-id replica lives on another host: this host stands down
@@ -221,6 +232,31 @@ func TestAStoredScheduleThatDoesNotParseIsSkippedNotFatal(t *testing.T) {
 	s.tick(context.Background())
 	if len(rec.gets) != 1 || rec.gets[0].URL.Path != "/ok" {
 		t.Errorf("gets = %v, want only /ok", rec.gets)
+	}
+}
+
+// A machine that is briefly not fireable -- mid-wake, mid-create -- keeps its
+// fired record, so coming back inside the same minute does not fire it again.
+// Forgetting is for machines that have LEFT, not machines that are busy
+// becoming something.
+func TestATransientStateDoesNotForgetWhatFired(t *testing.T) {
+	rec := &recorder{status: 200}
+	view := &fleetWith{machines: []state.Machine{
+		{ID: "m-1", Name: "a", HostID: "host-a", State: "running",
+			KindKnobs: knobsWith(api.Schedule{Cron: "* * * * *", Path: "/x"})},
+	}}
+	s := testScheduler(view, rec)
+	s.now = atMinute("11:11")
+	s.tick(context.Background())
+	if len(rec.gets) != 1 {
+		t.Fatalf("fired %d, want 1", len(rec.gets))
+	}
+	view.machines[0].State = "creating"
+	s.tick(context.Background())
+	view.machines[0].State = "running"
+	s.tick(context.Background())
+	if len(rec.gets) != 1 {
+		t.Errorf("a transient state let the job fire %d times in one minute", len(rec.gets))
 	}
 }
 

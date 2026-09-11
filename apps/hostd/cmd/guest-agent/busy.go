@@ -30,10 +30,6 @@ import (
 // point it at a directory of fixtures.
 var procRoot = "/proc"
 
-// sessionBusy reports whether any process other than the leader itself is
-// alive in the session led by leader.
-func sessionBusy(leader int) bool { return busySessions(procRoot)[leader] }
-
 // busySessions is one pass over the process table: the session ids that have
 // at least one member besides their own leader. handleSessions asks once and
 // answers every session from the result, rather than walking /proc once per
@@ -48,15 +44,33 @@ func busySessions(root string) map[int]bool {
 	return busy
 }
 
-// sessionMembers lists the pids whose session id is sid.
-func sessionMembers(root string, sid int) []int {
-	var members []int
-	eachProcess(root, func(pid, got int) {
-		if got == sid {
-			members = append(members, pid)
-		}
-	})
-	return members
+// sessionIsBusy is the rule for one live session, given what busySessions
+// found: argv is what the session was started with, leader its pid.
+//
+// A session whose leader is a shell is busy while the shell has a child;
+// alone, the shell is sitting at its prompt. A session whose leader is
+// anything else -- `exec/stream?cmd=python&cmd=train.py&tty=true`, a tool
+// run on a PTY with no shell around it -- IS the job, and is busy for as long
+// as it is alive, which "is there a member besides the leader" would read as
+// idle and suspend mid-run.
+func sessionIsBusy(argv []string, leader int, busy map[int]bool) bool {
+	if leader == 0 {
+		return false
+	}
+	if len(argv) > 0 && !isShell(argv[0]) {
+		return true
+	}
+	return busy[leader]
+}
+
+// isShell is whether a session leader is an interactive shell, which is the
+// one kind of leader that can be alive and doing nothing.
+func isShell(argv0 string) bool {
+	switch filepath.Base(argv0) {
+	case "sh", "bash", "dash", "zsh", "fish", "ash", "ksh":
+		return true
+	}
+	return false
 }
 
 // eachProcess calls fn with the pid and session id of every readable entry

@@ -571,6 +571,27 @@ services:
 	}
 }
 
+// A path schedule fires as a request, and a replica that suspends and cannot
+// wake would answer 503 to every one. The API refuses it; the planner runs
+// the same rule so the refusal names the service and arrives before the build.
+func TestXPilotsPathScheduleNeedsAWakeableReplica(t *testing.T) {
+	const file = `
+name: shop
+services:
+  web:
+    image: node:24
+    x-pilots:
+      auto_start: false
+      schedules:
+        - cron: "@hourly"
+          path: /jobs/tick
+`
+	_, _, err := Compile(context.Background(), Request{Compose: file})
+	if err == nil || !strings.Contains(err.Error(), "web") || !strings.Contains(err.Error(), "auto_start") {
+		t.Fatalf("err = %v, want a refusal naming the service and auto_start", err)
+	}
+}
+
 // "stop" was accepted and silently behaved as suspend, because the idle
 // monitor only checks for "off". Until POST /stop exists it is refused, with
 // the alternative named.

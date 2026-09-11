@@ -273,7 +273,7 @@ func handleSessions(w http.ResponseWriter, _ *http.Request) {
 			"ended": ended, "exit_code": s.ExitCode,
 		}
 		s.mu.Unlock()
-		entry["busy"] = !ended && leader != 0 && busy[leader]
+		entry["busy"] = !ended && sessionIsBusy(s.Argv, leader, busy)
 		out = append(out, entry)
 	}
 	writeJSON(w, http.StatusOK, out)

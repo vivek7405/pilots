@@ -1101,6 +1101,12 @@ func knobsFrom(name string, x xPilots) (*api.Knobs, error) {
 		}
 		k.SoftLimit = *x.SoftLimit
 	}
+	// The rules that span keys -- a path schedule on a replica that suspends
+	// and cannot wake -- are the API's, run here so the refusal names the
+	// service and arrives at plan time rather than after the build.
+	if err := k.Validate(); err != nil {
+		return nil, fmt.Errorf("compose: %s: x-pilots: %v", name, err)
+	}
 	return &k, nil
 }
 
