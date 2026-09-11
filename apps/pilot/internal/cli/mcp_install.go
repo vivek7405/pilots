@@ -250,14 +250,28 @@ func writeEntry(path string, h agents.Harness, entry map[string]any) (bool, erro
 	case "toml":
 		return writeTOMLEntry(path, h.Path, entry)
 	default:
-		return writeJSONEntry(path, h.Path, entry)
+		return writeJSONEntry(path, h.Name, h.Path, entry)
 	}
 }
 
-func writeJSONEntry(path string, keyPath []string, entry map[string]any) (bool, error) {
+func writeJSONEntry(path, harness string, keyPath []string, entry map[string]any) (bool, error) {
 	cfg := map[string]any{}
 	if raw, err := os.ReadFile(path); err == nil && len(strings.TrimSpace(string(raw))) > 0 {
 		if err := json.Unmarshal(raw, &cfg); err != nil {
+			// Tell a file with COMMENTS apart from a broken one. Zed and VS
+			// Code both write JSONC by default, so a perfectly good settings
+			// file lands here, and "fix it or move it aside" then reads as
+			// "delete your settings" for a file with nothing wrong with it.
+			//
+			// The comments are not stripped and the file is not rewritten:
+			// Go has no JSONC writer that preserves them, and silently
+			// dropping somebody's annotated settings to add one server is a
+			// far worse outcome than declining to.
+			if json.Unmarshal(stripJSONComments(raw), &cfg) == nil {
+				return false, out.Failf(
+					"run `pilot mcp install "+harness+" --print` and paste the entry in yourself",
+					"%s contains comments, and rewriting it would drop them", path)
+			}
 			return false, out.Failf("fix it or move it aside, then run the install again", "%s is not valid JSON", path)
 		}
 	}
@@ -476,4 +490,58 @@ func checkHarnesses(getenv config.Env) check {
 			Fix: "pilot mcp install <harness>; pilot mcp install --list names them"}
 	}
 	return check{Name: "agents", OK: true, Detail: "MCP server registered in " + strings.Join(found, ", ")}
+}
+
+// stripJSONComments removes // and /* */ comments so a JSONC file can be
+// RECOGNISED. It is used for that and nothing else: the result is never
+// written back, because it has lost the comments that made the file worth
+// keeping.
+//
+// String literals are tracked, so a "http://..." value is not mistaken for a
+// comment -- which is the whole reason this is not a regexp.
+func stripJSONComments(raw []byte) []byte {
+	out := make([]byte, 0, len(raw))
+	inString, escaped := false, false
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if inString {
+			out = append(out, c)
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+			continue
+		}
+		if c == '"' {
+			inString = true
+			out = append(out, c)
+			continue
+		}
+		if c == '/' && i+1 < len(raw) {
+			if raw[i+1] == '/' {
+				for i < len(raw) && raw[i] != '\n' {
+					i++
+				}
+				// Keep the newline: it separates the tokens around it.
+				if i < len(raw) {
+					out = append(out, '\n')
+				}
+				continue
+			}
+			if raw[i+1] == '*' {
+				i += 2
+				for i+1 < len(raw) && !(raw[i] == '*' && raw[i+1] == '/') {
+					i++
+				}
+				i++ // the loop's i++ steps over the closing slash
+				continue
+			}
+		}
+		out = append(out, c)
+	}
+	return out
 }
