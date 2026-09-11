@@ -12,30 +12,67 @@ export function quote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
 }
 
+/**
+ * The most base64 one command may carry.
+ *
+ * Linux caps a SINGLE argv string at `MAX_ARG_STRLEN` (128 KiB), and the whole
+ * command is one argument to `sh -c`, so a payload past that fails the exec
+ * itself -- which the guest agent reports as exit 127 with empty stderr, a
+ * failure that names nothing. A multiple of 4, so every chunk is a complete
+ * base64 group and decodes on its own.
+ */
+export const MAX_PAYLOAD = 48_000
+
 /** The commands, in one place, so a test asserts on what really runs. */
 export const cmd = {
   /** One call for everything a stat needs; `-c` never follows a symlink. */
   stat: (path: string) => `stat -c '%F|%s|%Y|%W' -- ${quote(path)}`,
   read: (path: string) => `base64 -w0 -- ${quote(path)}`,
+  /**
+   * The first chunk of a write: the parent is created and the file truncated.
+   *
+   * `$(dirname ...)` is quoted, or a path with a space in it makes the wrong
+   * directory and the redirect then fails on the one it meant.
+   */
   write: (path: string, base64: string) =>
-    `mkdir -p -- $(dirname ${quote(path)}) && printf %s ${quote(base64)} | base64 -d > ${quote(path)}`,
+    `mkdir -p -- "$(dirname -- ${quote(path)})" && printf %s ${quote(base64)} | base64 -d > ${quote(path)}`,
+  /** Every chunk after the first, appended. See MAX_PAYLOAD. */
+  append: (path: string, base64: string) => `printf %s ${quote(base64)} | base64 -d >> ${quote(path)}`,
   mkdir: (path: string) => `mkdir -p -- ${quote(path)}`,
   remove: (path: string, recursive: boolean) => (recursive ? `rm -rf -- ${quote(path)}` : `rm -f -- ${quote(path)}`),
+  /**
+   * A rename, and a refusal the caller can SEE.
+   *
+   * `mv -n` exits 0 when it skips, so a non-overwriting rename onto an
+   * existing file would report success while moving nothing, and the editor
+   * would show a file the guest does not have. The destination is tested
+   * instead, in words `classify` maps to FileExists.
+   */
   rename: (from: string, to: string, overwrite: boolean) =>
-    `mv ${overwrite ? '-f' : '-n'} -- ${quote(from)} ${quote(to)}`,
+    overwrite
+      ? `mv -f -- ${quote(from)} ${quote(to)}`
+      : `if [ -e ${quote(to)} ]; then echo 'mv: File exists' >&2; exit 1; fi; mv -- ${quote(from)} ${quote(to)}`,
   copy: (from: string, to: string, overwrite: boolean) =>
-    `cp -r ${overwrite ? '-f' : '-n'} -- ${quote(from)} ${quote(to)}`,
+    overwrite
+      ? `cp -r -f -- ${quote(from)} ${quote(to)}`
+      : `if [ -e ${quote(to)} ]; then echo 'cp: File exists' >&2; exit 1; fi; cp -r -- ${quote(from)} ${quote(to)}`,
   exists: (path: string) => `test -e ${quote(path)}`,
   /**
    * The listing AND each entry's type in ONE command.
    *
    * A `stat` per entry would be one round trip per file, which is what makes
    * a remote filesystem feel broken on a directory of any size.
+   *
+   * `cd` first, then `read`: `for f in $(ls)` word-splits and globs every
+   * name, so one file called `my file.txt` became two entries and a directory
+   * called `sub dir` became two files. `cd` also gives the command a real
+   * exit code and a real stderr, which `for` over a silenced `ls` never had --
+   * a path that does not exist used to render as an empty folder.
    */
   list: (path: string) =>
-    `for f in $(ls -A -- ${quote(path)} 2>/dev/null); do ` +
-    `if [ -d ${quote(path)}/"$f" ]; then echo "d|$f"; ` +
-    `elif [ -L ${quote(path)}/"$f" ]; then echo "l|$f"; ` +
+    `cd -- ${quote(path)} && ls -A | while IFS= read -r f; do ` +
+    `if [ -d "$f" ]; then echo "d|$f"; ` +
+    `elif [ -L "$f" ]; then echo "l|$f"; ` +
     `else echo "f|$f"; fi; done`,
 }
 

@@ -10,7 +10,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { classify, cmd, kindOf, parseListing, parseStat, quote } from '../src/guest.ts'
+import { classify, cmd, kindOf, MAX_PAYLOAD, parseListing, parseStat, quote } from '../src/guest.ts'
 
 test("a path with a quote in it cannot break out of its argument", () => {
   // The attack this is here for: a file literally named `'; rm -rf /; '`.
@@ -48,7 +48,13 @@ test('a listing is one round trip and carries each entry type', () => {
   // One command, not one per entry: a stat per file is what makes a remote
   // filesystem feel broken on a directory of any size.
   assert.equal(command.split('\n').length, 1)
-  assert.ok(command.includes('ls -A --'))
+  // No `for f in $(ls)`: that word-splits and globs, so `my file.txt` came
+  // back as two entries and `sub dir` as two files. And no silenced stderr,
+  // so a path that is not there is an error rather than an empty folder.
+  assert.ok(!command.includes('$('), `the listing re-splits its own output: ${command}`)
+  assert.ok(!command.includes('/dev/null'), 'the listing swallows the guest error')
+  assert.ok(command.includes('while IFS= read -r f'))
+  assert.ok(command.startsWith("cd -- '/home/pilot' &&"))
 
   assert.deepEqual(parseListing('d|src\nf|README.md\nl|current\n'), [
     ['src', 'directory'],
@@ -66,19 +72,31 @@ test('a write creates the parent and round-trips through base64', () => {
   const command = cmd.write('/app/config.json', Buffer.from('{"a":1}').toString('base64'))
   assert.ok(command.includes('mkdir -p --'), 'a write into a new directory must not fail on the directory')
   assert.ok(command.includes('base64 -d >'))
+  // The parent is QUOTED: `mkdir -p -- $(dirname '/app/my dir/x')` splits into
+  // two directories, neither of them the one the write then needs.
+  assert.ok(command.includes('"$(dirname --'), `the parent is not quoted: ${command}`)
   // The payload is base64, so a quote, a newline or a NUL in the file cannot
   // reach the shell as syntax.
   assert.ok(command.includes(quote('eyJhIjoxfQ==')))
+  // A chunk appends rather than truncating: a file is written in pieces
+  // because one `sh -c` argument cannot exceed 128 KiB.
+  assert.ok(cmd.append('/app/config.json', 'AAAA').includes('base64 -d >>'))
+  assert.equal(MAX_PAYLOAD % 4, 0, 'a chunk must be a whole base64 group or it cannot decode alone')
 })
 
 test('rm, mv and cp respect the overwrite flag the editor passed', () => {
   assert.ok(cmd.remove('/tmp/x', true).startsWith('rm -rf --'))
   assert.ok(cmd.remove('/tmp/x', false).startsWith('rm -f --'))
   assert.ok(cmd.rename('/a', '/b', true).startsWith('mv -f --'))
-  // -n rather than -f: a rename the editor did not mark as an overwrite must
-  // not silently destroy the target.
-  assert.ok(cmd.rename('/a', '/b', false).startsWith('mv -n --'))
-  assert.ok(cmd.copy('/a', '/b', false).startsWith('cp -r -n --'))
+  // NOT `mv -n`: it exits 0 when it skips, so a rename the editor did not mark
+  // as an overwrite reported success while moving nothing, and the editor
+  // showed a file the guest did not have. The destination is tested instead,
+  // in words classify() turns into FileExists.
+  for (const c of [cmd.rename('/a', '/b', false), cmd.copy('/a', '/b', false)]) {
+    assert.ok(!c.includes(' -n '), `a skip that exits 0: ${c}`)
+    assert.ok(c.startsWith("if [ -e '/b' ]; then"), c)
+    assert.equal(classify(c.slice(c.indexOf('echo') + 6)), 'exists')
+  }
 })
 
 test("the guest's stderr is classified, not flattened", () => {

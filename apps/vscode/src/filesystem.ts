@@ -21,7 +21,7 @@
 import type { PilotsClient } from '@pilots/sdk' with { 'resolution-mode': 'import' }
 import * as vscode from 'vscode'
 
-import { classify, cmd, parseListing, parseStat } from './guest.ts'
+import { classify, cmd, MAX_PAYLOAD, parseListing, parseStat } from './guest.ts'
 import type { Kind } from './guest.ts'
 
 /** How long a stat is trusted. Long enough for one render, short enough to be wrong rarely. */
@@ -97,7 +97,11 @@ export class PilotsFileSystem implements vscode.FileSystemProvider {
     if (cached && Date.now() - cached.at < STAT_TTL_MS) return cached.stat
 
     const res = await this.run(uri, cmd.stat(this.path(uri)))
-    const parsed = res.code === 0 ? parseStat(res.stdout) : null
+    // The guest's own words, not a guess: a directory the exec user cannot
+    // read answers "Permission denied", and reporting that as "file not found"
+    // sends someone looking for a path that is right there.
+    if (res.code !== 0) throw asFileSystemError(uri, res.stderr)
+    const parsed = parseStat(res.stdout)
     if (!parsed) throw vscode.FileSystemError.FileNotFound(uri)
 
     const stat: vscode.FileStat = {
@@ -132,7 +136,16 @@ export class PilotsFileSystem implements vscode.FileSystemProvider {
       if (exists && !options.overwrite) throw vscode.FileSystemError.FileExists(uri)
       if (!exists && !options.create) throw vscode.FileSystemError.FileNotFound(uri)
     }
-    await this.runOrThrow(uri, cmd.write(path, Buffer.from(content).toString('base64')))
+    // In CHUNKS, because the whole command is one argument to `sh -c` and
+    // Linux caps a single argv string at 128 KiB: an inlined payload made
+    // every save of a file over ~96 KiB fail the exec itself, which comes back
+    // as exit 127 with empty stderr. The first chunk truncates, the rest
+    // append; each is a whole base64 group, so each decodes on its own.
+    const encoded = Buffer.from(content).toString('base64')
+    await this.runOrThrow(uri, cmd.write(path, encoded.slice(0, MAX_PAYLOAD)))
+    for (let at = MAX_PAYLOAD; at < encoded.length; at += MAX_PAYLOAD) {
+      await this.runOrThrow(uri, cmd.append(path, encoded.slice(at, at + MAX_PAYLOAD)))
+    }
     this.stats.delete(uri.toString())
     this.emitter.fire([{ type: vscode.FileChangeType.Changed, uri }])
   }
