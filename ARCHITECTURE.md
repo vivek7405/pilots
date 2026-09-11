@@ -1191,8 +1191,9 @@ exist for.
 The layer cache is keyed **server-side on the Dockerfile's content hash**, so
 a client passes no cache name at all. It is **per org**: the daemon exports and
 imports it through the `buildctl` session into
-`/var/cache/pilots/build-cache/<org>/<df-hash>/` on the HOST, and hostd mirrors
-that directory to S3 under `build-cache/<org>/` with hostd's own credentials.
+`/var/cache/pilots/build-cache/orgs/<org>/<df-hash>/` on the HOST, and hostd
+mirrors that directory to S3 under `build-cache/orgs/<org>/` with hostd's own
+credentials.
 A daemon inside a tenant's VM may not write a cache another tenant reads, which
 is why the fleet-wide bucket-backed cache the host daemon used is gone: with
 bucket credentials an org could write any manifest under any key, and the next
@@ -1200,7 +1201,7 @@ org whose Dockerfile hashed the same would import it.
 
 Every app built from the same scaffold Dockerfile still shares one partition,
 because a build imports a second, **read-only platform-owned seed** at
-`build-cache/shared/<df-hash>/` that only hostd ever writes. That is what keeps
+`build-cache/shared/node-base/` that only hostd ever writes. That is what keeps
 the first deploy of a new webjs app warm on any host. S3 is the truth and local
 NVMe is the cache, so wiping a host's `build-cache/` costs one download, never
 a rebuild.

@@ -30,9 +30,13 @@ type Config struct {
 	TemplateRootfs string // PILOT_TEMPLATE_ROOTFS
 	// BuilderRootfs is the ext4 a per-org BUILDER machine is created from: the
 	// golden guest plus a rootful BuildKit daemon. A host without it serves no
-	// builds, which is a 501 rather than a build failure -- builds are the one
-	// thing on this host that runs a customer's own code, and they run inside
-	// a microVM or not at all.
+	// builds at all -- builds are the one thing on this host that runs a
+	// customer's own code, and they run inside a microVM or not at all.
+	//
+	// The refusal is machines.ErrNoBuilderRootfs, and it arrives mid-stream:
+	// POST /v1/builds has already written its 200 and its "build accepted"
+	// line by the time a builder is asked for, so the client reads it as a
+	// failed build naming the missing image, not as a status code.
 	BuilderRootfs string // PILOT_BUILDER_ROOTFS
 	// GuestAgentBin is the agent injected into every image a build produces.
 	// Without it a built machine boots and is unreachable: exec, the clock

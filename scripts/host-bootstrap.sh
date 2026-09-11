@@ -698,9 +698,9 @@ PILOT_ACME_EMAIL=${ACME_EMAIL}
 PILOT_CLOUDFLARE_API_TOKEN=${CF_TOKEN}
 PILOT_TEMPLATE_ROOTFS=/var/lib/pilots/templates/golden.ext4
 # The builder image. Builds run inside a per-org machine created from it, so a
-# host missing this file answers POST /v1/builds with a 501 rather than
-# falling back to building on the host, which is the thing this design exists
-# to stop.
+# host missing this file fails every build -- naming the missing image, in the
+# build's own log stream -- rather than falling back to building on the host,
+# which is the thing this design exists to stop.
 PILOT_BUILDER_ROOTFS=/var/lib/pilots/templates/builder.ext4
 # Guest memory comes out of the 2MiB pool reserved in step [2/10]. This line
 # is the difference between RESERVING the pool and USING it: without it the
