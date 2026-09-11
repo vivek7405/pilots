@@ -274,14 +274,15 @@ func (b *Builder) Build(ctx context.Context, id, orgID string, contextTar io.Rea
 	// what moves it to and from object storage. A miss is not a failure: S3
 	// is the truth and this disk is a cache, so a wiped host pays one
 	// download and an org that has never built here builds cold.
-	cacheDir := b.cacheDir(orgID, cacheNameFor(ctxDir))
-	b.pullCache(ctx, cacheDir, orgID, cacheNameFor(ctxDir))
+	cacheName := cacheNameFor(ctxDir)
+	cacheDir := b.cacheDir(orgID, cacheName)
+	b.pullCache(ctx, cacheDir, orgID, cacheName)
 
 	tarPath := filepath.Join(work, "rootfs.tar")
 	if err := b.solve(ctx, addr, ctxDir, tarPath, cacheDir, record); err != nil {
 		return res, err
 	}
-	b.pushCache(ctx, cacheDir, orgID, cacheNameFor(ctxDir))
+	b.pushCache(ctx, cacheDir, orgID, cacheName)
 
 	record(status(id, "packing rootfs"))
 	imagePath := filepath.Join(work, "rootfs.ext4")

@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
+	"strconv"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/vivek7405/pilots/hostd/internal/netns"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -75,6 +78,15 @@ func (m *Manager) EnsureBuilder(ctx context.Context, orgID string) (string, func
 	slot, ok := m.SlotFor(id)
 	if !ok {
 		return "", nil, fmt.Errorf("machines: builder %s is not running: %w", id, ErrNotFound)
+	}
+
+	// A running machine is not the same as a daemon accepting connections.
+	// A restore resumes one that was already listening, so this returns at
+	// once in the common case; a machine that had to cold boot needs the
+	// wait, and without it buildctl fails instantly with a refused connection
+	// that reads like a networking fault rather than a slow start.
+	if err := waitForBuildkit(ctx, slot.HostIP.String(), builderDialTimeout); err != nil {
+		return "", nil, fmt.Errorf("machines: builder %s never accepted a connection: %w", id, err)
 	}
 
 	// Bracket the whole build. Without this the idle monitor can suspend the
@@ -146,4 +158,42 @@ func (m *Manager) createBuilder(ctx context.Context, orgID, name string) (string
 	slog.Info("created a builder machine", "id", row.ID, "name", name,
 		"org", orgID, "seconds", int(time.Since(start).Seconds()))
 	return row.ID, nil
+}
+
+// builderDialTimeout bounds the wait for the daemon to start listening. Long
+// enough for a cold boot, short enough that a builder which is never going to
+// answer fails the build inside its own timeout rather than consuming it.
+const builderDialTimeout = 90 * time.Second
+
+// waitForBuildkit polls the daemon's port until it accepts a connection.
+//
+// A bare TCP accept rather than a BuildKit health call on purpose: hostd holds
+// no BuildKit client library, and what the next step needs to know is exactly
+// whether a dial succeeds.
+func waitForBuildkit(ctx context.Context, hostIP string, timeout time.Duration) error {
+	return waitForBuildkitAddr(ctx, net.JoinHostPort(hostIP, strconv.Itoa(netns.GuestBuildkitPort)), timeout)
+}
+
+// waitForBuildkitAddr is waitForBuildkit against an explicit address, so the
+// polling itself can be asserted without a guest behind it.
+func waitForBuildkitAddr(ctx context.Context, addr string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var last error
+	for time.Now().Before(deadline) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		last = err
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return fmt.Errorf("no connection to %s within %s: %w", addr, timeout, last)
 }

@@ -46,11 +46,9 @@ const sharedSeedDir = "shared/node-base"
 // share is the base image pull and the certificate layer, which is the
 // expensive part of a cold build, and that is exactly what this warms.
 //
-// detect.TestTheSeedMatchesTheRecipe asserts this stays a prefix of the real
-// recipe. The assertion lives there because detect imports this package and
-// not the other way round.
-// SeedDockerfile is exported so detect can assert it stays a prefix of the
-// real recipe; see TestTheSharedCacheSeedMatchesTheRecipe.
+// Exported so detect can assert it stays a prefix of the real recipe. That
+// assertion lives there, in TestTheSharedCacheSeedMatchesTheRecipe, because
+// detect imports this package and not the other way round.
 const SeedDockerfile = `FROM node:24-alpine
 RUN apk add --no-cache ca-certificates
 `
