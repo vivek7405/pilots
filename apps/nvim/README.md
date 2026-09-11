@@ -9,13 +9,23 @@ the editor and the terminal agree about what is on disk.
 
 ## Install
 
+Needs **Neovim 0.10 or newer** (it uses `vim.system` and `vim.base64`), the
+`pilot` CLI on PATH, and a machine you can reach. Nothing is installed in the
+machine and no port is opened.
+
+It is not on a plugin manager yet, because plugin managers install from a
+repository root and this lives in the pilots monorepo. Until it is split out,
+point your manager at the directory:
+
 ```lua
--- lazy.nvim
-{ "vivek7405/pilots.nvim", cmd = { "PilotsOpen", "PilotsTerminal" } }
+-- lazy.nvim, from a checkout
+{ dir = "~/path/to/pilots/apps/nvim", cmd = { "PilotsOpen", "PilotsTerminal" } }
 ```
 
-It needs the `pilot` CLI on PATH and a machine you can reach. Nothing is
-installed in the machine and no port is opened.
+```vim
+" or, with no plugin manager at all
+set runtimepath+=~/path/to/pilots/apps/nvim
+```
 
 ## Commands
 

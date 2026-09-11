@@ -9,6 +9,21 @@
 if vim.g.loaded_pilots then
   return
 end
+
+-- Refused by name rather than left to fail at the first keystroke.
+--
+-- The plugin needs `vim.system` and `vim.base64`, both 0.10. On 0.9 the first
+-- read dies with "attempt to index field 'base64' (a nil value)" from inside
+-- an autocommand, which names neither this plugin nor the reason, and the
+-- buffer is already open by then.
+if vim.fn.has("nvim-0.10") ~= 1 then
+  vim.notify(
+    "pilots.nvim needs Neovim 0.10 or newer: it uses vim.system and vim.base64",
+    vim.log.levels.ERROR
+  )
+  return
+end
+
 vim.g.loaded_pilots = true
 
 local group = vim.api.nvim_create_augroup("pilots", { clear = true })
