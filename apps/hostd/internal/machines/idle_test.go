@@ -3,6 +3,7 @@ package machines
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
 	"time"
 
@@ -153,7 +154,7 @@ func TestKnobsRoundTripThroughStorage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("marshalKnobs: %v", err)
 	}
-	if got := ParseKnobs(raw); got != want {
+	if got := ParseKnobs(raw); !reflect.DeepEqual(got, want) {
 		t.Errorf("round trip: got %+v, want %+v", got, want)
 	}
 }

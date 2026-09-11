@@ -14,10 +14,30 @@ import "encoding/json"
 // Knobs is the per-machine lifecycle policy. A sandbox and a production
 // service are the same machine with different knobs.
 type Knobs struct {
-	AutoStop           string `json:"auto_stop"`            // off|stop|suspend
+	AutoStop           string `json:"auto_stop"`            // off|suspend
 	AutoStart          bool   `json:"auto_start"`           // wake on an inbound request
 	MinMachinesRunning int    `json:"min_machines_running"` // 0 = scale to zero
 	SoftLimit          int    `json:"soft_limit"`
+	IdleTimeout        int    `json:"idle_timeout"` // seconds of quiet before suspend, 1..3600
+	// Schedules are the machine's cron jobs; null (nil here) means none. On a
+	// deploy an absent key inherits the previous release's and an explicit
+	// empty list clears them, which is why KnobsPatch carries a pointer to a
+	// slice.
+	//
+	// No omitempty, matching hostd: it drops an EMPTY slice as readily as a
+	// nil one, and the difference between the two is the difference between
+	// "no crons, deliberately" and "inherit whatever was there".
+	Schedules []Schedule `json:"schedules"`
+}
+
+// Schedule is one cron job: a five-field expression (UTC; or @hourly, @daily,
+// @weekly, @monthly) and exactly one of a path the host GETs on the machine
+// or a command it runs in it. A GET carries the X-Pilot-Cron header, which
+// cannot arrive from outside the fleet.
+type Schedule struct {
+	Cron string `json:"cron"`
+	Path string `json:"path,omitempty"`
+	Cmd  string `json:"cmd,omitempty"`
 }
 
 // KnobsPatch is a PARTIAL lifecycle policy: the shape a REQUEST carries.
@@ -42,10 +62,15 @@ type Knobs struct {
 //
 //	pilots.KnobsPatch{SoftLimit: pilots.Ptr(50)}
 type KnobsPatch struct {
-	AutoStop           *string `json:"auto_stop,omitempty"`            // off|stop|suspend
+	AutoStop           *string `json:"auto_stop,omitempty"`            // off|suspend
 	AutoStart          *bool   `json:"auto_start,omitempty"`           // wake on an inbound request
 	MinMachinesRunning *int    `json:"min_machines_running,omitempty"` // 0 = scale to zero
 	SoftLimit          *int    `json:"soft_limit,omitempty"`
+	IdleTimeout        *int    `json:"idle_timeout,omitempty"` // seconds of quiet before suspend, 1..3600
+	// A pointer to a slice, not a slice: omitempty drops an empty slice, and
+	// an empty list is the one way to clear inherited schedules on a deploy.
+	// Ptr([]Schedule{}) sends "schedules": [].
+	Schedules *[]Schedule `json:"schedules,omitempty"`
 }
 
 // Ptr returns a pointer to v, so a KnobsPatch field can be set inline.
@@ -658,6 +683,7 @@ type RepoRef struct {
 var wireTypes = []any{
 	UpdateMachineRequest{},
 	Knobs{},
+	Schedule{},
 	Machine{},
 	CreateMachineRequest{},
 	ExecRequest{},

@@ -124,17 +124,32 @@ func (r *Router) ForwardAPI(owner MachineOwner, next http.Handler) http.Handler 
 	})
 }
 
-// StripForwardMarker removes the fleet-internal forwarding marker from
-// requests arriving on the public listener.
+// CronHeader marks a request the host itself made to fire a machine's
+// schedule; its value is the cron expression that fired.
 //
-// The marker is a transport fact -- only a peer proxying over the mesh sets
-// it, and the internal listener is the only place it may be believed. A copy
-// arriving from outside is forged: trusting it would let any client make a
-// non-owner host act on a machine-scoped call locally, skipping both the
-// forwarding and the liveness logic.
+// It is the second header with the forwarding marker's trust model: set only
+// in-process (cmd/hostd's schedule loop) or by a peer over the mesh, stripped
+// from anything arriving on the public listener. That is what lets an app
+// answer "was this the scheduler?" from the header alone, with no shared
+// secret to mint, rotate or leak. A sibling machine in the same app reaches
+// the app over .internal without passing this listener and could set it; that
+// is the tenant's own code, and the same is true of every header today.
+const CronHeader = "X-Pilot-Cron"
+
+// StripForwardMarker removes the fleet-internal markers from requests
+// arriving on the public listener.
+//
+// The forwarding marker is a transport fact -- only a peer proxying over the
+// mesh sets it, and the internal listener is the only place it may be
+// believed. A copy arriving from outside is forged: trusting it would let any
+// client make a non-owner host act on a machine-scoped call locally, skipping
+// both the forwarding and the liveness logic. The cron marker is forged for
+// the same reason and stripped in the same place, so the two can never
+// drift apart.
 func StripForwardMarker(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		req.Header.Del(forwardedHeader)
+		req.Header.Del(CronHeader)
 		next.ServeHTTP(w, req)
 	})
 }

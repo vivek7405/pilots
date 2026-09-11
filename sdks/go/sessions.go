@@ -19,8 +19,13 @@ type Session struct {
 	Argv      []string `json:"argv"`
 	CreatedAt int64    `json:"created_at"`
 	Attached  bool     `json:"attached"`
-	Ended     bool     `json:"ended"`
-	ExitCode  int      `json:"exit_code"`
+	// Busy is whether a command is running in the session right now, read
+	// from the guest's process tree: a shell at its prompt is not busy, a
+	// build it started is, attached or not. A busy session keeps the
+	// machine awake.
+	Busy     bool `json:"busy"`
+	Ended    bool `json:"ended"`
+	ExitCode int  `json:"exit_code"`
 }
 
 // Sessions lists a machine's terminal sessions, oldest first, including

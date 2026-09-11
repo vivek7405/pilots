@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/compose"
 )
 
@@ -108,6 +109,11 @@ func Plan(ctx context.Context, dir string, opts Options) (*Result, *compose.Plan
 	if _, err := os.Stat(filepath.Join(dir, "Dockerfile")); err == nil {
 		step := baseStep("web")
 		step.Build = &compose.Build{Context: "."}
+		// Its crons still count. Writing a Dockerfile is a decision about how
+		// the app is built, and says nothing about when its jobs run.
+		if err := applyDeclaredSchedules(&step, FrameworkUnknown, dir); err != nil {
+			return nil, nil, nil, err
+		}
 		return &Result{
 			Plan: compose.Plan{App: app, Steps: []compose.Step{step}},
 			Detected: []compose.Detected{{
@@ -129,6 +135,9 @@ func Plan(ctx context.Context, dir string, opts Options) (*Result, *compose.Plan
 		step.Build = &compose.Build{Context: "."}
 		step.Dockerfile = recipe.Dockerfile
 		step.Health = recipe.Health
+		if err := applyDeclaredSchedules(&step, recipe.Framework, dir); err != nil {
+			return nil, nil, nil, err
+		}
 		return &Result{
 			Plan: compose.Plan{App: app, Steps: []compose.Step{step}},
 			Detected: []compose.Detected{{
@@ -139,7 +148,11 @@ func Plan(ctx context.Context, dir string, opts Options) (*Result, *compose.Plan
 	}
 
 	// (d) npm workspaces: one service per member the detector recognises.
-	if res := planWorkspaces(dir, app, members); res != nil {
+	res, err := planWorkspaces(dir, app, members)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	if res != nil {
 		return res, nil, nil, nil
 	}
 
@@ -153,7 +166,7 @@ func Plan(ctx context.Context, dir string, opts Options) (*Result, *compose.Plan
 // repository: a monorepo with three apps and one unrecognised tools directory
 // should deploy the three, and the skip is named in the first step's notes so
 // nobody discovers it by counting URLs.
-func planWorkspaces(dir, app string, members []string) *Result {
+func planWorkspaces(dir, app string, members []string) (*Result, error) {
 	var steps []compose.Step
 	var detected []compose.Detected
 	var skipped []string
@@ -180,6 +193,9 @@ func planWorkspaces(dir, app string, members []string) *Result {
 		step.Build = &compose.Build{Context: "."}
 		step.Dockerfile = member.Dockerfile
 		step.Health = member.Health
+		if err := applyDeclaredSchedules(&step, member.Framework, filepath.Join(dir, rel)); err != nil {
+			return nil, err
+		}
 		steps = append(steps, step)
 		detected = append(detected, compose.Detected{
 			Service: name, Source: "recipe", Framework: string(member.Framework),
@@ -187,14 +203,30 @@ func planWorkspaces(dir, app string, members []string) *Result {
 		})
 	}
 	if len(steps) == 0 {
-		return nil
+		return nil, nil
 	}
 	if len(skipped) > 0 {
 		detected[0].Notes = append(detected[0].Notes,
 			"no framework was detected in these workspaces, so they are not deployed: "+
 				strings.Join(skipped, ", "))
 	}
-	return &Result{Plan: compose.Plan{App: app, Steps: steps}, Detected: detected}
+	return &Result{Plan: compose.Plan{App: app, Steps: steps}, Detected: detected}, nil
+}
+
+// applyDeclaredSchedules puts onto the step the cron jobs the app's own config
+// declares (declaredCrons: vercel.json for anything, package.json's
+// webjs.crons for a webjs app). Nothing is set when neither file says
+// anything, so a step keeps carrying no knobs at all and the deploy keeps
+// merging onto the machine defaults exactly as before.
+func applyDeclaredSchedules(step *compose.Step, fw Framework, dir string) error {
+	crons, err := declaredCrons(dir, fw)
+	if err != nil || crons == nil {
+		return err
+	}
+	k := api.DefaultKnobs()
+	k.Schedules = crons
+	step.Knobs = &k
+	return nil
 }
 
 // baseStep is a step with the compose planner's own defaults, read through the

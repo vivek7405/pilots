@@ -31,8 +31,9 @@
 // # x-pilots
 //
 // Per service: domain, custom_domain, pre_deploy, size_gib (the size of every
-// named volume that service declares), and the four replica knobs --
-// min_machines_running, auto_stop, auto_start, soft_limit. Top-level: app.
+// named volume that service declares), and the replica knobs --
+// min_machines_running, auto_stop, auto_start, soft_limit, idle_timeout.
+// Top-level: app.
 // Unknown keys are tolerated rather than refused, so a compose file written for
 // a later CLI still plans here.
 //
@@ -148,7 +149,7 @@ type Step struct {
 	MemMiB     int               `json:"mem_mib"`
 	DependsOn  []string          `json:"depends_on,omitempty"`
 	// Knobs is the replica lifecycle policy, filled only when the file spelled
-	// at least one of the four keys out. The same struct the deploy carries,
+	// at least one of the knob keys out. The same struct the deploy carries,
 	// so the field names both sides write are one declaration.
 	Knobs  *api.Knobs `json:"knobs,omitempty"`
 	Domain string     `json:"domain,omitempty"`
@@ -206,9 +207,28 @@ type xPilots struct {
 	AutoStart          *bool   `mapstructure:"auto_start"`
 	MinMachinesRunning *int    `mapstructure:"min_machines_running"`
 	SoftLimit          *int    `mapstructure:"soft_limit"`
-	SizeGiB            int     `mapstructure:"size_gib"`
-	PreDeploy          string  `mapstructure:"pre_deploy"`
-	App                string  `mapstructure:"app"` // top-level only
+	// IdleTimeout is a duration the way compose spells every other one
+	// ("30m", "90s"), or a bare number of seconds. `any` because YAML hands
+	// the first over as a string and the second as an int, and mapstructure
+	// refuses to put an int into a *string.
+	IdleTimeout any `mapstructure:"idle_timeout"`
+	// Schedules are the service's cron jobs. A list that is present but
+	// empty is meaningful: it clears whatever the previous release's replicas
+	// carried, where an absent key inherits (see api.Knobs.Schedules). A
+	// pointer, because mapstructure decodes an empty YAML list into a nil
+	// slice and the difference between "[]" and "not there" is the point.
+	Schedules *[]xSchedule `mapstructure:"schedules"`
+	SizeGiB   int          `mapstructure:"size_gib"`
+	PreDeploy string       `mapstructure:"pre_deploy"`
+	App       string       `mapstructure:"app"` // top-level only
+}
+
+// xSchedule is one x-pilots.schedules entry, api.Schedule spelled for
+// mapstructure.
+type xSchedule struct {
+	Cron string `mapstructure:"cron"`
+	Path string `mapstructure:"path"`
+	Cmd  string `mapstructure:"cmd"`
 }
 
 // Compile returns the plan, or a PlanError the caller answers 400 with, or an
@@ -768,6 +788,15 @@ func toStep(name string, svc types.ServiceConfig) (Step, error) {
 	if _, err := svc.Extensions.Get("x-pilots", &x); err != nil {
 		return Step{}, fmt.Errorf("compose: %s: x-pilots: %w", name, err)
 	}
+	// `schedules: []` arrives from the loader as a nil list under a present
+	// key, and mapstructure leaves the pointer nil for that -- which would
+	// read as absent. Present-but-empty is the one spelling that clears a
+	// deploy's inherited crons, so it is recovered from the raw map.
+	if raw, _ := svc.Extensions["x-pilots"].(map[string]any); x.Schedules == nil {
+		if _, present := raw["schedules"]; present {
+			x.Schedules = &[]xSchedule{}
+		}
+	}
 	knobs, err := knobsFrom(name, x)
 	if err != nil {
 		return Step{}, err
@@ -1005,24 +1034,54 @@ func resourceLimits(svc types.ServiceConfig) *types.Resource {
 }
 
 // knobsFrom fills the replica policy from x-pilots, and only when the file
-// spelled at least one of the four keys out.
+// spelled at least one of the knob keys out.
 //
 // Built from the machine defaults rather than from zero, for the reason
 // api.DecodeKnobs exists: a struct assembled from zeros would carry
 // auto_start: false, and a replica that suspends and then refuses to wake is a
 // permanently dead URL earned by setting one unrelated field.
 func knobsFrom(name string, x xPilots) (*api.Knobs, error) {
-	if x.AutoStop == nil && x.AutoStart == nil && x.MinMachinesRunning == nil && x.SoftLimit == nil {
+	if x.AutoStop == nil && x.AutoStart == nil && x.MinMachinesRunning == nil && x.SoftLimit == nil && x.IdleTimeout == nil && x.Schedules == nil {
 		return nil, nil
 	}
 	k := api.DefaultKnobs()
+	if x.Schedules != nil {
+		// Present, possibly empty: an empty list is how a file says "no
+		// crons any more", and it must reach the deploy as [] rather than
+		// as nothing, or the previous release's schedules are inherited.
+		k.Schedules = make([]api.Schedule, 0, len(*x.Schedules))
+		for i, s := range *x.Schedules {
+			sched := api.Schedule{Cron: s.Cron, Path: s.Path, Cmd: s.Cmd}
+			if err := sched.Validate(); err != nil {
+				return nil, fmt.Errorf("compose: %s: x-pilots.schedules[%d] %v", name, i, err)
+			}
+			k.Schedules = append(k.Schedules, sched)
+		}
+		if len(k.Schedules) > api.MaxSchedules {
+			return nil, fmt.Errorf("compose: %s: x-pilots.schedules has %d entries, more than the %d a machine may carry",
+				name, len(k.Schedules), api.MaxSchedules)
+		}
+	}
+	if x.IdleTimeout != nil {
+		secs, err := idleTimeoutSeconds(x.IdleTimeout)
+		if err != nil {
+			return nil, fmt.Errorf("compose: %s: x-pilots.idle_timeout %v", name, err)
+		}
+		k.IdleTimeout = secs
+	}
 	if x.AutoStop != nil {
 		switch *x.AutoStop {
-		case "off", "stop", "suspend":
+		case "off", "suspend":
 			k.AutoStop = *x.AutoStop
+		case "stop":
+			// Accepted here before stop existed, and quietly behaving as
+			// suspend: the idle monitor only ever checks for "off". Refusing
+			// is honest until POST /stop is implemented.
+			return nil, fmt.Errorf("compose: %s: x-pilots.auto_stop \"stop\" is not "+
+				"available yet; use suspend, which is what an idle machine does", name)
 		default:
 			return nil, fmt.Errorf("compose: %s: x-pilots.auto_stop is %q, "+
-				"want off, stop or suspend", name, *x.AutoStop)
+				"want off or suspend", name, *x.AutoStop)
 		}
 	}
 	if x.AutoStart != nil {
@@ -1042,7 +1101,39 @@ func knobsFrom(name string, x xPilots) (*api.Knobs, error) {
 		}
 		k.SoftLimit = *x.SoftLimit
 	}
+	// The rules that span keys -- a path schedule on a replica that suspends
+	// and cannot wake -- are the API's, run here so the refusal names the
+	// service and arrives at plan time rather than after the build.
+	if err := k.Validate(); err != nil {
+		return nil, fmt.Errorf("compose: %s: x-pilots: %v", name, err)
+	}
 	return &k, nil
+}
+
+// idleTimeoutSeconds reads x-pilots.idle_timeout: a compose duration ("30m")
+// or a number of seconds, bounded the way the API bounds the knob.
+func idleTimeoutSeconds(v any) (int, error) {
+	var secs int
+	switch t := v.(type) {
+	case string:
+		d, err := time.ParseDuration(t)
+		if err != nil {
+			return 0, fmt.Errorf("is %q, want a duration such as 30m or 90s", t)
+		}
+		secs = int(d / time.Second)
+	case int:
+		secs = t
+	case int64:
+		secs = int(t)
+	case float64:
+		secs = int(t)
+	default:
+		return 0, fmt.Errorf("is %v, want a duration such as 30m or a number of seconds", v)
+	}
+	if secs < 1 || secs > api.MaxIdleTimeoutSeconds {
+		return 0, fmt.Errorf("is %ds, want 1s..%ds", secs, api.MaxIdleTimeoutSeconds)
+	}
+	return secs, nil
 }
 
 // kahn orders the steps so that nothing is built before what it depends on.

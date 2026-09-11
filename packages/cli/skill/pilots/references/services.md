@@ -17,6 +17,32 @@ A service is one or more machines behind a URL that never changes. That URL is `
 
 A deploy builds a rootfs, creates a release, starts a replica from it, and lets the release take traffic only once the replica has passed its health check. That gate is why a broken deploy does not take the previous one down.
 
+## Scheduled jobs
+
+A cron is a request on a schedule. Declare it and the platform GETs the path at the right minute, waking the machine if it is asleep; the machine sleeps again afterwards, so a job that runs for a minute a day costs a minute a day.
+
+    x-pilots:
+      schedules:
+        - cron: "0 5 * * *"      # five fields, UTC; or @hourly, @daily, @weekly, @monthly
+          path: /jobs/digest
+        - cron: "@hourly"
+          cmd: /app/bin/tick      # a command instead, for work with no route; it runs as the app user from its home, so spell the path out
+
+An app can declare them in its own config instead, and `deploy` reads it, so a cron needs no pilots-specific file at all:
+
+| The app has | Write |
+| --- | --- |
+| a `vercel.json` (Next, Astro, SvelteKit, Nuxt, Remix — anything) | `{ "crons": [{ "path": "/api/digest", "schedule": "0 5 * * *" }] }` |
+| a webjs `package.json` | `"webjs": { "crons": [{ "path": "/jobs/digest", "schedule": "0 5 * * *" }] }` |
+
+Same shape either way, and `vercel.json` is read whatever the app is written in — a Rails or Django service with that file gets its crons too. A webjs app's own block wins where both are present. A sandbox takes `pilot machines create --schedule "0 5 * * * GET /jobs/digest"` (or `--schedule "@hourly /usr/local/bin/backup.sh"` for a command).
+
+A `path` job is an ordinary request, so it needs a machine that can wake: `auto_start: false` together with the default `auto_stop: suspend` is refused at create, because the job could never run. A `cmd` job is not a request and takes neither.
+
+What the handler sees is a `GET` carrying `X-Pilot-Cron: <expression>`. The public edge strips that header from every outside request, so `if (!req.headers['x-pilot-cron']) return 403` is the whole check, with no secret to keep. A job can fire twice in rare cases (a host restart or a deploy inside its minute), so make it idempotent; a job still running when its next minute comes is skipped, not overlapped. One replica fires for a service, however many it has. To remove every cron, deploy with `schedules: []` (or `crons: []`); an absent key keeps the previous release's.
+
+A replica with no traffic suspends after about 30 seconds of quiet and the next request wakes it; that is the default and it costs nothing while asleep. A worker that must keep running with nothing connected to it -- a queue consumer, a scheduler -- keeps one replica resident with `x-pilots: min_machines_running: 1` in its compose entry (or `auto_stop: off`). The scale-down window is the autoscaler's and is not a knob; `idle_timeout` is the sandbox timer (sandboxes.md). The keys are listed in compose.md.
+
 ## The tools
 
 | I need to... | Tool | Note |

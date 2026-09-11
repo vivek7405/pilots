@@ -233,6 +233,171 @@ func TestAWebJSAppWinsOverAnyOtherSignal(t *testing.T) {
 	}
 }
 
+// A webjs app declares its crons in the config block it already owns, with
+// Vercel's field names, and the plan carries them as the step's knobs. Nothing
+// pilots-specific is written anywhere.
+func TestWebJSCronsReachThePlanAsSchedules(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "package.json", `{"name":"fx","dependencies":{"@webjsdev/core":"1"},
+		"webjs":{"crons":[{"path":"/jobs/digest","schedule":"0 5 * * *"},{"path":"/jobs/tick","schedule":"@hourly"}]}}`)
+	res, planErr, unknown, err := Plan(context.Background(), dir, Options{App: "fx"})
+	mustPlan(t, res, planErr, unknown, err)
+	k := res.Plan.Steps[0].Knobs
+	if k == nil || len(k.Schedules) != 2 || k.Schedules[0].Path != "/jobs/digest" || k.Schedules[0].Cron != "0 5 * * *" || k.Schedules[1].Cron != "@hourly" {
+		t.Fatalf("knobs = %+v, want the two crons as schedules", k)
+	}
+	if !k.AutoStart || k.IdleTimeout == 0 {
+		t.Errorf("the crons zeroed the step's other knobs: %+v", k)
+	}
+
+	// Absent: no knobs at all, exactly as before the key existed.
+	write(t, dir, "package.json", `{"name":"fx","dependencies":{"@webjsdev/core":"1"}}`)
+	res, planErr, unknown, err = Plan(context.Background(), dir, Options{App: "fx"})
+	mustPlan(t, res, planErr, unknown, err)
+	if res.Plan.Steps[0].Knobs != nil {
+		t.Errorf("a package.json with no crons produced knobs: %+v", res.Plan.Steps[0].Knobs)
+	}
+
+	// Present and empty: an empty list, which clears inherited crons on a
+	// deploy rather than leaving them in place.
+	write(t, dir, "package.json", `{"name":"fx","dependencies":{"@webjsdev/core":"1"},"webjs":{"crons":[]}}`)
+	res, planErr, unknown, err = Plan(context.Background(), dir, Options{App: "fx"})
+	mustPlan(t, res, planErr, unknown, err)
+	if k := res.Plan.Steps[0].Knobs; k == nil || k.Schedules == nil || len(k.Schedules) != 0 {
+		t.Errorf("crons: [] should reach the plan as an empty list, got %+v", k)
+	}
+
+	// Malformed: refused, naming the entry, rather than dropped.
+	for _, bad := range []string{
+		`[{"path":"jobs/digest","schedule":"0 5 * * *"}]`,
+		`[{"path":"/x","schedule":"every day"}]`,
+		`[{"schedule":"0 5 * * *"}]`,
+		`"0 5 * * *"`,
+	} {
+		write(t, dir, "package.json", `{"name":"fx","dependencies":{"@webjsdev/core":"1"},"webjs":{"crons":`+bad+`}}`)
+		_, _, _, err := Plan(context.Background(), dir, Options{App: "fx"})
+		if err == nil || !strings.Contains(err.Error(), "webjs.crons") {
+			t.Errorf("crons %s: err = %v, want a refusal naming webjs.crons", bad, err)
+		}
+	}
+}
+
+// The framework-agnostic half: vercel.json is what Next, Astro, SvelteKit,
+// Nuxt and Remix users already write, so their crons reach the plan with no
+// pilots-specific file either -- and it is read for every app, not for a list
+// of frameworks the platform happens to know.
+func TestVercelJSONCronsReachThePlanForAnyApp(t *testing.T) {
+	const crons = `{"crons":[{"path":"/api/digest","schedule":"0 5 * * *"}]}`
+
+	// A recipe-detected app that is not webjs.
+	next := t.TempDir()
+	write(t, next, "package.json", `{"name":"shop"}`)
+	write(t, next, "next.config.js", "module.exports = {}")
+	write(t, next, "package-lock.json", "{}")
+	write(t, next, "vercel.json", crons)
+	res, planErr, unknown, err := Plan(context.Background(), next, Options{App: "shop"})
+	mustPlan(t, res, planErr, unknown, err)
+	if res.Detected[0].Framework != string(FrameworkNext) {
+		t.Fatalf("framework = %q, want next", res.Detected[0].Framework)
+	}
+	k := res.Plan.Steps[0].Knobs
+	if k == nil || len(k.Schedules) != 1 || k.Schedules[0].Path != "/api/digest" || k.Schedules[0].Cron != "0 5 * * *" {
+		t.Fatalf("knobs = %+v, want the vercel.json cron as a schedule", k)
+	}
+	if !k.AutoStart || k.IdleTimeout == 0 {
+		t.Errorf("the crons zeroed the step's other knobs: %+v", k)
+	}
+
+	// An app that brought its own Dockerfile. How it builds says nothing
+	// about when its jobs run.
+	docker := t.TempDir()
+	write(t, docker, "Dockerfile", "FROM scratch\n")
+	write(t, docker, "vercel.json", crons)
+	res, planErr, unknown, err = Plan(context.Background(), docker, Options{App: "shop"})
+	mustPlan(t, res, planErr, unknown, err)
+	if res.Detected[0].Source != "dockerfile" {
+		t.Fatalf("source = %q, want dockerfile", res.Detected[0].Source)
+	}
+	if k := res.Plan.Steps[0].Knobs; k == nil || len(k.Schedules) != 1 {
+		t.Errorf("a Dockerfile app's vercel.json crons were dropped: %+v", k)
+	}
+
+	// A language with no JavaScript in it at all: the file is a declaration,
+	// and which framework wrote it is not this package's business.
+	rust := t.TempDir()
+	write(t, rust, "Cargo.toml", "[package]\nname = \"shop\"\nversion = \"0.1.0\"\n")
+	write(t, rust, "vercel.json", crons)
+	res, planErr, unknown, err = Plan(context.Background(), rust, Options{App: "shop"})
+	mustPlan(t, res, planErr, unknown, err)
+	if k := res.Plan.Steps[0].Knobs; k == nil || len(k.Schedules) != 1 {
+		t.Errorf("a rust app's vercel.json crons were dropped: %+v", k)
+	}
+}
+
+// Where both files speak, the framework's own is the more specific and wins;
+// a webjs app with nothing in its own block still gets its vercel.json read.
+func TestWebJSCronsWinOverVercelJSON(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "vercel.json", `{"crons":[{"path":"/from-vercel","schedule":"@daily"}]}`)
+
+	write(t, dir, "package.json", `{"name":"fx","dependencies":{"@webjsdev/core":"1"},
+		"webjs":{"crons":[{"path":"/from-webjs","schedule":"@hourly"}]}}`)
+	res, planErr, unknown, err := Plan(context.Background(), dir, Options{App: "fx"})
+	mustPlan(t, res, planErr, unknown, err)
+	if k := res.Plan.Steps[0].Knobs; k == nil || len(k.Schedules) != 1 || k.Schedules[0].Path != "/from-webjs" {
+		t.Errorf("knobs = %+v, want the webjs block to win", k)
+	}
+
+	// An explicit empty list in the framework's own file is a decision --
+	// "no crons" -- and must not fall through to the other file.
+	write(t, dir, "package.json", `{"name":"fx","dependencies":{"@webjsdev/core":"1"},"webjs":{"crons":[]}}`)
+	res, planErr, unknown, err = Plan(context.Background(), dir, Options{App: "fx"})
+	mustPlan(t, res, planErr, unknown, err)
+	if k := res.Plan.Steps[0].Knobs; k == nil || k.Schedules == nil || len(k.Schedules) != 0 {
+		t.Errorf("knobs = %+v, want webjs.crons: [] to stay an empty list", k)
+	}
+
+	// Saying nothing is not a decision, so vercel.json is read.
+	write(t, dir, "package.json", `{"name":"fx","dependencies":{"@webjsdev/core":"1"}}`)
+	res, planErr, unknown, err = Plan(context.Background(), dir, Options{App: "fx"})
+	mustPlan(t, res, planErr, unknown, err)
+	if k := res.Plan.Steps[0].Knobs; k == nil || len(k.Schedules) != 1 || k.Schedules[0].Path != "/from-vercel" {
+		t.Errorf("knobs = %+v, want the vercel.json cron", k)
+	}
+}
+
+func TestVercelJSONCronRefusalsAndTolerances(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "Dockerfile", "FROM scratch\n")
+
+	// Spelled wrongly, in a file that parses: the author was talking to us,
+	// so it is named rather than dropped.
+	for _, bad := range []string{
+		`[{"path":"api/digest","schedule":"0 5 * * *"}]`,
+		`[{"path":"/x","schedule":"every day"}]`,
+		`[{"schedule":"0 5 * * *"}]`,
+		`"0 5 * * *"`,
+	} {
+		write(t, dir, "vercel.json", `{"crons":`+bad+`}`)
+		if _, _, _, err := Plan(context.Background(), dir, Options{App: "fx"}); err == nil ||
+			!strings.Contains(err.Error(), "vercel.json") {
+			t.Errorf("crons %s: err = %v, want a refusal naming vercel.json", bad, err)
+		}
+	}
+
+	// Tolerated: a file with no crons, and a file that does not parse at all.
+	// Refusing the second would make an unrelated broken file -- one this
+	// platform has no other use for -- the reason an app cannot ship.
+	for _, body := range []string{`{"framework":"nextjs"}`, `{`, ``, `not json`} {
+		write(t, dir, "vercel.json", body)
+		res, planErr, unknown, err := Plan(context.Background(), dir, Options{App: "fx"})
+		mustPlan(t, res, planErr, unknown, err)
+		if k := res.Plan.Steps[0].Knobs; k != nil {
+			t.Errorf("vercel.json %q produced knobs %+v; it declares no crons", body, k)
+		}
+	}
+}
+
 func TestNextNeedsALockfileAsWellAsAConfig(t *testing.T) {
 	dir := t.TempDir()
 	write(t, dir, "next.config.js", "module.exports = {}")

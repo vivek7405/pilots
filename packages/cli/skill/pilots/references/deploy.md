@@ -35,6 +35,8 @@ MCP: `deploy` with `{ "dir": "<absolute path>" }`. Nothing else is required.
 
 Every recipe sets `PORT=8080`, exposes 8080 and reads `$PORT`. The router dials 8080.
 
+**Cron jobs come from the app's own config.** A `vercel.json` with `{ "crons": [{ "path": "/api/digest", "schedule": "0 5 * * *" }] }` is read for any app, whatever it is written in and whether or not it brought a Dockerfile; a webjs `package.json` may carry the same list under `"webjs": { "crons": [...] }`, and wins where both are present. The plan turns either into the service's schedules (services.md), so a cron needs no compose file and nothing pilots-specific. A `vercel.json` that does not parse is ignored; one that parses and spells a cron wrongly is a 400 naming the entry.
+
 ## Monorepos
 
 A root `package.json` with `workspaces` deploys each workspace directory as a service named after it, built from the repository root with `WORKDIR /app/<dir>`. The install stays at the root, so the lockfile and the hoisted `node_modules` are the ones each workspace expects. A workspace no recipe recognises is skipped and named in the notes.

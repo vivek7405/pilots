@@ -191,7 +191,11 @@ THE PRIMITIVE
   are the same machine with different lifecycle knobs. A service is one
   or more machines behind a permanent URL that survives every deploy.
   create_machine + exec is a sandbox. deploy is a service. promote turns
-  the first into the second without changing its URL.
+  the first into the second without changing its URL. A quiet machine
+  suspends (a freeze; it resumes on the next exec or request); a console
+  running a command keeps it up, idle_timeout sets the wait for a daemon.
+  A cron is a GET on a path on a schedule (schedules on create or deploy;
+  or the app's own vercel.json / webjs.crons); the host wakes it for one.
 
 RULES
   No directory and no repo in the conversation: ask, never invent one.

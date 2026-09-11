@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -259,6 +260,48 @@ func TestTheTokenIsResetBeforeTheSnapshot(t *testing.T) {
 // sprites discards memory images on upgrade, disk pressure and migration, so a
 // platform that failed the deploy because a snapshot was missing would be
 // worse than one that took the slow path. Restore-first, boot-second.
+// The API validates a deploy's knobs against the DEFAULTS, but the rollout
+// merges them onto what the previous replica carried, and a rule that spans
+// keys -- a path schedule on a replica that suspends and cannot wake -- can be
+// broken by that merge alone, each half valid on its own. The merged value is
+// what gets stored, so the merged value is what is checked.
+func TestADeployWhoseMergedKnobsCannotRunIsRefused(t *testing.T) {
+	ctx := context.Background()
+	for _, tc := range []struct{ name, first, second string }{
+		{"a schedule, then no wake", `{"schedules":[{"cron":"@hourly","path":"/x"}]}`, `{"auto_start":false}`},
+		{"no wake, then a schedule", `{"auto_start":false}`, `{"schedules":[{"cron":"@hourly","path":"/x"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, _, _, _ := fixture(t, 1)
+			if _, err := m.Deploy(ctx, "svc-1", "rootfs-1", json.RawMessage(tc.first)); err != nil {
+				t.Fatalf("first deploy, valid on its own: %v", err)
+			}
+			_, err := m.Deploy(ctx, "svc-1", "rootfs-2", json.RawMessage(tc.second))
+			if err == nil || !errors.Is(err, api.ErrInvalidKnobs) || !strings.Contains(err.Error(), "auto_start") {
+				t.Fatalf("second deploy: err = %v, want ErrInvalidKnobs naming auto_start", err)
+			}
+		})
+	}
+
+	// And the release that cannot run was never cut: the service still
+	// serves the first.
+	m, _, store, _ := fixture(t, 1)
+	first, err := m.Deploy(ctx, "svc-1", "rootfs-1", json.RawMessage(`{"schedules":[{"cron":"@hourly","path":"/x"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.Deploy(ctx, "svc-1", "rootfs-2", json.RawMessage(`{"auto_start":false}`)); err == nil {
+		t.Fatal("the refused deploy succeeded")
+	}
+	svc, err := store.GetService(ctx, "svc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if svc.ReleaseID != first.ID {
+		t.Errorf("the service moved to %s after a refused deploy; want it still on %s", svc.ReleaseID, first.ID)
+	}
+}
+
 func TestAReleaseWithNoSnapshotStillDeploys(t *testing.T) {
 	m, fm, _, _ := fixture(t, 2)
 	fm.noSnap = true
@@ -478,7 +521,7 @@ func TestAReplicaDefaultsToTheMachineDefaults(t *testing.T) {
 	if len(reps) != 1 {
 		t.Fatalf("deploy made %d replicas, want 1", len(reps))
 	}
-	if got := api.ParseKnobs(reps[0].KindKnobs); got != api.DefaultKnobs() {
+	if got := api.ParseKnobs(reps[0].KindKnobs); !reflect.DeepEqual(got, api.DefaultKnobs()) {
 		t.Errorf("replica knobs = %+v, want the machine defaults %+v", got, api.DefaultKnobs())
 	}
 }
