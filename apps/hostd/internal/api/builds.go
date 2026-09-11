@@ -31,7 +31,10 @@ type BuildRunner interface {
 	NewBuildID() string
 	// StartBuild runs a build to completion, calling emit for every line as it
 	// happens, and returns the rootfs build id.
-	StartBuild(ctx context.Context, id string, contextTar io.Reader,
+	// orgID names the tenant whose builder machine the solve runs in. A
+	// build executes inside that org's own guest, so it is not optional
+	// context: an empty org is the platform's own build, never a tenant's.
+	StartBuild(ctx context.Context, id, orgID string, contextTar io.Reader,
 		emit func(BuildLogLine)) (string, error)
 	// BuildLog returns what was recorded and, when following, a channel of
 	// what comes next. The bool reports whether this host has the build at all.
@@ -359,7 +362,7 @@ func (d Deps) handleBuild(w http.ResponseWriter, r *http.Request) {
 		TS: time.Now().UnixMilli(),
 	})
 
-	buildID, err := d.Builds.StartBuild(bctx, id, contextTar, write)
+	buildID, err := d.Builds.StartBuild(bctx, id, org, contextTar, write)
 	// The build is over either way; what follows is a rollout, which is not a
 	// build and must not hold a build's slot.
 	releaseGate()

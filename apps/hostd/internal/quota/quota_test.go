@@ -164,3 +164,56 @@ func TestANilGateIsUnlimited(t *testing.T) {
 	}
 	g.Release("org_1")
 }
+
+// A builder is hostd's machine, not the org's. It is created per org per host
+// to run that org's Dockerfile inside a microVM instead of on the host, and it
+// is destroyed on its own schedule, so counting it would make a deploy fail
+// against a limit the org never spent.
+func TestABuilderDoesNotCountAgainstTheOrgsQuota(t *testing.T) {
+	ctx := context.Background()
+	st := openStore(t)
+	if err := st.PutQuota(ctx, &state.Quota{
+		OrgID: "org_1", MaxMachines: 3, MaxVCPUs: 32, MaxMemMiB: 16384,
+		MaxVolumeGiB: 10, MaxBuilds: 1,
+	}); err != nil {
+		t.Fatalf("PutQuota: %v", err)
+	}
+	seedMachine(t, st, "m_1", "org_1", "running", 1, 512)
+	seedMachine(t, st, "m_2", "org_1", "running", 1, 512)
+
+	// Two tenant machines against a limit of three. Give the org a builder.
+	if err := st.PutMachine(ctx, &state.Machine{
+		ID: "m_builder", Name: BuilderNamePrefix + "org1-hosta", HostID: "host-a",
+		State: "running", VCPUs: 4, MemMiB: 4096,
+	}); err != nil {
+		t.Fatalf("PutMachine: %v", err)
+	}
+	if err := st.PutTenancy(ctx, &state.Tenancy{
+		ID: "m_builder", OrgID: "org_1", Kind: "machine",
+	}); err != nil {
+		t.Fatalf("PutTenancy: %v", err)
+	}
+
+	// The builder is visible to the org and owned by it, and still does not
+	// move the org's usage: the third machine the org asks for is allowed,
+	// because the builder is not one of the two it already has.
+	if err := Check(ctx, st, "org_1", Delta{Machines: 1, VCPUs: 1, MemMiB: 512}); err != nil {
+		t.Fatalf("a machine within the limit was refused: %v", err)
+	}
+
+	// Counterfactual: the exemption is the NAME. The same row under an
+	// ordinary name puts the org over its machine limit with nothing added,
+	// which is exactly the failure the exemption prevents.
+	if err := st.PutMachine(ctx, &state.Machine{
+		ID: "m_builder", Name: "ordinary", HostID: "host-a",
+		State: "running", VCPUs: 4, MemMiB: 4096,
+	}); err != nil {
+		t.Fatalf("PutMachine: %v", err)
+	}
+	var ex *Exceeded
+	if err := Check(ctx, st, "org_1", Delta{Machines: 1, VCPUs: 1, MemMiB: 512}); !errors.As(err, &ex) {
+		t.Fatalf("without the builder name the check returned %v, want *Exceeded", err)
+	} else if ex.Quota != "machines" || ex.Used != 3 {
+		t.Errorf("Exceeded = %+v, want machines used 3", ex)
+	}
+}

@@ -170,7 +170,7 @@ func (r *recordingBuilds) NewBuildID() string {
 	return r.lastID
 }
 
-func (r *recordingBuilds) StartBuild(_ context.Context, _ string, contextTar io.Reader,
+func (r *recordingBuilds) StartBuild(_ context.Context, _, _ string, contextTar io.Reader,
 	_ func(api.BuildLogLine)) (string, error) {
 
 	r.started = true

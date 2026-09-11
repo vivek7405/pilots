@@ -454,7 +454,7 @@ func stageTemplate(t *testing.T, m *Manager) *Template {
 			t.Fatalf("stage template build: %v", err)
 		}
 	}
-	if err := m.saveTemplate(tpl); err != nil {
+	if err := m.saveTemplate(variantGolden, tpl); err != nil {
 		t.Fatal(err)
 	}
 	return tpl

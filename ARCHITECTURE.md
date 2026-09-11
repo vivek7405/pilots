@@ -152,7 +152,11 @@ compose fragment on the ordinary primitives, not a product tier. See
    does not. The **memory template** is never a file and is never shipped: it
    exists only as builds a fleet host chunkified from its own boot and
    published through its own replica, so no laptop can mint one, and it is one
-   row per pool (`templates.id = "golden-<vendor>"`). `PILOT_CPU_TEMPLATE` is
+   row per pool (`templates.id = "golden-<vendor>"`). The **builder** template
+   is per pool for the same reason and by the same mechanism
+   (`templates.id = "builder-<vendor>"`): a builder is idle-suspended between
+   builds, so it has a memory image, and a memory image belongs to the vendor
+   that photographed it. `PILOT_CPU_TEMPLATE` is
    pinned in `/etc/pilots/config`; the bootstrap refuses a host whose CPU
    vendor or generation disagrees with it, and hostd refuses to start on the
    same disagreement. Note that auction i7 desktop boards have non-ECC RAM
@@ -1043,12 +1047,31 @@ costs the failure shape where one blocked unit wedges the whole data plane.
 Anything a customer saw, every self-heal and every re-seed is written up in
 `docs/incidents/`.
 
-**Build path:** `POST /v1/builds` accepts a Dockerfile context → BuildKit
-(rootless buildkitd on each host) → **BuildKit's `tar` exporter**, which
-already emits the flattened filesystem, so no layered image is unpacked →
-`mke2fs -d` into an ext4 → chunkify as a generation-0 template build → S3.
-Structured NDJSON log stream (`{step, stream, line, ts}`) so an agent can
-parse failures and loop.
+**Build path:** `POST /v1/builds` accepts a Dockerfile context → the
+receiving host creates or wakes **that org's builder machine on itself** →
+`buildctl` on the host drives the BuildKit daemon **inside that guest** over
+the slot's tap address → **BuildKit's `tar` exporter**, which already emits
+the flattened filesystem, so no layered image is unpacked → `mke2fs -d` into
+an ext4 → chunkify as a generation-0 template build → S3. Structured NDJSON
+log stream (`{step, stream, line, ts}`) so an agent can parse failures and
+loop.
+
+**The host runs no build daemon.** A `RUN` step is arbitrary customer code, so
+it executes behind KVM like every other workload here, not in a rootless
+container sharing the host kernel with other tenants' machines. fly reaches the
+same conclusion from the other direction: its builder is a Machine in the
+customer's own org, and the Depot builders that replaced it "run as Fly
+machines" too (`docs/prior-art/fly-io.md:164`). What pilots does not copy is a
+build tier. A builder is an ordinary machine on the host that received the
+request, created from a `builder-<vendor>` template, idle-suspended at 300 s
+and destroyed after 24 h suspended. No host looks up another host's builder, no
+request forwards, and the GitHub path still picks its host with
+`hash(repo) mod live_hosts` and then acts locally.
+
+Everything after the exporter stays on the host. `buildctl` streams the context
+in and the tar back out over its own session, so the guest never receives a
+credential, never reaches object storage, and needs no file-push path of its
+own.
 
 `mke2fs -d` takes the tarball directly, reading uid, gid and setuid straight
 out of the tar headers. That is why the fixups are appended to the tarball
@@ -1165,10 +1188,23 @@ A build that fails still carries every NDJSON line: the agent reads the
 failing step, patches the Dockerfile, retries — the loop the structured logs
 exist for.
 
-The fleet-wide layer cache is keyed **server-side on the Dockerfile's content
-hash**, so a client passes no cache name at all — and every app built from the
-same scaffold Dockerfile shares one partition, which is why the first deploy of
-a new webjs app is already warm on any host.
+The layer cache is keyed **server-side on the Dockerfile's content hash**, so
+a client passes no cache name at all. It is **per org**: the daemon exports and
+imports it through the `buildctl` session into
+`/var/cache/pilots/build-cache/orgs/<org>/<df-hash>/` on the HOST, and hostd
+mirrors that directory to S3 under `build-cache/orgs/<org>/` with hostd's own
+credentials.
+A daemon inside a tenant's VM may not write a cache another tenant reads, which
+is why the fleet-wide bucket-backed cache the host daemon used is gone: with
+bucket credentials an org could write any manifest under any key, and the next
+org whose Dockerfile hashed the same would import it.
+
+Every app built from the same scaffold Dockerfile still shares one partition,
+because a build imports a second, **read-only platform-owned seed** at
+`build-cache/shared/node-base/` that only hostd ever writes. That is what keeps
+the first deploy of a new webjs app warm on any host. S3 is the truth and local
+NVMe is the cache, so wiping a host's `build-cache/` costs one download, never
+a rebuild.
 
 **Deploy ingestion — two paths, one pipeline:**
 1. **Direct** (base primitive, GitHub-free): `pilot deploy` tars the local

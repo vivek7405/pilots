@@ -30,6 +30,10 @@ type fakeBuilder struct {
 	log     []BuildLogLine
 	hasLog  bool
 	started int
+	// gotOrg is the org the handler passed down. A build runs inside THAT
+	// org's builder machine, so passing the wrong one would run one tenant's
+	// Dockerfile in another tenant's guest.
+	gotOrg string
 
 	// recordEmitted mirrors the real builder, which appends a line to its log
 	// store before it emits. Opt-in, so the tests that hand BuildLog a fixed
@@ -39,9 +43,10 @@ type fakeBuilder struct {
 
 func (f *fakeBuilder) NewBuildID() string { return "bld-test" }
 
-func (f *fakeBuilder) StartBuild(_ context.Context, id string, r io.Reader,
+func (f *fakeBuilder) StartBuild(_ context.Context, id, org string, r io.Reader,
 	emit func(BuildLogLine)) (string, error) {
 	f.started++
+	f.gotOrg = org
 	_, _ = io.Copy(io.Discard, r)
 	for _, l := range f.lines {
 		if f.recordEmitted {
@@ -280,7 +285,7 @@ type cancelProbeBuilder struct {
 
 func (c *cancelProbeBuilder) NewBuildID() string { return "bld-cancel" }
 
-func (c *cancelProbeBuilder) StartBuild(ctx context.Context, _ string, _ io.Reader,
+func (c *cancelProbeBuilder) StartBuild(ctx context.Context, _, _ string, _ io.Reader,
 	_ func(BuildLogLine)) (string, error) {
 	close(c.started)
 	select {
@@ -355,7 +360,7 @@ type readingBuilder struct {
 
 func (b *readingBuilder) NewBuildID() string { return "bld-reading" }
 
-func (b *readingBuilder) StartBuild(_ context.Context, _ string, r io.Reader,
+func (b *readingBuilder) StartBuild(_ context.Context, _, _ string, r io.Reader,
 	emit func(BuildLogLine)) (string, error) {
 	if err := b.read(r, emit); err != nil {
 		return "", err
@@ -422,7 +427,7 @@ type blockingBuilder struct {
 
 func (b *blockingBuilder) NewBuildID() string { return "bld-block" }
 
-func (b *blockingBuilder) StartBuild(_ context.Context, _ string, r io.Reader,
+func (b *blockingBuilder) StartBuild(_ context.Context, _, _ string, r io.Reader,
 	_ func(BuildLogLine)) (string, error) {
 	_, _ = io.Copy(io.Discard, r)
 	b.once.Do(func() { close(b.inFlight) })
@@ -1080,4 +1085,30 @@ func countTenancy(t *testing.T, st state.Store) int {
 		t.Fatalf("ListTenancy: %v", err)
 	}
 	return len(rows)
+}
+
+// A build runs inside the requesting org's OWN builder machine, so the org on
+// the authenticated key has to reach the builder. Getting this wrong would run
+// one tenant's Dockerfile inside another tenant's guest, which is the whole
+// boundary a builder machine exists to draw.
+func TestTheBuildRunsInTheCallersOwnOrg(t *testing.T) {
+	fb := &fakeBuilder{result: "00000000-0000-0000-0000-00000000000a"}
+	_, st, fake := newTestServerWithManager(t)
+	h := Routes(Deps{HostID: "host-test", Store: st, Machines: fake, Builds: fb})
+
+	const tenant = "pilot_tenantkey"
+	sum := sha256.Sum256([]byte(tenant))
+	if err := st.PutAPIKey(context.Background(), &state.APIKey{
+		Hash: hex.EncodeToString(sum[:]), OrgID: "org_2", Scopes: "deploy",
+	}); err != nil {
+		t.Fatalf("PutAPIKey: %v", err)
+	}
+
+	rec := postTarAs(t, h, "/v1/builds", tenant, []byte("tar-bytes"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if fb.gotOrg != "org_2" {
+		t.Fatalf("the build ran for org %q, want the caller's org_2", fb.gotOrg)
+	}
 }

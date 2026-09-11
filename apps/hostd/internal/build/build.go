@@ -49,25 +49,28 @@ type Options struct {
 	// Chunks publishes the produced build.
 	Chunks Uploader
 
-	// BuildctlBin and the rootless daemon's socket.
-	BuildctlBin  string
-	BuildkitSock string
+	// BuildctlBin is the BuildKit client. It runs HERE, on the host, and it
+	// is the only half of BuildKit the host has: the daemon it drives lives
+	// inside the org's builder machine.
+	BuildctlBin string
+
+	// Builders creates or wakes the builder machine a solve is driven
+	// against. An interface rather than the machines package itself, because
+	// machines already imports this one for the guest agent's in-image path.
+	Builders Builders
 
 	// AgentBinary is the guest agent injected into every image.
 	AgentBinary string
 
-	// Cache import/export, so a redeploy does not rebuild from scratch. Empty
-	// bucket disables both.
-	CacheBucket   string
-	CacheEndpoint string
-	CacheRegion   string
-	// The cache backend runs inside buildkitd, which has no credentials of its
-	// own: it is a rootless daemon running as another user, deliberately
-	// unaware of hostd's configuration. Without these it falls back to the
-	// default AWS chain, reaches for the EC2 metadata service, and fails the
-	// build after a context deadline that names IMDS rather than the cache.
-	CacheAccessKey string
-	CacheSecretKey string
+	// CacheDir is where the daemon exports and imports the layer cache, on
+	// THIS host. The directories under it are served to the daemon over the
+	// buildctl session, so the guest is never told a path and never holds a
+	// credential. Empty disables the cache.
+	CacheDir string
+	// CacheStore mirrors those directories to object storage, with hostd's
+	// own credentials, so any host can warm an org's next build. Nil keeps
+	// the cache host-local, which is correct but colder.
+	CacheStore CacheStore
 
 	// Limits. Every one of these exists because a build is arbitrary user code
 	// running beside other tenants' machines.
@@ -125,17 +128,11 @@ func New(ctx context.Context, opts Options) *Builder {
 	if opts.BuildctlBin == "" {
 		opts.BuildctlBin = "/opt/pilots/bin/buildctl"
 	}
-	if opts.BuildkitSock == "" {
-		// Only correct when the daemon runs as THIS user, which on a real host
-		// it deliberately does not: buildkitd runs rootless as `pilot` so that
-		// an arbitrary user Dockerfile is not built by root beside other
-		// tenants' machines. hostd is root, so deriving the path from its own
-		// uid points at /run/user/0 and the dial fails with a bare "no such
-		// file or directory" that names nothing about users.
-		//
-		// So this default exists for a single-user dev box and nothing else;
-		// host-bootstrap.sh writes PILOT_BUILDKIT_SOCK on every real host.
-		opts.BuildkitSock = fmt.Sprintf("unix:///run/user/%d/buildkit/buildkitd.sock", os.Getuid())
+	if opts.Builders == nil {
+		// Refused rather than defaulted. There is no host-side daemon to fall
+		// back to any more, and silently building on the host is precisely
+		// what a builder machine exists to stop.
+		panic("build: Options.Builders is required; a build runs inside a machine")
 	}
 	if opts.AgentBinary == "" {
 		opts.AgentBinary = "/opt/pilots/bin/guest-agent"
@@ -199,7 +196,7 @@ func (b *Builder) Log(id string) (*Log, bool) { return b.logs.get(id) }
 // error is the build's failure; the failing step has already been emitted by
 // then, because an agent reading this to patch its own Dockerfile needs to be
 // told which step failed rather than left to find it.
-func (b *Builder) Build(ctx context.Context, id string, contextTar io.Reader,
+func (b *Builder) Build(ctx context.Context, id, orgID string, contextTar io.Reader,
 	emit func(api.BuildLogLine)) (Result, error) {
 
 	res := Result{ID: id}
@@ -261,10 +258,31 @@ func (b *Builder) Build(ctx context.Context, id string, contextTar io.Reader,
 			"start command will have to come from the service spec"))
 	}
 
-	tarPath := filepath.Join(work, "rootfs.tar")
-	if err := b.solve(ctx, ctxDir, tarPath, record); err != nil {
+	// The daemon this build runs against is a machine, and it belongs to the
+	// org whose Dockerfile this is. Created or woken HERE, on the host that
+	// took the request, so nothing about serving a build depends on another
+	// host being alive.
+	record(status(id, "starting the builder"))
+	addr, release, err := b.opts.Builders.EnsureBuilder(ctx, orgID)
+	if err != nil {
+		record(failure("starting the builder", err))
 		return res, err
 	}
+	defer release()
+
+	// The cache directory is this org's alone, on this host, and hostd is
+	// what moves it to and from object storage. A miss is not a failure: S3
+	// is the truth and this disk is a cache, so a wiped host pays one
+	// download and an org that has never built here builds cold.
+	cacheName := cacheNameFor(ctxDir)
+	cacheDir := b.cacheDir(orgID, cacheName)
+	b.pullCache(ctx, cacheDir, orgID, cacheName)
+
+	tarPath := filepath.Join(work, "rootfs.tar")
+	if err := b.solve(ctx, addr, ctxDir, tarPath, cacheDir, record); err != nil {
+		return res, err
+	}
+	b.pushCache(ctx, cacheDir, orgID, cacheName)
 
 	record(status(id, "packing rootfs"))
 	imagePath := filepath.Join(work, "rootfs.ext4")

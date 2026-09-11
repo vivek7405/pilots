@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vivek7405/pilots/hostd/internal/fc"
+	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
 // hugePageManager returns a Manager whose host is configured for 2MiB pages
@@ -27,7 +28,7 @@ func hugePageManager(t *testing.T, huge bool) *Manager {
 // insists on, so the only thing a test varies is the page size.
 func writeTemplate(t *testing.T, m *Manager, tpl *Template) {
 	t.Helper()
-	if err := os.MkdirAll(m.templateRoot(), 0o755); err != nil {
+	if err := os.MkdirAll(m.templateRoot(variantGolden), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	for _, dir := range []string{m.memParentDir(tpl), m.rootfsTemplateDir(tpl)} {
@@ -45,7 +46,7 @@ func writeTemplate(t *testing.T, m *Manager, tpl *Template) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(m.templateRoot(), templateFile), raw, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(m.templateRoot(variantGolden), templateFile), raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -72,7 +73,7 @@ func TestLoadTemplateRejectsAForeignPageSize(t *testing.T) {
 		PageSizeKiB:   4, // photographed at 4KiB
 	})
 
-	_, err := m.loadTemplate()
+	_, err := m.loadTemplate(variantGolden)
 	if err == nil {
 		t.Fatal("a 4KiB template was accepted by a 2MiB host")
 	}
@@ -90,7 +91,7 @@ func TestLoadTemplateRejectsAHugePageTemplateOnASmallPageHost(t *testing.T) {
 		PageSizeKiB:   2048,
 	})
 
-	if _, err := m.loadTemplate(); !errors.Is(err, errTemplatePageSize) {
+	if _, err := m.loadTemplate(variantGolden); !errors.Is(err, errTemplatePageSize) {
 		t.Errorf("error was %v, want it to wrap errTemplatePageSize", err)
 	}
 }
@@ -106,7 +107,7 @@ func TestLoadTemplateRejectsAManifestWithNoPageSize(t *testing.T) {
 		// PageSizeKiB left at zero, as a pre-change manifest would have it.
 	})
 
-	if _, err := m.loadTemplate(); !errors.Is(err, errTemplatePageSize) {
+	if _, err := m.loadTemplate(variantGolden); !errors.Is(err, errTemplatePageSize) {
 		t.Errorf("error was %v, want it to wrap errTemplatePageSize", err)
 	}
 }
@@ -120,7 +121,7 @@ func TestLoadTemplateAcceptsAMatchingPageSize(t *testing.T) {
 	}
 	writeTemplate(t, m, want)
 
-	got, err := m.loadTemplate()
+	got, err := m.loadTemplate(variantGolden)
 	if err != nil {
 		t.Fatalf("loadTemplate: %v", err)
 	}
@@ -168,7 +169,7 @@ func TestARejectedTemplateIsNotServedAgain(t *testing.T) {
 	writeTemplate(t, m, tpl)
 
 	// Nothing rejected: the manifest is good as far as anything local knows.
-	got, err := m.loadTemplate()
+	got, err := m.loadTemplate(variantGolden)
 	if err != nil {
 		t.Fatalf("loadTemplate: %v", err)
 	}
@@ -195,17 +196,17 @@ func TestDiscardTemplateForcesAReDerive(t *testing.T) {
 		SnapKey:       "template/x/snap.bin",
 		PageSizeKiB:   2048,
 	})
-	if _, err := m.loadTemplate(); err != nil {
+	if _, err := m.loadTemplate(variantGolden); err != nil {
 		t.Fatalf("loadTemplate before the discard: %v", err)
 	}
 
-	m.discardTemplate()
+	m.discardTemplate(variantGolden)
 
-	if _, err := m.loadTemplate(); !errors.Is(err, os.ErrNotExist) {
+	if _, err := m.loadTemplate(variantGolden); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("loadTemplate after the discard = %v, want the manifest to be gone", err)
 	}
 	// Idempotent: a host that never had one must not log or fail differently.
-	m.discardTemplate()
+	m.discardTemplate(variantGolden)
 }
 
 // The retry has to be able to tell the template's own missing artifact from
@@ -226,5 +227,32 @@ func TestTemplateArtifactMissingUnwrapsToTheSentinel(t *testing.T) {
 	// An unrelated failure must not look like one.
 	if errors.As(errors.New("boom"), &missing) {
 		t.Error("an unrelated error was taken for a missing template artifact")
+	}
+}
+
+// A builder machine must be created from the BUILDER template, not the golden
+// one. Restoring a builder from the golden image produces a guest with no
+// BuildKit daemon in it, and the first build against it fails on a refused
+// connection to a port nothing is listening on. Nothing else in the system
+// would report that as a template problem.
+//
+// The signal is the name prefix, deliberately the same one the quota loop and
+// the idle monitor read, so the three cannot disagree about what a builder is.
+func TestABuilderIsCreatedFromTheBuilderTemplate(t *testing.T) {
+	cases := []struct {
+		name string
+		want variant
+	}{
+		{"builder-org1-hosta", variantBuilder},
+		{BuilderName("org_1", "host-a"), variantBuilder},
+		{BuilderName("", "host-a"), variantBuilder},
+		{"web", variantGolden},
+		{"buildbot", variantGolden},
+		{"", variantGolden},
+	}
+	for _, tc := range cases {
+		if got := variantFor(&state.Machine{Name: tc.name}); got != tc.want {
+			t.Errorf("variantFor(%q) = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }

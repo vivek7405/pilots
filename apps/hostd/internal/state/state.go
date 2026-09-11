@@ -189,6 +189,13 @@ type Template struct {
 // snapshot never restores across the Intel/AMD boundary.
 func GoldenTemplateFor(vendor string) string { return "golden-" + vendor }
 
+// BuilderTemplateFor is the id of a vendor pool's BUILDER template row: the
+// golden guest plus a BuildKit daemon, which is what a per-org builder machine
+// is created from. Per pool for the same reason as the golden row, and it is
+// not optional here: a builder is idle-suspended between builds, so it has a
+// memory image, and a memory image never restores across the vendor boundary.
+func BuilderTemplateFor(vendor string) string { return "builder-" + vendor }
+
 // HostCPU is what a host says about its own CPU. Written by the host itself,
 // before its first heartbeat, so a peer never ranks it into a pool it is not in.
 type HostCPU struct {

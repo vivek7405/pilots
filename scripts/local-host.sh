@@ -26,6 +26,8 @@ CHROOT_BASE="${PILOT_CHROOT_BASE:-/var/lib/pilots/jailer}"
 KERNEL="${PILOT_KERNEL:-/opt/pilots/kernels/vmlinux-6.1.158/vmlinux.bin}"
 GOLDEN_SRC="${PILOT_GOLDEN_SRC:-$REPO/scripts/rootfs/golden.ext4}"
 GOLDEN_DST="${PILOT_TEMPLATE_ROOTFS:-/var/lib/pilots/templates/golden.ext4}"
+BUILDER_SRC="${PILOT_BUILDER_SRC:-$REPO/scripts/rootfs/builder.ext4}"
+BUILDER_DST="${PILOT_BUILDER_ROOTFS:-/var/lib/pilots/templates/builder.ext4}"
 
 [ "$(id -u)" = 0 ] || {
   cat >&2 <<'EOF'
@@ -194,6 +196,19 @@ else
   cp --reflink=auto --sparse=always "$GOLDEN_SRC" "$GOLDEN_DST"
 fi
 
+# The builder image, which is where a Dockerfile actually runs. Optional on a
+# laptop: without it every other path works and only builds refuse, which is a
+# better trade than refusing to stand the rig up at all.
+if [ ! -f "$BUILDER_SRC" ]; then
+  echo "==> no builder rootfs at $BUILDER_SRC; this host will refuse builds"
+  echo "    build one with: VARIANT=builder scripts/build-golden-rootfs.sh"
+elif [ "$(sha256sum "$BUILDER_SRC" | cut -d' ' -f1)" = "$(sha256sum "$BUILDER_DST" 2>/dev/null | cut -d' ' -f1 || true)" ]; then
+  echo "==> builder rootfs already in place at $BUILDER_DST"
+else
+  echo "==> copying the builder rootfs (sparse) to $BUILDER_DST"
+  cp --reflink=auto --sparse=always "$BUILDER_SRC" "$BUILDER_DST"
+fi
+
 # A local image is by definition built from this tree, so a difference from
 # the COMMITTED pin is expected and is a warning, not the refusal production
 # makes. What matters locally is that the guest agent inside the image is the
@@ -265,11 +280,11 @@ PILOT_AGENT_TOKEN_SECRET=${PILOT_AGENT_TOKEN_SECRET:-$(head -c 32 /dev/urandom |
 # Full base64, unlike the line above -- it is a 32-byte AES key, not an opaque
 # string, so the padding matters.
 PILOT_FLEET_KEY=${PILOT_FLEET_KEY:-$(head -c 32 /dev/urandom | base64)}
-# The rootless build daemon's socket, under the invoking user's runtime dir --
-# a fleet host runs buildkitd as \`pilot\` and this box runs it as you. hostd
-# refuses builds outright when this is unset, so a laptop without it deploys
-# only stock images. docs/local.md installs the daemon.
-PILOT_BUILDKIT_SOCK=${PILOT_BUILDKIT_SOCK:-unix:///run/user/${SUDO_UID:-$(id -u)}/buildkit/buildkitd.sock}
+# The builder image. Builds run inside a per-org machine created from it, the
+# same as on a fleet host, so this laptop runs no build daemon of its own.
+# Without the image hostd refuses builds outright and deploys only stock
+# images; build it with VARIANT=builder scripts/build-golden-rootfs.sh.
+PILOT_BUILDER_ROOTFS=${PILOT_BUILDER_ROOTFS:-/var/lib/pilots/templates/builder.ext4}
 EOF
   chmod 0600 "$CONFIG"
   umask 022

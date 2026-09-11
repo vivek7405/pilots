@@ -7,6 +7,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -27,10 +28,23 @@ type Config struct {
 	FirecrackerBin string // PILOT_FIRECRACKER
 	JailerBin      string // PILOT_JAILER
 	TemplateRootfs string // PILOT_TEMPLATE_ROOTFS
+	// BuilderRootfs is the ext4 a per-org BUILDER machine is created from: the
+	// golden guest plus a rootful BuildKit daemon. A host without it serves no
+	// builds at all -- builds are the one thing on this host that runs a
+	// customer's own code, and they run inside a microVM or not at all.
+	//
+	// The refusal is machines.ErrNoBuilderRootfs, and it arrives mid-stream:
+	// POST /v1/builds has already written its 200 and its "build accepted"
+	// line by the time a builder is asked for, so the client reads it as a
+	// failed build naming the missing image, not as a status code.
+	BuilderRootfs string // PILOT_BUILDER_ROOTFS
 	// GuestAgentBin is the agent injected into every image a build produces.
 	// Without it a built machine boots and is unreachable: exec, the clock
 	// poke and the port proxy all go through the agent.
 	GuestAgentBin string // PILOT_GUEST_AGENT
+	// BuildCacheDir holds the per-org BuildKit layer cache this host serves
+	// to builder machines over the buildctl session. Defaults under
+	// CacheRoot beside builds and builds-work; PILOT_BUILD_CACHE overrides.
 	BuildCacheDir string // PILOT_BUILD_CACHE
 	// BuildkitSock addresses the rootless buildkitd, which runs as a DIFFERENT
 	// user from hostd on purpose: a build runs an arbitrary user Dockerfile on a
@@ -167,6 +181,16 @@ func (c *Config) MachineStateRoot() string { return "/var/lib/pilots/machines" }
 // cache -- deleting it costs a re-download, never data.
 func (c *Config) CacheRoot() string { return "/var/cache/pilots" }
 
+// BuildCache is where builder machines' layer cache lives on this host.
+// Under CacheRoot beside builds and builds-work, unless PILOT_BUILD_CACHE
+// names somewhere else.
+func (c *Config) BuildCache() string {
+	if c.BuildCacheDir != "" {
+		return c.BuildCacheDir
+	}
+	return filepath.Join(c.CacheRoot(), "build-cache")
+}
+
 func envInt(key string, def int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
@@ -198,8 +222,9 @@ func Load() (*Config, error) {
 		FirecrackerBin:  env("PILOT_FIRECRACKER", "/opt/pilots/bin/firecracker"),
 		JailerBin:       env("PILOT_JAILER", "/opt/pilots/bin/jailer"),
 		TemplateRootfs:  env("PILOT_TEMPLATE_ROOTFS", "/var/lib/pilots/templates/golden.ext4"),
+		BuilderRootfs:   env("PILOT_BUILDER_ROOTFS", "/var/lib/pilots/templates/builder.ext4"),
 		GuestAgentBin:   env("PILOT_GUEST_AGENT", "/opt/pilots/bin/guest-agent"),
-		BuildCacheDir:   env("PILOT_BUILD_CACHE", "/var/cache/pilot-build"),
+		BuildCacheDir:   env("PILOT_BUILD_CACHE", ""),
 		BuildkitSock:    os.Getenv("PILOT_BUILDKIT_SOCK"),
 		ChrootBase:      env("PILOT_CHROOT_BASE", "/var/lib/pilots/jailer"),
 		CPUTemplate:     os.Getenv("PILOT_CPU_TEMPLATE"),

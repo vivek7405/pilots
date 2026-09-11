@@ -105,3 +105,44 @@ func TestResolveUnknownName(t *testing.T) {
 		t.Error("resolved a name that does not exist")
 	}
 }
+
+// A builder machine is not routable, by name or by domain.
+//
+// It serves no application, so a request to its address can only fail. What it
+// would do FIRST is wake it, and an org can read its own builder's name out of
+// the machine list, so without this a tenant could hold a quota-exempt 4 vCPU
+// machine awake indefinitely by curling a URL, with every hit resetting the
+// activity clock the stale-builder collector reads.
+func TestResolveRefusesABuilderMachine(t *testing.T) {
+	const builder = "builder-acme0a1b2c-host0d1e2f"
+	r := New(Options{
+		Domain: "pilotrun.app", HostID: "host-a",
+		Store: &stubStore{machines: []state.Machine{
+			{ID: "m-b", Name: builder, HostID: "host-a",
+				Domain: builder + ".pilotrun.app"},
+		}},
+	})
+
+	// By the domain the create stamped on the row.
+	if target, err := r.resolve(context.Background(), builder+".pilotrun.app"); err == nil {
+		t.Errorf("a builder resolved by domain to %q", target.Machine.ID)
+	}
+	// And by name, which is the half that clearing the domain would miss:
+	// the lookup matches either.
+	if target, err := r.resolve(context.Background(), builder+".otherdomain.test"); err == nil {
+		t.Errorf("a builder resolved by name to %q", target.Machine.ID)
+	}
+
+	// Counterfactual: the same row under an ordinary name resolves, so the
+	// refusal is the builder prefix and not something else about the row.
+	r2 := New(Options{
+		Domain: "pilotrun.app", HostID: "host-a",
+		Store: &stubStore{machines: []state.Machine{
+			{ID: "m-b", Name: "ordinary", HostID: "host-a",
+				Domain: "ordinary.pilotrun.app"},
+		}},
+	})
+	if _, err := r2.resolve(context.Background(), "ordinary.pilotrun.app"); err != nil {
+		t.Fatalf("an ordinary machine stopped resolving: %v", err)
+	}
+}

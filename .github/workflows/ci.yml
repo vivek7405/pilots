@@ -336,6 +336,7 @@ jobs:
       # that file afterwards would compare the image with itself and pass on
       # every input. The authority is the hash committed at the tag.
       - run: git show "${GITHUB_SHA}:scripts/rootfs/golden.ext4.sha256" > /tmp/pinned.sha256
+      - run: git show "${GITHUB_SHA}:scripts/rootfs/builder.ext4.sha256" > /tmp/pinned-builder.sha256
       - run: scripts/build-golden-rootfs.sh
       - name: the rootfs CI built is the one pinned at this tag
         run: |
@@ -347,7 +348,21 @@ jobs:
             exit 1
           }
 
+      # The builder image is the same pipeline with a different Dockerfile: the
+      # golden guest plus a BuildKit daemon, which is what a per-org builder
+      # machine runs so that a customer's Dockerfile never executes on a host.
+      - run: VARIANT=builder scripts/build-golden-rootfs.sh
+      - name: the builder rootfs CI built is the one pinned at this tag
+        run: |
+          sha256sum -c /tmp/pinned-builder.sha256 || {
+            echo "::error::The builder rootfs built at this tag does not match"
+            echo "::error::scripts/rootfs/builder.ext4.sha256. Refresh the pin"
+            echo "::error::with the change that altered the image."
+            exit 1
+          }
+
       - run: zstd -T0 -19 scripts/rootfs/golden.ext4 -o "golden-${GITHUB_REF_NAME}.ext4.zst"
+      - run: zstd -T0 -19 scripts/rootfs/builder.ext4 -o "builder-${GITHUB_REF_NAME}.ext4.zst"
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -358,4 +373,6 @@ jobs:
             gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes
           gh release upload "$GITHUB_REF_NAME" \
             "golden-${GITHUB_REF_NAME}.ext4.zst" \
-            scripts/rootfs/golden.ext4.sha256 --clobber
+            "builder-${GITHUB_REF_NAME}.ext4.zst" \
+            scripts/rootfs/golden.ext4.sha256 \
+            scripts/rootfs/builder.ext4.sha256 --clobber

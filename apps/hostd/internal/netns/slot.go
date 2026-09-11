@@ -56,6 +56,13 @@ const (
 	// slot's host-facing IP.
 	GuestAppPort   = 8080
 	GuestAgentPort = 3001
+
+	// GuestBuildkitPort is the BuildKit daemon inside a builder machine.
+	// hostd's buildctl dials it the way the router dials the app port, and
+	// nothing outside this host can: the prerouting rule that carries it
+	// rewrites the destination address only, and the tenant filter drops
+	// guest-to-guest traffic.
+	GuestBuildkitPort = 1234
 )
 
 // DefaultPoolSize is the number of concurrent machines a host can address.
@@ -159,6 +166,14 @@ func (s *Slot) VPeerCIDR() string { return s.VPeerIP.String() + "/31" }
 // AppAddr and AgentAddr are what the router dials from the host namespace.
 func (s *Slot) AppAddr() string   { return fmt.Sprintf("%s:%d", s.HostIP, GuestAppPort) }
 func (s *Slot) AgentAddr() string { return fmt.Sprintf("%s:%d", s.HostIP, GuestAgentPort) }
+
+// BuildkitAddr is the BuildKit daemon inside a builder machine, as buildctl
+// addresses it. No firewall change carries this port: the prerouting DNAT
+// matches and rewrites the destination ADDRESS, with no port expression, so
+// every port on the slot already lands in the guest.
+func (s *Slot) BuildkitAddr() string {
+	return fmt.Sprintf("tcp://%s:%d", s.HostIP, GuestBuildkitPort)
+}
 
 // NetnsPath is the bind-mounted namespace handle, which is also what gets
 // passed to the jailer as --netns.

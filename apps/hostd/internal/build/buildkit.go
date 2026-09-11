@@ -25,9 +25,14 @@ import (
 //   - `--progress rawjson`. The machine-readable stream. The alternative is
 //     scraping a display that redraws itself, where the failing command's
 //     output can be overwritten by the next frame.
-func (b *Builder) solveArgs(contextDir, out, cacheName string) []string {
+//
+// exportSuffix names the directory a cache is exported to before it replaces
+// the one it was imported from.
+const exportSuffix = ".new"
+
+func (b *Builder) solveArgs(addr, contextDir, out, cacheDir, seedDir string) []string {
 	args := []string{
-		"--addr", b.opts.BuildkitSock,
+		"--addr", addr,
 		"build",
 		"--frontend", "dockerfile.v0",
 		"--local", "context=" + contextDir,
@@ -36,31 +41,31 @@ func (b *Builder) solveArgs(contextDir, out, cacheName string) []string {
 		"--progress", "rawjson",
 	}
 
-	// The cache is what makes a redeploy cheap, and it lives in the same
-	// object store as everything else so any host can warm any build. Skipped
-	// entirely when there is no bucket: a cache export to nowhere fails the
-	// build rather than being slower.
-	if b.opts.CacheBucket != "" && cacheName != "" {
-		// use_path_style is not optional here: the bucket is addressed as a
-		// path on the endpoint, per the storage rule the rest of the engine
-		// follows, and virtual-host addressing resolves a hostname that does
-		// not exist.
-		//
-		// The credentials travel as cache attributes rather than in the
-		// daemon's environment, so they are scoped to the request instead of
-		// to every build the host ever runs. The cost is that they appear in
-		// this process's argv, which on this host is readable only by root and
-		// the build user -- the same user the daemon already runs as.
-		spec := fmt.Sprintf("bucket=%s,endpoint_url=%s,region=%s,name=%s,use_path_style=true",
-			b.opts.CacheBucket, b.opts.CacheEndpoint, b.opts.CacheRegion, cacheName)
-		if b.opts.CacheAccessKey != "" {
-			spec += fmt.Sprintf(",access_key_id=%s,secret_access_key=%s",
-				b.opts.CacheAccessKey, b.opts.CacheSecretKey)
-		}
+	// The cache is what makes a redeploy cheap. Both directories are on the
+	// HOST and reach the daemon over the buildctl session, so the guest is
+	// never told a path it could reach on its own and never holds a
+	// credential for one.
+	if cacheDir != "" {
 		args = append(args,
 			// mode=max caches intermediate layers too, not just the result.
-			"--export-cache", "type=s3,"+spec+",mode=max",
-			"--import-cache", "type=s3,"+spec)
+			//
+			// Exported to a SIBLING of the directory it imports from, which
+			// the caller then swaps into place. BuildKit's local exporter
+			// writes an OCI layout and never collects what a new index
+			// supersedes, so exporting over the import directory would leave
+			// every generation's blobs behind: an org redeploying one
+			// Dockerfile would grow this directory without bound on NVMe, in
+			// the bucket it is mirrored to, and in the download a cold host
+			// pays. One export, one generation.
+			"--export-cache", "type=local,dest="+cacheDir+exportSuffix+",mode=max",
+			"--import-cache", "type=local,src="+cacheDir)
+	}
+	// The shared seed is imported READ ONLY, and only hostd ever writes it.
+	// An org importing another org's output would be a supply chain the
+	// tenant chooses; an org importing bytes hostd built from a constant in
+	// this package is not.
+	if seedDir != "" {
+		args = append(args, "--import-cache", "type=local,src="+seedDir)
 	}
 	return args
 }
@@ -72,10 +77,10 @@ func (b *Builder) solveArgs(contextDir, out, cacheName string) []string {
 // failed build -- and a build that reports success while producing nothing is
 // the failure mode that hangs a deploy, so the two are checked separately and
 // both are surfaced.
-func (b *Builder) solve(ctx context.Context, contextDir, out string,
+func (b *Builder) solve(ctx context.Context, addr, contextDir, out, cacheDir string,
 	record func(api.BuildLogLine)) error {
 
-	args := b.solveArgs(contextDir, out, cacheNameFor(contextDir))
+	args := b.solveArgs(addr, contextDir, out, cacheDir, b.seedDir())
 	cmd := exec.CommandContext(ctx, b.opts.BuildctlBin, args...)
 	// Its own process group, so a timeout kills the whole build tree rather
 	// than leaving buildctl's children running against a daemon that has
@@ -90,9 +95,12 @@ func (b *Builder) solve(ctx context.Context, contextDir, out string,
 		}
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
-	cmd.Env = append(os.Environ(),
-		"AWS_ACCESS_KEY_ID="+os.Getenv("PILOT_S3_ACCESS_KEY"),
-		"AWS_SECRET_ACCESS_KEY="+os.Getenv("PILOT_S3_SECRET_KEY"))
+	// No storage credentials reach this process, and none reach the daemon.
+	// The daemon runs inside a machine the ORG controls: given bucket
+	// credentials it could write a cache manifest under any key, and the next
+	// org whose Dockerfile hashed the same would import it. Everything the
+	// build needs from object storage is fetched and pushed by hostd itself,
+	// on this side of the guest boundary.
 
 	// rawjson goes to stderr; buildctl writes nothing useful to stdout with a
 	// file output.

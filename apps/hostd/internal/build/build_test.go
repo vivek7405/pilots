@@ -106,9 +106,29 @@ func TestExtractContextWritesTheFiles(t *testing.T) {
 // The oci exporter emits a layered image tarball, and unpacking those layers
 // means reimplementing whiteout and diff ordering to arrive at bytes the tar
 // exporter already produced.
+// testBuilderAddr stands in for a builder machine's tap address. The daemon is
+// never on this host, so every solve is addressed over TCP to a guest.
+const testBuilderAddr = "tcp://10.11.0.2:1234"
+
+// The daemon buildctl dials lives INSIDE the org's builder machine. Nothing
+// here may reach for a host socket: that is the whole difference between
+// running a customer Dockerfile behind KVM and running it beside other
+// tenants' machines.
+func TestSolveDialsTheBuilderMachineAndNeverAHostSocket(t *testing.T) {
+	b := &Builder{opts: Options{}}
+	args := b.solveArgs(testBuilderAddr, "/work/context", "/work/rootfs.tar", "", "")
+
+	if args[0] != "--addr" || args[1] != testBuilderAddr {
+		t.Errorf("solve did not dial the builder machine: %v", args[:2])
+	}
+	if strings.Contains(strings.Join(args, " "), "unix://") {
+		t.Errorf("solve reached for a host socket: %v", args)
+	}
+}
+
 func TestSolveUsesTheTarExporterAndMachineReadableProgress(t *testing.T) {
-	b := &Builder{opts: Options{BuildkitSock: "unix:///run/user/1000/buildkit/buildkitd.sock"}}
-	args := b.solveArgs("/work/context", "/work/rootfs.tar", "")
+	b := &Builder{opts: Options{}}
+	args := b.solveArgs(testBuilderAddr, "/work/context", "/work/rootfs.tar", "", "")
 	joined := strings.Join(args, " ")
 
 	if !strings.Contains(joined, "--output type=tar,dest=/work/rootfs.tar") {
@@ -123,62 +143,88 @@ func TestSolveUsesTheTarExporterAndMachineReadableProgress(t *testing.T) {
 	if !strings.Contains(joined, "--frontend dockerfile.v0") {
 		t.Errorf("expected the dockerfile frontend: %v", args)
 	}
-	// No bucket configured: a cache export to nowhere fails the build rather
-	// than being merely slower.
+	// No cache directory: nothing is exported rather than exported nowhere.
 	if strings.Contains(joined, "export-cache") {
 		t.Errorf("a cache export was requested with no bucket: %v", args)
 	}
 }
 
-func TestSolveArgsWireUpTheSharedCache(t *testing.T) {
-	b := &Builder{opts: Options{
-		CacheBucket: "pilots", CacheEndpoint: "https://ep", CacheRegion: "auto",
-		CacheAccessKey: "ak", CacheSecretKey: "sk",
-	}}
-	joined := strings.Join(b.solveArgs("/ctx", "/out.tar", "df-abc"), " ")
+func TestSolveArgsWireUpTheOrgsCacheDirectory(t *testing.T) {
+	b := &Builder{opts: Options{CacheDir: "/var/cache/pilots/build-cache"}}
+	dir := b.cacheDir("org_1", "df-abc")
+	joined := strings.Join(b.solveArgs(testBuilderAddr, "/ctx", "/out.tar", dir, ""), " ")
 
-	base := "type=s3,bucket=pilots,endpoint_url=https://ep,region=auto,name=df-abc," +
-		"use_path_style=true,access_key_id=ak,secret_access_key=sk"
 	for _, want := range []string{
-		"--export-cache " + base + ",mode=max",
-		"--import-cache " + base,
+		// Exported BESIDE the directory it imports from, and swapped in
+		// afterwards. BuildKit's local exporter never collects what a new
+		// index supersedes, so exporting over the import directory would
+		// keep every generation an org ever built.
+		"--export-cache type=local,dest=" + dir + exportSuffix + ",mode=max",
+		"--import-cache type=local,src=" + dir,
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing %q in %s", want, joined)
 		}
 	}
+	// The old cache exported straight to a bucket from inside the daemon.
+	// Nothing may do that any more: the daemon runs in a guest the org
+	// controls.
+	if strings.Contains(joined, "type=s3") {
+		t.Errorf("the daemon was pointed at object storage: %s", joined)
+	}
 }
 
-// The cache backend runs inside buildkitd, which has no credentials of its
-// own and no way to acquire any: it is rootless, runs as another user, and
-// knows nothing of hostd's configuration. Without these attributes it reaches
-// for the EC2 metadata service and fails the build on a context deadline that
-// names IMDS rather than the cache.
-func TestTheCacheCarriesItsOwnCredentials(t *testing.T) {
-	b := &Builder{opts: Options{
-		CacheBucket: "pilots", CacheEndpoint: "https://ep", CacheRegion: "auto",
-		CacheAccessKey: "ak", CacheSecretKey: "sk",
-	}}
-	joined := strings.Join(b.solveArgs("/ctx", "/out.tar", "df-abc"), " ")
+// The whole cross-tenant argument rests on this. A daemon inside an org's
+// machine that held bucket credentials could write a cache manifest under any
+// key, and the next org whose Dockerfile hashed the same would import it. So
+// no credential may appear in what buildctl is given, ever.
+func TestNoCredentialEverReachesTheDaemon(t *testing.T) {
+	b := &Builder{opts: Options{CacheDir: "/var/cache/pilots/build-cache"}}
+	joined := strings.Join(
+		b.solveArgs(testBuilderAddr, "/ctx", "/out.tar", b.cacheDir("org_1", "df-abc"), "/seed"), " ")
 
-	for _, want := range []string{"access_key_id=ak", "secret_access_key=sk", "use_path_style=true"} {
-		if !strings.Contains(joined, want) {
-			t.Errorf("the cache spec is missing %q: %s", want, joined)
+	for _, forbidden := range []string{
+		"access_key_id", "secret_access_key", "AWS_", "endpoint_url", "bucket=",
+	} {
+		if strings.Contains(joined, forbidden) {
+			t.Errorf("a credential or bucket reached the daemon (%q): %s", forbidden, joined)
 		}
 	}
 }
 
-// No credentials configured means no credential attributes, rather than empty
-// ones: an empty access_key_id is a different request from an absent one, and
-// the daemon's own chain is the right fallback on a host that has one.
-func TestTheCacheOmitsAbsentCredentials(t *testing.T) {
-	b := &Builder{opts: Options{
-		CacheBucket: "pilots", CacheEndpoint: "https://ep", CacheRegion: "auto",
-	}}
-	joined := strings.Join(b.solveArgs("/ctx", "/out.tar", "df-abc"), " ")
+// An org's cache is its own directory. Two orgs building the SAME Dockerfile
+// get the same cache name and must still not share a directory, or one org's
+// layers become the other's.
+func TestTwoOrgsNeverShareACacheDirectory(t *testing.T) {
+	b := &Builder{opts: Options{CacheDir: "/cache"}}
+	if a, other := b.cacheDir("org_1", "df-abc"), b.cacheDir("org_2", "df-abc"); a == other {
+		t.Fatalf("org_1 and org_2 share %q for the same Dockerfile", a)
+	}
+	// A build with no org gets no cache at all rather than a pooled one: an
+	// admin-key build must not be able to write something a tenant reads.
+	if got := b.cacheDir("", "df-abc"); got != "" {
+		t.Errorf("an org-less build was given a cache directory: %q", got)
+	}
+	// And with no cache root configured, nothing is exported anywhere.
+	none := &Builder{opts: Options{}}
+	if got := none.cacheDir("org_1", "df-abc"); got != "" {
+		t.Errorf("a cache directory appeared with no cache root: %q", got)
+	}
+}
 
-	if strings.Contains(joined, "access_key_id") {
-		t.Errorf("an empty credential was sent: %s", joined)
+// The shared seed is imported read-only and never exported to. Only hostd
+// writes it, from a Dockerfile that is a constant in this package, which is
+// what makes it safe for every org to build on.
+func TestTheSharedSeedIsImportOnly(t *testing.T) {
+	b := &Builder{opts: Options{CacheDir: "/cache"}}
+	joined := strings.Join(
+		b.solveArgs(testBuilderAddr, "/ctx", "/out.tar", b.cacheDir("org_1", "df-abc"), "/cache/shared/node-base"), " ")
+
+	if !strings.Contains(joined, "--import-cache type=local,src=/cache/shared/node-base") {
+		t.Errorf("the shared seed was not imported: %s", joined)
+	}
+	if strings.Contains(joined, "--export-cache type=local,dest=/cache/shared/node-base") {
+		t.Errorf("a build exported into the shared seed: %s", joined)
 	}
 }
 
@@ -214,7 +260,7 @@ func TestBuildRejectsAContextWithNoDockerfile(t *testing.T) {
 		logs: newLogStore(4), sem: make(chan struct{}, 1), run: execRunner,
 	}
 	var lines []api.BuildLogLine
-	_, err := b.Build(context.Background(), "bld-1",
+	_, err := b.Build(context.Background(), "bld-1", "org-1",
 		contextTar(t, map[string]string{"app.js": "x"}, nil),
 		func(l api.BuildLogLine) { lines = append(lines, l) })
 
@@ -231,5 +277,64 @@ func TestBuildRejectsAContextWithNoDockerfile(t *testing.T) {
 	}
 	if !sawError {
 		t.Fatalf("the failure never reached the log stream: %+v", lines)
+	}
+}
+
+// A cache directory holds exactly one generation. BuildKit's local exporter
+// writes an OCI layout and never collects what a new index supersedes, so
+// without the swap an org redeploying one Dockerfile grows this directory
+// without bound on NVMe, in the bucket, and in the download a cold host pays.
+func TestTheCacheKeepsOneGenerationPerDockerfile(t *testing.T) {
+	b := &Builder{opts: Options{CacheDir: t.TempDir()}}
+	dir := b.cacheDir("org_1", "df-abc")
+
+	// Generation one is already in place, carrying a blob nothing will
+	// reference again.
+	mustWrite(t, filepath.Join(dir, "index.json"), "{\"gen\":1}")
+	mustWrite(t, filepath.Join(dir, "blobs", "sha256", "old"), "superseded")
+
+	// The exporter writes generation two beside it.
+	mustWrite(t, filepath.Join(dir+exportSuffix, "index.json"), "{\"gen\":2}")
+	mustWrite(t, filepath.Join(dir+exportSuffix, "blobs", "sha256", "new"), "current")
+
+	if err := b.swapExported(dir); err != nil {
+		t.Fatalf("swapExported: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dir, "index.json"))
+	if err != nil || string(got) != "{\"gen\":2}" {
+		t.Fatalf("index.json = %q (%v), want generation two", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "blobs", "sha256", "old")); !os.IsNotExist(err) {
+		t.Error("the superseded generation's blob survived the swap")
+	}
+	if _, err := os.Stat(dir + exportSuffix); !os.IsNotExist(err) {
+		t.Error("the export directory was left behind")
+	}
+}
+
+// A build where every step was a cache hit exports nothing, and the cache it
+// imported from has to survive that. Deleting it would turn a fully warm
+// build into the thing that makes the next one cold.
+func TestASwapWithNoExportKeepsWhatWasThere(t *testing.T) {
+	b := &Builder{opts: Options{CacheDir: t.TempDir()}}
+	dir := b.cacheDir("org_1", "df-abc")
+	mustWrite(t, filepath.Join(dir, "index.json"), "{\"gen\":1}")
+
+	if err := b.swapExported(dir); err != nil {
+		t.Fatalf("swapExported: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "index.json")); err != nil || string(got) != "{\"gen\":1}" {
+		t.Fatalf("index.json = %q (%v), want the existing generation kept", got, err)
+	}
+}
+
+func mustWrite(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

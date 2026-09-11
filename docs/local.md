@@ -126,81 +126,55 @@ S3 value from the operator through `host-bootstrap.sh`.
 
 ## 3b. The build and volume toolchain
 
-`pilot deploy` builds a Dockerfile, and a service that mounts a volume needs
-JuiceFS. Both come from `host-bootstrap.sh` on a fleet host and neither is a
-package: the versions are pinned there, and they are pinned to the same values
-here, because a JuiceFS that writes chunks the fleet cannot read and a BuildKit
-that produces images the fleet has never booted are exactly the two ways a
-"works on my box" divergence becomes a production incident.
+A service that mounts a volume needs JuiceFS, which comes from
+`host-bootstrap.sh` on a fleet host and is pinned to the same version here: a
+JuiceFS that writes chunks the fleet cannot read is one of the ways a "works on
+my box" divergence becomes a production incident.
+
+Builds need no daemon on this box at all. `pilot deploy` sends its Dockerfile
+to hostd, hostd creates or wakes a per-org **builder machine**, and the
+BuildKit daemon inside that guest runs the build. Only the client half lives
+here:
 
 ```sh
-JUICEFS_VERSION=1.4.1 LITESTREAM_VERSION=0.3.13
-BUILDKIT_VERSION=0.32.2 ROOTLESSKIT_VERSION=3.1.0
+JUICEFS_VERSION=1.4.1 LITESTREAM_VERSION=0.3.13 BUILDKIT_VERSION=0.32.2
 
 sudo install -d /opt/pilots/bin
-get() {  # url binary dest
-  tmp=$(mktemp -d); curl -fsSL "$1" -o "$tmp/dl.tgz"; tar -xzf "$tmp/dl.tgz" -C "$tmp"
-  sudo install -m0755 "$(find "$tmp" -name "$2" -type f | head -1)" "$3"; rm -rf "$tmp"
-}
+get() { url=$1 bin=$2 dst=$3; tmp=$(mktemp -d); curl -fsSL "$url" -o "$tmp/d.tgz"
+  tar -xzf "$tmp/d.tgz" -C "$tmp"
+  sudo install -m0755 "$(find "$tmp" -name "$bin" -type f | head -1)" "$dst"
+  rm -rf "$tmp"; }
 
+get "https://github.com/moby/buildkit/releases/download/v$BUILDKIT_VERSION/buildkit-v$BUILDKIT_VERSION.linux-amd64.tar.gz" \
+    buildctl /opt/pilots/bin/buildctl
 get "https://github.com/juicedata/juicefs/releases/download/v$JUICEFS_VERSION/juicefs-$JUICEFS_VERSION-linux-amd64.tar.gz" \
     juicefs /opt/pilots/bin/juicefs
 get "https://github.com/benbjohnson/litestream/releases/download/v$LITESTREAM_VERSION/litestream-v$LITESTREAM_VERSION-linux-amd64.tar.gz" \
     litestream /opt/pilots/bin/litestream
-for b in buildctl buildkitd buildkit-runc; do
-  get "https://github.com/moby/buildkit/releases/download/v$BUILDKIT_VERSION/buildkit-v$BUILDKIT_VERSION.linux-amd64.tar.gz" \
-      "$b" "/opt/pilots/bin/$b"
-done
-get "https://github.com/rootless-containers/rootlesskit/releases/download/v$ROOTLESSKIT_VERSION/rootlesskit-x86_64.tar.gz" \
-    rootlesskit /opt/pilots/bin/rootlesskit
-
-# buildkitd finds its OCI worker by looking for a binary named `runc` on PATH.
-# BuildKit ships it as buildkit-runc, so without this the daemon starts, finds
-# no worker, and exits with "no worker found, rebuild the buildkit daemon?" --
-# which reads like a broken download and is not one.
-sudo ln -sf /opt/pilots/bin/buildkit-runc /opt/pilots/bin/runc
 ```
 
-`slirp4netns`, `uidmap`, `fuse3` and `fakeroot` are packages, from whatever
-your distribution calls them (`sudo pacman -S slirp4netns fuse3 fakeroot`,
-`sudo apt-get install slirp4netns uidmap fuse3 fakeroot`). slirp4netns and
-uidmap are what give rootless BuildKit a user namespace and a network without
-root; fuse3 is what a JuiceFS mount is.
+`buildctl` and nothing else. No `buildkitd`, no `rootlesskit`, no
+`slirp4netns`, no subuid map and no userns sysctl: all of that existed to make
+a root-free build daemon safe to run beside other tenants' machines, and a
+microVM does that job properly. The version is still pinned, for the same
+reason it always was -- a different BuildKit produces images the fleet has
+never booted -- but now it is pinned in two places that must agree: this
+client, and `scripts/rootfs/Dockerfile.builder`, which bakes the daemon into
+the builder image.
 
-**buildkitd runs as YOU, rootless, not as root and not as `pilot`.** A fleet
-host has a `pilot` user and a unit under it; here the unit is yours, so its
-socket lands in your own runtime directory and `local-host.sh` writes exactly
-that path into `PILOT_BUILDKIT_SOCK`:
+**You need the builder image before you can build anything.** It is the golden
+guest plus that daemon, and `local-host.sh` copies it into place if it finds
+one:
 
 ```sh
-mkdir -p ~/.config/systemd/user
-cat > ~/.config/systemd/user/buildkitd.service <<'UNIT'
-[Unit]
-Description=pilots rootless buildkitd
-
-[Service]
-Environment=PATH=/opt/pilots/bin:/usr/local/bin:/usr/bin:/bin
-ExecStart=/opt/pilots/bin/rootlesskit --net=slirp4netns --copy-up=/etc --copy-up=/run --disable-host-loopback /opt/pilots/bin/buildkitd --oci-worker-snapshotter=overlayfs
-Restart=always
-RestartSec=2
-MemoryMax=8G
-CPUQuota=400%
-TasksMax=4096
-
-[Install]
-WantedBy=default.target
-UNIT
-
-systemctl --user daemon-reload
-systemctl --user enable --now buildkitd
-test -S /run/user/$(id -u)/buildkit/buildkitd.sock && echo "buildkitd listening"
+VARIANT=builder scripts/build-golden-rootfs.sh
 ```
 
-The flags are the production ones, character for character, and
-`--disable-host-loopback` is the one that shapes the rest of this document:
-inside that daemon `127.0.0.1` is its OWN loopback and the host's is
-unreachable BY DESIGN, so that a Dockerfile cannot reach whatever a host has
-bound to loopback. See section 4 for what that means for the object store.
+32 GiB apparent, a few hundred megabytes actual, because it is sparse. Without
+it every other path on this box works and only `pilot deploy` refuses, which is
+the trade `local-host.sh` deliberately makes rather than refusing to stand the
+rig up at all.
+
 
 Volumes also want a Litestream template unit, one instance per volume, started
 by hostd when it creates or takes over one:
@@ -282,26 +256,23 @@ PILOT_S3_ACCESS_KEY=pilots
 PILOT_S3_SECRET_KEY=pilots-secret
 PILOT_AGENT_TOKEN_SECRET=<generated once>
 PILOT_FLEET_KEY=<generated once>
-PILOT_BUILDKIT_SOCK=unix:///run/user/<your uid>/buildkit/buildkitd.sock
+PILOT_BUILDER_ROOTFS=/var/lib/pilots/templates/builder.ext4
 ```
 
-**`PILOT_S3_ENDPOINT` is not loopback, and must not be "simplified" back to
-it.** hostd hands that endpoint to buildkitd for the layer cache, and buildkitd
-runs under `rootlesskit --net=slirp4netns --disable-host-loopback`: inside that
-namespace `127.0.0.1` is the daemon's own loopback and slirp's `10.0.2.2` host
-alias is switched off, which is the point of the flag. A loopback endpoint
-therefore fails every build at `importing cache manifest from s3` with `dial
-tcp 127.0.0.1:9000: connect: connection refused`, minutes before anything is
-built, while `curl http://127.0.0.1:9000` from your shell answers 200 and makes
-the endpoint look fine. Measured from inside the daemon's namespace on the box
-this was written on:
+**`PILOT_S3_ENDPOINT` may be loopback again, and once could not be.** It used
+to have to be a routable address, because hostd handed the endpoint to a
+rootless buildkitd running under `--disable-host-loopback`, where `127.0.0.1`
+was the daemon's own loopback and a cache import failed minutes into every
+build with `dial tcp 127.0.0.1:9000: connect: connection refused` while
+`curl` from your shell answered 200. That is gone: the daemon is inside a
+builder machine now and is never told where object storage is, because it is
+never allowed to reach it. hostd reads and writes the layer cache itself, on
+this side of the guest boundary.
 
-| From buildkitd's netns | `http://<addr>:9000/minio/health/live` |
-|---|---|
-| `127.0.0.1` | no route |
-| `10.0.2.2` (slirp's host alias) | no route |
-| `192.168.29.207` (this host's LAN address) | 200 |
-| `192.168.124.1` (the libvirt bridge) | 200 |
+`local-host.sh` still derives a routable address rather than loopback, since
+the guests on this box reach hostd's own services by it, and nothing here
+needs changing if yours already works.
+
 
 **`PILOT_FLEET_KEY` has to be on every host, or service secrets do not work
 at all.** It is what seals `secret_env` before the row is written, and a row
@@ -611,7 +582,7 @@ is resident in its host, and its host is one of these:
 
 **A smaller rig runs less of the gate, and says so.** `gate.sh` is written
 against the fleet it finds rather than a hard-coded three, but sections that
-need a spare host refuse out loud rather than quietly passing -- section 22
+need a spare host refuse out loud rather than quietly passing -- section 23
 answers `need two live hosts to read a release from a host that did not build
 it`. `NODES=1` is for proving the pipeline works, not for the gate.
 
@@ -671,7 +642,7 @@ descriptor under `/var/cache/pilots/template/` and the `templates` row in
 | Hugepages | off | off unless the operator sets it |
 | CPU template | unset | unset unless the operator sets it |
 | Jailer uid | 0 | 0 |
-| Builds | rootless buildkitd as you, socket in your runtime dir | rootless buildkitd as `pilot` |
+| Builds | a builder machine per org, `buildctl` on the host | identical |
 | Object-store endpoint | this host's routable address (never loopback) | the operator's |
 | Bootstrapped by | `local-s3.sh` + section 3b + `local-host.sh` | `host-bootstrap.sh` |
 

@@ -2720,6 +2720,127 @@ PYEOF" >/dev/null 2>&1
   fi
 fi
 
+say "25. Builds run inside a microVM: no host daemon, and the wreckage is the guest's"
+# The property this section exists for cannot be seen from the public API. A
+# build that succeeds looks identical whether it ran on the host or inside a
+# machine, so the only way to assert WHERE it ran is to look at the host.
+BM_IP="${LIVE_IPS[0]:-${IPS[0]}}"
+
+# 25a. No host runs a build daemon at all.
+#
+# This is the whole change stated as one assertion. If buildkitd is running
+# here, a customer RUN step is executing on this kernel beside other tenants'
+# machines, which is exactly what a builder machine exists to stop.
+BM_DAEMON=$($SSH "root@${BM_IP}" "pgrep -c buildkitd 2>/dev/null || echo 0" 2>/dev/null | tr -d '[:space:]')
+if [ "${BM_DAEMON:-0}" = 0 ]; then
+  ok "no buildkitd process on the host"
+else
+  bad "buildkitd is running on the host (${BM_DAEMON} processes); builds are not isolated"
+fi
+
+BM_SOCK=$($SSH "root@${BM_IP}" "ls -d /run/user/*/buildkit 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
+if [ "${BM_SOCK:-0}" = 0 ]; then
+  ok "no rootless buildkit socket on the host"
+else
+  bad "a rootless buildkit socket is still present on the host"
+fi
+
+# 25b. A build creates a builder machine, and the guest kernel proves the RUN
+# step ran inside it.
+BM_BUILD=$(build_image "$BM_IP" 'FROM alpine
+RUN uname -r > /etc/gate-build-kernel
+')
+if [ -n "$BM_BUILD" ]; then
+  ok "a build through a builder machine produced a rootfs (${BM_BUILD:0:8})"
+else
+  bad "the build produced no rootfs"
+fi
+
+BM_NAMES=$($SSH "root@${BM_IP}" "sqlite3 /var/lib/pilots/corrosion/store.db \"SELECT name FROM machines WHERE name LIKE 'builder-%' AND state != 'destroyed';\"" 2>/dev/null)
+if [ -n "$BM_NAMES" ]; then
+  ok "the build left a builder machine behind to reuse"
+else
+  bad "no builder machine exists after a build"
+fi
+
+# A RUN step that recorded uname -r inside a microVM recorded the GUEST
+# kernel, which is pinned and differs from the host's. The same string on
+# both sides would mean the step ran on the host.
+if [ -n "$BM_BUILD" ]; then
+  BM_HOSTK=$($SSH "root@${BM_IP}" "uname -r" 2>/dev/null | tr -d '[:space:]')
+  BM_M=$(api "$BM_IP" POST /v1/machines "{\"name\":\"gate-bk-$$\",\"image\":\"${BM_BUILD}\"}" | jf id)
+  if [ -n "$BM_M" ]; then
+    BM_GUESTK=$(api "$BM_IP" POST "/v1/machines/${BM_M}/exec" '{"cmd":"cat /etc/gate-build-kernel","user":"root","timeout_ms":20000}' | jf stdout | tr -d '[:space:]')
+    if [ -n "$BM_GUESTK" ] && [ "$BM_GUESTK" != "$BM_HOSTK" ]; then
+      ok "the RUN step saw the guest kernel (${BM_GUESTK}), not the host's (${BM_HOSTK})"
+    else
+      bad "the RUN step saw kernel '${BM_GUESTK}' and the host runs '${BM_HOSTK}'; it did not run in a guest"
+    fi
+    api "$BM_IP" DELETE "/v1/machines/${BM_M}" >/dev/null 2>&1
+  else
+    bad "could not create a machine from the build to read its kernel back"
+  fi
+fi
+
+# 25c. Kill the builder's Firecracker mid-build.
+#
+# The sibling of section 23: there the build's CLIENT dies, here the thing
+# running the build does. The build must fail with a step named in its log
+# rather than hang, and the host must keep none of the wreckage, which is the
+# point of the work happening inside a guest.
+BM_TMP=$(mktemp -d)
+printf 'FROM alpine\nRUN sleep 120\n' > "${BM_TMP}/Dockerfile"
+( tar -cf - -C "$BM_TMP" Dockerfile | curl -s -m 300 -X POST "http://${BM_IP}:8080/v1/builds" -H "$AUTH" -H 'Content-Type: application/x-tar' --data-binary @- > "${BM_TMP}/ndjson" 2>/dev/null ) &
+BM_PID=$!
+sleep 25
+BM_FC=$($SSH "root@${BM_IP}" "pgrep -f 'firecracker.*builder-' | head -1" 2>/dev/null | tr -d '[:space:]')
+if [ -n "$BM_FC" ]; then
+  $SSH "root@${BM_IP}" "kill -9 ${BM_FC}" >/dev/null 2>&1
+  ok "killed the builder's Firecracker mid-build (pid ${BM_FC})"
+else
+  bad "could not find the builder's Firecracker to kill"
+fi
+wait $BM_PID 2>/dev/null || true
+
+if [ -s "${BM_TMP}/ndjson" ] && grep -q '"error"' "${BM_TMP}/ndjson"; then
+  ok "the build ended in a named failure rather than hanging"
+else
+  bad "the build stream carried no error after its builder was killed"
+fi
+
+# No residue on the host. A build that ran in a guest leaves its work
+# directory collected and hostd alive.
+BM_WORK=$($SSH "root@${BM_IP}" "ls /var/cache/pilots/builds-work 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
+if [ "${BM_WORK:-0}" = 0 ]; then
+  ok "no build work directory survived on the host"
+else
+  bad "${BM_WORK} build work directories were left on the host"
+fi
+
+BM_PANIC=$($SSH "root@${BM_IP}" "journalctl -u hostd --since '-3 min' --no-pager | grep -c 'panic:' || true" 2>/dev/null | tr -d '[:space:]')
+if [ "${BM_PANIC:-0}" = 0 ]; then
+  ok "hostd did not panic when its builder was killed"
+else
+  bad "hostd panicked after the builder was killed"
+fi
+
+if curl -sf -m 10 "http://${BM_IP}:8080/v1/health" >/dev/null 2>&1; then
+  ok "the host is still serving after the builder died"
+else
+  bad "the host stopped serving after the builder died"
+fi
+
+# 25d. The next build recreates a builder and succeeds.
+BM_AGAIN=$(build_image "$BM_IP" 'FROM alpine
+RUN echo recovered > /etc/gate-recovered
+')
+if [ -n "$BM_AGAIN" ]; then
+  ok "the next build recreated a builder and succeeded"
+else
+  bad "the host could not build again after its builder was killed"
+fi
+rm -rf "$BM_TMP"
+
 say "Result"
 echo "  ${PASS} passed, ${FAIL} failed"
 echo

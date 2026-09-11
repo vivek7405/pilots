@@ -337,3 +337,40 @@ func TestAnErrorMachineIsNeverAnIdleCandidate(t *testing.T) {
 		t.Errorf("the row moved to %q; the monitor acted on a machine that is down", got.State)
 	}
 }
+
+// A builder is hostd's machine, so nothing else will ever collect one. An org
+// that deploys once and never again would otherwise leave a memory image and a
+// 32 GiB disk image behind on every host it ever built on.
+//
+// destroyStaleBuilders is exercised through its selection rather than its
+// effect: Destroy needs a running engine, so the assertion is which rows it
+// picks. selectStaleBuilders is that selection.
+func TestStaleBuilderSelection(t *testing.T) {
+	m := testManager()
+	day := time.Now().Add(-25 * time.Hour).Unix()
+	fresh := time.Now().Add(-time.Hour).Unix()
+
+	rows := []state.Machine{
+		// The one case that should be collected.
+		{ID: "m_old", Name: "builder-org1-hosta", HostID: "host-a",
+			State: StateSuspended, LastActivity: day},
+		// Suspended a day, but a tenant's machine: not ours to reap.
+		{ID: "m_tenant", Name: "web", HostID: "host-a",
+			State: StateSuspended, LastActivity: day},
+		// A builder, but still in use today.
+		{ID: "m_fresh", Name: "builder-org2-hosta", HostID: "host-a",
+			State: StateSuspended, LastActivity: fresh},
+		// A builder that is RUNNING. The idle monitor suspends it first; a
+		// running machine is never destroyed out from under a build.
+		{ID: "m_running", Name: "builder-org3-hosta", HostID: "host-a",
+			State: StateRunning, LastActivity: day},
+		// Another host's builder. Single-writer: its row is not ours to write.
+		{ID: "m_other", Name: "builder-org4-hostb", HostID: "host-b",
+			State: StateSuspended, LastActivity: day},
+	}
+
+	got := m.selectStaleBuilders(rows)
+	if !reflect.DeepEqual(got, []string{"m_old"}) {
+		t.Fatalf("selectStaleBuilders = %v, want [m_old]", got)
+	}
+}
