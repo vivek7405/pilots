@@ -14,9 +14,48 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-SIZE_MB="${SIZE_MB:-2048}"
-OUT="${OUT:-scripts/rootfs/golden.ext4}"
-IMAGE="${IMAGE:-pilots-golden-rootfs}"
+# Two variants come out of this one script, because everything below the
+# Dockerfile -- the reproducibility probe, the single fakeroot session, the
+# resolv.conf and /sbin/init fixups -- is identical for both and is the part
+# that is expensive to get right.
+#
+#   golden   the rootfs every machine is created from
+#   builder  that image plus a rootful BuildKit daemon, which is what a
+#            per-org builder machine runs so that a customer `RUN` step
+#            executes behind KVM instead of on the host
+#
+# They share ONE docker context (scripts/rootfs) so that eth0.network and
+# guest-agent.service are not duplicated; the variant selects the Dockerfile
+# within it.
+VARIANT="${VARIANT:-golden}"
+case "$VARIANT" in
+  golden)
+    DOCKERFILE="${DOCKERFILE:-scripts/rootfs/Dockerfile}"
+    SIZE_MB="${SIZE_MB:-2048}"
+    OUT="${OUT:-scripts/rootfs/golden.ext4}"
+    IMAGE="${IMAGE:-pilots-golden-rootfs}"
+    # These two literals are what make the image byte-reproducible; see below.
+    FS_UUID="${FS_UUID:-6f696c70-7473-4000-8000-676f6c64656e}"
+    FS_HASH_SEED="${FS_HASH_SEED:-70696c6f-7473-4000-8000-736565646564}"
+    ;;
+  builder)
+    DOCKERFILE="${DOCKERFILE:-scripts/rootfs/Dockerfile.builder}"
+    # 32 GiB sparse. A builder holds BuildKit's snapshotter store for every
+    # image one org builds from, which the golden image's 2 GiB cannot fit.
+    # It costs nothing until written: the actual size is reported at the end.
+    SIZE_MB="${SIZE_MB:-32768}"
+    OUT="${OUT:-scripts/rootfs/builder.ext4}"
+    IMAGE="${IMAGE:-pilots-builder-rootfs}"
+    # Distinct from golden's, so the two filesystems are never confusable by
+    # UUID on a host that carries both.
+    FS_UUID="${FS_UUID:-6275696c-7473-4000-8000-6275696c6465}"
+    FS_HASH_SEED="${FS_HASH_SEED:-6275696c-7473-4000-8000-736565646564}"
+    ;;
+  *)
+    echo "unknown VARIANT '$VARIANT' (expected: golden, builder)" >&2
+    exit 2
+    ;;
+esac
 
 # Three knobs aimed at making the image byte-reproducible, so that rebuilding
 # it is idempotent and the pin in golden.ext4.sha256 can mean something.
@@ -41,8 +80,6 @@ IMAGE="${IMAGE:-pilots-golden-rootfs}"
 # ACROSS machines, something no combination of flags here can. That is not in
 # this change; see #108.
 : "${SOURCE_DATE_EPOCH:=1700000000}"
-FS_UUID="${FS_UUID:-6f696c70-7473-4000-8000-676f6c64656e}"
-FS_HASH_SEED="${FS_HASH_SEED:-70696c6f-7473-4000-8000-736565646564}"
 export SOURCE_DATE_EPOCH
 
 # Does THIS mke2fs actually produce the same bytes twice? Two 1 MiB
@@ -95,8 +132,8 @@ echo "==> building guest-agent (static)"
 ( cd apps/hostd && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     go build -trimpath -ldflags="-s -w" -o "../../$STAGED_BIN" ./cmd/guest-agent )
 
-echo "==> docker build $IMAGE"
-docker build -q -t "$IMAGE" scripts/rootfs
+echo "==> docker build $IMAGE ($VARIANT, -f $DOCKERFILE)"
+docker build -q -t "$IMAGE" -f "$DOCKERFILE" scripts/rootfs
 
 echo "==> exporting container filesystem"
 CID="$(docker create "$IMAGE")"

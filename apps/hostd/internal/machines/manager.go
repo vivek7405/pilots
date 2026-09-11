@@ -75,9 +75,13 @@ type Options struct {
 	StateRoot   string // /var/lib/pilots/machines
 	CacheRoot   string // /var/cache/pilots
 	FCConfig    fc.Config
-	Store       state.Store
-	Uploader    fc.Uploader
-	PoolSize    int
+	// BuilderRootfs is the ext4 a per-org builder machine is created from.
+	// Empty means this host serves no builds, and EnsureBuilderTemplate says
+	// so by name rather than failing somewhere further down.
+	BuilderRootfs string
+	Store         state.Store
+	Uploader      fc.Uploader
+	PoolSize      int
 
 	// Chunks writes content-addressed builds, and BlockStore reads them back.
 	// Both address the same objects under the chunk prefix; they are separate

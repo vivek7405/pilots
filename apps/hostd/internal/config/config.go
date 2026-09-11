@@ -27,6 +27,12 @@ type Config struct {
 	FirecrackerBin string // PILOT_FIRECRACKER
 	JailerBin      string // PILOT_JAILER
 	TemplateRootfs string // PILOT_TEMPLATE_ROOTFS
+	// BuilderRootfs is the ext4 a per-org BUILDER machine is created from: the
+	// golden guest plus a rootful BuildKit daemon. A host without it serves no
+	// builds, which is a 501 rather than a build failure -- builds are the one
+	// thing on this host that runs a customer's own code, and they run inside
+	// a microVM or not at all.
+	BuilderRootfs string // PILOT_BUILDER_ROOTFS
 	// GuestAgentBin is the agent injected into every image a build produces.
 	// Without it a built machine boots and is unreachable: exec, the clock
 	// poke and the port proxy all go through the agent.
@@ -198,6 +204,7 @@ func Load() (*Config, error) {
 		FirecrackerBin:  env("PILOT_FIRECRACKER", "/opt/pilots/bin/firecracker"),
 		JailerBin:       env("PILOT_JAILER", "/opt/pilots/bin/jailer"),
 		TemplateRootfs:  env("PILOT_TEMPLATE_ROOTFS", "/var/lib/pilots/templates/golden.ext4"),
+		BuilderRootfs:   env("PILOT_BUILDER_ROOTFS", "/var/lib/pilots/templates/builder.ext4"),
 		GuestAgentBin:   env("PILOT_GUEST_AGENT", "/opt/pilots/bin/guest-agent"),
 		BuildCacheDir:   env("PILOT_BUILD_CACHE", "/var/cache/pilot-build"),
 		BuildkitSock:    os.Getenv("PILOT_BUILDKIT_SOCK"),

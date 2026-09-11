@@ -434,6 +434,44 @@ if [ -f "${REPO}/scripts/rootfs/golden.ext4" ]; then
 else
   echo "  no local golden rootfs; the host will need one before creating machines"
 fi
+
+# The builder rootfs: the golden guest plus a BuildKit daemon. A per-org
+# builder machine is created from it, and that machine is where a customer's
+# Dockerfile executes, so a host without this image serves no builds. It is
+# pinned and shipped exactly like the golden one, for the same reason: the
+# guest agent inside it is version-tied to hostd.
+if [ -z "${PILOT_ROOTFS_TAG:-}" ] || [ -f "${REPO}/scripts/rootfs/builder.ext4" ]; then
+  :
+else
+  echo "  fetching builder-${PILOT_ROOTFS_TAG}.ext4.zst from the release"
+  command -v zstd >/dev/null || { echo "  zstd is needed to unpack it" >&2; exit 1; }
+  curl -fsSL -o "${REPO}/scripts/rootfs/builder.ext4.zst" \
+    "https://github.com/vivek7405/pilots/releases/download/${PILOT_ROOTFS_TAG}/builder-${PILOT_ROOTFS_TAG}.ext4.zst"
+  zstd -d -f "${REPO}/scripts/rootfs/builder.ext4.zst" -o "${REPO}/scripts/rootfs/builder.ext4"
+  rm -f "${REPO}/scripts/rootfs/builder.ext4.zst"
+fi
+if [ -f "${REPO}/scripts/rootfs/builder.ext4" ]; then
+  ( cd "$REPO" && sha256sum -c scripts/rootfs/builder.ext4.sha256 >/dev/null ) || {
+    echo "  this builder.ext4 is not the pinned one." >&2
+    echo "    Build it with VARIANT=builder scripts/build-golden-rootfs.sh at the" >&2
+    echo "    tagged commit, or set PILOT_ROOTFS_TAG=<tag> to download" >&2
+    echo "    builder-<tag>.ext4.zst from the release." >&2
+    exit 1
+  }
+  echo "  builder rootfs matches the pin"
+  # Sparse: 32 GiB apparent, a few hundred MiB on the wire. --sparse=always so
+  # the holes are not written out as zeros on the receiving end.
+  WANT=$(sha256sum "${REPO}/scripts/rootfs/builder.ext4" | cut -d' ' -f1)
+  HAVE=$(on_host "sha256sum /var/lib/pilots/templates/builder.ext4 2>/dev/null | cut -d' ' -f1" || true)
+  if [ "$WANT" = "$HAVE" ]; then
+    echo "  builder rootfs already present"
+  else
+    echo "  copying the builder rootfs (sparse)"
+    scp $SSH_OPTS -q "${REPO}/scripts/rootfs/builder.ext4" "root@${IP}:/var/lib/pilots/templates/builder.ext4"
+  fi
+else
+  echo "  no local builder rootfs; this host will refuse builds until it has one"
+fi
 if [ -f "/opt/pilots/kernels/vmlinux-${KERNEL_VERSION}/vmlinux.bin" ]; then
   on_host "mkdir -p /opt/pilots/kernels/vmlinux-${KERNEL_VERSION}"
   scp $SSH_OPTS -q "/opt/pilots/kernels/vmlinux-${KERNEL_VERSION}/vmlinux.bin" \
@@ -659,6 +697,11 @@ PILOT_ACME_EMAIL=${ACME_EMAIL}
 # with no wildcard, which serves custom domains and nothing else.
 PILOT_CLOUDFLARE_API_TOKEN=${CF_TOKEN}
 PILOT_TEMPLATE_ROOTFS=/var/lib/pilots/templates/golden.ext4
+# The builder image. Builds run inside a per-org machine created from it, so a
+# host missing this file answers POST /v1/builds with a 501 rather than
+# falling back to building on the host, which is the thing this design exists
+# to stop.
+PILOT_BUILDER_ROOTFS=/var/lib/pilots/templates/builder.ext4
 # Guest memory comes out of the 2MiB pool reserved in step [2/10]. This line
 # is the difference between RESERVING the pool and USING it: without it the
 # pool sits idle, every machine runs at 4KiB, and /v1/health reports hugepages

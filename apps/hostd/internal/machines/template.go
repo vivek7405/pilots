@@ -68,8 +68,31 @@ func (m *Manager) pageSizeKiB() int {
 	return 4
 }
 
-// templateRoot is where the template's builds and manifest live on this host.
-func (m *Manager) templateRoot() string { return filepath.Join(m.opts.CacheRoot, "template") }
+// templateRoot is where a variant's manifest lives on this host. Golden keeps
+// the historical path, so a host that already holds a manifest does not
+// re-derive one on upgrade.
+func (m *Manager) templateRoot(v variant) string {
+	if v == variantGolden {
+		return filepath.Join(m.opts.CacheRoot, "template")
+	}
+	return filepath.Join(m.opts.CacheRoot, "template-"+string(v))
+}
+
+// templateRowID is the fleet row a variant publishes to, one per vendor pool.
+func (m *Manager) templateRowID(v variant) string {
+	if v == variantGolden {
+		return state.GoldenTemplateFor(m.opts.Vendor)
+	}
+	return state.BuilderTemplateFor(m.opts.Vendor)
+}
+
+// variantRootfs is the ext4 a variant's disk half is chunkified from.
+func (m *Manager) variantRootfs(v variant) string {
+	if v == variantGolden {
+		return m.opts.FCConfig.TemplateRootfs
+	}
+	return m.opts.BuilderRootfs
+}
 
 // buildDir is where chunkify writes builds before they are uploaded, and where
 // a restore reads a local template from.
@@ -95,11 +118,33 @@ func (m *Manager) rootfsTemplateDir(t *Template) string {
 	return filepath.Join(m.buildDir(), t.RootfsBuildID.String())
 }
 
-// templateOnce serialises template construction. Two concurrent creates on a
-// cold host would otherwise each boot their own template machine, and the
-// second would overwrite the first's manifest while machines were already
-// restoring against it.
-var templateOnce sync.Mutex
+// A variant names one of the two templates a host derives.
+//
+// They are the same mechanism with different contents: golden is what an
+// ordinary machine is created from, builder is that image plus a BuildKit
+// daemon, and a builder machine is what runs a customer's Dockerfile so the
+// host does not. Both are per CPU-vendor pool, because both are suspended and
+// resumed and a memory image never crosses the Intel/AMD boundary.
+type variant string
+
+const (
+	variantGolden  variant = "golden"
+	variantBuilder variant = "builder"
+)
+
+// templateOnce serialises template construction, PER VARIANT. Two concurrent
+// creates on a cold host would otherwise each boot their own template machine,
+// and the second would overwrite the first's manifest while machines were
+// already restoring against it.
+//
+// One lock for both variants would be worse than a race: deriving the builder
+// template boots a machine, which needs the golden template, so a single lock
+// deadlocks the first build on a cold host. The map is written once here and
+// only read afterwards, so it needs no lock of its own.
+var templateOnce = map[variant]*sync.Mutex{
+	variantGolden:  {},
+	variantBuilder: {},
+}
 
 // EnsureTemplate returns the golden template, adopting the fleet's if there is
 // one and building it if there is not.
@@ -110,8 +155,24 @@ var templateOnce sync.Mutex
 // The order is therefore: what this host already has, then what the fleet
 // says, then build one.
 func (m *Manager) EnsureTemplate(ctx context.Context) (*Template, error) {
-	return m.ensureTemplate(ctx, "")
+	return m.ensureTemplate(ctx, variantGolden, "")
 }
+
+// EnsureBuilderTemplate is EnsureTemplate for the builder image: the same
+// golden guest plus a BuildKit daemon, which is what a per-org builder machine
+// is created from.
+func (m *Manager) EnsureBuilderTemplate(ctx context.Context) (*Template, error) {
+	if m.opts.BuilderRootfs == "" {
+		return nil, ErrNoBuilderRootfs
+	}
+	return m.ensureTemplate(ctx, variantBuilder, "")
+}
+
+// ErrNoBuilderRootfs says this host was not given a builder image, so it
+// cannot run builds. Named rather than generic: the operator fix is to ship
+// builder.ext4 and set PILOT_BUILDER_ROOTFS, and a caller turns this into a
+// 501 rather than a build failure.
+var ErrNoBuilderRootfs = errors.New("machines: this host has no builder rootfs")
 
 // ensureTemplate is EnsureTemplate with a snapshot key that has been PROVEN
 // unusable -- its vmstate object was not there when a restore reached for it.
@@ -123,26 +184,27 @@ func (m *Manager) EnsureTemplate(ctx context.Context) (*Template, error) {
 // and both sources are made to skip it. Without that, discarding the manifest
 // and re-deriving returns the same unusable template and the retry fails
 // exactly as the first attempt did.
-func (m *Manager) ensureTemplate(ctx context.Context, reject string) (*Template, error) {
-	templateOnce.Lock()
-	defer templateOnce.Unlock()
+func (m *Manager) ensureTemplate(ctx context.Context, v variant, reject string) (*Template, error) {
+	templateOnce[v].Lock()
+	defer templateOnce[v].Unlock()
 
 	// Already local and complete.
-	if t, err := m.loadTemplate(); err == nil && !t.rejected(reject) {
+	if t, err := m.loadTemplate(v); err == nil && !t.rejected(reject) {
 		return t, nil
 	}
 
 	// The fleet has one; pull what this host is missing.
-	if t, err := m.adoptFleetTemplate(ctx); err == nil && !t.rejected(reject) {
+	if t, err := m.adoptFleetTemplate(ctx, v); err == nil && !t.rejected(reject) {
 		return t, nil
 	} else if err != nil && !errors.Is(err, state.ErrNotFound) {
 		return nil, err
 	}
 
-	slog.Info("no golden template in this vendor pool; building one", "vendor", m.opts.Vendor)
+	slog.Info("no template in this vendor pool; building one",
+		"variant", v, "vendor", m.opts.Vendor)
 	start := time.Now()
 
-	t, err := m.buildTemplate(ctx)
+	t, err := m.buildTemplate(ctx, v)
 	if err != nil {
 		return nil, err
 	}
@@ -152,25 +214,25 @@ func (m *Manager) ensureTemplate(ctx context.Context, reject string) (*Template,
 	// loser must adopt the winner's rather than keep serving from a template
 	// no other host can restore against.
 	if err := m.opts.Store.PutTemplate(ctx, &state.Template{
-		ID: state.GoldenTemplateFor(m.opts.Vendor), MemBuildID: t.MemBuildID.String(),
+		ID: m.templateRowID(v), MemBuildID: t.MemBuildID.String(),
 		RootfsBuildID: t.RootfsBuildID.String(), SnapKey: t.SnapKey,
 		CreatedAt: t.CreatedAt,
 	}); err != nil {
-		return nil, fmt.Errorf("machines: publish the golden template: %w", err)
+		return nil, fmt.Errorf("machines: publish the %s template: %w", v, err)
 	}
 
-	if winner, err := m.adoptFleetTemplate(ctx); err == nil && !winner.rejected(reject) {
+	if winner, err := m.adoptFleetTemplate(ctx, v); err == nil && !winner.rejected(reject) {
 		if winner.MemBuildID != t.MemBuildID {
-			slog.Info("another host of this vendor published a golden template first; adopting it",
-				"vendor", m.opts.Vendor, "ours", t.MemBuildID, "theirs", winner.MemBuildID)
+			slog.Info("another host of this vendor published a template first; adopting it",
+				"variant", v, "vendor", m.opts.Vendor, "ours", t.MemBuildID, "theirs", winner.MemBuildID)
 		}
 		return winner, nil
 	}
 
-	if err := m.saveTemplate(t); err != nil {
+	if err := m.saveTemplate(v, t); err != nil {
 		return nil, err
 	}
-	slog.Info("golden template ready", "vendor", m.opts.Vendor,
+	slog.Info("template ready", "variant", v, "vendor", m.opts.Vendor,
 		"seconds", int(time.Since(start).Seconds()),
 		"mem_build", t.MemBuildID, "rootfs_build", t.RootfsBuildID)
 	return t, nil
@@ -183,12 +245,12 @@ func (m *Manager) ensureTemplate(ctx context.Context, reject string) (*Template,
 // in full, and it lands in exactly the layout a local build directory has.
 // That is what lets a host that has never run a template restore a machine
 // created from it.
-func (m *Manager) adoptFleetTemplate(ctx context.Context) (*Template, error) {
+func (m *Manager) adoptFleetTemplate(ctx context.Context, v variant) (*Template, error) {
 	// One row per vendor pool. The rootfs bytes are identical fleet-wide, but
 	// the memory half is a Firecracker snapshot and never restores across the
 	// Intel/AMD boundary, so a host adopts its OWN pool's row and nobody
 	// else's.
-	row, err := m.opts.Store.GetTemplate(ctx, state.GoldenTemplateFor(m.opts.Vendor))
+	row, err := m.opts.Store.GetTemplate(ctx, m.templateRowID(v))
 	if err != nil {
 		return nil, err
 	}
@@ -219,11 +281,11 @@ func (m *Manager) adoptFleetTemplate(ctx context.Context) (*Template, error) {
 			return nil, err
 		}
 	}
-	if err := m.saveTemplate(t); err != nil {
+	if err := m.saveTemplate(v, t); err != nil {
 		return nil, err
 	}
 
-	slog.Info("adopted the fleet's golden template",
+	slog.Info("adopted the fleet's template", "variant", v,
 		"seconds", int(time.Since(start).Seconds()),
 		"mem_build", t.MemBuildID, "rootfs_build", t.RootfsBuildID)
 	return t, nil
@@ -261,8 +323,8 @@ func (m *Manager) materializeBuild(ctx context.Context, id uuid.UUID) error {
 
 // loadTemplate reads a previously built template, checking that the builds it
 // names are actually still on disk.
-func (m *Manager) loadTemplate() (*Template, error) {
-	raw, err := os.ReadFile(filepath.Join(m.templateRoot(), templateFile))
+func (m *Manager) loadTemplate(v variant) (*Template, error) {
+	raw, err := os.ReadFile(filepath.Join(m.templateRoot(v), templateFile))
 	if err != nil {
 		return nil, err
 	}
@@ -297,8 +359,8 @@ func (m *Manager) loadTemplate() (*Template, error) {
 // photographed at a different guest page size.
 var errTemplatePageSize = errors.New("machines: template page size mismatch")
 
-func (m *Manager) saveTemplate(t *Template) error {
-	if err := os.MkdirAll(m.templateRoot(), 0o755); err != nil {
+func (m *Manager) saveTemplate(v variant, t *Template) error {
+	if err := os.MkdirAll(m.templateRoot(v), 0o755); err != nil {
 		return err
 	}
 	raw, err := json.MarshalIndent(t, "", "  ")
@@ -307,18 +369,18 @@ func (m *Manager) saveTemplate(t *Template) error {
 	}
 	// Atomic: a truncated manifest read on the next start would look like a
 	// corrupt template rather than an absent one.
-	tmp := filepath.Join(m.templateRoot(), templateFile+".tmp")
+	tmp := filepath.Join(m.templateRoot(v), templateFile+".tmp")
 	if err := os.WriteFile(tmp, raw, 0o644); err != nil {
 		return err
 	}
-	return os.Rename(tmp, filepath.Join(m.templateRoot(), templateFile))
+	return os.Rename(tmp, filepath.Join(m.templateRoot(v), templateFile))
 }
 
 // discardTemplate drops this host's cached manifest so the next ensureTemplate
 // re-derives one. Absence is the only way to say "re-derive": the manifest is
 // what loadTemplate reads, and a manifest that is present is believed.
-func (m *Manager) discardTemplate() {
-	path := filepath.Join(m.templateRoot(), templateFile)
+func (m *Manager) discardTemplate(v variant) {
+	path := filepath.Join(m.templateRoot(v), templateFile)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		slog.Warn("could not discard the unusable template manifest",
 			"path", path, "err", err)
@@ -326,7 +388,7 @@ func (m *Manager) discardTemplate() {
 }
 
 // buildTemplate boots one machine, lets it settle, and snapshots it.
-func (m *Manager) buildTemplate(ctx context.Context) (*Template, error) {
+func (m *Manager) buildTemplate(ctx context.Context, v variant) (*Template, error) {
 	// A key of this build's own, not a constant.
 	//
 	// Two fresh hosts can each find no template and each build one. Under a
@@ -342,21 +404,21 @@ func (m *Manager) buildTemplate(ctx context.Context) (*Template, error) {
 		PageSizeKiB: m.pageSizeKiB(),
 	}
 
-	// The disk template needs no VM at all: it is the golden rootfs, chunked.
+	// The disk template needs no VM at all: it is the variant's rootfs, chunked.
 	rootfsBuild := uuid.New()
 	if _, _, err := block.Chunkify(ctx, block.ChunkifyOpts{
-		In:      m.opts.FCConfig.TemplateRootfs,
+		In:      m.variantRootfs(v),
 		OutDir:  filepath.Join(m.buildDir(), rootfsBuild.String()),
 		BuildID: rootfsBuild,
 	}); err != nil {
-		return nil, fmt.Errorf("machines: chunkify the golden rootfs: %w", err)
+		return nil, fmt.Errorf("machines: chunkify the %s rootfs: %w", v, err)
 	}
 	if err := m.uploadBuild(ctx, rootfsBuild); err != nil {
 		return nil, err
 	}
 	t.RootfsBuildID = rootfsBuild
 
-	memBuild, err := m.captureTemplateMemory(ctx, t.SnapKey)
+	memBuild, err := m.captureTemplateMemory(ctx, v, t.SnapKey)
 	if err != nil {
 		return nil, err
 	}
@@ -365,7 +427,7 @@ func (m *Manager) buildTemplate(ctx context.Context) (*Template, error) {
 }
 
 // captureTemplateMemory boots a throwaway machine and chunkifies its memory.
-func (m *Manager) captureTemplateMemory(ctx context.Context, snapKey string) (uuid.UUID, error) {
+func (m *Manager) captureTemplateMemory(ctx context.Context, v variant, snapKey string) (uuid.UUID, error) {
 	row := &state.Machine{
 		// The prefix matters: it is how Manager.token knows this guest still
 		// carries the golden rootfs's placeholder credential.
@@ -389,7 +451,13 @@ func (m *Manager) captureTemplateMemory(ctx context.Context, snapKey string) (uu
 		return uuid.Nil, err
 	}
 
-	fcm, err := fc.Boot(ctx, m.machineFCConfig(row, slot, mac))
+	// The variant's own rootfs, not the host's default. Without this the
+	// builder template would be photographed from the golden image and every
+	// builder machine would come up with no BuildKit daemon in it.
+	fcCfg := m.machineFCConfig(row, slot, mac)
+	fcCfg.TemplateRootfs = m.variantRootfs(v)
+
+	fcm, err := fc.Boot(ctx, fcCfg)
 	if err != nil {
 		_ = netns.Teardown(slot)
 		return uuid.Nil, fmt.Errorf("machines: boot the template machine: %w", err)
@@ -478,9 +546,11 @@ func (m *Manager) templateFor(ctx context.Context, row *state.Machine) (*Templat
 
 	// The host's own template, when it happens to be the same one. Saves
 	// materialising what is already on disk, which is the common case.
-	if t, err := m.loadTemplate(); err == nil &&
-		t.MemBuildID == memID && t.RootfsBuildID == rootfsID {
-		return t, nil
+	for _, v := range []variant{variantGolden, variantBuilder} {
+		if t, err := m.loadTemplate(v); err == nil &&
+			t.MemBuildID == memID && t.RootfsBuildID == rootfsID {
+			return t, nil
+		}
 	}
 
 	// A template this host has never held. The builds are content-addressed

@@ -1,0 +1,18 @@
+# The builder's disk is finite and its life is not: a warm builder serves every
+# build for one org until it has been suspended for 24 h. Without garbage
+# collection its snapshotter store grows until the ext4 fills, and a full disk
+# shows up as a build failure with nothing in the log to explain it.
+#
+# `gc = true` selects BuildKit's default policy, which derives its thresholds
+# from the size of the filesystem it is on. That is deliberate: an absolute
+# byte bound written here would be a second copy of the image size set in
+# build-golden-rootfs.sh, and the two would drift.
+root = "/var/lib/buildkit"
+
+[worker.oci]
+  enabled = true
+  snapshotter = "overlayfs"
+  gc = true
+
+[worker.containerd]
+  enabled = false

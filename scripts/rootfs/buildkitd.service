@@ -1,0 +1,31 @@
+[Unit]
+Description=pilots builder BuildKit daemon
+# network.target only. systemd-networkd-wait-online is MASKED in this image,
+# so ordering on network-online.target would make this unit wait for a target
+# that can never be reached, and the daemon would never start.
+After=network.target
+
+[Service]
+Type=notify
+# The listener is plain TCP with no TLS, and that is deliberate. The port is
+# reachable only from the host side of this machine's netns: the host dials the
+# slot address, the prerouting DNAT rewrites it to this guest, and the tenant
+# filter drops guest-to-guest traffic. Adding mTLS here would be compensating
+# for a boundary that already exists, and it would put a credential inside a
+# guest an org controls.
+#
+# --oci-worker-net=host runs each build step in this guest's own network
+# namespace. The VM is the isolation boundary, not a netns inside it, and the
+# host's egress firewall applies to everything leaving this machine either way.
+# It also drops a CNI dependency the guest would otherwise carry.
+ExecStart=/usr/local/bin/buildkitd \
+  --addr tcp://0.0.0.0:1234 \
+  --oci-worker-snapshotter=overlayfs \
+  --oci-worker-net=host
+Restart=always
+RestartSec=1
+OOMScoreAdjust=-500
+LimitNOFILE=1048576
+
+[Install]
+WantedBy=multi-user.target

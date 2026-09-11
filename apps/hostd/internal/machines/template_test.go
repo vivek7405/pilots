@@ -27,7 +27,7 @@ func hugePageManager(t *testing.T, huge bool) *Manager {
 // insists on, so the only thing a test varies is the page size.
 func writeTemplate(t *testing.T, m *Manager, tpl *Template) {
 	t.Helper()
-	if err := os.MkdirAll(m.templateRoot(), 0o755); err != nil {
+	if err := os.MkdirAll(m.templateRoot(variantGolden), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	for _, dir := range []string{m.memParentDir(tpl), m.rootfsTemplateDir(tpl)} {
@@ -45,7 +45,7 @@ func writeTemplate(t *testing.T, m *Manager, tpl *Template) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(m.templateRoot(), templateFile), raw, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(m.templateRoot(variantGolden), templateFile), raw, 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -72,7 +72,7 @@ func TestLoadTemplateRejectsAForeignPageSize(t *testing.T) {
 		PageSizeKiB:   4, // photographed at 4KiB
 	})
 
-	_, err := m.loadTemplate()
+	_, err := m.loadTemplate(variantGolden)
 	if err == nil {
 		t.Fatal("a 4KiB template was accepted by a 2MiB host")
 	}
@@ -90,7 +90,7 @@ func TestLoadTemplateRejectsAHugePageTemplateOnASmallPageHost(t *testing.T) {
 		PageSizeKiB:   2048,
 	})
 
-	if _, err := m.loadTemplate(); !errors.Is(err, errTemplatePageSize) {
+	if _, err := m.loadTemplate(variantGolden); !errors.Is(err, errTemplatePageSize) {
 		t.Errorf("error was %v, want it to wrap errTemplatePageSize", err)
 	}
 }
@@ -106,7 +106,7 @@ func TestLoadTemplateRejectsAManifestWithNoPageSize(t *testing.T) {
 		// PageSizeKiB left at zero, as a pre-change manifest would have it.
 	})
 
-	if _, err := m.loadTemplate(); !errors.Is(err, errTemplatePageSize) {
+	if _, err := m.loadTemplate(variantGolden); !errors.Is(err, errTemplatePageSize) {
 		t.Errorf("error was %v, want it to wrap errTemplatePageSize", err)
 	}
 }
@@ -120,7 +120,7 @@ func TestLoadTemplateAcceptsAMatchingPageSize(t *testing.T) {
 	}
 	writeTemplate(t, m, want)
 
-	got, err := m.loadTemplate()
+	got, err := m.loadTemplate(variantGolden)
 	if err != nil {
 		t.Fatalf("loadTemplate: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestARejectedTemplateIsNotServedAgain(t *testing.T) {
 	writeTemplate(t, m, tpl)
 
 	// Nothing rejected: the manifest is good as far as anything local knows.
-	got, err := m.loadTemplate()
+	got, err := m.loadTemplate(variantGolden)
 	if err != nil {
 		t.Fatalf("loadTemplate: %v", err)
 	}
@@ -195,17 +195,17 @@ func TestDiscardTemplateForcesAReDerive(t *testing.T) {
 		SnapKey:       "template/x/snap.bin",
 		PageSizeKiB:   2048,
 	})
-	if _, err := m.loadTemplate(); err != nil {
+	if _, err := m.loadTemplate(variantGolden); err != nil {
 		t.Fatalf("loadTemplate before the discard: %v", err)
 	}
 
-	m.discardTemplate()
+	m.discardTemplate(variantGolden)
 
-	if _, err := m.loadTemplate(); !errors.Is(err, os.ErrNotExist) {
+	if _, err := m.loadTemplate(variantGolden); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("loadTemplate after the discard = %v, want the manifest to be gone", err)
 	}
 	// Idempotent: a host that never had one must not log or fail differently.
-	m.discardTemplate()
+	m.discardTemplate(variantGolden)
 }
 
 // The retry has to be able to tell the template's own missing artifact from

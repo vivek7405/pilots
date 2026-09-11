@@ -271,11 +271,15 @@ func run() error {
 		APIHostname: cfg.APIHostname,
 		StateRoot:   cfg.MachineStateRoot(),
 		CacheRoot:   cfg.CacheRoot(),
-		Store:       store,
-		Uploader:    uploader,
-		Chunks:      chunks,
-		BlockStore:  chunkReader(chunks),
-		NBDDevices:  devices,
+		// The image a per-org builder machine is created from. A host without
+		// it serves no builds at all, because a customer Dockerfile runs
+		// inside a microVM or it does not run here.
+		BuilderRootfs: cfg.BuilderRootfs,
+		Store:         store,
+		Uploader:      uploader,
+		Chunks:        chunks,
+		BlockStore:    chunkReader(chunks),
+		NBDDevices:    devices,
 		// The handlers are separate processes and read builds themselves, so
 		// they need this daemon's storage credentials.
 		HandlerEnv: os.Environ(),

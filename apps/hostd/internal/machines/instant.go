@@ -92,7 +92,7 @@ func (m *Manager) createFromTemplate(ctx context.Context, row *state.Machine,
 	if errors.As(err, &missing) {
 		slog.Warn("the golden template names a snapshot that is gone; re-deriving it",
 			"machine", row.ID, "snap_key", missing.snapKey)
-		m.discardTemplate()
+		m.discardTemplate(variantGolden)
 		fcm, slot, err = m.restoreFromTemplate(ctx, row, missing.snapKey)
 	}
 	if err != nil {
@@ -143,7 +143,7 @@ func (e *templateArtifactMissing) Unwrap() error { return e.err }
 // caller can retry.
 func (m *Manager) restoreFromTemplate(ctx context.Context, row *state.Machine,
 	reject string) (*fc.Machine, *netns.Slot, error) {
-	t, err := m.ensureTemplate(ctx, reject)
+	t, err := m.ensureTemplate(ctx, variantGolden, reject)
 	if err != nil {
 		return nil, nil, err
 	}
