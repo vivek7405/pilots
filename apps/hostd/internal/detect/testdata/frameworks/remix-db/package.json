@@ -1,0 +1,11 @@
+{
+  "name": "social-auth-demo",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24.3.0" },
+  "dependencies": { "remix": "^3.0.0" },
+  "scripts": {
+    "db:migrate": "remix db migrate",
+    "start": "node --env-file-if-exists=.env --import remix/node-tsx server.ts"
+  }
+}

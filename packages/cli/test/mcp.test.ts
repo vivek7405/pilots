@@ -297,7 +297,12 @@ test('an undetectable directory is a tool error carrying the server\'s details',
     }
     assert.equal(body.code, 'unknown_framework')
     assert.ok(body.next.length > 0)
-    assert.equal(body.details.looked_for.length, 10)
+    // Every signal the detector checks has to reach the agent, so this
+    // counts what the fake API serves rather than a literal: a hardcoded
+    // number turns adding a framework into a failing test instead of an
+    // incomplete refusal.
+    assert.ok(body.details.looked_for.length >= 10)
+    assert.ok(body.details.looked_for.some((s) => s.includes('remix')))
     assert.equal(body.details.rules.length, 2)
   } finally {
     await close()

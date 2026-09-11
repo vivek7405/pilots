@@ -401,8 +401,14 @@ Three behaviours are worth knowing before writing an agent against them:
 
 `generate_dockerfile` asks the host what it would write for a directory and
 returns the Dockerfile, the port and the health check: webjs, Next.js, React
-Router / Remix, Vite, Django, FastAPI, Rails, Go, Rust and Laravel. `deploy`
+Router, Remix 3, Vite, Django, FastAPI, Rails, Go, Rust and Laravel. `deploy`
 does this itself, so reach for it only when the file is wanted in the repo.
+
+React Router and Remix 3 are two entries rather than one because they are two
+frameworks. The `@remix-run/*` lineage became React Router and is detected by
+`react-router.config.*` or `remix.config.*`. Remix 3 is the bare `remix`
+package, ships no configuration file at all, and is buildless -- so it is
+detected by the dependency and gets a recipe with no build step.
 
 ### The two Dockerfile rules
 

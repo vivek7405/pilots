@@ -703,7 +703,7 @@ THE ONE CALL
   deploy { "dir": "<absolute path>" }
   -> { app, services: [{ name, url, release_id }], next }
   The host decides what the directory is: a compose file, a Dockerfile,
-  a recipe (webjs, next, react-router, vite, django, fastapi, rails, go,
+  a recipe (webjs, next, react-router, remix, vite, django, fastapi, rails, go,
   rust, laravel), or unknown. Do not write a Dockerfile first.
 
 EVERY RESULT CARRIES next. EVERY ERROR CARRIES code, next, details.

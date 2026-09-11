@@ -39,6 +39,7 @@ const (
 	FrameworkWebJS       Framework = "webjs"
 	FrameworkNext        Framework = "next"
 	FrameworkReactRouter Framework = "react-router"
+	FrameworkRemix       Framework = "remix"
 	FrameworkVite        Framework = "vite"
 	FrameworkDjango      Framework = "django"
 	FrameworkFastAPI     Framework = "fastapi"
@@ -63,6 +64,7 @@ var LookedFor = []string{
 	"package.json (with a @webjsdev/* dependency)",
 	"next.config.{js,ts,mjs,cjs}",
 	"react-router.config.* or remix.config.*",
+	"package.json with a bare `remix` dependency (Remix 3)",
 	"vite.config.*",
 	"manage.py with requirements.txt or pyproject.toml",
 	"main.py or app.py importing fastapi",
@@ -138,6 +140,8 @@ func DetectIn(dir, lockRoot string) Framework {
 		return FrameworkNext
 	case hasPrefix("react-router.config.") || hasPrefix("remix.config."):
 		return FrameworkReactRouter
+	case isRemix3(dir):
+		return FrameworkRemix
 	case hasPrefix("vite.config."):
 		return FrameworkVite
 	case has("manage.py") && (has("requirements.txt") || has("pyproject.toml")):
@@ -257,4 +261,35 @@ func cargoPackageName(dir string) string {
 		return string(m[1])
 	}
 	return ""
+}
+
+// isRemix3 answers whether a directory is a Remix 3 app.
+//
+// Remix 3 is the bare `remix` package. That is a different framework from the
+// one `@remix-run/*` names: that lineage became react-router, and the
+// react-router recipe above is its recipe. The two are told apart by the
+// dependency rather than by a file, because Remix 3 ships NO configuration
+// file the detector could key on -- no remix.config.*, no
+// react-router.config.*, and no vite.config.* -- which is why a Remix 3 app
+// fell all the way through to unknown before this existed.
+//
+// The remix.config.* case is checked before this one, so a Remix 1 app, which
+// also depended on a package called `remix`, is claimed by react-router first
+// and never reaches here. The @remix-run/* guard is the belt to that
+// suspenders: a directory carrying both is v2, not v3.
+func isRemix3(dir string) bool {
+	pkg := readPackageJSON(dir)
+	if pkg == nil {
+		return false
+	}
+	found := false
+	for _, name := range dependencyNames(pkg) {
+		if strings.HasPrefix(name, "@remix-run/") {
+			return false
+		}
+		if name == "remix" {
+			found = true
+		}
+	}
+	return found
 }

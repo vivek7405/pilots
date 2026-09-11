@@ -25,6 +25,7 @@ MCP: `deploy` with `{ "dir": "<absolute path>" }`. Nothing else is required.
 | `package.json` with any `@webjsdev/*` dependency | webjs | `/__webjs/ready`, grace 40 s |
 | `next.config.*` and a lockfile | next | `/` |
 | `react-router.config.*` or `remix.config.*` | react-router | `/` |
+| `package.json` with a bare `remix` dependency | remix (Remix 3) | `/` |
 | `vite.config.*` | vite, static behind nginx | `/` |
 | `manage.py` with `requirements.txt` or `pyproject.toml` | django | `/`, grace 30 s |
 | `main.py` or `app.py` importing fastapi | fastapi | `/` |
