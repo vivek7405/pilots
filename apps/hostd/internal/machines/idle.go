@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +16,20 @@ import (
 // when its knobs say nothing else; the idle_timeout knob is the per-machine
 // value.
 const DefaultIdleTimeout = api.DefaultIdleTimeoutSeconds * time.Second
+
+// builderMaxSuspended is how long a suspended builder is kept before it is
+// destroyed.
+//
+// A suspended builder is not free: it holds a memory image and a 32 GiB disk
+// image in object storage and on this host's NVMe. Keeping one for a day
+// covers a working day of deploys, so a developer never pays a create; past
+// that the next build pays one create, which sits inside the build's own
+// timeout and is invisible next to the solve.
+//
+// fly terminates its builder after ten minutes of inactivity, which is the
+// opposite trade: cheaper to hold, slower on the next deploy. A restore here
+// is sub-second, so the balance is different.
+const builderMaxSuspended = 24 * time.Hour
 
 // idleCheckInterval is how often the monitor looks. Frequent enough that a
 // machine suspends promptly, cheap because it is a local read.
@@ -131,6 +146,52 @@ func (m *Manager) suspendIdleMachines(ctx context.Context) {
 		}
 		slog.Info("machine suspended after going idle", "machine", row.ID)
 	}
+
+	// Reuses the rows this tick already listed. A second ListMachines here
+	// would double the only store read the monitor makes.
+	m.destroyStaleBuilders(ctx, rows)
+}
+
+// destroyStaleBuilders collects builders that have been suspended longer than
+// builderMaxSuspended.
+//
+// A builder is hostd's machine, not the org's, so nothing else will ever clean
+// one up: an org that deploys once and never again would otherwise leave a
+// memory image and a disk image behind on every host it ever built on. The
+// next build after a collection simply creates one again.
+func (m *Manager) destroyStaleBuilders(ctx context.Context, rows []state.Machine) {
+	for _, id := range m.selectStaleBuilders(rows) {
+		if err := m.Destroy(ctx, id); err != nil {
+			slog.Error("could not destroy a stale builder", "machine", id, "err", err)
+			continue
+		}
+		slog.Info("destroyed a builder that had been suspended for a day", "machine", id)
+	}
+}
+
+// selectStaleBuilders is the choice destroyStaleBuilders acts on, split out so
+// it can be asserted without an engine behind it.
+func (m *Manager) selectStaleBuilders(rows []state.Machine) []string {
+	var stale []string
+	for _, row := range rows {
+		// Single-writer: only the owning host may write this row. A RUNNING
+		// builder is never collected either, because the idle monitor
+		// suspends it first and a build in flight keeps it running.
+		if row.HostID != m.opts.HostID || row.State != StateSuspended {
+			continue
+		}
+		if !strings.HasPrefix(row.Name, builderNamePrefix) {
+			continue
+		}
+		// LastActivity is stamped by Touch, which EnsureBuilder calls when it
+		// hands a builder out and again when the build releases it. So this
+		// measures time since the last BUILD, not time since the suspend.
+		if time.Since(time.Unix(row.LastActivity, 0)) < builderMaxSuspended {
+			continue
+		}
+		stale = append(stale, row.ID)
+	}
+	return stale
 }
 
 // shouldSuspend requires BOTH signals to agree: nothing in flight, and no
