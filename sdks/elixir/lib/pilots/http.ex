@@ -123,7 +123,16 @@ defmodule Pilots.HTTP do
     request =
       case Keyword.get(opts, :body) do
         nil ->
-          {String.to_charlist(target), headers}
+          # A body-less POST still needs the FOUR-tuple. `:httpc` accepts the
+          # two-tuple only for get/head/delete/options/trace and answers
+          # `{:error, :invalid_request}` for the rest without opening a
+          # socket -- which made suspend, wake, restore and rollback fail
+          # every time, in words that read like a network error.
+          if method in [:post, :put, :patch] do
+            {String.to_charlist(target), headers, ~c"application/json", "{}"}
+          else
+            {String.to_charlist(target), headers}
+          end
 
         {content_type, raw} ->
           {String.to_charlist(target), headers, String.to_charlist(content_type),

@@ -195,6 +195,29 @@ defmodule PilotsTest do
     assert url_of(hd(calls.())) == "http://fleet.test/v1/machines/a%2Fb%3Fc"
   end
 
+  test "a body-less POST is still a four-tuple, which is the only form :httpc posts",
+       %{fun: fun, calls: calls} do
+    c = client(fun)
+    Pilots.suspend(c, "m_1")
+    Pilots.wake(c, "m_1")
+    Pilots.restore(c, "ck-1")
+    Pilots.rollback(c, "svc_1")
+
+    # `:httpc.request/4` takes `{url, headers}` only for get/head/delete/
+    # options/trace. For a post it answers `{:error, :invalid_request}`
+    # without opening a socket, so a two-tuple here would make every one of
+    # these calls fail in a way that reads like a network error.
+    for call <- calls.() do
+      assert call.method == :post
+      assert tuple_size(call.request) == 4, "a post built #{inspect(call.request)}"
+      assert body_of(call) == %{}
+    end
+
+    # A GET keeps the two-tuple form, which is the one `:httpc` wants there.
+    Pilots.list_machines(c)
+    assert tuple_size(List.last(calls.()).request) == 2
+  end
+
   test "a transport failure is an error rather than a crash", %{fun: fun, respond: respond} do
     respond.([{:error, Error.transport("connection refused")}])
     assert {:error, %Error{status: 0}} = Pilots.list_machines(client(fun))
