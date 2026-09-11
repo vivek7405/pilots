@@ -148,6 +148,19 @@ func TestInstallKeepsWhatIsThere(t *testing.T) {
 		t.Fatalf("the merge lost something: %s", raw)
 	}
 
+	// A config that was already 0644 must come back 0600, not stay readable
+	// by everyone on the box. The atomic write preserves the existing mode so
+	// it cannot silently tighten somebody's deliberate 0400 -- but preserving
+	// it UNMASKED left a live bearer token world-readable, and the perm
+	// assertion in TestInstallEveryHarness never saw it because the file
+	// there does not pre-exist.
+	if st, err := os.Stat(path); err != nil || st.Mode().Perm() != 0o600 {
+		t.Errorf("a pre-existing 0644 config carrying a key is %v, want 0600", st.Mode().Perm())
+	}
+	if !strings.Contains(string(raw), "pilot_k3y") {
+		t.Fatal("the test is not actually proving anything: no key was written")
+	}
+
 	if err := os.WriteFile(path, []byte(`{ not json`), 0o644); err != nil {
 		t.Fatal(err)
 	}

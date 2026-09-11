@@ -291,9 +291,16 @@ func writeJSONEntry(path string, keyPath []string, entry map[string]any) (bool, 
 // old one or the new one and never half of either.
 func writeFileAtomic(path string, data []byte) error {
 	dir := filepath.Dir(path)
+	// Preserve the owner's bits and NEVER the group's or the world's. These
+	// files carry a bearer token, so inheriting an existing 0644 would leave
+	// a live credential readable by everyone on the box -- which is what
+	// preserving the mode unmasked did. Masking with 0600 keeps a
+	// deliberately stricter 0400 and tightens anything looser.
 	perm := os.FileMode(0o600)
 	if info, err := os.Stat(path); err == nil {
-		perm = info.Mode().Perm()
+		if got := info.Mode().Perm() & 0o600; got != 0 {
+			perm = got
+		}
 	}
 	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")
 	if err != nil {
