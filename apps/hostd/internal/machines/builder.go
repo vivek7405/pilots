@@ -80,18 +80,17 @@ func (m *Manager) EnsureBuilder(ctx context.Context, orgID string) (string, func
 		return "", nil, fmt.Errorf("machines: builder %s is not running: %w", id, ErrNotFound)
 	}
 
-	// A running machine is not the same as a daemon accepting connections.
-	// A restore resumes one that was already listening, so this returns at
-	// once in the common case; a machine that had to cold boot needs the
-	// wait, and without it buildctl fails instantly with a refused connection
-	// that reads like a networking fault rather than a slow start.
-	if err := waitForBuildkit(ctx, slot.HostIP.String(), builderDialTimeout); err != nil {
-		return "", nil, fmt.Errorf("machines: builder %s never accepted a connection: %w", id, err)
-	}
-
-	// Bracket the whole build. Without this the idle monitor can suspend the
-	// daemon in the middle of a solve, which surfaces as a build that dies
-	// against a connection that simply stopped answering.
+	// Bracket the whole build, and take the bracket BEFORE the wait below
+	// rather than after it.
+	//
+	// Without the bracket at all, the idle monitor suspends the daemon in the
+	// middle of a solve, which surfaces as a build that dies against a
+	// connection that simply stopped answering. Taking it after the wait
+	// leaves the same window open, only narrower: shouldSuspend needs nothing
+	// in flight and a stale LastActivity, which is exactly the state a builder
+	// is in when a build arrives at its idle boundary, and the wait can run
+	// for the whole dial timeout on a cold boot. Touch immediately after, so
+	// the row also says this builder was just used.
 	m.Begin(id)
 	m.Touch(context.WithoutCancel(ctx), id)
 	released := false
@@ -103,6 +102,19 @@ func (m *Manager) EnsureBuilder(ctx context.Context, orgID string) (string, func
 		m.End(id)
 		m.Touch(context.WithoutCancel(ctx), id)
 	}
+
+	// A running machine is not the same as a daemon accepting connections.
+	// A restore resumes one that was already listening, so this returns at
+	// once in the common case; a machine that had to cold boot needs the
+	// wait, and without it buildctl fails instantly with a refused connection
+	// that reads like a networking fault rather than a slow start.
+	if err := waitForBuildkit(ctx, slot.HostIP.String(), builderDialTimeout); err != nil {
+		// The caller gets no release on an error, so this path has to drop
+		// the bracket itself or the builder never suspends again.
+		release()
+		return "", nil, fmt.Errorf("machines: builder %s never accepted a connection: %w", id, err)
+	}
+
 	return slot.BuildkitAddr(), release, nil
 }
 
