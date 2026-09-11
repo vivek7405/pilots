@@ -278,7 +278,44 @@ func writeJSONEntry(path string, keyPath []string, entry map[string]any) (bool, 
 		return false, err
 	}
 	// 0600: the hosted entry carries the key.
-	return true, os.WriteFile(path, append(raw, '\n'), 0o600)
+	return true, writeFileAtomic(path, append(raw, '\n'))
+}
+
+// writeFileAtomic replaces a config file through a temp file and a rename.
+//
+// Never in place, and that is not a style preference: these are other
+// programs' files -- `~/.claude.json` is Claude Code's whole state, project
+// history and every other MCP server included -- and an O_TRUNC write that
+// dies partway (a full disk, a ^C, a crash) destroys all of it to add one
+// entry. A rename is atomic on the same filesystem, so the file is either the
+// old one or the new one and never half of either.
+func writeFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	perm := os.FileMode(0o600)
+	if info, err := os.Stat(path); err == nil {
+		perm = info.Mode().Perm()
+	}
+	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp)
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, perm); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func sameJSON(a, b any) bool {
@@ -338,7 +375,7 @@ func writeTOMLEntry(path string, keyPath []string, entry map[string]any) (bool, 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return false, err
 	}
-	return true, os.WriteFile(path, []byte(strings.TrimRight(next, "\n")+"\n"), 0o600)
+	return true, writeFileAtomic(path, []byte(strings.TrimRight(next, "\n")+"\n"))
 }
 
 // renderTOML writes one table whose values are strings, string arrays, bools
