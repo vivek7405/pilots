@@ -75,7 +75,13 @@ func newUpgradeCmd(env *Env) *cobra.Command {
 			if err := json.NewDecoder(res.Body).Decode(&rel); err != nil {
 				return err
 			}
-			latest := rel.TagName
+			// The tag is `pilot-v0.2.0`; the binary is stamped with the
+			// version alone, because the release workflow strips the prefix
+			// before it passes -ldflags. Comparing the raw tag against the
+			// stamp would never match, so `upgrade` would replace the newest
+			// binary with itself and `--check` would advertise an upgrade
+			// forever.
+			latest := strings.TrimPrefix(rel.TagName, "pilot-")
 			if env.W.JSON && checkOnly {
 				return env.W.JSONValue(map[string]any{"current": Version, "latest": latest, "upgrade": latest != Version})
 			}
