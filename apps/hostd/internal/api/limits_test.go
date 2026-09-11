@@ -58,7 +58,7 @@ func TestExpiredKeyIsRefusedEverywhere(t *testing.T) {
 // The name prefix is enforced where a name is CHOSEN, and the refusal names
 // the prefix so an agent can retry with a name that works.
 func TestNamePrefixOnCreate(t *testing.T) {
-	h, st, _ := newTestServerWithManager(t)
+	h, st, mgr := newTestServerWithManager(t)
 	const key = "pilot_prefixed"
 	keyWithLimits(t, st, key, "org_1", state.APIKeyLimits{NamePrefix: "mcp-"})
 
@@ -77,10 +77,15 @@ func TestNamePrefixOnCreate(t *testing.T) {
 	if rec := postJSON(t, h, "/v1/machines", key, `{"name":"mcp-scratch"}`); rec.Code != http.StatusCreated {
 		t.Fatalf("a name inside the prefix: got %d, want 201: %s", rec.Code, rec.Body.String())
 	}
-	// An unnamed create is allowed: hostd mints the name, so it cannot be a
-	// way to reach a machine that already exists.
+	// An unnamed create is allowed, and is NAMED under the prefix. A minted
+	// name outside it would be both outside the restriction and invisible to
+	// the cap, which counts prefixed rows -- so the cap would never count
+	// anything an agent made this way.
 	if rec := postJSON(t, h, "/v1/machines", key, `{}`); rec.Code != http.StatusCreated {
 		t.Fatalf("an unnamed create: got %d, want 201: %s", rec.Code, rec.Body.String())
+	}
+	if name := mgr.lastCreate.Name; !strings.HasPrefix(name, "mcp-") {
+		t.Fatalf("an unnamed create under a prefix reached the manager as %q, which is outside it", name)
 	}
 
 	// A service's name is what its permanent address is minted from, so the
@@ -147,6 +152,13 @@ func TestMachineCapRefuses(t *testing.T) {
 	rec := postJSON(t, h, "/v1/machines", key, `{"name":"mcp-two"}`)
 	if rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("at the cap: got %d, want 429: %s", rec.Code, rec.Body.String())
+	}
+	// The same refusal with NO name. An unnamed create used to be named by
+	// hostd's own generator, outside the prefix, and the count above skips
+	// rows outside the prefix -- so the cap was one omitted field away from
+	// meaning nothing.
+	if unnamed := postJSON(t, h, "/v1/machines", key, `{}`); unnamed.Code != http.StatusTooManyRequests {
+		t.Fatalf("an unnamed create at the cap: got %d, want 429: %s", unnamed.Code, unnamed.Body.String())
 	}
 	var body struct {
 		Code    string         `json:"code"`

@@ -2,8 +2,11 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -51,16 +54,17 @@ func (d Deps) limitsFor(ctx context.Context) (*state.APIKeyLimits, error) {
 	return l, nil
 }
 
-// checkNamePrefix refuses a name a restricted key may not take.
+// checkNamePrefix refuses a name a restricted key may not take, and NAMES an
+// unnamed create under the prefix rather than letting it through.
 //
-// An EMPTY name is allowed through: hostd mints one from the id, and a minted
-// name cannot be a way to reach another agent's machine because it did not
-// exist before this call. The refusal names the prefix, because an agent that
-// is told only "refused" will retry the same name.
-func (d Deps) checkNamePrefix(w http.ResponseWriter, r *http.Request, name, kind string) bool {
-	if name == "" {
-		return true
-	}
+// The fill is not a convenience. hostd mints a name for an unnamed create from
+// its own generator, and a generated name carries no prefix -- so an unnamed
+// create would be outside the restriction AND invisible to checkMachineCap,
+// which counts prefixed rows. The cap would then never count anything, and a
+// consent screen's "at most N machines" would be one omitted request field
+// away from meaning nothing. The refusal names the prefix, because an agent
+// that is told only "refused" will retry the same name.
+func (d Deps) checkNamePrefix(w http.ResponseWriter, r *http.Request, name *string, kind string) bool {
 	l, err := d.limitsFor(r.Context())
 	if err != nil {
 		writeMapped(w, err)
@@ -69,14 +73,29 @@ func (d Deps) checkNamePrefix(w http.ResponseWriter, r *http.Request, name, kind
 	if l == nil || l.NamePrefix == "" {
 		return true
 	}
-	if strings.HasPrefix(name, l.NamePrefix) {
+	if *name == "" {
+		*name = l.NamePrefix + randomSuffix()
+		return true
+	}
+	if strings.HasPrefix(*name, l.NamePrefix) {
 		return true
 	}
 	WriteError(w, http.StatusForbidden, CodeScopeRequired,
 		"this token may only name a "+kind+" starting with "+l.NamePrefix,
-		"name it "+l.NamePrefix+name+", or use a token with no name restriction",
-		map[string]any{"name_prefix": l.NamePrefix, "name": name})
+		"name it "+l.NamePrefix+*name+", or use a token with no name restriction",
+		map[string]any{"name_prefix": l.NamePrefix, "name": *name})
 	return false
+}
+
+// randomSuffix is what an unnamed create is named with, under the caller's
+// prefix. Eight hex characters, so the whole name stays a legal DNS label even
+// beside the longest prefix the mint accepts.
+func randomSuffix() string {
+	var b [4]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano()&0xffffffff, 16)
+	}
+	return hex.EncodeToString(b[:])
 }
 
 // checkMachineCap refuses a create that would take a restricted key past the

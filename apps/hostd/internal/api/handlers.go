@@ -308,7 +308,7 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 	// manager because they are a property of the CALLER, not of the machine:
 	// the rollout creates in-process with no key at all and must not be held
 	// to an agent's consent screen. See limits.go.
-	if !d.checkNamePrefix(w, r, req.Name, "machine") {
+	if !d.checkNamePrefix(w, r, &req.Name, "machine") {
 		return
 	}
 	if !d.checkMachineCap(w, r) {

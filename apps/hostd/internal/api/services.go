@@ -89,7 +89,7 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	// A service is the durable half of the same primitive, and its name is
 	// what its permanent address is minted from, so a restricted key is held
 	// to its prefix here too. See limits.go.
-	if !d.checkNamePrefix(w, r, req.Name, "service") {
+	if !d.checkNamePrefix(w, r, &req.Name, "service") {
 		return
 	}
 	if req.Private && req.Domain != "" {
