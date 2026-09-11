@@ -21,6 +21,10 @@
     "./tanstack": {
       "types": "./dist/tanstack.d.ts",
       "import": "./dist/tanstack.js"
+    },
+    "./next": {
+      "types": "./dist/next.d.ts",
+      "default": "./dist/next.js"
     }
   },
   "files": ["dist", "README.md"],

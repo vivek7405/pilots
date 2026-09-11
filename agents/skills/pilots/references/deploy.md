@@ -36,6 +36,17 @@ MCP: `deploy` with `{ "dir": "<absolute path>" }`. Nothing else is required.
 
 Every recipe sets `PORT=8080`, exposes 8080 and reads `$PORT`. The router dials 8080.
 
+### Next.js: the deployment adapter
+
+Next defines an adapter interface, and pilots implements it. Setting
+`adapterPath: '@pilots/sdk/next'` in `next.config.js` (or
+`NEXT_ADAPTER_PATH=@pilots/sdk/next` with no config change) makes the build
+turn on `output: 'standalone'`, so the image carries the traced server rather
+than the whole repository, and writes `<distDir>/pilots-deploy.json` holding
+the static and prerendered paths, the routing rules, and a warning for any
+route built for the edge runtime. Without it the generic recipe above still
+works; the image is just much larger.
+
 ## Monorepos
 
 A root `package.json` with `workspaces` deploys each workspace directory as a service named after it, built from the repository root with `WORKDIR /app/<dir>`. The install stays at the root, so the lockfile and the hoisted `node_modules` are the ones each workspace expects. A workspace no recipe recognises is skipped and named in the notes.

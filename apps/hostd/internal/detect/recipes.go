@@ -184,6 +184,11 @@ func next() Recipe {
 		Health:    httpHealth("/", 0),
 		Notes: []string{
 			"Next binds 127.0.0.1 by default, which serves nothing outside the guest; -H 0.0.0.0 is not optional here.",
+			// Next defines an adapter interface for exactly this, and pilots
+			// implements it. Opting in is one line, and it is worth naming
+			// here because this recipe is otherwise the generic one: it copies
+			// the repository and ships a full node_modules.
+			"This recipe ships the whole repository and a full node_modules. For a much smaller image, set adapterPath: '@pilots/sdk/next' in next.config.js: the pilots adapter turns on output: 'standalone' and writes a manifest of the static and prerendered paths.",
 		},
 		Dockerfile: `FROM node:24-alpine
 RUN apk add --no-cache ca-certificates
