@@ -147,12 +147,16 @@ func listHarnesses(env *Env) error {
 		if project == "" {
 			project = "-"
 		}
-		rows = append(rows, []string{h.Name, h.Title, strings.Join(transports, ","), user, project})
+		rows = append(rows, []string{h.Name, h.Title, strings.Join(transports, ","), user, project, h.Checked})
 	}
-	return env.W.Table([]string{"NAME", "HARNESS", "TRANSPORTS", "USER FILE", "PROJECT FILE"}, rows)
+	// CHECKED is when that harness's config shape was last confirmed against
+	// the vendor. Nothing here can verify another product's file format, so
+	// the date is what lets a reader judge how much to trust the row, and
+	// `--json` carries the source URL beside it.
+	return env.W.Table([]string{"NAME", "HARNESS", "TRANSPORTS", "USER FILE", "PROJECT FILE", "CHECKED"}, rows)
 }
 
-// serverEntry is the harness's entry with $URL and $KEY filled in.
+// serverEntry is the harness's entry with $URL, $KEY and $KEYENV filled in.
 func serverEntry(env *Env, h agents.Harness, stdio bool) (map[string]any, error) {
 	if stdio {
 		if h.Stdio == nil {
@@ -163,8 +167,12 @@ func serverEntry(env *Env, h agents.Harness, stdio bool) (map[string]any, error)
 	if h.HTTP == nil {
 		return nil, out.Failf("pilot mcp install "+h.Name+" --stdio", "%s cannot dial a URL; register `pilot mcp` on stdio instead", h.Title)
 	}
-	if env.APIKey.Value == "" {
-		return nil, out.Failf("run pilot login, or set PILOT_API_KEY", "no API key to register for %s", env.APIURL.Value)
+	// Only a harness that EMBEDS the token needs one on hand. Codex is handed
+	// the variable's name and reads it itself, so requiring a stored key
+	// there would refuse a setup that works, and would be asking for a secret
+	// in order to not write it down.
+	if h.NeedsKeyValue() && env.APIKey.Value == "" {
+		return nil, out.Failf("run pilot login, or set "+agents.KeyEnvVar, "no API key to register for %s", env.APIURL.Value)
 	}
 	url := strings.TrimRight(env.APIURL.Value, "/") + "/mcp"
 	return substitute(cloneMap(h.HTTP), url, env.APIKey.Value).(map[string]any), nil
@@ -180,7 +188,10 @@ func cloneMap(m map[string]any) map[string]any {
 func substitute(v any, url, key string) any {
 	switch x := v.(type) {
 	case string:
-		return strings.NewReplacer("$URL", url, "$KEY", key).Replace(x)
+		// $KEYENV FIRST: it starts with $KEY, so replacing the short one
+		// first turns "$KEYENV" into "<the token>ENV" and writes a secret
+		// into a field that wanted a variable name.
+		return strings.NewReplacer("$URL", url, "$KEYENV", agents.KeyEnvVar, "$KEY", key).Replace(x)
 	case map[string]any:
 		for k, val := range x {
 			x[k] = substitute(val, url, key)

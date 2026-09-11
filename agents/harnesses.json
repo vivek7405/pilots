@@ -13,7 +13,9 @@
       "  /plugin marketplace add vivek7405/pilots",
       "  /plugin install pilots@pilots"
     ],
-    "verify": "/mcp, then ask: list my machines"
+    "verify": "/mcp, then ask: list my machines",
+    "source": "https://code.claude.com/docs/en/mcp",
+    "checked": "2026-09-11"
   },
   {
     "name": "codex",
@@ -22,9 +24,15 @@
     "project": ".codex/config.toml",
     "format": "toml",
     "path": ["mcp_servers", "pilots"],
-    "http": { "url": "$URL", "http_headers": { "Authorization": "Bearer $KEY" } },
+    "http": { "url": "$URL", "bearer_token_env_var": "$KEYENV" },
     "stdio": { "command": "pilot", "args": ["mcp"] },
-    "verify": "restart codex, then ask: list my machines"
+    "after": [
+      "Codex reads the token from the environment rather than the file, so the config carries no secret:",
+      "  export PILOT_API_KEY=<your token>"
+    ],
+    "verify": "codex mcp list",
+    "source": "codex mcp add --help (codex-cli 0.153.0), confirmed by writing an entry and reading it back",
+    "checked": "2026-09-11"
   },
   {
     "name": "cursor",
@@ -35,7 +43,9 @@
     "path": ["mcpServers", "pilots"],
     "http": { "url": "$URL", "headers": { "Authorization": "Bearer $KEY" } },
     "stdio": { "command": "pilot", "args": ["mcp"] },
-    "verify": "Settings > MCP shows pilots with a green dot"
+    "verify": "Settings > MCP shows pilots with a green dot",
+    "source": "https://cursor.com/docs/context/mcp",
+    "checked": "2026-09-11"
   },
   {
     "name": "opencode",
@@ -44,9 +54,11 @@
     "project": "opencode.json",
     "format": "json",
     "path": ["mcp", "pilots"],
-    "http": { "type": "remote", "url": "$URL", "headers": { "Authorization": "Bearer $KEY" }, "enabled": true },
+    "http": { "type": "remote", "url": "$URL", "headers": { "Authorization": "Bearer $KEY" } },
     "stdio": { "type": "local", "command": ["pilot", "mcp"], "enabled": true },
-    "verify": "opencode mcp list"
+    "verify": "opencode mcp list",
+    "source": "opencode mcp add --url (opencode 1.18.27), confirmed by writing an entry and reading it back",
+    "checked": "2026-09-11"
   },
   {
     "name": "windsurf",
@@ -56,7 +68,9 @@
     "path": ["mcpServers", "pilots"],
     "http": { "serverUrl": "$URL", "headers": { "Authorization": "Bearer $KEY" } },
     "stdio": { "command": "pilot", "args": ["mcp"] },
-    "verify": "Cascade > MCP servers shows pilots"
+    "verify": "Cascade > MCP servers shows pilots",
+    "source": "https://docs.devin.ai/desktop/cascade/mcp",
+    "checked": "2026-09-11"
   },
   {
     "name": "gemini",
@@ -67,7 +81,9 @@
     "path": ["mcpServers", "pilots"],
     "http": { "httpUrl": "$URL", "headers": { "Authorization": "Bearer $KEY" } },
     "stdio": { "command": "pilot", "args": ["mcp"] },
-    "verify": "/mcp inside gemini"
+    "verify": "/mcp inside gemini",
+    "source": "https://google-gemini.github.io/gemini-cli/docs/tools/mcp-server.html",
+    "checked": "2026-09-11"
   },
   {
     "name": "vscode",
@@ -79,7 +95,9 @@
     "path": ["servers", "pilots"],
     "http": { "type": "http", "url": "$URL", "headers": { "Authorization": "Bearer $KEY" } },
     "stdio": { "type": "stdio", "command": "pilot", "args": ["mcp"] },
-    "verify": "MCP: List Servers in the command palette"
+    "verify": "MCP: List Servers in the command palette",
+    "source": "https://code.visualstudio.com/docs/copilot/customization/mcp-servers",
+    "checked": "2026-09-11"
   },
   {
     "name": "zed",
@@ -88,8 +106,11 @@
     "project": ".zed/settings.json",
     "format": "json",
     "path": ["context_servers", "pilots"],
-    "stdio": { "source": "custom", "command": "pilot", "args": ["mcp"] },
-    "verify": "Agent panel > settings shows pilots"
+    "http": { "url": "$URL", "headers": { "Authorization": "Bearer $KEY" } },
+    "stdio": { "command": "pilot", "args": ["mcp"] },
+    "verify": "Agent panel > settings shows pilots",
+    "source": "https://zed.dev/docs/ai/mcp",
+    "checked": "2026-09-11"
   },
   {
     "name": "claude-desktop",
@@ -99,7 +120,9 @@
     "format": "json",
     "path": ["mcpServers", "pilots"],
     "stdio": { "command": "pilot", "args": ["mcp"] },
-    "verify": "restart Claude Desktop; the tools icon lists pilots"
+    "verify": "restart Claude Desktop; the tools icon lists pilots",
+    "source": "https://modelcontextprotocol.io/quickstart/user",
+    "checked": "2026-09-11"
   },
   {
     "name": "generic",
@@ -109,6 +132,8 @@
     "path": ["mcpServers", "pilots"],
     "http": { "type": "http", "url": "$URL", "headers": { "Authorization": "Bearer $KEY" } },
     "stdio": { "type": "stdio", "command": "pilot", "args": ["mcp"] },
-    "verify": "point the client at the file, or paste the entry into its own"
+    "verify": "point the client at the file, or paste the entry into its own",
+    "source": "https://modelcontextprotocol.io/specification",
+    "checked": "2026-09-11"
   }
 ]

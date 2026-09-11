@@ -3,6 +3,7 @@ package agents
 import (
 	_ "embed"
 	"encoding/json"
+	"strings"
 )
 
 //go:embed harnesses.json
@@ -26,8 +27,14 @@ type Harness struct {
 	Format string `json:"format"`
 	// Path is where the server entry sits in the file, e.g. mcpServers.pilots.
 	Path []string `json:"path"`
-	// HTTP and Stdio are the entry for each transport, with "$URL" and "$KEY"
-	// to be substituted. A harness that cannot dial a URL has no HTTP entry.
+	// HTTP and Stdio are the entry for each transport. Three placeholders are
+	// substituted: "$URL" is the fleet's /mcp endpoint, "$KEY" is the token
+	// itself, and "$KEYENV" is the NAME of the environment variable holding
+	// it. A harness that cannot dial a URL has no HTTP entry.
+	//
+	// $KEYENV rather than $KEY is how a harness that reads the token at
+	// runtime is spelled, and it is the better of the two: the config file
+	// then carries no secret. Codex is the one that works this way.
 	HTTP  map[string]any `json:"http,omitempty"`
 	Stdio map[string]any `json:"stdio,omitempty"`
 	// After is printed once the file is written: the plugin lines, a
@@ -35,6 +42,16 @@ type Harness struct {
 	After []string `json:"after,omitempty"`
 	// Verify is the one-line check that it worked.
 	Verify string `json:"verify,omitempty"`
+	// Source is where this row's shape was confirmed: a vendor URL, or the
+	// command that was run against the product itself. Required.
+	//
+	// It exists because nothing in CI can check a third party's file format.
+	// A row is a CLAIM about somebody else's software, and the most a
+	// repository can do about a claim is say where it came from and when, so
+	// a reader can check it and a stale one is visible rather than silent.
+	Source string `json:"source"`
+	// Checked is the date Source was last confirmed, YYYY-MM-DD.
+	Checked string `json:"checked"`
 }
 
 // Harnesses is the table, in the order it is documented.
@@ -54,4 +71,28 @@ func FindHarness(name string) (Harness, bool) {
 		}
 	}
 	return Harness{}, false
+}
+
+// KeyEnvVar is the environment variable a harness is pointed at when it reads
+// the token itself rather than having it written into its config file. The
+// same name every other surface uses, so one export serves the CLI, the SDKs
+// and the harness.
+const KeyEnvVar = "PILOT_API_KEY"
+
+// NeedsKeyValue reports whether this harness's hosted entry embeds the token
+// itself, which is what decides whether `pilot mcp install` has to have one
+// on hand. A harness that takes only the variable's NAME needs no stored key,
+// and demanding one would refuse a setup that works.
+//
+// $KEYENV is masked before the search rather than matched around, because
+// "$KEY" is a prefix of "$KEYENV" and a substring test for the shorter one
+// finds the longer one every time.
+func (h Harness) NeedsKeyValue() bool {
+	raw, err := json.Marshal(h.HTTP)
+	if err != nil {
+		// A row that will not marshal is a broken row; demanding the key is
+		// the conservative half of a choice that should never be reached.
+		return true
+	}
+	return strings.Contains(strings.ReplaceAll(string(raw), "$KEYENV", ""), "$KEY")
 }

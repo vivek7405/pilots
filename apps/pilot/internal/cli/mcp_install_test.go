@@ -63,8 +63,23 @@ func TestInstallEveryHarness(t *testing.T) {
 				t.Fatal(err)
 			}
 			if !stdio {
-				if !strings.Contains(string(raw), "https://api.example.test/mcp") || !strings.Contains(string(raw), "Bearer pilot_k3y") {
-					t.Fatalf("the hosted entry lost the URL or the key:\n%s", raw)
+				if !strings.Contains(string(raw), "https://api.example.test/mcp") {
+					t.Fatalf("the hosted entry lost the URL:\n%s", raw)
+				}
+				// Two ways to carry the credential, and which one a harness
+				// gets is not a style choice: Codex is handed the variable's
+				// NAME and reads it at runtime, so its file holds no secret.
+				if h.NeedsKeyValue() {
+					if !strings.Contains(string(raw), "Bearer pilot_k3y") {
+						t.Fatalf("the hosted entry lost the key:\n%s", raw)
+					}
+				} else {
+					if strings.Contains(string(raw), "pilot_k3y") {
+						t.Fatalf("%s reads the token from the environment; its file must not contain it:\n%s", h.Name, raw)
+					}
+					if !strings.Contains(string(raw), "PILOT_API_KEY") {
+						t.Fatalf("the hosted entry names no environment variable:\n%s", raw)
+					}
 				}
 			}
 			if h.Format == "json" {
@@ -160,10 +175,20 @@ func TestInstallCodexTOML(t *testing.T) {
 	raw, _ := os.ReadFile(path)
 	got := string(raw)
 	for _, want := range []string{"model = \"o3\"", "[mcp_servers.other]", "command = \"x\"", "[features]", "foo = true",
-		"[mcp_servers.pilots]", `url = "https://api.example.test/mcp"`, `http_headers = { Authorization = "Bearer pilot_k3y" }`} {
+		"[mcp_servers.pilots]", `url = "https://api.example.test/mcp"`, `bearer_token_env_var = "PILOT_API_KEY"`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in:\n%s", want, got)
 		}
+	}
+	// The shape above is what `codex mcp add --url ... --bearer-token-env-var ...`
+	// writes, checked against codex-cli 0.153.0. The earlier version of this
+	// row used an `http_headers` table Codex does not read, which is the bug
+	// that made every hosted Codex install silently unauthenticated.
+	if strings.Contains(got, "pilot_k3y") {
+		t.Errorf("the token was written into config.toml; Codex reads it from the environment:\n%s", got)
+	}
+	if strings.Contains(got, "http_headers") {
+		t.Errorf("http_headers is not a key Codex reads:\n%s", got)
 	}
 	if strings.Contains(got, `command = "old"`) {
 		t.Errorf("the old table survived:\n%s", got)
@@ -175,14 +200,33 @@ func TestInstallCodexTOML(t *testing.T) {
 
 func TestInstallRefusals(t *testing.T) {
 	env, _, _ := installEnv(t)
+	// Claude Desktop takes a local command and nothing else, so the hosted
+	// form is refused and the refusal names the flag that works. Zed is NOT
+	// this case: it reads a remote `url` with `headers`, which the first
+	// version of the table missed.
+	desktop, _ := agents.FindHarness("claude-desktop")
+	if _, err := serverEntry(env, desktop, false); err == nil || !strings.Contains(err.Error(), "stdio") {
+		t.Fatalf("claude-desktop must be refused the hosted form with the stdio hint, got %v", err)
+	}
 	zed, _ := agents.FindHarness("zed")
-	if _, err := serverEntry(env, zed, false); err == nil || !strings.Contains(err.Error(), "stdio") {
-		t.Fatalf("zed must be refused the hosted form with the stdio hint, got %v", err)
+	if _, err := serverEntry(env, zed, false); err != nil {
+		t.Fatalf("zed supports a remote server, so the hosted form must work: %v", err)
 	}
 	cc, _ := agents.FindHarness("claude-code")
 	env.APIKey.Value = ""
 	if _, err := serverEntry(env, cc, false); err == nil || !strings.Contains(err.Error(), "no API key") {
 		t.Fatalf("no key must be refused, got %v", err)
+	}
+	// But a harness that is handed the variable's NAME needs no stored key:
+	// demanding one would refuse a setup that works, and would be asking for
+	// a secret in order to not write it down.
+	codex, _ := agents.FindHarness("codex")
+	entry, err := serverEntry(env, codex, false)
+	if err != nil {
+		t.Fatalf("codex needs no stored key, got %v", err)
+	}
+	if entry["bearer_token_env_var"] != "PILOT_API_KEY" {
+		t.Fatalf("codex entry = %+v", entry)
 	}
 }
 
