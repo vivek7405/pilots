@@ -77,6 +77,23 @@
       "gate": {
         "UNMARKED_ASSET_LINKS": "error"
       }
-    }
+    },
+    "redirects": [
+      {
+        "source": "/.well-known/oauth-authorization-server",
+        "destination": "/api/oauth/metadata",
+        "statusCode": 307
+      },
+      {
+        "source": "/.well-known/oauth-authorization-server/:rest*",
+        "destination": "/api/oauth/metadata",
+        "statusCode": 307
+      },
+      {
+        "source": "/.well-known/openid-configuration",
+        "destination": "/api/oauth/metadata",
+        "statusCode": 307
+      }
+    ]
   }
 }

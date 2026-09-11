@@ -323,6 +323,7 @@ export function unknownFrameworkBody(): unknown {
         'package.json (with a @webjsdev/* dependency)',
         'next.config.{js,ts,mjs,cjs}',
         'react-router.config.* or remix.config.*',
+        'package.json with a bare `remix` dependency (Remix 3)',
         'vite.config.*',
         'manage.py with requirements.txt or pyproject.toml',
         'main.py or app.py importing fastapi',

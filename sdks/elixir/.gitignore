@@ -1,0 +1,7 @@
+_build/
+deps/
+cover/
+doc/
+*.ez
+pilots-*.tar
+.elixir_ls/

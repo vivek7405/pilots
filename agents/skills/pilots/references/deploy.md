@@ -25,6 +25,7 @@ MCP: `deploy` with `{ "dir": "<absolute path>" }`. Nothing else is required.
 | `package.json` with any `@webjsdev/*` dependency | webjs | `/__webjs/ready`, grace 40 s |
 | `next.config.*` and a lockfile | next | `/` |
 | `react-router.config.*` or `remix.config.*` | react-router | `/` |
+| `package.json` with a bare `remix` dependency | remix (Remix 3) | `/` |
 | `vite.config.*` | vite, static behind nginx | `/` |
 | `manage.py` with `requirements.txt` or `pyproject.toml` | django | `/`, grace 30 s |
 | `main.py` or `app.py` importing fastapi | fastapi | `/` |
@@ -34,6 +35,17 @@ MCP: `deploy` with `{ "dir": "<absolute path>" }`. Nothing else is required.
 | `composer.json` with `artisan` | laravel | `/` |
 
 Every recipe sets `PORT=8080`, exposes 8080 and reads `$PORT`. The router dials 8080.
+
+### Next.js: the deployment adapter
+
+Next defines an adapter interface, and pilots implements it. Setting
+`adapterPath: '@pilots/sdk/next'` in `next.config.js` (or
+`NEXT_ADAPTER_PATH=@pilots/sdk/next` with no config change) makes the build
+turn on `output: 'standalone'`, so the image carries the traced server rather
+than the whole repository, and writes `<distDir>/pilots-deploy.json` holding
+the static and prerendered paths, the routing rules, and a warning for any
+route built for the edge runtime. Without it the generic recipe above still
+works; the image is just much larger.
 
 **Cron jobs come from the app's own config.** A `vercel.json` with `{ "crons": [{ "path": "/api/digest", "schedule": "0 5 * * *" }] }` is read for any app, whatever it is written in and whether or not it brought a Dockerfile; a webjs `package.json` may carry the same list under `"webjs": { "crons": [...] }`, and wins where both are present. The plan turns either into the service's schedules (services.md), so a cron needs no compose file and nothing pilots-specific. A `vercel.json` that does not parse is ignored; one that parses and spells a cron wrongly is a 400 naming the entry.
 

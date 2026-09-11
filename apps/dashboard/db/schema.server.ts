@@ -75,6 +75,13 @@ export const apiKeys = table(
     scopes: json<string[]>().notNull(),
     /** Null for a key minted by the CLI exchange, which has no session. */
     createdBy: integer(),
+    /**
+     * The OAuth client this key was issued to, when a coding agent got it
+     * through the consent screen rather than a human through the form. It is
+     * what lets the tokens page say WHICH agent holds a key, so revoking the
+     * right one is possible.
+     */
+    clientId: text(),
     createdAt: createdAt(),
     lastUsedAt: timestamp(),
     revokedAt: timestamp(),
@@ -169,8 +176,73 @@ export const builds = table(
   (t) => [index(t.serviceId), index(t.orgId)],
 );
 
+/**
+ * An OAuth client, registered by an MCP client at `POST /api/oauth/register`
+ * (RFC 7591) or by hand.
+ *
+ * There are no client secrets here. Every client is PUBLIC and proves itself
+ * with PKCE, because the callers are desktop agents and CLIs: a secret shipped
+ * to one is not a secret. `redirectUris` is the allowlist an authorize request
+ * is checked against, exactly, with no prefix matching.
+ */
+export const oauthClients = table(
+  'oauth_clients',
+  {
+    /** The `client_id` handed out at registration. */
+    id: uuidPk(),
+    name: text().notNull(),
+    redirectUris: json<string[]>().notNull(),
+    /** The client's own homepage, shown on the consent screen when it has one. */
+    uri: text(),
+    /** Whether registration came from RFC 7591 rather than a human. */
+    dynamic: bool().notNull().default(true),
+    createdAt: createdAt(),
+  },
+  (t) => [index(t.name)],
+);
+
+/**
+ * One authorization code, in flight.
+ *
+ * The row stores the code's sha256 and never the code, for the reason
+ * `api_keys` stores a hash: a database that leaks must not hand anyone a
+ * usable credential. A code is single-use (`usedAt`), short-lived
+ * (`expiresAt`), and bound to the PKCE challenge, the redirect URI and the
+ * resource the client asked for.
+ *
+ * The restrictions travel with the code because they are chosen on the consent
+ * screen and applied when the key is minted: `namePrefix` limits what the key
+ * may name a machine, `maxMachines` caps how many it may create, and
+ * `expiresAt` on the KEY is a lifetime the fleet enforces.
+ */
+export const oauthCodes = table(
+  'oauth_codes',
+  {
+    id: uuidPk(),
+    /** sha256 of the code. The code itself is never stored. */
+    codeHash: text().notNull().unique(),
+    clientId: text().notNull(),
+    userId: integer().notNull(),
+    orgId: text().notNull(),
+    scopes: json<string[]>().notNull(),
+    redirectUri: text().notNull(),
+    /** RFC 7636. Only S256 is accepted; `plain` is refused at the authorize step. */
+    codeChallenge: text().notNull(),
+    /** RFC 8707: the resource the token is for, echoed into the audience check. */
+    resource: text(),
+    /** Restrictions the consent screen applied, carried to the mint. */
+    namePrefix: text(),
+    maxMachines: integer(),
+    keyExpiresAt: timestamp(),
+    expiresAt: timestamp().notNull(),
+    usedAt: timestamp(),
+    createdAt: createdAt(),
+  },
+  (t) => [index(t.clientId), index(t.expiresAt)],
+);
+
 export const relations = defineRelations(
-  { users, orgs, memberships, apiKeys, usageSamples, repoConnections, serviceVariables, builds },
+  { users, orgs, memberships, apiKeys, usageSamples, repoConnections, serviceVariables, builds, oauthClients, oauthCodes },
   (r) => ({
     users: { memberships: r.many.memberships() },
     orgs: {

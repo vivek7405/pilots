@@ -1,0 +1,63 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pilots-sdk"
+version = "0.1.0"
+description = "Python client for pilots: instant sandboxes and durable production services on Firecracker microVMs, one primitive"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [{ name = "pilots" }]
+keywords = ["pilots", "sandbox", "firecracker", "microvm", "ai-agents", "deploy", "checkpoint-restore"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+]
+dependencies = [
+  "httpx>=0.25",
+  "websockets>=12",
+]
+
+[project.optional-dependencies]
+# The framework adapters. Each is one module of this package that imports its
+# framework lazily, so the core stays two dependencies.
+adk = ["google-adk>=1.0"]
+openai-agents = ["openai-agents>=0.18"]
+anthropic = ["anthropic>=0.80"]
+dev = ["pytest>=8", "mypy>=1.10", "ruff>=0.11"]
+
+[project.urls]
+Homepage = "https://pilots.run"
+Documentation = "https://pilots.run/agents"
+Repository = "https://github.com/vivek7405/pilots"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pilots"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/pilots", "README.md", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 125
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+ignore_missing_imports = true

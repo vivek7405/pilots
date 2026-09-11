@@ -8,7 +8,7 @@
  */
 
 import { strict as assert } from 'node:assert'
-import { execFile } from 'node:child_process'
+import { execFile, execFileSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -50,7 +50,7 @@ test('init writes the skill, both MCP configs and the AGENTS.md stanza', async (
   assert.ok(existsSync(join(dir, '.agents', 'skills', 'pilots', 'SKILL.md')))
   assert.ok(existsSync(join(dir, '.agents', 'skills', 'pilots', 'references', 'deploy.md')))
 
-  for (const path of ['.claude.json', join('.cursor', 'mcp.json')]) {
+  for (const path of ['.mcp.json', join('.cursor', 'mcp.json')]) {
     const config = JSON.parse(readFileSync(join(dir, path), 'utf8')) as {
       mcpServers: { pilots: { command: string; args: string[] } }
     }
@@ -81,14 +81,14 @@ test('a second init changes nothing and says so', async () => {
 test('init keeps another MCP server and the rest of AGENTS.md', async () => {
   const dir = scratch('pilot-init-merge-')
   writeFileSync(
-    join(dir, '.claude.json'),
+    join(dir, '.mcp.json'),
     JSON.stringify({ mcpServers: { other: { command: 'other-server' } }, somethingElse: 1 }),
   )
   writeFileSync(join(dir, 'AGENTS.md'), '# House rules\n\nRun the tests.\n')
 
   await pilot(['init'], dir)
 
-  const config = JSON.parse(readFileSync(join(dir, '.claude.json'), 'utf8')) as {
+  const config = JSON.parse(readFileSync(join(dir, '.mcp.json'), 'utf8')) as {
     mcpServers: Record<string, unknown>
     somethingElse: number
   }
@@ -105,7 +105,7 @@ test('init keeps another MCP server and the rest of AGENTS.md', async () => {
 
 test('init refuses an MCP config that does not parse rather than guessing', async () => {
   const dir = scratch('pilot-init-broken-')
-  writeFileSync(join(dir, '.claude.json'), '{ not json')
+  writeFileSync(join(dir, '.mcp.json'), '{ not json')
 
   const res = await pilot(['init'], dir)
   assert.equal(res.code, 1)
@@ -155,6 +155,54 @@ test('the package ships exactly one copy of the skill, with no pack hooks', () =
   for (const hook of ['prepack', 'postpack', 'prepare']) {
     assert.equal(pkg.scripts[hook], undefined, `${hook} would decide whether the skill ships`)
   }
+})
+
+// The check above reads the MANIFEST, and a manifest that lists `skill` is not
+// the same claim as a tarball that contains one.
+//
+// It is not, here: `skill/` holds a single symlink to
+// ../../../agents/skills/pilots, npm will not follow a link out of the package
+// root, and `npm pack` produces a tarball with ZERO files under skill/. A
+// published install of this package could only ever hit the "reinstall
+// @pilots/cli" error in `pilot skill install`.
+//
+// The canonical copy has to stay where it is: agents/skill.go embeds it with
+// //go:embed, which cannot follow a symlink either, and the Go binary is the
+// CLI that actually ships. A prepack hook is ruled out directly above, for a
+// reason that still holds. So the package cannot ship the skill, and what is
+// enforced instead is that it cannot be PUBLISHED -- which is already true
+// (the one npm workflow publishes sdks/js, and this package is being retired
+// in favour of the Go binary), and is now written down where npm will act on
+// it rather than left to nobody noticing.
+//
+// The day someone drops `private` to publish this, the second half of the
+// assertion fires and names what has to be solved first.
+test('the package cannot be published while its tarball ships no skill', () => {
+  const root = join(import.meta.dirname, '..')
+  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as {
+    private?: boolean
+  }
+
+  let listed: string[]
+  try {
+    const out = execFileSync('npm', ['pack', '--dry-run', '--json'], {
+      cwd: root,
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    listed = (JSON.parse(out) as [{ files: { path: string }[] }])[0].files.map((f) => f.path)
+  } catch {
+    return // no npm on PATH, or an offline box: cannot pack is not cannot ship
+  }
+
+  const ships = listed.some((f) => f.startsWith('skill/') && f.endsWith('SKILL.md'))
+  assert.ok(
+    ships || pkg.private === true,
+    'npm pack ships no SKILL.md under skill/ (the `skill/pilots` symlink escapes the package ' +
+      'root and npm does not follow it), and the package is not private -- so `npm publish` ' +
+      'would put a CLI on the registry whose `pilot skill install` cannot work. Either make the ' +
+      'skill real content in this package, or keep `private: true`.',
+  )
 })
 
 test('the skill resolves from the package with no working-directory copy', () => {

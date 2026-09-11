@@ -297,7 +297,12 @@ test('an undetectable directory is a tool error carrying the server\'s details',
     }
     assert.equal(body.code, 'unknown_framework')
     assert.ok(body.next.length > 0)
-    assert.equal(body.details.looked_for.length, 10)
+    // Every signal the detector checks has to reach the agent, so this
+    // counts what the fake API serves rather than a literal: a hardcoded
+    // number turns adding a framework into a failing test instead of an
+    // incomplete refusal.
+    assert.ok(body.details.looked_for.length >= 10)
+    assert.ok(body.details.looked_for.some((s) => s.includes('remix')))
     assert.equal(body.details.rules.length, 2)
   } finally {
     await close()
@@ -514,7 +519,7 @@ test('docs returns one reference, searches them, and lists the topics', async ()
     assert.match(text, /unknown_framework/)
 
     const listed = await client.callTool({ name: 'docs', arguments: {} })
-    assert.equal((JSON.parse(textOf(listed)) as { topics: string[] }).topics.length, 9)
+    assert.equal((JSON.parse(textOf(listed)) as { topics: string[] }).topics.length, 10)
 
     const found = await client.callTool({ name: 'docs', arguments: { query: 'health_gate_failed' } })
     const { matches } = JSON.parse(textOf(found)) as { matches: { topic: string }[] }
@@ -536,7 +541,7 @@ test('the skill is served as pilots-docs resources', async () => {
     const uris = resources.map((r) => r.uri).sort()
     // SKILL.md plus one page per topic. A resource browser and the docs tool
     // have to see the same corpus, or a fix lands in one and misses the other.
-    assert.equal(uris.length, 10)
+    assert.equal(uris.length, 11)
     assert.ok(uris.includes('pilots-docs://SKILL.md'))
     assert.ok(uris.includes('pilots-docs://references/errors.md'))
 

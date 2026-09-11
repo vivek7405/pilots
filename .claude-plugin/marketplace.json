@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "pilots",
+  "owner": {
+    "name": "pilots",
+    "url": "https://pilots.run"
+  },
+  "description": "The official pilots plugin: sandboxes and production services on Firecracker microVMs, from Claude Code.",
+  "plugins": [
+    {
+      "name": "pilots",
+      "source": "./agents",
+      "description": "Create machines, run commands, checkpoint and restore, deploy and promote from Claude Code, with a guard that asks before a destructive call.",
+      "category": "Developer Tools",
+      "tags": [
+        "sandboxes",
+        "deploy",
+        "firecracker",
+        "mcp"
+      ]
+    }
+  ]
+}

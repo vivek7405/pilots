@@ -60,7 +60,7 @@ export function createInitCommand(): Command {
 
       const target = join(dir, '.agents', 'skills', 'pilots')
       record('.agents/skills/pilots', copySkill(source, target))
-      record('.claude.json', mergeMCPConfig(join(dir, '.claude.json')))
+      record('.mcp.json', mergeMCPConfig(join(dir, '.mcp.json')))
       record('.cursor/mcp.json', mergeMCPConfig(join(dir, '.cursor', 'mcp.json')))
       record('AGENTS.md', appendStanza(join(dir, 'AGENTS.md')))
 

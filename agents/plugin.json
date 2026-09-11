@@ -1,0 +1,21 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "pilots",
+  "version": "0.1.0",
+  "description": "Sandboxes and production services on Firecracker microVMs: create machines, run commands, checkpoint and restore, deploy and promote, from any agent that speaks MCP.",
+  "author": {
+    "name": "pilots",
+    "url": "https://pilots.run"
+  },
+  "homepage": "https://pilots.run/agents",
+  "repository": "https://github.com/vivek7405/pilots",
+  "license": "Apache-2.0",
+  "keywords": [
+    "agent-plugins",
+    "pilots",
+    "sandbox",
+    "firecracker",
+    "mcp",
+    "deploy"
+  ]
+}

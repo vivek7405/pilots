@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "pilots": {
+      "type": "http",
+      "url": "${PILOT_API_URL:-https://api.pilotrun.app}/mcp",
+      "headers": {
+        "Authorization": "Bearer ${PILOT_API_KEY}"
+      }
+    }
+  }
+}

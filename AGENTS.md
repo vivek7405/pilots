@@ -68,6 +68,9 @@ Master plan and phase breakdown: issues #1–#7.
 ## Layout
 
 ```
+agents/            the agent package: the skill, the Claude Code plugin, the
+                   portable Agent Plugin, and the MCP toolset both servers
+                   register (own go.mod)
 apps/hostd/        Go — the entire per-host data plane (own go.mod)
 apps/dashboard/    webjs — the product UI: overview, services, machines, terminal,
                    usage, tokens, team, GitHub App surface
@@ -76,8 +79,9 @@ apps/pilot/        Go — the `pilot` CLI and `pilot tui`, one static binary on
 packages/cli/      the previous TypeScript `pilot` CLI, kept until apps/pilot
                    is at parity and the swap is made; its skill/ pages are
                    the ones apps/pilot serves
-sdks/js, sdks/go   typed clients; each carries a drift test against
-                   apps/hostd/internal/api
+apps/vscode/       the VS Code extension: a machine as a workspace folder
+sdks/js, go,       typed clients; each carries a drift test against
+  python, elixir     apps/hostd/internal/api
 scripts/           one-shot bash + the e2e battery
 ARCHITECTURE.md    the design; source of truth
 ```
@@ -205,8 +209,10 @@ somebody already paid for.
 Two components are explicitly **ports, not rewrites** — they encode kernel
 ABI details that are expensive to rediscover:
 
-- the **uffd handler** (`cmd/pilot-uffd-handler`, ~881 LOC)
-- the **NBD handler** (`cmd/pilot-nbd-handler`, ~560 LOC)
+- the **uffd handler** (`apps/hostd/internal/uffd`, run as the hostd
+  subcommand `uffd-handler`)
+- the **NBD handler** (`apps/hostd/internal/nbd`, run as the hostd subcommand
+  `nbd-handler`)
 
 ### Where the hard problems are already solved
 

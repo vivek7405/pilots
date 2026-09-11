@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,303 +13,40 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/vivek7405/pilots/agents"
+	pilotsmcp "github.com/vivek7405/pilots/agents/mcp"
 	pilots "github.com/vivek7405/pilots/sdks/go"
 
 	"github.com/vivek7405/pilots/cli/internal/config"
 )
 
-// The MCP server: the same fleet, for an agent. Every tool answers JSON with
-// a `next` folded in, so a tool cannot ship without saying what to do after
-// it; every failure is isError with the most actionable text available --
-// the server's own body for an API error (it already carries code, next and
-// details), every NDJSON line for a failed build, the message otherwise.
+// The MCP server over stdio: the fleet toolset every host also serves at
+// /mcp (agents/mcp), plus the tools that need THIS machine's filesystem --
+// a directory to tar, a file to push or pull. The hosted endpoint cannot
+// offer those, which is the whole reason `pilot mcp` still exists.
 //
 // STDOUT IS THE PROTOCOL CHANNEL. Over stdio the client parses every byte
 // this process writes to stdout as JSON-RPC, so nothing here may print to
 // it; the logger and every diagnostic go to stderr.
 
-const dockerfileRules = "Any Dockerfile you write must bind 0.0.0.0 (never 127.0.0.1, which serves only the guest itself) " +
-	"and read the port from $PORT. Both mistakes produce a build that succeeds and a URL that answers 502."
-
 type mcpDeps struct {
 	client *pilots.Client
 	getenv config.Env
 	env    *Env
-	skill  string
+	pages  []agents.Page
 }
 
 func buildMCPServer(d mcpDeps) *mcp.Server {
-	s := mcp.NewServer(&mcp.Implementation{Name: "pilots", Version: Version}, nil)
-	d.registerTools(s)
-	d.registerSkill(s)
-	d.registerPrompts(s)
+	s := pilotsmcp.NewServer(d.client, pilotsmcp.Options{Version: Version, Pages: d.pages, Local: true})
+	d.registerLocalTools(s)
 	return s
 }
 
-// wrap shapes a handler's answer. next is a function of the result where
-// the next step depends on what came back, and a constant otherwise.
-func wrap(fn func() (any, error), next func(any) string) (*mcp.CallToolResult, any, error) {
-	result, err := fn()
-	if err != nil {
-		return &mcp.CallToolResult{IsError: true, Content: []mcp.Content{&mcp.TextContent{Text: errorText(err)}}}, nil, nil
-	}
-	step := ""
-	if next != nil {
-		step = next(result)
-	}
-	var body any
-	if m, ok := toObject(result); ok {
-		m["next"] = step
-		body = m
-	} else {
-		body = map[string]any{"result": result, "next": step}
-	}
-	text, _ := json.MarshalIndent(body, "", "  ")
-	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: string(text)}}}, nil, nil
-}
-
-func constant(next string) func(any) string { return func(any) string { return next } }
-
-// toObject round-trips a struct through JSON so `next` can be added beside
-// its fields rather than wrapping it.
-func toObject(v any) (map[string]any, bool) {
-	raw, err := json.Marshal(v)
-	if err != nil || len(raw) == 0 || raw[0] != '{' {
-		return nil, false
-	}
-	var m map[string]any
-	if json.Unmarshal(raw, &m) != nil {
-		return nil, false
-	}
-	return m, true
-}
-
-func errorText(err error) string {
-	var bf *pilots.BuildFailed
-	if errors.As(err, &bf) && len(bf.Lines) > 0 {
-		var b strings.Builder
-		for _, l := range bf.Lines {
-			raw, _ := json.Marshal(l)
-			b.Write(raw)
-			b.WriteByte('\n')
-		}
-		return strings.TrimRight(b.String(), "\n")
-	}
-	var apiErr *pilots.Error
-	if errors.As(err, &apiErr) {
-		if raw, e := json.Marshal(apiErr); e == nil {
-			return string(raw)
-		}
-	}
-	return err.Error()
-}
-
-func idOf(v any) string {
-	if m, ok := toObject(v); ok {
-		if id, ok := m["id"].(string); ok {
-			return id
-		}
-	}
-	return ""
-}
-
-type machineIn struct {
-	Machine string `json:"machine" jsonschema:"a machine id or name"`
-}
-
-func (d mcpDeps) registerTools(s *mcp.Server) {
+// registerLocalTools adds pilotsmcp.LocalTools: the ones that read or write
+// the agent's own disk.
+func (d mcpDeps) registerLocalTools(s *mcp.Server) {
 	client := d.client
-
-	type createIn struct {
-		Name       string            `json:"name,omitempty" jsonschema:"a stable name; the URL is derived from it and never changes"`
-		Image      string            `json:"image,omitempty" jsonschema:"a rootfs build id from the build tool"`
-		Template   string            `json:"template,omitempty"`
-		Checkpoint string            `json:"checkpoint,omitempty" jsonschema:"restore this checkpoint into the new machine"`
-		VCPUs      int               `json:"vcpus,omitempty"`
-		MemMiB     int               `json:"mem_mib,omitempty"`
-		App        string            `json:"app,omitempty"`
-		Cmd        string            `json:"cmd,omitempty" jsonschema:"the start command, overriding the image"`
-		Env        map[string]string `json:"env,omitempty"`
-		Labels     map[string]string `json:"labels,omitempty" jsonschema:"labels to find it by later; list_machines filters on them"`
-		// Seconds rather than a duration string: the API's own unit, so the
-		// value an agent reads back from the machine is the value it sent.
-		IdleTimeout int               `json:"idle_timeout,omitempty" jsonschema:"seconds of quiet before the machine suspends, 1..3600 (default 60); set it for a daemon nothing connects to"`
-		Schedules   []pilots.Schedule `json:"schedules,omitempty" jsonschema:"cron jobs: each is {cron, path} to GET a path on the machine on that schedule (five fields, UTC, or @hourly/@daily/@weekly/@monthly), or {cron, cmd} to run a command in it; the machine is woken for it"`
-	}
-	mcp.AddTool(s, &mcp.Tool{Name: "create_machine", Title: "Create a machine",
-		Description: "Create a microVM. A create is a restore from a template rather than a boot, so it is fast. " +
-			"The same primitive serves both a throwaway sandbox and a production replica; only the lifecycle knobs differ. " +
-			"It suspends after idle_timeout seconds of quiet (default 60) and wakes on the next request or exec; a console session running a command counts as activity."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in createIn) (*mcp.CallToolResult, any, error) {
-			return wrap(func() (any, error) {
-				req := pilots.CreateMachineRequest{
-					Name: in.Name, Image: in.Image, Template: in.Template, Checkpoint: in.Checkpoint,
-					VCPUs: in.VCPUs, MemMiB: in.MemMiB, App: in.App, Cmd: in.Cmd, Env: in.Env, Labels: in.Labels,
-				}
-				if in.IdleTimeout != 0 || len(in.Schedules) > 0 {
-					req.Knobs = &pilots.KnobsPatch{}
-					if in.IdleTimeout != 0 {
-						req.Knobs.IdleTimeout = pilots.Ptr(in.IdleTimeout)
-					}
-					if len(in.Schedules) > 0 {
-						req.Knobs.Schedules = &in.Schedules
-					}
-				}
-				return client.Machines.Create(ctx, req)
-			}, constant("exec on the returned id"))
-		})
-
-	type listIn struct {
-		App    string            `json:"app,omitempty"`
-		Labels map[string]string `json:"labels,omitempty" jsonschema:"only machines carrying every one of these labels"`
-	}
-	mcp.AddTool(s, &mcp.Tool{Name: "list_machines", Title: "List machines",
-		Description: "Every machine this API key can see, optionally narrowed to one app or to machines carrying given labels."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in listIn) (*mcp.CallToolResult, any, error) {
-			return wrap(func() (any, error) {
-				all, err := client.Machines.List(ctx)
-				if err != nil || (in.App == "" && len(in.Labels) == 0) {
-					return all, err
-				}
-				kept := []pilots.Machine{}
-				for _, m := range all {
-					if (in.App == "" || m.App == in.App) && hasLabels(m.Labels, in.Labels) {
-						kept = append(kept, m)
-					}
-				}
-				return kept, nil
-			}, constant(""))
-		})
-
-	type statusIn struct {
-		Machine string `json:"machine,omitempty" jsonschema:"a machine id or name"`
-	}
-	mcp.AddTool(s, &mcp.Tool{Name: "status", Title: "Status",
-		Description: "With a machine, that machine. Without one, the fleet: every host as the answering host sees it, " +
-			"plus a count of machines by state."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in statusIn) (*mcp.CallToolResult, any, error) {
-			return wrap(func() (any, error) {
-				if in.Machine != "" {
-					return resolveMachine(ctx, client, in.Machine)
-				}
-				hosts, err := client.Hosts.List(ctx)
-				if err != nil {
-					return nil, err
-				}
-				machines, err := client.Machines.List(ctx)
-				if err != nil {
-					return nil, err
-				}
-				byState := map[string]int{}
-				for _, m := range machines {
-					byState[m.State]++
-				}
-				return map[string]any{"hosts": hosts, "machines_by_state": byState, "machines_total": len(machines)}, nil
-			}, constant(""))
-		})
-
-	type execIn struct {
-		Machine   string            `json:"machine" jsonschema:"a machine id or name"`
-		Cmd       string            `json:"cmd" jsonschema:"the command line, run through a shell in the guest"`
-		Cwd       string            `json:"cwd,omitempty"`
-		Env       map[string]string `json:"env,omitempty"`
-		User      string            `json:"user,omitempty"`
-		TimeoutMS int               `json:"timeout_ms,omitempty"`
-	}
-	mcp.AddTool(s, &mcp.Tool{Name: "exec", Title: "Run a command",
-		Description: "Run a command and wait for it, returning stdout, stderr and the exit code. " +
-			"A non-zero exit is a result, not a tool error: decide what it means yourself. " +
-			"For output too large to hold in memory, use exec_stream."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in execIn) (*mcp.CallToolResult, any, error) {
-			return wrap(func() (any, error) {
-				m, err := resolveMachine(ctx, client, in.Machine)
-				if err != nil {
-					return nil, err
-				}
-				return client.Machines.Exec(ctx, m.ID, pilots.ExecRequest{Cmd: in.Cmd, Cwd: in.Cwd, Env: in.Env, User: in.User, TimeoutMS: in.TimeoutMS})
-			}, constant(""))
-		})
-
-	type execStreamIn struct {
-		Machine string            `json:"machine" jsonschema:"a machine id or name"`
-		Cmd     string            `json:"cmd"`
-		Cwd     string            `json:"cwd,omitempty"`
-		Env     map[string]string `json:"env,omitempty"`
-		User    string            `json:"user,omitempty"`
-		Stdin   bool              `json:"stdin,omitempty"`
-	}
-	mcp.AddTool(s, &mcp.Tool{Name: "exec_stream", Title: "Run a command over a stream",
-		Description: "Run a command over the streaming exec, collecting stdout and stderr. " +
-			"stdin is off unless you ask for it: a process holding an open stdin it never reads hangs."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in execStreamIn) (*mcp.CallToolResult, any, error) {
-			return wrap(func() (any, error) {
-				m, err := resolveMachine(ctx, client, in.Machine)
-				if err != nil {
-					return nil, err
-				}
-				stream, err := client.Machines.ExecStream(ctx, m.ID, []string{"sh", "-c", in.Cmd}, pilots.ExecStreamOptions{Dir: in.Cwd, Env: in.Env, User: in.User, Stdin: in.Stdin})
-				if err != nil {
-					return nil, err
-				}
-				defer stream.Close()
-				if in.Stdin && stream.Stdin != nil {
-					stream.Stdin.Close()
-				}
-				stdout, stderr, code, err := stream.Output()
-				if err != nil {
-					return nil, err
-				}
-				return map[string]any{"stdout": string(stdout), "stderr": string(stderr), "exit_code": code}, nil
-			}, constant(""))
-		})
-
-	type logsIn struct {
-		Machine string `json:"machine" jsonschema:"a machine id or name"`
-		Tail    int    `json:"tail,omitempty"`
-	}
-	mcp.AddTool(s, &mcp.Tool{Name: "logs", Title: "Console log",
-		Description: "The machine's console log, optionally only the last N lines."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in logsIn) (*mcp.CallToolResult, any, error) {
-			return wrap(func() (any, error) {
-				m, err := resolveMachine(ctx, client, in.Machine)
-				if err != nil {
-					return nil, err
-				}
-				text, err := client.Machines.Logs(ctx, m.ID)
-				if err != nil {
-					return nil, err
-				}
-				return map[string]string{"logs": tailLines(text, in.Tail)}, nil
-			}, constant(""))
-		})
-
-	type checkpointIn struct {
-		Machine string `json:"machine" jsonschema:"a machine id or name"`
-		Comment string `json:"comment,omitempty"`
-	}
-	mcp.AddTool(s, &mcp.Tool{Name: "checkpoint", Title: "Checkpoint a machine",
-		Description: "Capture the machine, memory included, so it can be restored to this exact moment. " +
-			"The resume gap does not grow with the machine size."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in checkpointIn) (*mcp.CallToolResult, any, error) {
-			return wrap(func() (any, error) {
-				m, err := resolveMachine(ctx, client, in.Machine)
-				if err != nil {
-					return nil, err
-				}
-				return client.Machines.Checkpoint(ctx, m.ID, in.Comment)
-			}, func(r any) string { return "restore with checkpoint=" + idOf(r) })
-		})
-
-	type restoreIn struct {
-		Checkpoint string `json:"checkpoint" jsonschema:"a checkpoint id"`
-	}
-	mcp.AddTool(s, &mcp.Tool{Name: "restore", Title: "Restore a checkpoint",
-		Description: "Restore a checkpoint IN PLACE. The machine keeps its id, its URL and its agent token; " +
-			"nothing new is created, so every link to it still works."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in restoreIn) (*mcp.CallToolResult, any, error) {
-			return wrap(func() (any, error) { return client.Checkpoints.Restore(ctx, in.Checkpoint) }, constant("status on the machine"))
-		})
-
+	wrap, constant, toObject := pilotsmcp.Wrap, pilotsmcp.Constant, pilotsmcp.ToObject
 	type buildIn struct {
 		Dir        string `json:"dir" jsonschema:"the build context directory"`
 		Dockerfile string `json:"dockerfile,omitempty" jsonschema:"Dockerfile CONTENTS (not a path); replaces any Dockerfile in the directory"`
@@ -319,7 +55,7 @@ func (d mcpDeps) registerTools(s *mcp.Server) {
 		Description: "Tar a directory and build it into a bootable root filesystem, returning a rootfs build id for deploy. " +
 			"Pass `dockerfile` to build with a Dockerfile you wrote here, without writing it to disk first. " +
 			"On failure the result carries EVERY log line as NDJSON: read the failing step, fix the Dockerfile, call this again. " +
-			dockerfileRules},
+			pilotsmcp.DockerfileRules},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in buildIn) (*mcp.CallToolResult, any, error) {
 			return wrap(func() (any, error) {
 				var extra map[string]string
@@ -371,46 +107,13 @@ func (d mcpDeps) registerTools(s *mcp.Server) {
 			}, constant("report the URL; the deploy is done"))
 		})
 
-	type promoteIn struct {
-		Machine      string `json:"machine" jsonschema:"a machine id or name"`
-		CustomDomain string `json:"custom_domain,omitempty"`
-		Replicas     int    `json:"replicas,omitempty"`
-	}
-	mcp.AddTool(s, &mcp.Tool{Name: "promote", Title: "Promote a machine",
-		Description: "Turn a sandbox into a durable service. The URL does not change, which is the whole point: " +
-			"every link to the sandbox keeps working against the service."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in promoteIn) (*mcp.CallToolResult, any, error) {
-			return wrap(func() (any, error) {
-				m, err := resolveMachine(ctx, client, in.Machine)
-				if err != nil {
-					return nil, err
-				}
-				return client.Machines.Promote(ctx, m.ID, pilots.PromoteRequest{CustomDomain: in.CustomDomain, Replicas: in.Replicas})
-			}, func(r any) string { return "service with service=" + idOf(r) })
-		})
-
-	mcp.AddTool(s, &mcp.Tool{Name: "destroy_machine", Title: "Destroy a machine",
-		Description: "Destroy a machine and its snapshots. Irreversible."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in machineIn) (*mcp.CallToolResult, any, error) {
-			return wrap(func() (any, error) {
-				m, err := resolveMachine(ctx, client, in.Machine)
-				if err != nil {
-					return nil, err
-				}
-				if err := client.Machines.Destroy(ctx, m.ID); err != nil {
-					return nil, err
-				}
-				return map[string]string{"destroyed": m.ID}, nil
-			}, nil)
-		})
-
 	type genIn struct {
 		Dir   string `json:"dir"`
 		Write bool   `json:"write,omitempty" jsonschema:"also write the Dockerfile, if the directory has none"`
 	}
 	mcp.AddTool(s, &mcp.Tool{Name: "generate_dockerfile", Title: "Generate a Dockerfile",
 		Description: "Detect the framework in a directory and return a Dockerfile for it, with the port and health check to deploy it with. " +
-			"Use this before `build` on a repo that has no Dockerfile. " + dockerfileRules},
+			"Use this before `build` on a repo that has no Dockerfile. " + pilotsmcp.DockerfileRules},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in genIn) (*mcp.CallToolResult, any, error) {
 			return wrap(func() (any, error) {
 				tarBytes, err := tarDirectory(in.Dir)
@@ -489,139 +192,6 @@ func (d mcpDeps) registerTools(s *mcp.Server) {
 			}, constant("deploy with dir="+in.Dir))
 		})
 
-	type buildLogsIn struct {
-		BuildID string `json:"build_id"`
-	}
-	mcp.AddTool(s, &mcp.Tool{Name: "build_logs", Title: "Replay a build log",
-		Description: "Replay a build's log by build_id, the id a failed deploy or build named. " +
-			"Call it when a result says a build failed and you did not see the lines. Read-only."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in buildLogsIn) (*mcp.CallToolResult, any, error) {
-			return wrap(func() (any, error) {
-				stream, err := client.Builds.Logs(ctx, in.BuildID, false)
-				if err != nil {
-					return nil, err
-				}
-				lines := []pilots.BuildLogLine{}
-				for line, err := range stream.Lines {
-					if err != nil {
-						return nil, err
-					}
-					lines = append(lines, line)
-				}
-				return map[string]any{"build_id": in.BuildID, "lines": lines}, nil
-			}, constant("fix what the line carrying error names, then build again"))
-		})
-
-	type noIn struct{}
-	mcp.AddTool(s, &mcp.Tool{Name: "list_services", Title: "List services",
-		Description: "Every service this key can see, with url, release_id and replicas. " +
-			"Call it to find a name before service, releases or logs. Read-only."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, _ noIn) (*mcp.CallToolResult, any, error) {
-			return wrap(func() (any, error) { return client.Services.List(ctx) }, constant("service with one of these names"))
-		})
-
-	type serviceIn struct {
-		Service string `json:"service" jsonschema:"a service id or name"`
-	}
-	mcp.AddTool(s, &mcp.Tool{Name: "service", Title: "One service",
-		Description: "One service by name or id: its health check, its env KEYS (never the values), its domain, " +
-			"its current release and its replica ids. Read-only. Next: releases for history, logs on a replica."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in serviceIn) (*mcp.CallToolResult, any, error) {
-			return wrap(func() (any, error) {
-				svc, err := mcpResolveService(ctx, client, in.Service)
-				if err != nil {
-					return nil, err
-				}
-				machines, err := client.Machines.List(ctx)
-				if err != nil {
-					return nil, err
-				}
-				out, _ := toObject(svc)
-				ids := []string{}
-				for _, m := range machines {
-					if m.ServiceID == svc.ID {
-						ids = append(ids, m.ID)
-					}
-				}
-				out["replica_ids"] = ids
-				return out, nil
-			}, constant("releases for history, or logs on a replica id"))
-		})
-
-	mcp.AddTool(s, &mcp.Tool{Name: "releases", Title: "A service's releases",
-		Description: "A service's releases, newest first, with healthy and the build each came from. " +
-			"Call it before rollback. Read-only."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in serviceIn) (*mcp.CallToolResult, any, error) {
-			return wrap(func() (any, error) {
-				svc, err := mcpResolveService(ctx, client, in.Service)
-				if err != nil {
-					return nil, err
-				}
-				return client.Services.Releases(ctx, svc.ID)
-			}, constant("rollback only if the user agrees to change what is serving"))
-		})
-
-	mcp.AddTool(s, &mcp.Tool{Name: "rollback", Title: "Roll a service back",
-		Description: "Roll a service back to its previous healthy release. " +
-			"This CHANGES WHAT IS SERVING: say so and get agreement before calling it. " +
-			"Next: service, to confirm release_id moved."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in serviceIn) (*mcp.CallToolResult, any, error) {
-			return wrap(func() (any, error) {
-				svc, err := mcpResolveService(ctx, client, in.Service)
-				if err != nil {
-					return nil, err
-				}
-				return client.Services.Rollback(ctx, svc.ID)
-			}, constant("service, to confirm release_id moved"))
-		})
-
-	mcp.AddTool(s, &mcp.Tool{Name: "domains", Title: "List custom domains",
-		Description: "Every custom domain on this key's services, with whether each is verified. Read-only: " +
-			"adding one is `pilot domains add`, because it needs a DNS record the user creates."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, _ noIn) (*mcp.CallToolResult, any, error) {
-			return wrap(func() (any, error) { return client.Domains.List(ctx) }, constant(""))
-		})
-
-	mcp.AddTool(s, &mcp.Tool{Name: "volumes", Title: "List volumes",
-		Description: "Every volume, with the machine each is attached to. Read-only: a volume is declared in a " +
-			"compose file, not created by hand."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, _ noIn) (*mcp.CallToolResult, any, error) {
-			return wrap(func() (any, error) { return client.Volumes.List(ctx) }, constant(""))
-		})
-
-	type diagnoseIn struct {
-		Replica string `json:"replica" jsonschema:"the replica id from a health_gate_failed error"`
-		Tail    int    `json:"tail,omitempty"`
-	}
-	mcp.AddTool(s, &mcp.Tool{Name: "diagnose", Title: "Diagnose a failed deploy",
-		Description: "Explain a failed deploy: the replica's last console lines and what it is doing. " +
-			"Call it right after health_gate_failed with details.replica. " +
-			"Deterministic, no model. Next: fix the app and deploy again, or rollback."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in diagnoseIn) (*mcp.CallToolResult, any, error) {
-			return wrap(func() (any, error) {
-				m, err := resolveMachine(ctx, client, in.Replica)
-				if err != nil {
-					return nil, err
-				}
-				text, err := client.Machines.Logs(ctx, m.ID)
-				if err != nil {
-					return nil, err
-				}
-				tail := in.Tail
-				if tail == 0 {
-					tail = 80
-				}
-				return map[string]any{
-					"replica": m.ID, "state": m.State, "url": m.URL, "tail": tailLines(text, tail),
-					"checks": []string{
-						"is the app listening on 0.0.0.0 rather than 127.0.0.1?",
-						"does it read $PORT, with 8080 as the fallback?",
-						"did it exit before it bound anything? the last lines say so",
-					},
-				}, nil
-			}, constant("fix the app and deploy again, or rollback"))
-		})
-
 	type pushIn struct {
 		Machine string `json:"machine" jsonschema:"a machine id or name"`
 		Src     string `json:"src" jsonschema:"a local file or directory"`
@@ -632,7 +202,7 @@ func (d mcpDeps) registerTools(s *mcp.Server) {
 			"A directory lands as dest itself. Next: exec to use it."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in pushIn) (*mcp.CallToolResult, any, error) {
 			return wrap(func() (any, error) {
-				m, err := resolveMachine(ctx, client, in.Machine)
+				m, err := pilotsmcp.ResolveMachine(ctx, client, in.Machine)
 				if err != nil {
 					return nil, err
 				}
@@ -653,7 +223,7 @@ func (d mcpDeps) registerTools(s *mcp.Server) {
 			"For a log, `logs` is cheaper; this is for build output, data files, anything you want on disk here."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in pullIn) (*mcp.CallToolResult, any, error) {
 			return wrap(func() (any, error) {
-				m, err := resolveMachine(ctx, client, in.Machine)
+				m, err := pilotsmcp.ResolveMachine(ctx, client, in.Machine)
 				if err != nil {
 					return nil, err
 				}
@@ -662,69 +232,6 @@ func (d mcpDeps) registerTools(s *mcp.Server) {
 				}
 				return map[string]string{"machine": m.ID, "src": in.Src, "dest": in.Dest}, nil
 			}, constant(""))
-		})
-
-	mcp.AddTool(s, &mcp.Tool{Name: "init", Title: "Read this first",
-		Description: "READ THIS FIRST. The pilots mental model in under sixty lines: one primitive, the one-call " +
-			"deploy, what every result and error carries, and the doc index. " +
-			"Call it once at the start of any pilots task. Read-only."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, _ noIn) (*mcp.CallToolResult, any, error) {
-			return wrap(func() (any, error) {
-				return map[string]any{"primer": primer, "topics": topics(d.skill)}, nil
-			}, constant("deploy with dir, once you know the directory"))
-		})
-
-	type docsIn struct {
-		Topic string `json:"topic,omitempty"`
-		Query string `json:"query,omitempty" jsonschema:"search every reference instead of naming one"`
-	}
-	mcp.AddTool(s, &mcp.Tool{Name: "docs", Title: "Read a reference",
-		Description: "Read one pilots reference by topic (deploy, sandboxes, services, secrets, volumes, domains, " +
-			"promote, errors, compose), or search them with query. No arguments lists the topics. " +
-			"Load one. Two at most. Read-only."},
-		func(ctx context.Context, _ *mcp.CallToolRequest, in docsIn) (*mcp.CallToolResult, any, error) {
-			return wrap(func() (any, error) {
-				if in.Query != "" {
-					return map[string]any{"query": in.Query, "matches": searchTopics(d.skill, in.Query)}, nil
-				}
-				if in.Topic == "" {
-					return map[string]any{"topics": topics(d.skill)}, nil
-				}
-				text, ok := readTopic(d.skill, in.Topic)
-				if !ok {
-					return nil, fmt.Errorf("no such topic %s; the topics are %s", in.Topic, strings.Join(topics(d.skill), ", "))
-				}
-				return map[string]any{"topic": in.Topic, "text": text}, nil
-			}, constant(""))
-		})
-}
-
-func (d mcpDeps) registerSkill(s *mcp.Server) {
-	for _, page := range skillPages(d.skill) {
-		uri := "pilots-docs://" + page.Name
-		path := page.Path
-		s.AddResource(&mcp.Resource{URI: uri, Name: page.Name, Title: page.Name,
-			Description: "The pilots skill: " + page.Name, MIMEType: "text/markdown"},
-			func(_ context.Context, _ *mcp.ReadResourceRequest) (*mcp.ReadResourceResult, error) {
-				raw, err := os.ReadFile(path)
-				if err != nil {
-					return nil, err
-				}
-				return &mcp.ReadResourceResult{Contents: []*mcp.ResourceContents{{URI: uri, MIMEType: "text/markdown", Text: string(raw)}}}, nil
-			})
-	}
-}
-
-func (d mcpDeps) registerPrompts(s *mcp.Server) {
-	s.AddPrompt(&mcp.Prompt{Name: "deploy", Title: "Deploy a directory to a URL",
-		Description: "Take a directory to a URL in one call, following the platform's next step on any error.",
-		Arguments:   []*mcp.PromptArgument{{Name: "dir", Description: "the directory to deploy", Required: true}}},
-		func(_ context.Context, req *mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
-			dir := req.Params.Arguments["dir"]
-			return &mcp.GetPromptResult{Messages: []*mcp.PromptMessage{{Role: "user", Content: &mcp.TextContent{Text: fmt.Sprintf(
-				"Deploy %s to pilots. Call init first, then deploy with dir=%s. "+
-					"On any error, read code, next and details, and do what next says. "+
-					"Report the URL when it is serving.", dir, dir)}}}}, nil
 		})
 }
 
@@ -803,6 +310,13 @@ func applyOverrides(plan *pilots.ComposePlan, in deployIn) error {
 	}
 	if in.CustomDomain != "" {
 		given = append(given, "custom_domain")
+	}
+	if in.Private {
+		// Listed like every other override: without it, `deploy {dir,
+		// private: true}` with nothing else set returns below and ships a
+		// PUBLIC service, which is the silent drop this function exists to
+		// prevent.
+		given = append(given, "private")
 	}
 	if in.Schedules != nil {
 		given = append(given, "schedules")
@@ -920,32 +434,6 @@ func (d mcpDeps) deployBuild(ctx context.Context, in deployIn) (any, error) {
 		case <-time.After(time.Second):
 		}
 	}
-}
-
-// mcpResolveService accepts an id or a name, as the TS tools did, and names
-// list_services in the refusal so the agent knows where to look.
-func mcpResolveService(ctx context.Context, client *pilots.Client, ref string) (*pilots.Service, error) {
-	services, err := client.Services.List(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for i := range services {
-		if services[i].ID == ref || services[i].Name == ref {
-			return &services[i], nil
-		}
-	}
-	return nil, fmt.Errorf("no service %s; list_services shows what this key can see", ref)
-}
-
-func tailLines(text string, n int) string {
-	if n <= 0 {
-		return text
-	}
-	lines := strings.Split(text, "\n")
-	if len(lines) <= n {
-		return text
-	}
-	return strings.Join(lines[len(lines)-n:], "\n")
 }
 
 // runMCP serves the fleet over stdio until the client goes away.

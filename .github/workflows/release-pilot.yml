@@ -1,0 +1,83 @@
+name: release pilot
+
+# Tag-driven, so a release is a deliberate act rather than a side effect of a
+# merge:
+#
+#     git tag pilot-v0.2.0 && git push origin pilot-v0.2.0
+#
+# The asset NAMES are a contract, not a convention. `pilot upgrade` asks the
+# GitHub API for the latest release and looks for an asset called exactly
+# `pilot_<goos>_<goarch>` (apps/pilot/internal/cli/upgrade.go), so a rename
+# here silently breaks in-place upgrades for everyone who already has the
+# binary. scripts/install-pilot.sh reads the same names.
+on:
+  push:
+    tags:
+      - 'pilot-v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache-dependency-path: apps/pilot/go.sum
+
+      # The gate before anything is published. An unpublish is a far worse
+      # thing to need than a red build.
+      - name: check
+        working-directory: apps/pilot
+        run: |
+          test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+          go vet ./...
+          go test ./...
+
+      - name: build every platform
+        working-directory: apps/pilot
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#pilot-}"
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            goos="${target%/*}"
+            goarch="${target#*/}"
+            echo "building pilot_${goos}_${goarch} at ${version}"
+            # CGO off so the linux binaries are static and run on any distro,
+            # which is the whole point of shipping one file.
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
+              -trimpath \
+              -ldflags "-s -w -X github.com/vivek7405/pilots/cli/internal/cli.Version=${version}" \
+              -o "dist/pilot_${goos}_${goarch}" ./cmd/pilot
+          done
+          ( cd dist && sha256sum pilot_* > checksums.txt )
+          ls -l dist
+
+      # The version the binary reports must be the tag, or `pilot upgrade`
+      # compares "dev" against a release forever and never settles.
+      - name: the binary reports the tag
+        working-directory: apps/pilot
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#pilot-}"
+          reported="$(./dist/pilot_linux_amd64 version --json | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p')"
+          test "$reported" = "$version" || { echo "binary says '$reported', tag says '$version'"; exit 1; }
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            apps/pilot/dist/pilot_*
+            apps/pilot/dist/checksums.txt
+          generate_release_notes: true
+          body: |
+            Install or upgrade:
+
+            ```sh
+            curl -fsSL https://raw.githubusercontent.com/vivek7405/pilots/main/scripts/install-pilot.sh | sh
+            ```
+
+            An existing install upgrades itself in place with `pilot upgrade`.

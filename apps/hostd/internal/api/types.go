@@ -658,6 +658,18 @@ type Host struct {
 type CreateAPIKeyRequest struct {
 	OrgID  string   `json:"org_id"`
 	Scopes []string `json:"scopes"`
+	// The three RESTRICTIONS, all optional. They are what an OAuth consent
+	// screen turns into something the fleet enforces: this agent may name
+	// only machines starting with NamePrefix, may hold at most MaxMachines of
+	// them at once, and stops authenticating at ExpiresAt. Absent means
+	// unrestricted, which is what an operator's own key is.
+	//
+	// Write-once, with the key: see state.APIKeyLimits. A key cannot be
+	// widened later, because a restriction that could be edited afterwards
+	// would not be one.
+	NamePrefix  string `json:"name_prefix,omitempty"`
+	MaxMachines int    `json:"max_machines,omitempty"`
+	ExpiresAt   int64  `json:"expires_at,omitempty"`
 }
 
 // APIKeyResponse carries the plaintext key exactly once, on the mint. Every
@@ -670,6 +682,12 @@ type APIKeyResponse struct {
 	Scopes    []string `json:"scopes"`
 	CreatedAt int64    `json:"created_at"`
 	RevokedAt int64    `json:"revoked_at,omitempty"`
+	// The restrictions this key carries, echoed on the mint and on every
+	// listing. Absent means unrestricted. A reader auditing what can reach an
+	// org needs to see that a key is limited, not merely that it exists.
+	NamePrefix  string `json:"name_prefix,omitempty"`
+	MaxMachines int    `json:"max_machines,omitempty"`
+	ExpiresAt   int64  `json:"expires_at,omitempty"`
 }
 
 type RevokeResponse struct {

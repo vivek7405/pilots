@@ -47,6 +47,7 @@ export const NEW_TAB = html`<span class="sr-only"> (opens in a new tab)</span>`;
 export const NAV = [
   { label: 'Sandboxes', href: '/sandboxes' },
   { label: 'Deploy', href: '/deploy' },
+  { label: 'Agents', href: '/agents' },
   { label: 'Architecture', href: '/architecture' },
   { label: 'Internals', href: '/architecture/internals' },
   { label: 'Roadmap', href: '/roadmap' },

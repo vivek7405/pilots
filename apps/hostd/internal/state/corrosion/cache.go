@@ -59,6 +59,15 @@ type Cache struct {
 	// revoked is the set of killed key hashes, checked on every request. Held
 	// as a set because nothing reads the revocation time on this path.
 	revoked map[string]struct{}
+	// keyLimits is what a restricted key may do, read on every authenticated
+	// request in the same breath as revoked. A map for the same reason: the
+	// alternative is a Corrosion query per request on the hot auth path,
+	// which is what the revocation set exists to avoid.
+	//
+	// Rows are write-once. The consent screen writes one when it mints a key
+	// and nothing updates it, so -- exactly like a revocation -- a rebuilt
+	// subscription that re-reads the table cannot miss one.
+	keyLimits map[string]state.APIKeyLimits
 	// heardAt is when THIS host last saw a peer's heartbeat change, by the
 	// local clock. Liveness is judged from it rather than from the last_seen
 	// the peer wrote, because that value is stamped by the peer's clock and
@@ -145,6 +154,11 @@ func NewCache(ctx context.Context, client *Client) (*Cache, error) {
 		services.Close()
 		return nil, err
 	}
+	keyLimits, err := c.subscribeKeyLimits(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	revocations, err := c.subscribeRevocations(ctx)
 	if err != nil {
 		machines.Close()
@@ -160,6 +174,7 @@ func NewCache(ctx context.Context, client *Client) (*Cache, error) {
 		services.Close()
 		tenancy.Close()
 		revocations.Close()
+		keyLimits.Close()
 		return nil, err
 	}
 	machineCPU, err := c.subscribeMachineCPU(ctx)
@@ -169,6 +184,7 @@ func NewCache(ctx context.Context, client *Client) (*Cache, error) {
 		services.Close()
 		tenancy.Close()
 		revocations.Close()
+		keyLimits.Close()
 		hostCPU.Close()
 		return nil, err
 	}
@@ -179,6 +195,7 @@ func NewCache(ctx context.Context, client *Client) (*Cache, error) {
 		services.Close()
 		tenancy.Close()
 		revocations.Close()
+		keyLimits.Close()
 		hostCPU.Close()
 		machineCPU.Close()
 		return nil, err
@@ -193,6 +210,7 @@ func NewCache(ctx context.Context, client *Client) (*Cache, error) {
 	go c.follow(ctx, services, "services", c.subscribeServices)
 	go c.follow(ctx, tenancy, "tenancy", c.subscribeTenancy)
 	go c.follow(ctx, revocations, "api_key_revocations", c.subscribeRevocations)
+	go c.follow(ctx, keyLimits, "api_key_limits", c.subscribeKeyLimits)
 	go c.follow(ctx, hostCPU, "host_cpu", c.subscribeHostCPU)
 	go c.follow(ctx, machineCPU, "machine_cpu", c.subscribeMachineCPU)
 	go c.follow(ctx, urlAuth, "url_auth", c.subscribeURLAuth)
@@ -312,6 +330,39 @@ func (c *Cache) subscribeTenancy(ctx context.Context) (*Subscription, error) {
 
 	c.mu.Lock()
 	c.tenancy = fresh
+	c.mu.Unlock()
+	return sub, nil
+}
+
+// subscribeKeyLimits materializes what each restricted key may do.
+//
+// Like the revocations above, the rows are write-once: a limits row is
+// written when a key is minted and never updated, so a rebuild that re-reads
+// the whole table always finds every row that exists.
+func (c *Cache) subscribeKeyLimits(ctx context.Context) (*Subscription, error) {
+	sub, err := c.client.Subscribe(ctx,
+		`SELECT hash, name_prefix, max_machines, expires_at, created_at FROM api_key_limits`)
+	if err != nil {
+		return nil, err
+	}
+
+	fresh := map[string]state.APIKeyLimits{}
+	rows := sub.Rows()
+	for rows.Next() {
+		var l state.APIKeyLimits
+		if err := rows.Scan(&l.Hash, &l.NamePrefix, &l.MaxMachines, &l.ExpiresAt, &l.CreatedAt); err != nil {
+			sub.Close()
+			return nil, err
+		}
+		fresh[l.Hash] = l
+	}
+	if err := rows.Err(); err != nil {
+		sub.Close()
+		return nil, err
+	}
+
+	c.mu.Lock()
+	c.keyLimits = fresh
 	c.mu.Unlock()
 	return sub, nil
 }
@@ -610,6 +661,18 @@ func (c *Cache) apply(table string, change Change) {
 		}
 		c.machineCPU[m.ID] = m
 
+	case "api_key_limits":
+		var l state.APIKeyLimits
+		if err := change.Scan(&l.Hash, &l.NamePrefix, &l.MaxMachines, &l.ExpiresAt, &l.CreatedAt); err != nil {
+			slog.Error("cluster cache could not read a key limits change", "err", err)
+			return
+		}
+		if change.Kind == ChangeDelete {
+			delete(c.keyLimits, l.Hash)
+			return
+		}
+		c.keyLimits[l.Hash] = l
+
 	case "api_key_revocations":
 		var hash string
 		if err := change.Scan(&hash); err != nil {
@@ -665,6 +728,17 @@ func (c *Cache) MachineCPU(id string) (state.MachineCPU, bool) {
 	defer c.mu.RUnlock()
 	m, ok := c.machineCPU[id]
 	return m, ok
+}
+
+// KeyLimits returns what a restricted key may do, and whether any row says
+// so. A key with no row is unrestricted, which is every operator key. Read on
+// every authenticated request, from memory, with no query.
+func (c *Cache) KeyLimits(hash string) (state.APIKeyLimits, bool) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	l, ok := c.keyLimits[hash]
+	return l, ok
 }
 
 // Revoked reports whether a key hash has been killed. Read on every

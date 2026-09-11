@@ -1,6 +1,7 @@
 package detect
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -36,6 +37,8 @@ func GenerateIn(dir, lockRoot string) (Recipe, bool) {
 		return next(), true
 	case FrameworkReactRouter:
 		return reactRouter(), true
+	case FrameworkRemix:
+		return remix(dir), true
 	case FrameworkVite:
 		return vite(), true
 	case FrameworkDjango:
@@ -67,7 +70,7 @@ func GenerateIn(dir, lockRoot string) (Recipe, bool) {
 // named, exactly as an undetected one is, which is a worse outcome than
 // working and a much better one than a broken image.
 var workspaceRewritable = map[Framework]bool{
-	FrameworkWebJS: true, FrameworkNext: true,
+	FrameworkWebJS: true, FrameworkNext: true, FrameworkRemix: true,
 	FrameworkReactRouter: true, FrameworkVite: true,
 }
 
@@ -181,6 +184,11 @@ func next() Recipe {
 		Health:    httpHealth("/", 0),
 		Notes: []string{
 			"Next binds 127.0.0.1 by default, which serves nothing outside the guest; -H 0.0.0.0 is not optional here.",
+			// Next defines an adapter interface for exactly this, and pilots
+			// implements it. Opting in is one line, and it is worth naming
+			// here because this recipe is otherwise the generic one: it copies
+			// the repository and ships a full node_modules.
+			"This recipe ships the whole repository and a full node_modules. For a much smaller image, set adapterPath: '@pilots/sdk/next' in next.config.js: the pilots adapter turns on output: 'standalone' and writes a manifest of the static and prerendered paths.",
 		},
 		Dockerfile: `FROM node:24-alpine
 RUN apk add --no-cache ca-certificates
@@ -226,6 +234,74 @@ CMD ["sh", "-c", "HOST=0.0.0.0 PORT=${PORT:-8080} npm start"]
 // nginx cannot read an environment variable in its config, so the listen
 // directive is templated with envsubst at start. Hard-coding a port would work
 // until the fleet handed the machine a different one.
+// remix is the recipe for Remix 3, the bare `remix` package.
+//
+// Remix 3 is buildless in the same sense webjs is: there is no bundler step
+// and no build output. `npm start` is
+// `node --import remix/node-tsx server.ts`, which strips the types at import
+// time and serves the source. So the recipe has no RUN npm run build, and
+// leaving one in would fail the image on a script that does not exist.
+//
+// dir is read for remix.json, which is where Remix 3 declares its database.
+// A project that declares migrations gets them run at start, the same shape
+// the django recipe uses and with the same caveat in the notes.
+func remix(dir string) Recipe {
+	start := "npm start"
+	notes := []string{
+		"Remix 3 is buildless: `npm start` runs `node --import remix/node-tsx server.ts`, which serves the TypeScript source directly. There is no build step to run, and no build output for a host to consume.",
+		"server.ts is the entry point and owns the listen call, so it must read process.env.PORT and bind 0.0.0.0. A server.ts that hardcodes a port builds cleanly and answers 502.",
+		"node:24-alpine is not a default here: the remix package declares engines.node >= 24.3.0, and an older runtime fails at the first import.",
+	}
+	if remixDeclaresMigrations(dir) {
+		start = "npx --no-install remix db migrate && npm start"
+		notes = append(notes,
+			"remix.json declares migrations, so `remix db migrate` runs at start.",
+			"The migration runs at start here. For a service with replicas, move it to x-pilots.pre_deploy so it runs once rather than once per replica.",
+			"A sqlite adapter in remix.json writes inside the machine. Attach a volume at the directory holding that file, or the database is lost on the next release.",
+		)
+	}
+	return Recipe{
+		Framework: FrameworkRemix,
+		Port:      AppPort,
+		Health:    httpHealth("/", 0),
+		Notes:     notes,
+		Dockerfile: `FROM node:24-alpine
+RUN apk add --no-cache ca-certificates
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN if [ -f package-lock.json ]; then npm ci; else npm install --no-audit --no-fund; fi
+COPY . .
+ENV NODE_ENV=production
+ENV HOST=0.0.0.0
+ENV PORT=8080
+EXPOSE 8080
+CMD ["sh", "-c", "HOST=0.0.0.0 PORT=${PORT:-8080} ` + start + `"]
+`,
+	}
+}
+
+// remixDeclaresMigrations reports whether remix.json names a migrations
+// directory. Absent or unreadable answers false: a recipe that runs a
+// migration a project has not configured fails the start, which is a worse
+// outcome than not running one.
+func remixDeclaresMigrations(dir string) bool {
+	raw, err := os.ReadFile(filepath.Join(dir, "remix.json"))
+	if err != nil {
+		return false
+	}
+	var cfg struct {
+		DB struct {
+			Migrations struct {
+				Directory string `json:"directory"`
+			} `json:"migrations"`
+		} `json:"db"`
+	}
+	if json.Unmarshal(raw, &cfg) != nil {
+		return false
+	}
+	return cfg.DB.Migrations.Directory != ""
+}
+
 func vite() Recipe {
 	return Recipe{
 		Framework: FrameworkVite,
@@ -333,6 +409,19 @@ func rails() Recipe {
 		Notes: []string{
 			"Rails 7.1 and newer serve /up as a health endpoint, which is what the check polls.",
 			"SECRET_KEY_BASE has to be set for a production boot; pass it as a sealed environment variable.",
+			// Turbo is not a separate framework and needs no recipe of its own:
+			// it is a gem inside the Rails app. But its broadcasts ride Action
+			// Cable, and Rails' generated config/cable.yml uses the redis
+			// adapter in production, defaulted to redis://localhost:6379/1 --
+			// an address that answers nothing inside a machine. The failure is
+			// silent in the worst way: the page renders, the deploy is green,
+			// and no Turbo Stream ever arrives.
+			"Turbo Streams broadcast over Action Cable, and the generated config/cable.yml uses the redis adapter in production at redis://localhost:6379/1. Nothing listens there inside a machine, so broadcasts are dropped with the page still rendering fine. Point REDIS_URL at a redis service, or switch the production adapter to solid_cable (database-backed) or async (single process only).",
+			"WebSocket upgrades and SSE both reach the app unbuffered, so Action Cable at /cable and a Turbo Stream over SSE work once the adapter above is right.",
+			// The other classic way a Rails app fails on a platform: force_ssl
+			// with no proxy header is an infinite redirect, and the health
+			// check polls /up over http, so the gate never opens.
+			"config.force_ssl = true is safe here: the router sets X-Forwarded-Proto, so Rails sees the request as SSL instead of redirecting to itself forever.",
 		},
 		Dockerfile: `FROM ruby:3.3-slim
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential libpq-dev ca-certificates && rm -rf /var/lib/apt/lists/*

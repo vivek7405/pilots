@@ -86,6 +86,12 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	if !checkLabels(w, req.Labels) {
 		return
 	}
+	// A service is the durable half of the same primitive, and its name is
+	// what its permanent address is minted from, so a restricted key is held
+	// to its prefix here too. See limits.go.
+	if !d.checkNamePrefix(w, r, &req.Name, "service") {
+		return
+	}
 	if req.Private && req.Domain != "" {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest,
 			"private and domain contradict: a private service has no address",

@@ -406,6 +406,28 @@ func (t cachedTenancy) Revoked(_ context.Context, hash string) (bool, error) {
 	return t.cache.Revoked(hash), nil
 }
 
+// Limits answers from the cache, and a MISS is authoritative -- which is the
+// one place this type does not fall back to the store, so the reason matters.
+//
+// handleCreateKey writes the limits row BEFORE the key row, deliberately, and
+// nothing ever updates it. So by the time a key can authenticate at all, its
+// limits row (if it has one) was already written and gossiped ahead of the row
+// that made the key usable, and a hash absent from a materialized subscription
+// has no row anywhere. That answer cannot change later, because a key never
+// gains limits after it is minted.
+//
+// The fallback is omitted rather than forgotten. An operator key has no limits
+// row by design, so the miss is the COMMON case: a store read on it would put
+// a corrosion query back on every authenticated request, which is the exact
+// cost this cache exists to remove. subscribeKeyLimits swaps the whole map in
+// only after it has read every row, so a rebuild never exposes an empty one.
+func (t cachedTenancy) Limits(_ context.Context, hash string) (*state.APIKeyLimits, error) {
+	if l, ok := t.cache.KeyLimits(hash); ok {
+		return &l, nil
+	}
+	return nil, fmt.Errorf("api key limits: %w", state.ErrNotFound)
+}
+
 // storeVersion exposes the replica's version vector sum on /v1/health, or nil
 // on SQLite where there is no replica and the field is 0.
 //

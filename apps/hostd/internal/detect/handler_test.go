@@ -72,8 +72,8 @@ func TestTheHandlerRefusesAnUnknownDirectoryWithEverythingNeededToFixIt(t *testi
 	if len(got.Details.Rules) != 2 {
 		t.Errorf("rules = %v, want the two Dockerfile rules", got.Details.Rules)
 	}
-	if len(got.Details.LookedFor) != 10 {
-		t.Errorf("looked_for has %d entries, want 10", len(got.Details.LookedFor))
+	if len(got.Details.LookedFor) != len(LookedFor) {
+		t.Errorf("looked_for has %d entries, want %d", len(got.Details.LookedFor), len(LookedFor))
 	}
 }
 

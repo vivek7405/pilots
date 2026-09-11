@@ -384,6 +384,10 @@ POST   /v1/volumes                   create JuiceFS volume
 GET    /v1/volumes                   list
 GET    /v1/hosts                     fleet view
 GET    /v1/whoami                    the caller's own org, scopes and host
+POST   /mcp                          the hosted MCP endpoint: the fleet toolset over
+                                     Streamable HTTP, stateless, same bearer key
+GET    /.well-known/oauth-protected-resource   unauthenticated (RFC 9728): names the
+                                     dashboard as the OAuth server that mints keys
 POST   /v1/api-keys                  admin: mint {org_id, scopes[]} → the plaintext key, ONCE
 POST   /v1/api-keys/:hash/revoke     admin: tombstone a key; no row is deleted
 GET    /v1/api-keys?org=             admin: list an org's keys, revoked ones included
@@ -1182,18 +1186,34 @@ The agent flow composes: after a prompt-to-URL deploy the agent offers to
 connect the repo for continuous deploys.
 
 The MCP toolset makes the whole journey agent-executable end-to-end, in
-twenty-four tools: `build, build_logs, checkpoint, create_machine, deploy,
-destroy_machine, diagnose, docs, domains, exec, exec_stream,
-generate_dockerfile, init, list_machines, list_services, logs, plan, promote,
-releases, restore, rollback, service, status, volumes` — so "deploy this app
-on pilots" is one agent conversation with a URL at the end, and usually one
-tool call. Every result carries `next`; every error carries `code`, `next`
-and `details`.
+twenty-six tools, defined once in `agents/mcp` and served two ways. The
+twenty **fleet** tools need only the API — `build_logs, checkpoint,
+create_machine, destroy_machine, diagnose, docs, domains, exec, exec_stream,
+init, list_machines, list_services, logs, promote, releases, restore,
+rollback, service, status, volumes` — and every host serves them at
+`POST /mcp` (Streamable HTTP, stateless, the same bearer key as the rest of
+the API), so an agent with no `pilot` binary points its client at the API
+hostname and is done. The six **local** tools read the agent's own
+filesystem — `build, deploy, generate_dockerfile, plan, pull_file,
+push_file` — and only `pilot mcp` on stdio can offer them. Either way "deploy
+this app on pilots" is one agent conversation with a URL at the end, and
+usually one tool call. Every result carries `next`; every error carries
+`code`, `next` and `details`.
 
-The server also ships the **skill** as `pilots-docs://` resources, so a
-client that browses resources and one that calls `init` and `docs` read one
-corpus. `pilot init` copies it into a repository and registers the server;
-`pilot skill install` links it for every project at once.
+The hosted endpoint keeps rule 1: a tool call builds an SDK client against
+the answering host's own listener with the caller's key, so auth, scopes,
+tenancy and owner-host forwarding are the paths every other client takes,
+and no session state lives on any one host. An unauthenticated call is
+answered with a `WWW-Authenticate` challenge naming
+`/.well-known/oauth-protected-resource`, which names the dashboard as the
+OAuth 2.1 authorization server; the token the dashboard issues IS a pilots
+API key, so the data plane never learns a second credential type.
+
+Both servers ship the **skill** as `pilots-docs://` resources, embedded from
+`agents/skills/pilots`, so a client that browses resources and one that
+calls `init` and `docs` read one corpus. `pilot init` copies it into a
+repository and registers the server; `pilot skill install` links it for
+every project at once; the Claude Code plugin in `agents/` carries it too.
 
 The bar for all of it is a **small local model**: every tool description says
 when to call it and what to call next, every result and error names the next
@@ -1307,7 +1327,8 @@ snapshot; a database restores and then replays WAL.
   scopes on the key bound what it can do, stored comma-separated and sent as
   a JSON array. They nest — `machines` ⊂ `deploy` ⊂ `admin`:
   `machines` covers `/v1/machines`, `/v1/checkpoints`, `/v1/volumes`,
-  `/v1/sprites`, `/v1/hosts` and `/v1/whoami`; `deploy` adds `/v1/builds`,
+  `/v1/sprites`, `/v1/hosts`, `/v1/whoami` and `/mcp` (each tool then
+  needs its own route's scope); `deploy` adds `/v1/builds`,
   `/v1/services` and `/v1/domains`; `admin` adds `/v1/api-keys`, `/v1/quotas` and
   `/v1/usage`. An unknown path or an unknown scope name fails closed, and a
   refusal is `403 {"error":"scope <s> required"}`. The MCP server reads the
@@ -1383,11 +1404,15 @@ pilots/
                           #   deployed by `pilot deploy` from apps/dashboard/,
                           #   SQLite on a volume at /data, pilots.run as a
                           #   custom domain, one replica
-  packages/cli/           # `pilot` CLI + its MCP server (TS, no build step:
-    bin/  src/{commands,compose,mcp}/   #   Node strips the types at run time)
-    skill/pilots/         # the agent skill: SKILL.md + nine reference pages,
-                          #   copied by `pilot init`, linked by `pilot skill
-                          #   install`, served as pilots-docs:// resources
+  agents/                 # the agent package, three things in one directory:
+    skills/pilots/        #   the skill: SKILL.md + ten reference pages, the
+                          #   ONE copy, embedded into hostd and `pilot`, copied
+                          #   by `pilot init`, served as pilots-docs:// resources
+    mcp/                  #   the MCP toolset both servers register (Go)
+    .claude-plugin/ .mcp.json hooks/ scripts/guard.py   # the Claude Code plugin
+    plugin.json mcp.json  #   the portable Agent Plugins v1 manifest
+  packages/cli/           # the previous `pilot` CLI (TS), kept until apps/pilot
+    bin/  src/{commands,compose,mcp}/   #   is at parity; skill/pilots links to agents/
     examples/             # one-service, and two-services-volume-secret
   sdks/js/                # @pilots/sdk — typed client + sprites-compat adapter
   sdks/go/                # github.com/vivek7405/pilots/sdks/go

@@ -457,8 +457,12 @@ func TestTheResolutionOrderIsComposeThenDockerfileThenRecipe(t *testing.T) {
 	if unknown == nil {
 		t.Fatal("an empty directory planned as something")
 	}
-	if len(unknown.Details.LookedFor) != 10 {
-		t.Errorf("looked_for has %d entries, want 10", len(unknown.Details.LookedFor))
+	// Compared against LookedFor rather than a literal: the refusal has to
+	// name every signal the detector actually checks, and a hardcoded count
+	// makes adding a framework look like a broken test instead of an
+	// incomplete refusal.
+	if len(unknown.Details.LookedFor) != len(LookedFor) {
+		t.Errorf("looked_for has %d entries, want %d", len(unknown.Details.LookedFor), len(LookedFor))
 	}
 	if len(unknown.Details.Rules) != 2 {
 		t.Errorf("rules has %d entries, want 2", len(unknown.Details.Rules))

@@ -5562,6 +5562,12 @@ const MCP_TOOLS = [
   'logs', 'plan', 'promote', 'pull_file', 'push_file', 'releases', 'restore',
   'rollback', 'service', 'status', 'volumes',
 ];
+// The six that read the agent's own filesystem. `pilot mcp` serves all 26;
+// the hosted endpoint on every host serves the other 20, because it has no
+// disk on the agent's side to read. One list, one subtraction, so the two
+// servers cannot drift apart without this file noticing.
+const MCP_LOCAL_TOOLS = ['build', 'deploy', 'generate_dockerfile', 'plan', 'pull_file', 'push_file'];
+const MCP_HOSTED_TOOLS = MCP_TOOLS.filter((t) => !MCP_LOCAL_TOOLS.includes(t));
 
 // The text of a tool result, which is JSON in every case here.
 function toolText(result) {
@@ -5980,7 +5986,7 @@ async function agentDeployAssertions(REFLINK) {
       assert(lines.length < 60, `the primer is ${lines.length} lines`);
       assert(lines.slice(0, 10).join('\n').includes('deploy'),
         'the one call is not in the first ten lines of the primer');
-      assert(topics.length === 9, `topics = ${JSON.stringify(topics)}`);
+      assert(topics.length === 10, `topics = ${JSON.stringify(topics)}`);
 
       const doc = await client.callTool({ name: 'docs', arguments: { topic: 'deploy' } });
       assert(!doc.isError, `docs failed: ${toolText(doc)}`);
@@ -5988,8 +5994,8 @@ async function agentDeployAssertions(REFLINK) {
         'the deploy reference does not cover the refusal');
 
       const { resources } = await client.listResources();
-      assert(resources.length === 10,
-        `${resources.length} pilots-docs:// resources, want 10`);
+      assert(resources.length === 11,
+        `${resources.length} pilots-docs:// resources, want 11`);
     });
   } finally {
     if (client) {
@@ -6008,6 +6014,100 @@ async function agentDeployAssertions(REFLINK) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// The hosted MCP endpoint: every host serves the fleet toolset at /mcp over
+// Streamable HTTP behind the same bearer key. The first half needs no
+// Firecracker (tool list, the 401 that names the login document, scopes); the
+// second creates a machine THROUGH the endpoint, runs a command in it and
+// destroys it, which on the rig exercises owner-host forwarding, since the
+// host that answers /mcp is rarely the one that owns the machine.
+// ---------------------------------------------------------------------------
+
+async function hostedMCPAssertions(full) {
+  console.log('hosted MCP');
+  let client;
+  let narrowClient;
+  let createdID;
+  try {
+    const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
+    const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
+    const connect = async (key) => {
+      const c = new Client({ name: 'e2e-hosted', version: '0' });
+      await c.connect(new StreamableHTTPClientTransport(new URL(`${API}/mcp`), {
+        requestInit: { headers: { Authorization: `Bearer ${key}` } },
+      }));
+      return c;
+    };
+
+    await step('/mcp answers 401 with the protected-resource document to a caller with no key', async () => {
+      const res = await fetch(`${API}/mcp`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      assert(res.status === 401, `POST /mcp without a key: HTTP ${res.status}`);
+      const challenge = res.headers.get('www-authenticate') ?? '';
+      assert(/resource_metadata="[^"]+\/\.well-known\/oauth-protected-resource"/.test(challenge),
+        `WWW-Authenticate does not name the document: ${challenge}`);
+      // The local document, not the header's URL: the header names the
+      // fleet's public API hostname, which need not resolve on a laptop.
+      const doc = await request('/.well-known/oauth-protected-resource', { auth: false });
+      assert(doc.status === 200, `well-known: HTTP ${doc.status}`);
+      assert(typeof doc.json?.resource === 'string' && doc.json.resource.endsWith('/mcp'),
+        `resource = ${JSON.stringify(doc.json)}`);
+      assert(Array.isArray(doc.json.bearer_methods_supported), 'no bearer_methods_supported');
+    });
+
+    await step('/mcp offers exactly the API-only tools', async () => {
+      client = await connect(KEY);
+      const { tools } = await client.listTools();
+      const names = tools.map((t) => t.name).sort();
+      assert(JSON.stringify(names) === JSON.stringify(MCP_HOSTED_TOOLS),
+        `the hosted tool set drifted: ${names.join(', ')}`);
+      for (const tool of tools) {
+        assert(tool.description && tool.description.length > 40, `${tool.name} has no useful description`);
+      }
+      const init = await client.callTool({ name: 'init', arguments: {} });
+      assert(!init.isError, `init failed: ${toolText(init)}`);
+      const { local_tools } = JSON.parse(toolText(init));
+      assert(typeof local_tools === 'string' && local_tools.includes('pilot mcp'),
+        'the hosted init does not say where the local tools are');
+      const { resources } = await client.listResources();
+      assert(resources.some((r) => r.uri === 'pilots-docs://SKILL.md'), 'the skill is not served as resources');
+    });
+
+    await step('a machines-scoped key reaches /mcp and is refused a deploy-scoped tool', async () => {
+      const minted = await request('/v1/api-keys', { method: 'POST', body: { org_id: 'e2e-hosted-mcp', scopes: ['machines'] } });
+      assert(minted.status === 201 || minted.status === 200, `mint: HTTP ${minted.status} ${minted.text}`);
+      narrowClient = await connect(minted.json.key);
+      const ok = await narrowClient.callTool({ name: 'list_machines', arguments: {} });
+      assert(!ok.isError, `list_machines with a machines key: ${toolText(ok)}`);
+      const refused = await narrowClient.callTool({ name: 'list_services', arguments: {} });
+      assert(refused.isError, 'a machines key reached list_services');
+      assert(toolText(refused).includes('scope_required'), `the refusal is not hostd's own body: ${toolText(refused)}`);
+    });
+
+    if (full) {
+      await step('a hosted tool call takes the same path as the SDK: create, exec, destroy', async () => {
+        const created = await client.callTool({ name: 'create_machine', arguments: { name: `hosted-${Math.random().toString(36).slice(2, 8)}` } });
+        assert(!created.isError, `create_machine: ${toolText(created)}`);
+        createdID = JSON.parse(toolText(created)).id;
+        assert(createdID, `no id in ${toolText(created)}`);
+        const ran = await client.callTool({ name: 'exec', arguments: { machine: createdID, cmd: 'echo hosted' } });
+        assert(!ran.isError, `exec: ${toolText(ran)}`);
+        const out = JSON.parse(toolText(ran));
+        assert(out.exit_code === 0 && out.stdout.trim() === 'hosted', `exec answered ${toolText(ran)}`);
+        const gone = await client.callTool({ name: 'destroy_machine', arguments: { machine: createdID } });
+        assert(!gone.isError, `destroy_machine: ${toolText(gone)}`);
+        createdID = undefined;
+      });
+    }
+  } finally {
+    for (const c of [client, narrowClient]) {
+      if (c) { try { await c.close(); } catch { /* best effort */ } }
+    }
+    if (createdID) {
+      try { await request(`/v1/machines/${createdID}`, { method: 'DELETE' }); } catch { /* best effort */ }
+    }
+  }
+}
+
 async function main() {
   console.log(`e2e: ${API}${FULL ? ' (full lifecycle)' : ' (process only)'}`);
 
@@ -6016,6 +6116,7 @@ async function main() {
   // Before the FULL gate: the compose plan, the service patch and the shape of
   // the usage answer need no Firecracker, and the half that does says so.
   await dataRouteAssertions();
+  await hostedMCPAssertions(FULL);
   if (FULL) {
     // The engine target or the degraded ceiling: enforce() needs to know
     // which, and the agent gate holds the one-call path to a budget.

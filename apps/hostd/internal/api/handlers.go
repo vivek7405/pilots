@@ -304,6 +304,16 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 	if !checkLabels(w, req.Labels) {
 		return
 	}
+	// What a RESTRICTED key may make. Both checks are here rather than in the
+	// manager because they are a property of the CALLER, not of the machine:
+	// the rollout creates in-process with no key at all and must not be held
+	// to an agent's consent screen. See limits.go.
+	if !d.checkNamePrefix(w, r, &req.Name, "machine") {
+		return
+	}
+	if !d.checkMachineCap(w, r) {
+		return
+	}
 	if !d.checkQuota(w, r, quota.Delta{
 		Machines: 1,
 		VCPUs:    orDefault(req.VCPUs, 1),

@@ -47,6 +47,16 @@ type Deps struct {
 	// Resolver verifies that a custom hostname points here. Nil uses the
 	// system resolver; a test supplies its own.
 	Resolver Resolver
+	// SelfURL is where this process reaches its own plain listener,
+	// http://127.0.0.1:<port>. The hosted MCP endpoint builds an SDK client
+	// against it per request, carrying the caller's key, so every tool call
+	// takes the public API's own path: auth, scopes, tenancy, forwarding.
+	SelfURL string
+	// DashboardURL is the fleet's dashboard origin, named as the OAuth
+	// authorization server in the protected-resource document an MCP client
+	// reads after a 401. Empty on a fleet without one; the document then
+	// names no server and the client is expected to carry a key in a header.
+	DashboardURL string
 	// FleetKey seals secret environments before they are written. A service
 	// create carrying secrets is refused without it rather than stored in the
 	// clear -- those rows replicate to every host and into every backup.
@@ -278,6 +288,13 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("GET /v1/machines/{id}/volume", d.handleMachineVolume)
 	mux.HandleFunc("GET /v1/hosts", d.handleListHosts)
 	mux.HandleFunc("GET /v1/whoami", d.handleWhoami)
+
+	// The hosted MCP endpoint: the fleet toolset over Streamable HTTP, on
+	// every host, behind the same bearer key. See mcp.go. The well-known
+	// document beside it is how a client with no key learns where to get one.
+	mux.Handle("/mcp", d.mcpHandler())
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource", d.handleProtectedResource)
+	mux.HandleFunc("GET /.well-known/oauth-protected-resource/mcp", d.handleProtectedResource)
 
 	// Which repositories an org may have this fleet fetch. The connect is
 	// admin-scoped inside the handler and the list is not; see repos.go for

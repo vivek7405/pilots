@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "pilots",
+  "displayName": "pilots",
+  "version": "0.1.0",
+  "description": "Sandboxes and production services on Firecracker microVMs, from Claude Code: create machines, run commands, checkpoint and restore, deploy, promote.",
+  "author": {
+    "name": "pilots",
+    "url": "https://pilots.run"
+  },
+  "homepage": "https://pilots.run/agents",
+  "repository": "https://github.com/vivek7405/pilots",
+  "license": "Apache-2.0",
+  "keywords": [
+    "pilots",
+    "sandbox",
+    "firecracker",
+    "mcp",
+    "deploy",
+    "claude-code"
+  ]
+}

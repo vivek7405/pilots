@@ -23,13 +23,26 @@ import { auth } from '#modules/auth/auth.server.ts';
 
 const limited = rateLimit({ window: '1m', max: 120, trustProxy: true, key: 'api:' });
 
-/** Paths that authenticate themselves rather than through the session cookie. */
+/**
+ * Paths that authenticate themselves rather than through the session cookie.
+ *
+ * `/api/auth/**` is how a visitor BECOMES authenticated and `/api/cli/**`
+ * authenticates with a GitHub token instead.
+ *
+ * The OAuth endpoints are listed one by one rather than as a prefix, and that
+ * is the point: metadata, registration, the token exchange and revocation are
+ * reached by a client that has no session and cannot have one, while
+ * `/api/oauth/approve` is a signed-in human clicking Authorize and MUST stay
+ * behind the gate. A prefix here would have opened it.
+ */
 const PUBLIC_PREFIXES = ['/api/auth/', '/api/cli/'];
+const PUBLIC_PATHS = ['/api/oauth/metadata', '/api/oauth/register', '/api/oauth/token', '/api/oauth/revoke'];
 
 export default async function apiMiddleware(req: Request, next: () => Promise<Response>): Promise<Response> {
   return limited(req, async () => {
     const { pathname } = new URL(req.url);
     if (PUBLIC_PREFIXES.some((p) => pathname.startsWith(p))) return next();
+    if (PUBLIC_PATHS.includes(pathname)) return next();
 
     const session = await auth(req);
     if (!session?.user) return new Response('unauthorized', { status: 401 });

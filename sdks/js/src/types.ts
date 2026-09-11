@@ -13,8 +13,16 @@
  * match the Go, and let the test say when that is done.
  */
 
-/** A machine's lifecycle state (`Machine.state`). */
-export type MachineState = 'creating' | 'running' | 'suspended' | 'stopped' | 'error'
+/**
+ * A machine's lifecycle state (`Machine.state`).
+ *
+ * The six hostd writes, from `internal/state/schema.sql`. `destroyed` is one
+ * of them and is NOT a deleted row: a delete racing a replica that still
+ * carries the insert loses through the merge and the machine comes back, so a
+ * destroyed machine is a tombstone with a state. A client listing machines
+ * therefore has to filter it out itself.
+ */
+export type MachineState = 'creating' | 'running' | 'suspended' | 'stopped' | 'error' | 'destroyed'
 
 /** Per-machine lifecycle policy. A sandbox and a service differ only here. */
 export interface Knobs {
@@ -483,6 +491,19 @@ export interface UpdateServiceRequest {
 export interface CreateAPIKeyRequest {
   org_id: string
   scopes: string[]
+  /**
+   * The three RESTRICTIONS, all optional and all enforced by the fleet.
+   * `name_prefix` is what every machine and service the key names must start
+   * with, `max_machines` caps how many of them may exist at once, and
+   * `expires_at` (unix seconds) is when the key stops authenticating. Absent
+   * means unrestricted, which is what an operator's own key is.
+   *
+   * Write-once with the key: a restriction that could be widened later would
+   * not be one, so a narrower key is minted again rather than edited.
+   */
+  name_prefix?: string
+  max_machines?: number
+  expires_at?: number
 }
 
 export interface APIKeyResponse {
@@ -493,6 +514,13 @@ export interface APIKeyResponse {
   scopes: string[]
   created_at: number
   revoked_at?: number
+  /**
+   * The restrictions this key carries, echoed on the mint and on every
+   * listing. Absent means unrestricted.
+   */
+  name_prefix?: string
+  max_machines?: number
+  expires_at?: number
 }
 
 export interface RevokeResponse {

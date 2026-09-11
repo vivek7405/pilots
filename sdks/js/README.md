@@ -295,6 +295,91 @@ refusal after the image exists -- a health gate that never passed, most of all
 -- arrives as the log's last line, carrying the same `error`, `code` and `next`
 `POST /v1/services/{id}/deploy` would have answered with.
 
+## `@pilots/sdk/tanstack`
+
+pilots as a [TanStack AI](https://tanstack.com/ai) sandbox provider, so an
+agent built there runs its tool calls on a machine.
+
+```ts
+import { pilotsSandbox } from '@pilots/sdk/tanstack'
+
+const sandbox = pilotsSandbox({ apiKey: process.env.PILOT_API_KEY })
+```
+
+`@tanstack/ai-sandbox` is an optional peer: the contract's types are mirrored
+structurally in this module, so the core package keeps its zero dependencies
+and a consumer who never imports this entry point never installs the peer.
+
+Three things about the mapping are worth knowing.
+
+- **A snapshot is a checkpoint, and a restore is in place.** `snapshot()`
+  returns a checkpoint id and `restoreSnapshot()` puts that state back on the
+  same machine, which is what keeps the URL. A restore that created a machine
+  would mint a new address.
+- **`ports.connect()` answers the machine's permanent URL** and opens nothing:
+  a machine already serves one HTTP port on an address that survives suspend,
+  wake, restore and redeploy.
+- **The caller's sandbox id becomes the machine's NAME.** That is what makes
+  the URL reconstructable from run context, and `create` adopts a machine whose
+  name already matches rather than making a second one.
+
+`capabilities()` reports `snapshots`, `durableFilesystem`, `writableStdin` and
+`killableProcesses` true, and `fork` false: cloning one machine's disk into
+another is on the roadmap, and a flag has to say what is true today.
+
+## `@pilots/sdk/next`
+
+pilots as a [Next.js deployment adapter](https://nextjs.org/docs/app/api-reference/adapters),
+so a Next build tells the platform what it produced instead of the platform
+guessing afterwards.
+
+```js
+// next.config.js
+module.exports = { adapterPath: '@pilots/sdk/next' }
+```
+
+or, with no config change at all:
+
+```bash
+NEXT_ADAPTER_PATH=@pilots/sdk/next next build
+```
+
+It does two things and deliberately not more.
+
+- **`modifyConfig` turns on `output: 'standalone'`** for a production build.
+  That is the highest-value thing a host can do to a Next build and the one
+  most often missed: standalone makes Next trace what each entrypoint actually
+  needs and emit a self-contained server, instead of the image carrying the
+  whole repository and a full `node_modules`. A project that has already chosen
+  an output mode keeps it -- `output: 'export'` is a static site, and
+  overriding it would break the build for a gain of nothing.
+- **`onBuildComplete` writes one file**, `<distDir>/pilots-deploy.json`: the
+  static and prerendered paths the router can serve without waking the machine,
+  the redirect / rewrite / header rules it can answer at the edge, the per-kind
+  counts, and the warnings a person should read. One file, because a second
+  copy of a contract is a thing to keep in sync, and the traced asset lists
+  stay Next's to own rather than ours to duplicate.
+
+A rule carrying a `has` or `missing` predicate is marked `conditional: true`
+and left otherwise intact. A consumer that does not implement Next's predicate
+dialect must skip such a rule rather than apply it: an unconditionally applied
+conditional redirect is a redirect loop.
+
+**Routes built for the edge runtime become a build-time warning.** pilots has
+one primitive -- a microVM running Node -- and no separate edge tier for them
+to land on, so they run on Node. That is usually fine and occasionally not, and
+saying it once at build time beats discovering it at runtime.
+
+This entry point is dependency-free and imports nothing from the client: it
+runs inside a build, where the pilots API is not reachable.
+
+> The subpath is exported with a `default` condition rather than `import`
+> alone, and that is load-bearing. Next resolves an adapter with
+> `require.resolve` before importing it, and a CJS resolve of an
+> `import`-only subpath fails with `ERR_PACKAGE_PATH_NOT_EXPORTED` -- so
+> `adapterPath: '@pilots/sdk/next'` would fail at config load. `test/next.test.ts`
+> drives the real resolver against the real exports map to keep it that way.
+
 ## `@pilots/sdk/sprites-compat`
 
 A sprites-shaped face over the same client, so a codebase written against the

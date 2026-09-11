@@ -9,13 +9,38 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
 type ctxKey int
 
-const principalKey ctxKey = iota
+const (
+	principalKey ctxKey = iota
+	// bearerKey carries the raw key a request authenticated with, for the
+	// one handler that has to present it again: the hosted MCP endpoint
+	// calls back through the public API as the caller.
+	bearerKey
+	// bearerHashKey carries its sha256, which is what the limits row is
+	// keyed by. Kept rather than recomputed, so a restriction check is a map
+	// lookup instead of a hash on the request path.
+	bearerHashKey
+)
+
+// BearerToken returns the key the request authenticated with, or "" when it
+// came in on an exempt path or as a peer.
+func BearerToken(ctx context.Context) string {
+	key, _ := ctx.Value(bearerKey).(string)
+	return key
+}
+
+// BearerHash returns the sha256 of that key, which is what a limits or
+// revocation row is keyed by. Empty for a peer or an exempt path.
+func BearerHash(ctx context.Context) string {
+	hash, _ := ctx.Value(bearerHashKey).(string)
+	return hash
+}
 
 // principal is the authenticated caller. Both halves travel together because
 // every authorisation question needs both: which org's rows may be seen, and
@@ -111,6 +136,11 @@ var scopePrefixes = []struct {
 	{"/v1/plan", ScopeMachines},
 	{"/v1/hosts", ScopeMachines},
 	{"/v1/whoami", ScopeMachines},
+	// The lowest scope opens the MCP endpoint; each tool then calls its own
+	// route back through this table with the same key, so a machines key
+	// reaches list_machines and is refused list_services, exactly as it
+	// would be over plain HTTP.
+	{"/mcp", ScopeMachines},
 	{"/v1/builds", ScopeDeploy},
 	// A deploy-scoped key READS its own connections here, because a caller
 	// refused a {repo, ref} build has to be able to see what it is connected
@@ -179,6 +209,10 @@ var exemptPaths = map[string]bool{
 	// one into GitHub's webhook configuration, which is a fleet-wide
 	// credential sitting in a third party's settings page.
 	"/v1/github/webhook": true,
+	// RFC 9728: an MCP client reads this after a 401 to learn where to log
+	// in, so by definition it has no credential yet.
+	"/.well-known/oauth-protected-resource":     true,
+	"/.well-known/oauth-protected-resource/mcp": true,
 }
 
 // WithAuth authenticates bearer API keys against the local state replica.
@@ -196,7 +230,7 @@ func WithAuth(d Deps, next http.Handler) http.Handler {
 
 		key, ok := bearerToken(r)
 		if !ok {
-			unauthorized(w)
+			unauthorized(w, d.challenge(r))
 			return
 		}
 
@@ -221,13 +255,13 @@ func WithAuth(d Deps, next http.Handler) http.Handler {
 					"auth lookup failed", NextInternal, nil)
 				return
 			}
-			unauthorized(w)
+			unauthorized(w, d.challenge(r))
 			return
 		}
 		// Cheap guard on the Store contract: the row is looked up by hash, so
 		// this should never differ.
 		if subtle.ConstantTimeCompare([]byte(rec.Hash), []byte(hash)) != 1 {
-			unauthorized(w)
+			unauthorized(w, d.challenge(r))
 			return
 		}
 
@@ -242,7 +276,28 @@ func WithAuth(d Deps, next http.Handler) http.Handler {
 			return
 		}
 		if revoked {
-			unauthorized(w)
+			unauthorized(w, d.challenge(r))
+			return
+		}
+
+		// A key's LIFETIME, checked in the same breath as its revocation and
+		// for the same reason: a credential that outlives what its owner
+		// agreed to is the failure both are here to prevent. A key with no
+		// limits row is unrestricted, which is every operator key.
+		limits, err := d.tenancy().Limits(r.Context(), hash)
+		if err != nil && !errors.Is(err, state.ErrNotFound) {
+			WriteError(w, http.StatusInternalServerError, CodeInternal,
+				"auth lookup failed", NextInternal, nil)
+			return
+		}
+		if expired(limits, time.Now()) {
+			// A 401 rather than a 403: the credential is no longer valid at
+			// all, and a client that sees this should get a new one rather
+			// than ask for a wider scope.
+			w.Header().Set("WWW-Authenticate", d.challenge(r))
+			WriteError(w, http.StatusUnauthorized, CodeUnauthorized,
+				"this token expired",
+				"authorize the application again, or use a token with no expiry", nil)
 			return
 		}
 
@@ -255,6 +310,8 @@ func WithAuth(d Deps, next http.Handler) http.Handler {
 
 		ctx := context.WithValue(r.Context(), principalKey,
 			principal{OrgID: rec.OrgID, Scopes: splitScopes(rec.Scopes)})
+		ctx = context.WithValue(ctx, bearerKey, key)
+		ctx = context.WithValue(ctx, bearerHashKey, hash)
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
@@ -338,8 +395,8 @@ func OfferedSubprotocol(r *http.Request) string {
 	return ""
 }
 
-func unauthorized(w http.ResponseWriter) {
-	w.Header().Set("WWW-Authenticate", `Bearer realm="pilots"`)
+func unauthorized(w http.ResponseWriter, challenge string) {
+	w.Header().Set("WWW-Authenticate", challenge)
 	WriteError(w, http.StatusUnauthorized, CodeUnauthorized, "unauthorized",
 		"pass an API key: pilot login, or set PILOT_API_KEY", nil)
 }

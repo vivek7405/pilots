@@ -46,6 +46,7 @@ func newDoctorCmd(env *Env, getenv config.Env) *cobra.Command {
 				checkCredentials(getenv),
 				checkFleet(ctx, env),
 				checkKey(ctx, env),
+				checkHarnesses(getenv),
 			}
 			if local := checkLocalHost(ctx); local != nil {
 				checks = append(checks, *local)
