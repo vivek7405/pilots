@@ -1697,15 +1697,15 @@ async function buildAssertions() {
     const image = lines[lines.length - 1]?.result;
     assert(image, `the build produced no rootfs: ${JSON.stringify(lines.slice(-2))}`);
 
-    const m = await request('/v1/machines', {
+    const { status, json } = await request('/v1/machines', {
       method: 'POST',
       body: { name: `e2e-buildkernel-${Date.now()}`, image },
     });
-    assert(m.status === 201 || m.status === 200, `create from the build: ${m.status}`);
-    const id = m.body.id;
+    assert(status === 201, `create from the build: ${status}: ${JSON.stringify(json)}`);
+    const id = json.id;
     try {
-      const out = await exec(id, 'cat /etc/pilots-build-kernel');
-      const buildKernel = (out.stdout || '').trim();
+      // exec returns the trimmed stdout, and throws on a non-zero exit.
+      const buildKernel = await exec(id, 'cat /etc/pilots-build-kernel');
       assert(buildKernel, 'the build recorded no kernel version');
       // The pinned guest kernel. A RUN step that ran on the host would have
       // recorded the host's, which is not this.
@@ -1744,9 +1744,9 @@ async function buildAssertions() {
   // list and lets you destroy it, and so do we. It must also not be counted
   // against the org's machine quota, since nobody asked for it.
   await step('the builder machine is visible to the org and destroyable', async () => {
-    const list = await request('/v1/machines');
-    assert(list.status === 200, `list machines: ${list.status}`);
-    const builders = (list.body.machines || list.body || [])
+    const { status, json } = await request('/v1/machines');
+    assert(status === 200, `list machines: ${status}`);
+    const builders = (json ?? [])
       .filter((m) => typeof m.name === 'string' && m.name.startsWith('builder-'));
     assert(builders.length >= 1,
       'no builder machine is visible after a build; the org cannot see or clear it');
@@ -1755,6 +1755,10 @@ async function buildAssertions() {
     const victim = builders[0];
     const del = await request(`/v1/machines/${victim.id}`, { method: 'DELETE' });
     assert(del.status === 200 || del.status === 204, `destroy the builder: ${del.status}`);
+    await waitFor(async () => {
+      const { json: after } = await request('/v1/machines');
+      return !(after ?? []).some((m) => m.id === victim.id && m.state !== 'destroyed');
+    }, { what: 'the destroyed builder to leave the machine list' });
 
     const again = await postTar('/v1/builds', tarball({
       'Dockerfile': 'FROM alpine:3.20\nRUN echo recovered > /etc/recovered\n',
@@ -1769,12 +1773,12 @@ async function buildAssertions() {
   // as a builder: the name decides whether the row counts against quota and
   // whether the idle monitor reaps it after a day.
   await step('a client cannot take a builder- name', async () => {
-    const res = await request('/v1/machines', {
+    const { status, json } = await request('/v1/machines', {
       method: 'POST',
       body: { name: `builder-squat-${Date.now()}` },
     });
-    assert(res.status >= 400 && res.status < 500,
-      `creating a builder- name returned ${res.status}, want a 4xx refusal`);
+    assert(status >= 400 && status < 500,
+      `creating a builder- name returned ${status}, want a 4xx refusal: ${JSON.stringify(json)}`);
   });
 }
 
