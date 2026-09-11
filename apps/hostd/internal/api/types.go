@@ -9,7 +9,11 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
+
+	"github.com/vivek7405/pilots/hostd/internal/cron"
 )
 
 // Knobs are the per-machine lifecycle policy. There is no sandbox type and no
@@ -17,18 +21,67 @@ import (
 // different knobs. Scale-to-zero (MinMachinesRunning == 0) is valid for
 // production services, exactly as it is on Fly.
 type Knobs struct {
-	AutoStop           string `json:"auto_stop"`            // off|stop|suspend
+	AutoStop           string `json:"auto_stop"`            // off|suspend
 	AutoStart          bool   `json:"auto_start"`           // wake on an inbound request
 	MinMachinesRunning int    `json:"min_machines_running"` // 0 = scale to zero
 	SoftLimit          int    `json:"soft_limit"`           // concurrency before starting another replica
+	// IdleTimeout is how many seconds of quiet the idle monitor waits before
+	// it suspends the machine. The machine's own activity -- a request, an
+	// exec, a session running a command -- restarts the wait, so this is the
+	// lever for work nothing is connected to: a daemon that polls a queue
+	// sets an hour and stays up an hour past its last exec. Capped so a
+	// forgotten value costs at most an hour per idle cycle, where
+	// auto_stop: off costs forever.
+	IdleTimeout int `json:"idle_timeout"` // seconds, 1..MaxIdleTimeoutSeconds
+	// Schedules are the machine's cron jobs: on each expression's minute the
+	// owning host wakes the machine if it must and either GETs Path on it
+	// through the router or runs Cmd in it. null means none.
+	//
+	// NOT omitempty, and that is load-bearing: a deploy's knobs are merged
+	// onto the previous replica's, so an absent key inherits and an explicit
+	// [] clears -- "remove every cron" is spelled schedules: []. This struct
+	// is what the plan route serialises a step's knobs as, and omitempty
+	// drops an EMPTY slice as readily as a nil one, so `schedules: []` in a
+	// compose file (or `crons: []` in package.json) would reach the CLI as
+	// no key at all and inherit exactly what it was written to remove. nil
+	// marshals as null, which every reader already treats as absent.
+	Schedules []Schedule `json:"schedules"`
 }
+
+// Schedule is one cron job: an expression and exactly one of a path to GET
+// or a command to run.
+//
+// A GET is the framework-agnostic trigger -- every framework has routes and
+// no two share a job syntax -- and it rides the same held wake a visitor's
+// request does, so a scale-to-zero app runs its cron without a machine kept
+// warm for it. The request carries X-Pilot-Cron, which the public listener
+// strips from anything arriving from outside, so a handler can trust it
+// without a shared secret. Cmd is for work with no HTTP surface at all.
+type Schedule struct {
+	Cron string `json:"cron"`           // five fields, UTC; or @hourly/@daily/@weekly/@monthly
+	Path string `json:"path,omitempty"` // GET this path on the machine, e.g. /jobs/digest
+	Cmd  string `json:"cmd,omitempty"`  // or run this command in it
+}
+
+// MaxSchedules bounds how many cron jobs one machine may carry. Twenty is more
+// than any app has asked for and small enough that the per-tick scan over a
+// host's machines stays a scan.
+const MaxSchedules = 20
+
+// The bounds of idle_timeout. Sixty seconds is the default every machine had
+// before the knob existed; an hour is the ceiling a forgotten value is allowed
+// to cost, the same bound Sprites puts on its keep-alive tasks.
+const (
+	DefaultIdleTimeoutSeconds = 60
+	MaxIdleTimeoutSeconds     = 3600
+)
 
 // DefaultKnobs is the policy a machine gets when the caller says nothing.
 //
 // The defaults keep a machine REACHABLE and cheap: it suspends when idle and
 // wakes on the next request.
 func DefaultKnobs() Knobs {
-	return Knobs{AutoStop: "suspend", AutoStart: true, SoftLimit: 20}
+	return Knobs{AutoStop: "suspend", AutoStart: true, SoftLimit: 20, IdleTimeout: DefaultIdleTimeoutSeconds}
 }
 
 // DecodeKnobs applies a caller's partial policy on top of the defaults.
@@ -45,9 +98,77 @@ func DecodeKnobs(raw json.RawMessage) (Knobs, error) {
 		return k, nil
 	}
 	if err := json.Unmarshal(raw, &k); err != nil {
-		return k, fmt.Errorf("api: invalid knobs: %w", err)
+		return k, fmt.Errorf("%w: %w", ErrInvalidKnobs, err)
+	}
+	if err := k.Validate(); err != nil {
+		return k, fmt.Errorf("%w: %w", ErrInvalidKnobs, err)
 	}
 	return k, nil
+}
+
+// ErrInvalidKnobs marks a policy the caller spelled wrong, so the API answers
+// 400 rather than storing a value the idle monitor would never act on.
+var ErrInvalidKnobs = errors.New("invalid knobs")
+
+// Validate is what a policy must satisfy before it is stored. It runs on the
+// wire path only -- DecodeKnobs, and the compose planner so a refusal names
+// the file: ParseKnobs reads what is already stored and must never refuse it.
+func (k Knobs) Validate() error {
+	if len(k.Schedules) > MaxSchedules {
+		return fmt.Errorf("schedules: %d is more than the %d a machine may carry", len(k.Schedules), MaxSchedules)
+	}
+	for i, s := range k.Schedules {
+		if err := s.Validate(); err != nil {
+			return fmt.Errorf("schedules[%d]: %w", i, err)
+		}
+		// A path schedule is a request, and a request wakes a machine only
+		// where auto_start says it may. On a machine that suspends and then
+		// refuses to wake, the job cannot run at all: the fire answers 503
+		// every minute for the life of the machine, and nothing about the
+		// create said so. Refusing the combination is how the caller finds
+		// out now rather than from a log nobody reads.
+		if s.Path != "" && k.AutoStop != "off" && !k.AutoStart {
+			return fmt.Errorf("schedules[%d]: a path schedule needs auto_start, "+
+				"or auto_stop: off -- on a machine that suspends and cannot wake it would never run", i)
+		}
+	}
+	switch k.AutoStop {
+	case "off", "suspend":
+	case "stop":
+		// Accepted before stop existed, and quietly behaving as suspend: the
+		// idle monitor only ever checks for "off". Refusing is honest until
+		// POST /stop is implemented.
+		return errors.New(`auto_stop "stop" is not available yet; use suspend, which is what an idle machine does`)
+	default:
+		return fmt.Errorf("auto_stop is %q, want off or suspend", k.AutoStop)
+	}
+	if k.MinMachinesRunning < 0 {
+		return errors.New("min_machines_running cannot be negative")
+	}
+	if k.SoftLimit < 0 {
+		return errors.New("soft_limit cannot be negative")
+	}
+	if k.IdleTimeout < 1 || k.IdleTimeout > MaxIdleTimeoutSeconds {
+		return fmt.Errorf("idle_timeout is %d, want 1..%d seconds", k.IdleTimeout, MaxIdleTimeoutSeconds)
+	}
+	return nil
+}
+
+// Validate checks one schedule: a cron expression the matcher accepts and
+// exactly one target.
+func (s Schedule) Validate() error {
+	if _, err := cron.Parse(s.Cron); err != nil {
+		return err
+	}
+	switch {
+	case s.Path == "" && s.Cmd == "":
+		return errors.New("needs a path to GET or a cmd to run")
+	case s.Path != "" && s.Cmd != "":
+		return errors.New("has both a path and a cmd; a schedule does one thing")
+	case s.Path != "" && !strings.HasPrefix(s.Path, "/"):
+		return fmt.Errorf("path %q must start with /", s.Path)
+	}
+	return nil
 }
 
 // ParseKnobs reads a machine's stored policy.

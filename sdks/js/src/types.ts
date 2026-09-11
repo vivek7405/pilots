@@ -26,10 +26,29 @@ export type MachineState = 'creating' | 'running' | 'suspended' | 'stopped' | 'e
 
 /** Per-machine lifecycle policy. A sandbox and a service differ only here. */
 export interface Knobs {
-  auto_stop: 'off' | 'stop' | 'suspend'
+  auto_stop: 'off' | 'suspend'
   auto_start: boolean
   min_machines_running: number
   soft_limit: number
+  /** Seconds of quiet before the machine suspends, 1..3600 (default 60). */
+  idle_timeout: number
+  /**
+   * The machine's cron jobs; `null` means none. On a deploy an absent key
+   * inherits the previous release's and an explicit `[]` clears them.
+   */
+  schedules: Schedule[] | null
+}
+
+/**
+ * One cron job: a five-field expression (UTC; or `@hourly`, `@daily`,
+ * `@weekly`, `@monthly`) and exactly one of a path the host GETs on the
+ * machine or a command it runs in it. A GET carries the `X-Pilot-Cron`
+ * header, which cannot arrive from outside the fleet.
+ */
+export interface Schedule {
+  cron: string
+  path?: string
+  cmd?: string
 }
 
 /**

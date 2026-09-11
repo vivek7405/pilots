@@ -47,7 +47,6 @@ func buildMCPServer(d mcpDeps) *mcp.Server {
 func (d mcpDeps) registerLocalTools(s *mcp.Server) {
 	client := d.client
 	wrap, constant, toObject := pilotsmcp.Wrap, pilotsmcp.Constant, pilotsmcp.ToObject
-
 	type buildIn struct {
 		Dir        string `json:"dir" jsonschema:"the build context directory"`
 		Dockerfile string `json:"dockerfile,omitempty" jsonschema:"Dockerfile CONTENTS (not a path); replaces any Dockerfile in the directory"`
@@ -281,6 +280,7 @@ type deployIn = struct {
 	Env          map[string]string   `json:"env,omitempty"`
 	SecretEnv    map[string]string   `json:"secret_env,omitempty"`
 	Replicas     int                 `json:"replicas,omitempty"`
+	Schedules    []pilots.Schedule   `json:"schedules,omitempty" jsonschema:"cron jobs for the service: {cron, path} GETs the path on a replica on that schedule (five fields, UTC, or @hourly/@daily/@weekly/@monthly), {cron, cmd} runs a command; an app that declares its own (vercel.json crons, or package.json webjs.crons) needs none of this"`
 }
 
 // applyOverrides: a health or replicas passed alongside dir and then quietly
@@ -318,6 +318,9 @@ func applyOverrides(plan *pilots.ComposePlan, in deployIn) error {
 		// prevent.
 		given = append(given, "private")
 	}
+	if in.Schedules != nil {
+		given = append(given, "schedules")
+	}
 	if len(given) == 0 {
 		return nil
 	}
@@ -353,6 +356,16 @@ func applyOverrides(plan *pilots.ComposePlan, in deployIn) error {
 	}
 	if in.CustomDomain != "" {
 		step.CustomDomain = in.CustomDomain
+	}
+	if in.Schedules != nil {
+		// Onto whatever the plan already carries (a webjs app's own crons,
+		// for one), replacing only the schedules: an explicit empty list is
+		// how a caller clears them.
+		if step.Knobs == nil {
+			step.Knobs = &pilots.KnobsPatch{}
+		}
+		list := in.Schedules
+		step.Knobs.Schedules = &list
 	}
 	if in.SecretEnv != nil {
 		return errors.New("secret_env with dir is not supported: put secret:// references in a compose file, or deploy with name and build")
@@ -391,7 +404,15 @@ func (d mcpDeps) deployBuild(ctx context.Context, in deployIn) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	release, err := d.client.Services.Deploy(ctx, service.ID, pilots.DeployRequest{Build: in.Build})
+	deploy := pilots.DeployRequest{Build: in.Build}
+	if in.Schedules != nil {
+		// The same rule applyOverrides states for the dir form: an argument
+		// accepted and quietly dropped is the worst outcome available. An
+		// explicit empty list clears the previous release's crons.
+		list := in.Schedules
+		deploy.Knobs = &pilots.KnobsPatch{Schedules: &list}
+	}
+	release, err := d.client.Services.Deploy(ctx, service.ID, deploy)
 	if err != nil {
 		return nil, err
 	}

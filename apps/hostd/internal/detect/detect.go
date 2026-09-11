@@ -25,11 +25,14 @@ package detect
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/vivek7405/pilots/hostd/internal/api"
 )
 
 // Framework is what a directory was recognised as.
@@ -176,6 +179,95 @@ func listing(dir string) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// declaredCrons reads the cron jobs an app declares in ITS OWN config, so a
+// cron needs no pilots-specific file for anybody:
+//
+//	vercel.json     { "crons": [{ "path": "/api/digest", "schedule": "0 5 * * *" }] }
+//	package.json    "webjs": { "crons": [ … same shape … ] }
+//
+// vercel.json is what Next, Astro, SvelteKit, Nuxt and Remix users already
+// write, and it is read for EVERY app rather than for a list of frameworks:
+// the file is an explicit declaration, and which framework wrote it is not
+// this package's business. webjs spells the same thing in the block it
+// already owns, with Vercel's field names, and wins where both are present --
+// the framework's own file is the more specific of the two.
+//
+// The result is nil when nothing declares any, and an empty, non-nil list
+// when a config declares an empty one: the deploy merges knobs onto the
+// previous release's, and only an explicit empty list clears inherited crons.
+//
+// A malformed entry is an error naming its file and index, not a warning: a
+// cron silently dropped at plan time fires nowhere and nobody is told.
+func declaredCrons(dir string, fw Framework) ([]api.Schedule, error) {
+	if fw == FrameworkWebJS {
+		// nil AND no error means "this file declares nothing", which is the
+		// only case that falls through to the other one.
+		if crons, err := webjsCrons(dir); crons != nil || err != nil {
+			return crons, err
+		}
+	}
+	return vercelCrons(dir)
+}
+
+func webjsCrons(dir string) ([]api.Schedule, error) {
+	pkg := readPackageJSON(dir)
+	block, _ := pkg["webjs"].(map[string]any)
+	raw, ok := block["crons"]
+	if !ok {
+		return nil, nil
+	}
+	return cronEntries("package.json: webjs.crons", raw)
+}
+
+// vercelCrons reads vercel.json's crons.
+//
+// A file that does not parse declares nothing readable and is ignored, the
+// same answer readPackageJSON gives: refusing the deploy would make an
+// unrelated broken file -- one this platform has no other use for -- the
+// reason an app cannot ship. A file that DOES parse and spells crons wrongly
+// is an error, because there the author was talking to us.
+func vercelCrons(dir string) ([]api.Schedule, error) {
+	body, err := os.ReadFile(filepath.Join(dir, "vercel.json"))
+	if err != nil {
+		return nil, nil
+	}
+	var cfg map[string]any
+	if json.Unmarshal(body, &cfg) != nil {
+		return nil, nil
+	}
+	raw, ok := cfg["crons"]
+	if !ok {
+		return nil, nil
+	}
+	return cronEntries("vercel.json: crons", raw)
+}
+
+// cronEntries turns Vercel's [{path, schedule}] into schedules. One parser for
+// both files, because webjs copied those field names deliberately and two
+// copies would drift on the day one of them gained a field.
+func cronEntries(source string, raw any) ([]api.Schedule, error) {
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("%s must be a list of {path, schedule}", source)
+	}
+	if len(list) > api.MaxSchedules {
+		return nil, fmt.Errorf("%s has %d entries, more than the %d a machine may carry",
+			source, len(list), api.MaxSchedules)
+	}
+	out := make([]api.Schedule, 0, len(list))
+	for i, item := range list {
+		entry, _ := item.(map[string]any)
+		path, _ := entry["path"].(string)
+		schedule, _ := entry["schedule"].(string)
+		s := api.Schedule{Cron: schedule, Path: path}
+		if err := s.Validate(); err != nil {
+			return nil, fmt.Errorf("%s[%d] %v", source, i, err)
+		}
+		out = append(out, s)
+	}
+	return out, nil
 }
 
 func readPackageJSON(dir string) map[string]any {

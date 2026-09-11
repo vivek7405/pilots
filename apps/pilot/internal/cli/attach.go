@@ -116,6 +116,11 @@ func newSessionsCmd(env *Env) *cobra.Command {
 				} else if s.Attached {
 					state = "attached"
 				}
+				// A session running a command keeps the machine awake; say
+				// so where the operator is looking for why it has not slept.
+				if !s.Ended && s.Busy {
+					state += ", busy"
+				}
 				rows = append(rows, []string{s.ID, state, unixTime(s.CreatedAt), strings.Join(s.Argv, " ")})
 			}
 			return env.W.Table([]string{"SESSION", "STATE", "STARTED", "COMMAND"}, rows)

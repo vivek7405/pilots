@@ -162,7 +162,10 @@ func (m *Manager) Promote(ctx context.Context, machineID string, req api.Promote
 	// sibling every extra replica inherits from. Moving this above PutMachine
 	// would hand replicas two and up the defaults instead of the sandbox's
 	// knobs.
-	knobs := m.replicaKnobs(ctx, svc, nil)
+	knobs, err := m.replicaKnobs(ctx, svc, nil)
+	if err != nil {
+		return nil, err
+	}
 	for i := 1; i < replicas; i++ {
 		if _, err := m.createReplica(ctx, svc, rel, knobs, ""); err != nil {
 			return nil, fmt.Errorf("services: replica %d of promoted %s: %w", i+1, machineID, err)

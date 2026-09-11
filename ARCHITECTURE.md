@@ -973,9 +973,16 @@ proxy — no socat, no per-VM forwarder processes); if running-remote: proxy
 over WireGuard to the owning hostd; if suspended and `autoStart`: **hold the
 connection**, restore locally (or trigger the owner), then proxy. Touch
 `last_activity` on every request AND every exec. Idle monitor suspends when
-BOTH the wall-clock timer (default 60s, per-machine) and concurrency
-(in-flight = 0 against `softLimit`) say idle — exec/WS activity counts, so an
-agent mid-build with zero HTTP traffic is never suspended. That monitor owns
+BOTH the wall-clock timer (the `idle_timeout` knob: default 60s, at most 1h,
+per-machine) and concurrency (in-flight = 0 against `softLimit`) say idle —
+exec/WS activity counts, so an agent mid-build with zero HTTP traffic is
+never suspended — and then, last, only for a machine those two already agreed
+on, asks the guest whether a console session is still running a command: the
+agent answers from its process tree (any process besides the session leader
+with the same session id), because a client that detached took hostd's only
+view of that session with it. That probe fails OPEN — a suspend is a freeze
+that resumes on the next touch, so the reversible mistake is the one to
+make — where the conntrack signal below fails safe. That monitor owns
 sandboxes only. A machine with a release (a rollout's replica or a promoted
 sandbox) is the autoscaler's: the host that HOLDS the replica gives it back
 when its own in-flight count, its held sessions and the row's `last_activity`
@@ -987,6 +994,25 @@ storage its snapshot occupies. N-replica: round-robin among healthy replicas,
 `softLimit` overflow starts the next stopped replica, excess capacity suspends
 them down to `minMachinesRunning`, which defaults to zero; `autoStop: off` on
 a deploy means never.
+
+**Schedules (in hostd):** a machine's cron jobs live in its knobs
+(`schedules: [{cron, path | cmd}]`) and the host that owns the machine fires
+them — `cmd/hostd/schedules.go`, one 10 s loop beside the waker. On an
+expression's minute it makes a `GET path` to `<machine>.<domain>` through the
+router's *internal* handler, which is the same resolve, held wake and proxy a
+visitor's request gets, so a scale-to-zero app runs its cron with nothing
+kept warm for it; `cmd` runs through exec instead. The request carries
+`X-Pilot-Cron`, stripped on the public listener beside `X-Pilot-Forwarded`,
+so an app trusts the header with no shared secret. Ownership is the row's
+single-writer `host_id`, so every fire is local and no leader exists; for a
+service the lowest-id current replica fires and the rest stand down (gating on
+the autoscaler's arbiter was rejected: its live set is a per-host clock
+window, so two hosts can disagree for a minute and both fire). At-least-once:
+fired minutes live in memory, a restart inside a minute may fire again, a
+fire still running when its next minute comes is skipped, and handlers are
+idempotent by convention. Vercel's model, on the wake path that already
+existed; the cron matcher is `internal/cron`, a hundred lines rather than a
+dependency.
 
 **Self-heal:** every hostd heartbeats `hosts.last_seen`; a host silent
 >30s is dead; each survivor rescues the slice

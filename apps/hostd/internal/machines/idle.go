@@ -7,11 +7,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
-// DefaultIdleTimeout is how long a machine must be quiet before it suspends.
-const DefaultIdleTimeout = 60 * time.Second
+// DefaultIdleTimeout is how long a machine must be quiet before it suspends
+// when its knobs say nothing else; the idle_timeout knob is the per-machine
+// value.
+const DefaultIdleTimeout = api.DefaultIdleTimeoutSeconds * time.Second
 
 // idleCheckInterval is how often the monitor looks. Frequent enough that a
 // machine suspends promptly, cheap because it is a local read.
@@ -191,8 +194,32 @@ func (m *Manager) shouldSuspend(ctx context.Context, row state.Machine) bool {
 		return false
 	}
 
+	// The wait is the machine's own. A blob stored before the knob existed
+	// has no idle_timeout and reads as the default through ParseKnobs; a
+	// zero written by an older test fixture is treated the same way rather
+	// than as "suspend the instant it goes quiet".
+	timeout := DefaultIdleTimeout
+	if knobs.IdleTimeout > 0 {
+		timeout = time.Duration(knobs.IdleTimeout) * time.Second
+	}
 	idleFor := time.Since(time.Unix(row.LastActivity, 0))
-	return idleFor >= DefaultIdleTimeout
+	if idleFor < timeout {
+		return false
+	}
+
+	// Last, and only for a machine every signal above has already agreed to
+	// suspend: ask the guest whether a console session is still running a
+	// command. A client that detached took hostd's only view of that session
+	// with it; the guest's process tree is the view that remains. This is the
+	// one step that talks to the guest, which is why it is not the first.
+	if slot, ok := m.SlotFor(row.ID); ok && m.sessionsBusy(ctx, row.ID, slot.AgentAddr()) {
+		// A running command is activity, and activity restarts the wait:
+		// without this touch the machine would suspend on the first tick
+		// after the command ended, not idle_timeout later as promised.
+		m.Touch(ctx, row.ID)
+		return false
+	}
+	return true
 }
 
 // currentRelease is the release a service is serving right now, or "" when

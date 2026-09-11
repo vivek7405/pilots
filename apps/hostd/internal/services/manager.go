@@ -220,7 +220,11 @@ func (m *Manager) rollOut(ctx context.Context, svc *state.Service, rel *state.Re
 	// a rollout the service still names the previous release, so replica two
 	// would inherit from that one while replica one carried what the deploy
 	// asked for.
-	knobs = m.replicaKnobs(ctx, svc, knobs)
+	merged, err := m.replicaKnobs(ctx, svc, knobs)
+	if err != nil {
+		return nil, err
+	}
+	knobs = merged
 
 	// Replica 1 BOOTS: a release has no memory image until something has
 	// proved this rootfs serves.
@@ -334,7 +338,11 @@ func (m *Manager) rollOutOnVolume(ctx context.Context, svc *state.Service, rel *
 		// A first deploy. On a failed gate the machine is LEFT in place:
 		// destroying the only machine of a service deletes the service row,
 		// sealed environment included.
-		created, err := m.createReplica(ctx, svc, rel, m.replicaKnobs(ctx, svc, knobs), volumeID)
+		merged, err := m.replicaKnobs(ctx, svc, knobs)
+		if err != nil {
+			return err
+		}
+		created, err := m.createReplica(ctx, svc, rel, merged, volumeID)
 		if err != nil {
 			return fmt.Errorf("services: first replica of %s: %w", rel.ID, err)
 		}
@@ -673,8 +681,16 @@ func max(a, b int) int {
 // attached. The release, not a knob, is what hands its idle decision to the
 // autoscaler (machines.shouldSuspend), so nothing here needs to differ. A
 // warm replica is a deploy with min_machines_running set.
+//
+// The error is the one thing the API could not have caught: it validated the
+// request against the DEFAULTS, and a rule that spans keys -- a path schedule
+// on a replica that suspends and cannot wake -- can be broken by the merge
+// alone, half from the request and half from what the sibling carried. Only
+// a request can create that, so only a request is validated; an inherited
+// blob with nothing asked of it is what is already running, and refusing it
+// would wedge the autoscaler on a value nobody just wrote.
 func (m *Manager) replicaKnobs(ctx context.Context, svc *state.Service,
-	requested json.RawMessage) json.RawMessage {
+	requested json.RawMessage) (json.RawMessage, error) {
 
 	base := api.DefaultKnobs()
 	if machines, err := m.replicasOf(ctx, svc.ID, svc.ReleaseID); err == nil {
@@ -690,9 +706,13 @@ func (m *Manager) replicaKnobs(ctx context.Context, svc *state.Service,
 		// changes the floor and nothing else. A decode error here is not
 		// the rollout's to swallow; the API validated the body already.
 		_ = json.Unmarshal(requested, &base)
+		if err := base.Validate(); err != nil {
+			return nil, fmt.Errorf("services: the deploy's knobs merged onto %s's replicas are not a policy the host can run: %w: %w",
+				svc.ID, api.ErrInvalidKnobs, err)
+		}
 	}
 	raw, _ := api.MarshalKnobs(base)
-	return json.RawMessage(raw)
+	return json.RawMessage(raw), nil
 }
 
 // remote asks another host to suspend or wake one of its machines.

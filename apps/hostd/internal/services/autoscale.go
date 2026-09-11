@@ -299,7 +299,11 @@ func (m *Manager) scaleUp(ctx context.Context, svc *state.Service, machines []st
 	if err != nil {
 		return err
 	}
-	_, err = m.createReplica(ctx, svc, rel, m.replicaKnobs(ctx, svc, nil), vol)
+	inherited, err := m.replicaKnobs(ctx, svc, nil)
+	if err != nil {
+		return err
+	}
+	_, err = m.createReplica(ctx, svc, rel, inherited, vol)
 	return err
 }
 

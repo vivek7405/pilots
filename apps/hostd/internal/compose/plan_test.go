@@ -489,6 +489,127 @@ services:
 	}
 }
 
+// idle_timeout is spelled the way compose spells durations, and a bare number
+// of seconds is accepted too; both are bounded like the API's knob.
+func TestXPilotsIdleTimeoutReachesTheKnobs(t *testing.T) {
+	const file = `
+name: shop
+services:
+  worker:
+    image: node:24
+    x-pilots:
+      idle_timeout: 30m
+  db:
+    image: postgres:17
+    x-pilots:
+      idle_timeout: 90
+`
+	plan, _, err := Compile(context.Background(), Request{Compose: file})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if got := stepNamed(t, plan, "worker").Knobs; got == nil || got.IdleTimeout != 1800 {
+		t.Errorf("worker idle_timeout = %+v, want 1800s from 30m", got)
+	}
+	if got := stepNamed(t, plan, "db").Knobs; got == nil || got.IdleTimeout != 90 {
+		t.Errorf("db idle_timeout = %+v, want 90 from a bare number", got)
+	}
+	for _, bad := range []string{"2h", "0s", "soon", "-5"} {
+		file := "name: shop\nservices:\n  db:\n    image: postgres:17\n    x-pilots:\n      idle_timeout: " + bad + "\n"
+		if _, _, err := Compile(context.Background(), Request{Compose: file}); err == nil || !strings.Contains(err.Error(), "idle_timeout") {
+			t.Errorf("idle_timeout %s: err = %v, want a refusal naming idle_timeout", bad, err)
+		}
+	}
+}
+
+// Schedules reach the plan as knobs, an empty list is kept (it clears
+// inherited crons on a deploy), and a bad entry is named by index.
+func TestXPilotsSchedulesReachTheKnobs(t *testing.T) {
+	const file = `
+name: shop
+services:
+  web:
+    image: node:24
+    x-pilots:
+      schedules:
+        - cron: "0 5 * * *"
+          path: /jobs/digest
+        - cron: "@hourly"
+          cmd: ./tick
+  worker:
+    image: node:24
+    x-pilots:
+      schedules: []
+`
+	plan, _, err := Compile(context.Background(), Request{Compose: file})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	web := stepNamed(t, plan, "web").Knobs
+	if web == nil || len(web.Schedules) != 2 || web.Schedules[0].Path != "/jobs/digest" || web.Schedules[1].Cmd != "./tick" {
+		t.Errorf("web schedules = %+v", web)
+	}
+	if web != nil && (!web.AutoStart || web.IdleTimeout == 0) {
+		t.Errorf("a schedules-only x-pilots zeroed its neighbours: %+v", web)
+	}
+	worker := stepNamed(t, plan, "worker").Knobs
+	if worker == nil || worker.Schedules == nil || len(worker.Schedules) != 0 {
+		t.Errorf("schedules: [] should reach the plan as an empty list, got %+v", worker)
+	}
+
+	for _, tc := range []struct{ entry, want string }{
+		{`- cron: "0 5 * * *"`, "schedules[0] needs a path"},
+		{`- cron: "soon"` + "\n          path: /x", "schedules[0]"},
+		{`- cron: "0 5 * * *"` + "\n          path: x", "must start with /"},
+		{`- cron: "0 5 * * *"` + "\n          path: /a\n        - cron: nope\n          cmd: x", "schedules[1]"},
+	} {
+		file := "name: shop\nservices:\n  db:\n    image: postgres:17\n    x-pilots:\n      schedules:\n        " + tc.entry + "\n"
+		_, _, err := Compile(context.Background(), Request{Compose: file})
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("entry %q: err = %v, want one mentioning %q", tc.entry, err, tc.want)
+		}
+	}
+}
+
+// A path schedule fires as a request, and a replica that suspends and cannot
+// wake would answer 503 to every one. The API refuses it; the planner runs
+// the same rule so the refusal names the service and arrives before the build.
+func TestXPilotsPathScheduleNeedsAWakeableReplica(t *testing.T) {
+	const file = `
+name: shop
+services:
+  web:
+    image: node:24
+    x-pilots:
+      auto_start: false
+      schedules:
+        - cron: "@hourly"
+          path: /jobs/tick
+`
+	_, _, err := Compile(context.Background(), Request{Compose: file})
+	if err == nil || !strings.Contains(err.Error(), "web") || !strings.Contains(err.Error(), "auto_start") {
+		t.Fatalf("err = %v, want a refusal naming the service and auto_start", err)
+	}
+}
+
+// "stop" was accepted and silently behaved as suspend, because the idle
+// monitor only checks for "off". Until POST /stop exists it is refused, with
+// the alternative named.
+func TestAutoStopStopIsRefusedUntilItExists(t *testing.T) {
+	const file = `
+name: shop
+services:
+  db:
+    image: postgres:17
+    x-pilots:
+      auto_stop: stop
+`
+	_, _, err := Compile(context.Background(), Request{Compose: file})
+	if err == nil || !strings.Contains(err.Error(), "suspend") {
+		t.Fatalf("err = %v, want a refusal naming suspend", err)
+	}
+}
+
 // One element stays one argument. Splitting on spaces would turn the WAL
 // archive command into five arguments and a shell operator the guest would
 // then run.

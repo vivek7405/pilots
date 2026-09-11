@@ -459,6 +459,75 @@ async function lifecycleAssertions() {
       assert(ended && ended.ended, `exit should end the session: ${JSON.stringify(after.json)}`);
     });
 
+    // #107: a session that is still RUNNING a command keeps its machine awake
+    // after the client has gone. hostd's own view of the session left with the
+    // websocket; the guest reads the process tree instead and reports `busy`,
+    // and the idle monitor asks before it suspends. The counterfactual is the
+    // same session at a bare prompt, which suspends on schedule.
+    //
+    // Two idle windows are waited out here (60 s timer + 10 s tick + slack,
+    // twice), which is what makes this the slowest step in the lifecycle
+    // section; it is also the first assertion the battery makes about the idle
+    // monitor at all.
+    await step('a detached console running a command keeps the machine awake; at a prompt it suspends', async () => {
+      const protocols = [`authorization.bearer.${KEY}`];
+      const open = (path) => new Promise((resolve, reject) => {
+        const ws = new WebSocket(WS_API + path, protocols);
+        ws.addEventListener('open', () => resolve(ws));
+        ws.addEventListener('error', (e) => reject(new Error(`ws ${path}: ${e.message ?? 'error'}`)));
+      });
+      const sessionOf = (ws, ms) => new Promise((resolve) => {
+        let sessionId = '';
+        ws.addEventListener('message', (ev) => {
+          if (typeof ev.data !== 'string') return;
+          try { const m = JSON.parse(ev.data); if (m.type === 'session') sessionId = m.id; } catch {}
+        });
+        setTimeout(() => resolve(sessionId), ms);
+      });
+      const stdin = (ws, s) => ws.send(Buffer.concat([Buffer.from([0]), Buffer.from(s)]));
+      const sessionRow = async (sessionId) => {
+        const { status, json } = await request(`/v1/machines/${id}/sessions`);
+        assert(status === 200, `sessions: ${status}`);
+        return json.find((s) => s.id === sessionId);
+      };
+      const stateOf = async () => (await request(`/v1/machines/${id}`)).json.state;
+      const idleWindow = 80_000;
+
+      const console_ = await open(`/v1/machines/${id}/exec/stream?cmd=/bin/sh&tty=true&stdin=true&rows=24&cols=80`);
+      const opened = sessionOf(console_, 2000);
+      setTimeout(() => stdin(console_, 'sleep 300\n'), 600);
+      const sessionId = await opened;
+      assert(sessionId, 'the agent must announce the session id');
+      console_.close(); // detach: hostd loses the websocket, the guest keeps the shell
+      await new Promise((r) => setTimeout(r, 1000));
+
+      const running = await sessionRow(sessionId);
+      assert(running && !running.ended && running.attached === false, `session should be live and detached: ${JSON.stringify(running)}`);
+      assert(running.busy === true, `a session running sleep should report busy: ${JSON.stringify(running)}`);
+
+      await new Promise((r) => setTimeout(r, idleWindow));
+      assert((await stateOf()) === 'running', 'the machine was suspended under a session that was still running a command');
+
+      // Interrupt the sleep: the shell is back at its prompt, nothing runs.
+      const again = await open(`/v1/machines/${id}/attach/${sessionId}?tty=true`);
+      await new Promise((r) => setTimeout(r, 500));
+      stdin(again, '\x03');
+      await new Promise((r) => setTimeout(r, 800));
+      again.close();
+      await new Promise((r) => setTimeout(r, 1000));
+
+      const prompt = await sessionRow(sessionId);
+      assert(prompt && !prompt.ended, `the shell should survive the interrupt: ${JSON.stringify(prompt)}`);
+      assert(prompt.busy === false, `a shell at its prompt should not report busy: ${JSON.stringify(prompt)}`);
+
+      await new Promise((r) => setTimeout(r, idleWindow));
+      assert((await stateOf()) === 'suspended', 'a machine whose only session sits at a prompt should have suspended');
+
+      // Leave it as the next step expects: awake. exec wakes it on its own.
+      await exec(id, 'true');
+      assert((await stateOf()) === 'running', 'exec should have woken the machine');
+    });
+
     await step('a non-zero exit is reported, not thrown away', async () => {
       const { status, json } = await request(`/v1/machines/${id}/exec`, {
         method: 'POST', body: { cmd: 'exit 42', user: 'root' },
@@ -609,6 +678,120 @@ async function lifecycleAssertions() {
         assert(json.knobs.auto_stop === 'suspend', `auto_stop = ${json.knobs.auto_stop}`);
       } finally {
         await request(`/v1/machines/${json.id}`, { method: 'DELETE' });
+      }
+    });
+
+    // #107: the wait before a quiet machine suspends is the machine's own.
+    // A policy spelled wrong is a 400 that names the alternative rather than a
+    // 500 or a value the monitor never acts on.
+    await step('a wrong lifecycle policy is refused, with the alternative named', async () => {
+      for (const [knobs, word] of [
+        [{ auto_stop: 'stop' }, 'suspend'],
+        [{ auto_stop: 'sometimes' }, 'auto_stop'],
+        [{ idle_timeout: 0 }, 'idle_timeout'],
+        [{ idle_timeout: 3601 }, 'idle_timeout'],
+        // A path schedule fires as a request, and a machine that suspends
+        // and cannot wake would answer 503 to every one of them, forever.
+        [{ auto_start: false, schedules: [{ cron: '@hourly', path: '/jobs/tick' }] }, 'auto_start'],
+      ]) {
+        const { status, json } = await request('/v1/machines', { method: 'POST', body: { knobs } });
+        assert(status === 400, `${JSON.stringify(knobs)}: expected 400, got ${status}`);
+        assert(json.code === 'bad_request' && typeof json.next === 'string',
+          `${JSON.stringify(knobs)}: the refusal must carry a code and a next: ${JSON.stringify(json)}`);
+        assert(`${json.error} ${json.next}`.includes(word),
+          `${JSON.stringify(knobs)}: the refusal should mention ${word}: ${JSON.stringify(json)}`);
+      }
+    });
+
+    // The knob is honoured: a machine asked to wait three minutes is still up
+    // where the default would have slept, and asleep once its own wait has
+    // passed. The counterfactual is the default-timeout step above.
+    await step('idle_timeout sets how long a quiet machine stays up', async () => {
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST', body: { knobs: { idle_timeout: 180 } },
+      });
+      assert(status === 201, `expected 201, got ${status}`);
+      const patient = json.id;
+      try {
+        assert(json.knobs.idle_timeout === 180, `idle_timeout = ${json.knobs.idle_timeout}`);
+        assert(json.knobs.auto_start === true, 'a partial knobs object must not zero auto_start');
+        await exec(patient, 'true'); // the last activity the wait counts from
+        await new Promise((r) => setTimeout(r, 80_000));
+        let { json: m } = await request(`/v1/machines/${patient}`);
+        assert(m.state === 'running', `suspended after 80s despite a 180s idle_timeout (state ${m.state})`);
+        await waitFor(async () => (await request(`/v1/machines/${patient}`)).json.state === 'suspended',
+          { timeoutMs: 150_000, everyMs: 5_000, what: 'the machine to suspend once its own wait passed' });
+      } finally {
+        await request(`/v1/machines/${patient}`, { method: 'DELETE' });
+      }
+    });
+
+    // #110: a cron is a request on a schedule. The owning host GETs the path
+    // (or runs the command) on the expression's minute, waking the machine if
+    // it must, and the GET carries X-Pilot-Cron -- which the public listener
+    // strips from anything arriving from outside, so the app trusts it with
+    // no secret. Everything here is what a client can see: the file the job
+    // writes, the machine's state, and the header as the app received it.
+    await step('a schedule fires on its minute, wakes a suspended machine, and its marker cannot be forged', async () => {
+      const server = [
+        'import http.server',
+        'class H(http.server.BaseHTTPRequestHandler):',
+        '    def do_GET(self):',
+        "        open('/root/hits', 'a').write(self.path + ' ' + (self.headers.get('X-Pilot-Cron') or 'none') + '\\n')",
+        '        self.send_response(200); self.end_headers(); self.wfile.write(b"ok")',
+        '    def log_message(self, *a): pass',
+        "http.server.HTTPServer(('0.0.0.0', 8080), H).serve_forever()",
+      ].join('\n');
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST', body: { knobs: { schedules: [
+          { cron: '* * * * *', path: '/hit' },
+          // /tmp, not /root: a cmd schedule runs as the app user (uid 1000),
+          // the same default `exec` has, and that user cannot write /root.
+          // The first run of this step wrote there and exited 1 every minute.
+          { cron: '* * * * *', cmd: 'date +%s >> /tmp/cron.log' },
+        ] } },
+      });
+      assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
+      const cronId = json.id;
+      try {
+        assert(json.knobs.schedules?.length === 2, `schedules = ${JSON.stringify(json.knobs.schedules)}`);
+        await exec(cronId, `printf '%s' '${server.replace(/'/g, `'\\''`)}' > /root/srv.py; setsid python3 /root/srv.py > /root/srv.log 2>&1 < /dev/null &`);
+        await new Promise((r) => setTimeout(r, 1000));
+
+        // Two minute boundaries pass; both jobs fire on each.
+        await waitFor(async () => {
+          const n = await exec(cronId, 'wc -l < /tmp/cron.log 2>/dev/null || echo 0');
+          return Number(n) >= 2;
+        }, { timeoutMs: 140_000, everyMs: 5_000, what: 'the cmd schedule to fire twice' });
+        const hits = await exec(cronId, 'cat /root/hits 2>/dev/null || true');
+        const cronHits = hits.split('\n').filter((l) => l.startsWith('/hit '));
+        assert(cronHits.length >= 1, `the path schedule never reached the app: ${JSON.stringify(hits)}`);
+        assert(cronHits.every((l) => l === '/hit * * * * *'),
+          `every scheduled GET should carry X-Pilot-Cron with its expression: ${JSON.stringify(cronHits)}`);
+
+        // A suspended machine is woken by its own cron: put it to sleep and
+        // let the next minute do the rest.
+        const susp = await request(`/v1/machines/${cronId}/suspend`, { method: 'POST' });
+        assert(susp.status === 204, `suspend: expected 204, got ${susp.status}`);
+        const before = cronHits.length;
+        await waitFor(async () => {
+          const { json: m } = await request(`/v1/machines/${cronId}`);
+          return m.state === 'running';
+        }, { timeoutMs: 80_000, everyMs: 3_000, what: 'the cron to wake the suspended machine' });
+        await waitFor(async () => {
+          const h = await exec(cronId, 'grep -c "^/hit " /root/hits || echo 0');
+          return Number(h) > before;
+        }, { timeoutMs: 30_000, everyMs: 2_000, what: 'the fire that woke it to reach the app' });
+
+        // The marker cannot arrive from outside: a forged header is stripped
+        // before the app sees the request.
+        const { json: m } = await request(`/v1/machines/${cronId}`);
+        const res = await viaRouter(new URL(m.url).host, '/hit', 30_000, { 'X-Pilot-Cron': 'forged' });
+        assert(res.status === 200, `the app should answer the outside request: ${res.status} ${res.body.slice(0, 100)}`);
+        const last = (await exec(cronId, 'tail -n 1 /root/hits'));
+        assert(last === '/hit none', `a forged X-Pilot-Cron reached the app: ${JSON.stringify(last)}`);
+      } finally {
+        await request(`/v1/machines/${cronId}`, { method: 'DELETE' });
       }
     });
 
@@ -3168,6 +3351,63 @@ async function dataRouteAssertions() {
         'the generated Dockerfile does not declare the port the router dials');
       assert(json.detected[0].health?.path === '/__webjs/ready',
         `health = ${JSON.stringify(json.detected[0].health)}`);
+    });
+
+    // #110: an app's crons live in its OWN config -- a webjs app's
+    // package.json, anything else's vercel.json, one shape between them --
+    // and the plan carries them as the step's schedules. Nothing
+    // pilots-specific was written; a bad entry is refused by name.
+    await step('the plan route turns package.json webjs.crons into schedules', async () => {
+      const files = readTree(WEBJS_FIXTURE);
+      const pkg = JSON.parse(files['package.json']);
+      pkg.webjs = { ...(pkg.webjs ?? {}), crons: [{ path: '/jobs/digest', schedule: '0 5 * * *' }, { path: '/jobs/tick', schedule: '@hourly' }] };
+      let res = await postTar('/v1/plan?app=fx', tarball({ ...files, 'package.json': JSON.stringify(pkg) }));
+      let json = await res.json();
+      assert(res.status === 200, `expected 200, got ${res.status}: ${JSON.stringify(json)}`);
+      const schedules = json.plan.steps[0].knobs?.schedules;
+      assert(Array.isArray(schedules) && schedules.length === 2, `schedules = ${JSON.stringify(json.plan.steps[0].knobs)}`);
+      assert(schedules[0].path === '/jobs/digest' && schedules[0].cron === '0 5 * * *', `schedules[0] = ${JSON.stringify(schedules[0])}`);
+      assert(schedules[1].cron === '@hourly', `schedules[1] = ${JSON.stringify(schedules[1])}`);
+      assert(json.plan.steps[0].knobs.auto_start === true, 'the crons zeroed the step\'s other knobs');
+
+      pkg.webjs.crons = [{ path: 'jobs/digest', schedule: 'every day' }];
+      res = await postTar('/v1/plan?app=fx', tarball({ ...files, 'package.json': JSON.stringify(pkg) }));
+      json = await res.json();
+      assert(res.status === 400, `a malformed cron should be a 400, got ${res.status}: ${JSON.stringify(json)}`);
+      assert(JSON.stringify(json).includes('webjs.crons'), `the refusal should name webjs.crons: ${JSON.stringify(json)}`);
+    });
+
+    // The framework-agnostic half of the same contract. vercel.json is what
+    // Next, Astro, SvelteKit, Nuxt and Remix users already write, and it is
+    // read for ANY app -- here one that brought nothing but a Dockerfile, so
+    // no recipe and no framework are involved at all.
+    await step('the plan route turns vercel.json crons into schedules for any app', async () => {
+      const app = {
+        Dockerfile: 'FROM scratch\n',
+        'vercel.json': JSON.stringify({ crons: [{ path: '/api/digest', schedule: '0 5 * * *' }] }),
+      };
+      let res = await postTar('/v1/plan?app=fx', tarball(app));
+      let json = await res.json();
+      assert(res.status === 200, `expected 200, got ${res.status}: ${JSON.stringify(json)}`);
+      assert(json.detected[0].source === 'dockerfile', `source = ${json.detected[0].source}`);
+      const schedules = json.plan.steps[0].knobs?.schedules;
+      assert(Array.isArray(schedules) && schedules.length === 1 && schedules[0].path === '/api/digest',
+        `schedules = ${JSON.stringify(json.plan.steps[0].knobs)}`);
+
+      // Spelled wrongly in a file that parses: named, not dropped.
+      res = await postTar('/v1/plan?app=fx', tarball({
+        ...app, 'vercel.json': JSON.stringify({ crons: [{ path: 'api/digest', schedule: 'every day' }] }),
+      }));
+      json = await res.json();
+      assert(res.status === 400, `a malformed cron should be a 400, got ${res.status}: ${JSON.stringify(json)}`);
+      assert(JSON.stringify(json).includes('vercel.json'), `the refusal should name vercel.json: ${JSON.stringify(json)}`);
+
+      // A file that does not parse declares nothing readable, and must not
+      // stop an app from shipping.
+      res = await postTar('/v1/plan?app=fx', tarball({ ...app, 'vercel.json': '{ not json' }));
+      json = await res.json();
+      assert(res.status === 200, `an unparseable vercel.json should be ignored, got ${res.status}: ${JSON.stringify(json)}`);
+      assert(!json.plan.steps[0].knobs, `it produced knobs: ${JSON.stringify(json.plan.steps[0].knobs)}`);
     });
 
     await step('a Dockerfile beats a recipe, and a compose file beats both', async () => {
