@@ -146,6 +146,11 @@ export async function issueCode(grant: IssuedCode): Promise<string> {
     keyExpiresAt: grant.keyExpiresAt ?? null,
     expiresAt: new Date(Date.now() + CODE_TTL_MS),
   });
+  // Opportunistic, and here rather than on a timer: this table only grows
+  // when a code is issued, so the issue path is exactly where it is worth
+  // spending one cheap DELETE. pruneCodes was written and then never called,
+  // which left every code ever issued in the table forever.
+  await pruneCodes();
   return code;
 }
 
