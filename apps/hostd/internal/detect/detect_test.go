@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/vivek7405/pilots/hostd/internal/build"
 	"github.com/vivek7405/pilots/hostd/internal/compose"
 )
 
@@ -698,5 +699,25 @@ func TestAWorkspaceRecipeThatCannotBeMovedIsRefused(t *testing.T) {
 	webjs, _ := Generate(filepath.Join(fixtures, "webjs"))
 	if _, ok := webjs.ForWorkspace("web"); !ok {
 		t.Error("a node recipe was refused")
+	}
+}
+
+// The build package seeds a shared layer cache from the context-independent
+// prefix of this recipe: the base image and the certificate layer, which every
+// Node application here starts from and which is the expensive part of a cold
+// build. If the recipe's first lines move, the seed stops warming anything and
+// nothing else would say so.
+//
+// The assertion lives here because detect imports build; build cannot import
+// detect back.
+func TestTheSharedCacheSeedMatchesTheRecipe(t *testing.T) {
+	recipe, ok := Generate(filepath.Join(fixtures, "webjs"))
+	if !ok {
+		t.Fatal("the webjs fixture no longer produces a recipe")
+	}
+	if !strings.HasPrefix(recipe.Dockerfile, build.SeedDockerfile) {
+		t.Errorf("the shared cache seed is no longer a prefix of the webjs recipe.\n"+
+			"seed:\n%s\nrecipe starts:\n%s",
+			build.SeedDockerfile, recipe.Dockerfile[:min(len(recipe.Dockerfile), 200)])
 	}
 }

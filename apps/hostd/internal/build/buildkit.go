@@ -25,7 +25,7 @@ import (
 //   - `--progress rawjson`. The machine-readable stream. The alternative is
 //     scraping a display that redraws itself, where the failing command's
 //     output can be overwritten by the next frame.
-func (b *Builder) solveArgs(addr, contextDir, out, cacheName string) []string {
+func (b *Builder) solveArgs(addr, contextDir, out, cacheDir, seedDir string) []string {
 	args := []string{
 		"--addr", addr,
 		"build",
@@ -36,31 +36,22 @@ func (b *Builder) solveArgs(addr, contextDir, out, cacheName string) []string {
 		"--progress", "rawjson",
 	}
 
-	// The cache is what makes a redeploy cheap, and it lives in the same
-	// object store as everything else so any host can warm any build. Skipped
-	// entirely when there is no bucket: a cache export to nowhere fails the
-	// build rather than being slower.
-	if b.opts.CacheBucket != "" && cacheName != "" {
-		// use_path_style is not optional here: the bucket is addressed as a
-		// path on the endpoint, per the storage rule the rest of the engine
-		// follows, and virtual-host addressing resolves a hostname that does
-		// not exist.
-		//
-		// The credentials travel as cache attributes rather than in the
-		// daemon's environment, so they are scoped to the request instead of
-		// to every build the host ever runs. The cost is that they appear in
-		// this process's argv, which on this host is readable only by root and
-		// the build user -- the same user the daemon already runs as.
-		spec := fmt.Sprintf("bucket=%s,endpoint_url=%s,region=%s,name=%s,use_path_style=true",
-			b.opts.CacheBucket, b.opts.CacheEndpoint, b.opts.CacheRegion, cacheName)
-		if b.opts.CacheAccessKey != "" {
-			spec += fmt.Sprintf(",access_key_id=%s,secret_access_key=%s",
-				b.opts.CacheAccessKey, b.opts.CacheSecretKey)
-		}
+	// The cache is what makes a redeploy cheap. Both directories are on the
+	// HOST and reach the daemon over the buildctl session, so the guest is
+	// never told a path it could reach on its own and never holds a
+	// credential for one.
+	if cacheDir != "" {
 		args = append(args,
 			// mode=max caches intermediate layers too, not just the result.
-			"--export-cache", "type=s3,"+spec+",mode=max",
-			"--import-cache", "type=s3,"+spec)
+			"--export-cache", "type=local,dest="+cacheDir+",mode=max",
+			"--import-cache", "type=local,src="+cacheDir)
+	}
+	// The shared seed is imported READ ONLY, and only hostd ever writes it.
+	// An org importing another org's output would be a supply chain the
+	// tenant chooses; an org importing bytes hostd built from a constant in
+	// this package is not.
+	if seedDir != "" {
+		args = append(args, "--import-cache", "type=local,src="+seedDir)
 	}
 	return args
 }
@@ -72,10 +63,10 @@ func (b *Builder) solveArgs(addr, contextDir, out, cacheName string) []string {
 // failed build -- and a build that reports success while producing nothing is
 // the failure mode that hangs a deploy, so the two are checked separately and
 // both are surfaced.
-func (b *Builder) solve(ctx context.Context, addr, contextDir, out string,
+func (b *Builder) solve(ctx context.Context, addr, contextDir, out, cacheDir string,
 	record func(api.BuildLogLine)) error {
 
-	args := b.solveArgs(addr, contextDir, out, cacheNameFor(contextDir))
+	args := b.solveArgs(addr, contextDir, out, cacheDir, b.seedDir())
 	cmd := exec.CommandContext(ctx, b.opts.BuildctlBin, args...)
 	// Its own process group, so a timeout kills the whole build tree rather
 	// than leaving buildctl's children running against a daemon that has

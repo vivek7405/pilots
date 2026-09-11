@@ -308,6 +308,22 @@ func run() error {
 	// The builder probes the local toolchain once at startup -- mke2fs here
 	// may or may not read a tarball -- so it is constructed before anything
 	// can post a build rather than on the first request.
+	// The layer cache's own prefix in the same bucket. A separate client
+	// rather than the chunk store, because these are not content-addressed
+	// builds and must not land among them.
+	var cacheStore build.CacheStore
+	if cfg.S3Bucket != "" {
+		cs, err := s3.New(ctx, s3.Config{
+			Endpoint: cfg.S3Endpoint, Region: cfg.S3Region, Bucket: cfg.S3Bucket,
+			Prefix:    buildCachePrefix,
+			AccessKey: cfg.S3AccessKey, SecretKey: cfg.S3SecretKey,
+		})
+		if err != nil {
+			return fmt.Errorf("layer cache store: %w", err)
+		}
+		cacheStore = cs
+	}
+
 	var builder api.BuildRunner
 	if cfg.S3Bucket != "" {
 		builder = build.New(ctx, build.Options{
@@ -318,12 +334,14 @@ func run() error {
 			// The daemon is not on this host. Each build runs against the
 			// requesting org's builder machine, which mgr creates or wakes
 			// here, locally, for the host that took the request.
-			Builders:       mgr,
-			CacheBucket:    cfg.S3Bucket,
-			CacheEndpoint:  cfg.S3Endpoint,
-			CacheRegion:    cfg.S3Region,
-			CacheAccessKey: cfg.S3AccessKey,
-			CacheSecretKey: cfg.S3SecretKey,
+			Builders: mgr,
+			// The cache lives on THIS host and is mirrored by hostd. The
+			// daemon inside the builder gets neither the bucket nor a
+			// credential for it: it exports into a directory served over
+			// the buildctl session, and nothing it writes is visible to
+			// another org until hostd puts it there.
+			CacheDir:   cfg.BuildCache(),
+			CacheStore: cacheStore,
 		})
 	} else {
 		slog.Warn("no object storage configured; builds are unavailable on this host")
@@ -366,6 +384,15 @@ func run() error {
 	defer stop()
 
 	go mgr.RunIdleMonitor(ctx)
+
+	// Warm the layer cache every Node application starts from, once per host,
+	// off the request path. hostd builds it itself from a constant, which is
+	// what makes it safe for every org to import: promoting one org's build
+	// output into a directory its neighbours read would let a tenant choose
+	// what they build on. A failure leaves builds colder, not broken.
+	if seeder, ok := builder.(interface{ SeedSharedCache(context.Context) }); ok {
+		go seeder.SeedSharedCache(ctx)
+	}
 	// Sweeps up Firecrackers this host has no record of -- the residue of a
 	// hostd killed mid-create, or a destroy that failed partway.
 	go mgr.RunReaper(ctx)
@@ -792,6 +819,11 @@ func settleReconciled(found []fc.Reconciled, root string, mgr *machines.Manager,
 
 // chunkPrefix namespaces content-addressed builds inside the bucket.
 const chunkPrefix = "chunks"
+
+// buildCachePrefix is where per-org BuildKit cache directories are mirrored.
+// Separate from chunkPrefix: these are not content-addressed builds, and a
+// prune deletes under this prefix.
+const buildCachePrefix = "build-cache"
 
 // newChunkStore builds the client that reads and writes builds.
 func newChunkStore(cfg *config.Config) (fc.Uploader, error) {

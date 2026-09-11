@@ -62,18 +62,15 @@ type Options struct {
 	// AgentBinary is the guest agent injected into every image.
 	AgentBinary string
 
-	// Cache import/export, so a redeploy does not rebuild from scratch. Empty
-	// bucket disables both.
-	CacheBucket   string
-	CacheEndpoint string
-	CacheRegion   string
-	// The cache backend runs inside buildkitd, which has no credentials of its
-	// own: it is a rootless daemon running as another user, deliberately
-	// unaware of hostd's configuration. Without these it falls back to the
-	// default AWS chain, reaches for the EC2 metadata service, and fails the
-	// build after a context deadline that names IMDS rather than the cache.
-	CacheAccessKey string
-	CacheSecretKey string
+	// CacheDir is where the daemon exports and imports the layer cache, on
+	// THIS host. The directories under it are served to the daemon over the
+	// buildctl session, so the guest is never told a path and never holds a
+	// credential. Empty disables the cache.
+	CacheDir string
+	// CacheStore mirrors those directories to object storage, with hostd's
+	// own credentials, so any host can warm an org's next build. Nil keeps
+	// the cache host-local, which is correct but colder.
+	CacheStore CacheStore
 
 	// Limits. Every one of these exists because a build is arbitrary user code
 	// running beside other tenants' machines.
@@ -273,10 +270,18 @@ func (b *Builder) Build(ctx context.Context, id, orgID string, contextTar io.Rea
 	}
 	defer release()
 
+	// The cache directory is this org's alone, on this host, and hostd is
+	// what moves it to and from object storage. A miss is not a failure: S3
+	// is the truth and this disk is a cache, so a wiped host pays one
+	// download and an org that has never built here builds cold.
+	cacheDir := b.cacheDir(orgID, cacheNameFor(ctxDir))
+	b.pullCache(ctx, cacheDir, orgID, cacheNameFor(ctxDir))
+
 	tarPath := filepath.Join(work, "rootfs.tar")
-	if err := b.solve(ctx, addr, ctxDir, tarPath, record); err != nil {
+	if err := b.solve(ctx, addr, ctxDir, tarPath, cacheDir, record); err != nil {
 		return res, err
 	}
+	b.pushCache(ctx, cacheDir, orgID, cacheNameFor(ctxDir))
 
 	record(status(id, "packing rootfs"))
 	imagePath := filepath.Join(work, "rootfs.ext4")
