@@ -163,6 +163,21 @@ func (r *Router) resolve(ctx context.Context, host string) (*Target, error) {
 		if row.Name != name && row.Domain != strings.ToLower(host) {
 			continue
 		}
+		// A builder is not routable, and this is the only place that can say
+		// so: the loop above matches on NAME as well as domain, so clearing
+		// the row's domain would not be enough.
+		//
+		// It serves no application -- nothing in a builder listens on the app
+		// port -- so a request to its address can only ever fail. What it
+		// would do first is WAKE it, and an org can read its own builder's
+		// name out of the machine list, so without this a tenant could hold a
+		// quota-exempt 4 vCPU machine awake indefinitely by curling a URL,
+		// and every hit would reset the activity clock the stale-builder
+		// collector reads. Nobody asked for that machine; it must not be
+		// reachable from outside the host that made it.
+		if machines.IsBuilder(row.Name) {
+			continue
+		}
 		// Ownership is NOT checked here. Any host can resolve any machine --
 		// DNS points every workload name at every host -- and what differs is
 		// only where the request is then served. See serveOrForward.

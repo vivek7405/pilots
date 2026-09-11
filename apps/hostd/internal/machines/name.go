@@ -62,6 +62,14 @@ func (m *Manager) ensureNotReserved(name string, internal bool) error {
 // cannot import this package, because this package imports quota.
 const builderNamePrefix = quota.BuilderNamePrefix
 
+// IsBuilder reports whether a machine name is a builder hostd made for itself.
+//
+// Exported because the router has to refuse these rows and cannot reach the
+// unexported constant. The prefix is the one signal four things read: this,
+// the quota loop, the idle monitor's collector, and which template a create
+// restores from.
+func IsBuilder(name string) bool { return strings.HasPrefix(name, builderNamePrefix) }
+
 // BuilderName is the name of the builder machine serving one org ON THIS HOST.
 //
 // The host id is in the name deliberately. ensureNameFree scans the whole

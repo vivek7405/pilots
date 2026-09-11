@@ -155,7 +155,11 @@ func TestSolveArgsWireUpTheOrgsCacheDirectory(t *testing.T) {
 	joined := strings.Join(b.solveArgs(testBuilderAddr, "/ctx", "/out.tar", dir, ""), " ")
 
 	for _, want := range []string{
-		"--export-cache type=local,dest=" + dir + ",mode=max",
+		// Exported BESIDE the directory it imports from, and swapped in
+		// afterwards. BuildKit's local exporter never collects what a new
+		// index supersedes, so exporting over the import directory would
+		// keep every generation an org ever built.
+		"--export-cache type=local,dest=" + dir + exportSuffix + ",mode=max",
 		"--import-cache type=local,src=" + dir,
 	} {
 		if !strings.Contains(joined, want) {
@@ -273,5 +277,64 @@ func TestBuildRejectsAContextWithNoDockerfile(t *testing.T) {
 	}
 	if !sawError {
 		t.Fatalf("the failure never reached the log stream: %+v", lines)
+	}
+}
+
+// A cache directory holds exactly one generation. BuildKit's local exporter
+// writes an OCI layout and never collects what a new index supersedes, so
+// without the swap an org redeploying one Dockerfile grows this directory
+// without bound on NVMe, in the bucket, and in the download a cold host pays.
+func TestTheCacheKeepsOneGenerationPerDockerfile(t *testing.T) {
+	b := &Builder{opts: Options{CacheDir: t.TempDir()}}
+	dir := b.cacheDir("org_1", "df-abc")
+
+	// Generation one is already in place, carrying a blob nothing will
+	// reference again.
+	mustWrite(t, filepath.Join(dir, "index.json"), "{\"gen\":1}")
+	mustWrite(t, filepath.Join(dir, "blobs", "sha256", "old"), "superseded")
+
+	// The exporter writes generation two beside it.
+	mustWrite(t, filepath.Join(dir+exportSuffix, "index.json"), "{\"gen\":2}")
+	mustWrite(t, filepath.Join(dir+exportSuffix, "blobs", "sha256", "new"), "current")
+
+	if err := b.swapExported(dir); err != nil {
+		t.Fatalf("swapExported: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(dir, "index.json"))
+	if err != nil || string(got) != "{\"gen\":2}" {
+		t.Fatalf("index.json = %q (%v), want generation two", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "blobs", "sha256", "old")); !os.IsNotExist(err) {
+		t.Error("the superseded generation's blob survived the swap")
+	}
+	if _, err := os.Stat(dir + exportSuffix); !os.IsNotExist(err) {
+		t.Error("the export directory was left behind")
+	}
+}
+
+// A build where every step was a cache hit exports nothing, and the cache it
+// imported from has to survive that. Deleting it would turn a fully warm
+// build into the thing that makes the next one cold.
+func TestASwapWithNoExportKeepsWhatWasThere(t *testing.T) {
+	b := &Builder{opts: Options{CacheDir: t.TempDir()}}
+	dir := b.cacheDir("org_1", "df-abc")
+	mustWrite(t, filepath.Join(dir, "index.json"), "{\"gen\":1}")
+
+	if err := b.swapExported(dir); err != nil {
+		t.Fatalf("swapExported: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(dir, "index.json")); err != nil || string(got) != "{\"gen\":1}" {
+		t.Fatalf("index.json = %q (%v), want the existing generation kept", got, err)
+	}
+}
+
+func mustWrite(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

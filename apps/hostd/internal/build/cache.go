@@ -56,9 +56,11 @@ RUN apk add --no-cache ca-certificates
 // maxCacheEntriesPerOrg bounds how many Dockerfile partitions an org keeps.
 //
 // A measured mode=max export of a Node base image plus an npm install is about
-// 73 MiB, so eight is a few hundred megabytes per org per host. The bound is on
-// COUNT rather than bytes because the unbounded axis is how many different
-// Dockerfiles an org builds, not how big one of them gets.
+// 73 MiB, and swapExported holds each partition to one generation, so eight is
+// a few hundred megabytes per org per host. Both halves are needed: this one
+// bounds how many different Dockerfiles an org accumulates, and the swap
+// bounds how much ONE of them grows over redeploys, which the local exporter
+// would otherwise let run away because it never collects a superseded blob.
 const maxCacheEntriesPerOrg = 8
 
 // cacheDir is where the daemon exports one org's cache for one Dockerfile.
@@ -162,10 +164,22 @@ func (b *Builder) pullCache(ctx context.Context, dir, orgID, cacheName string) {
 // reason as pullCache: the image is already built and published, and failing
 // the build now would throw that away over a cache.
 func (b *Builder) pushCache(ctx context.Context, dir, orgID, cacheName string) {
-	if dir == "" || b.opts.CacheStore == nil {
+	if dir == "" {
+		return
+	}
+	// Swap the freshly exported generation over the one it was imported from.
+	// The exporter writes a complete OCI layout, so the new directory stands
+	// alone and the old one is dead the moment it is replaced.
+	if err := b.swapExported(dir); err != nil {
+		slog.Warn("could not rotate the layer cache; keeping the previous one",
+			"org", orgID, "cache", cacheName, "err", err)
+		return
+	}
+	if b.opts.CacheStore == nil {
 		return
 	}
 	prefix := cacheKeyPrefix(orgID, cacheName)
+	kept := map[string]bool{}
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
@@ -174,14 +188,61 @@ func (b *Builder) pushCache(ctx context.Context, dir, orgID, cacheName string) {
 		if rerr != nil {
 			return rerr
 		}
-		return b.opts.CacheStore.PutFile(ctx, prefix+filepath.ToSlash(rel), path)
+		key := prefix + filepath.ToSlash(rel)
+		kept[key] = true
+		return b.opts.CacheStore.PutFile(ctx, key, path)
 	})
 	if err != nil {
 		slog.Warn("could not mirror the layer cache; the next build on another host "+
 			"will be colder", "org", orgID, "cache", cacheName, "err", err)
 		return
 	}
+	// The local side rotated, so the bucket has to as well, or the mirror
+	// keeps every generation this host has since discarded.
+	b.removeStaleObjects(ctx, prefix, kept)
 	b.pruneCache(ctx, orgID)
+}
+
+// swapExported replaces a cache directory with the one just exported beside it.
+//
+// A build that exported nothing -- every step a cache hit, or a failure before
+// the exporter ran -- leaves no new directory, and the existing one stands.
+func (b *Builder) swapExported(dir string) error {
+	fresh := dir + exportSuffix
+	if _, err := os.Stat(filepath.Join(fresh, "index.json")); err != nil {
+		_ = os.RemoveAll(fresh)
+		return nil
+	}
+	old := dir + ".old"
+	_ = os.RemoveAll(old)
+	if err := os.Rename(dir, old); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if err := os.Rename(fresh, dir); err != nil {
+		// Put the previous generation back rather than leaving no cache at
+		// all; the next build then exports over it again.
+		_ = os.Rename(old, dir)
+		return err
+	}
+	return os.RemoveAll(old)
+}
+
+// removeStaleObjects deletes every mirrored object under a prefix that the
+// freshly pushed generation did not write. The exporter reuses blob names by
+// content, so what is left is exactly what the new index no longer references.
+func (b *Builder) removeStaleObjects(ctx context.Context, prefix string, kept map[string]bool) {
+	objects, err := b.opts.CacheStore.List(ctx, prefix)
+	if err != nil {
+		return
+	}
+	for _, o := range objects {
+		if kept[o.Key] {
+			continue
+		}
+		if err := b.opts.CacheStore.Delete(ctx, o.Key); err != nil {
+			slog.Warn("could not drop a superseded cache object", "key", o.Key, "err", err)
+		}
+	}
 }
 
 // pruneCache keeps the most recently used entries for one org and drops the

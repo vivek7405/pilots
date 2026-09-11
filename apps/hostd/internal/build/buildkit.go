@@ -25,6 +25,11 @@ import (
 //   - `--progress rawjson`. The machine-readable stream. The alternative is
 //     scraping a display that redraws itself, where the failing command's
 //     output can be overwritten by the next frame.
+//
+// exportSuffix names the directory a cache is exported to before it replaces
+// the one it was imported from.
+const exportSuffix = ".new"
+
 func (b *Builder) solveArgs(addr, contextDir, out, cacheDir, seedDir string) []string {
 	args := []string{
 		"--addr", addr,
@@ -43,7 +48,16 @@ func (b *Builder) solveArgs(addr, contextDir, out, cacheDir, seedDir string) []s
 	if cacheDir != "" {
 		args = append(args,
 			// mode=max caches intermediate layers too, not just the result.
-			"--export-cache", "type=local,dest="+cacheDir+",mode=max",
+			//
+			// Exported to a SIBLING of the directory it imports from, which
+			// the caller then swaps into place. BuildKit's local exporter
+			// writes an OCI layout and never collects what a new index
+			// supersedes, so exporting over the import directory would leave
+			// every generation's blobs behind: an org redeploying one
+			// Dockerfile would grow this directory without bound on NVMe, in
+			// the bucket it is mirrored to, and in the download a cold host
+			// pays. One export, one generation.
+			"--export-cache", "type=local,dest="+cacheDir+exportSuffix+",mode=max",
 			"--import-cache", "type=local,src="+cacheDir)
 	}
 	// The shared seed is imported READ ONLY, and only hostd ever writes it.
