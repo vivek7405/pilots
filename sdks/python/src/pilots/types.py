@@ -35,6 +35,20 @@ KnobsPatch = dict[str, Any]
 
 
 @dataclass
+class Schedule:
+    """One cron job on a machine.
+
+    `cron` is five fields in UTC, or one of @hourly/@daily/@weekly/@monthly.
+    Exactly one of `path` (GET it on the machine) or `cmd` (run it inside)
+    carries the work; the machine is woken for either.
+    """
+
+    cron: str = ""
+    path: str = ""
+    cmd: str = ""
+
+
+@dataclass
 class Knobs:
     """Per-machine lifecycle policy. A sandbox and a service differ only here."""
 
@@ -42,6 +56,8 @@ class Knobs:
     auto_start: bool = False
     min_machines_running: int = 0
     soft_limit: int = 0
+    idle_timeout: int = 0
+    schedules: list[Schedule] = field(default_factory=list)
 
 
 @dataclass
