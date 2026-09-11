@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/vivek7405/pilots/hostd/internal/state"
@@ -97,6 +98,14 @@ func limitsFor(ctx context.Context, st state.Store, orgID string) (state.Quota, 
 // counter: a second copy of a number that has to stay right is a second thing
 // to keep right, and the create path already lists machines to check the name
 // is free.
+// BuilderNamePrefix is the name prefix of a hostd-owned builder machine, the
+// per-org guest a build's BuildKit daemon runs in.
+//
+// It lives here rather than in the machines package because quota must not
+// depend on machines, which depends on quota. machines.BuilderName is built
+// from this constant, so the two cannot drift.
+const BuilderNamePrefix = "builder-"
+
 func Check(ctx context.Context, st state.Store, orgID string, d Delta) error {
 	if orgID == "" {
 		// A create with no org can only come from an unauthenticated internal
@@ -123,6 +132,14 @@ func Check(ctx context.Context, st state.Store, orgID string, d Delta) error {
 		// collects it, and counting tombstones would make an org's limit fall
 		// over its lifetime rather than over what it is running.
 		if _, mine := owned[m.ID]; m.State == state.StateDestroyed || !mine {
+			continue
+		}
+		// A builder is not a workload the org asked for. hostd creates one per
+		// org per host to run that org's Dockerfile inside a microVM instead of
+		// on the host, and destroys it on its own schedule. Counting it would
+		// make a deploy fail against a limit the org never spent, and an org
+		// sitting exactly on its machine limit could never build again.
+		if strings.HasPrefix(m.Name, BuilderNamePrefix) {
 			continue
 		}
 		usedMachines++

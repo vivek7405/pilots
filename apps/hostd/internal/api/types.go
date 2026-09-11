@@ -306,6 +306,16 @@ type CreateMachineRequest struct {
 	// authenticated key. `json:"-"` is load-bearing: a client that could set
 	// it in the body could create machines inside another tenant.
 	OrgID string `json:"-"`
+
+	// Internal marks a machine hostd creates for itself rather than one a
+	// client asked for. Today that is exactly the per-org builder, which runs
+	// the BuildKit daemon a build is driven against.
+	//
+	// `json:"-"` for the same reason as OrgID, and here it is what makes the
+	// reserved `builder-` name prefix mean anything: the prefix is refused on
+	// every create except the one hostd makes itself, so a tenant cannot mint
+	// a machine that the idle monitor would then treat as a builder.
+	Internal bool `json:"-"`
 }
 
 // ExecRequest runs a command inside a machine. Cwd and Env are required on

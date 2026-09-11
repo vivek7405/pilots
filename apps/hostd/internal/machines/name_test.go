@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/vivek7405/pilots/hostd/internal/quota"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -130,7 +131,7 @@ func TestTheReservedNameFollowsTheConfiguredAPIHostname(t *testing.T) {
 	} {
 		t.Run(tc.why, func(t *testing.T) {
 			m := New(Options{Domain: "pilotrun.app", APIHostname: tc.apiHostname})
-			err := m.ensureNotReserved(tc.machine)
+			err := m.ensureNotReserved(tc.machine, false)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatalf("%q was accepted, but the control API answers there", tc.machine)
@@ -176,5 +177,60 @@ func TestEnsureNameFreeSeesServiceAddresses(t *testing.T) {
 
 	if err := m.ensureNameFree(ctx, "other"); err != nil {
 		t.Errorf("a free name was refused: %v", err)
+	}
+}
+
+// A tenant may not mint a machine that hostd's own machinery would then treat
+// as a builder. The prefix decides three things behind the tenant's back: the
+// quota loop skips the row, the idle monitor destroys it after a day
+// suspended, and the build path dials it. hostd's own create is the exception,
+// and it is the only one.
+func TestTheBuilderPrefixIsReservedForHostd(t *testing.T) {
+	m := &Manager{opts: Options{Domain: "pilotrun.app"}}
+
+	if err := m.ensureNotReserved("builder-acme-01", false); err == nil {
+		t.Fatal("a tenant was allowed to take a builder- name")
+	}
+	if err := m.ensureNotReserved("builder-acme-01", true); err != nil {
+		t.Fatalf("hostd's own builder create was refused: %v", err)
+	}
+	// The guard is the prefix, not the whole word: "build" and "builders" are
+	// ordinary names a tenant may have.
+	if err := m.ensureNotReserved("build", false); err != nil {
+		t.Fatalf("an ordinary name was refused: %v", err)
+	}
+}
+
+// BuilderName carries the host id because ensureNameFree scans the FLEET. A
+// bare builder-<org> would be takeable exactly once across every host, so the
+// second host to serve that org would fail its create with "the name is
+// already taken" -- which reads as a tenant error and is not one.
+func TestBuilderNameIsPerHostAndRoutable(t *testing.T) {
+	a := BuilderName("org-abcdefghijklmnop", "host-aaaaaaaa")
+	b := BuilderName("org-abcdefghijklmnop", "host-bbbbbbbb")
+	if a == b {
+		t.Fatalf("two hosts derived the same builder name: %q", a)
+	}
+	for _, name := range []string{a, b, BuilderName("", "host-aaaaaaaa")} {
+		if err := validateName(name); err != nil {
+			t.Fatalf("builder name %q is not usable as a DNS label: %v", name, err)
+		}
+		if !strings.HasPrefix(name, builderNamePrefix) {
+			t.Fatalf("builder name %q lost its prefix", name)
+		}
+	}
+	// An org-less builder is the platform's own, used to seed the shared
+	// layer cache. It must not collide with an org whose id starts "shared".
+	if BuilderName("", "host-aaaaaaaa") == BuilderName("sharedorg", "host-aaaaaaaa") {
+		t.Fatal("the platform builder collides with an org named shared*")
+	}
+}
+
+// quota cannot import machines, so it restates the prefix. If the two ever
+// disagree, builders start counting against an org's machine limit again and
+// a deploy fails on a limit the org never spent.
+func TestBuilderPrefixMatchesQuota(t *testing.T) {
+	if builderNamePrefix != quota.BuilderNamePrefix {
+		t.Fatalf("machines uses %q, quota uses %q", builderNamePrefix, quota.BuilderNamePrefix)
 	}
 }

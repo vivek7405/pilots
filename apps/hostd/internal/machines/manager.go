@@ -268,7 +268,7 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 	if err := validateName(name); err != nil {
 		return nil, err
 	}
-	if err := m.ensureNotReserved(name); err != nil {
+	if err := m.ensureNotReserved(name, req.Internal); err != nil {
 		return nil, err
 	}
 	if err := m.ensureNameFree(ctx, name); err != nil {

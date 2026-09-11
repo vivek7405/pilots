@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/vivek7405/pilots/hostd/internal/quota"
 )
 
 // validateName rejects a name that cannot work as a URL.
@@ -30,7 +31,7 @@ func validateName(name string) error {
 // the control API with PILOT_API_HOSTNAME moves the reservation with it, and
 // one who moves it off the workload domain entirely frees the name -- nothing
 // claims it there, so it routes like any other machine.
-func (m *Manager) ensureNotReserved(name string) error {
+func (m *Manager) ensureNotReserved(name string, internal bool) error {
 	apiHost := m.opts.APIHostname
 	if apiHost == "" {
 		apiHost = "api." + m.opts.Domain
@@ -39,7 +40,62 @@ func (m *Manager) ensureNotReserved(name string) error {
 		return fmt.Errorf("machines: the name %q is reserved for the control API hostname %q",
 			name, apiHost)
 	}
+	// The builder prefix is hostd's, not a tenant's. It is not cosmetic: the
+	// idle monitor decides what to destroy after a day by reading this prefix,
+	// and the quota loop skips these rows, so a tenant able to mint one could
+	// hand itself a machine that never counts and is reaped behind its back.
+	// Only the create hostd makes for itself may use it.
+	if !internal && strings.HasPrefix(name, builderNamePrefix) {
+		return fmt.Errorf("machines: names beginning %q are reserved for build machines", builderNamePrefix)
+	}
 	return nil
+}
+
+// builderNamePrefix marks a machine as this host's builder for one org.
+//
+// The prefix is load-bearing in three places: ensureNotReserved refuses it to
+// tenants, the quota loop does not count rows carrying it, and the idle
+// monitor destroys one that has been suspended for a day. It is defined in
+// the quota package and aliased here, so those three cannot disagree: quota
+// cannot import this package, because this package imports quota.
+const builderNamePrefix = quota.BuilderNamePrefix
+
+// BuilderName is the name of the builder machine serving one org ON THIS HOST.
+//
+// The host id is in the name deliberately. ensureNameFree scans the whole
+// fleet, so a bare builder-<org> is takeable exactly once across every host:
+// the second host to serve that org would fail its create with "the name is
+// already taken", which reads as a tenant error and is not one. Builders are
+// per host by design, so the name says so.
+//
+// An empty org is the platform's own builder, which exists only to seed the
+// shared layer cache and is never handed a tenant's context.
+func BuilderName(orgID, hostID string) string {
+	who := "shared"
+	if orgID != "" {
+		who = nameLabel(orgID, 12)
+	}
+	return builderNamePrefix + who + "-" + nameLabel(hostID, 8)
+}
+
+// nameLabel reduces an id to something legal in a DNS label, truncated to n
+// characters. Ids here are already hex or uuid-shaped, so this is a guard
+// against a future id format rather than a transformation that does work
+// today.
+func nameLabel(s string, n int) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+		if b.Len() == n {
+			break
+		}
+	}
+	if b.Len() == 0 {
+		return "x"
+	}
+	return b.String()
 }
 
 // ensureNameFree rejects a name already in use.
