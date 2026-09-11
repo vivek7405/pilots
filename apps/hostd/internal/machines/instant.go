@@ -143,7 +143,7 @@ func (e *templateArtifactMissing) Unwrap() error { return e.err }
 // caller can retry.
 func (m *Manager) restoreFromTemplate(ctx context.Context, row *state.Machine,
 	reject string) (*fc.Machine, *netns.Slot, error) {
-	t, err := m.ensureTemplate(ctx, variantGolden, reject)
+	t, err := m.ensureTemplate(ctx, variantFor(row), reject)
 	if err != nil {
 		return nil, nil, err
 	}

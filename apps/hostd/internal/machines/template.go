@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -116,6 +117,20 @@ func (m *Manager) memParentDir(t *Template) string {
 // reads through.
 func (m *Manager) rootfsTemplateDir(t *Template) string {
 	return filepath.Join(m.buildDir(), t.RootfsBuildID.String())
+}
+
+// variantFor is which template a machine is created from.
+//
+// The builder name prefix is the signal, and it is the SAME signal the quota
+// loop and the idle monitor read, so there is one rule rather than three. A
+// builder restored from the golden template would come up with no BuildKit
+// daemon in it, and the first build against it would fail on a refused
+// connection to a port nothing is listening on.
+func variantFor(row *state.Machine) variant {
+	if strings.HasPrefix(row.Name, builderNamePrefix) {
+		return variantBuilder
+	}
+	return variantGolden
 }
 
 // A variant names one of the two templates a host derives.

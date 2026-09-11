@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vivek7405/pilots/hostd/internal/fc"
+	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
 // hugePageManager returns a Manager whose host is configured for 2MiB pages
@@ -226,5 +227,32 @@ func TestTemplateArtifactMissingUnwrapsToTheSentinel(t *testing.T) {
 	// An unrelated failure must not look like one.
 	if errors.As(errors.New("boom"), &missing) {
 		t.Error("an unrelated error was taken for a missing template artifact")
+	}
+}
+
+// A builder machine must be created from the BUILDER template, not the golden
+// one. Restoring a builder from the golden image produces a guest with no
+// BuildKit daemon in it, and the first build against it fails on a refused
+// connection to a port nothing is listening on. Nothing else in the system
+// would report that as a template problem.
+//
+// The signal is the name prefix, deliberately the same one the quota loop and
+// the idle monitor read, so the three cannot disagree about what a builder is.
+func TestABuilderIsCreatedFromTheBuilderTemplate(t *testing.T) {
+	cases := []struct {
+		name string
+		want variant
+	}{
+		{"builder-org1-hosta", variantBuilder},
+		{BuilderName("org_1", "host-a"), variantBuilder},
+		{BuilderName("", "host-a"), variantBuilder},
+		{"web", variantGolden},
+		{"buildbot", variantGolden},
+		{"", variantGolden},
+	}
+	for _, tc := range cases {
+		if got := variantFor(&state.Machine{Name: tc.name}); got != tc.want {
+			t.Errorf("variantFor(%q) = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
