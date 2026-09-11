@@ -66,7 +66,13 @@ function M.read_buf(bufnr, target)
   -- is a terminator, not a separator, and dropping it would rewrite every
   -- file that has one the first time it is saved.
   local lines = vim.split(bytes, "\n", { plain = true })
-  if #lines > 0 and lines[#lines] == "" then
+  if bytes == "" then
+    -- An empty file is NOT a file with one empty line. A Neovim buffer always
+    -- has at least one line, so without this the round trip writes back a
+    -- single newline and a zero-byte file silently becomes one byte.
+    vim.b[bufnr].pilots_no_eol = true
+    lines = { "" }
+  elseif lines[#lines] == "" then
     table.remove(lines)
   else
     -- No trailing newline in the guest, so do not add one back on write.

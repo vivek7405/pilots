@@ -82,9 +82,16 @@ No project-wide search over a machine yet.
 ## Tests
 
 ```sh
-nvim -l apps/nvim/test/run.lua
+nvim -l apps/nvim/test/run.lua   # the pure halves: urls, guest commands
+nvim -l apps/nvim/test/e2e.lua   # the plugin, driven through real buffers
 ```
 
 Plain Lua rather than busted, which is a luarocks install: a suite that needs
 one more system dependency than the plugin itself is a suite that eventually
 gets skipped. Neovim is already required to use this.
+
+The end-to-end half runs the real autocommands against a stand-in `pilot` that
+executes each guest command on this machine instead of in a guest, so it needs
+no fleet and no KVM. It is what proves the chunking reassembles, that an empty
+file stays empty, that a file with no final newline does not gain one, and
+that a name with a quote in it survives the shell.
