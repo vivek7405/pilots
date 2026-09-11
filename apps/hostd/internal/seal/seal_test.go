@@ -1,6 +1,7 @@
 package seal
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"strings"
@@ -27,8 +28,23 @@ func TestSealRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
-	if strings.Contains(sealed, "postgres") || strings.Contains(sealed, "pw") {
-		t.Fatalf("the plaintext is legible in the sealed value: %s", sealed)
+	// Checked against the DECODED ciphertext, not the base64 text.
+	//
+	// Two reasons, and the second one is why this test used to fail roughly
+	// one run in forty. Searching the base64 is the wrong layer: plaintext
+	// sitting in the raw bytes is re-encoded across character boundaries, so
+	// the text form can hide what the bytes reveal. And a short needle in a
+	// 64-symbol alphabet collides by chance -- "pw" in a ~100-character blob
+	// lands about 2% of the time, which is a flake that reads like a
+	// catastrophic crypto failure and is nothing of the kind.
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(sealed, "pk1:"))
+	if err != nil {
+		t.Fatalf("the sealed value is not base64: %v", err)
+	}
+	for _, needle := range []string{"postgres", "DATABASE_URL", "db.internal", "user:pw"} {
+		if bytes.Contains(raw, []byte(needle)) {
+			t.Fatalf("the plaintext %q is legible in the sealed bytes: %x", needle, raw)
+		}
 	}
 
 	opened, err := k.Open(sealed)
