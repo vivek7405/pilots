@@ -49,9 +49,15 @@ type Options struct {
 	// Chunks publishes the produced build.
 	Chunks Uploader
 
-	// BuildctlBin and the rootless daemon's socket.
-	BuildctlBin  string
-	BuildkitSock string
+	// BuildctlBin is the BuildKit client. It runs HERE, on the host, and it
+	// is the only half of BuildKit the host has: the daemon it drives lives
+	// inside the org's builder machine.
+	BuildctlBin string
+
+	// Builders creates or wakes the builder machine a solve is driven
+	// against. An interface rather than the machines package itself, because
+	// machines already imports this one for the guest agent's in-image path.
+	Builders Builders
 
 	// AgentBinary is the guest agent injected into every image.
 	AgentBinary string
@@ -125,17 +131,11 @@ func New(ctx context.Context, opts Options) *Builder {
 	if opts.BuildctlBin == "" {
 		opts.BuildctlBin = "/opt/pilots/bin/buildctl"
 	}
-	if opts.BuildkitSock == "" {
-		// Only correct when the daemon runs as THIS user, which on a real host
-		// it deliberately does not: buildkitd runs rootless as `pilot` so that
-		// an arbitrary user Dockerfile is not built by root beside other
-		// tenants' machines. hostd is root, so deriving the path from its own
-		// uid points at /run/user/0 and the dial fails with a bare "no such
-		// file or directory" that names nothing about users.
-		//
-		// So this default exists for a single-user dev box and nothing else;
-		// host-bootstrap.sh writes PILOT_BUILDKIT_SOCK on every real host.
-		opts.BuildkitSock = fmt.Sprintf("unix:///run/user/%d/buildkit/buildkitd.sock", os.Getuid())
+	if opts.Builders == nil {
+		// Refused rather than defaulted. There is no host-side daemon to fall
+		// back to any more, and silently building on the host is precisely
+		// what a builder machine exists to stop.
+		panic("build: Options.Builders is required; a build runs inside a machine")
 	}
 	if opts.AgentBinary == "" {
 		opts.AgentBinary = "/opt/pilots/bin/guest-agent"
@@ -199,7 +199,7 @@ func (b *Builder) Log(id string) (*Log, bool) { return b.logs.get(id) }
 // error is the build's failure; the failing step has already been emitted by
 // then, because an agent reading this to patch its own Dockerfile needs to be
 // told which step failed rather than left to find it.
-func (b *Builder) Build(ctx context.Context, id string, contextTar io.Reader,
+func (b *Builder) Build(ctx context.Context, id, orgID string, contextTar io.Reader,
 	emit func(api.BuildLogLine)) (Result, error) {
 
 	res := Result{ID: id}
@@ -261,8 +261,20 @@ func (b *Builder) Build(ctx context.Context, id string, contextTar io.Reader,
 			"start command will have to come from the service spec"))
 	}
 
+	// The daemon this build runs against is a machine, and it belongs to the
+	// org whose Dockerfile this is. Created or woken HERE, on the host that
+	// took the request, so nothing about serving a build depends on another
+	// host being alive.
+	record(status(id, "starting the builder"))
+	addr, release, err := b.opts.Builders.EnsureBuilder(ctx, orgID)
+	if err != nil {
+		record(failure("starting the builder", err))
+		return res, err
+	}
+	defer release()
+
 	tarPath := filepath.Join(work, "rootfs.tar")
-	if err := b.solve(ctx, ctxDir, tarPath, record); err != nil {
+	if err := b.solve(ctx, addr, ctxDir, tarPath, record); err != nil {
 		return res, err
 	}
 

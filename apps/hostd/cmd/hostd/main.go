@@ -311,11 +311,14 @@ func run() error {
 	var builder api.BuildRunner
 	if cfg.S3Bucket != "" {
 		builder = build.New(ctx, build.Options{
-			WorkRoot:       filepath.Join(cfg.CacheRoot(), "builds-work"),
-			BuildDir:       filepath.Join(cfg.CacheRoot(), "builds"),
-			Chunks:         chunks,
-			AgentBinary:    cfg.GuestAgentBin,
-			BuildkitSock:   cfg.BuildkitSock,
+			WorkRoot:    filepath.Join(cfg.CacheRoot(), "builds-work"),
+			BuildDir:    filepath.Join(cfg.CacheRoot(), "builds"),
+			Chunks:      chunks,
+			AgentBinary: cfg.GuestAgentBin,
+			// The daemon is not on this host. Each build runs against the
+			// requesting org's builder machine, which mgr creates or wakes
+			// here, locally, for the host that took the request.
+			Builders:       mgr,
 			CacheBucket:    cfg.S3Bucket,
 			CacheEndpoint:  cfg.S3Endpoint,
 			CacheRegion:    cfg.S3Region,

@@ -48,7 +48,7 @@ type Deps struct {
 // builder serves both the public route and this one.
 type BuildRunner interface {
 	NewBuildID() string
-	StartBuild(ctx context.Context, id string, contextTar io.Reader,
+	StartBuild(ctx context.Context, id, orgID string, contextTar io.Reader,
 		emit func(api.BuildLogLine)) (string, error)
 	// RecordRefusal writes a failed build log with no build run, so a push
 	// the planner refused is readable at GET /v1/builds/{id}/logs exactly as
@@ -443,7 +443,9 @@ func (d Deps) buildRef(ctx context.Context, ev Event, ref, app, org string) (str
 	// Logs are recorded by the builder and readable at
 	// GET /v1/builds/{id}/logs. Nothing is emitted inline here: there is no
 	// client on the other end of a webhook.
-	rootfs, err := d.Builds.StartBuild(ctx, id, tar, func(api.BuildLogLine) {})
+	// The org whose service this push deploys, which is the org whose builder
+	// machine the Dockerfile runs inside. buildRef already has it.
+	rootfs, err := d.Builds.StartBuild(ctx, id, org, tar, func(api.BuildLogLine) {})
 	return rootfs, step, err
 }
 

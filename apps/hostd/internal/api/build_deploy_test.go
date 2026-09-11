@@ -64,7 +64,7 @@ func (b *deployingBuilder) NewBuildID() string {
 	return fmt.Sprintf("bld-deploy-%d", b.minted)
 }
 
-func (b *deployingBuilder) StartBuild(_ context.Context, id string, r io.Reader,
+func (b *deployingBuilder) StartBuild(_ context.Context, id, _ string, r io.Reader,
 	emit func(BuildLogLine)) (string, error) {
 
 	_, _ = io.Copy(io.Discard, r)

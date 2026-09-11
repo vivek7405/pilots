@@ -17,10 +17,10 @@ import (
 func (b *Builder) NewBuildID() string { return NewID() }
 
 // StartBuild runs a build to completion, streaming lines to emit.
-func (b *Builder) StartBuild(ctx context.Context, id string, contextTar io.Reader,
+func (b *Builder) StartBuild(ctx context.Context, id, orgID string, contextTar io.Reader,
 	emit func(api.BuildLogLine)) (string, error) {
 
-	res, err := b.Build(ctx, id, contextTar, emit)
+	res, err := b.Build(ctx, id, orgID, contextTar, emit)
 	if err != nil {
 		return "", err
 	}

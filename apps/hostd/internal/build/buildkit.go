@@ -25,9 +25,9 @@ import (
 //   - `--progress rawjson`. The machine-readable stream. The alternative is
 //     scraping a display that redraws itself, where the failing command's
 //     output can be overwritten by the next frame.
-func (b *Builder) solveArgs(contextDir, out, cacheName string) []string {
+func (b *Builder) solveArgs(addr, contextDir, out, cacheName string) []string {
 	args := []string{
-		"--addr", b.opts.BuildkitSock,
+		"--addr", addr,
 		"build",
 		"--frontend", "dockerfile.v0",
 		"--local", "context=" + contextDir,
@@ -72,10 +72,10 @@ func (b *Builder) solveArgs(contextDir, out, cacheName string) []string {
 // failed build -- and a build that reports success while producing nothing is
 // the failure mode that hangs a deploy, so the two are checked separately and
 // both are surfaced.
-func (b *Builder) solve(ctx context.Context, contextDir, out string,
+func (b *Builder) solve(ctx context.Context, addr, contextDir, out string,
 	record func(api.BuildLogLine)) error {
 
-	args := b.solveArgs(contextDir, out, cacheNameFor(contextDir))
+	args := b.solveArgs(addr, contextDir, out, cacheNameFor(contextDir))
 	cmd := exec.CommandContext(ctx, b.opts.BuildctlBin, args...)
 	// Its own process group, so a timeout kills the whole build tree rather
 	// than leaving buildctl's children running against a daemon that has
@@ -90,9 +90,12 @@ func (b *Builder) solve(ctx context.Context, contextDir, out string,
 		}
 		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
-	cmd.Env = append(os.Environ(),
-		"AWS_ACCESS_KEY_ID="+os.Getenv("PILOT_S3_ACCESS_KEY"),
-		"AWS_SECRET_ACCESS_KEY="+os.Getenv("PILOT_S3_SECRET_KEY"))
+	// No storage credentials reach this process, and none reach the daemon.
+	// The daemon runs inside a machine the ORG controls: given bucket
+	// credentials it could write a cache manifest under any key, and the next
+	// org whose Dockerfile hashed the same would import it. Everything the
+	// build needs from object storage is fetched and pushed by hostd itself,
+	// on this side of the guest boundary.
 
 	// rawjson goes to stderr; buildctl writes nothing useful to stdout with a
 	// file output.

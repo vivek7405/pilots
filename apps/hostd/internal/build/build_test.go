@@ -106,9 +106,29 @@ func TestExtractContextWritesTheFiles(t *testing.T) {
 // The oci exporter emits a layered image tarball, and unpacking those layers
 // means reimplementing whiteout and diff ordering to arrive at bytes the tar
 // exporter already produced.
+// testBuilderAddr stands in for a builder machine's tap address. The daemon is
+// never on this host, so every solve is addressed over TCP to a guest.
+const testBuilderAddr = "tcp://10.11.0.2:1234"
+
+// The daemon buildctl dials lives INSIDE the org's builder machine. Nothing
+// here may reach for a host socket: that is the whole difference between
+// running a customer Dockerfile behind KVM and running it beside other
+// tenants' machines.
+func TestSolveDialsTheBuilderMachineAndNeverAHostSocket(t *testing.T) {
+	b := &Builder{opts: Options{}}
+	args := b.solveArgs(testBuilderAddr, "/work/context", "/work/rootfs.tar", "")
+
+	if args[0] != "--addr" || args[1] != testBuilderAddr {
+		t.Errorf("solve did not dial the builder machine: %v", args[:2])
+	}
+	if strings.Contains(strings.Join(args, " "), "unix://") {
+		t.Errorf("solve reached for a host socket: %v", args)
+	}
+}
+
 func TestSolveUsesTheTarExporterAndMachineReadableProgress(t *testing.T) {
-	b := &Builder{opts: Options{BuildkitSock: "unix:///run/user/1000/buildkit/buildkitd.sock"}}
-	args := b.solveArgs("/work/context", "/work/rootfs.tar", "")
+	b := &Builder{opts: Options{}}
+	args := b.solveArgs(testBuilderAddr, "/work/context", "/work/rootfs.tar", "")
 	joined := strings.Join(args, " ")
 
 	if !strings.Contains(joined, "--output type=tar,dest=/work/rootfs.tar") {
@@ -135,7 +155,7 @@ func TestSolveArgsWireUpTheSharedCache(t *testing.T) {
 		CacheBucket: "pilots", CacheEndpoint: "https://ep", CacheRegion: "auto",
 		CacheAccessKey: "ak", CacheSecretKey: "sk",
 	}}
-	joined := strings.Join(b.solveArgs("/ctx", "/out.tar", "df-abc"), " ")
+	joined := strings.Join(b.solveArgs(testBuilderAddr, "/ctx", "/out.tar", "df-abc"), " ")
 
 	base := "type=s3,bucket=pilots,endpoint_url=https://ep,region=auto,name=df-abc," +
 		"use_path_style=true,access_key_id=ak,secret_access_key=sk"
@@ -159,7 +179,7 @@ func TestTheCacheCarriesItsOwnCredentials(t *testing.T) {
 		CacheBucket: "pilots", CacheEndpoint: "https://ep", CacheRegion: "auto",
 		CacheAccessKey: "ak", CacheSecretKey: "sk",
 	}}
-	joined := strings.Join(b.solveArgs("/ctx", "/out.tar", "df-abc"), " ")
+	joined := strings.Join(b.solveArgs(testBuilderAddr, "/ctx", "/out.tar", "df-abc"), " ")
 
 	for _, want := range []string{"access_key_id=ak", "secret_access_key=sk", "use_path_style=true"} {
 		if !strings.Contains(joined, want) {
@@ -175,7 +195,7 @@ func TestTheCacheOmitsAbsentCredentials(t *testing.T) {
 	b := &Builder{opts: Options{
 		CacheBucket: "pilots", CacheEndpoint: "https://ep", CacheRegion: "auto",
 	}}
-	joined := strings.Join(b.solveArgs("/ctx", "/out.tar", "df-abc"), " ")
+	joined := strings.Join(b.solveArgs(testBuilderAddr, "/ctx", "/out.tar", "df-abc"), " ")
 
 	if strings.Contains(joined, "access_key_id") {
 		t.Errorf("an empty credential was sent: %s", joined)
@@ -214,7 +234,7 @@ func TestBuildRejectsAContextWithNoDockerfile(t *testing.T) {
 		logs: newLogStore(4), sem: make(chan struct{}, 1), run: execRunner,
 	}
 	var lines []api.BuildLogLine
-	_, err := b.Build(context.Background(), "bld-1",
+	_, err := b.Build(context.Background(), "bld-1", "org-1",
 		contextTar(t, map[string]string{"app.js": "x"}, nil),
 		func(l api.BuildLogLine) { lines = append(lines, l) })
 
