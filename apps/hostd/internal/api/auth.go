@@ -284,7 +284,7 @@ func WithAuth(d Deps, next http.Handler) http.Handler {
 		// for the same reason: a credential that outlives what its owner
 		// agreed to is the failure both are here to prevent. A key with no
 		// limits row is unrestricted, which is every operator key.
-		limits, err := d.Store.GetAPIKeyLimits(r.Context(), hash)
+		limits, err := d.tenancy().Limits(r.Context(), hash)
 		if err != nil && !errors.Is(err, state.ErrNotFound) {
 			WriteError(w, http.StatusInternalServerError, CodeInternal,
 				"auth lookup failed", NextInternal, nil)

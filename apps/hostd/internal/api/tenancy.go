@@ -18,6 +18,11 @@ import (
 type TenancyView interface {
 	OrgOf(ctx context.Context, id string) (string, bool)
 	Revoked(ctx context.Context, hash string) (bool, error)
+	// Limits is read in the same breath as Revoked and belongs here for the
+	// same reason: it is on the authenticated request path, so in a fleet it
+	// must come from the subscription cache rather than a query. ErrNotFound
+	// means the key is unrestricted, which is every operator key.
+	Limits(ctx context.Context, hash string) (*state.APIKeyLimits, error)
 }
 
 // StoreTenancy answers from the state store. Used on a single box, and by the
@@ -36,6 +41,10 @@ func (t storeTenancy) OrgOf(ctx context.Context, id string) (string, bool) {
 
 func (t storeTenancy) Revoked(ctx context.Context, hash string) (bool, error) {
 	return t.st.IsRevoked(ctx, hash)
+}
+
+func (t storeTenancy) Limits(ctx context.Context, hash string) (*state.APIKeyLimits, error) {
+	return t.st.GetAPIKeyLimits(ctx, hash)
 }
 
 // tenancy returns the configured view, or one over the store.

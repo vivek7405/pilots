@@ -52,6 +52,7 @@ type cacheServer struct {
 	serviceRows    []string
 	tenancyRows    []string
 	revocationRows []string
+	keyLimitRows   []string
 	hostCPURows    []string
 	urlAuthRows    []string
 	machineCPURows []string
@@ -61,6 +62,7 @@ type cacheServer struct {
 	serviceChanges    chan string
 	tenancyChanges    chan string
 	revocationChanges chan string
+	keyLimitChanges   chan string
 	hostCPUChanges    chan string
 	machineCPUChanges chan string
 	urlAuthChanges    chan string
@@ -105,6 +107,7 @@ func startCache(t *testing.T, s *cacheServer) *Cache {
 		isServices := strings.Contains(string(body), "FROM services")
 		isTenancy := strings.Contains(string(body), "FROM tenancy")
 		isRevocations := strings.Contains(string(body), "FROM api_key_revocations")
+		isKeyLimits := strings.Contains(string(body), "FROM api_key_limits")
 
 		s.subscribes.Add(1)
 		w.Header().Set("corro-query-id", "sub")
@@ -127,6 +130,11 @@ func startCache(t *testing.T, s *cacheServer) *Cache {
 		} else if isTenancy {
 			flushLine(w, `{"columns":["id","org_id","kind"]}`)
 			for _, row := range s.tenancyRows {
+				flushLine(w, `{"row":[1,`+row+`]}`)
+			}
+		} else if isKeyLimits {
+			flushLine(w, `{"columns":["hash","name_prefix","max_machines","expires_at","created_at"]}`)
+			for _, row := range s.keyLimitRows {
 				flushLine(w, `{"row":[1,`+row+`]}`)
 			}
 		} else if isRevocations {
@@ -164,6 +172,8 @@ func startCache(t *testing.T, s *cacheServer) *Cache {
 			ch = s.tenancyChanges
 		case isRevocations:
 			ch = s.revocationChanges
+		case isKeyLimits:
+			ch = s.keyLimitChanges
 		case isServices:
 			ch = s.serviceChanges
 		case isHosts:
@@ -401,6 +411,12 @@ func TestCacheRebuildsWhenItsSubscriptionIsGone(t *testing.T) {
 			<-r.Context().Done()
 			return
 		}
+		if strings.Contains(string(body), "FROM api_key_limits") {
+			flushLine(w, `{"columns":["hash","name_prefix","max_machines","expires_at","created_at"]}`)
+			flushLine(w, `{"eoq":{"time":0,"change_id":1}}`)
+			<-r.Context().Done()
+			return
+		}
 
 		n := subscribes.Add(1)
 		flushLine(w, `{"columns":["id","name","host_id","state","kind_knobs","image_ref","vcpus","mem_mib","domain","custom_domain","app_port","agent_port","agent_token_hash","mem_build_id","rootfs_build_id","template_mem_build_id","template_rootfs_build_id","volume_id","service_id","release_id","app","slot","last_activity","updated_at"]}`)
@@ -540,6 +556,51 @@ func TestCacheServesTenancyAndRevocations(t *testing.T) {
 	revocations <- `{"change":["insert",1,["beef"],2]}`
 	waitFor(t, func() bool { return cache.Revoked("beef") },
 		"a revocation to reach the cache")
+}
+
+// Key limits are read on the same hot path, in the same breath as the
+// revocation above, so they come from the same place: memory.
+//
+// Before this, the expiry and prefix checks queried the corrosion agent on
+// EVERY authenticated request -- the exact cost the revocation set exists to
+// avoid, reintroduced next to it.
+func TestCacheServesKeyLimits(t *testing.T) {
+	limits := make(chan string)
+	cache := startCache(t, &cacheServer{
+		machineRows:     []string{machineRow("m-1", "alpha", "host-a", "running")},
+		hostRows:        []string{hostRow("host-a", "fdcc::1", time.Now().Unix())},
+		keyLimitRows:    []string{`["restricted","agent-",5,1893456000,1757000000]`},
+		keyLimitChanges: limits,
+	})
+
+	l, ok := cache.KeyLimits("restricted")
+	if !ok {
+		t.Fatal("a limits row from the initial read is not in the cache")
+	}
+	if l.NamePrefix != "agent-" {
+		t.Errorf("NamePrefix = %q, want agent-", l.NamePrefix)
+	}
+	if l.MaxMachines != 5 {
+		t.Errorf("MaxMachines = %d, want 5", l.MaxMachines)
+	}
+	if l.ExpiresAt != 1893456000 {
+		t.Errorf("ExpiresAt = %d, want 1893456000", l.ExpiresAt)
+	}
+
+	// A hash with no row is UNRESTRICTED, which is every operator key, and is
+	// the common case on this path. cachedTenancy answers the miss without
+	// falling back to a query, so this has to be a clean miss rather than an
+	// error: see cachedTenancy.Limits for why the miss is authoritative.
+	if _, ok := cache.KeyLimits("operator"); ok {
+		t.Error("a hash with no limits row reported limits")
+	}
+
+	// 0 for expires_at, which is the "lives until revoked" case.
+	limits <- `{"change":["insert",1,["later","bot-",1,0,1757000001],2]}`
+	waitFor(t, func() bool {
+		got, ok := cache.KeyLimits("later")
+		return ok && got.NamePrefix == "bot-" && got.ExpiresAt == 0
+	}, "a limits insert to reach the cache")
 }
 
 // The rescue ranking reads the vendor off the live host list, and the list is

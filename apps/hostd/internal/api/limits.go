@@ -44,7 +44,7 @@ func (d Deps) limitsFor(ctx context.Context) (*state.APIKeyLimits, error) {
 	if hash == "" || d.Store == nil {
 		return nil, nil
 	}
-	l, err := d.Store.GetAPIKeyLimits(ctx, hash)
+	l, err := d.tenancy().Limits(ctx, hash)
 	if errors.Is(err, state.ErrNotFound) {
 		return nil, nil
 	}
