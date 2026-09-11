@@ -279,8 +279,17 @@ func (b *Builder) SeedSharedCache(ctx context.Context) {
 		return
 	}
 
+	// Bounded exactly like a real solve, and for a sharper reason than tidiness.
+	// Under the daemon's root context a buildctl that wedges never returns, so
+	// `release` below is never called; the in-flight count it holds is what
+	// stops the idle monitor suspending the platform builder, and
+	// selectStaleBuilders only ever considers SUSPENDED rows -- so a 4 vCPU
+	// machine nobody asked for would stay up until hostd restarts.
+	solveCtx, cancel := contextWithTimeout(ctx, b.opts.Timeout)
+	defer cancel()
+
 	// No org: the platform's own builder, holding no tenant context.
-	addr, release, err := b.opts.Builders.EnsureBuilder(ctx, "")
+	addr, release, err := b.opts.Builders.EnsureBuilder(solveCtx, "")
 	if err != nil {
 		slog.Warn("could not start a builder to seed the shared layer cache", "err", err)
 		return
@@ -297,7 +306,7 @@ func (b *Builder) SeedSharedCache(ctx context.Context) {
 		"--progress", "rawjson",
 		"--export-cache", "type=local,dest=" + dir + ",mode=max",
 	}
-	if _, err := b.run(ctx, b.opts.BuildctlBin, args...); err != nil {
+	if _, err := b.run(solveCtx, b.opts.BuildctlBin, args...); err != nil {
 		slog.Warn("seeding the shared layer cache failed; builds will be colder", "err", err)
 		_ = os.RemoveAll(dir)
 		return
