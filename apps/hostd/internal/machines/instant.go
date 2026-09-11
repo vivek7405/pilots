@@ -90,9 +90,15 @@ func (m *Manager) createFromTemplate(ctx context.Context, row *state.Machine,
 	// be the template's, and the template is the thing to replace.
 	var missing *templateArtifactMissing
 	if errors.As(err, &missing) {
-		slog.Warn("the golden template names a snapshot that is gone; re-deriving it",
-			"machine", row.ID, "snap_key", missing.snapKey)
-		m.discardTemplate(variantGolden)
+		// The row's OWN variant, not golden. restoreFromTemplate picks the
+		// template by variantFor(row), so discarding golden here would delete
+		// a manifest that is fine -- making every ordinary create pay a
+		// re-adopt or a re-derive -- and leave the broken builder manifest
+		// exactly where it was.
+		v := variantFor(row)
+		slog.Warn("the template names a snapshot that is gone; re-deriving it",
+			"machine", row.ID, "variant", v, "snap_key", missing.snapKey)
+		m.discardTemplate(v)
 		fcm, slot, err = m.restoreFromTemplate(ctx, row, missing.snapKey)
 	}
 	if err != nil {
