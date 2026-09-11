@@ -2,6 +2,8 @@ package machines
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -69,7 +71,9 @@ const builderNamePrefix = quota.BuilderNamePrefix
 // per host by design, so the name says so.
 //
 // An empty org is the platform's own builder, which exists only to seed the
-// shared layer cache and is never handed a tenant's context.
+// shared layer cache and is never handed a tenant's context. "shared" carries
+// no digest, and cannot be reached by an org either: nameLabel always ends in
+// six hex characters, and "shared" is not hex.
 func BuilderName(orgID, hostID string) string {
 	who := "shared"
 	if orgID != "" {
@@ -78,11 +82,33 @@ func BuilderName(orgID, hostID string) string {
 	return builderNamePrefix + who + "-" + nameLabel(hostID, 8)
 }
 
-// nameLabel reduces an id to something legal in a DNS label, truncated to n
-// characters. Ids here are already hex or uuid-shaped, so this is a guard
-// against a future id format rather than a transformation that does work
-// today.
+// nameLabel reduces an id to something legal in a DNS label: a readable prefix
+// of at most n characters, then six hex of a digest of the WHOLE id.
+//
+// The digest is the load-bearing half, and it is not decoration. NEITHER input
+// here is a controlled shape -- org ids are free-form at POST /v1/api-keys
+// (see api.AllowRepo on what that has already cost), and a host id defaults to
+// the hostname -- so a truncated, punctuation-stripped prefix collides on
+// perfectly ordinary names, and both collisions are silent:
+//
+//   - Two orgs called `customer-alpha-1` and `customer-alpha-2` would derive
+//     one builder name on a host, EnsureBuilder would find the other tenant's
+//     row, and one org's Dockerfile and build context would run inside the
+//     other's guest. That is the boundary a builder machine exists to draw.
+//   - Two hosts called `pilots-hel1-01` and `pilots-hel1-02` would derive one
+//     name too. findBuilder matches on host, so the second host never reuses
+//     the first's row; ensureNameFree scans the FLEET, so its create is
+//     refused, and every build on that host fails for as long as the first
+//     host's builder exists.
+//
+// Six hex is 24 bits over a population of, at most, the orgs on one host, and
+// a collision there is a create that is refused rather than a tenant boundary
+// crossed -- the org half of the name no longer decides who anything belongs
+// to on its own, because the digest covers the id in full.
 func nameLabel(s string, n int) string {
+	sum := sha256.Sum256([]byte(s))
+	tag := hex.EncodeToString(sum[:3])
+
 	var b strings.Builder
 	for _, r := range strings.ToLower(s) {
 		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
@@ -92,10 +118,9 @@ func nameLabel(s string, n int) string {
 			break
 		}
 	}
-	if b.Len() == 0 {
-		return "x"
-	}
-	return b.String()
+	// The tag is hex, so it is alphanumeric and a legal label start on its
+	// own: an id with nothing readable in it needs no placeholder character.
+	return b.String() + tag
 }
 
 // ensureNameFree rejects a name already in use.

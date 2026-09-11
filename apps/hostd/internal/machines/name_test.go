@@ -234,3 +234,48 @@ func TestBuilderPrefixMatchesQuota(t *testing.T) {
 		t.Fatalf("machines uses %q, quota uses %q", builderNamePrefix, quota.BuilderNamePrefix)
 	}
 }
+
+// The half of BuilderName that decides who a builder belongs to must be
+// collision-free, because NEITHER of its inputs is a controlled shape: org ids
+// are free-form at POST /v1/api-keys, and a host id defaults to the hostname.
+//
+// A truncated, punctuation-stripped prefix is not enough, and both ways it
+// fails are silent. Two orgs sharing a name share a BUILDER, so one tenant's
+// Dockerfile runs inside another's guest. Two hosts sharing one means the
+// second host's create is refused by the fleet-wide ensureNameFree, and every
+// build on it fails for as long as the first host's builder exists.
+func TestBuilderNamesDoNotCollideOnSimilarIDs(t *testing.T) {
+	const host = "host-aaaaaaaa"
+
+	for _, tc := range []struct{ why, a, b string }{
+		{"two orgs agreeing past the readable prefix",
+			"customer-alpha-1", "customer-alpha-2"},
+		{"the same org id written two ways", "Acme_Corp", "acme-corp"},
+		{"two orgs differing only in punctuation", "acme-1", "acme1"},
+	} {
+		if got, other := BuilderName(tc.a, host), BuilderName(tc.b, host); got == other {
+			t.Errorf("%s: %q and %q both derive %q, so they would share a builder",
+				tc.why, tc.a, tc.b, got)
+		}
+	}
+
+	// And the host half, where the collision is a permanent refusal rather
+	// than a crossed boundary.
+	for _, tc := range []struct{ why, a, b string }{
+		{"two hosts agreeing past the readable prefix",
+			"pilots-hel1-01", "pilots-hel1-02"},
+		{"two rig nodes", "pilots-node-1", "pilots-node-2"},
+	} {
+		if got, other := BuilderName("org_1", tc.a), BuilderName("org_1", tc.b); got == other {
+			t.Errorf("%s: %q and %q both derive %q, so the second host could never create one",
+				tc.why, tc.a, tc.b, got)
+		}
+	}
+
+	// Still a legal label after the digest is appended, on the longest inputs
+	// either side is likely to see.
+	long := BuilderName(strings.Repeat("organisation-", 8), strings.Repeat("hostname-", 8))
+	if err := validateName(long); err != nil {
+		t.Fatalf("a builder name from long ids is not a usable label: %v", err)
+	}
+}
