@@ -306,5 +306,5 @@ func (r *Router) serveLocally(w http.ResponseWriter, req *http.Request, target *
 	defer r.opts.Manager.End(target.Machine.ID)
 	go r.opts.Manager.Touch(context.WithoutCancel(ctx), target.Machine.ID)
 
-	r.proxyTo(w, req, slot, target.Port)
+	r.proxyTo(w, req, slot, target.Port, target)
 }
