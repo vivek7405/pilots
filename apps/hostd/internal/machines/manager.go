@@ -1255,6 +1255,15 @@ func (m *Manager) Adopt(id string, fcm *fc.Machine, slotIdx int) error {
 // consuming every core or all remaining memory -- including hostd's own. The
 // limits were previously documented as mandatory and then never set from the
 // machine's shape, so only a pid cap was ever applied.
+// vmmOverheadMiB is the margin added to a guest's RAM when bounding the
+// machine's cgroup, for Firecracker's own allocations.
+//
+// It is the hypervisor's slice and NOT memory a guest can allocate, which is
+// why nothing reports it as the machine's limit: a 512 MiB guest told its
+// limit was 640 had already been OOM-killed at 512. See stats.go, where
+// reading memory.max instead of the row was exactly that bug.
+const vmmOverheadMiB = 128
+
 func (m *Manager) machineFCConfig(row *state.Machine, slot *netns.Slot, mac string) fc.Config {
 	cfg := m.opts.FCConfig
 	cfg.MachineID = row.ID
@@ -1266,7 +1275,6 @@ func (m *Manager) machineFCConfig(row *state.Machine, slot *netns.Slot, mac stri
 
 	// Memory: the guest's own size plus a margin for Firecracker's own
 	// allocations, so the VMM is not OOM-killed for doing its job.
-	const vmmOverheadMiB = 128
 	cfg.Limits.MemMaxB = int64(row.MemMiB+vmmOverheadMiB) * 1024 * 1024
 
 	// CPU: vcpus worth of a 100ms period, so a machine cannot exceed the cores

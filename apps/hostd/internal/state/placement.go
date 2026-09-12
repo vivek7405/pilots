@@ -72,6 +72,34 @@ func (r PlacementRequest) need() int { return r.MemMiB }
 // is bin-packing arrived at by accident.
 const affinityBonus = 0.25
 
+// placementTieTolerance is how close two scores have to be to count as tied.
+//
+// # Why this is not exact equality, which is what it was
+//
+// Because exact equality between two floats derived from live memory readings
+// essentially never happens, so the hash spread below it essentially never
+// ran. freeMemMiB reports MemAvailable/1024 (cmd/hostd/fleet.go), which moves
+// by megabytes between heartbeats on any host doing work. Two hosts that are
+// interchangeable for placement purposes therefore scored differently every
+// single time, the tie branch was skipped, and the fleet degenerated to
+// "whichever host is momentarily emptiest takes everything" -- the bin-packing
+// this file's header says it is avoiding.
+//
+// It survived because the test for it used byte-identical hosts, where the
+// floats are equal by construction. Identical inputs are exactly the case a
+// tolerance is not needed for, so the test could not see the bug.
+//
+// # The number
+//
+// Scores are headroom-after-placement in MiB divided by CPUCount*1024, so this
+// is 64 MiB of headroom on a 4-CPU host: below any difference that should
+// decide where a machine goes, and comfortably above heartbeat noise.
+//
+// Sixteen times smaller than affinityBonus, deliberately. A cached build must
+// still outrank a host that is merely a little emptier, and would stop doing
+// so if the two were close in size.
+const placementTieTolerance = 1.0 / 64.0
+
 // RankHosts orders the live fleet for one create, best first.
 //
 // A pure function of rows the caller already holds: no I/O, no clock beyond
@@ -159,19 +187,25 @@ func RankHosts(req PlacementRequest, now time.Time, live []Host,
 
 	out := make([]string, 0, len(in)+len(tiedHosts))
 
-	// An exact tie at the top is broken by the hash, so a fleet of identical
-	// idle hosts spreads rather than sending every create to whichever id
-	// sorts first.
-	if len(in) > 1 && in[0].score == in[1].score {
+	// A tie at the top is broken by the hash, so a fleet of comparable idle
+	// hosts spreads rather than sending every create to whichever one is
+	// momentarily emptiest.
+	//
+	// Within a tolerance rather than at equality: see placementTieTolerance.
+	// The set is still a pure function of the scores, so every host in the
+	// fleet collects the same one and ranks the create identically.
+	if len(in) > 1 && in[0].score-in[1].score <= placementTieTolerance {
 		var tied []Host
 		for _, s := range in {
-			if s.score != in[0].score {
+			if in[0].score-s.score > placementTieTolerance {
 				break
 			}
 			tied = append(tied, s.host)
 		}
 		if winner, ok := OwnerFor(req.Name, tied); ok {
 			out = append(out, winner)
+			// Everyone else in score order, so a refused create still falls
+			// back to the emptiest host rather than to an arbitrary one.
 			for _, s := range in {
 				if s.id != winner {
 					out = append(out, s.id)

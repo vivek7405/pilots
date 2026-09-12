@@ -3,94 +3,134 @@ package machines
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
+
+	"github.com/vivek7405/pilots/hostd/internal/fc"
+	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
-// A fake cgroup tree, so the parser is exercised against the shape the kernel
-// actually writes rather than against a string somebody typed inline.
-func fakeCgroup(t *testing.T, usageUsec, memoryCurrent, memoryMax string) string {
+// fakeCgroup writes one machine's slice with the files Stats reads.
+//
+// procs is what goes in cgroup.procs: a pid for a machine that is running,
+// empty for one whose VMM is gone but whose slice the kernel still holds.
+func fakeCgroup(t *testing.T, id, procs string, current, max int64) {
 	t.Helper()
-	dir := t.TempDir()
+	root := t.TempDir()
+	old := cgroupRoot
+	cgroupRoot = root
+	t.Cleanup(func() { cgroupRoot = old })
+
+	dir := filepath.Join(root, "pilots", "firecracker", id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	write := func(name, body string) {
+		t.Helper()
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
-			t.Fatalf("write %s: %v", name, err)
+			t.Fatal(err)
 		}
 	}
-	// cpu.stat carries several lines and usage_usec is not always first, which
-	// is exactly why the parser looks for it by name.
-	write("cpu.stat", "nr_periods 0\nusage_usec "+usageUsec+"\nuser_usec 1\nsystem_usec 2\n")
-	write("memory.current", memoryCurrent+"\n")
-	write("memory.max", memoryMax+"\n")
-	return dir
+	write("cgroup.procs", procs)
+	write("cpu.stat", "usage_usec 2269379\nuser_usec 1\nsystem_usec 1\n")
+	write("memory.current", strconv.FormatInt(current, 10))
+	write("memory.max", strconv.FormatInt(max, 10))
 }
 
-func TestTheCPUTotalIsReadByNameAndNotByPosition(t *testing.T) {
-	dir := fakeCgroup(t, "2500000", "1048576", "536870912")
-	usec, err := readCPUUsec(dir)
+// statsManager is a manager owning one machine row, with the cgroup layout
+// pointed at whatever fakeCgroup just built.
+func statsManager(t *testing.T, id string, memMiB int) *Manager {
+	t.Helper()
+	st, err := state.Open(":memory:")
 	if err != nil {
-		t.Fatalf("readCPUUsec: %v", err)
+		t.Fatal(err)
 	}
-	if usec != 2500000 {
-		t.Errorf("usage_usec = %d, want 2500000", usec)
+	t.Cleanup(func() { st.Close() })
+
+	row := &state.Machine{
+		ID: id, Name: id, HostID: "host-a",
+		State: StateRunning, VCPUs: 1, MemMiB: memMiB,
+	}
+	if err := st.PutMachine(t.Context(), row); err != nil {
+		t.Fatal(err)
+	}
+	return &Manager{opts: Options{
+		HostID: "host-a", Store: st,
+		FCConfig: fc.Config{FirecrackerBin: "/usr/bin/firecracker"},
+	}}
+}
+
+// A machine's memory limit is the RAM it was asked for, not the cgroup's.
+//
+// # The bug
+//
+// The cgroup's memory.max is the guest's RAM PLUS 128 MiB of headroom for
+// Firecracker's own allocations, and Stats preferred it. So the owner of a
+// 512 MiB machine was told their limit was 640 MiB -- 128 MiB of hypervisor
+// slice their guest can never allocate, having been OOM-killed at 512.
+//
+// It was wrong downstream too: the CLI warns at 90% of the limit, which
+// against 640 MiB is 576 MiB and therefore never, and the dashboard's fill bar
+// showed a full machine at 80%.
+func TestTheMemoryLimitIsTheGuestsRAMNotTheCgroupsCeiling(t *testing.T) {
+	const memMiB = 512
+	// What the jailer actually writes: 512 + 128 MiB of VMM overhead.
+	fakeCgroup(t, "m_abc", "4242\n", 27271168, (memMiB+vmmOverheadMiB)<<20)
+
+	m := statsManager(t, "m_abc", memMiB)
+	got, err := m.Stats(t.Context(), "m_abc")
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if want := int64(memMiB) << 20; got.MemoryLimitBytes != want {
+		t.Errorf("memory_limit_bytes = %d, want %d. The extra is Firecracker's "+
+			"own headroom, which is not memory the guest can use",
+			got.MemoryLimitBytes, want)
 	}
 }
 
-// "max" is the kernel's word for no limit. Parsed as a number it would be an
-// error, and reported as an error it would make an unlimited machine look
-// broken; 0 is the honest answer for "there is no ceiling".
-func TestAnUnlimitedMemoryCeilingReadsAsNoCeiling(t *testing.T) {
-	dir := fakeCgroup(t, "1", "2048", "max")
-	if got := readInt(filepath.Join(dir, "memory.max")); got != 0 {
-		t.Errorf("memory.max = %d, want 0 for \"max\"", got)
+// A machine whose processes are gone is using no memory.
+//
+// # The bug
+//
+// Stats assumed "no cgroup means suspended", and nothing on the suspend path
+// removes the cgroup -- only Destroy and the reaper do. So the slice survived,
+// memory.current still reported the page cache and slab the kernel had not
+// reclaimed, and a suspended machine read as a small running one. On the rig
+// that was 4.6 MiB.
+func TestASuspendedMachineReportsNoMemory(t *testing.T) {
+	// The slice is still there, still charged, and has no processes in it.
+	fakeCgroup(t, "m_abc", "\n", 4820992, 640<<20)
+
+	m := statsManager(t, "m_abc", 512)
+	got, err := m.Stats(t.Context(), "m_abc")
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
 	}
-	if got := readInt(filepath.Join(dir, "memory.current")); got != 2048 {
-		t.Errorf("memory.current = %d, want 2048", got)
+	if got.MemoryBytes != 0 {
+		t.Errorf("a machine with an empty cgroup.procs reported %d bytes of "+
+			"memory; with no process there is nothing using memory, and a "+
+			"residual charge reads exactly like a small machine running",
+			got.MemoryBytes)
+	}
+	// The CPU total still comes back, because it is a counter and a suspend
+	// must never lower it.
+	if got.CPUSeconds <= 0 {
+		t.Errorf("cpu_seconds = %v; a suspend must not lose the total", got.CPUSeconds)
 	}
 }
 
-// A file that is not there is not an error to report. A suspended machine has
-// no cgroup, and that is the ordinary case rather than a failure.
-func TestAMissingCgroupFileIsZeroRatherThanAnError(t *testing.T) {
-	if got := readInt(filepath.Join(t.TempDir(), "absent")); got != 0 {
-		t.Errorf("a missing file read as %d", got)
-	}
-	if _, err := readCPUUsec(t.TempDir()); err == nil {
-		t.Error("a missing cpu.stat read as a success, so a suspended machine " +
-			"would report the cgroup's zero rather than its persisted total")
-	}
-}
+// A running machine still reports what it is using, or the fix above would be
+// indistinguishable from always reporting zero.
+func TestARunningMachineStillReportsItsMemory(t *testing.T) {
+	fakeCgroup(t, "m_abc", "4242\n", 27271168, 640<<20)
 
-// The whole reason the total is persisted: a counter that goes DOWN makes every
-// rate over it negative or enormous, and every alert on it fires on an ordinary
-// suspend.
-func TestTheCPUTotalSurvivesACgroupBeingDestroyed(t *testing.T) {
-	root := t.TempDir()
-	m := &Manager{opts: Options{StateRoot: root}}
-
-	// Nothing persisted yet.
-	if got := m.carriedCPU("m_1"); got != 0 {
-		t.Fatalf("carried = %d before anything was written", got)
+	m := statsManager(t, "m_abc", 512)
+	got, err := m.Stats(t.Context(), "m_abc")
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
 	}
-
-	// A machine that ran for 4 seconds, persisted as its cgroup goes away.
-	dir := filepath.Join(root, "m_1")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		t.Fatalf("mkdir: %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, statsFile), []byte(`{"cpu_usec":4000000}`), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if got := m.carriedCPU("m_1"); got != 4000000 {
-		t.Errorf("carried = %d, want 4000000", got)
-	}
-
-	// An unreadable file is zero rather than an error: losing the carried total
-	// under-reports, which is bad; failing the whole sample would mean no
-	// number at all, which is worse.
-	if err := os.WriteFile(filepath.Join(dir, statsFile), []byte("not json"), 0o644); err != nil {
-		t.Fatalf("write: %v", err)
-	}
-	if got := m.carriedCPU("m_1"); got != 0 {
-		t.Errorf("an unreadable stats file gave %d", got)
+	if got.MemoryBytes != 27271168 {
+		t.Errorf("memory_bytes = %d, want the cgroup's 27271168", got.MemoryBytes)
 	}
 }
