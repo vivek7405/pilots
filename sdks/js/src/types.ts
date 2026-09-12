@@ -113,6 +113,12 @@ export interface Machine {
   /** Who may reach the URL: 'public' (the default) or 'org'. */
   url_auth?: 'public' | 'org'
   /**
+   * The machine this one was FORKED from, and the checkpoint it was restored
+   * from. Absent on a machine that was created rather than forked.
+   */
+  parent?: string
+  checkpoint?: string
+  /**
    * The address this machine's OUTBOUND traffic leaves from, when its host
    * manages egress. Shared with the org's other machines on the same host, and
    * outliving every one of them.
@@ -132,6 +138,37 @@ export interface Machine {
  * addresses. It changes when a host joins or leaves the fleet and at no other
  * time, which is what makes it safe to put in somebody else's firewall.
  */
+/**
+ * Asks for N new machines from one machine's or checkpoint's exact state: the
+ * source's processes already running, its memory already warm.
+ */
+export interface ForkRequest {
+  /** The first fork's name; the rest take a suffix. Omitted mints one. */
+  name?: string
+  /** How many, default 1, capped at 100. */
+  count?: number
+  /**
+   * Fork the source's volume too. A source WITH a volume and this unset is
+   * refused rather than forked without it.
+   */
+  volume?: boolean
+}
+
+/**
+ * One entry per requested fork, in order. Per-fork rather than one status for
+ * the request, because forks are independent: nine that came up are worth
+ * having when the tenth did not.
+ */
+export interface ForkResponse {
+  forks: ForkEntry[]
+}
+
+/** One fork: the machine, or why it did not happen. */
+export interface ForkEntry {
+  machine?: Machine
+  error?: string
+}
+
 /**
  * One point-in-time copy of a volume.
  *

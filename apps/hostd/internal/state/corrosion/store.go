@@ -992,6 +992,79 @@ func (s *Store) ListHostCapacity(ctx context.Context) ([]state.HostCapacity, err
 // The caller writes it only when the set changed, because this row is gossiped
 // in full on every write and the cache changes far more often than placement
 // needs to know about.
+// PutLineage records where a forked machine came from.
+//
+// Guarded like machine_labels: only the host that writes the FORK's machine
+// row may write its lineage, because the row describes that machine. Write-once
+// on top of that -- an upsert would let a later write change which builds are
+// pinned, and the pinning is the only thing keeping a live fork's memory image
+// from being discarded by its parent.
+func (s *Store) PutLineage(ctx context.Context, l *state.Lineage) error {
+	if err := s.assertMachineOwner(ctx, l.ID, state.WriteAuth{}); err != nil {
+		return err
+	}
+	if _, err := s.client.Exec(ctx, `
+		INSERT INTO machine_lineage (id, parent_id, checkpoint_id, mem_build_id,
+			rootfs_build_id, volume_snapshot, created_at)
+		VALUES (?,?,?,?,?,?,?)`,
+		l.ID, l.ParentID, l.CheckpointID, l.MemBuildID, l.RootfsBuildID,
+		l.VolumeSnapshot, l.CreatedAt); err != nil {
+		return fmt.Errorf("state: put lineage %q: %w", l.ID, err)
+	}
+	return nil
+}
+
+func (s *Store) GetLineage(ctx context.Context, machineID string) (*state.Lineage, error) {
+	rows, err := s.client.Query(ctx, `
+		SELECT id, parent_id, checkpoint_id, mem_build_id, rootfs_build_id,
+		       volume_snapshot, created_at
+		FROM machine_lineage WHERE id = ?`, machineID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, state.ErrNotFound
+	}
+	var l state.Lineage
+	if err := rows.Scan(&l.ID, &l.ParentID, &l.CheckpointID, &l.MemBuildID,
+		&l.RootfsBuildID, &l.VolumeSnapshot, &l.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &l, nil
+}
+
+func (s *Store) ListLineage(ctx context.Context) ([]state.Lineage, error) {
+	rows, err := s.client.Query(ctx, `
+		SELECT id, parent_id, checkpoint_id, mem_build_id, rootfs_build_id,
+		       volume_snapshot, created_at
+		FROM machine_lineage ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []state.Lineage
+	for rows.Next() {
+		var l state.Lineage
+		if err := rows.Scan(&l.ID, &l.ParentID, &l.CheckpointID, &l.MemBuildID,
+			&l.RootfsBuildID, &l.VolumeSnapshot, &l.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteLineage(ctx context.Context, machineID string) error {
+	if _, err := s.client.Exec(ctx, `DELETE FROM machine_lineage WHERE id = ?`, machineID); err != nil {
+		return fmt.Errorf("state: delete lineage %q: %w", machineID, err)
+	}
+	return nil
+}
+
 // PutHandoff offers a machine to another host.
 //
 // Only the machine's CURRENT owner may write it, which is the whole reason the

@@ -344,6 +344,11 @@ func Routes(d Deps) http.Handler {
 	// OFFER row authorises the move, so this only saves the target from
 	// waiting to notice one.
 	mux.HandleFunc("POST /v1/machines/{id}/take", d.handleTake)
+	// New machines from an existing one's exact state: the source's processes
+	// already running, its memory already warm. A suspended source is forked
+	// without waking it.
+	mux.HandleFunc("POST /v1/machines/{id}/fork", d.handleForkMachine)
+	mux.HandleFunc("POST /v1/checkpoints/{id}/fork", d.handleForkCheckpoint)
 	mux.HandleFunc("GET /v1/whoami", d.handleWhoami)
 
 	// The hosted MCP endpoint: the fleet toolset over Streamable HTTP, on

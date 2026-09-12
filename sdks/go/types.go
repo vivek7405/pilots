@@ -116,6 +116,11 @@ type Machine struct {
 	Labels map[string]string `json:"labels,omitempty"`
 	// URLAuth is who may reach the URL: "public" (the default) or "org".
 	URLAuth string `json:"url_auth,omitempty"`
+	// Parent is the machine this one was FORKED from, and Checkpoint the
+	// checkpoint it was restored from. Empty on a machine that was created
+	// rather than forked.
+	Parent     string `json:"parent,omitempty"`
+	Checkpoint string `json:"checkpoint,omitempty"`
 	// Egress is the address this machine's OUTBOUND traffic leaves from, when
 	// its host manages egress. Shared with the org's other machines on the
 	// same host, and outliving every one of them.
@@ -484,6 +489,32 @@ type Host struct {
 	Draining bool `json:"draining,omitempty"`
 	// BuildsCached is how many builds this host holds on local disk.
 	BuildsCached int `json:"builds_cached,omitempty"`
+}
+
+// ForkRequest asks for N new machines from one machine's or checkpoint's exact
+// state: the source's processes already running, its memory already warm.
+type ForkRequest struct {
+	// Name is the first fork's name; the rest take a suffix. Empty mints one.
+	Name string `json:"name,omitempty"`
+	// Count is how many, default 1, capped at 100.
+	Count int `json:"count,omitempty"`
+	// Volume forks the source's volume too. A source WITH a volume and this
+	// unset is refused rather than forked without it.
+	Volume bool `json:"volume,omitempty"`
+}
+
+// ForkResponse is one entry per requested fork, in order.
+//
+// Per-fork rather than one status for the request, because forks are
+// independent: nine that came up are worth having when the tenth did not.
+type ForkResponse struct {
+	Forks []ForkEntry `json:"forks"`
+}
+
+// ForkEntry is one fork: the machine, or why it did not happen.
+type ForkEntry struct {
+	Machine *Machine `json:"machine,omitempty"`
+	Error   string   `json:"error,omitempty"`
 }
 
 // SnapshotResponse is one point-in-time copy of a volume.
@@ -898,6 +929,9 @@ var wireTypes = []any{
 	Size{},
 	EgressResponse{},
 	EgressAddress{},
+	ForkRequest{},
+	ForkResponse{},
+	ForkEntry{},
 	SnapshotResponse{},
 	SnapshotListResponse{},
 	DrainReport{},

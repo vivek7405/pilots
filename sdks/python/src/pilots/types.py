@@ -87,11 +87,44 @@ class Machine:
     last_start_at: int | None = None
     labels: dict[str, str] | None = None
     url_auth: str | None = None
+    #: The machine this one was FORKED from, and the checkpoint it was
+    #: restored from. None on a machine that was created rather than forked.
+    parent: str | None = None
+    checkpoint: str | None = None
     #: The address this machine's OUTBOUND traffic leaves from, when its host
     #: manages egress. Shared with the org's other machines on the same host.
     #: None means the host's shared address, which is what every machine had
     #: before egress addresses existed.
     egress: str | None = None
+
+
+@dataclass
+class ForkRequest:
+    """Asks for N new machines from one machine's or checkpoint's exact state:
+    the source's processes already running, its memory already warm."""
+
+    name: str | None = None
+    count: int | None = None
+    volume: bool | None = None
+
+
+@dataclass
+class ForkEntry:
+    """One fork: the machine, or why it did not happen."""
+
+    machine: Machine | None = None
+    error: str | None = None
+
+
+@dataclass
+class ForkResponse:
+    """One entry per requested fork, in order.
+
+    Per-fork rather than one status for the request, because forks are
+    independent: nine that came up are worth having when the tenth did not.
+    """
+
+    forks: list[ForkEntry] = field(default_factory=list)
 
 
 @dataclass

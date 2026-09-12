@@ -375,6 +375,24 @@ func (s *ServiceSize) ImageMatchesSize() bool {
 	return s.ImageVCPUs == vcpus && s.ImageMemMiB == memMiB
 }
 
+// Lineage is where a forked machine came from.
+//
+// The build ids are the load-bearing part. A fork faults pages out of its
+// parent's memory image until its own first suspend writes one, so the
+// parent's next suspend or destroy must not discard an artifact a live fork is
+// still reading. This row is what says so.
+//
+// Write-once: a fork's origin does not change.
+type Lineage struct {
+	ID             string
+	ParentID       string
+	CheckpointID   string
+	MemBuildID     string
+	RootfsBuildID  string
+	VolumeSnapshot string
+	CreatedAt      int64
+}
+
 // Handoff is one host offering a machine to another, on a planned drain.
 //
 // WRITE-ONCE. A CRDT merge has nothing to corrupt in a row nobody rewrites,
@@ -645,6 +663,17 @@ type Store interface {
 	// PutHandoff offers a machine to another host. Written once, by the
 	// machine's CURRENT owner, and never updated: a repeated offer is a new
 	// row with a higher Seq.
+	// PutLineage records where a forked machine came from. Written once, by
+	// the fork's own host.
+	PutLineage(ctx context.Context, l *Lineage) error
+	// GetLineage returns ErrNotFound for a machine that was not forked, which
+	// is most of them.
+	GetLineage(ctx context.Context, machineID string) (*Lineage, error)
+	// ListLineage is every fork, for the check that keeps a parent's builds
+	// alive while a fork still reads them.
+	ListLineage(ctx context.Context) ([]Lineage, error)
+	DeleteLineage(ctx context.Context, machineID string) error
+
 	PutHandoff(ctx context.Context, h *Handoff) error
 	// NewestHandoff is the most recent offer of a machine, or ErrNotFound
 	// when it has never been offered.
@@ -1209,6 +1238,66 @@ func (s *sqliteStore) ListHostCapacity(ctx context.Context) ([]HostCapacity, err
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+func (s *sqliteStore) PutLineage(ctx context.Context, l *Lineage) error {
+	// INSERT, never upsert: a fork's origin does not change, and an upsert
+	// here would let a later write rewrite which builds are pinned.
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO machine_lineage (id, parent_id, checkpoint_id, mem_build_id,
+			rootfs_build_id, volume_snapshot, created_at)
+		VALUES (?,?,?,?,?,?,?)`,
+		l.ID, l.ParentID, l.CheckpointID, l.MemBuildID, l.RootfsBuildID,
+		l.VolumeSnapshot, l.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put lineage %q: %w", l.ID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) GetLineage(ctx context.Context, machineID string) (*Lineage, error) {
+	var l Lineage
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, parent_id, checkpoint_id, mem_build_id, rootfs_build_id,
+		       volume_snapshot, created_at
+		FROM machine_lineage WHERE id = ?`, machineID).
+		Scan(&l.ID, &l.ParentID, &l.CheckpointID, &l.MemBuildID, &l.RootfsBuildID,
+			&l.VolumeSnapshot, &l.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get lineage %q: %w", machineID, err)
+	}
+	return &l, nil
+}
+
+func (s *sqliteStore) ListLineage(ctx context.Context) ([]Lineage, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, parent_id, checkpoint_id, mem_build_id, rootfs_build_id,
+		       volume_snapshot, created_at
+		FROM machine_lineage ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("state: list lineage: %w", err)
+	}
+	defer rows.Close()
+	var out []Lineage
+	for rows.Next() {
+		var l Lineage
+		if err := rows.Scan(&l.ID, &l.ParentID, &l.CheckpointID, &l.MemBuildID,
+			&l.RootfsBuildID, &l.VolumeSnapshot, &l.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+func (s *sqliteStore) DeleteLineage(ctx context.Context, machineID string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM machine_lineage WHERE id = ?`, machineID); err != nil {
+		return fmt.Errorf("state: delete lineage %q: %w", machineID, err)
+	}
+	return nil
 }
 
 func (s *sqliteStore) PutHandoff(ctx context.Context, h *Handoff) error {

@@ -255,6 +255,15 @@ type Machine struct {
 	// URLAuth is who may reach the URL: "public" (the default) or "org", which
 	// makes the router ask for an API key of the owning org.
 	URLAuth string `json:"url_auth,omitempty"`
+	// Parent is the machine this one was FORKED from, and Checkpoint the
+	// checkpoint it was restored from. Absent on a machine that was created
+	// rather than forked, which is most of them.
+	//
+	// Worth reporting rather than leaving internal: a fork shares artifacts
+	// with its parent until its own first suspend, so "which machine did this
+	// come from" is the question behind every surprising thing a fork does.
+	Parent     string `json:"parent,omitempty"`
+	Checkpoint string `json:"checkpoint,omitempty"`
 	// Egress is the address this machine's OUTBOUND traffic leaves from, when
 	// its host manages egress. Derived from the host's prefix and the owning
 	// org, so it is shared with the org's other machines on the same host and

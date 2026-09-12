@@ -861,6 +861,19 @@ func (m *Manager) discardBuilds(ctx context.Context, ids ...string) {
 		if id == "" {
 			continue
 		}
+		// A build a FORK is still reading is not superseded, whatever the
+		// machine that made it thinks.
+		//
+		// A fork faults pages out of its parent's memory image until its own
+		// first suspend writes one of its own. Discarding it here would leave
+		// a live machine reading an object that is gone, which surfaces as the
+		// guest hanging on a page fault -- with nothing connecting it back to
+		// the unrelated machine that was suspended a moment earlier.
+		if m.buildReferenced(ctx, id) {
+			slog.Info("keeping a build a fork still reads",
+				"build", id)
+			continue
+		}
 		for _, name := range []string{id + "/header", id + "/data"} {
 			if err := deleter.Delete(ctx, name); err != nil {
 				slog.Warn("a superseded build was left in object storage",
@@ -868,6 +881,60 @@ func (m *Manager) discardBuilds(ctx context.Context, ids ...string) {
 			}
 		}
 	}
+}
+
+// buildReferenced reports whether a live forked machine still needs this build.
+//
+// Errs on the side of KEEPING. A build kept needlessly costs storage, which is
+// metered and visible; a build deleted while something reads it costs a machine,
+// and the failure appears nowhere near the cause. So an unreadable lineage
+// table, or an unreadable machine list, both read as "referenced".
+func (m *Manager) buildReferenced(ctx context.Context, buildID string) bool {
+	if buildID == "" {
+		return false
+	}
+	// A manager with no store has no lineage table, so there are no forks and
+	// nothing can be referencing anything. Not the same as "could not read":
+	// there is genuinely nothing to read.
+	if m.opts.Store == nil {
+		return false
+	}
+	rows, err := m.opts.Store.ListLineage(ctx)
+	if err != nil {
+		slog.Warn("could not check whether a build is still forked from; keeping it",
+			"build", buildID, "err", err)
+		return true
+	}
+	var holders []string
+	for _, l := range rows {
+		if l.MemBuildID == buildID || l.RootfsBuildID == buildID {
+			holders = append(holders, l.ID)
+		}
+	}
+	if len(holders) == 0 {
+		return false
+	}
+	// A lineage row outlives its machine until the reaper collects it, so the
+	// machine has to be asked whether it is still there. A destroyed fork pins
+	// nothing.
+	machines, err := m.opts.Store.ListMachines(ctx)
+	if err != nil {
+		slog.Warn("could not check whether a fork still exists; keeping its build",
+			"build", buildID, "err", err)
+		return true
+	}
+	alive := make(map[string]bool, len(machines))
+	for _, row := range machines {
+		if row.State != state.StateDestroyed {
+			alive[row.ID] = true
+		}
+	}
+	for _, id := range holders {
+		if alive[id] {
+			return true
+		}
+	}
+	return false
 }
 
 // Wake restores a suspended machine.

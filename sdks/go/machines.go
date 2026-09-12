@@ -100,6 +100,20 @@ func (m *Machines) Resize(ctx context.Context, id string, vcpus, memMiB int) (*M
 		ResizeMachineRequest{VCPUs: vcpus, MemMiB: memMiB}, &out)
 }
 
+// Fork makes new machines from this one's exact state.
+//
+// Each fork comes up with the source's processes already running and its memory
+// already warm: an agent that spent two minutes installing dependencies and
+// loading a model forks into ten machines that all begin from that moment.
+//
+// A RUNNING source is checkpointed first, in place, keeping its id and URL. A
+// SUSPENDED source is forked without being woken at all.
+func (m *Machines) Fork(ctx context.Context, id string, req ForkRequest) (*ForkResponse, error) {
+	var out ForkResponse
+	return &out, m.c.do(ctx, http.MethodPost,
+		"/v1/machines/"+url.PathEscape(id)+"/fork", req, &out)
+}
+
 // Processes lists what a machine is running.
 //
 // A machine runs a NAMED SET of processes: an image's own command is the
@@ -179,6 +193,15 @@ type Checkpoints struct{ c *Client }
 func (k *Checkpoints) Restore(ctx context.Context, id string) (*Machine, error) {
 	var out Machine
 	return &out, k.c.do(ctx, http.MethodPost, "/v1/checkpoints/"+url.PathEscape(id)+"/restore", nil, &out)
+}
+
+// Fork makes new machines from a checkpoint, rather than from a machine's
+// current state. The same restore, addressed by the moment rather than by the
+// machine.
+func (k *Checkpoints) Fork(ctx context.Context, id string, req ForkRequest) (*ForkResponse, error) {
+	var out ForkResponse
+	return &out, k.c.do(ctx, http.MethodPost,
+		"/v1/checkpoints/"+url.PathEscape(id)+"/fork", req, &out)
 }
 
 // Get reports a checkpoint's state; Durable flips once the upload lands.

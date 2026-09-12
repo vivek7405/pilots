@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 
@@ -40,6 +42,12 @@ type fakeManager struct {
 	processLogTail int
 	// resizedTo is the size the last resize asked for, as {vcpus, mem_mib}.
 	resizedTo [2]int
+	// forked records what each fork request asked for, so a test can assert
+	// the source and count reached the manager rather than only that the route
+	// answered. forkFails makes the Nth fork fail, for the assertion that one
+	// failure does not take its siblings with it.
+	forked    []ForkOptions
+	forkFails int
 	// The volume snapshot surface: what was taken, listed and restored.
 	volumeSnapshots   []string
 	snapshotted       []string
@@ -238,4 +246,32 @@ func (f *fakeManager) RestoreVolumeSnapshot(_ context.Context, volumeID, stamp s
 	defer f.mu.Unlock()
 	f.restoredSnapshots = append(f.restoredSnapshots, volumeID+"@"+stamp)
 	return f.err
+}
+
+// Fork answers with one machine per requested fork. forkFails makes that many
+// of them fail, from the first, so a test can check that the successful ones
+// still come back.
+func (f *fakeManager) Fork(_ context.Context, opts ForkOptions) ([]ForkOutcome, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.forked = append(f.forked, opts)
+	if f.err != nil {
+		return nil, f.err
+	}
+	count := opts.Count
+	if count <= 0 {
+		count = 1
+	}
+	out := make([]ForkOutcome, 0, count)
+	for i := range count {
+		if i < f.forkFails {
+			out = append(out, ForkOutcome{Err: errors.New("no room for this one")})
+			continue
+		}
+		row := *f.machine
+		row.ID = fmt.Sprintf("m_fork_%d", i)
+		row.Name = fmt.Sprintf("fork-%d", i)
+		out = append(out, ForkOutcome{Machine: &row})
+	}
+	return out, nil
 }

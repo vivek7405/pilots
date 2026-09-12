@@ -503,6 +503,29 @@ CREATE TABLE IF NOT EXISTS host_builds (       -- writer: the host itself
 -- superseded by the next offer rather than racing it.
 --
 -- Reaped by their writer after a day, like destroyed machines.
+-- Where a forked machine came from.
+--
+-- A fork is a NEW machine restored from another machine's memory and disk: new
+-- id, new name, new URL, new token. What it shares with its parent is the
+-- artifacts it was restored from, and that sharing is the whole reason this
+-- table exists -- without a record of it, the parent's next suspend or destroy
+-- would discard builds the fork is still faulting pages out of.
+--
+-- A side table rather than a `parent` column on machines, because `machines`
+-- has rows (rule 6).
+--
+-- Write-once, by the fork's own host, which is the host that created the fork
+-- and therefore already writes its machine row.
+CREATE TABLE IF NOT EXISTS machine_lineage (   -- writer: the fork's host (write-once)
+  id              TEXT NOT NULL PRIMARY KEY,   -- the FORK's machine id
+  parent_id       TEXT,     -- the machine it came from, "" for a checkpoint with no live parent
+  checkpoint_id   TEXT,     -- the checkpoint it was restored from, "" for a suspend-image fork
+  mem_build_id    TEXT,     -- the artifacts it shares with its parent, and
+  rootfs_build_id TEXT,     -- which therefore must outlive the parent
+  volume_snapshot TEXT,     -- the volume snapshot its own volume was filled from
+  created_at      INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS machine_handoffs (  -- writer: the machine's owner (write-once)
   id         TEXT NOT NULL PRIMARY KEY,        -- ho-<uuid>
   machine_id TEXT,

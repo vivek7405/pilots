@@ -101,6 +101,7 @@ func newMachinesCmd(env *Env) *cobra.Command {
 		newMachinesLifecycleCmd(env, "suspend", "suspend a machine to a memory snapshot", "Suspend", "Suspend captures memory so `wake` resumes where it left off, instantly.\nThis is what auto_stop does on idle."),
 		newMachinesLifecycleCmd(env, "wake", "wake a suspended machine", "Wake", "A request to the machine's URL wakes it on its own; this does it by hand."),
 		newMachinesResizeCmd(env),
+		newMachinesForkCmd(env),
 		newMachinesExecCmd(env),
 		newMachinesLogsCmd(env),
 		newMachinesCheckpointCmd(env),

@@ -79,6 +79,9 @@ type Manager interface {
 	// running machine and drops a suspended one's memory image, which held
 	// cached filesystem state from the disk being replaced.
 	RestoreVolumeSnapshot(ctx context.Context, volumeID, stamp string) error
+	// Fork makes new machines from one machine's or checkpoint's exact state:
+	// new ids, new names, new URLs, the source's processes already running.
+	Fork(ctx context.Context, opts ForkOptions) ([]ForkOutcome, error)
 }
 
 // toAPI converts a stored row to the wire shape.
@@ -90,6 +93,7 @@ type Manager interface {
 // every row's owner from the pass it made to filter them, and re-asking per
 // row would turn one lookup into N.
 func (d Deps) toAPI(ctx context.Context, row state.Machine, orgID string, cpu state.MachineCPU, labels map[string]string, urlAuth string) Machine {
+	parent, checkpoint := d.lineageOf(ctx, row.ID)
 	return Machine{
 		Labels:  labels,
 		URLAuth: urlAuth,
@@ -110,7 +114,21 @@ func (d Deps) toAPI(ctx context.Context, row state.Machine, orgID string, cpu st
 		LastActivity: row.LastActivity,
 		LastStart:    cpu.LastStart,
 		LastStartAt:  cpu.LastStartAt,
+		Parent:       parent,
+		Checkpoint:   checkpoint,
 	}
+}
+
+// lineageOf is where a machine was forked from, or empty for one that was not.
+//
+// A store error reads as "not forked": the field is provenance, and a blipped
+// side-table read must not fail a machine read.
+func (d Deps) lineageOf(ctx context.Context, id string) (parent, checkpoint string) {
+	l, err := d.Store.GetLineage(ctx, id)
+	if err != nil || l == nil {
+		return "", ""
+	}
+	return l.ParentID, l.CheckpointID
 }
 
 // urlAuthOf reads who may reach an object's URL; nothing recorded is public,
