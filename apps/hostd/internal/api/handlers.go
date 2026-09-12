@@ -217,7 +217,7 @@ func (d Deps) handleUpdateMachine(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, "url_auth must be public or org", "pass url_auth: public, or url_auth: org", nil)
 		return
 	}
-	if err := d.Store.PutURLAuth(r.Context(), &state.URLAuth{ID: row.ID, Kind: "machine", Mode: *req.URLAuth, UpdatedAt: time.Now().Unix()}); err != nil {
+	if err := d.putURLAuth(r.Context(), &state.URLAuth{ID: row.ID, Kind: "machine", Mode: *req.URLAuth, UpdatedAt: time.Now().Unix()}); err != nil {
 		writeMapped(w, err)
 		return
 	}
@@ -300,6 +300,22 @@ var ErrNoCapacity = errors.New("no capacity")
 // Lives here rather than in machines for the reason the two above do: the
 // mapper has to recognise it, and machines imports this package.
 var ErrBadRequest = errors.New("bad request")
+
+// putURLAuth writes who may reach an object's URL, and tells the router.
+//
+// Every write of a mode goes through here rather than calling the store
+// directly, for the reason the self-token check lives in ownedMachine: a list
+// of call sites goes out of date, and the one somebody adds next year would
+// leave the router answering with the mode the object used to have.
+func (d Deps) putURLAuth(ctx context.Context, u *state.URLAuth) error {
+	if err := d.Store.PutURLAuth(ctx, u); err != nil {
+		return err
+	}
+	if d.ForgetURLAuth != nil {
+		d.ForgetURLAuth(u.ID)
+	}
+	return nil
+}
 
 func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 	var req CreateMachineRequest
@@ -436,7 +452,7 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if req.URLAuth == URLAuthOrg {
-		if err := d.Store.PutURLAuth(r.Context(), &state.URLAuth{ID: row.ID, Kind: "machine", Mode: URLAuthOrg, UpdatedAt: time.Now().Unix()}); err != nil {
+		if err := d.putURLAuth(r.Context(), &state.URLAuth{ID: row.ID, Kind: "machine", Mode: URLAuthOrg, UpdatedAt: time.Now().Unix()}); err != nil {
 			writeMapped(w, err)
 			return
 		}

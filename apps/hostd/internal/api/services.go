@@ -359,7 +359,7 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if req.URLAuth == URLAuthOrg {
-		if err := d.Store.PutURLAuth(r.Context(), &state.URLAuth{ID: svc.ID, Kind: "service", Mode: URLAuthOrg, UpdatedAt: time.Now().Unix()}); err != nil {
+		if err := d.putURLAuth(r.Context(), &state.URLAuth{ID: svc.ID, Kind: "service", Mode: URLAuthOrg, UpdatedAt: time.Now().Unix()}); err != nil {
 			writeMapped(w, err)
 			return
 		}
@@ -516,7 +516,7 @@ func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
 			WriteError(w, http.StatusBadRequest, CodeBadRequest, "url_auth must be public or org", "pass url_auth: public, or url_auth: org", nil)
 			return
 		}
-		if err := d.Store.PutURLAuth(r.Context(), &state.URLAuth{ID: svc.ID, Kind: "service", Mode: *req.URLAuth, UpdatedAt: time.Now().Unix()}); err != nil {
+		if err := d.putURLAuth(r.Context(), &state.URLAuth{ID: svc.ID, Kind: "service", Mode: *req.URLAuth, UpdatedAt: time.Now().Unix()}); err != nil {
 			writeMapped(w, err)
 			return
 		}
@@ -936,7 +936,7 @@ func (d Deps) handlePromote(w http.ResponseWriter, r *http.Request) {
 	// promoted, and every replica the service gains afterwards -- which
 	// carries no mode of its own -- would be reachable by anyone.
 	if mode := d.urlAuthOf(r.Context(), r.PathValue("id")); mode == URLAuthOrg {
-		if err := d.Store.PutURLAuth(r.Context(), &state.URLAuth{ID: svc.ID, Kind: "service", Mode: mode, UpdatedAt: time.Now().Unix()}); err != nil {
+		if err := d.putURLAuth(r.Context(), &state.URLAuth{ID: svc.ID, Kind: "service", Mode: mode, UpdatedAt: time.Now().Unix()}); err != nil {
 			writeMapped(w, err)
 			return
 		}

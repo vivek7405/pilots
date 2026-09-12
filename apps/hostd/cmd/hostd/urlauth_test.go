@@ -75,3 +75,68 @@ func TestNothingAnywhereMeansPublic(t *testing.T) {
 		t.Fatalf("got %q, want %q", mode, api.URLAuthPublic)
 	}
 }
+
+// An explicit public from the cache is an answer, not a miss.
+//
+// # The bug this exists for, which the FIRST version of this fix caused
+//
+// The gate read "anything that is not org is not authoritative", so an
+// explicit public fell through to the store-backed memo -- which, on a URL
+// that had just been changed from org to public, still held org. The URL went
+// on answering 401 for the life of the memo. The e2e battery caught it as
+// "public again should not be gated, got 401".
+//
+// Only the MISS was ever dangerous. Any answer the cache actually has is the
+// answer.
+func TestAnExplicitPublicFromTheCacheIsTrusted(t *testing.T) {
+	store := &countingStore{mode: api.URLAuthOrg} // what the memo would have held
+	g := newURLAuthGate(func(string) string { return api.URLAuthPublic }, store)
+
+	if mode := g.Mode(context.Background(), "m1"); mode != api.URLAuthPublic {
+		t.Fatalf("a URL the cache knows to be public came back as %q", mode)
+	}
+	if store.asked != 0 {
+		t.Errorf("an explicit answer still cost %d store reads", store.asked)
+	}
+}
+
+// Changing the mode drops what was memoised about it.
+//
+// The write and the read are on the same host, so the host that changes a mode
+// can say so rather than waiting for its own memo to expire. Without this a
+// URL opened to the public keeps refusing anonymous callers for as long as the
+// memo lives, which is the failure above arriving by a different route.
+func TestForgettingAModeDropsTheMemo(t *testing.T) {
+	store := &countingStore{mode: api.URLAuthOrg}
+	// A cache that knows nothing, so every answer comes from the store.
+	g := newURLAuthGate(func(string) string { return "" }, store)
+
+	if mode := g.Mode(context.Background(), "m1"); mode != api.URLAuthOrg {
+		t.Fatalf("got %q, want the store's org", mode)
+	}
+	if store.asked != 1 {
+		t.Fatalf("the store was asked %d times, want 1", store.asked)
+	}
+
+	// Memoised: a second read costs nothing.
+	g.Mode(context.Background(), "m1")
+	if store.asked != 1 {
+		t.Fatalf("the memo did not hold; the store was asked %d times", store.asked)
+	}
+
+	// The mode changes, and this host says so.
+	store.mode = api.URLAuthPublic
+	g.Forget("m1")
+
+	if mode := g.Mode(context.Background(), "m1"); mode != api.URLAuthPublic {
+		t.Fatalf("after Forget the gate still answered %q; a URL opened to the "+
+			"public goes on refusing anonymous callers", mode)
+	}
+}
+
+// Forgetting something never memoised is not an error, because most writes
+// are to objects nothing has asked about yet.
+func TestForgettingAnUnknownIDIsHarmless(t *testing.T) {
+	g := newURLAuthGate(func(string) string { return "" }, &countingStore{})
+	g.Forget("never-seen")
+}

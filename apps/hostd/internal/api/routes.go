@@ -16,6 +16,11 @@ import (
 // Deps is what the handlers need from the rest of the process. It stays small
 // on purpose: anything reachable only from one host does not belong here.
 type Deps struct {
+	// ForgetURLAuth tells the router to drop what it memoised about an
+	// object's URL mode, because this host has just changed it. Nil on a host
+	// that serves no router, where there is nothing to tell.
+	ForgetURLAuth func(id string)
+
 	HostID   string
 	Store    state.Store
 	Machines Manager

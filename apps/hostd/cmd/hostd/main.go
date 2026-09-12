@@ -495,6 +495,10 @@ func run() error {
 	// exactly right for that host.
 	go runEgress(ctx, cfg.HostID, cfg.Egress, store, view, locator)
 
+	// Set below when this host serves a router, and handed to the API so a
+	// mode change invalidates what the router memoised about it.
+	var urlAuth *urlAuthGate
+
 	routerOpts := router.Options{
 		Domain: cfg.WorkloadDomain,
 		HostID: cfg.HostID,
@@ -567,7 +571,8 @@ func run() error {
 		// Who may reach a URL: the cache, and on a MISS the store, memoised so
 		// the hot path stays a map read. See urlauth.go for why the cache alone
 		// was serving gated URLs to anyone.
-		routerOpts.URLAuthOf = newURLAuthGate(f.cache.URLAuth, store).Mode
+		urlAuth = newURLAuthGate(f.cache.URLAuth, store)
+		routerOpts.URLAuthOf = urlAuth.Mode
 	}
 	rtr := router.New(routerOpts)
 
@@ -672,8 +677,13 @@ func run() error {
 	// holding a nil pointer, and the not_configured branch would never run.
 	stager := github.NewStager(ghDeps)
 
+	forgetURLAuth := func(string) {}
+	if urlAuth != nil {
+		forgetURLAuth = urlAuth.Forget
+	}
 	deps := api.Deps{
-		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink, HugePages: cfg.HugePages,
+		ForgetURLAuth: forgetURLAuth,
+		HostID:        cfg.HostID, Store: store, Machines: mgr, Reflink: reflink, HugePages: cfg.HugePages,
 		Replication: replication(store, joinGate),
 		Builds:      builder, Rollout: rollout, Domain: cfg.WorkloadDomain, URL: publicURL,
 		APIHostname: cfg.APIHostname,

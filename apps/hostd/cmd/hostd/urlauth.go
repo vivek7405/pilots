@@ -65,10 +65,27 @@ func newURLAuthGate(cache func(id string) string, store state.Store) *urlAuthGat
 	return &urlAuthGate{cache: cache, store: store, memo: map[string]urlAuthAnswer{}}
 }
 
+// Forget drops a memoised answer, because this host just changed it.
+//
+// Without this the memo outlives the write that invalidates it. A URL PATCHed
+// back to public went on answering 401 for the rest of the memo's life: the
+// cache had not caught up either, so the miss path was still returning the
+// "org" it had read a moment earlier. The write and the read are on the same
+// host, so the host that changes a mode can simply say so.
+func (g *urlAuthGate) Forget(id string) {
+	g.mu.Lock()
+	delete(g.memo, id)
+	g.mu.Unlock()
+}
+
 func (g *urlAuthGate) Mode(ctx context.Context, id string) string {
-	// The cache first, and a gated answer needs nothing else.
+	// ANY answer the cache has is authoritative, public included.
+	//
+	// Only the MISS was ever dangerous. Falling through on an explicit public
+	// was the bug's mirror image: a URL the cache correctly knew to be open
+	// was answered from a memo that still held the mode it used to have.
 	if g.cache != nil {
-		if mode := g.cache(id); mode != "" && mode != api.URLAuthPublic {
+		if mode := g.cache(id); mode != "" {
 			return mode
 		}
 	}
