@@ -155,6 +155,13 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
   comment that meant an empty SQL string. Also run `bash -n` on every shell
   script you edited and `node --check scripts/e2e.mjs` — a syntax error in
   either is only found at the moment it is needed, on a host, mid-bootstrap.
+- **A new background loop registers a liveness budget.** One line at the top
+  of the loop (`metrics.NewLoop(name, budget)`) and one `Tick()` at the END of
+  each pass, budget normally three times the interval. `Restart=always` only
+  catches a loop that dies; the failure that actually happens is a loop that
+  wedges while the process stays healthy, and the watchdog withholds its pet
+  on an overdue budget so systemd restarts the host. A loop with no budget is
+  invisible to that, which is the whole of the bug.
 - Every phase issue (#2–#7) carries a **gate checklist**. An issue closes
   when its gate is green, not when the code is written.
 

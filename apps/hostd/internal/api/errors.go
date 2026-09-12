@@ -35,6 +35,10 @@ const (
 	// the repository, not to hold a wider key, and a client that branches on
 	// codes has to be able to tell those two apart.
 	CodeRepoNotConnected = "repo_not_connected"
+	// CodePayloadTooLarge is a field too big to live in a replicated row. The
+	// body limit is separate and larger: this is about what the fleet carries
+	// for the life of the object, not about one request. See payload.go.
+	CodePayloadTooLarge = "payload_too_large"
 )
 
 // Codes is the closed list, for the test that guards it and for the docs page
@@ -45,6 +49,7 @@ var Codes = []string{
 	CodeNotImplemented, CodeUnavailable, CodeInternal, CodePlanUnsupported,
 	CodeComposeInvalid, CodeUnknownFramework, CodePlanMultiService,
 	CodeBuildFailed, CodeHealthGateFailed, CodeRepoNotConnected,
+	CodePayloadTooLarge,
 }
 
 // NextNotFound is the only next a 404 may carry. It is deliberately generic:

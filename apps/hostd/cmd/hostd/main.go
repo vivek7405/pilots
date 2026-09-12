@@ -376,6 +376,13 @@ func run() error {
 				"err", err)
 		} else if n > 0 {
 			slog.Info("republished own rows", "count", n)
+			// A bulk write leaves SQLite's planner statistics describing the
+			// table as it was before. Fly watched that turn every read into a
+			// full scan, spike CPU and stop the WAL truncating until the disk
+			// filled (infra log, 2026-06-25).
+			if cs, ok := store.(*corrosion.Store); ok {
+				cs.Analyze(ctx)
+			}
 		}
 	}
 

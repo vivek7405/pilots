@@ -3,6 +3,7 @@ package corrosion
 import (
 	"context"
 	"fmt"
+	"log/slog"
 )
 
 // What a replica knows about how far along it is.
@@ -19,6 +20,25 @@ import (
 // scripts/host-bootstrap.sh installs. An error on any of them reads as "not
 // complete" at the caller rather than as a guess, because the only safe
 // reading of "I could not tell" is "do not act yet".
+
+// Analyze refreshes SQLite's planner statistics.
+//
+// Called after a BULK write, and only then. SQLite picks an index from
+// sqlite_stat1, which is written by ANALYZE and by nothing else: a table that
+// grew from empty to thousands of rows without one keeps the statistics of an
+// empty table, and the planner reads "any index is as good as a full scan"
+// from them. Fly watched exactly that turn every read into a full scan on a
+// host that had just republished its rows, spike CPU, and stop the WAL from
+// truncating, which then filled the disk (infra log, 2026-06-25).
+//
+// Best effort: a failed ANALYZE costs a slower planner, never correctness, and
+// the caller is a bulk write that has already succeeded.
+func (s *Store) Analyze(ctx context.Context) {
+	if _, err := s.client.Exec(ctx, `ANALYZE`); err != nil {
+		slog.Warn("could not refresh the planner statistics; queries on this "+
+			"host may fall back to full scans", "err", err)
+	}
+}
 
 // VersionVector is the per-actor version this replica has applied: one entry
 // per host that has ever written, keyed by the actor's site id in hex.

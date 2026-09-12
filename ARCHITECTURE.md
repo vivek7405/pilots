@@ -451,7 +451,9 @@ GET    /metrics                      Prometheus (unauthenticated)
                                      pilots_router_inflight, pilots_slots_free,
                                      pilots_quota_refusals_total{quota},
                                      pilots_replication_complete,
-                                     pilots_replication_gaps
+                                     pilots_replication_gaps,
+                                     pilots_loop_last_tick_seconds{loop},
+                                     pilots_cert_expiry_seconds
 ```
 
 **Every non-2xx body is `{error, code, next, details}`.** `error` is a sentence

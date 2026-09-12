@@ -311,6 +311,12 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, "url_auth must be public or org", "pass url_auth: public, or url_auth: org", nil)
 		return
 	}
+	if !checkPayloadSize(w, map[string]any{
+		"env": req.Env, "secret_env": req.SecretEnv,
+		"knobs": req.Knobs, "labels": req.Labels,
+	}) {
+		return
+	}
 	if !checkLabels(w, req.Labels) {
 		return
 	}
