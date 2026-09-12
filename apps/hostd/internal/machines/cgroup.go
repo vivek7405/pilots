@@ -1,6 +1,7 @@
 package machines
 
 import (
+	"bytes"
 	"fmt"
 	"log/slog"
 	"os"
@@ -126,6 +127,26 @@ func (m *Manager) removeCgroup(machineID string) {
 
 // cgroupProcs reads the pids in a machine's cgroup. For the tests and for a
 // diagnostic; nothing on the request path calls it.
+// cgroupHasProcs reports whether any process is in this slice.
+//
+// The question "is this machine running" answered by observation rather than
+// by a row. A cgroup outlives the processes in it: suspend kills the VMM and
+// leaves the directory, so its presence proves nothing and its cpu and memory
+// files go on reporting the last waking period's numbers.
+//
+// An unreadable cgroup.procs answers TRUE, deliberately. The callers use this
+// to decide whether a reading is live, and a host that cannot read the file
+// has not learned that the machine is idle -- it has learned nothing. Saying
+// "running" there keeps a readable number flowing instead of reporting a
+// confident zero nobody can check.
+func cgroupHasProcs(dir string) bool {
+	raw, err := os.ReadFile(filepath.Join(dir, "cgroup.procs"))
+	if err != nil {
+		return true
+	}
+	return len(bytes.TrimSpace(raw)) > 0
+}
+
 func cgroupProcs(execFileName, machineID string) ([]int, error) {
 	raw, err := os.ReadFile(filepath.Join(machineCgroup(execFileName, machineID), "cgroup.procs"))
 	if err != nil {

@@ -1,6 +1,7 @@
 package machines
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -35,6 +36,23 @@ func fakeCgroup(t *testing.T, id, procs string, current, max int64) {
 	write("cpu.stat", "usage_usec 2269379\nuser_usec 1\nsystem_usec 1\n")
 	write("memory.current", strconv.FormatInt(current, 10))
 	write("memory.max", strconv.FormatInt(max, 10))
+}
+
+// writeCarried puts a persisted CPU total where carriedCPU will find it,
+// which is what Suspend leaves behind.
+func writeCarried(t *testing.T, m *Manager, id string, usec int64) {
+	t.Helper()
+	dir := m.stateDir(id)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(persistedStats{CPUUsec: usec})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, statsFile), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // statsManager is a manager owning one machine row, with the cgroup layout
@@ -117,6 +135,41 @@ func TestASuspendedMachineReportsNoMemory(t *testing.T) {
 	// must never lower it.
 	if got.CPUSeconds <= 0 {
 		t.Errorf("cpu_seconds = %v; a suspend must not lose the total", got.CPUSeconds)
+	}
+}
+
+// A suspended machine is not charged twice for its last waking period.
+//
+// # The bug inside the bug
+//
+// Suspend calls PersistCPU, which writes carried+usec into the machine's state
+// directory. The cgroup it read that usec from is NOT removed, so it sits there
+// with the same number still in cpu.stat. Reading carried+usec afterwards adds
+// the same microseconds a second time.
+//
+// The first version of this fix returned zero memory and still reported
+// carried+usec, so it corrected the reading everyone was looking at and left a
+// doubled counter behind it.
+func TestASuspendedMachineIsNotChargedTwice(t *testing.T) {
+	const usec = 2269379 // what fakeCgroup writes into cpu.stat
+
+	fakeCgroup(t, "m_abc", "\n", 4820992, 640<<20)
+	m := statsManager(t, "m_abc", 512)
+
+	// What Suspend leaves behind: the live usec already folded into the
+	// persisted total.
+	writeCarried(t, m, "m_abc", usec)
+
+	got, err := m.Stats(t.Context(), "m_abc")
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	want := float64(usec) / 1e6
+	if got.CPUSeconds != want {
+		t.Errorf("cpu_seconds = %v, want %v. The cgroup survives a suspend with "+
+			"its usage still in it, and PersistCPU already folded that usage into "+
+			"the carried total, so adding it again charges the machine twice for "+
+			"the same seconds", got.CPUSeconds, want)
 	}
 }
 

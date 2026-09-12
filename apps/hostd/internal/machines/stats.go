@@ -1,7 +1,6 @@
 package machines
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -73,31 +72,38 @@ func (m *Manager) Stats(ctx context.Context, id string) (*api.Stats, error) {
 	}
 	carried := m.carriedCPU(id)
 
+	// The cgroup OUTLIVES the machine's processes. Suspend kills the VMM and
+	// leaves the slice in place -- only Destroy and the reaper remove it --
+	// so "the directory is there" does not mean "the machine is running", and
+	// reading it as if it did was two wrong numbers rather than one.
+	//
+	// An empty cgroup.procs is the physical fact, and it is what is checked
+	// here rather than the row's state: a row says what the fleet last agreed,
+	// and a VMM that died without hostd writing one still reads as running.
+	// This says what is true on this host at this instant.
 	dir := m.cgroupOf(id)
 	usec, err := readCPUUsec(dir)
-	if err != nil {
-		// No cgroup to read. The machine is suspended, stopped, or this host
-		// does not account that way; either way the persisted total is the
-		// honest answer and memory is zero.
+	if err != nil || !cgroupHasProcs(dir) {
+		// Nothing is running here. The persisted total is the whole answer:
+		//
+		// CPU is the carried total ALONE, not carried+usec. Suspend calls
+		// PersistCPU, which writes carried+usec into the machine's state dir,
+		// and the cgroup it read that usec from is still sitting there with
+		// the same number in it. Adding it again charges the machine twice for
+		// its last waking period.
+		//
+		// Memory is left at zero. With no process there is nothing resident;
+		// memory.current still reports the page cache and slab the kernel has
+		// not reclaimed, which on the rig was 4.6 MiB and read exactly like a
+		// small machine running.
+		//
+		// The LIMIT stays the row's rather than blinking to zero: it is what
+		// the machine will be held to when it wakes, which is still a true
+		// thing to say about a machine that is asleep.
 		out.CPUSeconds = float64(carried) / 1e6
 		return out, nil
 	}
 	out.CPUSeconds = float64(carried+usec) / 1e6
-
-	// The cgroup OUTLIVES the machine's processes. Suspend kills the VMM and
-	// leaves the slice in place -- only Destroy and the reaper remove it -- so
-	// a suspended machine's memory.current still reports whatever page cache
-	// and slab the kernel has not got round to reclaiming. On the rig that was
-	// a few megabytes, which reads exactly like a small machine running.
-	//
-	// An empty cgroup.procs is the physical fact: no process, so nothing is
-	// using memory, so the honest answer is zero. Checked rather than inferred
-	// from the row's state, because a row says what the fleet last agreed and
-	// this says what is true on this host right now.
-	if procs, err := os.ReadFile(filepath.Join(dir, "cgroup.procs")); err == nil &&
-		len(bytes.TrimSpace(procs)) == 0 {
-		return out, nil
-	}
 	out.MemoryBytes = readInt(filepath.Join(dir, "memory.current"))
 
 	// The LIMIT stays the row's, and memory.max is deliberately not read.
