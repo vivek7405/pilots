@@ -499,12 +499,32 @@ func upsertService(ctx context.Context, client *pilots.Client, app string, step 
 			Name: step.Name, App: app, Build: rootfs, Replicas: step.Replicas,
 			Health: step.Health, Domain: step.Domain, Private: step.Private, CustomDomain: step.CustomDomain,
 			Volume: volumeID, Env: step.Env, SecretEnv: sealed, Knobs: step.Knobs,
+			Size: stepSize(step),
 		})
 	}
 	replicas := step.Replicas
+	// The size is NOT sent here. It rides on the deploy that follows, because
+	// a patch carrying a size runs a rollout of its own: a compose file that
+	// changed both its image and its `mem_limit` would roll the service twice
+	// to arrive where one rollout puts it.
 	return client.Services.Patch(ctx, existing.ID, pilots.UpdateServiceRequest{
 		Replicas: &replicas, Health: step.Health, Env: step.Env, SecretEnv: sealed,
 	})
+}
+
+// stepSize is the size a compose step asks for, or nil when it asks for the
+// defaults.
+//
+// The planner has always resolved `cpus` and `mem_limit` onto the step and
+// they have always reached nothing: a service had no size to put them in. Nil
+// rather than the defaults spelled out, so a compose file that says nothing
+// about size leaves the service's size alone rather than resetting it to the
+// default on every deploy.
+func stepSize(step *pilots.ComposeStep) *pilots.Size {
+	if step.VCPUs == pilots.DefaultVCPUs && step.MemMiB == pilots.DefaultMemMiB {
+		return nil
+	}
+	return &pilots.Size{VCPUs: step.VCPUs, MemMiB: step.MemMiB}
 }
 
 // waitForRelease polls until the release is current. The host flips

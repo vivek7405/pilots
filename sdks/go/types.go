@@ -698,6 +698,15 @@ type ComposeVolume struct {
 	MountPath string `json:"mount_path"`
 }
 
+// What a compose step gets when its file says nothing about size. Mirrored
+// from internal/compose so a caller can tell "the file asked for this" from
+// "the planner filled in the default", which is the difference between
+// changing a service's size and leaving it alone.
+const (
+	DefaultVCPUs  = 1
+	DefaultMemMiB = 512
+)
+
 type ComposeStep struct {
 	Name       string        `json:"name"`
 	Build      *ComposeBuild `json:"build,omitempty"`
