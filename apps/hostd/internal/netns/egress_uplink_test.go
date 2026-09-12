@@ -86,3 +86,28 @@ func TestDisabledMeansNoRewritingNotNoInternet(t *testing.T) {
 		t.Fatal("a prefix with no interface was accepted")
 	}
 }
+
+// PlanEgress refuses a host with machines and no prefix, which is why the
+// reconcile loop must not ask it for one.
+//
+// This is written down because it is the trap the masquerade fix walked into:
+// the loop asked for a plan unconditionally, PlanEgress returned this error
+// every tick on any unconfigured host with a machine running, and the apply
+// was skipped -- so the masquerade was never installed on exactly the fleet it
+// had just been written for. The loop now asks only when per-org egress is
+// configured, and this is the behaviour that makes that necessary.
+func TestPlanningWithNoPrefixRefusesOnceThereIsAMachine(t *testing.T) {
+	binding := EgressBinding{OrgID: "org-1", Machine6: netip.MustParseAddr("fdcd::2")}
+
+	// No machines: nothing to place, so nothing to validate.
+	if _, err := PlanEgress(netip.Prefix{}, nil); err != nil {
+		t.Fatalf("planning an empty fleet with no prefix failed: %v", err)
+	}
+
+	// One machine: the prefix is now load-bearing and its absence is an error.
+	if _, err := PlanEgress(netip.Prefix{}, []EgressBinding{binding}); err == nil {
+		t.Fatal("planning a machine with no prefix succeeded. If that ever " +
+			"becomes true, the loop's reason for only planning when configured " +
+			"is gone and this test should be reconsidered rather than deleted")
+	}
+}

@@ -49,7 +49,23 @@ func runEgress(ctx context.Context, hostID string, cfg netns.EgressConfig,
 		// Resolved each tick rather than once at startup: a default route can
 		// move, and the masquerade is scoped to an interface name.
 		uplink, uerr := netns.UplinkInterface(cfg.Interface)
-		plan, err := netns.PlanEgress(cfg.Prefix6, egressBindings(ctx, hostID, store, view, loc))
+
+		// The plan is asked for ONLY when per-org egress is configured.
+		//
+		// PlanEgress validates the prefix as soon as there is a machine to
+		// place, so on a host with no prefix and any machine running it
+		// returns an error -- every tick, forever. Asking anyway would log
+		// that error and skip the apply, which is to say the masquerade this
+		// loop now exists to install would never be installed on precisely
+		// the fleet it was added for.
+		//
+		// An empty plan is also the correct answer there: no prefix means no
+		// per-org rewrites, which is the whole of what a plan describes.
+		var plan netns.EgressPlan
+		var err error
+		if cfg.Enabled() {
+			plan, err = netns.PlanEgress(cfg.Prefix6, egressBindings(ctx, hostID, store, view, loc))
+		}
 		switch {
 		case uerr != nil:
 			slog.Error("could not work out which interface guest traffic leaves by; "+
