@@ -187,23 +187,43 @@ end
 ---
 --- A permission error rendered as "file not found" sends someone looking for a
 --- path that is right there, so the two are told apart by what the shell said.
+---
+--- The cases AND their order match apps/vscode/src/guest.ts exactly. Order is
+--- not cosmetic: a message can satisfy two probes, and whichever runs first
+--- wins, so two implementations that test the same words in a different
+--- sequence disagree on the same stderr.
 ---@param stderr string
----@return string one of "not_found", "exists", "permission", "not_a_directory", "failed"
+---@return string one of "permission", "not_found", "exists", "not_a_directory", "is_a_directory", "failed"
 function M.classify(stderr)
-  local s = stderr:lower()
-  if s:find("no such file", 1, true) then
-    return "not_found"
-  end
-  if s:find("file exists", 1, true) then
-    return "exists"
-  end
-  if s:find("permission denied", 1, true) then
+  local text = stderr:lower()
+  if text:find("permission denied", 1, true) then
     return "permission"
   end
-  if s:find("not a directory", 1, true) then
+  if text:find("no such file", 1, true) then
+    return "not_found"
+  end
+  if text:find("file exists", 1, true) then
+    return "exists"
+  end
+  if text:find("not a directory", 1, true) then
     return "not_a_directory"
   end
+  if text:find("is a directory", 1, true) then
+    return "is_a_directory"
+  end
   return "failed"
+end
+
+--- Stats the TARGET of a path, following a symlink.
+---
+--- The plain stat above deliberately does not follow one, because the VS Code
+--- provider has to tell the editor that a link IS a link. Opening is the other
+--- question: a symlink to a directory must open as a directory, and `cmd.list`
+--- already marks one `d` because `[ -d ]` dereferences. Without this the
+--- listing says directory and the open says file, and `<CR>` on an ordinary
+--- `current -> releases/x` fails.
+function M.cmd.stat_target(path)
+  return "stat -Lc '%F|%s|%Y|%W' -- " .. M.quote(path)
 end
 
 return M

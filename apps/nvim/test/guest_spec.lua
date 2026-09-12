@@ -109,5 +109,33 @@ test("stderr is classified by what the shell actually said", function()
   eq(guest.classify("mv: File exists"), "exists")
   eq(guest.classify("cat: /root/x: Permission denied"), "permission")
   eq(guest.classify("cd: /etc/hosts: Not a directory"), "not_a_directory")
+  eq(guest.classify("cat: /etc: Is a directory"), "is_a_directory")
   eq(guest.classify("something else entirely"), "failed")
+end)
+
+-- The cases AND their order have to match apps/vscode/src/guest.ts, because a
+-- message can satisfy two probes and whichever runs first wins. This drifted
+-- on day one: `is a directory` was simply missing, so the symlink bug arrived
+-- as a generic failure with nothing in it to act on.
+test("classify covers every case the VS Code port does, and probes in its order", function()
+  for _, want in ipairs({ "permission", "not_found", "exists", "not_a_directory", "is_a_directory" }) do
+    local sample = ({
+      permission = "Permission denied",
+      not_found = "No such file or directory",
+      exists = "File exists",
+      not_a_directory = "Not a directory",
+      is_a_directory = "Is a directory",
+    })[want]
+    eq(guest.classify(sample), want, "missing case: " .. want)
+  end
+  -- Permission is probed FIRST in the reference, so a message carrying both
+  -- must come back as permission and not as not_found.
+  eq(guest.classify("Permission denied: No such file or directory"), "permission")
+end)
+
+-- Opening asks about the TARGET of a symlink; the listing already marks a
+-- symlinked directory as a directory because [ -d ] dereferences.
+test("stat_target follows a symlink and plain stat does not", function()
+  truthy(guest.cmd.stat_target("/x"):find("stat %-Lc") ~= nil, "stat_target must pass -L")
+  truthy(guest.cmd.stat("/x"):find("stat %-Lc") == nil, "plain stat must not follow")
 end)

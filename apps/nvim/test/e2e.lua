@@ -52,6 +52,12 @@ put("it's a file.txt", "quoted\n")
 put("big.txt", "x\n")
 put("binary.dat", "\0\1\2\255binary\0")
 put("sub/nested.txt", "deep\n")
+put("at@", "a file whose name ends in the symlink marker\n")
+put("precious.txt", "IMPORTANT ORIGINAL CONTENT\n")
+put("eoltest.txt", "keeps its newline\n")
+-- A symlink to a directory is ordinary in a guest: node_modules/.bin, a
+-- `current -> releases/x` deploy layout, this repo's own /home/sprite.
+vim.fn.system({ "ln", "-sfn", root .. "/sub", root .. "/linkdir" })
 
 -- The plugin is loaded the way a plugin manager loads it.
 dofile(here .. "/plugin/pilots.lua")
@@ -146,6 +152,76 @@ check("following an entry descends, and .. climbs back", function()
   vim.api.nvim_win_set_cursor(0, { 1, 0 }) -- the ../ entry
   require("pilots").follow()
   eq(vim.api.nvim_buf_get_name(0), u())
+end)
+
+-- Every finding below lived on a FAILURE path, which is exactly what the
+-- happy-path assertions above never reach. Each of these reproduces one.
+
+-- A buffer that never held the guest's bytes must not be writable over the
+-- file. Without the guard a transient read failure left an empty, modifiable
+-- buffer that BufWriteCmd still matched, and the next :w truncated the file
+-- while reporting success.
+check("a failed read cannot be written back over the file", function()
+  -- The read reports its failure, which propagates out of :e. The buffer is
+  -- created either way, which is the situation this guards.
+  pcall(vim.cmd.edit, vim.fn.fnameescape(u("/does-not-exist.txt")))
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, { "typed after the failure" })
+  pcall(vim.cmd.write)
+  eq(vim.fn.filereadable(root .. "/does-not-exist.txt"), 0,
+    "a write after a failed read created the file")
+end)
+
+check("a read that failed on an EXISTING file cannot truncate it", function()
+  -- Point the plugin at a binary that always fails, so the read of a real
+  -- file fails the way a transient guest error would.
+  local fs = require("pilots.fs")
+  local good = fs.cmd_name
+  fs.cmd_name = "/bin/false"
+  -- pcall AND restore outside it: the read raises, and a restore that only
+  -- runs on the happy path leaves every later assertion running against a
+  -- binary that always fails. That cost one debugging round here.
+  pcall(vim.cmd.edit, vim.fn.fnameescape(u("/precious.txt")))
+  fs.cmd_name = good
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, { "clobbered" })
+  pcall(vim.cmd.write)
+  eq(read_guest("precious.txt"), "IMPORTANT ORIGINAL CONTENT\n",
+    "a failed read let the next write truncate the file")
+end)
+
+-- A buffer is reused across :e!, so a flag that is only ever set true carries
+-- the last file's shape onto the next one.
+check("the no-newline flag does not leak from one file to the next", function()
+  -- Its own fixture, so the assertion does not depend on which earlier test
+  -- last rewrote a shared one.
+  vim.cmd.edit(vim.fn.fnameescape(u("/noeol.txt")))    -- sets the flag
+  vim.cmd.edit(vim.fn.fnameescape(u("/eoltest.txt")))  -- must clear it
+  vim.cmd.write()
+  eq(read_guest("eoltest.txt"), "keeps its newline\n", "the trailing newline was stripped")
+end)
+
+-- cmd.list marks a symlinked directory `d` because [ -d ] dereferences, so
+-- the open has to ask about the target or the listing and the open disagree.
+check("a symlink to a directory opens as a directory", function()
+  vim.cmd.edit(vim.fn.fnameescape(u("/linkdir")))
+  eq(vim.bo.filetype, "pilots-listing", "a symlinked directory did not open as one")
+  local joined = table.concat(vim.api.nvim_buf_get_lines(0, 0, -1, false), "\n")
+  assert(joined:find("nested.txt", 1, true), "the target's contents are missing: " .. joined)
+end)
+
+-- A regular file named `at@` renders with no suffix of its own, so reversing
+-- the rendering strips the @ and opens a path that does not exist.
+check("a file whose name ends in @ is followed correctly", function()
+  vim.cmd.edit(vim.fn.fnameescape(u()))
+  local lines = vim.api.nvim_buf_get_lines(0, 0, -1, false)
+  for i, l in ipairs(lines) do
+    if l == "at@" then
+      vim.api.nvim_win_set_cursor(0, { i, 0 })
+    end
+  end
+  require("pilots").follow()
+  eq(vim.api.nvim_buf_get_name(0), u("/at@"), "the @ was stripped from a real name")
+  eq(vim.api.nvim_buf_get_lines(0, 0, -1, false)[1],
+    "a file whose name ends in the symlink marker")
 end)
 
 print(string.format("\ne2e: %d passed, %d failed", passed, failed))

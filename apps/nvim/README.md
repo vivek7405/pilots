@@ -19,8 +19,14 @@ point your manager at the directory:
 
 ```lua
 -- lazy.nvim, from a checkout
-{ dir = "~/path/to/pilots/apps/nvim", cmd = { "PilotsOpen", "PilotsTerminal" } }
+{ dir = "~/path/to/pilots/apps/nvim", lazy = false }
 ```
+
+`lazy = false` matters. Lazy-loading on `cmd` defers `plugin/pilots.lua`, and
+with it the `BufReadCmd` that makes a URL open at all, so `:e pilot://…` would
+give you the empty buffer named after a URL that this plugin exists to avoid.
+The commands are a convenience over the URL, not the only way in, so there is
+nothing useful to lazy-load behind.
 
 ```vim
 " or, with no plugin manager at all

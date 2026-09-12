@@ -100,10 +100,19 @@ function M.list(machine, path)
 end
 
 --- Stats a guest path.
+---
+--- `follow` asks about the TARGET of a symlink rather than the link. That is
+--- what opening needs: `cmd.list` already marks a symlinked directory `d`,
+--- because `[ -d ]` dereferences, so without it the listing says directory and
+--- the open says file and `<CR>` on an ordinary `current -> releases/x` fails.
+---@param machine string
+---@param path string
+---@param follow boolean|nil
 ---@return table|nil stat
 ---@return string|nil err
-function M.stat(machine, path)
-  local res = M.exec(machine, guest.cmd.stat(path))
+function M.stat(machine, path, follow)
+  local command = follow and guest.cmd.stat_target(path) or guest.cmd.stat(path)
+  local res = M.exec(machine, command)
   if res.code ~= 0 then
     return nil, guest.classify(res.stderr) .. ": " .. path
   end
@@ -136,6 +145,13 @@ function M.listing_lines(entries)
 end
 
 --- The entry name a listing line refers to, with the type suffix removed.
+---
+--- A FALLBACK only. The rendered line is lossy: a regular file named `at@`
+--- renders with no suffix of its own and this strips the `@` anyway, so the
+--- caller opens a path that does not exist. `render_listing` records the
+--- parsed entries on the buffer and `follow` reads those instead; this is what
+--- answers when a line has no entry behind it, which is the `../` row and
+--- anything a user typed into the buffer.
 ---@param line string
 ---@return string|nil
 function M.entry_of(line)
@@ -144,6 +160,24 @@ function M.entry_of(line)
     return nil
   end
   return name
+end
+
+--- The entry a listing line number refers to, from what was parsed rather
+--- than from what was drawn.
+---
+--- Line 1 is always `../`; entry N is on line N+1.
+---@param bufnr integer
+---@param lnum integer 1-based
+---@return string|nil
+function M.entry_at(bufnr, lnum)
+  if lnum <= 1 then
+    return ".."
+  end
+  local ok, entries = pcall(vim.api.nvim_buf_get_var, bufnr, "pilots_entries")
+  if ok and type(entries) == "table" and entries[lnum - 1] ~= nil then
+    return entries[lnum - 1].name
+  end
+  return M.entry_of(vim.api.nvim_buf_get_lines(bufnr, lnum - 1, lnum, false)[1] or "")
 end
 
 --- Renders a directory into the current buffer.
@@ -161,6 +195,9 @@ function M.render_listing(bufnr, target)
   end
   vim.bo[bufnr].modifiable = true
   vim.api.nvim_buf_set_lines(bufnr, 0, -1, false, M.listing_lines(entries))
+  -- The parsed entries, kept so that following one does not have to reverse
+  -- the rendering. See entry_at.
+  vim.api.nvim_buf_set_var(bufnr, "pilots_entries", entries)
   vim.bo[bufnr].modifiable = false
   vim.bo[bufnr].modified = false
   vim.bo[bufnr].buftype = "nofile"
