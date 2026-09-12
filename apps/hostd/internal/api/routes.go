@@ -228,6 +228,11 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("POST /v1/machines/{id}/stop", d.handleSuspend)
 	mux.HandleFunc("POST /v1/machines/{id}/start", d.handleWake)
 
+	// Builders: an org's build machines, and the reset that clears both the
+	// wedged one and every host's copy of its layer cache.
+	mux.HandleFunc("GET /v1/builders", d.handleListBuilders)
+	mux.HandleFunc("POST /v1/builders/{host}/reset", d.handleResetBuilder)
+
 	// Processes: what a machine runs, and how to bounce one of them without
 	// touching the others.
 	mux.HandleFunc("GET /v1/machines/{id}/processes", d.handleProcesses)

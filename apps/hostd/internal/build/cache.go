@@ -119,13 +119,24 @@ func (b *Builder) pullCache(ctx context.Context, dir, orgID, cacheName string) {
 	if dir == "" || b.opts.CacheStore == nil {
 		return
 	}
+	// The epoch a reset advances. Read before the warm check, because a warm
+	// directory from before a reset is exactly what must NOT be used: that is
+	// the whole mechanism, and taking the early return first would make Reset
+	// a no-op on every host that already had a copy. See epoch.go.
+	epoch := b.readEpoch(ctx, orgID)
 	if _, err := os.Stat(filepath.Join(dir, "index.json")); err == nil {
-		// Already warm locally. Stamp it so the prune keeps what is in use.
-		_ = os.Chtimes(dir, time.Now(), time.Now())
-		return
+		if readLocalEpoch(dir) == epoch {
+			// Already warm locally. Stamp it so the prune keeps what is in use.
+			_ = os.Chtimes(dir, time.Now(), time.Now())
+			return
+		}
+		slog.Info("the build cache was reset; dropping this host's copy",
+			"org", orgID, "cache", cacheName,
+			"had", readLocalEpoch(dir), "want", epoch)
+		_ = os.RemoveAll(dir)
 	}
 
-	prefix := cacheKeyPrefix(orgID, cacheName)
+	prefix := cacheKeyPrefixAt(orgID, cacheName, epoch)
 	objects, err := b.opts.CacheStore.List(ctx, prefix)
 	if err != nil {
 		slog.Warn("could not list the layer cache; building cold",
@@ -155,8 +166,9 @@ func (b *Builder) pullCache(ctx context.Context, dir, orgID, cacheName string) {
 			return
 		}
 	}
+	writeLocalEpoch(dir, epoch)
 	slog.Info("pulled the layer cache", "org", orgID, "cache", cacheName,
-		"objects", len(objects), "seconds", int(time.Since(start).Seconds()))
+		"epoch", epoch, "objects", len(objects), "seconds", int(time.Since(start).Seconds()))
 }
 
 // pushCache mirrors a freshly exported cache directory to object storage, so
@@ -178,7 +190,10 @@ func (b *Builder) pushCache(ctx context.Context, dir, orgID, cacheName string) {
 	if b.opts.CacheStore == nil {
 		return
 	}
-	prefix := cacheKeyPrefix(orgID, cacheName)
+	// Pushed under the epoch this host pulled at, so a build that started
+	// before a reset does not write its result into the new epoch and hand
+	// every other host the cache the reset was meant to discard.
+	prefix := cacheKeyPrefixAt(orgID, cacheName, readLocalEpoch(dir))
 	kept := map[string]bool{}
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {

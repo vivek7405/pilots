@@ -370,8 +370,17 @@ func (d Deps) handleListMachines(w http.ResponseWriter, r *http.Request) {
 	}
 	org, narrow := listOrg(r)
 	want := labelFilter(r)
+	builders := includeBuilders(r)
 	out := make([]Machine, 0, len(rows))
 	for _, row := range rows {
+		// A builder is infrastructure hostd made for itself, not something the
+		// org created, so it is absent unless asked for: an agent listing
+		// machines to pick one to exec into should not have to know to skip
+		// it, and a list that shows it invites someone to destroy the thing
+		// their next deploy needs. GET /v1/builders is where they are.
+		if !builders && isBuilder(row.Name) {
+			continue
+		}
 		owner, ok := d.visible(r, row.ID, org, narrow)
 		if !ok {
 			continue

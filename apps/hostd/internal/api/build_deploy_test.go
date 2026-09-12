@@ -94,7 +94,8 @@ func (b *deployingBuilder) BuildLog(_ context.Context, _ string, _ bool) (
 	return append([]BuildLogLine(nil), b.log...), nil, len(b.log) > 0
 }
 
-func (b *deployingBuilder) RecordRefusal(id string, line BuildLogLine) { b.RecordLine(id, line) }
+func (b *deployingBuilder) RecordRefusal(id string, line BuildLogLine)     { b.RecordLine(id, line) }
+func (b *deployingBuilder) BumpEpoch(context.Context, string) (int, error) { return 1, nil }
 
 func (b *deployingBuilder) HoldLog(string) {
 	b.mu.Lock()

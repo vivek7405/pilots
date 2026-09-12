@@ -142,6 +142,11 @@ var scopePrefixes = []struct {
 	// would be over plain HTTP.
 	{"/mcp", ScopeMachines},
 	{"/v1/builds", ScopeDeploy},
+	// Builders belong to the org whose builds run in them, so seeing and
+	// resetting one is a deploy-scoped act rather than an administrative one.
+	// Without this row the table falls through to admin, and unsticking your
+	// own build would need a key that can mint keys.
+	{"/v1/builders", ScopeDeploy},
 	// A deploy-scoped key READS its own connections here, because a caller
 	// refused a {repo, ref} build has to be able to see what it is connected
 	// to. Writing one is admin-scoped, checked in handleConnectRepo rather
