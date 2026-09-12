@@ -191,6 +191,18 @@ func (m *Manager) suspendIdleMachines(ctx context.Context) {
 	// already lists the host's rows, and a scrape must never query the store.
 	m.countByState(rows)
 
+	// Console logs, rotated on the same walk. This loop already lists exactly
+	// the rows a rotation needs, on a cadence already right for a file that
+	// takes hours to fill, so a second loop would be a second thing to keep
+	// alive for no gain.
+	mine := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if row.HostID == m.opts.HostID && row.State != state.StateDestroyed {
+			mine = append(mine, row.ID)
+		}
+	}
+	m.rotateLogs(mine)
+
 	for _, row := range rows {
 		if row.HostID != m.opts.HostID || row.State != StateRunning {
 			continue

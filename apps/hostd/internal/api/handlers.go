@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -782,6 +783,23 @@ const logRowInterval = 5 * time.Second
 // file is nil rather than an error.
 const logFollowRetries = 10
 
+// Resuming a follow, and taking only the end of one.
+//
+// # Why an offset and not a cursor
+//
+// The log is one append-only file, so the byte offset IS the position, and a
+// client that knows it can resume exactly. A cursor would be a second identity
+// for the same number, kept correct on both sides. `X-Pilot-Log-Offset` says
+// where the body starts, `?offset=` says where to start it, and they are the
+// same units on purpose.
+//
+// # Why the plain-text default is untouched
+//
+// The CLI, three SDKs, the MCP tool and the dashboard route all read this body
+// as text today. A response that changed shape to add a feature none of them
+// asked for would break five clients to serve one. SSE is opt-in through
+// Accept, and everything else is a query parameter that defaults to what
+// happens now, byte for byte.
 func (d Deps) handleLogs(w http.ResponseWriter, r *http.Request) {
 	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
 		return
@@ -792,14 +810,166 @@ func (d Deps) handleLogs(w http.ResponseWriter, r *http.Request) {
 		writeMapped(w, err)
 		return
 	}
+
+	// Where this body starts. Computed before anything is written, because the
+	// header cannot be set after the first byte and a client resuming from the
+	// wrong number either repeats output or loses it.
+	start := int64(0)
+	if raw := r.URL.Query().Get("offset"); raw != "" {
+		if at, err := strconv.ParseInt(raw, 10, 64); err == nil && at >= 0 {
+			// Past the end is not an error: the file was rotated, or the client
+			// held an offset from a previous boot. Starting at zero and saying
+			// so is better than refusing, because the client wants the log.
+			if at <= int64(len(logs)) {
+				start = at
+			}
+		}
+	}
+	body := logs[start:]
+	if raw := r.URL.Query().Get("tail"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+			body = lastLines(body, n)
+			start = int64(len(logs)) - int64(len(body))
+		}
+	}
+
+	if wantsSSE(r) {
+		d.streamLogEvents(w, r, id, logs, start, body)
+		return
+	}
+
+	w.Header().Set("X-Pilot-Log-Offset", strconv.FormatInt(start, 10))
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(logs)
+	_, _ = w.Write(body)
 
 	if !r.URL.Query().Has("follow") { // follow=1 and a bare follow both work
 		return
 	}
 	d.followLogs(w, r, id, int64(len(logs)))
+}
+
+// wantsSSE reports whether the client asked for server-sent events.
+//
+// Opt-in through Accept rather than a query parameter, because that is what
+// Accept is for and because an EventSource sends it without being told.
+func wantsSSE(r *http.Request) bool {
+	return strings.Contains(r.Header.Get("Accept"), "text/event-stream")
+}
+
+// lastLines is the final n lines of a body.
+//
+// Counted from the END, so a 40 MiB log costs one backwards scan rather than a
+// split of the whole thing into a slice nobody keeps.
+func lastLines(body []byte, n int) []byte {
+	if n <= 0 {
+		return nil
+	}
+	seen := 0
+	// A trailing newline terminates the last line rather than starting an empty
+	// one, so it is skipped before counting.
+	end := len(body)
+	if end > 0 && body[end-1] == '\n' {
+		end--
+	}
+	for i := end - 1; i >= 0; i-- {
+		if body[i] != '\n' {
+			continue
+		}
+		seen++
+		if seen == n {
+			return body[i+1:]
+		}
+	}
+	return body
+}
+
+// streamLogEvents serves the log as server-sent events.
+//
+// The id of each event is the offset AFTER it, which is what makes
+// `Last-Event-ID` a resume: the browser sends back the last id it saw, and that
+// is exactly where the next byte is. Nothing is repeated and nothing is
+// skipped, which a line-counting cursor could not promise.
+func (d Deps) streamLogEvents(w http.ResponseWriter, r *http.Request, id string,
+	logs []byte, start int64, body []byte) {
+
+	// Last-Event-ID wins over ?offset=: the browser sets it automatically on a
+	// reconnect, and that reconnect is precisely the case a client cannot
+	// intervene in to set a query parameter.
+	if raw := r.Header.Get("Last-Event-ID"); raw != "" {
+		if at, err := strconv.ParseInt(raw, 10, 64); err == nil && at >= 0 && at <= int64(len(logs)) {
+			start, body = at, logs[at:]
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Pilot-Log-Offset", strconv.FormatInt(start, 10))
+	w.WriteHeader(http.StatusOK)
+
+	flusher, _ := w.(http.Flusher)
+	flush := func() {
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+
+	offset := start
+	if len(body) > 0 {
+		offset += int64(len(body))
+		writeLogEvent(w, "log", offset, body)
+	}
+	flush()
+
+	if !r.URL.Query().Has("follow") {
+		return
+	}
+
+	poll := logFollowInterval
+	if d.LogFollowInterval > 0 {
+		poll = d.LogFollowInterval
+	}
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+		}
+		delta, err := d.Machines.LogTail(id, offset)
+		if err != nil {
+			// The file was rotated out from under this follow. `reset` with id
+			// 0 tells the client its offset is meaningless now, which is the
+			// one thing it cannot work out for itself: without it, it would
+			// resume from a byte in the middle of a line of different output.
+			writeLogEvent(w, "reset", 0, nil)
+			flush()
+			offset = 0
+			continue
+		}
+		if len(delta) == 0 {
+			continue
+		}
+		offset += int64(len(delta))
+		writeLogEvent(w, "log", offset, delta)
+		flush()
+	}
+}
+
+// writeLogEvent emits one event, splitting the payload into `data:` lines.
+//
+// Every line has to be prefixed, because SSE ends an event at a blank line: a
+// log chunk written raw would end its own event at the first blank line in the
+// output and the rest would be parsed as a new one.
+func writeLogEvent(w http.ResponseWriter, kind string, id int64, payload []byte) {
+	fmt.Fprintf(w, "event: %s\nid: %d\n", kind, id)
+	if len(payload) > 0 {
+		for _, line := range strings.Split(strings.TrimSuffix(string(payload), "\n"), "\n") {
+			fmt.Fprintf(w, "data: %s\n", line)
+		}
+	}
+	fmt.Fprint(w, "\n")
 }
 
 // followLogs streams the console log as it grows.
