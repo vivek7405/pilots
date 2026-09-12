@@ -464,6 +464,23 @@ export interface Host {
    * /proc/cpuinfo vendor_id. Absent on a host that has not published it yet.
    */
   cpu_vendor?: string
+  /**
+   * Memory held by RUNNING machines this host would suspend if it needed the
+   * room. Placement counts it as available, so a host whose free memory looks
+   * small can still take a create. Suspended machines are not counted: their
+   * memory is already in `mem_free_mib`.
+   */
+  mem_reclaimable_mib: number
+  /**
+   * The vCPUs this host's machines are configured with. Oversubscription is
+   * normal, because vCPUs are timeshared, so this is a load signal rather than
+   * a limit.
+   */
+  vcpus_running: number
+  /** An operator is moving this host's machines off it; rankers skip it. */
+  draining?: boolean
+  /** How many builds this host holds on local disk. */
+  builds_cached?: number
 }
 
 /**

@@ -24,6 +24,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/config"
 	"github.com/vivek7405/pilots/hostd/internal/machines"
 	"github.com/vivek7405/pilots/hostd/internal/mesh"
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/router"
 	"github.com/vivek7405/pilots/hostd/internal/selfheal"
 	"github.com/vivek7405/pilots/hostd/internal/state"
@@ -596,4 +597,15 @@ type cachedMachineCPU struct{ cache *corrosion.Cache }
 
 func (v cachedMachineCPU) MachineCPU(_ context.Context, id string) (state.MachineCPU, bool) {
 	return v.cache.MachineCPU(id)
+}
+
+// placementMetric reports where creates ended up.
+//
+// A type rather than a closure so the API package's dependency is an interface
+// it can be tested against, and so hostd's metric registry stays out of the
+// API package entirely.
+type placementMetric struct{}
+
+func (placementMetric) Observe(outcome string) {
+	metrics.PlacementOutcomes.With(outcome).Inc()
 }

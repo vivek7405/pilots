@@ -470,6 +470,20 @@ type Host struct {
 	// CPUVendor is which pool this host restores memory images from, the raw
 	// /proc/cpuinfo vendor_id. Empty until the host publishes it.
 	CPUVendor string `json:"cpu_vendor,omitempty"`
+	// MemReclaimableMiB is memory held by RUNNING machines this host would
+	// suspend if it needed the room. Placement counts it as available, so a
+	// host whose free memory looks small can still take a create. Suspended
+	// machines are not counted: their memory is already in mem_free_mib.
+	MemReclaimableMiB int `json:"mem_reclaimable_mib"`
+	// VCPUsRunning is the vCPUs this host's machines are configured with.
+	// Oversubscription is normal, because vCPUs are timeshared, so this is a
+	// load signal rather than a limit.
+	VCPUsRunning int `json:"vcpus_running"`
+	// Draining says an operator is moving this host's machines off it. Every
+	// ranker skips a draining host.
+	Draining bool `json:"draining,omitempty"`
+	// BuildsCached is how many builds this host holds on local disk.
+	BuildsCached int `json:"builds_cached,omitempty"`
 }
 
 type HealthResponse struct {

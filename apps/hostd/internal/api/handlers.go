@@ -357,6 +357,18 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// AFTER the quota, because the org and the key are only resolved here and
+	// a create the org may not have should be refused once, by the host that
+	// received it, rather than forwarded somewhere to be refused again.
+	//
+	// Before the manager, because the whole point is that another host may be
+	// the better place to run it. A volume-backed create is not forwarded: the
+	// volume is claimed by whichever host mounts it, and moving the create
+	// would move the claim without moving the data.
+	if req.Volume == "" && d.forwardCreate(w, r, req) {
+		return
+	}
+
 	row, err := d.Machines.Create(r.Context(), req)
 	if err != nil {
 		writeMapped(w, err)
@@ -910,14 +922,47 @@ func (d Deps) handleListHosts(w http.ResponseWriter, r *http.Request) {
 		writeMapped(w, err)
 		return
 	}
+	// What each host reports about its own capacity, joined in memory. Two
+	// list queries rather than two per row: a fleet read must not cost a query
+	// per host, and neither of these is large.
+	//
+	// Both best effort. A host whose capacity row cannot be read is still
+	// listed, with zeroes, because the hosts row is the answer to "who is in
+	// the fleet" and a missing side table must not remove anyone from it.
+	caps := map[string]state.HostCapacity{}
+	if rows, err := d.Store.ListHostCapacity(r.Context()); err == nil {
+		for _, c := range rows {
+			caps[c.HostID] = c
+		}
+	}
+	cached := map[string]int{}
+	if rows, err := d.Store.ListHostBuilds(r.Context()); err == nil {
+		for _, b := range rows {
+			cached[b.HostID] = len(b.Builds)
+		}
+	}
+
 	const aliveWindow = 30 * time.Second
 	out := make([]Host, 0, len(hosts))
 	for _, h := range hosts {
+		c := caps[h.ID]
+		// The capacity row's figure wins when there is one: it is what every
+		// ranker actually reads, and reporting the hosts row's older copy here
+		// would show an operator a different number from the one placement
+		// used.
+		free := h.MemFreeMiB
+		if c.UpdatedAt > 0 {
+			free = c.MemFreeMiB
+		}
 		out = append(out, Host{
 			ID: h.ID, PublicIP: h.PublicIP, WGAddr: h.WGAddr,
-			CPUFree: h.CPUFree, MemFreeMiB: h.MemFreeMiB, LastSeen: h.LastSeen,
-			Alive:     time.Since(time.Unix(h.LastSeen, 0)) < aliveWindow,
-			CPUVendor: h.Vendor,
+			CPUFree: h.CPUFree, MemFreeMiB: free, LastSeen: h.LastSeen,
+			Alive:             time.Since(time.Unix(h.LastSeen, 0)) < aliveWindow,
+			CPUVendor:         h.Vendor,
+			MemReclaimableMiB: c.MemReclaimableMiB,
+			VCPUsRunning:      c.VCPUsRunning,
+			Draining:          c.Draining,
+			BuildsCached:      cached[h.ID],
 		})
 	}
 	writeJSON(w, http.StatusOK, out)

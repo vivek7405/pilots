@@ -84,6 +84,21 @@ var (
 	RouterHardLimitRefusals = NewCounter(Default, "pilots_router_hard_limit_refusals_total",
 		"Requests refused because a machine was at its hard_limit.")
 
+	// Where creates ended up. `local` means this host ranked itself best,
+	// `forwarded` means a peer took it, `fallback` means every candidate
+	// refused or was unreachable and this host served it anyway. A fleet whose
+	// fallback count is climbing is a fleet running out of room, which is
+	// visible here before it is visible as a failed create.
+	PlacementOutcomes = NewCounterVec(Default, "pilots_placement_total",
+		"Machine creates by where they were placed.", "outcome")
+
+	// What this host still has, as the fleet's rankers see it. Published as a
+	// gauge as well as a row so an operator can graph the thing placement
+	// actually reads, rather than a number that resembles it.
+	HostMemReclaimable = NewGauge(Default, "pilots_host_mem_reclaimable_mib",
+		"Memory held by running machines this host would suspend if it needed "+
+			"the room. Counted as available by placement.")
+
 	ReplicationGaps = NewGauge(Default, "pilots_replication_gaps",
 		"Ranges of changes this replica knows it has not applied yet. "+
 			"Above zero means corrosion is still filling holes.")

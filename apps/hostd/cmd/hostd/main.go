@@ -640,7 +640,8 @@ func run() error {
 		Builds:      builder, Rollout: rollout, Domain: cfg.WorkloadDomain, URL: publicURL,
 		APIHostname: cfg.APIHostname,
 		Peers:       peerLookup(f), PeerToken: api.PeerTokenFor(cfg.AgentTokenSecret),
-		Tenancy: tenancy, MachineCPU: machineCPU, BuildGate: &quota.HostGate{},
+		Placement: placementMetric{},
+		Tenancy:   tenancy, MachineCPU: machineCPU, BuildGate: &quota.HostGate{},
 		// The key the boot path already holds, handed to the API too. Without
 		// this line every service create and patch carrying secret_env is
 		// refused on a host that HAS a key, because the field it is refused on

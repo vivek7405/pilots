@@ -360,6 +360,17 @@ class Host:
     last_seen: int = 0
     alive: bool = False
     cpu_vendor: str | None = None
+    #: Memory held by RUNNING machines this host would suspend if it needed the
+    #: room. Placement counts it as available. Suspended machines are not
+    #: counted: their memory is already in mem_free_mib.
+    mem_reclaimable_mib: int = 0
+    #: The vCPUs this host's machines are configured with. A load signal rather
+    #: than a limit, because vCPUs are timeshared.
+    vcpus_running: int = 0
+    #: An operator is moving this host's machines off it; rankers skip it.
+    draining: bool = False
+    #: How many builds this host holds on local disk.
+    builds_cached: int = 0
 
 
 @dataclass

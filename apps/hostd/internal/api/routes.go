@@ -66,6 +66,10 @@ type Deps struct {
 	// Peers resolves other hosts, so a service write that arrived at the
 	// wrong host can be forwarded to the one allowed to perform it.
 	Peers PeerLookup
+	// Placement counts where creates ended up, so an operator can see whether
+	// the fleet is spreading or whether every create is being served locally
+	// because no candidate would take it. Nil on a host with no metrics.
+	Placement Placement
 	// PeerToken authenticates a call from another host of this fleet on the
 	// internal listener. Derived from the agent-token secret every host
 	// already shares, and accepted only on a request that carries the

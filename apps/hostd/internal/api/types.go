@@ -776,6 +776,25 @@ type Host struct {
 	// /proc/cpuinfo vendor_id. Empty on a host that has not published its row
 	// yet, which ranks as "in no pool".
 	CPUVendor string `json:"cpu_vendor,omitempty"`
+	// MemReclaimableMiB is memory held by RUNNING machines this host would
+	// suspend if it needed the room. Placement counts it as available, so a
+	// host whose free memory looks small can still take a create.
+	//
+	// Not suspended machines: suspend kills the Firecracker process, so a
+	// suspended machine's memory is already in mem_free_mib.
+	MemReclaimableMiB int `json:"mem_reclaimable_mib"`
+	// VCPUsRunning is the vCPUs this host's machines are configured with.
+	// Oversubscription is normal and expected -- vCPUs are timeshared -- so
+	// this is a load signal rather than a limit.
+	VCPUsRunning int `json:"vcpus_running"`
+	// Draining says an operator is moving this host's machines off it. Every
+	// ranker skips a draining host, which is what lets a drain converge
+	// instead of racing the placer.
+	Draining bool `json:"draining,omitempty"`
+	// BuildsCached is how many builds this host holds on local disk. A create
+	// whose builds are all here starts from a restore rather than a download,
+	// which is worth a tie-break in placement and nothing more.
+	BuildsCached int `json:"builds_cached,omitempty"`
 }
 
 // CreateAPIKeyRequest mints a key for an org. Admin-scoped: the org is named
