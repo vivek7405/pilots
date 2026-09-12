@@ -70,6 +70,10 @@ type Deps struct {
 	// the fleet is spreading or whether every create is being served locally
 	// because no candidate would take it. Nil on a host with no metrics.
 	Placement Placement
+	// Drain empties THIS host on an operator's request, and takes machines
+	// another host is emptying. Nil on a host that cannot, which answers 501
+	// rather than pretending the route is absent.
+	Drain Drainer
 	// PeerToken authenticates a call from another host of this fleet on the
 	// internal listener. Derived from the agent-token secret every host
 	// already shares, and accepted only on a request that carries the
@@ -323,6 +327,17 @@ func Routes(d Deps) http.Handler {
 	// Every address the acting org's outbound traffic can leave from, which is
 	// what a tenant hands to anything that allowlists by source address.
 	mux.HandleFunc("GET /v1/egress", d.handleEgress)
+	// Emptying a host on purpose, so a reboot or a retirement is not an outage
+	// for the machines it happens to be holding. Admin-scoped: a drain moves
+	// every org's machines at once. Any host serves these; the named host does
+	// the work, because it is the only one allowed to offer its own machines.
+	mux.HandleFunc("POST /v1/hosts/{id}/drain", d.handleDrain)
+	mux.HandleFunc("GET /v1/hosts/{id}/drain", d.handleDrainStatus)
+	mux.HandleFunc("DELETE /v1/hosts/{id}/drain", d.handleUndrain)
+	// Internal: a draining host telling its target to take a machine. The
+	// OFFER row authorises the move, so this only saves the target from
+	// waiting to notice one.
+	mux.HandleFunc("POST /v1/machines/{id}/take", d.handleTake)
 	mux.HandleFunc("GET /v1/whoami", d.handleWhoami)
 
 	// The hosted MCP endpoint: the fleet toolset over Streamable HTTP, on

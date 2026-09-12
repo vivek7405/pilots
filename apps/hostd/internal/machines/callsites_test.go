@@ -248,10 +248,13 @@ func TestNoRestoreSkipsTheVendorCheck(t *testing.T) {
 		},
 		{
 			callee: "bringUp",
-			want:   []string{"Rescue", "Wake"},
-			why: "these are the two paths that bring a suspended machine back " +
+			want:   []string{"Rescue", "Take", "Wake"},
+			why: "these are the paths that bring a suspended machine back " +
 				"locally; anything else reaching them is a bring-up outside the " +
-				"lock and the ledger hooks both of these own",
+				"lock and the ledger hooks these own. TAKE is the planned twin " +
+				"of Rescue: the same restore, authorised by an offer from a LIVE " +
+				"host rather than by the old owner being dead, and it holds the " +
+				"same lock and opens the same ledger interval",
 		},
 		{
 			callee: "bootFromDisk",

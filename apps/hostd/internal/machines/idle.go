@@ -259,6 +259,13 @@ func (m *Manager) selectStaleBuilders(rows []state.Machine) []string {
 // alone would suspend one that is busy but generating no HTTP traffic. Only
 // the conjunction is safe.
 func (m *Manager) shouldSuspend(ctx context.Context, row state.Machine) bool {
+	// A machine being handed to another host is nobody's to suspend: the drain
+	// already suspended it, or is about to, and a second suspend racing the
+	// handoff would write a row the target is in the middle of claiming.
+	if _, moving := m.HandingOff(row.ID); moving {
+		return false
+	}
+
 	// Whose machine is this? Every running machine needs exactly one
 	// controller: two would race, none bills forever.
 	//

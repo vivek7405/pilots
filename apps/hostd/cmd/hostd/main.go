@@ -555,6 +555,17 @@ func run() error {
 		Ready: joinGate.Ready,
 	})
 
+	// The manager is built long before this, because every netns slot's
+	// address derives from the mesh key and the key has to be loaded first. So
+	// the peer notifier is installed here, once there is a fleet to call.
+	if f != nil {
+		mgr.SetHandoffs(handoffCaller{peers: peerAPI{
+			cache: f.cache,
+			http:  &http.Client{Timeout: 2 * time.Minute},
+			token: api.PeerTokenFor(cfg.AgentTokenSecret),
+		}})
+	}
+
 	// Only the arbiter for a service acts on it, so every host can run this
 	// loop: they all see every service in their local replica, and all but one
 	// will decline for any given service.
@@ -640,8 +651,8 @@ func run() error {
 		Builds:      builder, Rollout: rollout, Domain: cfg.WorkloadDomain, URL: publicURL,
 		APIHostname: cfg.APIHostname,
 		Peers:       peerLookup(f), PeerToken: api.PeerTokenFor(cfg.AgentTokenSecret),
-		Placement: placementMetric{},
-		Tenancy:   tenancy, MachineCPU: machineCPU, BuildGate: &quota.HostGate{},
+		Placement: placementMetric{}, Drain: drainAdapter{mgr: mgr},
+		Tenancy: tenancy, MachineCPU: machineCPU, BuildGate: &quota.HostGate{},
 		// The key the boot path already holds, handed to the API too. Without
 		// this line every service create and patch carrying secret_env is
 		// refused on a host that HAS a key, because the field it is refused on

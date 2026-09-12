@@ -609,3 +609,42 @@ type placementMetric struct{}
 func (placementMetric) Observe(outcome string) {
 	metrics.PlacementOutcomes.With(outcome).Inc()
 }
+
+// drainAdapter is the machine manager as the API's Drainer.
+//
+// A thin shim rather than the manager implementing api.Drainer directly,
+// because the two disagree about one type on purpose: the manager reports a
+// drain in its own terms and the API reports it in wire terms, and neither
+// should have to carry the other's shape.
+type drainAdapter struct{ mgr *machines.Manager }
+
+func (d drainAdapter) Drain(ctx context.Context,
+	pick func(state.Machine) (string, bool)) (*api.DrainReport, error) {
+
+	got, err := d.mgr.Drain(ctx, pick)
+	if err != nil {
+		return nil, err
+	}
+	return &api.DrainReport{
+		Moved: got.Moved, Left: got.Left, Errors: got.Errors, Started: got.Started,
+	}, nil
+}
+
+func (d drainAdapter) Undrain()       { d.mgr.SetDraining(false) }
+func (d drainAdapter) Draining() bool { return d.mgr.Draining() }
+
+func (d drainAdapter) Take(ctx context.Context, machineID, handoffID string) error {
+	return d.mgr.Take(ctx, machineID, handoffID)
+}
+
+// handoffCaller tells a target host to take a machine, over the mesh.
+//
+// Best effort by construction: the offer ROW authorises the move, so a failed
+// call costs the source a wait rather than the handoff. That is why this
+// returns an error nobody treats as fatal.
+type handoffCaller struct{ peers peerAPI }
+
+func (h handoffCaller) Offer(ctx context.Context, hostID, machineID, handoffID string) error {
+	return h.peers.PostJSON(ctx, hostID, "/v1/machines/"+machineID+"/take",
+		api.TakeRequest{HandoffID: handoffID})
+}

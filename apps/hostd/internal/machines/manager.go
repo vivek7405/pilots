@@ -124,6 +124,14 @@ type Options struct {
 	// a large host and a small one are ranked fairly rather than by raw MiB.
 	CPUCount int
 
+	// Handoffs tells another host to take a machine this one is draining.
+	//
+	// A courtesy, not the mechanism: the offer ROW is what authorises the
+	// move, so a host that never receives the call still takes the machine
+	// when it notices the row. The call only makes the common case fast.
+	// Nil on a single box, where there is nowhere to hand anything.
+	Handoffs HandoffNotifier
+
 	// Volumes creates and mounts persistent disks. Nil on a host with no
 	// object storage, where every volume operation is refused up front rather
 	// than failing somewhere inside a create.
@@ -196,6 +204,13 @@ type Manager struct {
 	// process's willingness to take work: the replicated half lives in
 	// host_capacity, written from the same flag on the next heartbeat.
 	draining atomic.Bool
+
+	// handingOff maps a machine id to the host it is moving to, while a drain
+	// is in flight. In memory because it is a property of THIS process's
+	// current operation: the durable half is the handoff row, and a restart
+	// mid-drain leaves the machine where it was rather than in a state nobody
+	// is acting on.
+	handingOff sync.Map // machine id -> target host id
 }
 
 func New(opts Options) *Manager {
@@ -867,6 +882,15 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 
 	if _, ok := m.get(id); ok {
 		return nil // another waker got there first
+	}
+
+	// A machine mid-handoff must not be woken HERE. Its memory image has
+	// already been offered to another host, and bringing it up on this one
+	// would leave two hosts believing they hold it the moment the target
+	// claims. The router forwards the request to the target instead, so the
+	// caller is held rather than refused.
+	if target, moving := m.HandingOff(id); moving {
+		return fmt.Errorf("%w: %s", ErrDraining, target)
 	}
 
 	row, err := m.opts.Store.GetMachine(ctx, id)
