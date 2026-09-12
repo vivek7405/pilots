@@ -137,6 +137,15 @@ func (m *Manager) rollOutOrdinal(ctx context.Context, svc *state.Service, rel *s
 		return withRelease(m.waitHealthy(ctx, created.ID, health), svc.ID, rel.ID)
 	}
 
+	// The write-ahead log is flushed before the process is killed.
+	//
+	// Sixty seconds of exposure is the right trade in ordinary running, and the
+	// WRONG one at a moment we control: a redeploy kills this node on purpose,
+	// and losing up to a minute of writes to a PLANNED operation is a loss
+	// nobody agreed to. `x-pilots.pre_deploy` cannot do this, because it runs
+	// on a throwaway machine rather than on the one about to be killed.
+	m.flushBeforeKill(ctx, mach)
+
 	// An existing ordinal is REDEPLOYED in place, keeping its volume and its
 	// name. The name matters beyond tidiness: the engine identifies a member by
 	// it, so an ordinal that came back under a new name would join as a new
@@ -270,4 +279,35 @@ func (m *Manager) engineOf(ctx context.Context, serviceID string) string {
 		return ""
 	}
 	return labels.Labels["pilot.engine"]
+}
+
+// flushBeforeKill asks a node to archive what it has not archived yet.
+//
+// Best effort, and that is a decision rather than laziness. The flush REDUCES a
+// loss that is already bounded and already documented; refusing to deploy
+// because a node would not flush would turn a smaller exposure into an outage,
+// and an operator who asked for a deploy would get neither the deploy nor an
+// explanation they could act on.
+//
+// So a failure is a log line naming the node, and the deploy continues with the
+// sixty-second window the recipe already promises.
+func (m *Manager) flushBeforeKill(ctx context.Context, mach *state.Machine) {
+	if m.opts.Machines == nil {
+		return
+	}
+	res, err := m.opts.Machines.Exec(ctx, mach.ID, api.ExecRequest{
+		Cmd: "/usr/local/bin/pilot-pg-flush", User: "root",
+	})
+	switch {
+	case err != nil:
+		slog.Warn("could not flush a node's write-ahead log before redeploying it; "+
+			"the ordinary sixty-second window applies",
+			"machine", mach.ID, "err", err)
+	case res.ExitCode != 0:
+		slog.Warn("a node did not archive its write-ahead log before being redeployed; "+
+			"the ordinary sixty-second window applies",
+			"machine", mach.ID, "exit", res.ExitCode, "stderr", res.Stderr)
+	default:
+		slog.Info("flushed a node's write-ahead log before redeploying it", "machine", mach.ID)
+	}
 }

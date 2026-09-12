@@ -56,6 +56,8 @@ The recipe carries a `pilot.engine` label, which is what makes the rest of this 
 | what the engine says | `pilot metrics <service>` | connections against the limit, cache hits, commits against rollbacks |
 | recover to a moment | `pilot db restore <service> --to <RFC3339>` | Postgres in wal-archive mode; runs as a NEW service beside the old one |
 | a port held open | `pilot proxy` | for a tool that is not a shell |
+| several Postgres machines | `pilot db ha enable <service>` | Patroni, with its own etcd; five machines at the smallest useful size |
+| which node is primary | `pilot db ha status <service>` | asks every node, because two that both claim it is the thing worth seeing |
 
 ### Two addresses, and which is which
 
@@ -110,3 +112,13 @@ How far back you can go is bounded by the oldest base backup the archive still h
 - Do not `exec` a replica to read logs. `logs` is the console and needs no shell in the image.
 - Do not ask for a database password over the API or MCP. There is no route that returns one: passwords live in the operator's own credentials file and never in the fleet. To open a session, tell the operator to run `pilot db connect`.
 - Do not point a migration at `DATABASE_URL` on a pooled database. Transaction pooling drops the session state a migration relies on; use `DATABASE_URL_DIRECT`.
+
+### High availability
+
+Only a Postgres written by `pilot add` can become a cluster: the write-once `pilot.engine` label is what lets a service run several replicas on several volumes, and it cannot be added to a hand-written service. Everything else volume-backed runs exactly one replica, because two machines mounting one volume is two processes writing one filesystem.
+
+Each node gets its own volume and lands on a different host where the fleet has one. The address and the connection string do not change: every node runs a proxy on the published port that follows whichever node Patroni says is primary, checked every second. There is no leader recorded anywhere to read, deliberately.
+
+Patroni decides which node leads and pilots does not participate in that decision. `docs/honesty.md` says exactly which half is whose, and the command prints it before it writes anything.
+
+Turning it off keeps the FIRST node and destroys the rest with their volumes, so it is refused while any other node is primary: that would keep the machine that is behind and destroy the one that is ahead.

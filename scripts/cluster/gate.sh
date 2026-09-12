@@ -3825,6 +3825,124 @@ else
   api "$MX_IP" DELETE "/v1/machines/${MX_ID}" >/dev/null 2>&1 || true
 fi
 
+say "43. Postgres high availability: a killed leader, and the address that did not change"
+# F7. The e2e battery can see that a cluster comes up and serves. Only a host
+# shell can KILL a leader the way a host death kills one -- no shutdown, no
+# handover, the process simply gone -- and only a host shell can see that the
+# nodes landed on different hosts in the first place.
+HA_IP="${LIVE_IPS[0]:-${IPS[0]}}"
+HA_SVC=$(api "$HA_IP" GET /v1/services | jq -r '[.[] | select(.labels["pilot.engine"] == "postgres")][0].id' 2>/dev/null)
+
+if [ -z "$HA_SVC" ] || [ "$HA_SVC" = "null" ]; then
+  # Not a failure: this section measures a cluster, and a rig with no database
+  # deployed has nothing to measure. Said out loud rather than passing quietly,
+  # because a section that reports nothing looks the same as one that passed.
+  say "   (no postgres service on this rig; deploy one to measure failover)"
+else
+  HA_NODES=$(api "$HA_IP" GET /v1/machines | jq -r --arg s "$HA_SVC" \
+    '[.[] | select(.service_id == $s and .state == "running")]' 2>/dev/null)
+  HA_COUNT=$(echo "$HA_NODES" | jq 'length' 2>/dev/null)
+
+  if [ "${HA_COUNT:-0}" -lt 2 ]; then
+    say "   (postgres is running one machine; \`pilot db ha enable\` makes it a cluster)"
+  else
+    # Distinct hosts. Replicas of one service on one host are replicas that die
+    # together, which is the whole reason the placement is derived per ordinal.
+    HA_HOSTS=$(echo "$HA_NODES" | jq -r '[.[].host_id] | unique | length' 2>/dev/null)
+    [ "${HA_HOSTS:-0}" -ge 2 ] \
+      && ok "the cluster's nodes are on ${HA_HOSTS} different hosts" \
+      || bad "all ${HA_COUNT} nodes are on one host: they would die together"
+    echo "  MEASURED ha_nodes=${HA_COUNT} ha_hosts=${HA_HOSTS:-0}"
+
+    # Which node leads, asked of the nodes themselves. There is no row to read:
+    # that is the design, and it is why this asks.
+    HA_LEADER=""
+    HA_LEADER_HOST=""
+    for row in $(echo "$HA_NODES" | jq -r '.[] | @base64'); do
+      node=$(echo "$row" | base64 -d)
+      nid=$(echo "$node" | jq -r '.id')
+      code=$(api "$HA_IP" POST "/v1/machines/${nid}/exec" \
+        '{"cmd":"curl -s -o /dev/null -w %{http_code} http://127.0.0.1:8008/primary","user":"root"}' \
+        | jq -r '.stdout' 2>/dev/null | tr -d '[:space:]')
+      if [ "$code" = "200" ]; then
+        HA_LEADER="$nid"
+        HA_LEADER_HOST=$(echo "$node" | jq -r '.host_id')
+      fi
+    done
+
+    if [ -z "$HA_LEADER" ]; then
+      bad "no node reports itself primary; the cluster is electing or has lost quorum"
+    else
+      ok "one node reports itself primary"
+
+      # The kill. -9 on the leader's Firecracker, which is what a host death
+      # looks like to everything above it: no shutdown, no handover.
+      # Which address answers as that host id. Asked rather than assumed: the
+      # order of IPS and the order of host ids are two different orders, and a
+      # section that assumed they matched would kill the wrong machine.
+      HA_HOST_IP=""
+      for ip in "${LIVE_IPS[@]:-${IPS[@]}}"; do
+        if [ "$(api "$ip" GET /v1/health | jf host_id)" = "$HA_LEADER_HOST" ]; then
+          HA_HOST_IP="$ip"
+          break
+        fi
+      done
+      if [ -z "$HA_HOST_IP" ]; then
+        bad "could not find the address of ${HA_LEADER_HOST}"
+      else
+        HA_START=$(date +%s)
+        $SSH "root@$HA_HOST_IP" "pkill -9 -f 'firecracker.*${HA_LEADER}'" >/dev/null 2>&1 || true
+
+        # Time to a WRITE through the unchanged address, which is the number
+        # anybody actually cares about: not "a node was promoted" but "my
+        # application can write again".
+        HA_WROTE=0
+        HA_ELAPSED=0
+        while [ "$(( $(date +%s) - HA_START ))" -lt 90 ]; do
+          for row in $(echo "$HA_NODES" | jq -r --arg l "$HA_LEADER" '.[] | select(.id != $l) | .id'); do
+            res=$(api "$HA_IP" POST "/v1/machines/${row}/exec" \
+              '{"cmd":"psql -U postgres -Atqc \"create table if not exists gate43(n int); insert into gate43 values (1)\" 2>/dev/null && echo WROTE","user":"root"}' \
+              | jq -r '.stdout' 2>/dev/null | tr -d '[:space:]')
+            if [ "$res" = "WROTE" ]; then
+              HA_WROTE=1
+              HA_ELAPSED=$(( $(date +%s) - HA_START ))
+              break
+            fi
+          done
+          [ "$HA_WROTE" = "1" ] && break
+          sleep 2
+        done
+
+        if [ "$HA_WROTE" = "1" ]; then
+          echo "  MEASURED ha_failover_to_write_seconds=${HA_ELAPSED}"
+          # Patroni's ttl is 30 and the proxy checks every second, so a
+          # promotion inside 45 is the shape this is configured for. A number
+          # past it means the configuration and the behaviour disagree, which
+          # is worth failing over.
+          [ "$HA_ELAPSED" -le 45 ] \
+            && ok "a write succeeded ${HA_ELAPSED}s after the leader was killed" \
+            || bad "took ${HA_ELAPSED}s to accept a write; ttl 30 plus one check should be under 45"
+        else
+          bad "no write succeeded within 90s of killing the leader"
+        fi
+
+        # The killed node comes back, as a follower. A node that came back
+        # believing it is still primary is the split brain this whole
+        # arrangement exists to avoid.
+        sleep 20
+        HA_OLD=$(api "$HA_IP" POST "/v1/machines/${HA_LEADER}/exec" \
+          '{"cmd":"curl -s -o /dev/null -w %{http_code} http://127.0.0.1:8008/primary","user":"root"}' \
+          | jq -r '.stdout' 2>/dev/null | tr -d '[:space:]')
+        case "$HA_OLD" in
+          503) ok "the killed node came back as a follower" ;;
+          200) bad "the killed node came back believing it is still primary: split brain" ;;
+          *)   say "   (the killed node has not answered yet: ${HA_OLD})" ;;
+        esac
+      fi
+    fi
+  fi
+fi
+
 say "Result"
 echo "  ${PASS} passed, ${FAIL} failed"
 echo

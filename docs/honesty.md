@@ -116,6 +116,39 @@ to be the one who decides what failover means for your data.
 - **The health gate**, so a deploy that cannot reach the database does not
   become the running release.
 
+## High availability, and whose it is
+
+`pilot db ha enable` runs several Postgres machines with automatic failover, on
+Patroni, with its own etcd beside them. Read this before turning it on, because
+the failover is the part that makes people assume somebody is on call.
+
+**What pilots operates.** The machines, the volumes, the snapshots, the process
+supervisor, and the placement of each node on a different host where the fleet
+has one. When a host dies, its node comes back on another host with the same
+name and the same volume.
+
+**What pilots does not operate.** Patroni's choice of leader. The replication
+tuning. The decision to fail back. The three in the morning. Nothing in the
+platform reads or writes which node is primary, and that is deliberate: the
+proxy in front of the database follows Patroni's own health endpoint, checked
+every second, because a leader recorded in a replicated row would be stale
+exactly when it mattered.
+
+**What it costs.** Two Postgres machines and three etcd members is the smallest
+sensible cluster, which is five machines, each with its own volume, all of them
+billed. etcd must be an odd number: an even one has no majority it did not
+already have at one fewer member, so it buys failure modes and no availability.
+
+**What a failover looks like from outside.** Your connection string does not
+change, and the address does not change. A connection that was open to the old
+primary is reset, which is physics rather than a policy: the process it was
+talking to is gone. A new connection reaches the new primary once the proxy's
+next check notices, which is seconds rather than minutes.
+
+**What it does not protect you from.** A bad migration, a wrong DELETE, or
+anything else that replicates faithfully to every node. That is what
+`pilot db restore` is for, and it is a different tool for a different failure.
+
 ## If you need more than this
 
 You need a managed database, and you should use one. Point `DATABASE_URL` at

@@ -134,6 +134,7 @@ func newDBConnectCmd(env *Env, getenv config.Env) *cobra.Command {
 		useLocal bool
 		remote   bool
 		pooled   bool
+		replica  bool
 	)
 	c := &cobra.Command{
 		Use:   "connect [service]",
@@ -196,7 +197,12 @@ func newDBConnectCmd(env *Env, getenv config.Env) *cobra.Command {
 				return nil
 			}
 
-			m, err := engineReplica(c.Context(), client, svc.ID)
+			// On a CLUSTER, the node matters. A session opened on a replica
+			// answers reads and refuses every write, which looks like a broken
+			// permission rather than the wrong node, so the leader is found
+			// before anything is opened. On a single database this is one
+			// running machine and costs nothing.
+			m, err := databaseNode(c.Context(), client, svc.ID, replica)
 			if err != nil {
 				return err
 			}
@@ -240,6 +246,7 @@ func newDBConnectCmd(env *Env, getenv config.Env) *cobra.Command {
 	f.BoolVar(&useLocal, "local", false, "require the local client; fail rather than fall back")
 	f.BoolVar(&remote, "remote", false, "run the client inside the machine")
 	f.BoolVar(&pooled, "pooled", false, "connect through the pooler instead of direct")
+	f.BoolVar(&replica, "replica", false, "open the session on a replica rather than the primary")
 	Describe(c, Doc{
 		What: "An interactive session on a database, in the client you already\n" +
 			"know: psql, mysql, redis-cli or mongosh.",
@@ -430,4 +437,83 @@ func connectInsideMachine(c *cobra.Command, env *Env, client *pilots.Client,
 	}
 	env.W.Notef("%s inside %s", eng.Image, m.Name)
 	return runConsole(c, env, client, m.ID, argv)
+}
+
+// databaseNode picks which machine of a database to open a session on.
+//
+// # Why the node matters
+//
+// On a cluster, a session opened on a replica answers reads and refuses every
+// write with a message about a read-only transaction. That reads as a broken
+// permission rather than as the wrong node, and somebody chasing it looks at
+// their user before they look at their topology.
+//
+// So the primary is found by ASKING each node, on Patroni's own endpoint, which
+// is the same source of truth the proxy in front of the database follows. There
+// is no leader recorded anywhere to read instead, deliberately: a row would be
+// written by whichever host noticed a promotion, and it would be stale exactly
+// when it mattered.
+//
+// # Why a single database costs nothing here
+//
+// One running machine, one answer, no Patroni to ask: the loop finds it and
+// falls through. Nothing about an ordinary database changes.
+func databaseNode(ctx context.Context, client *pilots.Client, serviceID string, wantReplica bool) (*pilots.Machine, error) {
+	machines, err := client.Machines.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var running []pilots.Machine
+	for i := range machines {
+		if machines[i].ServiceID == serviceID && machines[i].State == "running" {
+			running = append(running, machines[i])
+		}
+	}
+	switch len(running) {
+	case 0:
+		return nil, out.Failf("start it, or check pilot status", "no running instance to connect to")
+	case 1:
+		if wantReplica {
+			return nil, out.Failf("this is a single database, not a cluster",
+				"there is no replica to connect to")
+		}
+		return &running[0], nil
+	}
+
+	want := "primary"
+	if wantReplica {
+		want = "replica"
+	}
+	for i := range running {
+		if roleOfNode(ctx, client, &running[i]) == want {
+			return &running[i], nil
+		}
+	}
+	// No node claims the role. Reported rather than guessed at: opening a
+	// session on whichever node answered first, on a cluster that is mid
+	// election or has lost quorum, is how somebody writes to a node that is
+	// about to be rewound.
+	return nil, out.Failf("pilot db ha status "+serviceID+" shows what each node thinks",
+		"no node reports itself %s: the cluster is electing, or it has lost quorum", want)
+}
+
+// roleOfNode asks one node what it believes it is, from inside it.
+func roleOfNode(ctx context.Context, client *pilots.Client, m *pilots.Machine) string {
+	res, err := client.Machines.Exec(ctx, m.ID, pilots.ExecRequest{
+		Cmd:  `curl -s -o /dev/null -w %{http_code} http://127.0.0.1:8008/primary`,
+		User: "root",
+	})
+	if err != nil {
+		return ""
+	}
+	switch strings.TrimSpace(res.Stdout) {
+	case "200":
+		return "primary"
+	case "503":
+		// Patroni's own answer for "not the primary", which on this endpoint
+		// means a replica rather than a failure.
+		return "replica"
+	default:
+		return ""
+	}
 }

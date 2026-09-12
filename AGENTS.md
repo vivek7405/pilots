@@ -193,6 +193,10 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
   is bar 4 as a test rather than a claim.
 - `scripts/cluster/gate.sh` is the fleet battery, a numbered `say` section per
   property, run against the local multi-node rig. It grows monotonically too.
+  Section 43 covers Postgres high availability: the nodes on distinct hosts,
+  a leader killed with -9 the way a host death kills one, and the seconds from
+  that kill to a successful WRITE through the unchanged address -- not "a node
+  was promoted" but "an application can write again".
   Section 42 covers per-machine numbers and log rotation: the reported memory
   against what the kernel itself says, a scrape on a host that does NOT own the
   machine, and a console log that stays bounded with its writer still appending
