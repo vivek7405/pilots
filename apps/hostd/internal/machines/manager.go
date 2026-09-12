@@ -196,6 +196,13 @@ type Manager struct {
 	// away. See retiredUffd.
 	retired retiredUffd
 
+	// rootfsIDs memoises the content hash of each variant's ext4, keyed by
+	// path, size and mtime. Hashing a rootfs is milliseconds and the answer
+	// only changes when a host is given a new artifact, so it is computed once
+	// per version rather than once per create. See rootfsID.
+	rootfsIDMu sync.Mutex
+	rootfsIDs  map[string]string
+
 	// exits is the wall time of the last exit nobody asked for, per machine.
 	// In memory on purpose: its one reader is the crash-loop guard in
 	// settleExit, and a gossiped row for a per-process policy would be a

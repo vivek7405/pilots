@@ -2,9 +2,12 @@ package machines
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -53,6 +56,39 @@ type Template struct {
 	// manifest written before page size was recorded, which is treated the
 	// same way.
 	PageSizeKiB int `json:"page_size_kib"`
+	// RootfsID identifies the ext4 artifact this template was derived from.
+	//
+	// The golden rootfs carries the whole guest userspace, the guest agent
+	// included, baked in when the artifact is built. A template is a snapshot
+	// of a machine booted from it, so every machine restored from that
+	// template runs that userspace for as long as the template lives.
+	//
+	// Nothing connected the two. Shipping a host a NEW rootfs left the cached
+	// template in place -- its manifest names build ids and a page size, none
+	// of which change when the artifact underneath does -- so the host went on
+	// minting machines from the old userspace indefinitely. The failure is
+	// silent by construction: the machines work, they just answer the way the
+	// previous release did.
+	//
+	// The rig showed it. Its template was two days older than its rootfs, and
+	// a session's `busy` field, which the current agent emits and the old one
+	// does not, was absent from every response -- so an assertion failed
+	// against a fleet whose code was right.
+	//
+	// Empty means this template was not derived here -- it was adopted from
+	// the fleet, or written before this field existed -- and is then not
+	// judged against the local artifact at all. A host that adopted a
+	// template never read its own ext4 to build it, so discarding the
+	// template because that ext4 moved would be answering a question nobody
+	// asked.
+	//
+	// What that leaves unsolved, stated rather than hidden: shipping a new
+	// artifact fleet-wide re-derives it on the hosts that built their own and
+	// does NOT dislodge it on the hosts that adopted one. Those hosts follow
+	// when the pool's published template is replaced. Making adopters chase an
+	// artifact they never read is a fleet-propagation design, and this is the
+	// single-host correctness half of it.
+	RootfsID string `json:"rootfs_id"`
 }
 
 // rejected reports whether this template is the one a restore just proved
@@ -367,7 +403,87 @@ func (m *Manager) loadTemplate(v variant) (*Template, error) {
 		return nil, fmt.Errorf("machines: template is %d KiB pages, this host "+
 			"runs %d KiB: %w", t.PageSizeKiB, want, errTemplatePageSize)
 	}
+
+	// A template derived from an artifact this host no longer ships is
+	// reported as no template, which rebuilds -- the same answer a page-size
+	// mismatch gets, for a weaker but more insidious reason. A wrong page size
+	// fails loudly at restore. A stale userspace WORKS: it boots, it serves,
+	// it execs, and it answers every request the way it did before whatever
+	// the new artifact added. Nothing is red and the change simply never
+	// reached a guest.
+	//
+	// A rebuild costs minutes, once, when the artifact actually changes.
+	if want := m.rootfsID(v); want != "" && t.RootfsID != "" && t.RootfsID != want {
+		return nil, fmt.Errorf("machines: template was derived from rootfs %s, "+
+			"this host ships %s: %w", shortID(t.RootfsID), shortID(want), errTemplateRootfs)
+	}
 	return &t, nil
+}
+
+// errTemplateRootfs marks a template derived from an artifact this host has
+// since replaced.
+var errTemplateRootfs = errors.New("machines: template rootfs mismatch")
+
+// shortID trims a hash for a log line.
+func shortID(id string) string {
+	switch {
+	case id == "":
+		return "none"
+	case len(id) > 12:
+		return id[:12]
+	}
+	return id
+}
+
+// rootfsID identifies the ext4 a variant's template is derived from.
+//
+// The CONTENT, not the path or the timestamp. A host bootstrap rewrites the
+// file and moves its mtime whether or not a byte changed, and rebuilding every
+// template on every bootstrap would cost minutes for nothing. Hashing is
+// memoised on size and mtime, so it runs once per artifact version per hostd
+// lifetime rather than once per create.
+//
+// An unreadable artifact returns the empty string, which is deliberately
+// treated as "do not judge". A host that cannot stat its own rootfs has a
+// problem, and throwing away a working template is not a way to report it --
+// especially since a template already adopted from the fleet is usable on a
+// host whose local artifact was never written at all.
+func (m *Manager) rootfsID(v variant) string {
+	path := m.variantRootfs(v)
+	if path == "" {
+		return ""
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	key := fmt.Sprintf("%s|%d|%d", path, info.Size(), info.ModTime().UnixNano())
+
+	m.rootfsIDMu.Lock()
+	if id, ok := m.rootfsIDs[key]; ok {
+		m.rootfsIDMu.Unlock()
+		return id
+	}
+	m.rootfsIDMu.Unlock()
+
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return ""
+	}
+	sum := hex.EncodeToString(h.Sum(nil))
+
+	m.rootfsIDMu.Lock()
+	if m.rootfsIDs == nil {
+		m.rootfsIDs = map[string]string{}
+	}
+	m.rootfsIDs[key] = sum
+	m.rootfsIDMu.Unlock()
+	return sum
 }
 
 // errTemplatePageSize marks a template this host cannot restore because it was
@@ -417,6 +533,10 @@ func (m *Manager) buildTemplate(ctx context.Context, v variant) (*Template, erro
 		SnapKey:     filepath.Join("template", uuid.NewString(), fc.SnapFile),
 		CreatedAt:   time.Now().Unix(),
 		PageSizeKiB: m.pageSizeKiB(),
+		// Stamped HERE and not on the adopt path: this is the one place a
+		// template is built out of a local artifact, so it is the one place
+		// that can honestly say which artifact that was.
+		RootfsID: m.rootfsID(v),
 	}
 
 	// The disk template needs no VM at all: it is the variant's rootfs, chunked.
