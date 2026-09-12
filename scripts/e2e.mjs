@@ -5204,7 +5204,17 @@ async function capacityAssertions() {
 // CLI and MCP server (#32). Where a dependency is missing the step FAILS and
 // names it. It does not skip -- a battery that quietly stops asserting when a
 // dependency is late is how a whole section goes green while testing nothing.
-const QUOTA_ORG = process.env.PILOTS_E2E_ORG ?? 'org-e2e';
+// The org whose quota this section drives.
+//
+// The ACTING key's org, not a name nothing belongs to. This was hardcoded to
+// "org-e2e" while the battery's key acts as whatever `hostd bootstrap-key`
+// minted, so the quota was set on one org and the machines were created in
+// another: the ceiling could never be reached and "the create past the quota
+// succeeded" was structural rather than a bug in enforcement. Overridable for
+// a fleet that wants the assertion pointed somewhere specific.
+async function quotaOrg() {
+  return process.env.PILOTS_E2E_ORG ?? (await myOrg());
+}
 const QUOTA_HEADROOM = 2;
 const CLI = process.env.PILOT_CLI ?? 'pilot';
 
@@ -5286,6 +5296,8 @@ async function quotaAssertions() {
   const created = [];
   const tag = Math.random().toString(36).slice(2, 8);
   let limit = 0;
+  // What the org's quota was before this section, restored in the finally.
+  let savedQuota = null;
 
   const run = (args, env) => new Promise((resolve) => {
     execFile(CLI, args, { env, timeout: 60_000 }, (error, stdout, stderr) => {
@@ -5297,14 +5309,22 @@ async function quotaAssertions() {
 
   try {
     await step('a machine quota can be set and filled to its limit', async () => {
-      const baseline = (await quotaUsage(QUOTA_ORG)).used_machines ?? 0;
+      const org = await quotaOrg();
+      const baseline = (await quotaUsage(org)).used_machines ?? 0;
       limit = baseline + QUOTA_HEADROOM;
 
-      const { status, text } = await request(`/v1/quotas/${QUOTA_ORG}`, {
+      // What the org was held to before this section, so the finally can put
+      // it back. Deleting the row instead would drop a fleet's real limits on
+      // the way out, which matters now that this runs against the acting org
+      // rather than a name nothing uses.
+      const before = await request(`/v1/quotas/${org}`);
+      savedQuota = before.status === 200 ? before.json : null;
+
+      const { status, text } = await request(`/v1/quotas/${org}`, {
         method: 'PUT', body: { max_machines: limit }, raw: true,
       });
       assert(status >= 200 && status < 300,
-        `PUT /v1/quotas/${QUOTA_ORG} returned HTTP ${status} (${text.slice(0, 200)}). ` +
+        `PUT /v1/quotas/${org} returned HTTP ${status} (${text.slice(0, 200)}). ` +
         'Quota enforcement is issue #30 (Phase 6a); this asserts nothing until it lands');
 
       for (let i = 0; i < QUOTA_HEADROOM; i++) {
@@ -5411,8 +5431,21 @@ async function quotaAssertions() {
     // The quota outlives the run otherwise, and the next run's "fill to the
     // limit" loop then hits 429 partway through against a ceiling this run
     // computed from a machine count that has since moved.
+    //
+    // PUT back what was there rather than DELETE. This now runs against the
+    // acting org, which on a real fleet has limits somebody chose, and a
+    // teardown that dropped them would leave the fleet on defaults.
     try {
-      await request(`/v1/quotas/${QUOTA_ORG}`, { method: 'DELETE' });
+      const org = await quotaOrg();
+      if (savedQuota) {
+        const restore = { ...savedQuota };
+        for (const k of Object.keys(restore)) {
+          if (k.startsWith('used_') || k === 'updated_at' || k === 'org_id') delete restore[k];
+        }
+        await request(`/v1/quotas/${org}`, { method: 'PUT', body: restore });
+      } else {
+        await request(`/v1/quotas/${org}`, { method: 'DELETE' });
+      }
     } catch { /* best effort, like every other teardown here */ }
   }
 }
