@@ -9,7 +9,10 @@ package pilots
 // hostd's Go source on every run and fails naming the struct and the tag when
 // the two sides disagree, in either direction.
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // Knobs is the per-machine lifecycle policy. A sandbox and a production
 // service are the same machine with different knobs.
@@ -526,6 +529,44 @@ type SnapshotResponse struct {
 	Snapshot string `json:"snapshot"`
 }
 
+// ComposeRecipe is the compose fragment for one database, with the durability
+// decision made and explained.
+//
+// Fetched rather than built by the client: two copies of a recipe is two places
+// for it to drift from what the planner will accept. The PASSWORD is generated
+// on the client and never crosses the wire -- SecretNames says what to make,
+// and URLTemplate carries PASSWORD where it goes.
+type ComposeRecipe struct {
+	Engine string `json:"engine"`
+	// Mode is "wal-archive" or "durable-volume" for Postgres, and
+	// "durable-volume" for every other engine.
+	Mode string `json:"mode"`
+	// Service is the compose service block, ready to splice into a file.
+	Service map[string]any `json:"service"`
+	// Volumes are the named volumes it declares.
+	Volumes map[string]struct{} `json:"volumes"`
+	// Files are extra files the fragment needs, by path relative to the
+	// project root. Anything ending .sh is written executable.
+	Files map[string]string `json:"files,omitempty"`
+	// SecretNames are the secrets to generate and store locally.
+	SecretNames []string `json:"secret_names"`
+	// ConnVar is the environment variable an application reads, and
+	// URLTemplate its value with PASSWORD standing in for the secret.
+	ConnVar     string `json:"conn_var"`
+	URLTemplate string `json:"url_template"`
+	// Statement is what this mode costs and guarantees, in one line. Print it:
+	// a durability decision the operator did not read is one they did not make.
+	Statement string `json:"statement"`
+}
+
+// URLFor is the connection string with the generated password in it.
+//
+// The template travels with PASSWORD where the secret goes, so the value is
+// made on the caller's machine and the fleet never sees it.
+func (r *ComposeRecipe) URLFor(password string) string {
+	return strings.Replace(r.URLTemplate, "PASSWORD", password, 1)
+}
+
 // VolumePolicy is how often a volume is snapshotted and how much is kept.
 //
 // Two retention numbers rather than one, because they answer different
@@ -948,6 +989,7 @@ var wireTypes = []any{
 	ForkEntry{},
 	SnapshotResponse{},
 	VolumePolicy{},
+	ComposeRecipe{},
 	SnapshotListResponse{},
 	DrainReport{},
 	TakeRequest{},

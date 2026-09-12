@@ -244,3 +244,28 @@ func (v *Volumes) SetPolicy(ctx context.Context, id string, p VolumePolicy) (*Vo
 	return &out, v.c.do(ctx, http.MethodPut,
 		"/v1/volumes/"+url.PathEscape(id)+"/policy", p, &out)
 }
+
+// Recipes are the database fragments `pilot add` splices into a compose file.
+type Recipes struct{ c *Client }
+
+// Get fetches one. name defaults to the engine; mode is "wal-archive" or
+// "durable-volume" and applies to Postgres only; pool defaults on, and applies
+// to Postgres only.
+//
+// The recipe carries no password: SecretNames says what to generate, and the
+// caller generates it, so the value never travels.
+func (r *Recipes) Get(ctx context.Context, engine, name, mode string, pool bool) (*ComposeRecipe, error) {
+	pairs := make([][2]string, 0, 3)
+	if name != "" {
+		pairs = append(pairs, [2]string{"name", name})
+	}
+	if mode != "" {
+		pairs = append(pairs, [2]string{"mode", mode})
+	}
+	if !pool {
+		pairs = append(pairs, [2]string{"pool", "false"})
+	}
+	var out ComposeRecipe
+	return &out, r.c.do(ctx, http.MethodGet,
+		query("/v1/recipes/"+url.PathEscape(engine), pairs...), nil, &out)
+}

@@ -181,6 +181,37 @@ export interface SnapshotResponse {
 }
 
 /**
+ * The compose fragment for one database, with the durability decision made and
+ * explained.
+ *
+ * Fetched rather than built by the client: two copies of a recipe is two places
+ * for it to drift from what the planner will accept. The password is generated
+ * on the client and never crosses the wire -- `secret_names` says what to make,
+ * and `url_template` carries `PASSWORD` where it goes.
+ */
+export interface ComposeRecipe {
+  engine: string
+  /** `wal-archive` or `durable-volume` for Postgres; `durable-volume` otherwise. */
+  mode: string
+  /** The compose service block, ready to splice into a file. */
+  service: Record<string, unknown>
+  /** The named volumes it declares. */
+  volumes: Record<string, Record<string, never>>
+  /** Extra files it needs, by path. Anything ending `.sh` is executable. */
+  files?: Record<string, string>
+  /** The secrets to generate and store locally. */
+  secret_names: string[]
+  /** What an application reads to reach it, and its value with `PASSWORD` in it. */
+  conn_var: string
+  url_template: string
+  /**
+   * What this mode costs and guarantees, in one line. Show it: a durability
+   * decision the operator did not read is one they did not make.
+   */
+  statement: string
+}
+
+/**
  * How often a volume is snapshotted and how much is kept.
  *
  * Two retention numbers rather than one, because they answer different

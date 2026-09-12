@@ -140,6 +140,29 @@ class SnapshotResponse:
 
 
 @dataclass
+class ComposeRecipe:
+    """The compose fragment for one database, with the durability decision made
+    and explained.
+
+    Fetched rather than built by the client: two copies of a recipe is two
+    places for it to drift from what the planner will accept. The password is
+    generated on the client and never crosses the wire -- ``secret_names`` says
+    what to make, and ``url_template`` carries ``PASSWORD`` where it goes.
+    """
+
+    engine: str = ""
+    mode: str = ""
+    service: dict[str, Any] = field(default_factory=dict)
+    volumes: dict[str, Any] = field(default_factory=dict)
+    files: dict[str, str] | None = None
+    secret_names: list[str] = field(default_factory=list)
+    conn_var: str = ""
+    url_template: str = ""
+    #: What this mode costs and guarantees, in one line. Show it.
+    statement: str = ""
+
+
+@dataclass
 class VolumePolicy:
     """How often a volume is snapshotted and how much is kept.
 

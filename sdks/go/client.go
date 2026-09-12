@@ -61,6 +61,7 @@ type Client struct {
 	Quotas      *Quotas
 	Usage       *Usage
 	Compose     *Compose
+	Recipes     *Recipes
 }
 
 // Option customises a Client.
@@ -121,6 +122,7 @@ func New(apiKey string, opts ...Option) *Client {
 	c.Quotas = &Quotas{c: c}
 	c.Usage = &Usage{c: c}
 	c.Compose = &Compose{c: c}
+	c.Recipes = &Recipes{c: c}
 	return c
 }
 

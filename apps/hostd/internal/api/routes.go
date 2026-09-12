@@ -85,6 +85,10 @@ type Deps struct {
 	// in tests, where the route answers 503 rather than vanishing from the
 	// table -- a route that disappears in tests is a route nothing checks.
 	Compose http.HandlerFunc
+	// Recipes serves the database fragments `pilot add` and the dashboard
+	// splice into a compose file. Injected for the reason Compose is: the
+	// generator lives in internal/compose, which imports this package.
+	Recipes http.HandlerFunc
 	// Plan decides what a directory is and answers with a compose plan.
 	// Injected for the same reason Compose is: internal/detect imports this
 	// package for the wire structs, so the import cannot go both ways. Nil
@@ -338,6 +342,11 @@ func Routes(d Deps) http.Handler {
 	// Every address the acting org's outbound traffic can leave from, which is
 	// what a tenant hands to anything that allowlists by source address.
 	mux.HandleFunc("GET /v1/egress", d.handleEgress)
+	// The compose fragment for a database, with the durability decision made
+	// and explained. One generator, fetched by every client, because two
+	// copies of a recipe is two places for it to drift from what the planner
+	// will accept.
+	mux.HandleFunc("GET /v1/recipes/{engine}", d.serveRecipes)
 	// Emptying a host on purpose, so a reboot or a retirement is not an outage
 	// for the machines it happens to be holding. Admin-scoped: a drain moves
 	// every org's machines at once. Any host serves these; the named host does
