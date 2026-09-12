@@ -2249,6 +2249,33 @@ print(h.get('path', ''))
     bad "the refusal line carries no build id, so there is nothing to read back"
   fi
 
+  # --- the dot beside the commit -------------------------------------------
+  # A push deploy had no feedback at all: the build ran, it worked or it did
+  # not, and the only way to find out was to notice the app had not changed.
+  # The statuses the push path posts are logged by the stand-in, since nothing
+  # about them is observable from the public API.
+  GH_STATUSES=$(grep -c '^status ' "${GH_TMP}/fake-github.log" 2>/dev/null | tr -d '[:space:]')
+  if [ "${GH_STATUSES:-0}" -ge 1 ]; then
+    ok "the push path posted ${GH_STATUSES} commit statuses"
+  else
+    bad "no commit status was posted; a push deploy reports nothing to the commit"
+  fi
+  # The successful deploy earlier in this section, and the refused one after
+  # it, are a success and a failure on two different commits.
+  grep -q '^status .* success ' "${GH_TMP}/fake-github.log" 2>/dev/null \
+    && ok "a deploy that worked reported success" \
+    || bad "no success status was posted for the deploy that worked"
+  grep -q '^status .* failure ' "${GH_TMP}/fake-github.log" 2>/dev/null \
+    && ok "the refused push reported failure" \
+    || bad "the refused push reported no failure status"
+  # And the status links somewhere a person can read the log.
+  grep '^status ' "${GH_TMP}/fake-github.log" 2>/dev/null | grep -q '/builds/' \
+    && ok "a status links the build's log page" \
+    || bad "no status carries a target url, so the dot leads nowhere"
+  grep '^status ' "${GH_TMP}/fake-github.log" 2>/dev/null | grep -q 'pilots/deploy' \
+    && ok "the status uses one context, so branch protection can require it" \
+    || bad "no status carries the pilots/deploy context"
+
   GH_REL3=$(api "${LIVE_IPS[0]}" GET "/v1/services/${GH_SVC2}" | jf release_id)
   [ "$GH_REL3" = "$GH_REL2" ] \
     && ok "the refused service did not deploy anything" \

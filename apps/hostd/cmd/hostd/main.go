@@ -607,6 +607,10 @@ func run() error {
 		// Without it a single box tells a developer https://<name> on a host
 		// that only listens plain on :8080.
 		URL: publicURL,
+		// Where a commit status points for this build's log. The same URL the
+		// MCP protected-resource document names, so there is one answer to
+		// "where is the dashboard" rather than two.
+		DashboardURL: dashboardURL(cfg),
 	}
 	// Nil on a fleet with no App, and the nil is kept VISIBLE below: assigning
 	// a nil *github.Stager to an interface field yields a non-nil interface

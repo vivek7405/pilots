@@ -33,6 +33,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 TARBALL = re.compile(r"^/repos/[^/]+/([^/]+)/tarball/")
 INSTALLATION = re.compile(r"^/repos/[^/]+/([^/]+)/installation$")
+# A commit status: the dot beside a commit that says whether a push deployed.
+# Logged rather than discarded, because nothing about a status is observable
+# from the public API -- the gate reads this log to assert the push path
+# reported itself.
+STATUS = re.compile(r"^/repos/([^/]+/[^/]+)/statuses/([0-9a-zA-Z]+)$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -54,6 +59,19 @@ class Handler(BaseHTTPRequestHandler):
         if self.path.endswith("/access_tokens"):
             # Never checked for expiry by the caller: it mints one per job.
             self._send(201, json.dumps({"token": "t"}).encode(), "application/json")
+            return
+        match = STATUS.match(self.path)
+        if match:
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                body = {}
+            print("status %s %s %s %s %s" % (
+                match.group(2), body.get("state", ""), body.get("context", ""),
+                body.get("target_url", ""), body.get("description", "")),
+                file=sys.stderr, flush=True)
+            self._send(201, b"{}", "application/json")
             return
         # A comment, or anything else the push path posts. Accepted and
         # discarded: what the comment SAYS is asserted in Go, not here.
