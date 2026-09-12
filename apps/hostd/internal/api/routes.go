@@ -279,6 +279,14 @@ func Routes(d Deps) http.Handler {
 	// written can be recovered, rather than kept in a second place that is
 	// worse. See serviceenv.go.
 	mux.HandleFunc("GET /v1/services/{id}/env", d.handleServiceEnv)
+	// What a machine, or every replica of a service, may ask its host's broker
+	// for. Deny by default: no row means no token and no secrets.
+	mux.HandleFunc("GET /v1/machines/{id}/secrets", d.handleGetMachineGrant)
+	mux.HandleFunc("PUT /v1/machines/{id}/secrets", d.handlePutMachineGrant)
+	mux.HandleFunc("DELETE /v1/machines/{id}/secrets", d.handleDeleteMachineGrant)
+	mux.HandleFunc("GET /v1/services/{id}/secrets", d.handleGetServiceGrant)
+	mux.HandleFunc("PUT /v1/services/{id}/secrets", d.handlePutServiceGrant)
+	mux.HandleFunc("DELETE /v1/services/{id}/secrets", d.handleDeleteServiceGrant)
 	mux.HandleFunc("POST /v1/services/{id}/deploy", d.handleDeploy)
 	mux.HandleFunc("POST /v1/services/{id}/rollback", d.handleRollback)
 

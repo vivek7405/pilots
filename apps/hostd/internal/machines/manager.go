@@ -525,6 +525,18 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 
 	m.releaseDiscovery(id)
 
+	// The grant goes with the machine. A sealed blob that outlived the row it
+	// describes is a secret nothing lists and nothing will ever delete, and the
+	// id is reusable in principle, so leaving it is the one way a future
+	// machine could inherit a grant nobody wrote for it. Best effort: a destroy
+	// that could not clear a grant must still destroy the machine, and the
+	// broker refuses a destroyed machine anyway.
+	if m.opts.Store != nil {
+		if err := m.opts.Store.DeleteBrokerGrant(ctx, id); err != nil {
+			slog.Warn("could not clear a destroyed machine s broker grant", "machine", id, "err", err)
+		}
+	}
+
 	if fcm, ok := m.get(id); ok {
 		// The copy-on-write file holds every write since the last snapshot.
 		// Destroy is the ONLY point at which discarding it is correct.
