@@ -536,9 +536,24 @@ func newStatusCmd(env *Env) *cobra.Command {
 				}
 				hostRows := make([][]string, 0, len(hosts))
 				for _, h := range hosts {
-					hostRows = append(hostRows, []string{h.ID, strconv.FormatBool(h.Alive), strconv.Itoa(h.CPUFree), strconv.Itoa(h.MemFreeMiB), orDash(h.CPUVendor)})
+					// RECLAIMABLE beside free, because they are one number as
+					// far as placement is concerned: a host with 512 MiB free
+					// and 8 GiB reclaimable will take an 4 GiB machine. Showing
+					// only the free column would have an operator reading a
+					// host as full that the fleet reads as roomy.
+					state := "-"
+					if h.Draining {
+						state = "draining"
+					}
+					hostRows = append(hostRows, []string{
+						h.ID, strconv.FormatBool(h.Alive), strconv.Itoa(h.CPUFree),
+						strconv.Itoa(h.MemFreeMiB), strconv.Itoa(h.MemReclaimableMiB),
+						orDash(h.CPUVendor), state,
+					})
 				}
-				if err := env.W.Table([]string{"HOST", "ALIVE", "CPU FREE", "MEM FREE MIB", "CPU"}, hostRows); err != nil {
+				if err := env.W.Table([]string{
+					"HOST", "ALIVE", "CPU FREE", "MEM FREE MIB", "RECLAIMABLE MIB", "CPU", "STATE",
+				}, hostRows); err != nil {
 					return err
 				}
 				env.W.Linef("")

@@ -161,9 +161,19 @@ func (s *Store) PutMachine(ctx context.Context, m *state.Machine, opts ...state.
 // back.
 func (s *Store) ClaimMachine(ctx context.Context, id, newHostID, newState string, opts ...state.WriteOption) error {
 	auth := state.ResolveAuth(opts)
+
+	// A planned handoff: a LIVE host offered this machine, so liveness is not
+	// the test. The OFFER is, and every part of it is checked here rather than
+	// trusted from the caller -- this is the one path on which a running
+	// fleet's machine changes owner, so it is the one place a mistake would
+	// give two hosts one machine.
+	if auth.HandoffID != "" {
+		return s.claimByHandoff(ctx, id, newHostID, newState, auth.HandoffID)
+	}
+
 	if auth.DeadOwnerClaim == "" {
 		return fmt.Errorf("state: claiming %q needs WithDeadOwnerClaim naming the "+
-			"host it is taken from: %w", id, state.ErrNotOwner)
+			"host it is taken from, or WithHandoff naming an offer: %w", id, state.ErrNotOwner)
 	}
 
 	alive, err := s.hostIsLive(ctx, auth.DeadOwnerClaim)
@@ -186,6 +196,84 @@ func (s *Store) ClaimMachine(ctx context.Context, id, newHostID, newState string
 		// Someone else claimed it first, or it moved. Either way it is not
 		// ours and the next tick re-hashes.
 		return fmt.Errorf("state: claim machine %q: %w", id, state.ErrNotOwner)
+	}
+	return nil
+}
+
+// claimByHandoff takes a machine a live host offered.
+//
+// Five checks, and every one of them is load-bearing:
+//
+//  1. The offer exists. Without it there is nothing authorising this at all.
+//  2. It names THIS host. Otherwise any host could take a machine offered to
+//     somebody else by quoting the id.
+//  3. Its from_host is the machine's CURRENT owner. An offer made before the
+//     machine moved is stale, and honouring it would take the machine from
+//     whoever holds it now.
+//  4. It is the machine's NEWEST offer. A source that gave up on one target
+//     and offered the machine to another must not have the first target
+//     arrive late and take it.
+//  5. The machine is not running. The source suspends before it offers, so a
+//     running row means the offer has not been acted on by its writer yet --
+//     or the machine came back -- and taking it would leave two Firecrackers
+//     for one id.
+//
+// Gossip may deliver the offer before the suspended write that should precede
+// it; check 5 absorbs that by refusing until the machine is actually down, and
+// the caller retries.
+func (s *Store) claimByHandoff(ctx context.Context, id, newHostID, newState, handoffID string) error {
+	rows, err := s.client.Query(ctx, `
+		SELECT machine_id, from_host, to_host, seq FROM machine_handoffs WHERE id = ?`, handoffID)
+	if err != nil {
+		return err
+	}
+	var h state.Handoff
+	found := rows.Next()
+	if found {
+		if err := rows.Scan(&h.MachineID, &h.FromHost, &h.ToHost, &h.Seq); err != nil {
+			rows.Close()
+			return err
+		}
+	}
+	rows.Close()
+	if !found {
+		return fmt.Errorf("state: no handoff %q offers %q: %w", handoffID, id, state.ErrNotOwner)
+	}
+	if h.MachineID != id {
+		return fmt.Errorf("state: handoff %q offers %q, not %q: %w",
+			handoffID, h.MachineID, id, state.ErrNotOwner)
+	}
+	if h.ToHost != newHostID {
+		return fmt.Errorf("state: handoff %q offers %q to %s, not to %s: %w",
+			handoffID, id, h.ToHost, newHostID, state.ErrNotOwner)
+	}
+
+	newest, err := s.NewestHandoff(ctx, id)
+	if err != nil {
+		return err
+	}
+	if newest.ID != handoffID {
+		return fmt.Errorf("state: handoff %q for %q is superseded by %q: %w",
+			handoffID, id, newest.ID, state.ErrNotOwner)
+	}
+
+	// The UPDATE carries the rest: from_host must still be the owner, and the
+	// machine must not be running. Both in the WHERE clause rather than read
+	// first and checked, so there is no window between the check and the write
+	// for either to change.
+	res, err := s.client.Exec(ctx,
+		`UPDATE machines SET host_id = ?, state = ?, updated_at = ?
+		 WHERE id = ? AND host_id = ? AND state != ?`,
+		newHostID, newState, time.Now().Unix(), id, h.FromHost, state.StateRunning)
+	if err != nil {
+		return fmt.Errorf("state: claim machine %q by handoff: %w", id, err)
+	}
+	if res.RowsAffected == 0 {
+		// Either it is no longer on the offering host, or it is running. The
+		// caller retries: on a drain the source is about to suspend it, and
+		// gossip may simply not have caught up.
+		return fmt.Errorf("state: %q is not where handoff %q said, or is still "+
+			"running: %w", id, handoffID, state.ErrNotOwner)
 	}
 	return nil
 }
@@ -904,6 +992,79 @@ func (s *Store) ListHostCapacity(ctx context.Context) ([]state.HostCapacity, err
 // The caller writes it only when the set changed, because this row is gossiped
 // in full on every write and the cache changes far more often than placement
 // needs to know about.
+// PutHandoff offers a machine to another host.
+//
+// Only the machine's CURRENT owner may write it, which is the whole reason the
+// exception is safe: the offer is made by the host that already owns what it
+// describes, so nothing is asserted across a boundary. A host writing an offer
+// for somebody else's machine would be inventing permission for a third host
+// to take it.
+func (s *Store) PutHandoff(ctx context.Context, h *state.Handoff) error {
+	if h.FromHost != s.hostID {
+		return fmt.Errorf("state: host %s may not offer a machine on %s's behalf: %w",
+			s.hostID, h.FromHost, state.ErrNotOwner)
+	}
+	if err := s.assertMachineOwner(ctx, h.MachineID, state.WriteAuth{}); err != nil {
+		return err
+	}
+	// INSERT, never upsert: write-once is what leaves a CRDT merge nothing to
+	// corrupt here.
+	if _, err := s.client.Exec(ctx, `
+		INSERT INTO machine_handoffs (id, machine_id, from_host, to_host, seq, created_at)
+		VALUES (?,?,?,?,?,?)`,
+		h.ID, h.MachineID, h.FromHost, h.ToHost, h.Seq, h.CreatedAt); err != nil {
+		return fmt.Errorf("state: put handoff %q: %w", h.ID, err)
+	}
+	return nil
+}
+
+func (s *Store) NewestHandoff(ctx context.Context, machineID string) (*state.Handoff, error) {
+	rows, err := s.client.Query(ctx, `
+		SELECT id, machine_id, from_host, to_host, seq, created_at
+		FROM machine_handoffs WHERE machine_id = ? ORDER BY seq DESC LIMIT 1`, machineID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, state.ErrNotFound
+	}
+	var h state.Handoff
+	if err := rows.Scan(&h.ID, &h.MachineID, &h.FromHost, &h.ToHost, &h.Seq, &h.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &h, nil
+}
+
+func (s *Store) ListHandoffs(ctx context.Context) ([]state.Handoff, error) {
+	rows, err := s.client.Query(ctx, `
+		SELECT id, machine_id, from_host, to_host, seq, created_at
+		FROM machine_handoffs ORDER BY machine_id, seq`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []state.Handoff
+	for rows.Next() {
+		var h state.Handoff
+		if err := rows.Scan(&h.ID, &h.MachineID, &h.FromHost, &h.ToHost, &h.Seq, &h.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteHandoff(ctx context.Context, id string) error {
+	if _, err := s.client.Exec(ctx, `DELETE FROM machine_handoffs WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("state: delete handoff %q: %w", id, err)
+	}
+	return nil
+}
+
 func (s *Store) PutHostBuilds(ctx context.Context, b *state.HostBuilds) error {
 	if b.HostID != s.hostID {
 		return fmt.Errorf("state: host %s cannot write host %s's build row: %w",

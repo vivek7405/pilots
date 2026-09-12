@@ -134,6 +134,10 @@ type WriteAuth struct {
 	// that host's last_seen immediately before writing, because the claim is
 	// only legitimate while the owner is still gone.
 	DeadOwnerClaim string
+	// HandoffID names a machine_handoffs row: one live host offering a
+	// machine to another on a planned drain. The driver reads the row and
+	// checks it; the id alone authorises nothing.
+	HandoffID string
 	// APIKeyWrite: an admin-scoped request on any host writing api_keys, one
 	// of the tables whose rows describe no machine. The dashboard used to be
 	// the only writer; it is a guest on the platform now and reaches the API
@@ -151,6 +155,22 @@ func WithNameAllocation() WriteOption {
 // does not assert it.
 func WithDeadOwnerClaim(ownerID string) WriteOption {
 	return func(a *WriteAuth) { a.DeadOwnerClaim = ownerID }
+}
+
+// WithHandoff authorises taking a machine a LIVE host has offered.
+//
+// The third sanctioned exception to single-writer, and the only one where a
+// live host's machine changes owner. The driver verifies the offer
+// independently -- who offered it, to whom, that it is the newest offer for
+// that machine, and that the machine is not running -- so passing this option
+// asserts nothing by itself.
+//
+// Named by the handoff row's id rather than by the host, unlike
+// WithDeadOwnerClaim, because the offer is the authority here: a host that
+// merely says "I am taking this from host-b" is asserting something it cannot
+// know, while a host presenting an offer row is quoting something host-b wrote.
+func WithHandoff(handoffID string) WriteOption {
+	return func(a *WriteAuth) { a.HandoffID = handoffID }
 }
 
 // WithAPIKeyWrite authorises an admin-scoped request's api_keys write.
@@ -173,6 +193,11 @@ var ErrNotOwner = errors.New("state: this host does not own that machine")
 // StateDestroyed is the tombstone. Reads filter it; a reaper collects the rows
 // after a retention window.
 const StateDestroyed = "destroyed"
+
+// StateRunning is the one other state this package names, because the handoff
+// claim refuses a machine that is still up and the check belongs in the SQL
+// rather than in a string the caller passes down.
+const StateRunning = "running"
 
 // Template is the golden image machines are created from, shared by the whole
 // fleet. See the schema for why it cannot be per host.
@@ -348,6 +373,21 @@ func (s *ServiceSize) ImageMatchesSize() bool {
 	}
 	vcpus, memMiB := s.Size()
 	return s.ImageVCPUs == vcpus && s.ImageMemMiB == memMiB
+}
+
+// Handoff is one host offering a machine to another, on a planned drain.
+//
+// WRITE-ONCE. A CRDT merge has nothing to corrupt in a row nobody rewrites,
+// which is most of why this exception is safe where an ordinary cross-host
+// write is not. Repeated offers of one machine are new rows with a higher Seq,
+// never an edit of the old one.
+type Handoff struct {
+	ID        string
+	MachineID string
+	FromHost  string
+	ToHost    string
+	Seq       int
+	CreatedAt int64
 }
 
 type MachineCPU struct {
@@ -601,6 +641,18 @@ type Store interface {
 	// gossiped in full on every write.
 	PutHostBuilds(ctx context.Context, b *HostBuilds) error
 	ListHostBuilds(ctx context.Context) ([]HostBuilds, error)
+
+	// PutHandoff offers a machine to another host. Written once, by the
+	// machine's CURRENT owner, and never updated: a repeated offer is a new
+	// row with a higher Seq.
+	PutHandoff(ctx context.Context, h *Handoff) error
+	// NewestHandoff is the most recent offer of a machine, or ErrNotFound
+	// when it has never been offered.
+	NewestHandoff(ctx context.Context, machineID string) (*Handoff, error)
+	// ListHandoffs is every offer, for the router's pending map and for the
+	// reaper that clears old ones.
+	ListHandoffs(ctx context.Context) ([]Handoff, error)
+	DeleteHandoff(ctx context.Context, id string) error
 	// PutMachineCPU records the vendor that photographed a memory image. The
 	// writer is the host that writes the object row it describes, so a
 	// replicated store runs the same owner check that row's write runs.
@@ -1157,6 +1209,61 @@ func (s *sqliteStore) ListHostCapacity(ctx context.Context) ([]HostCapacity, err
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+func (s *sqliteStore) PutHandoff(ctx context.Context, h *Handoff) error {
+	// INSERT, never upsert. A handoff row is write-once, and an ON CONFLICT
+	// here would quietly turn the one property that makes this exception safe
+	// into a row two hosts could rewrite.
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO machine_handoffs (id, machine_id, from_host, to_host, seq, created_at)
+		VALUES (?,?,?,?,?,?)`,
+		h.ID, h.MachineID, h.FromHost, h.ToHost, h.Seq, h.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put handoff %q: %w", h.ID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) NewestHandoff(ctx context.Context, machineID string) (*Handoff, error) {
+	var h Handoff
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, machine_id, from_host, to_host, seq, created_at
+		FROM machine_handoffs WHERE machine_id = ? ORDER BY seq DESC LIMIT 1`, machineID).
+		Scan(&h.ID, &h.MachineID, &h.FromHost, &h.ToHost, &h.Seq, &h.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: newest handoff of %q: %w", machineID, err)
+	}
+	return &h, nil
+}
+
+func (s *sqliteStore) ListHandoffs(ctx context.Context) ([]Handoff, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, machine_id, from_host, to_host, seq, created_at
+		FROM machine_handoffs ORDER BY machine_id, seq`)
+	if err != nil {
+		return nil, fmt.Errorf("state: list handoffs: %w", err)
+	}
+	defer rows.Close()
+	var out []Handoff
+	for rows.Next() {
+		var h Handoff
+		if err := rows.Scan(&h.ID, &h.MachineID, &h.FromHost, &h.ToHost, &h.Seq, &h.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+func (s *sqliteStore) DeleteHandoff(ctx context.Context, id string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM machine_handoffs WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("state: delete handoff %q: %w", id, err)
+	}
+	return nil
 }
 
 func (s *sqliteStore) PutHostBuilds(ctx context.Context, b *HostBuilds) error {

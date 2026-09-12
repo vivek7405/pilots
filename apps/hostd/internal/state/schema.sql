@@ -481,6 +481,37 @@ CREATE TABLE IF NOT EXISTS host_builds (       -- writer: the host itself
   updated_at INTEGER
 );
 
+-- One host OFFERING a machine to another, on a planned drain.
+--
+-- This is the third sanctioned exception to single-writer, and the only one
+-- where a LIVE host's machine changes owner. It exists because the alternative
+-- is worse: without it, a host reboot is customer-visible, since a machine only
+-- ever moved when its owner was provably dead.
+--
+-- Why it is safe where an ordinary cross-host write is not:
+--
+--   * WRITE-ONCE. A handoff row is inserted and never updated. A CRDT merge
+--     has nothing to corrupt in a row nobody rewrites.
+--   * The SOURCE writes it, and the source is the machine's current owner, so
+--     the row is written by the host that already owns what it describes.
+--   * The target's claim is checked against it: to_host must be the claimer,
+--     from_host must be the row's current owner, it must be the machine's
+--     newest offer, and the machine must not be running. A claim that fails
+--     any of those is refused exactly as a claim with no dead owner is.
+--
+-- seq orders repeated offers of one machine: a target that never took it is
+-- superseded by the next offer rather than racing it.
+--
+-- Reaped by their writer after a day, like destroyed machines.
+CREATE TABLE IF NOT EXISTS machine_handoffs (  -- writer: the machine's owner (write-once)
+  id         TEXT NOT NULL PRIMARY KEY,        -- ho-<uuid>
+  machine_id TEXT,
+  from_host  TEXT,
+  to_host    TEXT,
+  seq        INTEGER,
+  created_at INTEGER
+);
+
 -- Keyed like tenancy: the id of the object whose memory image this describes.
 -- A release's and a checkpoint's images are as vendor-locked as a machine's.
 -- last_start and last_start_at are written for machines only: the observable
