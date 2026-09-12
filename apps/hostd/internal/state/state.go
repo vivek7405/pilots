@@ -143,6 +143,20 @@ type WriteAuth struct {
 	// the only writer; it is a guest on the platform now and reaches the API
 	// like any other client.
 	APIKeyWrite bool
+	// ForService names the service a write belongs to, for a row about an
+	// object that does not exist yet.
+	//
+	// The machine_cpu row for a RELEASE is the case: it is written while the
+	// release is being assembled, and the driver's writer check read the
+	// release back to find its service. That read cannot succeed -- the
+	// release row is written afterwards -- so the check failed on every
+	// release, every time.
+	//
+	// The caller knows the service; it is holding the release struct. Saying
+	// so is what makes the guard answerable at the moment it is asked. It
+	// authorises nothing on its own: the driver still checks that THIS host is
+	// the named service's writer.
+	ForService string
 }
 
 // WithNameAllocation authorises the write that reserves a machine name.
@@ -179,6 +193,12 @@ func WithAPIKeyWrite() WriteOption {
 }
 
 // ResolveAuth collects options into one authorisation.
+// WithService names the service a row belongs to, for a write about an object
+// whose own row does not exist yet. See WriteAuth.ForService.
+func WithService(serviceID string) WriteOption {
+	return func(a *WriteAuth) { a.ForService = serviceID }
+}
+
 func ResolveAuth(opts []WriteOption) WriteAuth {
 	var a WriteAuth
 	for _, opt := range opts {

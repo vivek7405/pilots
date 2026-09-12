@@ -1321,6 +1321,16 @@ func (s *Store) PutMachineCPU(ctx context.Context, c *state.MachineCPU, opts ...
 func (s *Store) assertMachineCPUWriter(ctx context.Context, c *state.MachineCPU, auth state.WriteAuth) error {
 	switch c.Kind {
 	case state.KindRelease:
+		// The service from the CALLER when it said so, because this row is
+		// written while the release is being assembled and the release row
+		// does not exist yet. Reading it back failed on every release: a
+		// promote surfaced that as a flat 404, and a deploy swallowed it as
+		// "this release has no memory image" -- which was false, and which
+		// left the CPU-vendor guard silently unarmed on every release the
+		// fleet ever cut.
+		if svc := auth.ForService; svc != "" {
+			return s.assertServiceWriter(ctx, svc)
+		}
 		rel, err := s.GetRelease(ctx, c.ID)
 		if err != nil {
 			return fmt.Errorf("state: cpu row for release %q: %w", c.ID, err)

@@ -276,8 +276,15 @@ func (m *Manager) rollOut(ctx context.Context, svc *state.Service, rel *state.Re
 	// budgeted. Best effort by design: a release that cannot be snapshotted
 	// still deploys, it just deploys the slow way.
 	if err := m.snapshotRelease(ctx, first.ID, rel); err != nil {
-		slog.Warn("release has no memory image; its replicas will boot rather than restore",
-			"service", svc.ID, "release", rel.ID, "err", err)
+		// Deliberately not "this release has no memory image". It might have
+		// one: snapshotRelease also records the CPU pool and the vmstate, and
+		// a failure in either of those leaves a perfectly good build pair
+		// behind. Saying the image is missing when the bookkeeping failed sent
+		// everyone looking at the checkpoint, which was fine, and hid a writer
+		// check that was refusing every release the fleet cut.
+		slog.Warn("a release was not fully photographed; some of its replicas may "+
+			"boot rather than restore, and its CPU pool may be unrecorded",
+			"service", svc.ID, "release", rel.ID, "mem_build", rel.MemBuildID, "err", err)
 	}
 
 	rel.Healthy = true
@@ -584,7 +591,7 @@ func (m *Manager) snapshotRelease(ctx context.Context, machineID string, rel *st
 	if err := m.opts.Store.PutMachineCPU(ctx, &state.MachineCPU{
 		ID: rel.ID, Kind: state.KindRelease, Vendor: m.opts.Vendor,
 		UpdatedAt: time.Now().Unix(),
-	}); err != nil {
+	}, state.WithService(rel.ServiceID)); err != nil {
 		return fmt.Errorf("record the release's cpu vendor: %w", err)
 	}
 	return nil

@@ -187,6 +187,77 @@ func (f *fakeMachines) ResetAgentToken(ctx context.Context, id string) error {
 	return nil
 }
 
+// cpuAuthStore records the WriteOptions each machine_cpu write carried.
+//
+// The sqlite store enforces no writer rule, so the only way to test that the
+// caller SAYS which service a release belongs to is to watch what it passes.
+// On corrosion that option is the whole difference between the write landing
+// and failing.
+type cpuAuthStore struct {
+	state.Store
+	mu    sync.Mutex
+	auths map[string]state.WriteAuth
+}
+
+func (s *cpuAuthStore) PutMachineCPU(ctx context.Context, c *state.MachineCPU,
+	opts ...state.WriteOption) error {
+
+	s.mu.Lock()
+	if s.auths == nil {
+		s.auths = map[string]state.WriteAuth{}
+	}
+	s.auths[c.ID] = state.ResolveAuth(opts)
+	s.mu.Unlock()
+	return s.Store.PutMachineCPU(ctx, c, opts...)
+}
+
+func (s *cpuAuthStore) authFor(id string) (state.WriteAuth, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.auths[id]
+	return a, ok
+}
+
+// A release's CPU-pool row names its service, because nothing can look it up.
+//
+// # The bug
+//
+// The driver's writer check read the release back to find its service. That
+// read cannot succeed: the row is written from inside snapshotRelease, while
+// the release is still being assembled, and the release row is written
+// afterwards. So the check failed on every release the fleet ever cut.
+//
+// A promote surfaced it as a flat HTTP 404 with nothing in the journal -- the
+// checkpoint had succeeded, and a missing local row became "not found; check
+// the id". A deploy swallowed it as a warning saying the release had no memory
+// image, which was false, and carried on with the CPU-vendor guard silently
+// unarmed: every later replica read no pool row, took that as "in no pool",
+// and restored a memory image that may have been photographed on the other
+// vendor.
+func TestAReleasesCPURowNamesItsService(t *testing.T) {
+	ctx := context.Background()
+	m, _, store, svc := fixture(t, 1)
+	spy := &cpuAuthStore{Store: store}
+	m.opts.Store = spy
+
+	rel, err := m.Deploy(ctx, "svc-1", "rootfs-build", nil)
+	if err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	auth, ok := spy.authFor(rel.ID)
+	if !ok {
+		t.Fatal("no CPU-pool row was written for the release, so nothing records " +
+			"which vendor photographed its memory image and the cross-vendor " +
+			"guard has nothing to read")
+	}
+	if auth.ForService != svc.ID {
+		t.Errorf("the write named service %q, want %q. Without it the driver "+
+			"falls back to reading the release, which does not exist yet",
+			auth.ForService, svc.ID)
+	}
+}
+
 func fixture(t *testing.T, replicas int) (*Manager, *fakeMachines, state.Store, *state.Service) {
 	t.Helper()
 	store, err := state.Open(":memory:")
