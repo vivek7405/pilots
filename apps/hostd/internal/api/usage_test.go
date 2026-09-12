@@ -15,13 +15,22 @@ import (
 // fakeUsage is a ledger that answers a fixed set and records what it was asked.
 type fakeUsage struct {
 	totals      map[string]usage.Totals
+	byMachine   map[string]map[string]usage.Totals
 	err         error
 	since, unti int64
+	// byMachineCalls counts the per-machine reads, so a test can assert the
+	// larger answer is computed only when it was asked for.
+	byMachineCalls int
 }
 
 func (f *fakeUsage) Sum(since, until int64) (map[string]usage.Totals, error) {
 	f.since, f.unti = since, until
 	return f.totals, f.err
+}
+
+func (f *fakeUsage) SumByMachine(since, until int64) (map[string]map[string]usage.Totals, error) {
+	f.byMachineCalls++
+	return f.byMachine, f.err
 }
 
 // usageServer is newTestServerWithManager plus a ledger.
@@ -148,4 +157,70 @@ func TestUsageReportsALedgerItCannotRead(t *testing.T) {
 // of this feature are the same shape.
 func TestALedgerIsAUsageSource(t *testing.T) {
 	var _ UsageSource = usage.New(t.TempDir())
+}
+
+// An invoice line nobody can explain is the failure this answers. Fly
+// aggregated under a payment provider's rate limit, shipped lines reading
+// "9,972,448 seconds", and said afterwards it cost them a lot of trust.
+func TestUsageByMachineBreaksTheOrgDown(t *testing.T) {
+	src := &fakeUsage{
+		totals: map[string]usage.Totals{
+			"org_1": {MachineSeconds: 300, VCPUSeconds: 100},
+		},
+		byMachine: map[string]map[string]usage.Totals{
+			"org_1": {
+				"m_a": {MachineSeconds: 200, VCPUSeconds: 60, SnapshotMiBSeconds: 2048},
+				"m_b": {MachineSeconds: 100, VCPUSeconds: 40},
+			},
+		},
+	}
+	h, _ := usageServer(t, src)
+
+	rec := do(t, h, "GET", "/v1/usage?by=machine", testKey)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
+	}
+	var got UsageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	rows := got.Machines["org_1"]
+	if len(rows) != 2 {
+		t.Fatalf("machines = %+v, want two", rows)
+	}
+	if rows["m_a"].MachineSeconds != 200 || rows["m_b"].MachineSeconds != 100 {
+		t.Errorf("per-machine seconds = %+v", rows)
+	}
+	// The org total is still there: the breakdown explains the line, it does
+	// not replace it.
+	if got.Orgs["org_1"].MachineSeconds != 300 {
+		t.Errorf("org total = %+v, want it alongside the breakdown", got.Orgs["org_1"])
+	}
+	// And the snapshot dimension converts to GiB the same way.
+	if rows["m_a"].SnapshotGiBSeconds != 2 {
+		t.Errorf("snapshot_gib_seconds = %d, want 2", rows["m_a"].SnapshotGiBSeconds)
+	}
+}
+
+// The larger answer is computed only when asked for: most callers want the
+// invoice line rather than its derivation.
+func TestUsageWithoutByMachineDoesNotComputeIt(t *testing.T) {
+	src := &fakeUsage{totals: map[string]usage.Totals{"org_1": {MachineSeconds: 10}}}
+	h, _ := usageServer(t, src)
+
+	rec := do(t, h, "GET", "/v1/usage", testKey)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("got %d", rec.Code)
+	}
+	if src.byMachineCalls != 0 {
+		t.Errorf("the per-machine sum ran %d times for a request that did not ask",
+			src.byMachineCalls)
+	}
+	var got UsageResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.Machines != nil {
+		t.Errorf("machines = %+v on a request that did not ask", got.Machines)
+	}
 }

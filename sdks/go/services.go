@@ -148,3 +148,19 @@ func (u *Usage) Get(ctx context.Context, since, until int64) (*UsageResponse, er
 	}
 	return &out, u.c.do(ctx, http.MethodGet, query(path, pairs...), nil, &out)
 }
+
+// ByMachine is Get plus the per-machine breakdown, in Machines. The org totals
+// come back too: the breakdown explains an invoice line rather than replacing
+// it.
+func (u *Usage) ByMachine(ctx context.Context, since, until int64) (*UsageResponse, error) {
+	var out UsageResponse
+	pairs := make([][2]string, 0, 3)
+	if since > 0 {
+		pairs = append(pairs, [2]string{"since", itoa(since)})
+	}
+	if until > 0 {
+		pairs = append(pairs, [2]string{"until", itoa(until)})
+	}
+	pairs = append(pairs, [2]string{"by", "machine"})
+	return &out, u.c.do(ctx, http.MethodGet, query("/v1/usage", pairs...), nil, &out)
+}

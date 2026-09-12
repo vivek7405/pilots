@@ -113,6 +113,7 @@ func NewRoot(getenv config.Env) *cobra.Command {
 		InGroup(newDeployCmd(env, getenv), "deploy"),
 		InGroup(newServicesCmd(env), "deploy"),
 		InGroup(newBuildersCmd(env), "deploy"),
+		InGroup(newUsageCmd(env), "inspect"),
 		InGroup(newPromoteCmd(env), "deploy"),
 		InGroup(newURLCmd(env), "deploy"),
 		InGroup(newTUICmd(env), "inspect"),

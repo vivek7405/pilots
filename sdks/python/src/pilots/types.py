@@ -458,6 +458,7 @@ class UsageResponse:
     since: int = 0
     until: int = 0
     orgs: dict[str, UsageTotals] = field(default_factory=dict)
+    machines: dict[str, dict[str, UsageTotals]] | None = None
 
 
 # ---------------------------------------------------------------------------

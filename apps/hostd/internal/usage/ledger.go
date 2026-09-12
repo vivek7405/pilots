@@ -381,18 +381,28 @@ func sumFile(path string, since, until int64, out map[string]Totals) error {
 		if strings.TrimSpace(text) == "" {
 			continue
 		}
-		var rec line
-		if err := json.Unmarshal([]byte(text), &rec); err != nil {
-			// A torn last line is what a host killed mid-write leaves. It is
-			// worth a line in the log and is not worth failing the whole
-			// answer, which would take every other org's usage with it.
-			slog.Warn("skipping an unparseable usage line", "path", path, "err", err)
+		rec, ok := decodeLine(text, path)
+		if !ok {
 			continue
 		}
 		add(out, rec.OrgID, rec.State, rec.VCPUs, rec.MemMiB, rec.VolumeGiB,
 			rec.SnapshotMiB, overlap(rec.From, rec.To, since, until))
 	}
 	return nil
+}
+
+// decodeLine parses one ledger line, or reports that it could not.
+//
+// A torn last line is what a host killed mid-write leaves. It is worth a line
+// in the log and is not worth failing the whole answer, which would take every
+// other org's usage with it.
+func decodeLine(text, path string) (line, bool) {
+	var rec line
+	if err := json.Unmarshal([]byte(text), &rec); err != nil {
+		slog.Warn("skipping an unparseable usage line", "path", path, "err", err)
+		return line{}, false
+	}
+	return rec, true
 }
 
 // overlap is how many seconds of [from, to) fall inside [since, until).

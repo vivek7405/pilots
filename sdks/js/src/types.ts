@@ -604,6 +604,12 @@ export interface UsageResponse {
   since: number
   until: number
   orgs: Record<string, UsageTotals>
+  /**
+   * The same accrual per machine, keyed by org and then by machine id. Present
+   * only for `by=machine`, because it is the larger answer and most callers
+   * want the invoice line rather than its derivation.
+   */
+  machines?: Record<string, Record<string, UsageTotals>>
 }
 
 // ---------------------------------------------------------------------------

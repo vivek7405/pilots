@@ -782,6 +782,11 @@ type UsageResponse struct {
 	Since  int64                  `json:"since"`
 	Until  int64                  `json:"until"`
 	Orgs   map[string]UsageTotals `json:"orgs"`
+	// Machines is the same accrual per machine, keyed by org and then by
+	// machine id. Present only for ?by=machine, because it is the larger
+	// answer and most callers want the invoice line rather than its
+	// derivation.
+	Machines map[string]map[string]UsageTotals `json:"machines,omitempty"`
 }
 
 type HealthResponse struct {
