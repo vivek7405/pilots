@@ -301,7 +301,7 @@ func (m *Manager) restore(ctx context.Context, row *state.Machine, backends fc.B
 		return nil, nil, err
 	}
 
-	fcm, err := fc.RestoreInstant(ctx, fc.InstantConfig{
+	instant := fc.InstantConfig{
 		Config:        m.machineFCConfig(row, slot, mac),
 		Backends:      backends,
 		LocalDir:      localDir,
@@ -309,7 +309,14 @@ func (m *Manager) restore(ctx context.Context, row *state.Machine, backends fc.B
 		SnapKey:       snapKey,
 		SnapImmutable: immutable,
 		Env:           m.opts.HandlerEnv,
-	}, m.opts.Uploader, m.opts.BlockStore, m.opts.NBDDevices)
+	}
+	// Started before the handlers, since they dial it on their first read, and
+	// scoped to exactly the builds this machine was spawned with.
+	instant.ChunksSock = m.chunks.start(row.ID, instant.StateDir,
+		m.opts.BlockStore, allowedBuilds(instant))
+
+	fcm, err := fc.RestoreInstant(ctx, instant,
+		m.opts.Uploader, m.opts.BlockStore, m.opts.NBDDevices)
 	if err != nil {
 		_ = netns.Teardown(slot)
 		m.pool.Return(slot.Idx)

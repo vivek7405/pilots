@@ -281,9 +281,12 @@ func run() error {
 		Chunks:        chunks,
 		BlockStore:    chunkReader(chunks),
 		NBDDevices:    devices,
-		// The handlers are separate processes and read builds themselves, so
-		// they need this daemon's storage credentials.
-		HandlerEnv: os.Environ(),
+		// An ALLOWLIST, not this daemon's environment. The handlers read their
+		// builds through a per-machine socket now, so nothing they do needs a
+		// storage credential, and a process sitting next to a guest holding
+		// keys to every tenant's bucket was a blast radius nobody was buying
+		// anything with. See internal/chunkserve.
+		HandlerEnv: machines.HandlerEnv(),
 		// Fleet-wide, so a host that rescues a machine can still reach it.
 		AgentTokenSecret: cfg.AgentTokenSecret,
 		Volumes:          volumeManager,

@@ -40,8 +40,15 @@ type Process struct {
 // StartOptions describes a handler to launch.
 type StartOptions struct {
 	Config
-	// Env is passed through; the child needs PILOT_S3_* to open a build.
+	// Env is passed through. It is an ALLOWLIST, not hostd's own environment:
+	// a handler reads its build through ChunksSock and holds no storage
+	// credential at all. See internal/chunkserve.
 	Env []string
+	// ChunksSock is the host socket this handler reads build chunks through.
+	// Empty falls back to reading object storage directly, which needs the
+	// PILOT_S3_* credentials in Env and is how a handler adopted from before
+	// this existed keeps working.
+	ChunksSock string
 	// LogFile receives the handler's output. Without it the handler's
 	// failures are invisible -- it is a different process from hostd, so its
 	// stderr goes nowhere by default.
@@ -144,6 +151,9 @@ func argv(opts StartOptions) []string {
 	}
 	if opts.ControlSock != "" {
 		args = append(args, "--control", opts.ControlSock)
+	}
+	if opts.ChunksSock != "" {
+		args = append(args, "--chunks-sock", opts.ChunksSock)
 	}
 	return args
 }

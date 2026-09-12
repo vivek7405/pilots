@@ -46,6 +46,15 @@ func (d Deps) handleCreateAPIKey(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, "org_id is required", "pass org_id and scopes", nil)
 		return
 	}
+	// Checked for SHAPE, not only for presence. This id is concatenated into
+	// object keys, machine names and query filters, so a ".." in one is a path
+	// traversal everywhere it is treated as a segment. The dashboard's UUIDs
+	// pass unchanged.
+	if err := ValidateOrgID(req.OrgID); err != nil {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(),
+			"use the org id from pilot whoami, or the dashboard's", nil)
+		return
+	}
 	if len(req.Scopes) == 0 {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, "scopes is required", "pass org_id and scopes", nil)
 		return

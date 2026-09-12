@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/vivek7405/pilots/hostd/internal/block"
+	"github.com/vivek7405/pilots/hostd/internal/chunkserve"
 	"github.com/vivek7405/pilots/hostd/internal/config"
 	"github.com/vivek7405/pilots/hostd/internal/nbd"
 	"github.com/vivek7405/pilots/hostd/internal/procname"
@@ -44,6 +45,8 @@ func runNBDHandler(args []string) error {
 	cacheRoot := fs.String("cache-root", "", "local cache for remote builds")
 	readyFD := fs.Int("ready-fd", 0, "fd to signal once the device is online")
 	readOnly := fs.Bool("read-only", false, "refuse writes")
+	chunksSock := fs.String("chunks-sock", "",
+		"host socket to read build chunks through, instead of object storage")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -76,13 +79,35 @@ func runNBDHandler(args []string) error {
 
 	var store block.ObjectStore
 	if cfg.TemplateBuildID != uuid.Nil || cfg.RehydrateBuildID != uuid.Nil {
-		if store, err = newBlockStore(ctx); err != nil {
+		if store, err = openBlockStore(ctx, *chunksSock); err != nil {
 			return err
 		}
 	}
 
 	slog.Info("nbd handler starting", "device", cfg.Device, "cache", cfg.CachePath)
 	return nbd.Run(ctx, cfg, store)
+}
+
+// openBlockStore gives a handler something to read its builds through.
+//
+// The socket when hostd passed one, which is every machine started by a hostd
+// that carries this code: the handler then holds NO storage credential, and
+// can reach only the builds its own machine was spawned with. See
+// internal/chunkserve for why that matters.
+//
+// The direct client is the fallback, for a handler adopted from a hostd that
+// predates the socket. It is not dead code and it is not a second mechanism to
+// maintain: it is the same client hostd itself uses, reached through the same
+// interface, and it is what keeps a daemon upgrade from being an outage for
+// every machine already running.
+func openBlockStore(ctx context.Context, chunksSock string) (block.ObjectStore, error) {
+	if chunksSock != "" {
+		return chunkserve.Dial(chunksSock), nil
+	}
+	slog.Warn("no chunk socket was passed, so this handler is reading object " +
+		"storage directly and holds its credentials; it was started by a hostd " +
+		"that predates the chunk service")
+	return newBlockStore(ctx)
 }
 
 // newBlockStore builds the object-storage client the handler reads builds

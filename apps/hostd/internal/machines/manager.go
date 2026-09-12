@@ -151,6 +151,10 @@ type Manager struct {
 	mu      sync.RWMutex
 	running map[string]*fc.Machine // machine id -> live process
 
+	// chunks serves each running machine's builds to its own handlers over a
+	// unix socket, so no handler holds a storage credential. See chunks.go.
+	chunks *chunkServers
+
 	locks  sync.Map // machine id -> *sync.Mutex
 	flight *inFlight
 
@@ -174,6 +178,7 @@ func New(opts Options) *Manager {
 		pool:    netns.NewPool(opts.PoolSize, opts.MachinePrefix),
 		running: make(map[string]*fc.Machine),
 		flight:  newInFlight(),
+		chunks:  newChunkServers(),
 	}
 }
 
@@ -220,8 +225,13 @@ func (m *Manager) put(id string, fcm *fc.Machine) {
 
 func (m *Manager) drop(id string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	delete(m.running, id)
+	m.mu.Unlock()
+	// The chunk socket goes with the process that read it. Here rather than in
+	// Destroy alone, because this is the ONE place a machine stops running: a
+	// socket left listening for a machine that is gone would answer a handler
+	// nobody is supervising.
+	m.chunks.close(id)
 }
 
 // GCOrphanInterfaces removes veth links belonging to no live machine.

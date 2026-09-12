@@ -70,9 +70,14 @@ type InstantConfig struct {
 	// is the opposite: one key, rewritten on every suspend, so a cached copy
 	// silently restores the PREVIOUS suspend and loses everything since.
 	SnapImmutable bool
-	// Env is handed to the handler processes; they need the storage
-	// credentials.
+	// Env is handed to the handler processes. It is an ALLOWLIST rather than
+	// hostd's environment: a handler reads its builds through ChunksSock and
+	// holds no storage credential. See internal/chunkserve.
 	Env []string
+	// ChunksSock is the host socket the handlers read build chunks through.
+	// Empty makes them read object storage directly, which is what a handler
+	// started by a hostd predating the chunk service does.
+	ChunksSock string
 }
 
 // CowPath is where a machine's copy-on-write disk lives.
@@ -164,7 +169,7 @@ func RestoreInstant(ctx context.Context, cfg InstantConfig, dl Uploader,
 					ControlSock:      nbd.ControlSockFor(cfg.StateDir),
 					CacheRoot:        cfg.Backends.CacheRoot,
 				},
-				Env: cfg.Env, LogFile: logFile,
+				Env: cfg.Env, ChunksSock: cfg.ChunksSock, LogFile: logFile,
 			})
 			return perr
 		},
@@ -179,7 +184,7 @@ func RestoreInstant(ctx context.Context, cfg InstantConfig, dl Uploader,
 					PrefetchFile:  uffd.PrefetchFor(cfg.StateDir),
 					ControlSock:   uffd.ControlSockFor(cfg.StateDir),
 				},
-				Env: cfg.Env, LogFile: logFile,
+				Env: cfg.Env, ChunksSock: cfg.ChunksSock, LogFile: logFile,
 			})
 			return perr
 		},

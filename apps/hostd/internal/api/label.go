@@ -53,6 +53,40 @@ func ValidateLabel(name string) error {
 	return nil
 }
 
+// ValidateOrgID rejects an org id that cannot safely be used as a path
+// segment or a storage key.
+//
+// The only check on an org id was that it was not empty, while the id is
+// concatenated into object keys (`build-cache/orgs/<org>/`), into machine
+// names, and into query filters. A `..` in one is a path traversal in every
+// place that treats it as a segment, and there is no reason to accept it: the
+// dashboard mints UUIDs, which pass this unchanged.
+//
+// Deliberately WIDER than ValidateLabel in two ways, because an org id is not
+// a DNS label and borrowing that rule would reject ids this fleet already
+// issues. Underscores are allowed, since the ids in use here look like
+// `org_1`; and the port-selector rule does not apply, because an org id never
+// stands alone as a hostname, so a numeric first segment cannot be read as a
+// port. What it refuses is what actually causes damage: a dot, a slash, a
+// space, and anything containing "..".
+func ValidateOrgID(id string) error {
+	switch {
+	case id == "":
+		return fmt.Errorf("org_id must not be empty")
+	case len(id) > MaxLabelLen:
+		return fmt.Errorf("org_id must be at most %d characters", MaxLabelLen)
+	case strings.Contains(id, "."):
+		return fmt.Errorf("org_id must not contain a dot")
+	case !validOrgID.MatchString(id):
+		return fmt.Errorf("org_id must be lowercase alphanumerics, hyphens and " +
+			"underscores, starting and ending with an alphanumeric")
+	}
+	return nil
+}
+
+// validOrgID is validLabel plus underscores. See ValidateOrgID.
+var validOrgID = regexp.MustCompile(`^[a-z0-9]([a-z0-9_-]*[a-z0-9])?$`)
+
 // LabelFromName normalises a service name into a label that ValidateLabel
 // accepts: lowercased, every run of other characters collapsed to one hyphen,
 // hyphens trimmed at both ends, cut to max, and prefixed with "svc-" when what
