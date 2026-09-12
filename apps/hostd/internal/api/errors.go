@@ -12,9 +12,13 @@ import (
 // which is what keeps the list a contract rather than a suggestion: a code an
 // SDK branches on is only useful if it cannot be invented at a call site.
 const (
-	CodeBadRequest       = "bad_request"
-	CodeUnauthorized     = "unauthorized"
-	CodeScopeRequired    = "scope_required"
+	CodeBadRequest    = "bad_request"
+	CodeUnauthorized  = "unauthorized"
+	CodeScopeRequired = "scope_required"
+	// CodeSelfOnly is a machine's own token reaching past the machine it was
+	// minted for. 403 rather than 404: the caller is in the org and can already
+	// see the object, so hiding it would teach nothing.
+	CodeSelfOnly         = "self_only"
 	CodeNotFound         = "not_found"
 	CodeConflict         = "conflict"
 	CodeVolumeInUse      = "volume_in_use"
@@ -53,7 +57,7 @@ var Codes = []string{
 	CodeNotImplemented, CodeUnavailable, CodeInternal, CodePlanUnsupported,
 	CodeComposeInvalid, CodeUnknownFramework, CodePlanMultiService,
 	CodeBuildFailed, CodeHealthGateFailed, CodeRepoNotConnected,
-	CodePayloadTooLarge, CodeNoCapacity,
+	CodePayloadTooLarge, CodeNoCapacity, CodeSelfOnly,
 }
 
 // NextNotFound is the only next a 404 may carry. It is deliberately generic:

@@ -99,6 +99,15 @@ func (d Deps) ownedMachine(w http.ResponseWriter, r *http.Request, id string) (*
 		notFound(w, "machine")
 		return nil, false
 	}
+	// A broker token acts on its own machine and nothing else. Checked HERE,
+	// where every machine-scoped handler already passes, rather than in each of
+	// them: a list of call sites goes out of date, and the handler somebody
+	// writes next year would silently let a machine act on its siblings.
+	if !selfAllows(r, row.ID, row.ServiceID) {
+		self, _ := Self(r.Context())
+		selfRefused(w, self)
+		return nil, false
+	}
 	return row, true
 }
 
@@ -111,6 +120,13 @@ func (d Deps) ownedService(w http.ResponseWriter, r *http.Request, id string) (*
 	}
 	if !d.mayAccess(r, id) {
 		notFound(w, "service")
+		return nil, false
+	}
+	// A replica may act on its OWN service and no other. selfAllows takes the
+	// service id in both positions because a service IS the object here.
+	if !selfAllows(r, svc.ID, svc.ID) {
+		self, _ := Self(r.Context())
+		selfRefused(w, self)
 		return nil, false
 	}
 	return svc, true

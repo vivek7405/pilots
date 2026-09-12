@@ -42,6 +42,7 @@ func TestEveryWriteErrorUsesAListedCode(t *testing.T) {
 		"CodePlanMultiService": CodePlanMultiService, "CodeBuildFailed": CodeBuildFailed,
 		"CodeHealthGateFailed": CodeHealthGateFailed, "CodeRepoNotConnected": CodeRepoNotConnected,
 		"CodePayloadTooLarge": CodePayloadTooLarge, "CodeNoCapacity": CodeNoCapacity,
+		"CodeSelfOnly": CodeSelfOnly,
 	}
 
 	calls := 0

@@ -26,6 +26,7 @@ import (
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/block"
+	"github.com/vivek7405/pilots/hostd/internal/broker"
 	"github.com/vivek7405/pilots/hostd/internal/build"
 	"github.com/vivek7405/pilots/hostd/internal/compose"
 	"github.com/vivek7405/pilots/hostd/internal/config"
@@ -246,7 +247,6 @@ func run() error {
 	}
 	responder := dns.New(dns.NewFleetResolver(view, locator), upstreams)
 	defer responder.Close()
-	var discovery machines.Discovery = responder
 
 	// The fleet key. Parsed at startup so a malformed one is a host that
 	// refuses to start rather than a create that fails much later, after a
@@ -255,6 +255,19 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// The credential broker, beside the responder in every machine's namespace.
+	// Built here rather than earlier because it opens the sealed half of a
+	// grant, so it needs the fleet key that was just parsed.
+	credentials := broker.New(broker.Options{
+		Store: store, Seal: fleetKey, Tenant: api.StoreTenancy(store),
+		Key:    api.BrokerKeyFor(cfg.AgentTokenSecret),
+		APIURL: "https://" + cfg.APIHostname,
+	})
+	defer credentials.Close()
+	// One fan-out, so the machine lifecycle keeps knowing about exactly one
+	// thing that follows a namespace however many listeners live in there.
+	var discovery machines.Discovery = machines.Discoveries{responder, credentials}
+
 	if !fleetKey.IsSet() {
 		slog.Warn("no fleet key, so this host cannot store secrets: creates " +
 			"carrying secret_env will be refused. Set PILOT_FLEET_KEY to the " +
@@ -655,6 +668,7 @@ func run() error {
 		Builds:      builder, Rollout: rollout, Domain: cfg.WorkloadDomain, URL: publicURL,
 		APIHostname: cfg.APIHostname,
 		Peers:       peerLookup(f), PeerToken: api.PeerTokenFor(cfg.AgentTokenSecret),
+		BrokerKey: api.BrokerKeyFor(cfg.AgentTokenSecret),
 		Placement: placementMetric{}, Drain: drainAdapter{mgr: mgr},
 		Tenancy: tenancy, MachineCPU: machineCPU, BuildGate: &quota.HostGate{},
 		// The key the boot path already holds, handed to the API too. Without

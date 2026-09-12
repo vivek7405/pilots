@@ -80,6 +80,10 @@ type Deps struct {
 	// forwarding marker, which the public listener strips. Empty on a single
 	// box, where there are no peers to authenticate.
 	PeerToken string
+	// BrokerKey signs and verifies broker tokens, derived once from the
+	// agent-token secret. Held as the derived key rather than the secret so
+	// nothing here can reach the guest credential or the peer token.
+	BrokerKey []byte
 	// Compose plans a compose file. Injected as a handler because the compose
 	// package imports this one for the wire structs its steps embed. Nil only
 	// in tests, where the route answers 503 rather than vanishing from the
