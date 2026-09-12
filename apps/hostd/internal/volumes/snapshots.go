@@ -164,6 +164,23 @@ func (m *Manager) RestoreSnapshot(ctx context.Context, id, stamp string) error {
 	return nil
 }
 
+// DeleteSnapshot removes one snapshot.
+//
+// This is what actually frees storage. A snapshot holds a refcount on every
+// slice it references, so blocks the live volume has since overwritten stay in
+// the bucket for as long as any snapshot points at them; deleting the clone is
+// what drops those refcounts and lets the space go.
+func (m *Manager) DeleteSnapshot(ctx context.Context, id, stamp string) error {
+	dir := filepath.Dir(m.snapshotPath(id, stamp))
+	// RemoveAll rather than Remove: the directory holds the image and whatever
+	// else a future snapshot format puts beside it, and a half-deleted
+	// snapshot is worse than either outcome.
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("volumes: delete snapshot %s of %s: %w", stamp, id, err)
+	}
+	return nil
+}
+
 // CopySnapshotTo fills another volume's image from one of this volume's
 // snapshots.
 //

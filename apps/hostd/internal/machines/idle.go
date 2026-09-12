@@ -208,6 +208,12 @@ func (m *Manager) suspendIdleMachines(ctx context.Context) {
 	// Reuses the rows this tick already listed. A second ListMachines here
 	// would double the only store read the monitor makes.
 	m.destroyStaleBuilders(ctx, rows)
+
+	// Scheduled volume snapshots ride this loop rather than a ticker of their
+	// own. It already runs every few seconds over this host's state, and a
+	// second timer would be a second thing to keep alive and a second thing to
+	// notice when it stops.
+	m.snapshotDueVolumes(ctx)
 }
 
 // destroyStaleBuilders collects builders that have been suspended longer than

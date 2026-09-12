@@ -503,6 +503,29 @@ CREATE TABLE IF NOT EXISTS host_builds (       -- writer: the host itself
 -- superseded by the next offer rather than racing it.
 --
 -- Reaped by their writer after a day, like destroyed machines.
+-- How often a volume is snapshotted, and how many snapshots are kept.
+--
+-- A scheduled snapshot is the difference between "you can roll back" and "you
+-- can roll back to a moment you thought to record". Nobody takes a manual
+-- snapshot before the mistake.
+--
+-- Retention is two numbers rather than one because the two questions are
+-- different: how far back can I go at a day's resolution, and how far back can
+-- I go at all. Keeping the newest N dailies plus the newest of each of M weeks
+-- answers both in bounded space.
+--
+-- A NEW table rather than columns on `volumes`, which has rows (rule 6).
+--
+-- Writer: the volume's host, which is the only host that can take the snapshot
+-- the policy describes.
+CREATE TABLE IF NOT EXISTS volume_policies (   -- writer: the volume's host_id
+  volume_id   TEXT NOT NULL PRIMARY KEY,
+  cron        TEXT,     -- five fields UTC, or @daily/@weekly/@hourly/@monthly
+  keep_daily  INTEGER,  -- the newest N snapshots
+  keep_weekly INTEGER,  -- plus the newest of each of the last M ISO weeks
+  updated_at  INTEGER
+);
+
 -- Where a forked machine came from.
 --
 -- A fork is a NEW machine restored from another machine's memory and disk: new

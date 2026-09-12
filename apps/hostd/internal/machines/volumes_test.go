@@ -33,6 +33,7 @@ type fakeVolumes struct {
 	snapshots map[string][]string
 	copied    []string
 	restored  []string
+	deleted   []string
 }
 
 // Check is the filesystem gate. Recorded rather than performed: what the tests
@@ -57,6 +58,18 @@ func (f *fakeVolumes) ListSnapshots(id string) ([]string, error) {
 
 func (f *fakeVolumes) RestoreSnapshot(_ context.Context, id, stamp string) error {
 	f.restored = append(f.restored, id+"@"+stamp)
+	return nil
+}
+
+func (f *fakeVolumes) DeleteSnapshot(_ context.Context, id, stamp string) error {
+	kept := f.snapshots[id][:0]
+	for _, s := range f.snapshots[id] {
+		if s != stamp {
+			kept = append(kept, s)
+		}
+	}
+	f.snapshots[id] = kept
+	f.deleted = append(f.deleted, id+"@"+stamp)
 	return nil
 }
 

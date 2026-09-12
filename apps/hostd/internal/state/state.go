@@ -375,6 +375,25 @@ func (s *ServiceSize) ImageMatchesSize() bool {
 	return s.ImageVCPUs == vcpus && s.ImageMemMiB == memMiB
 }
 
+// VolumePolicy is how often a volume is snapshotted and how much is kept.
+//
+// Two retention numbers rather than one, because the two questions are
+// different: how far back at a day's resolution, and how far back at all.
+// Keeping the newest KeepDaily snapshots plus the newest of each of the last
+// KeepWeekly ISO weeks answers both in bounded space.
+type VolumePolicy struct {
+	VolumeID string
+	// Cron is five fields in UTC, or @hourly/@daily/@weekly/@monthly. Empty
+	// means no schedule, which is what every volume had before this existed.
+	Cron       string
+	KeepDaily  int
+	KeepWeekly int
+	UpdatedAt  int64
+}
+
+// Scheduled returns whether this policy actually schedules anything.
+func (p *VolumePolicy) Scheduled() bool { return p != nil && p.Cron != "" }
+
 // Lineage is where a forked machine came from.
 //
 // The build ids are the load-bearing part. A fork faults pages out of its
@@ -663,6 +682,16 @@ type Store interface {
 	// PutHandoff offers a machine to another host. Written once, by the
 	// machine's CURRENT owner, and never updated: a repeated offer is a new
 	// row with a higher Seq.
+	// PutVolumePolicy records a volume's snapshot schedule and retention.
+	// Written by the volume's host, which is the only one that can act on it.
+	PutVolumePolicy(ctx context.Context, p *VolumePolicy) error
+	// GetVolumePolicy returns ErrNotFound for a volume with no schedule,
+	// which is every volume until somebody sets one.
+	GetVolumePolicy(ctx context.Context, volumeID string) (*VolumePolicy, error)
+	// ListVolumePolicies is every schedule, for the loop that fires them.
+	ListVolumePolicies(ctx context.Context) ([]VolumePolicy, error)
+	DeleteVolumePolicy(ctx context.Context, volumeID string) error
+
 	// PutLineage records where a forked machine came from. Written once, by
 	// the fork's own host.
 	PutLineage(ctx context.Context, l *Lineage) error
@@ -1238,6 +1267,61 @@ func (s *sqliteStore) ListHostCapacity(ctx context.Context) ([]HostCapacity, err
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+func (s *sqliteStore) PutVolumePolicy(ctx context.Context, p *VolumePolicy) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO volume_policies (volume_id, cron, keep_daily, keep_weekly, updated_at)
+		VALUES (?,?,?,?,?)
+		ON CONFLICT(volume_id) DO UPDATE SET
+			cron=excluded.cron, keep_daily=excluded.keep_daily,
+			keep_weekly=excluded.keep_weekly, updated_at=excluded.updated_at`,
+		p.VolumeID, p.Cron, p.KeepDaily, p.KeepWeekly, p.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put volume policy %q: %w", p.VolumeID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) GetVolumePolicy(ctx context.Context, volumeID string) (*VolumePolicy, error) {
+	var p VolumePolicy
+	err := s.db.QueryRowContext(ctx, `
+		SELECT volume_id, cron, keep_daily, keep_weekly, updated_at
+		FROM volume_policies WHERE volume_id = ?`, volumeID).
+		Scan(&p.VolumeID, &p.Cron, &p.KeepDaily, &p.KeepWeekly, &p.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get volume policy %q: %w", volumeID, err)
+	}
+	return &p, nil
+}
+
+func (s *sqliteStore) ListVolumePolicies(ctx context.Context) ([]VolumePolicy, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT volume_id, cron, keep_daily, keep_weekly, updated_at
+		FROM volume_policies ORDER BY volume_id`)
+	if err != nil {
+		return nil, fmt.Errorf("state: list volume policies: %w", err)
+	}
+	defer rows.Close()
+	var out []VolumePolicy
+	for rows.Next() {
+		var p VolumePolicy
+		if err := rows.Scan(&p.VolumeID, &p.Cron, &p.KeepDaily, &p.KeepWeekly, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *sqliteStore) DeleteVolumePolicy(ctx context.Context, volumeID string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM volume_policies WHERE volume_id = ?`, volumeID); err != nil {
+		return fmt.Errorf("state: delete volume policy %q: %w", volumeID, err)
+	}
+	return nil
 }
 
 func (s *sqliteStore) PutLineage(ctx context.Context, l *Lineage) error {

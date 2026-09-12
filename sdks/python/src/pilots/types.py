@@ -140,6 +140,22 @@ class SnapshotResponse:
 
 
 @dataclass
+class VolumePolicy:
+    """How often a volume is snapshotted and how much is kept.
+
+    Two retention numbers rather than one, because they answer different
+    questions: how far back at a day's resolution, and how far back at all.
+
+    An empty ``cron`` means no schedule. Retention of zero and zero keeps
+    EVERYTHING, never nothing.
+    """
+
+    cron: str | None = None
+    keep_daily: int | None = None
+    keep_weekly: int | None = None
+
+
+@dataclass
 class SnapshotListResponse:
     """Every snapshot of a volume, newest first."""
 

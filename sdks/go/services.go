@@ -219,3 +219,28 @@ func (v *Volumes) RestoreSnapshot(ctx context.Context, id, snapshot string) (*Sn
 	return &out, v.c.do(ctx, http.MethodPost,
 		"/v1/volumes/"+url.PathEscape(id)+"/snapshots/"+url.PathEscape(snapshot)+"/restore", nil, &out)
 }
+
+// DeleteSnapshot removes one snapshot, freeing the blocks only it still holds.
+func (v *Volumes) DeleteSnapshot(ctx context.Context, id, snapshot string) error {
+	return v.c.do(ctx, http.MethodDelete,
+		"/v1/volumes/"+url.PathEscape(id)+"/snapshots/"+url.PathEscape(snapshot), nil, nil)
+}
+
+// Policy is a volume's snapshot schedule and retention. An empty one means no
+// schedule, which is what every volume has until somebody sets one.
+func (v *Volumes) Policy(ctx context.Context, id string) (*VolumePolicy, error) {
+	var out VolumePolicy
+	return &out, v.c.do(ctx, http.MethodGet,
+		"/v1/volumes/"+url.PathEscape(id)+"/policy", nil, &out)
+}
+
+// SetPolicy schedules snapshots and sets how many are kept.
+//
+// Nobody takes a manual snapshot before the mistake, which is the whole reason
+// this exists: a schedule protects against the failures you did not anticipate,
+// and those are the ones that happen.
+func (v *Volumes) SetPolicy(ctx context.Context, id string, p VolumePolicy) (*VolumePolicy, error) {
+	var out VolumePolicy
+	return &out, v.c.do(ctx, http.MethodPut,
+		"/v1/volumes/"+url.PathEscape(id)+"/policy", p, &out)
+}

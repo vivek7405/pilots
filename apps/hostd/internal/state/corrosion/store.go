@@ -992,6 +992,92 @@ func (s *Store) ListHostCapacity(ctx context.Context) ([]state.HostCapacity, err
 // The caller writes it only when the set changed, because this row is gossiped
 // in full on every write and the cache changes far more often than placement
 // needs to know about.
+// PutVolumePolicy records a volume's snapshot schedule.
+//
+// Guarded like the volume row itself: only the host that MOUNTS the volume may
+// write it, because that host is the only one that can act on the schedule. A
+// policy written by a host that does not hold the volume would be a schedule
+// nobody fires.
+func (s *Store) PutVolumePolicy(ctx context.Context, p *state.VolumePolicy) error {
+	if err := s.assertVolumeOwner(ctx, p.VolumeID); err != nil {
+		return err
+	}
+	if _, err := s.client.Exec(ctx, `
+		INSERT INTO volume_policies (volume_id, cron, keep_daily, keep_weekly, updated_at)
+		VALUES (?,?,?,?,?)
+		ON CONFLICT(volume_id) DO UPDATE SET
+			cron=excluded.cron, keep_daily=excluded.keep_daily,
+			keep_weekly=excluded.keep_weekly, updated_at=excluded.updated_at`,
+		p.VolumeID, p.Cron, p.KeepDaily, p.KeepWeekly, p.UpdatedAt); err != nil {
+		return fmt.Errorf("state: put volume policy %q: %w", p.VolumeID, err)
+	}
+	return nil
+}
+
+// assertVolumeOwner refuses a write about a volume this host does not hold.
+//
+// A volume with NO host is claimable: the write is part of creating it, or of
+// taking one nobody has mounted. What is refused is writing about a volume
+// another live host is using.
+func (s *Store) assertVolumeOwner(ctx context.Context, volumeID string) error {
+	v, err := s.GetVolume(ctx, volumeID)
+	if err != nil {
+		return err
+	}
+	if v.HostID != "" && v.HostID != s.hostID {
+		return fmt.Errorf("state: host %s does not mount volume %s (%s does): %w",
+			s.hostID, volumeID, v.HostID, state.ErrNotOwner)
+	}
+	return nil
+}
+
+func (s *Store) GetVolumePolicy(ctx context.Context, volumeID string) (*state.VolumePolicy, error) {
+	rows, err := s.client.Query(ctx, `
+		SELECT volume_id, cron, keep_daily, keep_weekly, updated_at
+		FROM volume_policies WHERE volume_id = ?`, volumeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, state.ErrNotFound
+	}
+	var p state.VolumePolicy
+	if err := rows.Scan(&p.VolumeID, &p.Cron, &p.KeepDaily, &p.KeepWeekly, &p.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+func (s *Store) ListVolumePolicies(ctx context.Context) ([]state.VolumePolicy, error) {
+	rows, err := s.client.Query(ctx, `
+		SELECT volume_id, cron, keep_daily, keep_weekly, updated_at
+		FROM volume_policies ORDER BY volume_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []state.VolumePolicy
+	for rows.Next() {
+		var p state.VolumePolicy
+		if err := rows.Scan(&p.VolumeID, &p.Cron, &p.KeepDaily, &p.KeepWeekly, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteVolumePolicy(ctx context.Context, volumeID string) error {
+	if _, err := s.client.Exec(ctx, `DELETE FROM volume_policies WHERE volume_id = ?`, volumeID); err != nil {
+		return fmt.Errorf("state: delete volume policy %q: %w", volumeID, err)
+	}
+	return nil
+}
+
 // PutLineage records where a forked machine came from.
 //
 // Guarded like machine_labels: only the host that writes the FORK's machine

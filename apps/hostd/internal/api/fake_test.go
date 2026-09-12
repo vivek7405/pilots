@@ -52,6 +52,7 @@ type fakeManager struct {
 	volumeSnapshots   []string
 	snapshotted       []string
 	restoredSnapshots []string
+	deletedSnapshots  []string
 }
 
 func newFakeManager() *fakeManager {
@@ -274,4 +275,18 @@ func (f *fakeManager) Fork(_ context.Context, opts ForkOptions) ([]ForkOutcome, 
 		out = append(out, ForkOutcome{Machine: &row})
 	}
 	return out, nil
+}
+
+func (f *fakeManager) DeleteVolumeSnapshot(_ context.Context, volumeID, stamp string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	kept := f.volumeSnapshots[:0]
+	for _, s := range f.volumeSnapshots {
+		if s != stamp {
+			kept = append(kept, s)
+		}
+	}
+	f.volumeSnapshots = kept
+	f.deletedSnapshots = append(f.deletedSnapshots, volumeID+"@"+stamp)
+	return f.err
 }

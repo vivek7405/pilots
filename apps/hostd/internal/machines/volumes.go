@@ -35,6 +35,10 @@ type VolumeManager interface {
 	Snapshot(ctx context.Context, id, stamp string) error
 	ListSnapshots(id string) ([]string, error)
 	RestoreSnapshot(ctx context.Context, id, stamp string) error
+	// DeleteSnapshot removes one, for retention. A snapshot holds blocks the
+	// live volume has overwritten, so deleting one is what actually frees
+	// storage rather than merely tidying a listing.
+	DeleteSnapshot(ctx context.Context, id, stamp string) error
 	CopySnapshotTo(ctx context.Context, id, stamp, destImage string) error
 }
 

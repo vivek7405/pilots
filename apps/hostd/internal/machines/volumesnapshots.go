@@ -82,6 +82,27 @@ func (m *Manager) ListVolumeSnapshots(ctx context.Context, volumeID string) ([]s
 	return m.opts.Volumes.ListSnapshots(volumeID)
 }
 
+// DeleteVolumeSnapshot removes one snapshot.
+//
+// Nothing about the machine matters here, which is why there is no state
+// check: deleting a snapshot touches only the clone, never the live image, so
+// a running guest is unaffected. What it frees is the blocks only that
+// snapshot still held.
+func (m *Manager) DeleteVolumeSnapshot(ctx context.Context, volumeID, stamp string) error {
+	if m.opts.Volumes == nil {
+		return ErrNoVolumes
+	}
+	v, err := m.opts.Store.GetVolume(ctx, volumeID)
+	if err != nil {
+		return err
+	}
+	if v.HostID != "" && v.HostID != m.opts.HostID {
+		return fmt.Errorf("machines: volume %s is mounted on %s, not here: %w",
+			volumeID, v.HostID, state.ErrNotOwner)
+	}
+	return m.opts.Volumes.DeleteSnapshot(ctx, volumeID, stamp)
+}
+
 // RestoreVolumeSnapshot puts a snapshot back as the volume's live image.
 //
 // A RUNNING machine is refused. Replacing the disk under a live guest is not a

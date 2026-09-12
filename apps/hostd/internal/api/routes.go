@@ -325,6 +325,11 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("POST /v1/volumes/{id}/snapshots", d.handleCreateVolumeSnapshot)
 	mux.HandleFunc("GET /v1/volumes/{id}/snapshots", d.handleListVolumeSnapshots)
 	mux.HandleFunc("POST /v1/volumes/{id}/snapshots/{stamp}/restore", d.handleRestoreVolumeSnapshot)
+	// The schedule that takes them without being asked. Nobody takes a manual
+	// snapshot before the mistake.
+	mux.HandleFunc("DELETE /v1/volumes/{id}/snapshots/{stamp}", d.handleDeleteVolumeSnapshot)
+	mux.HandleFunc("GET /v1/volumes/{id}/policy", d.handleGetVolumePolicy)
+	mux.HandleFunc("PUT /v1/volumes/{id}/policy", d.handlePutVolumePolicy)
 	// The volume drive as Firecracker holds it, not as hostd meant to set it.
 	// See MachineVolume: the difference between the two is a durability
 	// guarantee that fails silently.

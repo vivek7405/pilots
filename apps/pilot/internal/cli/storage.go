@@ -29,6 +29,7 @@ func newVolumesCmd(env *Env) *cobra.Command {
 	c.AddCommand(
 		newVolumesListCmd(env), newVolumesCreateCmd(env),
 		newVolumesSnapshotCmd(env), newVolumesSnapshotsCmd(env), newVolumesRestoreCmd(env),
+		newVolumesPolicyCmd(env),
 	)
 	return c
 }

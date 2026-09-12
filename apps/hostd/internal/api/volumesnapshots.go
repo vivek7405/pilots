@@ -5,6 +5,9 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"time"
+
+	"github.com/vivek7405/pilots/hostd/internal/cron"
+	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
 // Point-in-time copies of a volume.
@@ -26,6 +29,23 @@ type SnapshotResponse struct {
 	// Snapshot is the stamp that names it, `20260912T101500Z`. It sorts
 	// lexically in time order, so a list needs no separate ordering field.
 	Snapshot string `json:"snapshot"`
+}
+
+// VolumePolicy is how often a volume is snapshotted and how much is kept.
+//
+// Two retention numbers rather than one, because they answer different
+// questions: how far back at a day's resolution, and how far back at all.
+// Keeping the newest KeepDaily snapshots plus the newest of each of the last
+// KeepWeekly ISO weeks answers both in space bounded by their sum.
+//
+// An absent or empty Cron means no schedule, which is what every volume had
+// before this existed. Retention of zero and zero keeps EVERYTHING, never
+// nothing: an unset policy read as "keep none" would delete a volume's whole
+// history the first time the loop ran.
+type VolumePolicy struct {
+	Cron       string `json:"cron,omitempty"`
+	KeepDaily  int    `json:"keep_daily,omitempty"`
+	KeepWeekly int    `json:"keep_weekly,omitempty"`
 }
 
 // SnapshotListResponse is every snapshot of a volume, newest first.
@@ -124,4 +144,81 @@ func (d Deps) forwardToVolumeOwner(w http.ResponseWriter, r *http.Request, hostI
 	proxy.FlushInterval = time.Second
 	proxy.ServeHTTP(w, r)
 	return true
+}
+
+func (d Deps) handleDeleteVolumeSnapshot(w http.ResponseWriter, r *http.Request) {
+	v, ok := d.ownedVolume(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	if d.forwardToVolumeOwner(w, r, v.HostID) {
+		return
+	}
+	if err := d.Machines.DeleteVolumeSnapshot(r.Context(), v.ID, r.PathValue("stamp")); err != nil {
+		writeMapped(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (d Deps) handleGetVolumePolicy(w http.ResponseWriter, r *http.Request) {
+	v, ok := d.ownedVolume(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	// Read from the local replica rather than forwarded: a policy is a row, and
+	// every host has it. Only the WRITE has to reach the mounting host, because
+	// only that host can act on the schedule.
+	p, err := d.Store.GetVolumePolicy(r.Context(), v.ID)
+	if err != nil {
+		// No policy is not an error: it is what every volume has until somebody
+		// sets one, and the honest answer is an empty policy.
+		writeJSON(w, http.StatusOK, VolumePolicy{})
+		return
+	}
+	writeJSON(w, http.StatusOK, VolumePolicy{
+		Cron: p.Cron, KeepDaily: p.KeepDaily, KeepWeekly: p.KeepWeekly,
+	})
+}
+
+func (d Deps) handlePutVolumePolicy(w http.ResponseWriter, r *http.Request) {
+	v, ok := d.ownedVolume(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	if d.forwardToVolumeOwner(w, r, v.HostID) {
+		return
+	}
+	var req VolumePolicy
+	if err := decodeBody(r, &req); err != nil {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(), NextBadBody, nil)
+		return
+	}
+	// Validated HERE rather than at the moment it fires. A schedule the parser
+	// cannot read would simply never run, and "my backups never happened" is
+	// the worst possible way to discover a typo.
+	if req.Cron != "" {
+		if _, err := cron.Parse(req.Cron); err != nil {
+			WriteError(w, http.StatusBadRequest, CodeBadRequest,
+				"cron: "+err.Error(),
+				"five fields in UTC, or @hourly, @daily, @weekly, @monthly", nil)
+			return
+		}
+	}
+	if req.KeepDaily < 0 || req.KeepWeekly < 0 {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest,
+			"retention cannot be negative",
+			"keep_daily and keep_weekly are counts; zero on both keeps everything", nil)
+		return
+	}
+
+	if err := d.Store.PutVolumePolicy(r.Context(), &state.VolumePolicy{
+		VolumeID: v.ID, Cron: req.Cron,
+		KeepDaily: req.KeepDaily, KeepWeekly: req.KeepWeekly,
+		UpdatedAt: time.Now().Unix(),
+	}); err != nil {
+		writeMapped(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, req)
 }

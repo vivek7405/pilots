@@ -79,6 +79,10 @@ type Manager interface {
 	// running machine and drops a suspended one's memory image, which held
 	// cached filesystem state from the disk being replaced.
 	RestoreVolumeSnapshot(ctx context.Context, volumeID, stamp string) error
+	// DeleteVolumeSnapshot removes one. This is what frees storage: a snapshot
+	// holds a refcount on every block it references, so blocks the live volume
+	// has overwritten stay until the snapshot goes.
+	DeleteVolumeSnapshot(ctx context.Context, volumeID, stamp string) error
 	// Fork makes new machines from one machine's or checkpoint's exact state:
 	// new ids, new names, new URLs, the source's processes already running.
 	Fork(ctx context.Context, opts ForkOptions) ([]ForkOutcome, error)

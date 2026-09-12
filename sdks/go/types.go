@@ -526,6 +526,20 @@ type SnapshotResponse struct {
 	Snapshot string `json:"snapshot"`
 }
 
+// VolumePolicy is how often a volume is snapshotted and how much is kept.
+//
+// Two retention numbers rather than one, because they answer different
+// questions: how far back at a day's resolution, and how far back at all.
+//
+// An empty Cron means no schedule. Retention of zero and zero keeps
+// EVERYTHING, never nothing: an unset policy read as "keep none" would delete
+// a volume's whole history the first time the loop ran.
+type VolumePolicy struct {
+	Cron       string `json:"cron,omitempty"`
+	KeepDaily  int    `json:"keep_daily,omitempty"`
+	KeepWeekly int    `json:"keep_weekly,omitempty"`
+}
+
 // SnapshotListResponse is every snapshot of a volume, newest first.
 type SnapshotListResponse struct {
 	VolumeID  string   `json:"volume_id"`
@@ -933,6 +947,7 @@ var wireTypes = []any{
 	ForkResponse{},
 	ForkEntry{},
 	SnapshotResponse{},
+	VolumePolicy{},
 	SnapshotListResponse{},
 	DrainReport{},
 	TakeRequest{},

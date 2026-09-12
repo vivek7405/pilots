@@ -180,6 +180,21 @@ export interface SnapshotResponse {
   snapshot: string
 }
 
+/**
+ * How often a volume is snapshotted and how much is kept.
+ *
+ * Two retention numbers rather than one, because they answer different
+ * questions: how far back at a day's resolution, and how far back at all.
+ *
+ * An absent `cron` means no schedule. Retention of zero and zero keeps
+ * EVERYTHING, never nothing.
+ */
+export interface VolumePolicy {
+  cron?: string
+  keep_daily?: number
+  keep_weekly?: number
+}
+
 /** Every snapshot of a volume, newest first. */
 export interface SnapshotListResponse {
   volume_id: string

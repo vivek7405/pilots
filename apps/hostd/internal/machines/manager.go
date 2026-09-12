@@ -211,6 +211,11 @@ type Manager struct {
 	// mid-drain leaves the machine where it was rather than in a state nobody
 	// is acting on.
 	handingOff sync.Map // machine id -> target host id
+
+	// snapshotFired remembers which minute each volume's snapshot schedule
+	// last fired on, so the loop driving it can tick several times inside one
+	// minute and still fire once.
+	snapshotFired *snapshotFired
 }
 
 func New(opts Options) *Manager {
@@ -223,6 +228,8 @@ func New(opts Options) *Manager {
 		running: make(map[string]*fc.Machine),
 		flight:  newInFlight(),
 		chunks:  newChunkServers(),
+
+		snapshotFired: newSnapshotFired(),
 	}
 }
 
