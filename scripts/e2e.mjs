@@ -3908,8 +3908,21 @@ async function dataRouteAssertions() {
       assert(res.status === 400, `expected 400, got ${res.status}: ${JSON.stringify(json)}`);
       assert(json.code === 'unknown_framework', `code = ${json.code}`);
       assert(json.next && json.next.length > 0, 'the refusal says nothing about what to do');
-      assert(json.details?.looked_for?.length === 10,
-        `looked_for = ${JSON.stringify(json.details?.looked_for)}`);
+      // A FLOOR and the entries that carry the meaning, not an exact count.
+      //
+      // The count was 10 and the list is 11: Remix 3 was added and the number
+      // was not, so this failed on a change that was entirely correct. An
+      // exact count here guards nothing -- the assertion is that the refusal
+      // NAMES what it looked for, so somebody can see why their directory was
+      // not recognised -- and it breaks every time a framework is added, which
+      // trains whoever hits it to edit the number without reading the test.
+      const lookedFor = json.details?.looked_for ?? [];
+      assert(lookedFor.length >= 8,
+        `looked_for = ${JSON.stringify(lookedFor)}`);
+      for (const marker of ['package.json', 'go.mod', 'Cargo.toml']) {
+        assert(lookedFor.some((entry) => entry.includes(marker)),
+          `the refusal never mentions ${marker}: ${JSON.stringify(lookedFor)}`);
+      }
       // The two rules travel on every refusal, because the model that has to
       // obey them may have loaded no documentation at all.
       assert(json.details?.rules?.length === 2,
