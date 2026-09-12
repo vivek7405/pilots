@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -52,6 +53,7 @@ type Load interface {
 // can see whether its replica is busy. Every host runs the loop and each acts
 // on the half that is its own.
 func (m *Manager) RunAutoscaler(ctx context.Context, load Load) {
+	live := metrics.NewLoop("autoscaler", 3*ScaleInterval)
 	tick := time.NewTicker(ScaleInterval)
 	defer tick.Stop()
 
@@ -65,6 +67,7 @@ func (m *Manager) RunAutoscaler(ctx context.Context, load Load) {
 		if err := m.scaleOnce(ctx, load, idleSince); err != nil {
 			slog.Debug("autoscale pass failed", "err", err)
 		}
+		live.Tick()
 	}
 }
 

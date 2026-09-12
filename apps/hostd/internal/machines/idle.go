@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -110,6 +111,7 @@ func (m *Manager) Touch(ctx context.Context, id string) {
 
 // RunIdleMonitor suspends machines that have gone quiet, until ctx ends.
 func (m *Manager) RunIdleMonitor(ctx context.Context) {
+	live := metrics.NewLoop("idle_monitor", 3*idleCheckInterval)
 	ticker := time.NewTicker(idleCheckInterval)
 	defer ticker.Stop()
 
@@ -119,6 +121,7 @@ func (m *Manager) RunIdleMonitor(ctx context.Context) {
 			return
 		case <-ticker.C:
 			m.suspendIdleMachines(ctx)
+			live.Tick()
 		}
 	}
 }

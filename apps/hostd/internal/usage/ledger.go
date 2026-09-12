@@ -45,6 +45,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 )
 
 // dayLayout names a ledger file. It is also parsed back, so the file name is
@@ -396,6 +398,8 @@ func (l *Ledger) Run(ctx context.Context, up Uploader, hostID string) {
 		slog.Info("usage ledger: no object storage; intervals stay on local disk",
 			"dir", l.dir)
 	}
+	// Three times the interval, so one slow upload is not a restart.
+	live := metrics.NewLoop("usage_ledger", 3*l.interval)
 	t := time.NewTicker(l.interval)
 	defer t.Stop()
 	for {
@@ -407,6 +411,10 @@ func (l *Ledger) Run(ctx context.Context, up Uploader, hostID string) {
 			if up != nil {
 				l.upload(ctx, up, hostID)
 			}
+			// At the END of the pass: a loop that began one and blocked inside
+			// it has not ticked, and metering that silently stops is exactly
+			// what this catches (fly, 2026-09-02, five hours of billing).
+			live.Tick()
 		}
 	}
 }

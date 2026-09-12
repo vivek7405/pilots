@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -102,6 +103,7 @@ func (o Options) now() time.Time {
 // reads, so a host that stops writing it is, by definition, gone -- and its
 // machines become someone else's to rescue.
 func RunHeartbeat(ctx context.Context, opts Options) {
+	live := metrics.NewLoop("heartbeat", 3*HeartbeatInterval)
 	tick := time.NewTicker(HeartbeatInterval)
 	defer tick.Stop()
 
@@ -116,6 +118,11 @@ func RunHeartbeat(ctx context.Context, opts Options) {
 			slog.Error("could not write this host's heartbeat; the fleet will "+
 				"shortly treat this host as dead", "err", err)
 		}
+		// Ticked even when the write failed: what this watches is whether the
+		// LOOP is running. A store that refuses is loud already, in the line
+		// above and in every peer's view of this host. A loop that stopped
+		// spinning says nothing at all, which is the case the watchdog is for.
+		live.Tick()
 
 		select {
 		case <-ctx.Done():
@@ -127,11 +134,13 @@ func RunHeartbeat(ctx context.Context, opts Options) {
 
 // RunRescue reclaims orphaned machines until ctx is done.
 func RunRescue(ctx context.Context, opts Options) {
+	live := metrics.NewLoop("self_heal", 3*RescueInterval)
 	tick := time.NewTicker(RescueInterval)
 	defer tick.Stop()
 
 	for {
 		Tick(ctx, opts)
+		live.Tick()
 		select {
 		case <-ctx.Done():
 			return

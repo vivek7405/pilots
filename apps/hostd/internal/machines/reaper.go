@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/netns"
 	"strconv"
 	"strings"
@@ -36,6 +37,7 @@ const (
 // memory, their cgroup and their network slot indefinitely, and the only
 // remedy is a human with a terminal.
 func (m *Manager) RunReaper(ctx context.Context) {
+	live := metrics.NewLoop("reaper", 3*reaperInterval)
 	ticker := time.NewTicker(reaperInterval)
 	defer ticker.Stop()
 
@@ -45,6 +47,7 @@ func (m *Manager) RunReaper(ctx context.Context) {
 			return
 		case <-ticker.C:
 			m.reapOrphans(ctx)
+			live.Tick()
 		}
 	}
 }

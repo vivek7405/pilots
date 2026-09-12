@@ -696,6 +696,11 @@ func run() error {
 		"addr", ln.Addr().String(), "host_id", cfg.HostID, "domain", cfg.WorkloadDomain,
 		"url", publicURL.Of(cfg.APIHostname))
 	notifyReady()
+	// After readiness, so a slow start is never mistaken for a wedged loop.
+	// From here on the pet is withheld whenever one of hostd's loops stops
+	// ticking, which is what turns a daemon that is up but doing nothing into
+	// a daemon systemd restarts. See watchdog.go.
+	go runWatchdog(ctx)
 
 	select {
 	case err := <-errc:
@@ -890,25 +895,9 @@ func newUploader(cfg *config.Config) (fc.Uploader, error) {
 
 // notifyReady tells systemd (Type=notify) that the process is serving. Done by
 // hand rather than with a dependency: it is one datagram on a unix socket.
-func notifyReady() {
-	sock := os.Getenv("NOTIFY_SOCKET")
-	if sock == "" {
-		return
-	}
-	// A leading '@' denotes an abstract socket, written as a NUL byte.
-	if sock[0] == '@' {
-		sock = "\x00" + sock[1:]
-	}
-	conn, err := net.Dial("unixgram", sock)
-	if err != nil {
-		slog.Warn("sd_notify dial failed", "err", err)
-		return
-	}
-	defer conn.Close()
-	if _, err := conn.Write([]byte("READY=1\n")); err != nil {
-		slog.Warn("sd_notify write failed", "err", err)
-	}
-}
+// notifyReady tells systemd the host is serving. One datagram, sent by
+// sdNotify in watchdog.go, which also carries the watchdog's conditional pet.
+func notifyReady() { sdNotify("READY=1\n") }
 
 // newCertStore opens the bucket certificates are shared through.
 //

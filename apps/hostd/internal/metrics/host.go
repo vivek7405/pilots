@@ -64,6 +64,20 @@ var (
 		"1 once this replica has caught up with the fleet and may claim "+
 			"machines of hosts it cannot see. 0 while it is still joining.")
 
+	// One family with a loop label rather than a name per loop, the shape
+	// pilots_machines{state} already uses: a loop added later needs no change
+	// here, and an operator's alert is one expression over every loop.
+	LoopLastTick = NewGaugeVec(Default, "pilots_loop_last_tick_seconds",
+		"Unix time of each background loop's last completed pass. A loop that "+
+			"wedges rather than dying leaves the process healthy and the work "+
+			"stopped, which is what this is for.", "loop")
+
+	// A renewal that stalls is a falling number here rather than an expired
+	// certificate nobody saw coming. certmagic renews inside its own
+	// goroutine, so there is no loop of ours to give a budget to.
+	CertExpirySeconds = NewGauge(Default, "pilots_cert_expiry_seconds",
+		"Seconds until the fleet's wildcard certificate expires.")
+
 	ReplicationGaps = NewGauge(Default, "pilots_replication_gaps",
 		"Ranges of changes this replica knows it has not applied yet. "+
 			"Above zero means corrosion is still filling holes.")
