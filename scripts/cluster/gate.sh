@@ -2841,8 +2841,115 @@ else
 fi
 rm -rf "$BM_TMP"
 
-# Sections 26 and 27 belong to the process-model and host-death work in the
-# same PR and are added there. 28 and 29 are the join gate's pair.
+say "26. A machine's handlers hold no credential and live in its own cgroup"
+# Two properties of the processes BESIDE a guest, neither visible from the
+# public API. A handler reads the machine's builds and used to inherit hostd's
+# whole environment to do it, which put a key to every tenant's bucket in a
+# process one block-layer bug away from the guest. And it ran in hostd's own
+# cgroup, so the memory a guest caused it to allocate was charged to the
+# daemon, and a destroy that killed only Firecracker left it alive charged to
+# nobody.
+HD_IP="${LIVE_IPS[0]:-${IPS[0]}}"
+HD=$(api "$HD_IP" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
+HD_ID=$(echo "$HD" | jf id)
+if [ -z "$HD_ID" ]; then
+  bad "could not create a machine to inspect its handlers: $HD"
+else
+  ok "machine ${HD_ID} is up on ${HD_IP}"
+
+  # 26a. No PILOT_ variable in any handler's environ. /proc/<pid>/environ is
+  # NUL-separated, so tr makes it greppable.
+  HD_PIDS=$($SSH "root@$HD_IP" \
+    "pgrep -f 'hostd (nbd|uffd)-handler' 2>/dev/null | head -20" 2>/dev/null | tr -d '\r')
+  if [ -z "$HD_PIDS" ]; then
+    bad "no handler processes found for any machine on ${HD_IP}"
+  else
+    HD_LEAK=0
+    for pid in $HD_PIDS; do
+      N=$($SSH "root@$HD_IP" \
+        "tr '\\0' '\\n' < /proc/${pid}/environ 2>/dev/null | grep -c '^PILOT_'" 2>/dev/null | tr -d '[:space:]')
+      [ "${N:-0}" != "0" ] && HD_LEAK=$((HD_LEAK + ${N:-0}))
+    done
+    if [ "$HD_LEAK" = 0 ]; then
+      ok "no handler carries a PILOT_ variable in its environment"
+    else
+      bad "${HD_LEAK} PILOT_ variables are in handler environments on ${HD_IP}"
+    fi
+  fi
+
+  # 26b. The handlers are in the machine's own cgroup, beside Firecracker.
+  HD_SLICE=$(slice_of "$HD_IP" "$HD_ID")
+  if [ -z "$HD_SLICE" ]; then
+    bad "no cgroup slice for ${HD_ID}"
+  else
+    HD_PROCS=$($SSH "root@$HD_IP" "cat ${HD_SLICE}/cgroup.procs 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
+    echo "  MEASURED cgroup.procs in ${HD_ID}'s slice: ${HD_PROCS:-0}"
+    if [ "${HD_PROCS:-0}" -ge 2 ]; then
+      ok "the machine's slice holds Firecracker and at least one handler"
+    else
+      bad "the slice holds ${HD_PROCS:-0} processes; the handlers are charged elsewhere"
+    fi
+  fi
+
+  # 26c. Destroy empties the cgroup: nothing outlives the machine charged to
+  # nobody.
+  api "$HD_IP" DELETE "/v1/machines/${HD_ID}" >/dev/null 2>&1
+  sleep 5
+  HD_LEFT=$($SSH "root@$HD_IP" \
+    "cat ${HD_SLICE}/cgroup.procs 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
+  if [ "${HD_LEFT:-0}" = 0 ]; then
+    ok "the slice is empty after the destroy"
+  else
+    bad "${HD_LEFT} processes are still in ${HD_ID}'s slice after it was destroyed"
+  fi
+fi
+
+say "27. A machine's chunk socket answers only that machine's builds"
+# The other half of the same change: the handler holds no credential because
+# hostd serves it the chunks, and that service refuses any build id the machine
+# was not spawned with. The socket lives in the machine's own state directory.
+CS_IP="${LIVE_IPS[0]:-${IPS[0]}}"
+CS=$(api "$CS_IP" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
+CS_ID=$(echo "$CS" | jf id)
+if [ -z "$CS_ID" ]; then
+  bad "could not create a machine to inspect its chunk socket: $CS"
+else
+  CS_SOCK="/var/lib/pilots/machines/${CS_ID}/chunks.sock"
+  if $SSH "root@$CS_IP" "test -S ${CS_SOCK}" 2>/dev/null; then
+    ok "the machine has a chunk socket at ${CS_SOCK}"
+    # Owner-only: nothing else on the host has any business reading a
+    # tenant's build.
+    CS_MODE=$($SSH "root@$CS_IP" "stat -c '%a' ${CS_SOCK}" 2>/dev/null | tr -d '[:space:]')
+    [ "$CS_MODE" = "600" ] && ok "the socket is owner-only (${CS_MODE})" \
+      || bad "the chunk socket is mode ${CS_MODE}, want 600"
+
+    # A foreign build id is refused, and the refusal is logged with the
+    # machine id. Asked over the socket directly, which is what a compromised
+    # handler would do.
+    $SSH "root@$CS_IP" "printf '{\"key\":\"00000000-0000-0000-0000-000000000000/header\"}\n' | timeout 5 nc -U ${CS_SOCK} >/dev/null 2>&1 || true" >/dev/null 2>&1
+    sleep 1
+    CS_LOG=$($SSH "root@$CS_IP" \
+      "journalctl -u hostd --since '-2 min' --no-pager | grep -c 'asked for a build it was not spawned for'" 2>/dev/null | tr -d '[:space:]')
+    if [ "${CS_LOG:-0}" -ge 1 ]; then
+      ok "a foreign build id was refused and logged with the machine id"
+    else
+      bad "nothing in the journal records the refused chunk request"
+    fi
+  else
+    bad "no chunk socket for ${CS_ID}; its handlers are reading object storage directly"
+  fi
+  api "$CS_IP" DELETE "/v1/machines/${CS_ID}" >/dev/null 2>&1
+
+  # And the socket goes with the machine.
+  sleep 3
+  if $SSH "root@$CS_IP" "test -S ${CS_SOCK}" 2>/dev/null; then
+    bad "the chunk socket outlived its machine"
+  else
+    ok "the chunk socket is gone with the machine"
+  fi
+fi
+
+# 28 and 29 are the join gate's pair.
 
 say "28. A host that has not caught up serves its own machines and claims none"
 # The bug this gate exists for cannot be seen from the public API: a host with

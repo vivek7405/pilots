@@ -175,6 +175,15 @@ func argv(opts StartOptions) []string {
 	return args
 }
 
+// PID is the handler process's id, for putting it in the machine's cgroup.
+// Zero when the handler is not running.
+func (p *Process) PID() int {
+	if p == nil {
+		return 0
+	}
+	return p.pid
+}
+
 // Dirty asks the handler which blocks the machine has written.
 //
 // The VM must be paused first. A bitmap taken while the guest is writing

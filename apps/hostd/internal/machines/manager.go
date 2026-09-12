@@ -98,8 +98,10 @@ type Options struct {
 	// served on. One pool per host, because the devices are a host resource.
 	NBDDevices *nbd.DevicePool
 
-	// HandlerEnv is passed to the block and fault servers, which need the
-	// object-storage credentials to read builds.
+	// HandlerEnv is passed to the block and fault servers. It is an ALLOWLIST
+	// built by HandlerEnv(), not this daemon's environment: those processes
+	// read their builds through a per-machine chunk socket and hold no storage
+	// credential. See chunks.go and internal/chunkserve.
 	HandlerEnv []string
 
 	// AgentTokenSecret derives each machine's guest credential. See
@@ -471,6 +473,11 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 		if err := fcm.Kill(); err != nil {
 			errs = append(errs, fmt.Errorf("kill: %w", err))
 		}
+		// The sweep a per-pid teardown cannot make: one write the kernel
+		// applies to every member of the cgroup at once, so a handler wedged
+		// in an uninterruptible wait, or anything a guest escape left behind,
+		// goes with the machine rather than outliving it charged to nobody.
+		m.killCgroup(id)
 		// Release the slot and the registry entry regardless: the process is
 		// gone or unreachable either way, and holding them leaks a slot per
 		// failed destroy until the pool is exhausted.

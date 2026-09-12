@@ -95,6 +95,11 @@ func (m *Manager) reapOrphanResources(machineID string) {
 	if err := os.RemoveAll(m.stateDir(machineID)); err != nil {
 		slog.Warn("could not remove an orphan's state dir", "machine", machineID, "err", err)
 	}
+	// An empty cgroup still costs a kernel structure, so a host that made one
+	// per machine and removed none would accumulate them for as long as it
+	// stays up.
+	m.killCgroup(machineID)
+	m.removeCgroup(machineID)
 }
 
 type fcProcess struct {

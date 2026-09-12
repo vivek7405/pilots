@@ -158,6 +158,15 @@ func argv(opts StartOptions) []string {
 	return args
 }
 
+// PID is the handler process's id, for putting it in the machine's cgroup.
+// Zero when the handler is not running.
+func (p *Process) PID() int {
+	if p == nil {
+		return 0
+	}
+	return p.pid
+}
+
 // Stop tears the handler down.
 //
 // Called only AFTER Firecracker is gone. A handler killed while the guest is

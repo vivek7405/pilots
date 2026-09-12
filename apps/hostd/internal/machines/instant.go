@@ -317,6 +317,11 @@ func (m *Manager) restore(ctx context.Context, row *state.Machine, backends fc.B
 
 	fcm, err := fc.RestoreInstant(ctx, instant,
 		m.opts.Uploader, m.opts.BlockStore, m.opts.NBDDevices)
+	if fcm != nil {
+		// After the jailer has made the cgroup, so the boot ordering the
+		// handlers need is untouched. See cgroup.go.
+		m.joinHandlersToCgroup(fcm)
+	}
 	if err != nil {
 		_ = netns.Teardown(slot)
 		m.pool.Return(slot.Idx)
