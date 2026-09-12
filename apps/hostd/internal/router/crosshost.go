@@ -185,6 +185,21 @@ func (r *Router) InternalHandler() http.Handler {
 func (r *Router) serveOrForward(w http.ResponseWriter, req *http.Request, target *Target) {
 	m := target.Machine
 
+	// A machine mid-DRAIN is a special case that has to come first: its row
+	// still names this host, and its memory image has already been offered to
+	// another one. Serving it here would wake a machine somebody else is in
+	// the middle of claiming; refusing would make a planned operation
+	// customer-visible, which is the whole thing a drain exists to avoid. So
+	// the request follows the machine.
+	if r.opts.HandingOff != nil {
+		if to, moving := r.opts.HandingOff(m.ID); moving && to != r.opts.HostID {
+			moved := m
+			moved.HostID = to
+			r.forwardToOwner(w, req, moved)
+			return
+		}
+	}
+
 	if m.HostID == "" || m.HostID == r.opts.HostID {
 		r.serveLocally(w, req, target)
 		return

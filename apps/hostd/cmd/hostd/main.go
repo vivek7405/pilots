@@ -474,6 +474,10 @@ func run() error {
 		Domain: cfg.WorkloadDomain,
 		HostID: cfg.HostID,
 		Store:  store,
+		// A machine being MOVED to another host: the row still names this one,
+		// so without this the request would be served here and wake a machine
+		// the target is claiming. See router.Options.HandingOff.
+		HandingOff: mgr.HandingOff,
 		// On a single box this reads the local SQLite store; a store error
 		// there means the host itself is broken, and the router has nothing
 		// better to say than public. On a fleet the cache below replaces it,

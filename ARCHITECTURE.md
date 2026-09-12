@@ -59,6 +59,17 @@ compose fragment on the ordinary primitives, not a product tier. See
    no uniqueness constraints and no cross-host transactions, therefore:
    - **Single-writer invariant:** a host writes ONLY rows about its own
      machines. Enforced in review; violations corrupt silently.
+   - **The planned handoff** is the one exception where a LIVE host's machine
+     changes owner, and it is the narrowest shape that can work. The source --
+     the machine's current owner -- suspends it, then writes a WRITE-ONCE
+     offer row naming the target. The target's claim is checked against that
+     row rather than against anything it says itself: the offer must name it,
+     must come from the machine's current owner, must be the machine's newest
+     offer, and the machine must not be running. The last two are the ones
+     easy to omit and expensive to omit: without "newest", a target the source
+     gave up on can arrive late and take a machine offered elsewhere; without
+     "not running", two Firecrackers end up serving one id. See `pilot hosts
+     drain`.
    - **Deterministic ownership** for anything needing uniqueness or an
      actor: `hash(key) mod live_hosts` (name allocation, self-heal slices).
      What machine names and service addresses actually do today is the
@@ -431,6 +442,16 @@ POST   /v1/machines/:id/redeploy     {image, release?}  boot the same machine
 POST   /v1/machines/:id/checkpoints  {comment?} → {id, seq}
 GET    /v1/machines/:id/checkpoints  list
 POST   /v1/checkpoints/:id/restore   in-place restore
+POST   /v1/hosts/:id/drain           move every machine off a host, so it can be
+                                     rebooted or retired without taking them down.
+                                     Each is suspended there and restored elsewhere,
+                                     keeping its id, name and URL; a request arriving
+                                     mid-move is HELD and served late, never refused.
+                                     The host keeps refusing new machines afterwards.
+                                     Admin-scoped; any host serves it and forwards to
+                                     the one named
+GET    /v1/hosts/:id/drain           whether it is draining, and what is still on it
+DELETE /v1/hosts/:id/drain           let it take machines again; nothing moves back
 GET    /v1/egress                    {org_id, addresses:[{host_id, ipv6, interface}]}
                                      every address this org's OUTBOUND traffic can
                                      leave from, one per host that manages egress.
@@ -695,9 +716,9 @@ Landmines:
   and root-namespace state, rebuilt at restore. The guest knows `169.254.0.22`,
   its own `fdee::21`, and whatever DNS returned.
 - **Key rotation is a readdressing event.** Machine addresses derive from the
-  host's key, so rotating it moves every machine that host runs: drain first,
-  or accept a connection-reset event for all of them plus an AllowedIPs and
-  NAT rebuild.
+  host's key, so rotating it moves every machine that host runs:
+  `pilot hosts drain <host>` first, or accept a connection-reset event for all
+  of them plus an AllowedIPs and NAT rebuild.
 
 ### Environment and secrets
 

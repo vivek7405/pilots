@@ -3213,6 +3213,144 @@ else
   fi
 fi
 
+say "34. Placement: a create lands where there is room, and a full host says so"
+# A3. Until this existed nothing on the create path read free memory: a machine
+# ran wherever the client pointed its CLI, and a full host answered with
+# whatever Firecracker said when it could not get the memory.
+#
+# The API half is in e2e.mjs. This is the half only a host shell can see: that
+# the number the fleet ranks on is the number the kernel reports.
+PL_IP="${LIVE_IPS[0]:-${IPS[0]}}"
+PL_HOSTID=$($SSH "root@$PL_IP" "grep '^PILOT_HOST_ID=' /etc/pilots/hostd.env | cut -d= -f2-" 2>/dev/null | tr -d '[:space:]')
+[ -n "$PL_HOSTID" ] || PL_HOSTID=$($SSH "root@$PL_IP" "hostname" 2>/dev/null | tr -d '[:space:]')
+
+PL_REPORTED=$(api "$PL_IP" GET /v1/hosts | jq -r --arg h "$PL_HOSTID" '.[] | select(.id == $h) | .mem_free_mib' 2>/dev/null)
+if [ -z "$PL_REPORTED" ] || [ "$PL_REPORTED" = "null" ]; then
+  bad "host ${PL_HOSTID} reports no free memory on /v1/hosts"
+else
+  # Hugepages when the host reserves a pool, MemAvailable otherwise. The
+  # engine's guests come out of whichever one backs them, so that is the one
+  # placement has to be reading.
+  PL_HUGE=$($SSH "root@$PL_IP" "grep -c '^PILOT_HUGEPAGES=1' /etc/pilots/hostd.env" 2>/dev/null | tr -d '[:space:]')
+  if [ "${PL_HUGE:-0}" = "1" ]; then
+    PL_FREE=$($SSH "root@$PL_IP" "awk '/HugePages_Free/{f=\$2} /Hugepagesize/{s=\$2} END{print int(f*s/1024)}' /proc/meminfo" 2>/dev/null | tr -d '[:space:]')
+    PL_WHAT="free hugepages"
+  else
+    PL_FREE=$($SSH "root@$PL_IP" "awk '/MemAvailable/{print int(\$2/1024)}' /proc/meminfo" 2>/dev/null | tr -d '[:space:]')
+    PL_WHAT="MemAvailable"
+  fi
+  # Within a heartbeat's drift. An exact match would fail on a busy host for
+  # reasons that are not a bug; an order-of-magnitude gap is the real failure,
+  # and that is what a percentage catches.
+  if [ -n "$PL_FREE" ] && [ "$PL_FREE" -gt 0 ]; then
+    PL_DIFF=$(( PL_REPORTED > PL_FREE ? PL_REPORTED - PL_FREE : PL_FREE - PL_REPORTED ))
+    PL_TOL=$(( PL_FREE / 4 + 256 ))
+    [ "$PL_DIFF" -le "$PL_TOL" ] \
+      && ok "the fleet ranks on this host's real ${PL_WHAT} (${PL_REPORTED} vs ${PL_FREE} MiB)" \
+      || bad "the fleet thinks ${PL_HOSTID} has ${PL_REPORTED} MiB free; the kernel says ${PL_FREE} (${PL_WHAT})"
+  else
+    bad "could not read ${PL_WHAT} on ${PL_IP}"
+  fi
+fi
+
+# Reclaimable is the other half of capacity, and it must be a number rather
+# than absent: a host that never publishes it is a host placement will not
+# prefer, for as long as that lasts.
+PL_RECLAIM=$(api "$PL_IP" GET /v1/hosts | jq -r --arg h "$PL_HOSTID" '.[] | select(.id == $h) | .mem_reclaimable_mib' 2>/dev/null)
+[ -n "$PL_RECLAIM" ] && [ "$PL_RECLAIM" != "null" ] \
+  && ok "it publishes reclaimable memory too (${PL_RECLAIM} MiB)" \
+  || bad "host ${PL_HOSTID} publishes no reclaimable figure, so placement will never prefer it"
+
+# A machine bigger than any host can hold is refused with 507 and a code that
+# names capacity, not a 500 naming a boot failure.
+PL_HUGE_REQ=$(curl -s -o /dev/null -m 60 -w '%{http_code}' -X POST \
+  "http://${PL_IP}:8080/v1/machines" -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"vcpus":1,"mem_mib":1048576}')
+[ "$PL_HUGE_REQ" = "507" ] \
+  && ok "a machine no host can hold is refused with 507" \
+  || bad "a 1 TiB machine got HTTP ${PL_HUGE_REQ}, want 507"
+
+say "35. Drain: a host is emptied on purpose, and nothing it held is lost"
+# B5. A machine moved only when its host was provably dead, which made every
+# planned reboot customer-visible.
+if [ "${#LIVE_IPS[@]}" -lt 2 ]; then
+  bad "the drain section needs at least two live hosts; the rig has ${#LIVE_IPS[@]}"
+else
+  DR_FROM="${LIVE_IPS[1]}"
+  DR_ENTRY="${LIVE_IPS[0]}"
+  DR_HOSTID=$($SSH "root@$DR_FROM" "grep '^PILOT_HOST_ID=' /etc/pilots/hostd.env | cut -d= -f2-" 2>/dev/null | tr -d '[:space:]')
+  [ -n "$DR_HOSTID" ] || DR_HOSTID=$($SSH "root@$DR_FROM" "hostname" 2>/dev/null | tr -d '[:space:]')
+
+  # A machine created ON the host about to be drained, with something written
+  # inside it: the point of a drain is that the machine survives, not merely
+  # that a row moves.
+  DR_M=$(api "$DR_FROM" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
+  DR_ID=$(echo "$DR_M" | jf id)
+  if [ -z "$DR_ID" ]; then
+    bad "could not create a machine to drain: $DR_M"
+  else
+    api "$DR_FROM" POST "/v1/machines/${DR_ID}/exec" '{"cmd":"echo drained-marker > /tmp/marker"}' >/dev/null 2>&1
+    DR_BEFORE=$(api "$DR_ENTRY" GET "/v1/machines/${DR_ID}" | jf host_id)
+    DR_URL_BEFORE=$(api "$DR_ENTRY" GET "/v1/machines/${DR_ID}" | jf url)
+
+    # Drained through the OTHER host, which is the shape an operator uses: any
+    # host serves the route and forwards it to the one named.
+    DR_OUT=$(api "$DR_ENTRY" POST "/v1/hosts/${DR_HOSTID}/drain" '{}')
+    echo "$DR_OUT" | jq -e '.draining == true' >/dev/null 2>&1 \
+      && ok "the host is marked draining" \
+      || bad "the drain did not mark the host: $DR_OUT"
+
+    sleep 5
+    DR_AFTER=$(api "$DR_ENTRY" GET "/v1/machines/${DR_ID}" | jf host_id)
+    DR_URL_AFTER=$(api "$DR_ENTRY" GET "/v1/machines/${DR_ID}" | jf url)
+
+    [ -n "$DR_AFTER" ] && [ "$DR_AFTER" != "$DR_BEFORE" ] \
+      && ok "the machine moved from ${DR_BEFORE} to ${DR_AFTER}" \
+      || bad "the machine is still on ${DR_AFTER:-nowhere}, want anywhere but ${DR_BEFORE}"
+
+    # The whole promise of rule 4: the address does not change.
+    [ "$DR_URL_BEFORE" = "$DR_URL_AFTER" ] \
+      && ok "its URL is unchanged (${DR_URL_AFTER})" \
+      || bad "the URL changed from ${DR_URL_BEFORE} to ${DR_URL_AFTER}"
+
+    # And it is a working machine on the other side, not just a row.
+    DR_READ=$(api "$DR_ENTRY" POST "/v1/machines/${DR_ID}/exec" '{"cmd":"cat /tmp/marker"}' | jf stdout)
+    case "$DR_READ" in
+      *drained-marker*) ok "a file written before the drain reads back after it" ;;
+      *) bad "the marker did not survive the drain: ${DR_READ:-nothing}" ;;
+    esac
+
+    # Nothing of the machine may be left on the source. A leftover jailer root
+    # is a disk leak; a leftover Firecracker is two processes for one id.
+    DR_LEFT=$($SSH "root@$DR_FROM" "pgrep -fc \"firecracker.*${DR_ID}\"" 2>/dev/null | tr -d '[:space:]')
+    [ "${DR_LEFT:-0}" = "0" ] \
+      && ok "no Firecracker for it is left on the source host" \
+      || bad "${DR_LEFT} Firecracker process(es) for ${DR_ID} still run on ${DR_FROM}"
+
+    # A drained host takes nothing new. This is what lets the drain converge
+    # rather than race the placer.
+    DR_NEW=$(api "$DR_ENTRY" POST /v1/machines '{"vcpus":1,"mem_mib":512}')
+    DR_NEW_ID=$(echo "$DR_NEW" | jf id)
+    DR_NEW_HOST=$(echo "$DR_NEW" | jf host_id)
+    if [ -n "$DR_NEW_ID" ]; then
+      [ "$DR_NEW_HOST" != "$DR_HOSTID" ] \
+        && ok "a new machine went to ${DR_NEW_HOST}, not to the draining host" \
+        || bad "a new machine was placed on the draining host ${DR_HOSTID}"
+      api "$DR_ENTRY" DELETE "/v1/machines/${DR_NEW_ID}" >/dev/null 2>&1 || true
+    fi
+
+    # Undrain, so the rig is left usable. Nothing moves back, which is the
+    # documented behaviour and not an omission.
+    api "$DR_ENTRY" DELETE "/v1/hosts/${DR_HOSTID}/drain" >/dev/null 2>&1
+    DR_STILL=$(api "$DR_ENTRY" GET "/v1/hosts/${DR_HOSTID}/drain" | jq -r '.draining' 2>/dev/null)
+    [ "$DR_STILL" = "false" ] \
+      && ok "undrain lets the host take machines again" \
+      || bad "the host is still draining after an undrain (${DR_STILL:-missing})"
+
+    api "$DR_ENTRY" DELETE "/v1/machines/${DR_ID}" >/dev/null 2>&1 || true
+  fi
+fi
+
 say "Result"
 echo "  ${PASS} passed, ${FAIL} failed"
 echo

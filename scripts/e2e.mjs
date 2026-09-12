@@ -3465,6 +3465,109 @@ async function egressAddressAssertions() {
   });
 }
 
+// A3 and B5. Where a machine lands, and what happens when a host is emptied.
+//
+// Runs on every fleet. On a single box the assertions are about the SHAPE the
+// API reports rather than about spreading, and that is worth keeping: a lone
+// host still has to publish its capacity, or a second host joining would have
+// nothing to rank against.
+async function placementAssertions() {
+  await step('every host publishes what it can still hold', async () => {
+    const { status, json } = await request('/v1/hosts');
+    assert(status === 200, `expected 200, got ${status}`);
+    assert(Array.isArray(json) && json.length > 0, 'no hosts listed at all');
+    for (const h of json) {
+      assert(typeof h.mem_free_mib === 'number',
+        `host ${h.id} reports no free memory`);
+      assert(typeof h.mem_reclaimable_mib === 'number',
+        `host ${h.id} reports no reclaimable memory, so placement will never prefer it`);
+      assert(typeof h.vcpus_running === 'number',
+        `host ${h.id} reports no running vCPU count`);
+    }
+  });
+
+  await step('a machine no host could hold is refused with 507, not 500', async () => {
+    // The number is absurd on purpose: no host in any fleet has a terabyte to
+    // give one guest. Before admission existed this was created, booted, and
+    // failed with whatever Firecracker said about memory -- a 500 describing a
+    // symptom rather than an answer about capacity.
+    const { status, json } = await request('/v1/machines', {
+      method: 'POST',
+      body: { name: `too-big-${Math.random().toString(36).slice(2, 8)}`, mem_mib: 1024 * 1024 },
+    });
+    assert(status === 507, `expected 507, got ${status}: ${JSON.stringify(json)}`);
+    assert(json.code === 'no_capacity', `code = ${json.code}, want no_capacity`);
+    assert(typeof json.next === 'string' && json.next.length > 0,
+      'the refusal says nothing about what to do next');
+  });
+
+  const { json: hosts } = await request('/v1/hosts');
+  const live = (hosts ?? []).filter((h) => h.alive);
+  if (live.length < 2) {
+    // Not a skip of an assertion: on one host there is nowhere to spread TO,
+    // and the shape assertions above have already run.
+    console.log('  - placement spreading needs two live hosts; this fleet has ' + live.length);
+    return;
+  }
+
+  await step('creates through one host land on more than one', async () => {
+    // The gap this closes: a machine used to run wherever the client happened
+    // to point its CLI, so a fleet of five behaved like one host with four
+    // spares.
+    const tag = Math.random().toString(36).slice(2, 8);
+    const created = [];
+    const landed = new Set();
+    try {
+      for (let i = 0; i < 6; i++) {
+        const { status, json } = await request('/v1/machines', {
+          method: 'POST',
+          body: { name: `place-${tag}-${i}`, mem_mib: 512, knobs: { auto_stop: 'off' } },
+        });
+        assert(status === 201, `create ${i}: HTTP ${status} ${JSON.stringify(json)}`);
+        created.push(json.id);
+        landed.add(json.host_id);
+      }
+      assert(landed.size > 1,
+        `six creates all landed on ${[...landed].join(',')}; a fleet of ${live.length} must spread`);
+    } finally {
+      for (const id of created) await destroy(id);
+    }
+  });
+
+  await step('a draining host is given nothing, and takes work again after', async () => {
+    const victim = live[live.length - 1].id;
+    const tag = Math.random().toString(36).slice(2, 8);
+    const created = [];
+    try {
+      const drained = await request(`/v1/hosts/${encodeURIComponent(victim)}/drain`, { method: 'POST' });
+      assert(drained.status === 200, `drain: HTTP ${drained.status} ${JSON.stringify(drained.json)}`);
+      assert(drained.json.draining === true, 'the host is not marked draining');
+
+      // Every create now avoids it. That is what lets a drain converge rather
+      // than race the placer for the machines it is trying to move off.
+      for (let i = 0; i < 4; i++) {
+        const { status, json } = await request('/v1/machines', {
+          method: 'POST',
+          body: { name: `drain-${tag}-${i}`, mem_mib: 512, knobs: { auto_stop: 'off' } },
+        });
+        assert(status === 201, `create ${i}: HTTP ${status} ${JSON.stringify(json)}`);
+        created.push(json.id);
+        assert(json.host_id !== victim,
+          `${json.id} was placed on ${victim}, which is draining`);
+      }
+    } finally {
+      for (const id of created) await destroy(id);
+      // Leave the fleet usable whatever happened above.
+      await request(`/v1/hosts/${encodeURIComponent(victim)}/drain`, { method: 'DELETE' });
+    }
+
+    const after = await request(`/v1/hosts/${encodeURIComponent(victim)}/drain`);
+    assert(after.status === 200, `drain status: HTTP ${after.status}`);
+    assert(after.json.draining === false,
+      `${victim} is still draining after an undrain`);
+  });
+}
+
 async function dataRouteAssertions() {
   const tag = Math.random().toString(36).slice(2, 8);
   const created = [];
@@ -6346,6 +6449,7 @@ async function main() {
   // the usage answer need no Firecracker, and the half that does says so.
   await dataRouteAssertions();
   await egressAddressAssertions();
+  await placementAssertions();
   await hostedMCPAssertions(FULL);
   if (FULL) {
     // The engine target or the degraded ceiling: enforce() needs to know

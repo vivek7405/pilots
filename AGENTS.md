@@ -100,7 +100,11 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
 
 1. **Single-writer.** A host writes ONLY rows describing its own machines.
    The sanctioned exceptions are deterministic-owner operations (name
-   allocation and self-heal claims of a *provably dead* host's machines) and
+   allocation and self-heal claims of a *provably dead* host's machines),
+   a **planned handoff** (a LIVE host offering its own machine to another, on
+   a drain — the offer row is write-once, written by the machine's current
+   owner, and the claim is checked against it: right target, right current
+   owner, newest offer, machine not running), and
    the write-once rows in `tenancy`, `api_key_revocations` and
    `repo_links`, plus
    `api_keys` and `org_quotas` on an admin-scoped request. Violating this

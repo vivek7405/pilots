@@ -73,6 +73,20 @@ type Options struct {
 	// outage lasting until a background loop notices.
 	Rescue func(ctx context.Context, m state.Machine) error
 
+	// HandingOff reports the host a machine is being MOVED to, while a planned
+	// drain is in flight, and false otherwise.
+	//
+	// Read before anything else on the request path, because during that
+	// window the row still names the source host while the machine has already
+	// been suspended there and offered elsewhere. Without this the request
+	// would reach the source, be refused a wake, and the client would see a
+	// failure for an operation nobody asked them to notice. With it the
+	// request goes to the target and waits there, which is what makes a drain
+	// invisible.
+	//
+	// Nil on a single box, where there is nowhere to hand anything.
+	HandingOff func(machineID string) (hostID string, ok bool)
+
 	// Lookup resolves a machine by name from an in-memory replica, sparing
 	// the routing hot path a store query per request -- which in a fleet is
 	// an HTTP round trip to the corrosion agent. Optional; nil, and a miss
