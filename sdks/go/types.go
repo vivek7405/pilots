@@ -609,6 +609,10 @@ type UsageTotals struct {
 	VCPUSeconds      int64 `json:"vcpu_seconds"`
 	MiBSeconds       int64 `json:"mib_seconds"`
 	VolumeGiBSeconds int64 `json:"volume_gib_seconds"`
+	// SnapshotGiBSeconds is what this org's checkpoints held in object
+	// storage, accrued in EVERY machine state: the bytes are there whatever
+	// the guest is doing, which is why a stopped machine is not free.
+	SnapshotGiBSeconds int64 `json:"snapshot_gib_seconds"`
 }
 
 type UsageResponse struct {

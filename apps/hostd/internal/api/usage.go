@@ -63,6 +63,10 @@ func (d Deps) handleUsage(w http.ResponseWriter, r *http.Request) {
 				VCPUSeconds:      t.VCPUSeconds,
 				MiBSeconds:       t.MiBSeconds,
 				VolumeGiBSeconds: t.VolumeGiBSeconds,
+				// MiB inside the ledger, GiB on the wire: a diff checkpoint is
+				// tens of megabytes, so the ledger would meter most of them as
+				// zero in GiB, and an invoice line is read in GiB.
+				SnapshotGiBSeconds: t.SnapshotMiBSeconds / 1024,
 			}
 		}
 	}

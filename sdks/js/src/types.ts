@@ -591,6 +591,12 @@ export interface UsageTotals {
   vcpu_seconds: number
   mib_seconds: number
   volume_gib_seconds: number
+  /**
+   * What this org's checkpoints held in object storage, accrued in EVERY
+   * machine state: the bytes are there whatever the guest is doing, which is
+   * why a stopped machine is not free.
+   */
+  snapshot_gib_seconds: number
 }
 
 export interface UsageResponse {

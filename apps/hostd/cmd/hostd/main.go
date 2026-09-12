@@ -362,7 +362,7 @@ func run() error {
 	// Meter from the adopted set forward. The previous hostd's open intervals
 	// ended at its last tick, so the gap a restart leaves is bounded by one
 	// tick rather than by how long the process was down.
-	ledger.Recover(usageEntries(ctx, store, cfg.HostID))
+	ledger.Recover(usageEntries(ctx, store, cfg.HostID, mgr))
 
 	// Re-gossip this host's own rows. A write that reached the local replica
 	// and never left the host -- a partition, a wedge, a kill between the two
@@ -768,7 +768,9 @@ func dispatch(cfg *config.Config, rtr http.Handler, ctrl http.Handler) http.Hand
 // The org and the volume size are read here rather than inside the ledger, so
 // internal/usage imports neither the store nor the API and stays a file
 // format with a clock.
-func usageEntries(ctx context.Context, store state.Store, hostID string) []usage.Entry {
+func usageEntries(ctx context.Context, store state.Store, hostID string,
+	mgr *machines.Manager) []usage.Entry {
+
 	rows, err := store.ListMachines(ctx)
 	if err != nil {
 		slog.Warn("could not list machines to resume metering; usage for "+
@@ -794,6 +796,11 @@ func usageEntries(ctx context.Context, store state.Store, hostID string) []usage
 			if v, verr := store.GetVolume(ctx, row.VolumeID); verr == nil && v != nil {
 				e.VolumeGiB = v.SizeMiB / 1024
 			}
+		}
+		// What this machine's checkpoints hold, so a restart resumes metering
+		// the storage rather than starting it again at zero.
+		if mgr != nil {
+			e.SnapshotMiB = mgr.SnapshotMiBOf(ctx, row.ID)
 		}
 		out = append(out, e)
 	}

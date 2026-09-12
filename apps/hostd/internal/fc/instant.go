@@ -2,6 +2,7 @@ package fc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -817,12 +818,15 @@ func (m *Machine) finishCheckpoint(up Uploader, chunks Uploader, opts SnapshotOp
 	// buffer, and dropping its cache costs the next merge rather than saving
 	// anything.
 
+	var rootfsPacked int64
 	if ids.RootfsBuildID != uuid.Nil {
-		if _, _, err := block.Chunkify(ctx, block.ChunkifyOpts{
+		_, rootfsStats, cerr := block.Chunkify(ctx, block.ChunkifyOpts{
 			In:      filepath.Join(localDir, CowFile),
 			OutDir:  filepath.Join(opts.BuildDir, ids.RootfsBuildID.String()),
 			BuildID: ids.RootfsBuildID, ParentDir: opts.RootfsTemplateDir, Dirty: dirty,
-		}); err != nil {
+		})
+		rootfsPacked = rootfsStats.PackedBytes
+		if err := cerr; err != nil {
 			fail(err)
 			return
 		}
@@ -870,7 +874,16 @@ func (m *Machine) finishCheckpoint(up Uploader, chunks Uploader, opts SnapshotOp
 		return
 	}
 
-	if err := os.WriteFile(filepath.Join(localDir, durableMarker), nil, 0o644); err != nil {
+	// The marker carries what this checkpoint ADDED to storage: the packed
+	// bytes of both halves, which is the O(dirty) number rather than the
+	// apparent size of a sparse image. Written here because this is the only
+	// place that knows it, and read by StatusOf, which is what the metering
+	// asks. An empty marker, written by a host that predates this, reads as
+	// zero bytes and meters as nothing rather than failing.
+	marker, _ := json.Marshal(map[string]int64{
+		"bytes": memStats.PackedBytes + rootfsPacked,
+	})
+	if err := os.WriteFile(filepath.Join(localDir, durableMarker), marker, 0o644); err != nil {
 		slog.Error("could not mark checkpoint durable", "machine", m.ID, "err", err)
 	}
 

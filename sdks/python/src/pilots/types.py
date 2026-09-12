@@ -449,6 +449,7 @@ class UsageTotals:
     vcpu_seconds: int = 0
     mib_seconds: int = 0
     volume_gib_seconds: int = 0
+    snapshot_gib_seconds: int = 0
 
 
 @dataclass
