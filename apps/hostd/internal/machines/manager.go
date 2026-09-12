@@ -521,6 +521,14 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 // shape: the process gone but the slot still held, the caches still on disk,
 // the row still in the store -- and Kill aggregates its own errors, so a single
 // stubborn namespace could strand everything else.
+// captureDrain is how long a destroy or a redeploy waits for a background
+// checkpoint upload before removing the files it is reading.
+//
+// Generous enough that an ordinary capture finishes inside it, short enough
+// that a wedged one cannot hold a destroy open. See fc.Machine.AwaitCapture
+// for what happens without the wait at all.
+const captureDrain = 30 * time.Second
+
 func (m *Manager) Destroy(ctx context.Context, id string) error {
 	lock := m.lockFor(id)
 	lock.Lock()
@@ -547,7 +555,11 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 		}
 	}
 
+	// Kept past the registry drop below, because the background capture
+	// outlives the process and the only handle to it is this one.
+	var capturing *fc.Machine
 	if fcm, ok := m.get(id); ok {
+		capturing = fcm
 		// The copy-on-write file holds every write since the last snapshot.
 		// Destroy is the ONLY point at which discarding it is correct.
 		defer fcm.DiscardCow()
@@ -586,6 +598,14 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	// live guest loses its last writes silently rather than failing.
 	if err := m.releaseVolume(ctx, row.VolumeID); err != nil {
 		errs = append(errs, fmt.Errorf("release volume: %w", err))
+	}
+
+	// A checkpoint's upload runs in the background out of the directories
+	// below, and killing the VMM does not stop it. Removing them under a live
+	// capture is what put thirteen "no such file or directory" failures in the
+	// rig's journal. Bounded, because a destroy must still finish.
+	if capturing != nil {
+		capturing.AwaitCapture(captureDrain)
 	}
 
 	if err := os.RemoveAll(m.stateDir(id)); err != nil {
@@ -1106,6 +1126,10 @@ func (m *Manager) Redeploy(ctx context.Context, id string, req api.RedeployReque
 		if slotIdx > 0 {
 			m.pool.Return(slotIdx)
 		}
+		// Before the cache below it is cleared, for the reason Destroy waits:
+		// a checkpoint's upload is still reading that tree and the kill does
+		// not stop it.
+		fcm.AwaitCapture(captureDrain)
 		// The copy-on-write file holds every write since the last snapshot,
 		// and the new image supersedes all of it. Discarded HERE rather than
 		// deferred the way Destroy defers it: the path is derived from the
