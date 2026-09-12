@@ -3159,6 +3159,15 @@ if [ "${EG_CONFIGURED:-0}" = "0" ]; then
       && bad "an unconfigured host carries a per-org snat rule; tenant traffic is being rewritten by nobody's request" \
       || ok "and it rewrites nothing, because no operator asked it to"
   fi
+
+  # The masquerade is decoration without this. Forwarding inside a machine's
+  # own namespace gets a packet from the guest's tap to the veth; getting it
+  # from the veth to the uplink is the root namespace's job, and with the knob
+  # off a guest cannot reach the internet while every rule reads as correct.
+  EG_FWD=$($SSH "root@$EG_IP" "cat /proc/sys/net/ipv4/ip_forward 2>/dev/null" | tr -d '[:space:]')
+  [ "${EG_FWD:-0}" = "1" ] \
+    && ok "the root namespace forwards IPv4, so the masquerade has something to do" \
+    || bad "net.ipv4.ip_forward is ${EG_FWD:-unset} in the root namespace; the masquerade is installed and guests still have no outbound IPv4"
   # And the API agrees with the host: no prefix anywhere means no addresses.
   EG_N=$(api "$EG_IP" GET /v1/egress | jq '.addresses | length' 2>/dev/null)
   [ "${EG_N:-x}" = "0" ] && ok "and /v1/egress reports no addresses, matching the host" \

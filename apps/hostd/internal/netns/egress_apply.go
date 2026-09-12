@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"os"
 
 	"github.com/google/nftables"
 	"github.com/google/nftables/expr"
@@ -108,6 +109,23 @@ func ApplyEgress(c EgressConfig, plan EgressPlan, uplink string) error {
 	if uplink == "" {
 		return fmt.Errorf("netns: no uplink interface to masquerade guest traffic out of; " +
 			"set PILOT_EGRESS_INTERFACE, or give this host a default route")
+	}
+
+	// IPv4 forwarding in the ROOT namespace, without which the masquerade
+	// below is decoration.
+	//
+	// setup.go turns forwarding on inside each machine's own namespace, which
+	// gets a packet from the guest's tap to the veth. Getting it from the veth
+	// to the uplink is the root namespace's job, and nothing turned it on
+	// there -- so with the masquerade rule installed, correct, and scoped to
+	// the right interface, a guest still could not reach the internet and
+	// nothing anywhere said why.
+	//
+	// Here rather than in the bootstrap script's sysctl file for the reason
+	// ApplyTenantFilter writes the v6 knob here: the rule and the knob are
+	// useless apart, so whoever adds one has already added the other.
+	if err := os.WriteFile(v4ForwardingKnob, []byte("1\n"), 0o644); err != nil {
+		return fmt.Errorf("netns: enable ipv4 forwarding: %w", err)
 	}
 
 	conn, err := nftables.New()
