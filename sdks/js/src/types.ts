@@ -211,6 +211,13 @@ export interface ComposeRecipe {
   conn_var: string
   url_template: string
   /**
+   * The second connection string, past the pooler, present only when there is
+   * a pooler. Transaction pooling is not a superset of a direct connection, so
+   * the address a migration must use is named rather than guessed.
+   */
+  direct_var?: string
+  direct_template?: string
+  /**
    * What this mode costs and guarantees, in one line. Show it: a durability
    * decision the operator did not read is one they did not make.
    */

@@ -159,6 +159,8 @@ class ComposeRecipe:
     secret_names: list[str] = field(default_factory=list)
     conn_var: str = ""
     url_template: str = ""
+    direct_var: str = ""
+    direct_template: str = ""
     #: What this mode costs and guarantees, in one line. Show it.
     statement: str = ""
 

@@ -80,11 +80,31 @@ type Recipe struct {
 	// generated secret.
 	ConnVar     string `json:"conn_var"`
 	URLTemplate string `json:"url_template"`
+	// DirectVar and DirectTemplate are the SECOND connection string, past the
+	// pooler, set only when there is a pooler to go past.
+	//
+	// Both are published because transaction pooling is not a superset of a
+	// direct connection: it costs LISTEN/NOTIFY, session advisory locks,
+	// temporary tables and any SET that outlives a transaction. A migration
+	// tool pointed at the pooler fails in ways that look like a broken
+	// migration, so the address that works is named rather than left to be
+	// rediscovered.
+	DirectVar      string `json:"direct_var,omitempty"`
+	DirectTemplate string `json:"direct_template,omitempty"`
 	// Statement is the one-line explanation of the durability trade this mode
 	// makes. Printed by `pilot add` and shown in the dashboard, because a
 	// durability decision the operator did not read is a decision they did not
 	// make.
 	Statement string `json:"statement"`
+}
+
+// DirectURLFor is the connection string that goes PAST the pooler, with the
+// generated password in it. Empty when this recipe has no pooler.
+func (r *Recipe) DirectURLFor(password string) string {
+	if r.DirectTemplate == "" {
+		return ""
+	}
+	return strings.Replace(r.DirectTemplate, "PASSWORD", password, 1)
 }
 
 // Engines are the databases a recipe exists for.
@@ -258,6 +278,8 @@ func postgresRecipe(name, mode string, pool bool) *Recipe {
 		// published too, for the migrations and admin tools that need it.
 		r.ConnVar = "DATABASE_URL"
 		r.URLTemplate = "postgres://postgres:PASSWORD@" + name + ".internal:6432/postgres"
+		r.DirectVar = "DATABASE_URL_DIRECT"
+		r.DirectTemplate = "postgres://postgres:PASSWORD@" + name + ".internal:" + port + "/postgres"
 		r.Statement += " Connections go through pgbouncer on 6432 in transaction " +
 			"mode; " + name + ".internal:5432 is the direct address, which is what " +
 			"migrations and any session-level feature must use."

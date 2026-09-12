@@ -127,6 +127,9 @@ func newAddCmd(env *Env, getenv config.Env) *cobra.Command {
 				store[app][n] = password
 			}
 			store[app][engine+"_url"] = recipe.URLFor(password)
+			if direct := recipe.DirectURLFor(password); direct != "" {
+				store[app][engine+"_url_direct"] = direct
+			}
 			if err := saveSecrets(getenv, creds, store); err != nil {
 				return err
 			}
@@ -139,14 +142,33 @@ func newAddCmd(env *Env, getenv config.Env) *cobra.Command {
 			// the sentence that tells somebody what they just chose.
 			env.W.Notef("%s", recipe.Statement)
 
-			line := fmt.Sprintf("%s: secret://%s_url", recipe.ConnVar, engine)
-			if to != "" {
-				if err := addEnvTo(file, to, recipe.ConnVar, "secret://"+engine+"_url"); err != nil {
+			// The pooled address and, where there is a pooler, the direct one
+			// beside it. Both, because transaction pooling costs the
+			// session-level features and a migration tool pointed at the pooler
+			// fails in ways that read as a broken migration.
+			vars := [][2]string{{recipe.ConnVar, engine + "_url"}}
+			if recipe.DirectVar != "" {
+				vars = append(vars, [2]string{recipe.DirectVar, engine + "_url_direct"})
+			}
+			var lines []string
+			for _, v := range vars {
+				lines = append(lines, fmt.Sprintf("    %s: secret://%s", v[0], v[1]))
+				if to == "" {
+					continue
+				}
+				if err := addEnvTo(file, to, v[0], "secret://"+v[1]); err != nil {
 					return err
 				}
-				env.W.Linef("set %s on %s", recipe.ConnVar, to)
-			} else {
-				env.W.Notef("add this to whichever service uses it:\n  environment:\n    %s", line)
+				env.W.Linef("set %s on %s", v[0], to)
+			}
+			if to == "" {
+				env.W.Notef("add this to whichever service uses it:\n  environment:\n%s",
+					strings.Join(lines, "\n"))
+			}
+			if recipe.DirectVar != "" {
+				env.W.Notef("point migrations and anything using LISTEN/NOTIFY, session "+
+					"advisory locks or temporary tables at %s: transaction pooling "+
+					"does not carry them", recipe.DirectVar)
 			}
 			env.W.Notef("then `pilot deploy` to bring it up")
 			// Said once, on the command that creates the expectation. A

@@ -559,6 +559,13 @@ type ComposeRecipe struct {
 	// URLTemplate its value with PASSWORD standing in for the secret.
 	ConnVar     string `json:"conn_var"`
 	URLTemplate string `json:"url_template"`
+	// DirectVar and DirectTemplate are the second connection string, past the
+	// pooler, present only when there is a pooler. Transaction pooling is not a
+	// superset of a direct connection -- it costs LISTEN/NOTIFY, session
+	// advisory locks, temporary tables and any SET that outlives a transaction
+	// -- so the address a migration must use is named rather than guessed.
+	DirectVar      string `json:"direct_var,omitempty"`
+	DirectTemplate string `json:"direct_template,omitempty"`
 	// Statement is what this mode costs and guarantees, in one line. Print it:
 	// a durability decision the operator did not read is one they did not make.
 	Statement string `json:"statement"`
@@ -570,6 +577,15 @@ type ComposeRecipe struct {
 // made on the caller's machine and the fleet never sees it.
 func (r *ComposeRecipe) URLFor(password string) string {
 	return strings.Replace(r.URLTemplate, "PASSWORD", password, 1)
+}
+
+// DirectURLFor is the connection string that goes PAST the pooler. Empty when
+// the recipe has no pooler.
+func (r *ComposeRecipe) DirectURLFor(password string) string {
+	if r.DirectTemplate == "" {
+		return ""
+	}
+	return strings.Replace(r.DirectTemplate, "PASSWORD", password, 1)
 }
 
 // VolumePolicy is how often a volume is snapshotted and how much is kept.
