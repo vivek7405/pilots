@@ -226,6 +226,28 @@ func (v *Volumes) DeleteSnapshot(ctx context.Context, id, snapshot string) error
 		"/v1/volumes/"+url.PathEscape(id)+"/snapshots/"+url.PathEscape(snapshot), nil, nil)
 }
 
+// Grant replaces what every replica of this service may ask its host's broker
+// for. See GrantRequest: both fields replace.
+func (s *Services) Grant(ctx context.Context, id string, req GrantRequest) (*GrantResponse, error) {
+	var out GrantResponse
+	return &out, s.c.do(ctx, http.MethodPut,
+		"/v1/services/"+url.PathEscape(id)+"/secrets", req, &out)
+}
+
+// GrantOf reads what is granted: names and scopes, never values.
+func (s *Services) GrantOf(ctx context.Context, id string) (*GrantResponse, error) {
+	var out GrantResponse
+	return &out, s.c.do(ctx, http.MethodGet,
+		"/v1/services/"+url.PathEscape(id)+"/secrets", nil, &out)
+}
+
+// RevokeGrant removes it, so the next token this service's replicas ask for is
+// refused. Tokens already minted die at their own expiry.
+func (s *Services) RevokeGrant(ctx context.Context, id string) error {
+	return s.c.do(ctx, http.MethodDelete,
+		"/v1/services/"+url.PathEscape(id)+"/secrets", nil, nil)
+}
+
 // Env reads a service's environment back, values and all.
 //
 // The one call that answers with values; everything else returns names. Needs a

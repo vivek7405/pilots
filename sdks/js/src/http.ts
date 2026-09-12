@@ -7,6 +7,8 @@
  * bought for convenience.
  */
 
+import { machineCredential } from './broker.ts'
+import type { BrokerCredential } from './broker.ts'
 import {
   ComposePlanError,
   NotFoundError,
@@ -66,15 +68,25 @@ export function resolveBaseURL(explicit?: string): string {
 export class Http {
   readonly baseURL: string
   readonly apiKey: string
+  /**
+   * The machine's own token, for a client inside one that was given no key.
+   * undefined everywhere else. An explicit key is never replaced by it: a
+   * process that passed a key acting as something else is the worst kind of
+   * authentication bug, because the call succeeds against the wrong identity.
+   */
+  private readonly broker: BrokerCredential | undefined
   readonly timeoutMs: number
   /** See HttpOptions.org. Empty on a client that acts as its own key's org. */
   readonly org: string | undefined
   private readonly fetchImpl: FetchLike
 
   constructor(apiKey: string, opts: HttpOptions = {}) {
-    if (!apiKey) {
-      // Before any request: a client built with no key would otherwise fail
-      // once per call with a 401 that says nothing about the cause.
+    // Inside a machine, no key is the NORMAL case: the guest agent keeps this
+    // machine's own token on disk and that is what a client uses. Outside one,
+    // no key is still a mistake worth catching before any request, because it
+    // would otherwise fail once per call with a 401 that says nothing.
+    this.broker = apiKey ? undefined : machineCredential()
+    if (!apiKey && !this.broker) {
       throw new PilotsError('an API key is required: new PilotsClient(process.env.PILOT_API_KEY)')
     }
     this.apiKey = apiKey
@@ -82,6 +94,18 @@ export class Http {
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
     this.org = opts.org || undefined
     this.fetchImpl = opts.fetch ?? globalThis.fetch
+  }
+
+  /**
+   * The bearer to send: the explicit key, or this machine's own token.
+   *
+   * One function, so the places that set an Authorization header cannot
+   * disagree about which credential a request carries. Three of them are
+   * WebSocket dials, which is exactly where a divergence shows up as an upgrade
+   * that fails with nothing in the body to explain it.
+   */
+  credential(): string {
+    return this.apiKey || this.broker?.value() || ''
   }
 
   /**
@@ -102,7 +126,7 @@ export class Http {
 
   /** Performs the request and throws on any non-2xx. */
   async send(method: string, path: string, init: RequestInit_ = {}): Promise<Response> {
-    const headers: Record<string, string> = { authorization: `Bearer ${this.apiKey}` }
+    const headers: Record<string, string> = { authorization: `Bearer ${this.credential()}` }
     if (init.accept) headers.accept = init.accept
 
     let body: BodyInit | undefined

@@ -602,6 +602,50 @@ type VolumePolicy struct {
 	KeepWeekly int    `json:"keep_weekly,omitempty"`
 }
 
+// GrantRequest is what a machine, or every replica of a service, may ask its
+// host's credential broker for. Both fields REPLACE.
+//
+// Replace rather than merge, because merging two partial grants produces a
+// permission nobody wrote: one caller adds a scope, another adds a secret, and
+// the machine ends up holding a union neither reviewed.
+type GrantRequest struct {
+	// Scopes a minted token may carry. Empty means no token at all. A caller
+	// may grant only scopes it already holds, and never admin.
+	Scopes []string `json:"scopes,omitempty"`
+	// Secrets the machine may fetch from its broker. These never enter the
+	// machine's environment, so they are in no snapshot and on no disk in the
+	// guest. Empty means none.
+	Secrets map[string]string `json:"secrets,omitempty"`
+}
+
+// GrantResponse is what is granted, without the values. Reading a grant answers
+// with NAMES: a route that returned granted secrets would be a second reveal
+// route with none of the deliberation the first one has.
+type GrantResponse struct {
+	ID          string   `json:"id"`
+	Kind        string   `json:"kind"`
+	OrgID       string   `json:"org_id,omitempty"`
+	Scopes      []string `json:"scopes"`
+	SecretNames []string `json:"secret_names"`
+	UpdatedAt   int64    `json:"updated_at,omitempty"`
+}
+
+// BrokerClaims is what a machine's own token says about itself.
+//
+// Decodable by a client that wants to know when its token dies or what it is
+// allowed to do, which is the only reason this is here: it is never sent as a
+// request body. The signature is not carried, so nothing in a client can be
+// mistaken for a verifier -- verifying is hostd's, from a secret no client has.
+type BrokerClaims struct {
+	V        int      `json:"v"`
+	Org      string   `json:"org"`
+	Machine  string   `json:"machine"`
+	Service  string   `json:"service,omitempty"`
+	Scopes   []string `json:"scopes"`
+	IssuedAt int64    `json:"iat"`
+	Expires  int64    `json:"exp"`
+}
+
 // ServiceEnvResponse is a service's environment WITH the values in it.
 //
 // Every other surface returns variable names only. This one exists so a
@@ -1044,6 +1088,9 @@ var wireTypes = []any{
 	SnapshotResponse{},
 	VolumePolicy{},
 	ComposeRecipe{},
+	GrantRequest{},
+	GrantResponse{},
+	BrokerClaims{},
 	ServiceEnvResponse{},
 	ForkVolumeRequest{},
 	SnapshotListResponse{},

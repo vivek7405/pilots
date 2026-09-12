@@ -259,3 +259,27 @@ func (h *Hosts) Egress(ctx context.Context) (*EgressResponse, error) {
 	var out EgressResponse
 	return &out, h.c.do(ctx, http.MethodGet, "/v1/egress", nil, &out)
 }
+
+// Grant replaces what this machine may ask its host's broker for.
+//
+// Deny by default: a machine with no grant can mint no token and read no
+// secret, which is the state every machine starts in.
+func (m *Machines) Grant(ctx context.Context, id string, req GrantRequest) (*GrantResponse, error) {
+	var out GrantResponse
+	return &out, m.c.do(ctx, http.MethodPut,
+		"/v1/machines/"+url.PathEscape(id)+"/secrets", req, &out)
+}
+
+// GrantOf reads what is granted: names and scopes, never values.
+func (m *Machines) GrantOf(ctx context.Context, id string) (*GrantResponse, error) {
+	var out GrantResponse
+	return &out, m.c.do(ctx, http.MethodGet,
+		"/v1/machines/"+url.PathEscape(id)+"/secrets", nil, &out)
+}
+
+// RevokeGrant removes it. A token already minted lives out its fifteen minutes;
+// revoke the token itself to end one sooner.
+func (m *Machines) RevokeGrant(ctx context.Context, id string) error {
+	return m.c.do(ctx, http.MethodDelete,
+		"/v1/machines/"+url.PathEscape(id)+"/secrets", nil, nil)
+}

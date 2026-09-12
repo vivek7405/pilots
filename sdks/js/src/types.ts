@@ -240,6 +240,50 @@ export interface VolumePolicy {
 }
 
 /**
+ * What a machine, or every replica of a service, may ask its host's credential
+ * broker for. Both fields REPLACE.
+ *
+ * Replace rather than merge, because merging two partial grants produces a
+ * permission nobody wrote.
+ */
+export interface GrantRequest {
+  /** Scopes a minted token may carry. Empty means no token. Never `admin`. */
+  scopes?: string[]
+  /**
+   * Secrets the machine may fetch from its broker. These never enter the
+   * machine's environment, so they are in no snapshot and on no disk in it.
+   */
+  secrets?: Record<string, string>
+}
+
+/** What is granted, without the values. Reading a grant answers with names. */
+export interface GrantResponse {
+  id: string
+  kind: string
+  org_id?: string
+  scopes: string[]
+  secret_names: string[]
+  updated_at?: number
+}
+
+/**
+ * What a machine's own token says about itself.
+ *
+ * Decodable by a client that wants to know when its token dies. Never sent as a
+ * request body, and the signature is not carried: verifying is hostd's, from a
+ * secret no client has.
+ */
+export interface BrokerClaims {
+  v: number
+  org: string
+  machine: string
+  service?: string
+  scopes: string[]
+  iat: number
+  exp: number
+}
+
+/**
  * A service's environment WITH the values in it.
  *
  * Every other surface returns names only. This one exists so a password that

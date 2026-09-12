@@ -182,6 +182,47 @@ class VolumePolicy:
 
 
 @dataclass
+class GrantRequest:
+    """What a machine may ask its host's credential broker for.
+
+    Both fields replace. Merging two partial grants produces a permission
+    nobody wrote.
+    """
+
+    scopes: list[str] = field(default_factory=list)
+    secrets: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class GrantResponse:
+    """What is granted, without the values."""
+
+    id: str = ""
+    kind: str = ""
+    org_id: str = ""
+    scopes: list[str] = field(default_factory=list)
+    secret_names: list[str] = field(default_factory=list)
+    updated_at: int = 0
+
+
+@dataclass
+class BrokerClaims:
+    """What a machine's own token says about itself.
+
+    Never sent as a request body, and the signature is not carried: verifying
+    is hostd's, from a secret no client has.
+    """
+
+    v: int = 0
+    org: str = ""
+    machine: str = ""
+    service: str = ""
+    scopes: list[str] = field(default_factory=list)
+    iat: int = 0
+    exp: int = 0
+
+
+@dataclass
 class ServiceEnvResponse:
     """A service's environment with the values in it.
 

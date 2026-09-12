@@ -94,7 +94,7 @@ export class PilotsClient {
   }
 
   get apiKey(): string {
-    return this.http.apiKey
+    return this.http.credential()
   }
 
   /** Liveness. The one route that needs no key. */
@@ -212,7 +212,7 @@ export class Machines {
       opts,
       this.http.org,
     )
-    return new ExecStream(url, this.http.apiKey, {
+    return new ExecStream(url, this.http.credential(), {
       // A tty implies stdin, so the pair is settled here rather than left to
       // each caller: hostd refuses tty=true with stdin=false outright.
       stdin: opts.tty ? true : (opts.stdin ?? false),
@@ -233,7 +233,7 @@ export class Machines {
    * cannot arrive until the queue drains.
    */
   tcp(id: string, port: number, opts: TCPOptions = {}): Promise<Duplex> {
-    return tcpStream(this.http.baseURL, this.http.apiKey, id, port, this.http.org, {
+    return tcpStream(this.http.baseURL, this.http.credential(), id, port, this.http.org, {
       ...(opts.WebSocket ?? this.WebSocket ? { WebSocket: opts.WebSocket ?? this.WebSocket! } : {}),
     })
   }
