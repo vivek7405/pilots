@@ -478,11 +478,22 @@ func run() error {
 		// session to it holds it. Read beside the filter that writes the
 		// counters.
 		go runActivity(ctx, view, locator, mgr, guest)
-		// Per-org outbound addresses, on a host that has been given a prefix.
-		// Behind the mesh check because the rules match a machine's MESH
-		// address: without a mesh identity there is nothing unique to match.
-		go runEgress(ctx, cfg.HostID, cfg.Egress, store, view, locator)
 	}
+
+	// Outbound traffic: the shared masquerade always, per-org addresses when
+	// an operator has configured them.
+	//
+	// NOT behind the mesh check any more, and that was a real gap rather than
+	// tidying. The check was right when this loop only wrote per-org source
+	// rewrites, which match a machine's MESH address and are meaningless
+	// without one. It also installs the IPv4 masquerade, which matches a slot
+	// address and has nothing to do with the mesh -- so a host without a mesh
+	// prefix got no masquerade and its guests had no outbound IPv4 at all.
+	//
+	// Safe without a mesh: egressBindings skips a machine it cannot address,
+	// so the plan is empty and the table holds the masquerade alone, which is
+	// exactly right for that host.
+	go runEgress(ctx, cfg.HostID, cfg.Egress, store, view, locator)
 
 	routerOpts := router.Options{
 		Domain: cfg.WorkloadDomain,
