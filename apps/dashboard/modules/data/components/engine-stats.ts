@@ -130,4 +130,4 @@ function humanDuration(seconds: number): string {
   return `${Math.floor(seconds / 86400)}d`;
 }
 
-customElements.define('engine-stats', EngineStats);
+EngineStats.register('engine-stats');

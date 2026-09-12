@@ -240,6 +240,27 @@ export interface VolumePolicy {
 }
 
 /**
+ * One machine's CPU and memory, read from its cgroup on the host that owns it.
+ *
+ * `cpu_seconds` is monotonic across suspend and wake: a counter that went down
+ * would make every rate over it negative and fire every alert on an ordinary
+ * suspend. `memory_bytes` is zero while suspended, which is the truth rather
+ * than a gap.
+ */
+export interface MachineMetrics {
+  machine_id: string
+  name?: string
+  service_id?: string
+  state: string
+  vcpus: number
+  mem_mib: number
+  cpu_seconds: number
+  memory_bytes: number
+  memory_limit_bytes: number
+  sampled_at: number
+}
+
+/**
  * What a machine, or every replica of a service, may ask its host's credential
  * broker for. Both fields REPLACE.
  *

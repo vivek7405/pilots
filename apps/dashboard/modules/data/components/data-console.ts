@@ -171,4 +171,4 @@ export class DataConsole extends WebComponent({
   }
 }
 
-customElements.define('data-console', DataConsole);
+DataConsole.register('data-console');

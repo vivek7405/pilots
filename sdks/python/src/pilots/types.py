@@ -182,6 +182,26 @@ class VolumePolicy:
 
 
 @dataclass
+class MachineMetrics:
+    """One machine's CPU and memory, read from its cgroup on its owner.
+
+    ``cpu_seconds`` is monotonic across suspend and wake; ``memory_bytes`` is
+    zero while suspended, which is the truth rather than a gap.
+    """
+
+    machine_id: str = ""
+    name: str = ""
+    service_id: str = ""
+    state: str = ""
+    vcpus: int = 0
+    mem_mib: int = 0
+    cpu_seconds: float = 0.0
+    memory_bytes: int = 0
+    memory_limit_bytes: int = 0
+    sampled_at: int = 0
+
+
+@dataclass
 class GrantRequest:
     """What a machine may ask its host's credential broker for.
 

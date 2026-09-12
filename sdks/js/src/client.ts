@@ -42,6 +42,7 @@ import type {
   Release,
   RepoLinkListResponse,
   RepoLinkResponse,
+  MachineMetrics,
   RepoRef,
   ServiceEnvResponse,
   ResizeMachineRequest,
@@ -236,6 +237,16 @@ export class Machines {
     return tcpStream(this.http.baseURL, this.http.credential(), id, port, this.http.org, {
       ...(opts.WebSocket ?? this.WebSocket ? { WebSocket: opts.WebSocket ?? this.WebSocket! } : {}),
     })
+  }
+
+  /**
+   * What one machine is using, from the host that owns it.
+   *
+   * A host asked about somebody else's machine forwards rather than answering
+   * with zeroes, so this is correct wherever it is called.
+   */
+  metrics(id: string): Promise<MachineMetrics> {
+    return this.http.json<MachineMetrics>('GET', `/v1/machines/${encodeURIComponent(id)}/metrics`)
   }
 
   /** Follows the console log line by line. Never given a client deadline. */

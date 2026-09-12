@@ -6011,11 +6011,12 @@ const MCP_TOOLS = [
   'destroy_machine', 'diagnose', 'docs', 'domains', 'exec',
   'exec_stream', 'fork', 'generate_dockerfile', 'grant', 'grants', 'init',
   'list_machines', 'list_services',
-  'logs', 'plan', 'promote', 'pull_file', 'push_file', 'releases', 'restore',
+  'logs', 'metrics', 'plan', 'promote', 'pull_file', 'push_file', 'releases',
+  'restore',
   'rollback', 'service', 'status', 'volumes',
 ];
-// The six that read the agent's own filesystem. `pilot mcp` serves all 30;
-// the hosted endpoint on every host serves the other 24, because it has no
+// The six that read the agent's own filesystem. `pilot mcp` serves all 31;
+// the hosted endpoint on every host serves the other 25, because it has no
 // disk on the agent's side to read. One list, one subtraction, so the two
 // servers cannot drift apart without this file noticing.
 const MCP_LOCAL_TOOLS = ['build', 'deploy', 'generate_dockerfile', 'plan', 'pull_file', 'push_file'];

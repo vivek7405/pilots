@@ -99,8 +99,8 @@ func TestFleetToolsAreExactlyTheList(t *testing.T) {
 			t.Errorf("%s is in both lists", name)
 		}
 	}
-	if len(FleetTools)+len(LocalTools) != 30 {
-		t.Fatalf("the two lists hold %d tools; the battery expects 30", len(FleetTools)+len(LocalTools))
+	if len(FleetTools)+len(LocalTools) != 31 {
+		t.Fatalf("the two lists hold %d tools; the battery expects 31", len(FleetTools)+len(LocalTools))
 	}
 }
 

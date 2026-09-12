@@ -52,6 +52,22 @@ func (m *Machines) Logs(ctx context.Context, id string) (string, error) {
 	return m.c.text(ctx, http.MethodGet, "/v1/machines/"+url.PathEscape(id)+"/logs")
 }
 
+// LogsTail returns the last n lines.
+//
+// A separate method rather than a variadic on Logs, because Logs is called from
+// four places and a signature that silently accepted a count would be one
+// somebody could pass the wrong thing to and never notice.
+//
+// n of zero or less is the whole log, which is what "no tail" means and what a
+// flag left unset should do.
+func (m *Machines) LogsTail(ctx context.Context, id string, n int) (string, error) {
+	path := "/v1/machines/" + url.PathEscape(id) + "/logs"
+	if n > 0 {
+		path = query(path, [2]string{"tail", strconv.Itoa(n)})
+	}
+	return m.c.text(ctx, http.MethodGet, path)
+}
+
 // FollowLogs streams the console log line by line. The sequence ends when the
 // context is cancelled or the connection drops; a read error is the second
 // value of the final pair.
@@ -282,4 +298,14 @@ func (m *Machines) GrantOf(ctx context.Context, id string) (*GrantResponse, erro
 func (m *Machines) RevokeGrant(ctx context.Context, id string) error {
 	return m.c.do(ctx, http.MethodDelete,
 		"/v1/machines/"+url.PathEscape(id)+"/secrets", nil, nil)
+}
+
+// Metrics is what one machine is using, from the host that owns it.
+//
+// A host asked about somebody else's machine forwards rather than answering
+// with zeroes, so this is correct wherever it is called.
+func (m *Machines) Metrics(ctx context.Context, id string) (*MachineMetrics, error) {
+	var out MachineMetrics
+	return &out, m.c.do(ctx, http.MethodGet,
+		"/v1/machines/"+url.PathEscape(id)+"/metrics", nil, &out)
 }

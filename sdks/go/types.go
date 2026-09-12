@@ -602,6 +602,30 @@ type VolumePolicy struct {
 	KeepWeekly int    `json:"keep_weekly,omitempty"`
 }
 
+// MachineMetrics is one machine's CPU and memory.
+//
+// Read from the cgroup on the host that owns the machine, so the numbers are
+// the kernel's rather than an estimate. Distinct from the host's own /metrics,
+// which stays unauthenticated and label-free because a label per machine
+// multiplies every series by the machine count.
+type MachineMetrics struct {
+	MachineID string `json:"machine_id"`
+	Name      string `json:"name,omitempty"`
+	ServiceID string `json:"service_id,omitempty"`
+	State     string `json:"state"`
+	VCPUs     int    `json:"vcpus"`
+	MemMiB    int    `json:"mem_mib"`
+	// CPUSeconds is monotonic across suspend and wake. A counter that went down
+	// would make every rate over it negative or enormous, and would fire every
+	// alert built on it whenever a machine was suspended.
+	CPUSeconds float64 `json:"cpu_seconds"`
+	// MemoryBytes is what it holds now. Zero while suspended, which is the
+	// truth rather than a gap.
+	MemoryBytes      int64 `json:"memory_bytes"`
+	MemoryLimitBytes int64 `json:"memory_limit_bytes"`
+	SampledAt        int64 `json:"sampled_at"`
+}
+
 // GrantRequest is what a machine, or every replica of a service, may ask its
 // host's credential broker for. Both fields REPLACE.
 //
@@ -1088,6 +1112,7 @@ var wireTypes = []any{
 	SnapshotResponse{},
 	VolumePolicy{},
 	ComposeRecipe{},
+	MachineMetrics{},
 	GrantRequest{},
 	GrantResponse{},
 	BrokerClaims{},

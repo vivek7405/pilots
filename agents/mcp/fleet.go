@@ -29,8 +29,9 @@ import (
 var FleetTools = []string{
 	"build_logs", "checkpoint", "create_machine", "database", "destroy_machine",
 	"diagnose", "docs", "domains", "exec", "exec_stream", "fork", "grant",
-	"grants", "init", "list_machines", "list_services", "logs", "promote",
-	"releases", "restore", "rollback", "service", "status", "volumes",
+	"grants", "init", "list_machines", "list_services", "logs", "metrics",
+	"promote", "releases", "restore", "rollback", "service", "status",
+	"volumes",
 }
 
 // LocalTools are the tools that need the agent's own filesystem: a directory
@@ -472,6 +473,25 @@ func RegisterFleetTools(s *mcp.Server, client *pilots.Client, opts Options) {
 		func(ctx context.Context, _ *mcp.CallToolRequest, in databaseIn) (*mcp.CallToolResult, any, error) {
 			return Wrap(func() (any, error) { return describeDatabase(ctx, client, in.Service) },
 				Constant("exec on the machine, or tell the operator to run `pilot db connect`"))
+		})
+
+	// What a machine is USING, as opposed to what it was allotted.
+	//
+	// The tool for "why is this slow" and "why did this die": the allotment is
+	// already on the machine, and the difference between the two is the answer.
+	mcp.AddTool(s, &mcp.Tool{Name: "metrics", Title: "What a machine is using",
+		Description: "CPU seconds used and memory held now, against the ceilings, read from the machine s cgroup " +
+			"on the host that owns it. CPU is a TOTAL, not a rate: take two readings to get a rate. Memory is " +
+			"zero while a machine is suspended, which is the truth rather than a gap. Memory near the ceiling " +
+			"is why a process was killed; CPU flat while a request hangs means it is waiting, not computing."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in MachineIn) (*mcp.CallToolResult, any, error) {
+			return Wrap(func() (any, error) {
+				m, err := ResolveMachine(ctx, client, in.Machine)
+				if err != nil {
+					return nil, err
+				}
+				return client.Machines.Metrics(ctx, m.ID)
+			}, Constant("logs for what it printed, or exec to look inside"))
 		})
 
 	type grantIn struct {
