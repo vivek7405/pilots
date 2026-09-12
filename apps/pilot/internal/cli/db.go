@@ -10,6 +10,7 @@ import (
 
 	pilots "github.com/vivek7405/pilots/sdks/go"
 
+	"github.com/vivek7405/pilots/cli/internal/config"
 	"github.com/vivek7405/pilots/cli/internal/out"
 )
 
@@ -183,7 +184,7 @@ func humanDuration(sec int64) string {
 // newDBCmd groups the database operations that are not ordinary machine
 // operations. Recovery is the only one so far, and it is here rather than under
 // `volumes` because what a person wants back is a database, not a disk.
-func newDBCmd(env *Env) *cobra.Command {
+func newDBCmd(env *Env, getenv config.Env) *cobra.Command {
 	c := &cobra.Command{
 		Use:     "db",
 		Aliases: []string{"database"},
@@ -193,10 +194,12 @@ func newDBCmd(env *Env) *cobra.Command {
 		What: "What a database needs beyond what a machine needs. Chiefly getting\n" +
 			"back to a moment before something went wrong.",
 		Related: []string{
+			"pilot db connect  a shell on it, in the engine's own client",
 			"pilot add       add a database to a project",
 			"pilot metrics   what the engine says about itself",
 		},
 	})
+	c.AddCommand(newDBConnectCmd(env, getenv))
 	c.AddCommand(newDBRestoreCmd(env))
 	return c
 }
