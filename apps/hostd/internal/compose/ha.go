@@ -76,17 +76,23 @@ func ValidateHAShape(replicas, etcd int) error {
 // Returned as data rather than written here, because the thing that edits a
 // person's compose file is the CLI, on their machine, where they can read the
 // diff before it is deployed.
+//
+// The tags are load-bearing, not decoration. This struct is encoded straight
+// onto the wire, and every SDK mirrors it in snake_case -- so while it had no
+// tags it shipped Go field names, and `etcd_name` was undefined in every
+// client that asked for it. Nothing failed: the CLI read undefined and wrote a
+// compose block naming an etcd service called "undefined".
 type HAFragment struct {
 	// Service is what replaces the database's own block's changing half: the
 	// replica count, the role, and what it now depends on.
-	Service map[string]any
+	Service map[string]any `json:"service"`
 	// Etcd is the new service, by name.
-	EtcdName    string
-	Etcd        map[string]any
-	EtcdVolume  string
-	SecretNames []string
+	EtcdName    string         `json:"etcd_name"`
+	Etcd        map[string]any `json:"etcd"`
+	EtcdVolume  string         `json:"etcd_volume"`
+	SecretNames []string       `json:"secret_names"`
 	// Statement is what the operator is told before any of it happens.
-	Statement string
+	Statement string `json:"statement"`
 }
 
 // HAFragmentFor builds the conversion for one database.
