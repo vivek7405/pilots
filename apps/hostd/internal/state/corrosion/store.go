@@ -1866,6 +1866,23 @@ func (s *Store) PutServiceVolume(ctx context.Context, sv *state.ServiceVolume) e
 }
 
 // DeleteServiceVolumes drops a service's bindings, beside DeleteService.
+// DeleteServiceVolume drops one ordinal's binding.
+//
+// The arbiter's write, like the put: the row names a service, so there is no
+// host column to enforce single-writer on and the service's arbiter is the one
+// party that may change it.
+func (s *Store) DeleteServiceVolume(ctx context.Context, serviceID string, ordinal int) error {
+	if err := s.assertServiceWriter(ctx, serviceID); err != nil {
+		return err
+	}
+	_, err := s.client.Exec(ctx,
+		`DELETE FROM service_volumes WHERE service_id = ? AND ordinal = ?`, serviceID, ordinal)
+	if err != nil {
+		return fmt.Errorf("state: unbind %s ordinal %d: %w", serviceID, ordinal, err)
+	}
+	return nil
+}
+
 func (s *Store) DeleteServiceVolumes(ctx context.Context, serviceID string) error {
 	if _, err := s.client.Exec(ctx,
 		`DELETE FROM service_volumes WHERE service_id = ?`, serviceID); err != nil {

@@ -910,6 +910,10 @@ type Store interface {
 	// arbiter: the row names a service, so there is no host column to enforce
 	// single-writer on and nothing a last-write-wins merge could corrupt.
 	PutServiceVolume(ctx context.Context, sv *ServiceVolume) error
+	// DeleteServiceVolume drops ONE ordinal's binding, for a scale down. The
+	// volume itself is destroyed by the caller: this row is the name, not the
+	// thing, and deleting a row that still names a live volume would leak it.
+	DeleteServiceVolume(ctx context.Context, serviceID string, ordinal int) error
 	// DeleteServiceVolumes drops a service's bindings, called beside
 	// DeleteService. The volume itself stays.
 	DeleteServiceVolumes(ctx context.Context, serviceID string) error
@@ -2437,6 +2441,15 @@ func (s *sqliteStore) ListDomains(ctx context.Context) ([]Domain, error) {
 }
 
 const serviceVolumeCols = `id, service_id, ordinal, volume_id, created_at`
+
+func (s *sqliteStore) DeleteServiceVolume(ctx context.Context, serviceID string, ordinal int) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM service_volumes WHERE service_id = ? AND ordinal = ?`, serviceID, ordinal)
+	if err != nil {
+		return fmt.Errorf("state: unbind %s ordinal %d: %w", serviceID, ordinal, err)
+	}
+	return nil
+}
 
 func (s *sqliteStore) ServiceVolume(ctx context.Context, serviceID string) (*ServiceVolume, error) {
 	rows, err := s.db.QueryContext(ctx,

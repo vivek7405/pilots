@@ -38,6 +38,9 @@ type MachineManager interface {
 	// fleet-wide.
 	Touch(ctx context.Context, id string)
 	Exec(ctx context.Context, machineID string, req api.ExecRequest) (*api.ExecResponse, error)
+	// CreateVolume makes one, for a service whose engine replicates between
+	// its own ordinals and therefore needs a volume per ordinal.
+	CreateVolume(ctx context.Context, req api.CreateVolumeRequest) (*state.Volume, error)
 	Checkpoint(ctx context.Context, machineID, comment string) (*state.Checkpoint, error)
 	// AppAddr is where this host can reach the machine's application port,
 	// empty if it holds no slot for it.
@@ -170,7 +173,15 @@ func (m *Manager) Deploy(ctx context.Context, serviceID, rootfsBuildID string,
 		return nil, err
 	}
 	if vol != "" {
-		if err := m.rollOutOnVolume(ctx, svc, rel, health, knobs, vol); err != nil {
+		// An engine that replicates between its OWN ordinals takes the
+		// per-ordinal path: one volume each, ordinal 1 gated before the rest
+		// so followers find a leader to copy from. Every other volume-backed
+		// service takes the single path below, unchanged.
+		if engine := m.engineOf(ctx, svc.ID); replicatesItsOwnOrdinals(engine) && svc.Replicas > 1 {
+			if err := m.rollOutOnVolumes(ctx, svc, rel, health, knobs, svc.Replicas); err != nil {
+				return nil, err
+			}
+		} else if err := m.rollOutOnVolume(ctx, svc, rel, health, knobs, vol); err != nil {
 			return nil, err
 		}
 		if err := m.opts.Store.CASServiceRelease(ctx, svc.ID, svc.ReleaseID, rel.ID); err != nil {

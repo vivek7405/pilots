@@ -1195,3 +1195,24 @@ func TestAnErrorReplicaIsPrunedByTheSecondDeployAfterIt(t *testing.T) {
 		t.Errorf("the error replica survived the second deploy after it: %v", fm.events)
 	}
 }
+
+// CreateVolume records the volume and stores it, so an ordinal rollout can be
+// driven without a filesystem. The events log carries it, because WHEN a volume
+// is created relative to its binding is a property worth asserting: the binding
+// is write-once and naming a volume that does not exist could never be undone.
+func (f *fakeMachines) CreateVolume(ctx context.Context, req api.CreateVolumeRequest) (*state.Volume, error) {
+	f.mu.Lock()
+	f.next++
+	id := fmt.Sprintf("vol_%d", f.next)
+	f.events = append(f.events, "create-volume "+req.Name)
+	f.mu.Unlock()
+
+	v := &state.Volume{
+		ID: id, Name: req.Name, SizeMiB: req.SizeGiB * 1024,
+		MountPath: req.MountPath, CreatedAt: 1,
+	}
+	if err := f.store.PutVolume(ctx, v); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
