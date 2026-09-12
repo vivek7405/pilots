@@ -158,6 +158,15 @@ type Step struct {
 	Private      bool   `json:"private,omitempty"`
 	CustomDomain string `json:"custom_domain,omitempty"`
 	PreDeploy    string `json:"pre_deploy,omitempty"`
+	// Labels are attached to the service at create, write-once. The recipes
+	// set `pilot.engine`, which is how every later reader -- `pilot metrics`,
+	// the dashboard's data view, `pilot db restore` -- knows this service is a
+	// database and which one.
+	Labels map[string]string `json:"labels,omitempty"`
+	// SnapshotPolicy is the volume's schedule and retention, applied after the
+	// volume exists. Nil leaves whatever is already set, so a redeploy does
+	// not silently reset a schedule somebody tuned.
+	SnapshotPolicy *api.VolumePolicy `json:"snapshot_policy,omitempty"`
 	// Processes is filled when SEVERAL compose services share one build
 	// context and therefore run as one machine. Empty is the ordinary case:
 	// one service, one machine, one process named app.
@@ -247,6 +256,22 @@ type xPilots struct {
 	SizeGiB   int          `mapstructure:"size_gib"`
 	PreDeploy string       `mapstructure:"pre_deploy"`
 	App       string       `mapstructure:"app"` // top-level only
+	// Engine names the database this service runs, which is what makes
+	// `pilot metrics` and the dashboard's data view know which client to use.
+	// Written by the recipes; a hand-written file may set it too.
+	Engine string `mapstructure:"engine"`
+	// Snapshots is the volume's schedule and retention. Carried on the SERVICE
+	// rather than set separately, because the thing that knows a database
+	// needs daily backups is the recipe that wrote the database.
+	Snapshots *xSnapshots `mapstructure:"snapshots"`
+}
+
+// xSnapshots is one x-pilots.snapshots block, api.VolumePolicy spelled for
+// mapstructure.
+type xSnapshots struct {
+	Cron       string `mapstructure:"cron"`
+	KeepDaily  int    `mapstructure:"keep_daily"`
+	KeepWeekly int    `mapstructure:"keep_weekly"`
 }
 
 // xSchedule is one x-pilots.schedules entry, api.Schedule spelled for
@@ -852,6 +877,22 @@ func toStep(name string, svc types.ServiceConfig) (Step, error) {
 		PreDeploy:    x.PreDeploy,
 	}
 	step.Env, step.SecretRefs = envOf(svc)
+
+	// The engine label, and the snapshot schedule that goes with it. Both come
+	// from x-pilots rather than from compose's own `labels:`, which the planner
+	// refuses: a compose label is a Docker concept with Docker semantics, and
+	// borrowing it would make a file that means one thing here and another
+	// under docker compose.
+	if x.Engine != "" {
+		step.Labels = map[string]string{"pilot.engine": x.Engine}
+	}
+	if x.Snapshots != nil && x.Snapshots.Cron != "" {
+		step.SnapshotPolicy = &api.VolumePolicy{
+			Cron:       x.Snapshots.Cron,
+			KeepDaily:  x.Snapshots.KeepDaily,
+			KeepWeekly: x.Snapshots.KeepWeekly,
+		}
+	}
 
 	if svc.Build != nil {
 		// build: wins over image:, which in that case is only the tag the

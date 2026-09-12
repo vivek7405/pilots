@@ -916,6 +916,17 @@ export interface ComposeStep {
   custom_domain?: string
   pre_deploy?: string
   /**
+   * Attached to the service at create, write-once. The database recipes set
+   * `pilot.engine`, which is how the data view knows a service is a database
+   * and which one.
+   */
+  labels?: Record<string, string>
+  /**
+   * The volume's snapshot schedule and retention. Absent leaves whatever is
+   * set, so a redeploy does not reset a schedule somebody tuned.
+   */
+  snapshot_policy?: VolumePolicy
+  /**
    * Filled when SEVERAL compose services share one build context and therefore
    * run as one machine with one process each. Absent is the ordinary case: one
    * service, one machine, one process named `app`.

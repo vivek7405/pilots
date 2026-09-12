@@ -899,9 +899,16 @@ type ComposeStep struct {
 	Domain string      `json:"domain,omitempty"`
 	// Private asks for no address at all. A service without it is given one
 	// from its name, so this is how a database says it has nothing to serve.
-	Private      bool   `json:"private,omitempty"`
-	CustomDomain string `json:"custom_domain,omitempty"`
-	PreDeploy    string `json:"pre_deploy,omitempty"`
+	Private bool `json:"private,omitempty"`
+	// Labels are attached to the service at create, write-once. The database
+	// recipes set `pilot.engine`, which is how `pilot metrics` and the
+	// dashboard know a service is a database and which one.
+	Labels map[string]string `json:"labels,omitempty"`
+	// SnapshotPolicy is the volume's schedule and retention. Nil leaves
+	// whatever is set, so a redeploy does not reset a schedule somebody tuned.
+	SnapshotPolicy *VolumePolicy `json:"snapshot_policy,omitempty"`
+	CustomDomain   string        `json:"custom_domain,omitempty"`
+	PreDeploy      string        `json:"pre_deploy,omitempty"`
 	// Processes is filled when SEVERAL compose services share one build
 	// context and therefore run as one machine with one process each. Empty is
 	// the ordinary case: one service, one machine, one process named app.

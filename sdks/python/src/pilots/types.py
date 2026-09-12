@@ -704,6 +704,13 @@ class ComposeStep:
     private: bool | None = None
     custom_domain: str | None = None
     pre_deploy: str | None = None
+    #: Attached to the service at create, write-once. The database recipes set
+    #: ``pilot.engine``, which is how the data view knows a service is a
+    #: database and which one.
+    labels: dict[str, str] | None = None
+    #: The volume's snapshot schedule and retention. None leaves whatever is
+    #: set, so a redeploy does not reset a schedule somebody tuned.
+    snapshot_policy: VolumePolicy | None = None
     processes: list["ComposeProcess"] | None = None
 
 

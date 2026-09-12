@@ -289,6 +289,23 @@ func executePlan(ctx context.Context, env *Env, client *pilots.Client, plan pilo
 		if err := runPreDeploy(ctx, env, client, plan.App, step, rootfs, sealed); err != nil {
 			return nil, err
 		}
+		// The snapshot schedule, once the volume exists to carry one. After the
+		// volume and before the deploy: a database that comes up before its
+		// backup policy does is a database with a window where a mistake is
+		// unrecoverable, and the window is exactly the first minutes, which is
+		// when mistakes happen.
+		//
+		// Best effort. A schedule that could not be set is worth saying out
+		// loud and is not worth failing a deploy over: the service still runs,
+		// and `pilot volumes policy` sets it in one command.
+		if volumeID != "" && step.SnapshotPolicy != nil {
+			if _, err := client.Volumes.SetPolicy(ctx, volumeID, *step.SnapshotPolicy); err != nil {
+				env.W.Notef("could not set %s's snapshot schedule (%v); "+
+					"set it with `pilot volumes policy %s --cron '%s'`",
+					step.Name, err, volumeID, step.SnapshotPolicy.Cron)
+			}
+		}
+
 		service, err := upsertService(ctx, client, plan.App, step, rootfs, sealed, existing, volumeID)
 		if err != nil {
 			return nil, err
@@ -499,7 +516,7 @@ func upsertService(ctx context.Context, client *pilots.Client, app string, step 
 			Name: step.Name, App: app, Build: rootfs, Replicas: step.Replicas,
 			Health: step.Health, Domain: step.Domain, Private: step.Private, CustomDomain: step.CustomDomain,
 			Volume: volumeID, Env: step.Env, SecretEnv: sealed, Knobs: step.Knobs,
-			Size: stepSize(step),
+			Size: stepSize(step), Labels: step.Labels,
 		})
 	}
 	replicas := step.Replicas
