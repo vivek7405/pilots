@@ -571,7 +571,7 @@ func run() error {
 		// Who may reach a URL: the cache, and on a MISS the store, memoised so
 		// the hot path stays a map read. See urlauth.go for why the cache alone
 		// was serving gated URLs to anyone.
-		urlAuth = newURLAuthGate(f.cache.URLAuth, store)
+		urlAuth = newURLAuthGate(f.cache.URLAuthKnown, store)
 		routerOpts.URLAuthOf = urlAuth.Mode
 	}
 	rtr := router.New(routerOpts)

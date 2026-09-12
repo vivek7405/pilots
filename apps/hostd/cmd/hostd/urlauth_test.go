@@ -31,7 +31,7 @@ func (s *countingStore) GetURLAuth(_ context.Context, _ string) (*state.URLAuth,
 // cache had no row for it yet and an absent row reads as public.
 func TestACacheMissFindsTheGateInTheStore(t *testing.T) {
 	store := &countingStore{mode: api.URLAuthOrg}
-	g := newURLAuthGate(func(string) string { return "" }, store)
+	g := newURLAuthGate(func(string) (string, bool) { return "public", false }, store)
 
 	if mode := g.Mode(context.Background(), "m1"); mode != api.URLAuthOrg {
 		t.Fatalf("a gated URL was served as %q", mode)
@@ -42,7 +42,7 @@ func TestACacheMissFindsTheGateInTheStore(t *testing.T) {
 // hot path, and a machine with no url_auth row at all is the common case.
 func TestRepeatedMissesAskTheStoreOnce(t *testing.T) {
 	store := &countingStore{}
-	g := newURLAuthGate(func(string) string { return "" }, store)
+	g := newURLAuthGate(func(string) (string, bool) { return "public", false }, store)
 
 	for range 50 {
 		if mode := g.Mode(context.Background(), "m1"); mode != api.URLAuthPublic {
@@ -57,7 +57,7 @@ func TestRepeatedMissesAskTheStoreOnce(t *testing.T) {
 // A gated answer from the cache is authoritative, so it must not cost a query.
 func TestAGatedCacheHitDoesNotAskTheStore(t *testing.T) {
 	store := &countingStore{}
-	g := newURLAuthGate(func(string) string { return api.URLAuthOrg }, store)
+	g := newURLAuthGate(func(string) (string, bool) { return api.URLAuthOrg, true }, store)
 
 	if mode := g.Mode(context.Background(), "m1"); mode != api.URLAuthOrg {
 		t.Fatalf("got %q, want %q", mode, api.URLAuthOrg)
@@ -70,7 +70,7 @@ func TestAGatedCacheHitDoesNotAskTheStore(t *testing.T) {
 // A store that errors or has nothing must leave the URL public rather than
 // locking out a URL that was never gated.
 func TestNothingAnywhereMeansPublic(t *testing.T) {
-	g := newURLAuthGate(func(string) string { return "" }, &countingStore{})
+	g := newURLAuthGate(func(string) (string, bool) { return "public", false }, &countingStore{})
 	if mode := g.Mode(context.Background(), "m1"); mode != api.URLAuthPublic {
 		t.Fatalf("got %q, want %q", mode, api.URLAuthPublic)
 	}
@@ -90,7 +90,7 @@ func TestNothingAnywhereMeansPublic(t *testing.T) {
 // answer.
 func TestAnExplicitPublicFromTheCacheIsTrusted(t *testing.T) {
 	store := &countingStore{mode: api.URLAuthOrg} // what the memo would have held
-	g := newURLAuthGate(func(string) string { return api.URLAuthPublic }, store)
+	g := newURLAuthGate(func(string) (string, bool) { return api.URLAuthPublic, true }, store)
 
 	if mode := g.Mode(context.Background(), "m1"); mode != api.URLAuthPublic {
 		t.Fatalf("a URL the cache knows to be public came back as %q", mode)
@@ -109,7 +109,7 @@ func TestAnExplicitPublicFromTheCacheIsTrusted(t *testing.T) {
 func TestForgettingAModeDropsTheMemo(t *testing.T) {
 	store := &countingStore{mode: api.URLAuthOrg}
 	// A cache that knows nothing, so every answer comes from the store.
-	g := newURLAuthGate(func(string) string { return "" }, store)
+	g := newURLAuthGate(func(string) (string, bool) { return "public", false }, store)
 
 	if mode := g.Mode(context.Background(), "m1"); mode != api.URLAuthOrg {
 		t.Fatalf("got %q, want the store's org", mode)
@@ -137,6 +137,52 @@ func TestForgettingAModeDropsTheMemo(t *testing.T) {
 // Forgetting something never memoised is not an error, because most writes
 // are to objects nothing has asked about yet.
 func TestForgettingAnUnknownIDIsHarmless(t *testing.T) {
-	g := newURLAuthGate(func(string) string { return "" }, &countingStore{})
+	g := newURLAuthGate(func(string) (string, bool) { return "public", false }, &countingStore{})
 	g.Forget("never-seen")
+}
+
+// The cache's "public" for an object it has never seen is not an answer.
+//
+// # The bug this exists for, twice
+//
+// corrosion.Cache.URLAuth returns the literal string "public" for an id it has
+// no row for, which is indistinguishable from an object somebody deliberately
+// made public. Every version of this gate that read that one string got one of
+// the two directions wrong:
+//
+//   - Trusting it served every gated URL to anyone until the subscription
+//     delivered the row. That is the security bug this gate was written for.
+//   - Distrusting it refused every URL the cache correctly knew to be public,
+//     because the fallback memo still held the mode it used to have. That is
+//     what the fix caused, and the battery caught it as "public again should
+//     not be gated, got 401".
+//
+// Neither is fixable from the mode alone. The cache has to be able to say it
+// does not know, which is what URLAuthKnown's second return is for.
+func TestAMissDressedAsPublicIsStillAMiss(t *testing.T) {
+	store := &countingStore{mode: api.URLAuthOrg}
+	// Exactly what the real cache does for an id it has never seen.
+	g := newURLAuthGate(func(string) (string, bool) { return "public", false }, store)
+
+	if mode := g.Mode(context.Background(), "m1"); mode != api.URLAuthOrg {
+		t.Fatalf("a gated URL was served as %q. The cache said \"public\" because "+
+			"it had no row, and that was read as an answer", mode)
+	}
+	if store.asked == 0 {
+		t.Error("the store was never consulted, so the miss was taken at face value")
+	}
+}
+
+// And a KNOWN public still costs nothing, which is the whole reason the second
+// return exists rather than simply always reading the store.
+func TestAKnownPublicIsAnsweredFromTheCache(t *testing.T) {
+	store := &countingStore{mode: api.URLAuthOrg}
+	g := newURLAuthGate(func(string) (string, bool) { return api.URLAuthPublic, true }, store)
+
+	if mode := g.Mode(context.Background(), "m1"); mode != api.URLAuthPublic {
+		t.Fatalf("got %q, want the cache's public", mode)
+	}
+	if store.asked != 0 {
+		t.Errorf("a known answer cost %d store reads", store.asked)
+	}
 }

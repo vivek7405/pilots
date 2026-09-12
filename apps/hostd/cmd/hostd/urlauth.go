@@ -54,14 +54,21 @@ type urlAuthAnswer struct {
 
 // urlAuthGate answers the router's question, cache first and store on a miss.
 type urlAuthGate struct {
-	cache func(id string) string
+	// cache reports the mode AND whether it has a row at all.
+	//
+	// Both halves are needed, and taking only the first is how this broke
+	// twice. The cache answers "public" for an object it has never seen, so a
+	// gate that read the mode alone either served every gated URL to anyone
+	// (trusting the miss) or refused every public one it had cached a mode for
+	// (distrusting the answer). Neither is fixable without the second return.
+	cache func(id string) (string, bool)
 	store state.Store
 
 	mu   sync.Mutex
 	memo map[string]urlAuthAnswer
 }
 
-func newURLAuthGate(cache func(id string) string, store state.Store) *urlAuthGate {
+func newURLAuthGate(cache func(id string) (string, bool), store state.Store) *urlAuthGate {
 	return &urlAuthGate{cache: cache, store: store, memo: map[string]urlAuthAnswer{}}
 }
 
@@ -79,13 +86,10 @@ func (g *urlAuthGate) Forget(id string) {
 }
 
 func (g *urlAuthGate) Mode(ctx context.Context, id string) string {
-	// ANY answer the cache has is authoritative, public included.
-	//
-	// Only the MISS was ever dangerous. Falling through on an explicit public
-	// was the bug's mirror image: a URL the cache correctly knew to be open
-	// was answered from a memo that still held the mode it used to have.
+	// Any answer the cache HAS is authoritative, public included. A miss is
+	// not an answer, whatever it is dressed as.
 	if g.cache != nil {
-		if mode := g.cache(id); mode != "" {
+		if mode, known := g.cache(id); known && mode != "" {
 			return mode
 		}
 	}
