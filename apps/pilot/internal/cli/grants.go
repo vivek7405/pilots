@@ -31,8 +31,10 @@ import (
 
 func newGrantCmd(env *Env, kind string) *cobra.Command {
 	c := &cobra.Command{
-		Use:     "grant",
-		Short:   "what " + kind + " may ask its host for",
+		Use: "grant",
+		// "a machine" / "a service": the article reads as a typo without it,
+		// and this string is the one line most people ever see of this group.
+		Short:   "what a " + kind + " may ask its host for",
 		Aliases: []string{"grants"},
 	}
 	Describe(c, Doc{
