@@ -553,12 +553,10 @@ func run() error {
 		// The hot path reads the subscription cache, not the agent.
 		routerOpts.Lookup = f.cache.MachineByName
 		routerOpts.Service = f.cache.ServiceReplicas
-		// Who may reach a URL, from the same replica the rest of the hot path
-		// reads. A live query here would have a failure mode whose only two
-		// answers are serving a gated URL to anyone or refusing a public one.
-		routerOpts.URLAuthOf = func(_ context.Context, id string) string {
-			return f.cache.URLAuth(id)
-		}
+		// Who may reach a URL: the cache, and on a MISS the store, memoised so
+		// the hot path stays a map read. See urlauth.go for why the cache alone
+		// was serving gated URLs to anyone.
+		routerOpts.URLAuthOf = newURLAuthGate(f.cache.URLAuth, store).Mode
 	}
 	rtr := router.New(routerOpts)
 
