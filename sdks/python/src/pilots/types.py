@@ -182,6 +182,21 @@ class VolumePolicy:
 
 
 @dataclass
+class ServiceEnvResponse:
+    """A service's environment with the values in it.
+
+    Every other surface returns names only. Calling this is a deliberate act,
+    and ``sealed`` false on a service with a sealed half means the host could
+    not open it rather than that the environment is empty.
+    """
+
+    service_id: str = ""
+    env: dict[str, str] = field(default_factory=dict)
+    secret_env: dict[str, str] = field(default_factory=dict)
+    sealed: bool = False
+
+
+@dataclass
 class ForkVolumeRequest:
     """Names the new volume a fork creates.
 

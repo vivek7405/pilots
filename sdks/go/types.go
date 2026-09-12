@@ -602,6 +602,26 @@ type VolumePolicy struct {
 	KeepWeekly int    `json:"keep_weekly,omitempty"`
 }
 
+// ServiceEnvResponse is a service's environment WITH the values in it.
+//
+// Every other surface returns variable names only. This one exists so a
+// password that was written can be recovered rather than kept in a second place
+// that is worse, and calling it is a deliberate act.
+//
+// Env and SecretEnv stay separate because the difference survives the round
+// trip: one was written in the clear and the other was sealed, and a client
+// that merged them could no longer write them back the way they came.
+//
+// Sealed false on a service that has a sealed half means the host could not
+// open it -- no fleet key, or a key that disagrees -- which is a configuration
+// problem, not an empty environment.
+type ServiceEnvResponse struct {
+	ServiceID string            `json:"service_id"`
+	Env       map[string]string `json:"env,omitempty"`
+	SecretEnv map[string]string `json:"secret_env,omitempty"`
+	Sealed    bool              `json:"sealed"`
+}
+
 // ForkVolumeRequest names the new volume a fork creates. Empty mints one from
 // the source's name and the snapshot's stamp.
 type ForkVolumeRequest struct {
@@ -1024,6 +1044,7 @@ var wireTypes = []any{
 	SnapshotResponse{},
 	VolumePolicy{},
 	ComposeRecipe{},
+	ServiceEnvResponse{},
 	ForkVolumeRequest{},
 	SnapshotListResponse{},
 	DrainReport{},

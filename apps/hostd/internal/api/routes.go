@@ -270,6 +270,11 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("GET /v1/services/{id}", d.handleGetService)
 	mux.HandleFunc("PATCH /v1/services/{id}", d.handleUpdateService)
 	mux.HandleFunc("GET /v1/services/{id}/releases", d.handleListReleases)
+	// The ONE route that answers with variable VALUES. Every other surface
+	// returns names only, on purpose; this one exists so a password that was
+	// written can be recovered, rather than kept in a second place that is
+	// worse. See serviceenv.go.
+	mux.HandleFunc("GET /v1/services/{id}/env", d.handleServiceEnv)
 	mux.HandleFunc("POST /v1/services/{id}/deploy", d.handleDeploy)
 	mux.HandleFunc("POST /v1/services/{id}/rollback", d.handleRollback)
 

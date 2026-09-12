@@ -240,6 +240,24 @@ export interface VolumePolicy {
 }
 
 /**
+ * A service's environment WITH the values in it.
+ *
+ * Every other surface returns names only. This one exists so a password that
+ * was written can be recovered rather than kept somewhere worse, and calling it
+ * is a deliberate act. `env` and `secret_env` stay separate because the
+ * difference survives the round trip.
+ *
+ * `sealed` false on a service that has a sealed half means the host could not
+ * open it, which is a configuration problem rather than an empty environment.
+ */
+export interface ServiceEnvResponse {
+  service_id: string
+  env?: Record<string, string>
+  secret_env?: Record<string, string>
+  sealed: boolean
+}
+
+/**
  * Names the new volume a fork creates. Empty mints one from the source's name
  * and the snapshot's stamp.
  */

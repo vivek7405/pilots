@@ -226,6 +226,15 @@ func (v *Volumes) DeleteSnapshot(ctx context.Context, id, snapshot string) error
 		"/v1/volumes/"+url.PathEscape(id)+"/snapshots/"+url.PathEscape(snapshot), nil, nil)
 }
 
+// Env reads a service's environment back, values and all.
+//
+// The one call that answers with values; everything else returns names. Needs a
+// deploy-scoped key, which is the level that already sets them.
+func (s *Services) Env(ctx context.Context, id string) (*ServiceEnvResponse, error) {
+	var out ServiceEnvResponse
+	return &out, s.c.do(ctx, http.MethodGet, "/v1/services/"+url.PathEscape(id)+"/env", nil, &out)
+}
+
 // ForkSnapshot makes a NEW volume holding a snapshot's contents, leaving the
 // original alone.
 //

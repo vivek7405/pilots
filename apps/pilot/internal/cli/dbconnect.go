@@ -172,9 +172,11 @@ func newDBConnectCmd(env *Env, getenv config.Env) *cobra.Command {
 			}
 
 			// Credentials come from the local store, which is where `pilot add`
-			// put them. They are not fetched from the fleet: a password that
-			// can be read back over the API is a password one leaked API key
-			// hands over, and the remote path below needs no password at all.
+			// put them. Nothing is fetched from the fleet here, even though a
+			// route exists, because the fallback is better than a fetch: with no
+			// local password the client runs INSIDE the machine, where the
+			// password already is. That path needs no credential to move at all,
+			// so moving one would be work done for no gain.
 			_, store, err := loadSecrets(getenv)
 			if err != nil {
 				return err
@@ -253,9 +255,9 @@ func newDBConnectCmd(env *Env, getenv config.Env) *cobra.Command {
 			"advisory locks and LISTEN, which makes for a surprising shell, and an\n" +
 			"interactive session is the one connection that does not need pooling.\n" +
 			"Use --pooled to see what the application sees.\n\n" +
-			"Passwords are read from the local credentials file, never from the\n" +
-			"fleet. A password the API can hand back is a password one leaked key\n" +
-			"hands over.",
+			"Passwords are read from the local credentials file. With none stored,\n" +
+			"the client runs inside the machine instead, where the password already\n" +
+			"is, so nothing has to be fetched to make this work.",
 		Examples: []string{
 			"pilot db connect",
 			"pilot db connect postgres",

@@ -114,6 +114,7 @@ func newServicesListCmd(env *Env) *cobra.Command {
 }
 
 func newServicesInfoCmd(env *Env) *cobra.Command {
+	var reveal bool
 	c := &cobra.Command{
 		Use:   "info <service>",
 		Short: "everything about one service",
@@ -127,7 +128,22 @@ func newServicesInfoCmd(env *Env) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Variable NAMES come with the service and are printed below.
+			// VALUES are a second, deliberate request, which is the whole
+			// difference: `info` is a thing people run in front of other people
+			// and paste into tickets, and a command that printed passwords by
+			// default would put one in every screenshot.
+			var values *pilots.ServiceEnvResponse
+			if reveal {
+				values, err = client.Services.Env(c.Context(), s.ID)
+				if err != nil {
+					return err
+				}
+			}
 			if env.W.JSON {
+				if values != nil {
+					return env.W.JSONValue(map[string]any{"service": s, "env": values})
+				}
 				return env.W.JSONValue(s)
 			}
 			rows := [][]string{
@@ -162,10 +178,48 @@ func newServicesInfoCmd(env *Env) *cobra.Command {
 			for _, sched := range s.Knobs.Schedules {
 				rows = append(rows, []string{"SCHEDULE", scheduleLine(sched)})
 			}
-			return env.W.Table([]string{"", ""}, rows)
+			// Which half a variable is in is printed beside it, because it is
+			// the thing somebody reading this actually has to know: the sealed
+			// half survives a Corrosion replica read as ciphertext and the
+			// plaintext half does not.
+			if values != nil {
+				for _, name := range sortedKeys(values.Env) {
+					rows = append(rows, []string{"VARIABLE", name + "=" + values.Env[name]})
+				}
+				for _, name := range sortedKeys(values.SecretEnv) {
+					rows = append(rows, []string{"SECRET", name + "=" + values.SecretEnv[name]})
+				}
+			}
+			if err := env.W.Table([]string{"", ""}, rows); err != nil {
+				return err
+			}
+			if reveal {
+				env.W.Notef("those are real values; they are on your screen and in " +
+					"your scrollback now")
+			}
+			return nil
 		},
 	}
-	Describe(c, Doc{Examples: []string{"pilot services info web", "pilot services info web --json"}})
+	c.Flags().BoolVar(&reveal, "reveal", false, "print variable VALUES, not just their names")
+	Describe(c, Doc{
+		What: "Everything one service is: its address, its release, its replicas,\n" +
+			"its schedules, and the names of every variable set on it.",
+		How: "Values are not printed unless you ask. `info` is a command people run\n" +
+			"in front of other people and paste into tickets, so a password in its\n" +
+			"default output would end up in every screenshot of it.\n\n" +
+			"--reveal makes a second request for the values and prints them. The\n" +
+			"sealed half is opened by the host's fleet key, so a host without one\n" +
+			"says so rather than showing an empty environment.",
+		Examples: []string{
+			"pilot services info web",
+			"pilot services info web --reveal",
+			"pilot services info web --json",
+		},
+		Related: []string{
+			"pilot env set     change a variable",
+			"pilot db connect  a session on a database, with no value to copy",
+		},
+	})
 	return c
 }
 
