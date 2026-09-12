@@ -955,6 +955,17 @@ export interface QuotaResponse {
    */
   max_snapshot_gib: number
   updated_at: number
+  /**
+   * What the org is holding right now, against those limits. Present on GET
+   * and absent on PUT, because they are not settable. Counting machines
+   * yourself gives a different number: builders do not count against the
+   * quota.
+   */
+  used_machines?: number
+  used_vcpus?: number
+  used_mem_mib?: number
+  used_volume_gib?: number
+  used_snapshot_gib?: number
 }
 
 export interface QuotaExceededResponse {

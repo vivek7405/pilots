@@ -3491,10 +3491,16 @@ async function placementAssertions() {
     // give one guest. Before admission existed this was created, booted, and
     // failed with whatever Firecracker said about memory -- a 500 describing a
     // symptom rather than an answer about capacity.
-    const { status, json } = await request('/v1/machines', {
-      method: 'POST',
-      body: { name: `too-big-${Math.random().toString(36).slice(2, 8)}`, mem_mib: 1024 * 1024 },
-    });
+    //
+    // Under a lifted memory quota, because the quota refuses a terabyte before
+    // placement ever sees it -- correctly, and that is a different assertion.
+    // What is under test here is the answer when the request is allowed and
+    // there is simply nowhere to put it.
+    const { status, json } = await withMemoryQuotaLifted(await myOrg(), () =>
+      request('/v1/machines', {
+        method: 'POST',
+        body: { name: `too-big-${Math.random().toString(36).slice(2, 8)}`, mem_mib: 1024 * 1024 },
+      }));
     assert(status === 507, `expected 507, got ${status}: ${JSON.stringify(json)}`);
     assert(json.code === 'no_capacity', `code = ${json.code}, want no_capacity`);
     assert(typeof json.next === 'string' && json.next.length > 0,
@@ -4784,6 +4790,25 @@ async function machineCount(base = API) {
   return (json ?? []).length;
 }
 
+// How many machines an org is holding AS THE QUOTA COUNTS THEM.
+//
+// Not the same as the length of GET /v1/machines, and the difference is what
+// made the quota assertion below fail. A builder machine is visible in the
+// org's list and does not count against its quota: hostd creates one per org
+// per host to run that org's Dockerfile inside a microVM, and destroys it on
+// its own schedule, so an org sitting on its limit could never build again if
+// it counted. Deriving a baseline from the list therefore set the limit one
+// too high per builder, and the create that should have been refused was
+// admitted.
+//
+// So this asks the quota rather than re-deriving it. Two copies of a counting
+// rule is exactly the shape that produced the bug.
+async function quotaUsage(org, base = API) {
+  const { status, json } = await requestAt(base, `/v1/quotas/${org}`);
+  assert(status === 200, `GET /v1/quotas/${org}: HTTP ${status}`);
+  return json ?? {};
+}
+
 // metricValue reads one Prometheus sample from /metrics, or null when the
 // family is absent. Absent is still not a failure: a vec family renders
 // nothing until it has a series, so a caller that reads one carries a fallback
@@ -4976,6 +5001,54 @@ const SLOT_POOL = Number(process.env.PILOTS_E2E_SLOT_POOL ?? '') || 0;
 // have the memory free.
 const IMPOSSIBLE_MEM_MIB = 1024 * 1024 * 4; // 4 TiB
 
+// Run something with this org's memory quota lifted out of the way, then put
+// it back.
+//
+// The capacity assertions below ask for a machine no host could hold, and the
+// point is the CAPACITY refusal: 507, naming capacity, leaking no slot. But a
+// request that large trips the org's memory quota first -- correctly, since
+// that check is cheaper and more specific -- so what came back was a 429 about
+// mem_mib and the placement path was never reached at all. The assertion read
+// as a failure while both refusals were working exactly as designed.
+//
+// Lifting the ceiling is what makes the next check downstream the one under
+// test. Restored in a finally, because leaving an org with an unbounded memory
+// quota would quietly retire every quota assertion that runs after this one.
+let myOrgCache = null;
+async function myOrg() {
+  if (myOrgCache) return myOrgCache;
+  const me = await request('/v1/whoami');
+  assert(me.status === 200, `whoami: HTTP ${me.status}`);
+  assert(me.json?.org_id, `whoami named no org: ${JSON.stringify(me.json)}`);
+  myOrgCache = me.json.org_id;
+  return myOrgCache;
+}
+
+async function withMemoryQuotaLifted(org, body) {
+  const before = await request(`/v1/quotas/${org}`);
+  const saved = before.status === 200 ? before.json : null;
+  const lifted = { ...(saved ?? {}), max_mem_mib: IMPOSSIBLE_MEM_MIB * 4 };
+  // The usage half of the body is answered, never settable; sending it back
+  // would be sending a limit named used_machines.
+  for (const k of Object.keys(lifted)) {
+    if (k.startsWith('used_') || k === 'updated_at' || k === 'org_id') delete lifted[k];
+  }
+  const put = await request(`/v1/quotas/${org}`, { method: 'PUT', body: lifted });
+  assert(put.status >= 200 && put.status < 300,
+    `could not lift the memory quota of ${org}: HTTP ${put.status}`);
+  try {
+    return await body();
+  } finally {
+    if (saved) {
+      const restore = { ...saved };
+      for (const k of Object.keys(restore)) {
+        if (k.startsWith('used_') || k === 'updated_at' || k === 'org_id') delete restore[k];
+      }
+      await request(`/v1/quotas/${org}`, { method: 'PUT', body: restore });
+    }
+  }
+}
+
 async function capacityAssertions() {
   const tag = Math.random().toString(36).slice(2, 8);
   const created = [];
@@ -4995,10 +5068,14 @@ async function capacityAssertions() {
       const before = await freeSlots();
       console.log(`      capacity read from ${before.source} (${before.value})`);
 
-      const { status, json, text } = await request('/v1/machines', {
-        method: 'POST',
-        body: { name: `e2e-ceiling-${tag}`, vcpus: 1, mem_mib: IMPOSSIBLE_MEM_MIB },
-      });
+      // Lifted for the same reason the assertion above lifts it: a 4 TiB
+      // request trips the org's memory ceiling first, and this step is about
+      // the HOST's.
+      const { status, json, text } = await withMemoryQuotaLifted(await myOrg(), () =>
+        request('/v1/machines', {
+          method: 'POST',
+          body: { name: `e2e-ceiling-${tag}`, vcpus: 1, mem_mib: IMPOSSIBLE_MEM_MIB },
+        }));
       refusal = status;
       if (status >= 200 && status < 300) {
         if (json?.id) created.push(json.id);
@@ -5220,7 +5297,7 @@ async function quotaAssertions() {
 
   try {
     await step('a machine quota can be set and filled to its limit', async () => {
-      const baseline = await machineCount();
+      const baseline = (await quotaUsage(QUOTA_ORG)).used_machines ?? 0;
       limit = baseline + QUOTA_HEADROOM;
 
       const { status, text } = await request(`/v1/quotas/${QUOTA_ORG}`, {

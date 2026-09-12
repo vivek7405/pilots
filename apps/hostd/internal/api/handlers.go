@@ -287,6 +287,20 @@ var ErrConflict = errors.New("conflict")
 // error mapper has to recognise it, and machines imports this package.
 var ErrNoCapacity = errors.New("no capacity")
 
+// ErrBadRequest marks something the CALLER got wrong, reported from a layer
+// below the handler that read the body.
+//
+// A handler validates what it can see. Some rules live deeper -- a name
+// reserved for hostd's own machines, say -- and a plain error from down there
+// falls through the mapper to a 500 carrying the reason inside `details`. The
+// reason was right and the status was a lie: a 500 tells the caller the fleet
+// is broken and invites a retry, when the only thing that will help is a
+// different request.
+//
+// Lives here rather than in machines for the reason the two above do: the
+// mapper has to recognise it, and machines imports this package.
+var ErrBadRequest = errors.New("bad request")
+
 func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 	var req CreateMachineRequest
 	if err := decodeBody(r, &req); err != nil && !errors.Is(err, io.EOF) {

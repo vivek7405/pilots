@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -30,7 +31,26 @@ func (d Deps) handleGetQuota(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, "org is required", "pass org", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, quotaToAPI(quota.For(r.Context(), d.Store, org)))
+	out := quotaToAPI(quota.For(r.Context(), d.Store, org))
+
+	// Usage from the one function that decides what counts, rather than from a
+	// second count here that would drift from the refusal's.
+	//
+	// A failure is not fatal to the answer: the limits are what the caller
+	// asked for and they are correct, so the usage half is omitted and logged
+	// rather than turning a readable quota into a 500.
+	used, err := quota.Used(r.Context(), d.Store, org, true)
+	if err != nil {
+		slog.Warn("could not count an org's quota usage; answering with limits alone",
+			"org", org, "err", err)
+	} else {
+		out.UsedMachines = used.Machines
+		out.UsedVCPUs = used.VCPUs
+		out.UsedMemMiB = used.MemMiB
+		out.UsedVolumeGiB = used.VolumeGiB
+		out.UsedSnapshotGiB = used.SnapshotGiB
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (d Deps) handlePutQuota(w http.ResponseWriter, r *http.Request) {

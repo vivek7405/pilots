@@ -902,6 +902,23 @@ type QuotaResponse struct {
 	// checkpoints without meaning to.
 	MaxSnapshotGiB int   `json:"max_snapshot_gib"`
 	UpdatedAt      int64 `json:"updated_at,omitempty"`
+
+	// What the org is holding right now, against those limits.
+	//
+	// A quota API that reports the ceiling and not the floor is half an API:
+	// the only way to learn the other half was to hit it and read the 429. So
+	// anyone who wanted to show a usage bar, or decide whether to ask for one
+	// more machine, had to count it themselves -- and a count derived from
+	// GET /v1/machines cannot know that builders do not count, so it is wrong
+	// by however many builders the org has.
+	//
+	// Answered on GET, absent on PUT: these are not settable, and omitempty
+	// keeps them out of the body a client echoes back when it changes a limit.
+	UsedMachines    int `json:"used_machines,omitempty"`
+	UsedVCPUs       int `json:"used_vcpus,omitempty"`
+	UsedMemMiB      int `json:"used_mem_mib,omitempty"`
+	UsedVolumeGiB   int `json:"used_volume_gib,omitempty"`
+	UsedSnapshotGiB int `json:"used_snapshot_gib,omitempty"`
 }
 
 // QuotaExceededResponse names the limit that refused a request, so a client is

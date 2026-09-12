@@ -142,6 +142,13 @@ func mapError(err error) (int, ErrorResponse) {
 			Next: "add a host, destroy machines you no longer need, or ask for a " +
 				"smaller one; pilot status shows what each host has free",
 		}
+	case errors.Is(err, ErrBadRequest):
+		// 400 and not 500. The request named something it may not name, and
+		// no retry of the same request will ever work.
+		return http.StatusBadRequest, ErrorResponse{
+			Error: err.Error(), Code: CodeBadRequest,
+			Next: "change the request; the message says which part is not allowed",
+		}
 	case errors.Is(err, ErrConflict):
 		// 409 rather than 400 or 403: nothing about the request is wrong and
 		// the caller is allowed. The object is in a state that forbids it, or

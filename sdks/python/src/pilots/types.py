@@ -746,6 +746,15 @@ class QuotaResponse:
     max_builds: int = 0
     max_snapshot_gib: int = 0
     updated_at: int = 0
+    # What the org is holding right now, against those limits. Answered on GET
+    # and absent on PUT, because they are not settable. Counting machines
+    # yourself gives a different number: builders do not count against the
+    # quota.
+    used_machines: int = 0
+    used_vcpus: int = 0
+    used_mem_mib: int = 0
+    used_volume_gib: int = 0
+    used_snapshot_gib: int = 0
 
 
 @dataclass

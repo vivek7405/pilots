@@ -959,6 +959,17 @@ type QuotaResponse struct {
 	// checkpoints by omitting it.
 	MaxSnapshotGiB int   `json:"max_snapshot_gib"`
 	UpdatedAt      int64 `json:"updated_at"`
+
+	// UsedMachines and the fields beside it are what the org is holding right
+	// now, against those limits. Answered on GET and absent on PUT, because
+	// they are not settable. A caller that counted machines itself to get this
+	// number could not know that builders do not count against the quota, and
+	// was wrong by however many the org had.
+	UsedMachines    int `json:"used_machines,omitempty"`
+	UsedVCPUs       int `json:"used_vcpus,omitempty"`
+	UsedMemMiB      int `json:"used_mem_mib,omitempty"`
+	UsedVolumeGiB   int `json:"used_volume_gib,omitempty"`
+	UsedSnapshotGiB int `json:"used_snapshot_gib,omitempty"`
 }
 
 // QuotaExceededResponse is a 429 body. Scope is "host" when the ceiling is the
