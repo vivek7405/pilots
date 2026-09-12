@@ -602,6 +602,31 @@ type VolumePolicy struct {
 	KeepWeekly int    `json:"keep_weekly,omitempty"`
 }
 
+// ComposeHAFragment is the compose text that turns one Postgres into a Patroni
+// cluster.
+//
+// Returned as data rather than applied, because the thing that edits somebody's
+// compose file is the CLI, on their machine, where they can read the diff before
+// any of it is deployed.
+type ComposeHAFragment struct {
+	// Service replaces the database block's changing half: the replica count,
+	// the role it starts in, and what it now depends on.
+	Service map[string]any `json:"service"`
+	// Etcd is the new service. Its own, because the smallest sensible cluster
+	// is two data nodes and three etcd members, which cannot co-locate -- and
+	// a lost data node must not also shrink the quorum that decides whether to
+	// replace it.
+	EtcdName   string         `json:"etcd_name"`
+	Etcd       map[string]any `json:"etcd"`
+	EtcdVolume string         `json:"etcd_volume"`
+	// SecretNames are the secrets the caller must generate locally. Named
+	// rather than carried, like every other recipe: the value is made on the
+	// caller's machine and never travels.
+	SecretNames []string `json:"secret_names"`
+	// Statement is what the operator is told before any of it happens.
+	Statement string `json:"statement"`
+}
+
 // MachineMetrics is one machine's CPU and memory.
 //
 // Read from the cgroup on the host that owns the machine, so the numbers are
@@ -1112,6 +1137,7 @@ var wireTypes = []any{
 	SnapshotResponse{},
 	VolumePolicy{},
 	ComposeRecipe{},
+	ComposeHAFragment{},
 	MachineMetrics{},
 	GrantRequest{},
 	GrantResponse{},

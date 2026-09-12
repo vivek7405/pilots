@@ -1181,6 +1181,16 @@ func (d Deps) handleListHosts(w http.ResponseWriter, r *http.Request) {
 // serveRecipes hands off to the injected generator, or says so when a host has
 // none. A nil handler is a test server rather than a real host, and a route
 // that answered 404 there would be a route nothing checks.
+func (d Deps) serveHAFragment(w http.ResponseWriter, r *http.Request) {
+	if d.HAFragment == nil {
+		WriteError(w, http.StatusServiceUnavailable, CodeNotConfigured,
+			"this host serves no database recipes",
+			"upgrade the host; every host with a compose planner has them", nil)
+		return
+	}
+	d.HAFragment(w, r)
+}
+
 func (d Deps) serveRecipes(w http.ResponseWriter, r *http.Request) {
 	if d.Recipes == nil {
 		WriteError(w, http.StatusServiceUnavailable, CodeNotConfigured,

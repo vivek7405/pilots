@@ -182,6 +182,22 @@ class VolumePolicy:
 
 
 @dataclass
+class ComposeHAFragment:
+    """The compose text that turns one Postgres into a Patroni cluster.
+
+    Returned as data rather than applied: the client edits the file, where the
+    diff can be read before any of it is deployed.
+    """
+
+    service: dict[str, Any] = field(default_factory=dict)
+    etcd_name: str = ""
+    etcd: dict[str, Any] = field(default_factory=dict)
+    etcd_volume: str = ""
+    secret_names: list[str] = field(default_factory=list)
+    statement: str = ""
+
+
+@dataclass
 class MachineMetrics:
     """One machine's CPU and memory, read from its cgroup on its owner.
 

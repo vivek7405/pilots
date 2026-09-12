@@ -240,6 +240,23 @@ export interface VolumePolicy {
 }
 
 /**
+ * The compose text that turns one Postgres into a Patroni cluster.
+ *
+ * Returned as data rather than applied: the thing that edits somebody's compose
+ * file is their own client, where they can read the diff before deploying it.
+ */
+export interface ComposeHAFragment {
+  service: Record<string, unknown>
+  etcd_name: string
+  etcd: Record<string, unknown>
+  etcd_volume: string
+  /** Secrets to generate locally. The value never travels. */
+  secret_names: string[]
+  /** What the operator is told before any of it happens. */
+  statement: string
+}
+
+/**
  * One machine's CPU and memory, read from its cgroup on the host that owns it.
  *
  * `cpu_seconds` is monotonic across suspend and wake: a counter that went down

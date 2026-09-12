@@ -680,9 +680,10 @@ func run() error {
 		CPUVendor: vendor, CPUVendorForced: vendorForced,
 		Usage:   ledger,
 		Compose: compose.Handler(), Recipes: compose.RecipesHandler(),
-		Plan:   detect.Handler(filepath.Join(cfg.CacheRoot(), "plan-work"), planStager(stager), store),
-		Lookup: machineByName(f),
-		GitHub: github.Handler(ghDeps),
+		HAFragment: compose.HAFragmentHandler(),
+		Plan:       detect.Handler(filepath.Join(cfg.CacheRoot(), "plan-work"), planStager(stager), store),
+		Lookup:     machineByName(f),
+		GitHub:     github.Handler(ghDeps),
 		// The hosted MCP endpoint dials this process back on its plain
 		// listener, and names the dashboard as the place a keyless client
 		// logs in.

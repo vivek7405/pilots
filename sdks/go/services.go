@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/url"
+	"strconv"
 )
 
 // Services are machines with a rollout attached.
@@ -224,6 +225,19 @@ func (v *Volumes) RestoreSnapshot(ctx context.Context, id, snapshot string) (*Sn
 func (v *Volumes) DeleteSnapshot(ctx context.Context, id, snapshot string) error {
 	return v.c.do(ctx, http.MethodDelete,
 		"/v1/volumes/"+url.PathEscape(id)+"/snapshots/"+url.PathEscape(snapshot), nil, nil)
+}
+
+// HAFragment is the compose text that turns one Postgres into a cluster.
+//
+// Fetched rather than built here for the reason every recipe is: the generator
+// lives beside the planner that has to accept its output, and a second copy in
+// a client would drift from it silently.
+func (r *Recipes) HAFragment(ctx context.Context, name string, replicas, etcd int) (*ComposeHAFragment, error) {
+	var out ComposeHAFragment
+	path := query("/v1/recipes/ha/"+url.PathEscape(name),
+		[2]string{"replicas", strconv.Itoa(replicas)},
+		[2]string{"etcd", strconv.Itoa(etcd)})
+	return &out, r.c.do(ctx, http.MethodGet, path, nil, &out)
 }
 
 // Grant replaces what every replica of this service may ask its host's broker

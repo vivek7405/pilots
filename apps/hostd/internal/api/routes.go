@@ -93,6 +93,8 @@ type Deps struct {
 	// splice into a compose file. Injected for the reason Compose is: the
 	// generator lives in internal/compose, which imports this package.
 	Recipes http.HandlerFunc
+	// HAFragment serves the Patroni conversion for one database.
+	HAFragment http.HandlerFunc
 	// Plan decides what a directory is and answers with a compose plan.
 	// Injected for the same reason Compose is: internal/detect imports this
 	// package for the wire structs, so the import cannot go both ways. Nil
@@ -373,6 +375,10 @@ func Routes(d Deps) http.Handler {
 	// copies of a recipe is two places for it to drift from what the planner
 	// will accept.
 	mux.HandleFunc("GET /v1/recipes/{engine}", d.serveRecipes)
+	// The compose fragment that turns one Postgres into a Patroni cluster.
+	// Beside the recipes, and for the same reason: the generator lives with
+	// the planner that has to accept its output.
+	mux.HandleFunc("GET /v1/recipes/ha/{name}", d.serveHAFragment)
 	// Emptying a host on purpose, so a reboot or a retirement is not an outage
 	// for the machines it happens to be holding. Admin-scoped: a drain moves
 	// every org's machines at once. Any host serves these; the named host does

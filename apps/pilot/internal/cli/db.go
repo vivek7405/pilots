@@ -200,6 +200,7 @@ func newDBCmd(env *Env, getenv config.Env) *cobra.Command {
 		},
 	})
 	c.AddCommand(newDBConnectCmd(env, getenv))
+	c.AddCommand(newDBHACmd(env))
 	c.AddCommand(newDBRestoreCmd(env))
 	return c
 }
