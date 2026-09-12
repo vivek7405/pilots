@@ -371,6 +371,15 @@ uses, and deleted before the object row:
   addresses out of. Written by the host it names. Replicated because the host
   ANSWERING a request about a machine is usually not the host the machine runs
   on, and it cannot derive the address without the prefix.
+- `machine_lineage` -- where a FORKED machine came from: its parent, the
+  checkpoint it was restored from, and the build ids it shares. Write-once, by
+  the fork's own host. The build ids are load-bearing rather than informational:
+  a fork faults pages out of its parent's memory image until its own first
+  suspend, so `discardBuilds` reads this before deleting anything. Without it
+  the parent's next suspend removes an object a live machine is reading, and
+  the failure appears as an unrelated guest hanging on a page fault.
+- `machine_handoffs` -- one host offering a machine to another on a drain. See
+  the planned handoff above.
 
 The next such fact is the next table. A column add is never the answer.
 
@@ -442,6 +451,24 @@ POST   /v1/machines/:id/redeploy     {image, release?}  boot the same machine
 POST   /v1/machines/:id/checkpoints  {comment?} → {id, seq}
 GET    /v1/machines/:id/checkpoints  list
 POST   /v1/checkpoints/:id/restore   in-place restore
+POST   /v1/machines/:id/fork         {count?, name?, volume?} → {forks:[{machine|error}]}
+POST   /v1/checkpoints/:id/fork      NEW machines from a machine's or checkpoint's
+                                     exact state: the source's processes already
+                                     running, its memory already warm. A running
+                                     source is checkpointed in place first and keeps
+                                     its id and URL; a SUSPENDED source is forked
+                                     without being woken. One result per fork, because
+                                     forks are independent. Capped at 100; a source
+                                     with a volume needs volume: true
+POST   /v1/volumes/:id/snapshots     point-in-time copy; a clone inside the volume's
+                                     own filesystem, so no blocks move. A running
+                                     guest is PAUSED for the clone
+GET    /v1/volumes/:id/snapshots     newest first
+POST   /v1/volumes/:id/snapshots/:ts/restore
+                                     the snapshot becomes the live disk. 409 while a
+                                     machine is RUNNING on it; a SUSPENDED machine
+                                     loses its memory image and cold-boots, because
+                                     that image cached the OLD filesystem
 POST   /v1/hosts/:id/drain           move every machine off a host, so it can be
                                      rebooted or retired without taking them down.
                                      Each is suspended there and restored elsewhere,

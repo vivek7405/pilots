@@ -3568,6 +3568,125 @@ async function placementAssertions() {
   });
 }
 
+// B8. New machines from an existing one's exact state.
+//
+// The assertion that matters is not "a machine appeared" -- a create does that
+// -- but that the fork starts from what the source had in MEMORY. A fork that
+// only carried the disk would be a create with extra steps.
+async function forkAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const created = [];
+
+  try {
+    let source;
+    await step('a machine with state in memory can be forked', async () => {
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST',
+        body: { name: `fork-src-${tag}`, mem_mib: 512, knobs: { auto_stop: 'off' } },
+      });
+      assert(status === 201, `create: HTTP ${status} ${JSON.stringify(json)}`);
+      source = json;
+      created.push(json.id);
+
+      const wrote = await request(`/v1/machines/${source.id}/exec`, {
+        method: 'POST',
+        body: { cmd: `echo forked-${tag} > /tmp/marker` },
+      });
+      assert(wrote.status === 200, `write a marker: HTTP ${wrote.status}`);
+    });
+
+    let forks = [];
+    await step('forking gives N machines, each with its own id and URL', async () => {
+      const { status, json } = await request(`/v1/machines/${source.id}/fork`, {
+        method: 'POST',
+        body: { count: 2 },
+      });
+      assert(status === 201, `fork: HTTP ${status} ${JSON.stringify(json)}`);
+      forks = (json.forks ?? []).filter((f) => f.machine).map((f) => f.machine);
+      for (const f of forks) created.push(f.id);
+
+      assert(forks.length === 2, `${forks.length} forks came up, want 2: ${JSON.stringify(json)}`);
+      const ids = new Set(forks.map((f) => f.id));
+      const urls = new Set(forks.map((f) => f.url));
+      assert(ids.size === 2, 'two forks share an id');
+      assert(urls.size === 2, 'two forks share a URL');
+      assert(!ids.has(source.id), 'a fork took the source machine\'s id');
+    });
+
+    await step('a fork starts from what the source had in memory', async () => {
+      for (const f of forks) {
+        const { status, json } = await request(`/v1/machines/${f.id}/exec`, {
+          method: 'POST',
+          body: { cmd: 'cat /tmp/marker' },
+        });
+        assert(status === 200, `exec on ${f.id}: HTTP ${status}`);
+        assert((json.stdout ?? '').includes(`forked-${tag}`),
+          `${f.id} does not carry the source's state: ${JSON.stringify(json.stdout)}`);
+      }
+    });
+
+    await step('a fork names the machine it came from', async () => {
+      const { status, json } = await request(`/v1/machines/${forks[0].id}`);
+      assert(status === 200, `read: HTTP ${status}`);
+      assert(json.parent === source.id,
+        `parent = ${json.parent}, want ${source.id}`);
+    });
+
+    await step('a fork outlives its parent', async () => {
+      // The fork faults pages out of the artifacts it was restored from until
+      // its own first suspend. Destroying the parent must not discard them, or
+      // the fork hangs on a page fault with nothing naming the cause.
+      const gone = await request(`/v1/machines/${source.id}`, { method: 'DELETE' });
+      assert(gone.status === 204 || gone.status === 200, `destroy the source: HTTP ${gone.status}`);
+
+      const { status, json } = await request(`/v1/machines/${forks[0].id}/exec`, {
+        method: 'POST',
+        body: { cmd: 'cat /tmp/marker' },
+      });
+      assert(status === 200, `exec after the parent was destroyed: HTTP ${status}`);
+      assert((json.stdout ?? '').includes(`forked-${tag}`),
+        'the fork broke when its parent was destroyed');
+    });
+
+    await step('a suspended machine forks without being woken', async () => {
+      const made = await request('/v1/machines', {
+        method: 'POST',
+        body: { name: `fork-sleep-${tag}`, mem_mib: 512, knobs: { auto_stop: 'off' } },
+      });
+      assert(made.status === 201, `create: HTTP ${made.status}`);
+      created.push(made.json.id);
+
+      const slept = await request(`/v1/machines/${made.json.id}/suspend`, { method: 'POST' });
+      assert(slept.status === 200 || slept.status === 204, `suspend: HTTP ${slept.status}`);
+
+      const { status, json } = await request(`/v1/machines/${made.json.id}/fork`, {
+        method: 'POST',
+        body: {},
+      });
+      assert(status === 201, `fork a suspended machine: HTTP ${status} ${JSON.stringify(json)}`);
+      for (const f of json.forks ?? []) {
+        if (f.machine) created.push(f.machine.id);
+      }
+
+      // And the source is STILL asleep. Waking it to fork it would make this
+      // cost what a wake costs, every time.
+      const after = await request(`/v1/machines/${made.json.id}`);
+      assert(after.json.state === 'suspended',
+        `the source is ${after.json.state}; forking woke it`);
+    });
+
+    await step('asking for more forks than allowed is refused', async () => {
+      const { status, json } = await request(`/v1/machines/${forks[0].id}/fork`, {
+        method: 'POST',
+        body: { count: 101 },
+      });
+      assert(status === 400, `expected 400, got ${status}: ${JSON.stringify(json)}`);
+    });
+  } finally {
+    for (const id of created) await destroy(id);
+  }
+}
+
 async function dataRouteAssertions() {
   const tag = Math.random().toString(36).slice(2, 8);
   const created = [];
@@ -5890,12 +6009,12 @@ const EXAMPLE_TWO_SERVICE = new URL('../packages/cli/examples/two-services-volum
 const MCP_TOOLS = [
   'build', 'build_logs', 'checkpoint', 'create_machine', 'deploy',
   'destroy_machine', 'diagnose', 'docs', 'domains', 'exec',
-  'exec_stream', 'generate_dockerfile', 'init', 'list_machines', 'list_services',
+  'exec_stream', 'fork', 'generate_dockerfile', 'init', 'list_machines', 'list_services',
   'logs', 'plan', 'promote', 'pull_file', 'push_file', 'releases', 'restore',
   'rollback', 'service', 'status', 'volumes',
 ];
-// The six that read the agent's own filesystem. `pilot mcp` serves all 26;
-// the hosted endpoint on every host serves the other 20, because it has no
+// The six that read the agent's own filesystem. `pilot mcp` serves all 27;
+// the hosted endpoint on every host serves the other 21, because it has no
 // disk on the agent's side to read. One list, one subtraction, so the two
 // servers cannot drift apart without this file noticing.
 const MCP_LOCAL_TOOLS = ['build', 'deploy', 'generate_dockerfile', 'plan', 'pull_file', 'push_file'];
@@ -6458,6 +6577,7 @@ async function main() {
     await lifecycleAssertions();
     await timingAssertions();
     await volumeAssertions();
+    await forkAssertions();
     await buildAssertions();
     await internalAssertions();
     await edgeAssertions();

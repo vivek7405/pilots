@@ -3351,6 +3351,224 @@ else
   fi
 fi
 
+say "36. A volume snapshot survives the host that took it, and the filesystem is checked"
+# B1. A volume had no point-in-time copy at all: the only version of its data
+# was its current contents, which is the thing that goes wrong.
+SN_IP="${LIVE_IPS[0]:-${IPS[0]}}"
+SN_VOL=$(api "$SN_IP" POST /v1/volumes '{"name":"gate-snap","size_gib":1,"mount_path":"/data"}')
+SN_VOLID=$(echo "$SN_VOL" | jf id)
+if [ -z "$SN_VOLID" ]; then
+  bad "could not create a volume to snapshot: $SN_VOL"
+else
+  SN_M=$(api "$SN_IP" POST /v1/machines "{\"vcpus\":1,\"mem_mib\":512,\"volume\":\"${SN_VOLID}\",\"knobs\":{\"auto_stop\":\"off\"}}")
+  SN_MID=$(echo "$SN_M" | jf id)
+  if [ -z "$SN_MID" ]; then
+    bad "could not create a machine on the volume: $SN_M"
+  else
+    # A marker, a snapshot, then a SECOND marker. The snapshot must hold the
+    # first and not the second: that is the whole of what point-in-time means.
+    api "$SN_IP" POST "/v1/machines/${SN_MID}/exec" '{"cmd":"echo one > /data/marker && sync"}' >/dev/null 2>&1
+    SN_TS=$(api "$SN_IP" POST "/v1/volumes/${SN_VOLID}/snapshots" '{}' | jf snapshot)
+    api "$SN_IP" POST "/v1/machines/${SN_MID}/exec" '{"cmd":"echo two > /data/marker && sync"}' >/dev/null 2>&1
+
+    [ -n "$SN_TS" ] && ok "took a snapshot (${SN_TS})" || bad "no snapshot was taken"
+
+    # The clone lives INSIDE the volume's own filesystem. Anywhere else and it
+    # shares no blocks with the image it came from, which makes it a full copy
+    # wearing the name of a snapshot.
+    if [ -n "$SN_TS" ]; then
+      if $SSH "root@$SN_IP" "test -f /var/lib/pilots/volumes-mnt/${SN_VOLID}/snapshots/${SN_TS}/disk.img" 2>/dev/null; then
+        ok "the snapshot is a clone inside the volume's filesystem"
+      else
+        bad "no clone at snapshots/${SN_TS}/disk.img inside the volume"
+      fi
+
+      # A clone costs no blocks. Compared against the live image, which is a
+      # whole gibibyte: a full copy would show as one.
+      SN_USED=$($SSH "root@$SN_IP" "du -sm --apparent-size /var/lib/pilots/volumes-mnt/${SN_VOLID}/snapshots 2>/dev/null | cut -f1" | tr -d '[:space:]')
+      echo "  MEASURED snapshot_apparent_mib=${SN_USED:-unknown}"
+    fi
+
+    # Restoring under a RUNNING machine is refused: replacing the disk beneath
+    # a live guest is corruption with a nicer name.
+    SN_CODE=$(curl -s -o /dev/null -m 60 -w '%{http_code}' -X POST \
+      "http://${SN_IP}:8080/v1/volumes/${SN_VOLID}/snapshots/${SN_TS}/restore" -H "$AUTH")
+    [ "$SN_CODE" = "409" ] \
+      && ok "a restore under a running machine is refused (409)" \
+      || bad "a restore under a running machine got HTTP ${SN_CODE}, want 409"
+
+    # Suspended, it is allowed -- and the machine loses its memory image, so
+    # the next wake cold-boots onto the restored disk rather than waking with
+    # cached filesystem state describing the disk that was there before.
+    api "$SN_IP" POST "/v1/machines/${SN_MID}/suspend" >/dev/null 2>&1
+    sleep 2
+    SN_RESTORE=$(api "$SN_IP" POST "/v1/volumes/${SN_VOLID}/snapshots/${SN_TS}/restore" '{}')
+    echo "$SN_RESTORE" | jq -e '.snapshot' >/dev/null 2>&1 \
+      && ok "a restore on a suspended machine is accepted" \
+      || bad "the restore was refused: $SN_RESTORE"
+
+    api "$SN_IP" POST "/v1/machines/${SN_MID}/wake" >/dev/null 2>&1
+    sleep 3
+    SN_READ=$(api "$SN_IP" POST "/v1/machines/${SN_MID}/exec" '{"cmd":"cat /data/marker"}' | jf stdout)
+    case "$SN_READ" in
+      *one*) ok "the volume is back at the snapshot (marker reads 'one')" ;;
+      *two*) bad "the restore did not take: the marker still reads 'two'" ;;
+      *) bad "the marker reads ${SN_READ:-nothing}" ;;
+    esac
+
+    # And the machine cold-booted, because its memory image was dropped.
+    SN_START=$(api "$SN_IP" GET "/v1/machines/${SN_MID}" | jf last_start)
+    [ "$SN_START" = "boot" ] || [ "$SN_START" = "cold_boot" ] \
+      && ok "it cold-booted onto the restored disk (${SN_START})" \
+      || bad "it came up as ${SN_START:-unknown}; a memory image cached the OLD filesystem"
+
+    # The filesystem check runs before a guest is given a volume. Proof is in
+    # the log rather than in the API: it is a gate, and a gate that passes is
+    # invisible from outside.
+    SN_FSCK=$($SSH "root@$SN_IP" "journalctl -u hostd --since '-10 min' --no-pager | grep -c e2fsck" 2>/dev/null | tr -d '[:space:]')
+    [ "${SN_FSCK:-0}" -ge 1 ] \
+      && ok "the filesystem was checked before the guest was given it" \
+      || bad "no e2fsck ran; a host that died mid-write leaves an image that still says it is clean"
+
+    api "$SN_IP" DELETE "/v1/machines/${SN_MID}" >/dev/null 2>&1 || true
+  fi
+fi
+
+say "37. Forking a machine: the fork starts where the source got to"
+# B8. A checkpoint could only be restored IN PLACE, so there was no way to say
+# "give me ten machines that all start from here".
+FK_IP="${LIVE_IPS[0]:-${IPS[0]}}"
+FK_M=$(api "$FK_IP" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
+FK_ID=$(echo "$FK_M" | jf id)
+if [ -z "$FK_ID" ]; then
+  bad "could not create a machine to fork: $FK_M"
+else
+  # State the fork has to inherit. In MEMORY as well as on disk: a fork that
+  # only copied the disk would be a create with extra steps.
+  api "$FK_IP" POST "/v1/machines/${FK_ID}/exec" '{"cmd":"echo forked-from-here > /tmp/marker"}' >/dev/null 2>&1
+
+  FK_START=$(date +%s%N)
+  FK_OUT=$(api "$FK_IP" POST "/v1/machines/${FK_ID}/fork" '{"count":3}')
+  FK_MS=$(( ($(date +%s%N) - FK_START) / 1000000 ))
+  FK_N=$(echo "$FK_OUT" | jq '[.forks[] | select(.machine)] | length' 2>/dev/null)
+
+  [ "${FK_N:-0}" = "3" ] \
+    && ok "three forks came up" \
+    || bad "$FK_OUT"
+  echo "  MEASURED fork_count=3 fork_total_ms=${FK_MS}"
+
+  # Each is its OWN machine: distinct ids, distinct URLs. A fork that shared
+  # either would be a second name for one machine.
+  FK_IDS=$(echo "$FK_OUT" | jq -r '[.forks[].machine.id] | unique | length' 2>/dev/null)
+  FK_URLS=$(echo "$FK_OUT" | jq -r '[.forks[].machine.url] | unique | length' 2>/dev/null)
+  [ "${FK_IDS:-0}" = "3" ] && [ "${FK_URLS:-0}" = "3" ] \
+    && ok "each fork has its own id and URL" \
+    || bad "the forks share ids or URLs (${FK_IDS} ids, ${FK_URLS} urls)"
+
+  # The state carries. This is the assertion the whole feature exists for.
+  FK_FIRST=$(echo "$FK_OUT" | jq -r '.forks[0].machine.id' 2>/dev/null)
+  if [ -n "$FK_FIRST" ] && [ "$FK_FIRST" != "null" ]; then
+    FK_READ=$(api "$FK_IP" POST "/v1/machines/${FK_FIRST}/exec" '{"cmd":"cat /tmp/marker"}' | jf stdout)
+    case "$FK_READ" in
+      *forked-from-here*) ok "a fork carries what the source had in memory" ;;
+      *) bad "the fork does not have the source's state: ${FK_READ:-nothing}" ;;
+    esac
+    FK_PARENT=$(api "$FK_IP" GET "/v1/machines/${FK_FIRST}" | jf parent)
+    [ "$FK_PARENT" = "$FK_ID" ] \
+      && ok "the fork names its parent" \
+      || bad "the fork's parent is ${FK_PARENT:-missing}, want ${FK_ID}"
+  fi
+
+  # Destroy the SOURCE. The forks are still faulting pages out of its memory
+  # image, so the build must survive it -- otherwise the guests hang on a page
+  # fault with nothing connecting it back to this.
+  api "$FK_IP" DELETE "/v1/machines/${FK_ID}" >/dev/null 2>&1
+  sleep 3
+  if [ -n "$FK_FIRST" ] && [ "$FK_FIRST" != "null" ]; then
+    FK_AFTER=$(api "$FK_IP" POST "/v1/machines/${FK_FIRST}/exec" '{"cmd":"cat /tmp/marker"}' | jf stdout)
+    case "$FK_AFTER" in
+      *forked-from-here*) ok "a fork still works after its parent is destroyed" ;;
+      *) bad "the fork broke when its parent went away: ${FK_AFTER:-nothing}" ;;
+    esac
+  fi
+
+  # A suspended source forks WITHOUT waking. e2b refuses this outright.
+  FK_S=$(api "$FK_IP" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
+  FK_SID=$(echo "$FK_S" | jf id)
+  if [ -n "$FK_SID" ]; then
+    api "$FK_IP" POST "/v1/machines/${FK_SID}/suspend" >/dev/null 2>&1
+    sleep 2
+    FK_SOUT=$(api "$FK_IP" POST "/v1/machines/${FK_SID}/fork" '{"count":1}')
+    FK_SN=$(echo "$FK_SOUT" | jq '[.forks[] | select(.machine)] | length' 2>/dev/null)
+    FK_SSTATE=$(api "$FK_IP" GET "/v1/machines/${FK_SID}" | jf state)
+    [ "${FK_SN:-0}" = "1" ] \
+      && ok "a suspended machine forks" \
+      || bad "forking a suspended machine: $FK_SOUT"
+    [ "$FK_SSTATE" = "suspended" ] \
+      && ok "and it stays suspended; nothing was woken to do it" \
+      || bad "the source is ${FK_SSTATE}, so forking woke it"
+    for id in $(echo "$FK_SOUT" | jq -r '.forks[].machine.id // empty' 2>/dev/null); do
+      api "$FK_IP" DELETE "/v1/machines/${id}" >/dev/null 2>&1 || true
+    done
+    api "$FK_IP" DELETE "/v1/machines/${FK_SID}" >/dev/null 2>&1 || true
+  fi
+
+  for id in $(echo "$FK_OUT" | jq -r '.forks[].machine.id // empty' 2>/dev/null); do
+    api "$FK_IP" DELETE "/v1/machines/${id}" >/dev/null 2>&1 || true
+  done
+fi
+
+say "38. How many volumes a host can hold: the measurement, not a guess"
+# C3. Every volume is a JuiceFS mount plus a Litestream process, and nobody has
+# measured what that costs at scale. The porting decision -- move volumes to
+# the nbd block path, which would also give O(1) forks -- is worth making on a
+# number rather than on a feeling, so this prints one and asserts almost
+# nothing.
+VS_IP="${LIVE_IPS[0]:-${IPS[0]}}"
+VS_SCALE="${GATE_VOLUME_SCALE:-1 5}"
+VS_BASE_JUICE=$($SSH "root@$VS_IP" "pgrep -c juicefs || true" 2>/dev/null | tr -d '[:space:]')
+VS_BASE_LITE=$($SSH "root@$VS_IP" "pgrep -c litestream || true" 2>/dev/null | tr -d '[:space:]')
+
+for N in $VS_SCALE; do
+  VS_IDS=""
+  VS_T0=$(date +%s%N)
+  VS_FAILED=0
+  for i in $(seq 1 "$N"); do
+    VS_V=$(api "$VS_IP" POST /v1/volumes "{\"name\":\"scale-${N}-${i}\",\"size_gib\":1,\"mount_path\":\"/data\"}")
+    VS_VID=$(echo "$VS_V" | jf id)
+    if [ -z "$VS_VID" ]; then
+      VS_FAILED=$((VS_FAILED + 1))
+      continue
+    fi
+    VS_IDS="$VS_IDS $VS_VID"
+  done
+  VS_MS=$(( ($(date +%s%N) - VS_T0) / 1000000 ))
+  VS_PER=$(( N > 0 ? VS_MS / N : 0 ))
+
+  VS_JUICE=$($SSH "root@$VS_IP" "pgrep -c juicefs || true" 2>/dev/null | tr -d '[:space:]')
+  VS_LITE=$($SSH "root@$VS_IP" "pgrep -c litestream || true" 2>/dev/null | tr -d '[:space:]')
+  VS_RSS=$($SSH "root@$VS_IP" "ps -o rss= -C juicefs -C litestream 2>/dev/null | awk '{s+=\$1} END {print int(s/1024)}'" 2>/dev/null | tr -d '[:space:]')
+  VS_AVAIL=$($SSH "root@$VS_IP" "awk '/MemAvailable/{print int(\$2/1024)}' /proc/meminfo" 2>/dev/null | tr -d '[:space:]')
+
+  echo "  MEASURED volumes=${N} create_total_ms=${VS_MS} create_per_volume_ms=${VS_PER} juicefs_procs=${VS_JUICE:-0} litestream_procs=${VS_LITE:-0} rss_mib=${VS_RSS:-0} mem_available_mib=${VS_AVAIL:-0}"
+
+  [ "$VS_FAILED" = "0" ] \
+    && ok "created ${N} volume(s)" \
+    || bad "${VS_FAILED} of ${N} volume creates failed"
+
+  for id in $VS_IDS; do
+    api "$VS_IP" DELETE "/v1/volumes/${id}" >/dev/null 2>&1 || true
+  done
+done
+
+# Back to where it started. A process count that does not return is a leak,
+# and it is the one thing this section asserts rather than measures.
+sleep 5
+VS_END_JUICE=$($SSH "root@$VS_IP" "pgrep -c juicefs || true" 2>/dev/null | tr -d '[:space:]')
+[ "${VS_END_JUICE:-0}" -le "$(( ${VS_BASE_JUICE:-0} + 2 ))" ] \
+  && ok "the juicefs process count returned to its baseline (${VS_BASE_JUICE:-0} -> ${VS_END_JUICE:-0})" \
+  || bad "juicefs processes leaked: ${VS_BASE_JUICE:-0} before, ${VS_END_JUICE:-0} after"
+
 say "Result"
 echo "  ${PASS} passed, ${FAIL} failed"
 echo

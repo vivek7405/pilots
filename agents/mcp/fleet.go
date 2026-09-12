@@ -28,7 +28,7 @@ import (
 // serves, and the first half of what `pilot mcp` serves. Sorted.
 var FleetTools = []string{
 	"build_logs", "checkpoint", "create_machine", "destroy_machine", "diagnose",
-	"docs", "domains", "exec", "exec_stream", "init", "list_machines",
+	"docs", "domains", "exec", "exec_stream", "fork", "init", "list_machines",
 	"list_services", "logs", "promote", "releases", "restore", "rollback",
 	"service", "status", "volumes",
 }
@@ -419,6 +419,32 @@ func RegisterFleetTools(s *mcp.Server, client *pilots.Client, opts Options) {
 			"nothing new is created, so every link to it still works."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in restoreIn) (*mcp.CallToolResult, any, error) {
 			return Wrap(func() (any, error) { return client.Checkpoints.Restore(ctx, in.Checkpoint) }, Constant("status on the machine"))
+		})
+
+	type forkIn struct {
+		Source string `json:"source" jsonschema:"a machine id or name, or a checkpoint id"`
+		Count  int    `json:"count,omitempty" jsonschema:"how many forks, default 1, up to 100"`
+		Name   string `json:"name,omitempty" jsonschema:"name the first fork; the rest take a suffix"`
+		Volume bool   `json:"volume,omitempty" jsonschema:"fork the source's volume too"`
+	}
+	mcp.AddTool(s, &mcp.Tool{Name: "fork", Title: "Fork a machine",
+		Description: "Make NEW machines from a machine's or checkpoint's exact state: the source's processes " +
+			"already running, its memory already warm. Use this when getting to a state is the expensive part " +
+			"-- installing dependencies, loading a model, reaching a reproduction -- and you want several " +
+			"machines that all start from there. A running source is checkpointed in place and keeps its id " +
+			"and URL; a suspended source is forked without being woken. Each fork is a separate machine with " +
+			"its own id and URL."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in forkIn) (*mcp.CallToolResult, any, error) {
+			return Wrap(func() (any, error) {
+				req := pilots.ForkRequest{Name: in.Name, Count: in.Count, Volume: in.Volume}
+				// A machine NAME wins over a checkpoint id, which is what an
+				// agent that typed a name expects. A source that resolves to no
+				// machine is tried as a checkpoint.
+				if m, err := ResolveMachine(ctx, client, in.Source); err == nil {
+					return client.Machines.Fork(ctx, m.ID, req)
+				}
+				return client.Checkpoints.Fork(ctx, in.Source, req)
+			}, Constant("exec on any fork; each has its own id and URL"))
 		})
 
 	type promoteIn struct {
