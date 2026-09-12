@@ -3136,14 +3136,28 @@ say "32. Per-org egress: one address per org, and nothing at all unless configur
 EG_IP="${LIVE_IPS[0]:-${IPS[0]}}"
 EG_CONFIGURED=$($SSH "root@$EG_IP" "grep -c '^PILOT_EGRESS_PREFIX6=' /etc/pilots/hostd.env" 2>/dev/null | tr -d '[:space:]')
 if [ "${EG_CONFIGURED:-0}" = "0" ]; then
-  # The COUNTERFACTUAL, and it is an assertion rather than a skip: a host that
-  # was told nothing must install nothing. A leftover table here would mean
-  # some earlier run, or a default nobody asked for, is rewriting tenant
-  # traffic on a host whose operator never enabled the feature.
-  if $SSH "root@$EG_IP" "nft list table inet pilots-egress >/dev/null 2>&1"; then
-    bad "an unconfigured host has an inet pilots-egress table; outbound traffic is being rewritten by nobody's request"
+  # The COUNTERFACTUAL, in two halves, because "unconfigured" does not mean
+  # "no table" and it used to.
+  #
+  # A host told nothing must REWRITE nothing: a snat rule here would mean some
+  # earlier run, or a default nobody asked for, is sending tenant traffic out
+  # under an address whose operator never enabled the feature.
+  #
+  # But it must still MASQUERADE. A guest's packets reach the root namespace
+  # wearing the slot's 10.11 address, which is routable nowhere, so a host
+  # with no masquerade gives its guests no outbound IPv4 at all -- and an
+  # unconfigured host is the default, which made that the default fleet. The
+  # e2e battery caught it: the host reached 1.1.1.1 and the guest did not.
+  EG_TABLE=$($SSH "root@$EG_IP" "nft list table inet pilots-egress 2>/dev/null" || true)
+  if [ -z "$EG_TABLE" ]; then
+    bad "an unconfigured host has no inet pilots-egress table, so it has no masquerade and its guests have no outbound IPv4"
   else
-    ok "an unconfigured host installs no egress table, so traffic leaves as it always did"
+    echo "$EG_TABLE" | grep -q 'masquerade' \
+      && ok "an unconfigured host still masquerades, so its guests reach the internet" \
+      || bad "the egress table on an unconfigured host has no masquerade rule; guests have no outbound IPv4"
+    echo "$EG_TABLE" | grep -q 'snat' \
+      && bad "an unconfigured host carries a per-org snat rule; tenant traffic is being rewritten by nobody's request" \
+      || ok "and it rewrites nothing, because no operator asked it to"
   fi
   # And the API agrees with the host: no prefix anywhere means no addresses.
   EG_N=$(api "$EG_IP" GET /v1/egress | jq '.addresses | length' 2>/dev/null)
