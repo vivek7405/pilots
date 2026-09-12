@@ -47,6 +47,10 @@ func (m *Manager) RunReaper(ctx context.Context) {
 			return
 		case <-ticker.C:
 			m.reapOrphans(ctx)
+			// The same loop, for the same reason: this is where "clean up what
+			// nothing is using" already lives, and a second timer for
+			// checkpoints would be a second thing to reason about.
+			m.ExpireCheckpoints(ctx)
 			live.Tick()
 		}
 	}

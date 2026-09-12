@@ -134,6 +134,11 @@ type Options struct {
 	// checks.
 	Usage *usage.Ledger
 
+	// Retention is the tiered checkpoint policy. The zero value is
+	// DefaultRetention: an hour of everything, a day of hourlies, a week of
+	// dailies. See retention.go.
+	Retention Retention
+
 	// Vendor is this host's CPU vendor, from cpuvendor.Detect: the raw
 	// /proc/cpuinfo vendor_id, GenuineIntel or AuthenticAMD. It decides which
 	// golden template pool this host builds into and whether a memory image
