@@ -307,8 +307,23 @@ func writeAppCmd(cmd string) error {
 var (
 	startApp = func() (bool, string) {
 		cmdline, env, err := readAppCmd()
-		if err != nil || cmdline == "" {
+		saved := savedProcesses()
+		if (err != nil || cmdline == "") && len(saved) == 0 {
 			return false, "this image carries no application command"
+		}
+
+		// Several processes, or one registered at runtime on a previous boot.
+		// Supervised here rather than handed to systemd even on an image that
+		// has it: the unit knows one command, and splitting the set across two
+		// mechanisms would mean two answers to "what is running".
+		if len(saved) > 0 {
+			specs := saved
+			if cmdline != "" {
+				specs = append([]processSpec{{
+					Name: DefaultProcess, Cmd: cmdline, Env: env, Port: true,
+				}}, saved...)
+			}
+			return appSupervisor.startAll(specs)
 		}
 
 		// Which mechanism, decided by looking rather than by assuming. The

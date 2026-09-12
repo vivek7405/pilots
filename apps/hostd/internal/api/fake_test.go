@@ -33,6 +33,11 @@ type fakeManager struct {
 	logs     string
 	logsErr  error
 	streamed []string
+	// The process surface, recorded so a test can assert WHICH process an
+	// action named rather than only that the call happened.
+	processes      string
+	processActions []string
+	processLogTail int
 }
 
 func newFakeManager() *fakeManager {
@@ -85,6 +90,31 @@ func (f *fakeManager) Logs(context.Context, string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return []byte(f.logs), f.err
+}
+
+func (f *fakeManager) Processes(context.Context, string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.processes == "" {
+		return []byte(`{"processes":[]}`), f.err
+	}
+	return []byte(f.processes), f.err
+}
+
+// ProcessAction records what was asked of which process, so a test can assert
+// that restarting one names that one and not the machine.
+func (f *fakeManager) ProcessAction(_ context.Context, machineID, name, action string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.processActions = append(f.processActions, machineID+" "+action+" "+name)
+	return f.err
+}
+
+func (f *fakeManager) ProcessLogs(_ context.Context, _, name string, tail int) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.processLogTail = tail
+	return []byte("logs of " + name), f.err
 }
 
 // ExecStream records the machine and answers 200. An httptest recorder cannot

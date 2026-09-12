@@ -62,6 +62,11 @@ type Discovery interface {
 // this package.
 var ErrNotFound = fmt.Errorf("machines: %w", state.ErrNotFound)
 
+// ErrInvalid is a request this package refuses on its face, before anything is
+// asked of a guest: an unknown action, a missing name. Separate from
+// ErrNotFound so the API answers 400 rather than 404 for a caller mistake.
+var ErrInvalid = errors.New("machines: invalid request")
+
 // Options configures the manager.
 type Options struct {
 	HostID string

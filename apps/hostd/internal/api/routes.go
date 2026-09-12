@@ -220,8 +220,19 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("POST /v1/machines/{id}/wake", d.handleWake)
 	// Redeploy is the rollout's: the same machine, booted from another image.
 	mux.HandleFunc("POST /v1/machines/{id}/redeploy", d.handleRedeploy)
-	mux.HandleFunc("POST /v1/machines/{id}/stop", notImplemented)
-	mux.HandleFunc("POST /v1/machines/{id}/start", notImplemented)
+	// stop and start are suspend and wake under the names every other
+	// platform's CLI and SDK uses. They were 501 while the CLI and both SDKs
+	// already called them, so the commonest lifecycle pair in the product
+	// answered "not implemented" on a machine that could do it perfectly well.
+	// One behaviour, two spellings, rather than a second mechanism.
+	mux.HandleFunc("POST /v1/machines/{id}/stop", d.handleSuspend)
+	mux.HandleFunc("POST /v1/machines/{id}/start", d.handleWake)
+
+	// Processes: what a machine runs, and how to bounce one of them without
+	// touching the others.
+	mux.HandleFunc("GET /v1/machines/{id}/processes", d.handleProcesses)
+	mux.HandleFunc("POST /v1/machines/{id}/processes/{name}/{action}", d.handleProcessAction)
+	mux.HandleFunc("GET /v1/machines/{id}/processes/{name}/logs", d.handleProcessLogs)
 
 	// Checkpoints. Restore is in place: same machine, same URL, same token.
 	mux.HandleFunc("POST /v1/machines/{id}/checkpoints", d.handleCreateCheckpoint)

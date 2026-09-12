@@ -37,6 +37,16 @@ type Manager interface {
 	GetCheckpoint(ctx context.Context, checkpointID string) (*state.Checkpoint, error)
 	Exec(ctx context.Context, machineID string, req ExecRequest) (*ExecResponse, error)
 	Logs(ctx context.Context, machineID string) ([]byte, error)
+	// Processes answers what a machine is running, as the agent's own JSON.
+	// Passed through rather than re-encoded: the guest is the only thing that
+	// knows whether a pid is alive, so a shape assembled on the host would be
+	// a second copy of an answer that is stale the moment it is written.
+	Processes(ctx context.Context, machineID string) ([]byte, error)
+	// ProcessAction starts, stops or restarts one named process, leaving the
+	// machine's other processes alone.
+	ProcessAction(ctx context.Context, machineID, name, action string) error
+	// ProcessLogs is one process's captured output, most recent last.
+	ProcessLogs(ctx context.Context, machineID, name string, tail int) ([]byte, error)
 	// ExecStream proxies the agent's websocket exec stream onto w. An error is
 	// returned only before anything was written (a wake that failed, a machine
 	// that is not running); once the upgrade has been attempted it is nil.
