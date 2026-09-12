@@ -10,6 +10,10 @@ import { BuildStream } from './build.ts'
 import { Http, textLines } from './http.ts'
 import type { HttpOptions } from './http.ts'
 import { buildExecURL, ExecStream } from './stream.ts'
+import { tcpStream } from './tcp.ts'
+import type { TCPOptions } from './tcp.ts'
+import type { Duplex } from 'node:stream'
+
 import type { ExecStreamOptions, WebSocketCtor } from './stream.ts'
 import type {
   AddDomainRequest,
@@ -212,6 +216,23 @@ export class Machines {
       // each caller: hostd refuses tty=true with stdin=false outright.
       stdin: opts.tty ? true : (opts.stdin ?? false),
       tty: opts.tty ?? false,
+      ...(opts.WebSocket ?? this.WebSocket ? { WebSocket: opts.WebSocket ?? this.WebSocket! } : {}),
+    })
+  }
+
+  /**
+   * One TCP connection to a port inside the machine, as a Duplex.
+   *
+   * What a database driver needs: `pg`, `mysql2`, `ioredis` and `mongodb` all
+   * speak to something shaped like a `net.Socket`, so handing them this makes
+   * every one of them work unmodified against a machine on the fleet.
+   *
+   * Resolves once the socket is OPEN. A driver handed a stream that is not yet
+   * connected writes its handshake into a queue and waits for a reply that
+   * cannot arrive until the queue drains.
+   */
+  tcp(id: string, port: number, opts: TCPOptions = {}): Promise<Duplex> {
+    return tcpStream(this.http.baseURL, this.http.apiKey, id, port, this.http.org, {
       ...(opts.WebSocket ?? this.WebSocket ? { WebSocket: opts.WebSocket ?? this.WebSocket! } : {}),
     })
   }

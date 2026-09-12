@@ -35,6 +35,8 @@ export type { FetchLike, HttpOptions } from './http.ts'
 
 export { BuildStream } from './build.ts'
 export { buildExecURL, ExecStream } from './stream.ts'
+export { tcpStream } from './tcp.ts'
+export type { TCPOptions } from './tcp.ts'
 export type { ExecStreamInit, ExecStreamOptions, WebSocketCtor } from './stream.ts'
 
 export {
