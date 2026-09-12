@@ -54,4 +54,17 @@ var (
 		"Machines unreachable at their own URL because the control API "+
 			"hostname answers there. Above zero is a permanent URL that has "+
 			"stopped being served; see the host log for which machine.")
+
+	// The join gate. A host that has just joined serves its own machines
+	// immediately and claims nothing until these two say it has caught up;
+	// see internal/state/corrosion/joingate.go for what complete means.
+	// Complete stuck at 0 on a host that has been up for minutes is a
+	// replication problem, and a host in that state is doing half its job.
+	ReplicationComplete = NewGauge(Default, "pilots_replication_complete",
+		"1 once this replica has caught up with the fleet and may claim "+
+			"machines of hosts it cannot see. 0 while it is still joining.")
+
+	ReplicationGaps = NewGauge(Default, "pilots_replication_gaps",
+		"Ranges of changes this replica knows it has not applied yet. "+
+			"Above zero means corrosion is still filling holes.")
 )

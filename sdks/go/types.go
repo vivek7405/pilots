@@ -408,6 +408,16 @@ type HealthResponse struct {
 	// CPUVendorForced is true only when a fault flag is making this host lie
 	// about its CPU, which is how the fleet gate reaches the cold-boot tier.
 	CPUVendorForced bool `json:"cpu_vendor_forced,omitempty"`
+	// StoreVersions is the same number broken out per actor: how far this
+	// replica has applied each host's changes, keyed by site id in hex. The
+	// sum answers "are we far apart"; this answers "on whose rows". Empty on
+	// a single-box SQLite host.
+	StoreVersions map[string]int64 `json:"store_versions,omitempty"`
+	// ReplicationComplete is false while this host is still catching up with
+	// the fleet. Such a host serves its own machines normally and claims none
+	// of anybody else's, so it is healthy, not broken. Stuck false for more
+	// than a few seconds is a replication problem.
+	ReplicationComplete bool `json:"replication_complete"`
 }
 
 // WhoamiResponse is what the caller's key resolves to on the host that

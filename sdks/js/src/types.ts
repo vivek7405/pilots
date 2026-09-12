@@ -431,6 +431,19 @@ export interface HealthResponse {
   cpu_vendor: string
   /** True only when a fault flag is making this host lie about its CPU. */
   cpu_vendor_forced?: boolean
+  /**
+   * The same number broken out per actor: how far this replica has applied
+   * each host's changes, keyed by site id in hex. The sum answers "are we far
+   * apart"; this answers "on whose rows". Empty on a single-box SQLite host.
+   */
+  store_versions?: Record<string, number>
+  /**
+   * False while this host is still catching up with the fleet. Such a host
+   * serves its own machines normally and claims none of anybody else's, so it
+   * is healthy, not broken. Stuck false for more than a few seconds is a
+   * replication problem.
+   */
+  replication_complete: boolean
 }
 
 export interface ErrorResponse {

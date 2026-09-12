@@ -60,6 +60,13 @@ type Options struct {
 	// image only when the pools match, and boots from the rootfs when they do
 	// not -- the documented slow path, not an error.
 	Vendor string
+	// Ready reports whether this host's replica has caught up with the fleet.
+	// Nil means always ready. The autoscaler is arbitrated by a hash over the
+	// live host list, so a host with a partial view computes a different
+	// arbiter than the fleet does and acts on services that are not its to act
+	// on. Rollouts are not gated: they are driven by a request, which carries
+	// its own authority.
+	Ready func() bool
 }
 
 // PeerCaller performs a lifecycle call against a machine held by another host.

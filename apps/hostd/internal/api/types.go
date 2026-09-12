@@ -810,6 +810,18 @@ type HealthResponse struct {
 	// lie about its CPU. It exists so the fleet gate can prove it armed the
 	// fault rather than assume it; a real host never sets it.
 	CPUVendorForced bool `json:"cpu_vendor_forced,omitempty"`
+	// StoreVersions is the same number broken out per actor: how far this
+	// replica has applied each host's changes, keyed by site id in hex. The
+	// sum above answers "are we far apart"; this answers "on whose rows",
+	// which is what a joining host has to know before it may act on a row it
+	// cannot see. Empty on SQLite.
+	StoreVersions map[string]int64 `json:"store_versions,omitempty"`
+	// ReplicationComplete is the join gate: false while this host is still
+	// catching up, during which it serves its own machines normally and
+	// claims none of anybody else's. See
+	// internal/state/corrosion/joingate.go. Always true on SQLite, which has
+	// no replica to wait for.
+	ReplicationComplete bool `json:"replication_complete"`
 }
 
 // WhoamiResponse is what the caller's key resolves to on the host that

@@ -56,6 +56,18 @@ type Options struct {
 	Fleet  Fleet
 	Store  state.Store
 
+	// Ready reports whether this host's replica has caught up with the fleet.
+	// Nil means always ready, which is the single box and every test that is
+	// not about the gate.
+	//
+	// This loop is the reason the join gate exists. Its whole job is to act on
+	// machines whose owner it cannot see, and on a half-replicated replica an
+	// owner that is merely unseen is indistinguishable from one that is dead:
+	// both are an empty result. The claim that follows merges cleanly into a
+	// row a live host is still writing, so nothing errors and two hosts end up
+	// believing they own the same machine.
+	Ready func() bool
+
 	// Capacity reports whether this host can take another machine of this
 	// size. Refusing is normal and costs nothing: the next tick recomputes the
 	// live set and re-hashes, so a full host does not wedge a machine.
@@ -135,6 +147,15 @@ func Tick(ctx context.Context, opts Options) {
 	// else now owns, and every moment it keeps serving is a moment two
 	// Firecrackers are writing the same machine's disk.
 	releaseLost(ctx, opts)
+
+	// Releasing what we lost is a read of PRESENCE: another host's id is in
+	// the row, which a partial replica can only under-report, never invent. So
+	// it runs before the gate. Everything below this line reads an ABSENCE and
+	// waits.
+	if opts.Ready != nil && !opts.Ready() {
+		slog.Warn("replication not complete; claiming nothing this tick")
+		return
+	}
 
 	now := opts.now()
 

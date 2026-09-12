@@ -24,9 +24,11 @@ type Deps struct {
 	// HugePages is this host's guest page size setting; see
 	// HealthResponse.HugePages.
 	HugePages bool
-	// StoreVersion reads the replica's version, for HealthResponse.StoreVersion.
-	// Nil on SQLite, where there is no replica and the field is 0.
-	StoreVersion func(context.Context) (int64, error)
+	// Replication reads how far this replica has caught up, for the three
+	// replication fields of HealthResponse: the version vector's sum, the
+	// vector itself, and whether the join gate has opened. Nil on SQLite,
+	// where there is no replica, the versions are empty and complete is true.
+	Replication func(context.Context) (int64, map[string]int64, bool, error)
 	// Builds turns a Dockerfile context into a rootfs build. Nil on a host
 	// with no object storage, where a build has nowhere to publish to.
 	Builds BuildRunner
@@ -153,7 +155,10 @@ func Routes(d Deps) http.Handler {
 			HugePages: d.HugePages,
 			CPUVendor: d.CPUVendor, CPUVendorForced: d.CPUVendorForced,
 		}
-		if d.StoreVersion != nil {
+		// True by default so a host with no replica (SQLite) is not reported
+		// as forever joining. A corrosion host overwrites this below.
+		resp.ReplicationComplete = true
+		if d.Replication != nil {
 			// Bounded, and short. The corrosion client sets no response
 			// timeout, so an agent that accepts the connection and then stops
 			// answering would hold this handler open until the client gave
@@ -166,10 +171,15 @@ func Routes(d Deps) http.Handler {
 			// still answers 200 and the version stays 0, because a health
 			// check that fails on a store hiccup takes the host out of
 			// rotation for a problem that is not the host's.
-			if v, err := d.StoreVersion(ctx); err != nil {
+			if v, vec, complete, err := d.Replication(ctx); err != nil {
 				slog.Warn("could not read the store version", "err", err)
+				// A replica that cannot be read has not been shown to be
+				// caught up, and this field is what a joining peer reads to
+				// decide whether IT may act. Unreadable answers as not
+				// complete, which is the direction that waits.
+				resp.ReplicationComplete = false
 			} else {
-				resp.StoreVersion = v
+				resp.StoreVersion, resp.StoreVersions, resp.ReplicationComplete = v, vec, complete
 			}
 		}
 		writeJSON(w, http.StatusOK, resp)

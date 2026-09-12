@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/config"
 	"github.com/vivek7405/pilots/hostd/internal/machines"
 	"github.com/vivek7405/pilots/hostd/internal/mesh"
@@ -193,8 +195,11 @@ func startHeartbeat(ctx context.Context, cfg *config.Config, store state.Store, 
 // startSelfHeal runs the rescue loop. The heartbeat is started separately, by
 // startHeartbeat, because every host writes its own row whether or not it is
 // part of a fleet.
-func startSelfHeal(ctx context.Context, cfg *config.Config, f *fleet, mgr *machines.Manager) {
+func startSelfHeal(ctx context.Context, cfg *config.Config, f *fleet, mgr *machines.Manager,
+	gate *corrosion.JoinGate) {
+
 	opts := selfheal.Options{
+		Ready:     gate.Ready,
 		HostID:    cfg.HostID,
 		Fleet:     f.cache,
 		Store:     f.store,
@@ -207,7 +212,18 @@ func startSelfHeal(ctx context.Context, cfg *config.Config, f *fleet, mgr *machi
 		StopLocal:      mgr.StopLocal,
 	}
 
-	go selfheal.RunRescue(ctx, opts)
+	// The first tick waits for the gate outright rather than being refused by
+	// it, so a joining host does not log a refusal every two seconds while it
+	// catches up. After that Ready is what each tick reads, because the loop
+	// outlives the join.
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-gate.Done():
+		}
+		selfheal.RunRescue(ctx, opts)
+	}()
 }
 
 // freeMemMiB reports how much memory this host can still give to guests.
@@ -428,18 +444,88 @@ func (t cachedTenancy) Limits(_ context.Context, hash string) (*state.APIKeyLimi
 	return nil, fmt.Errorf("api key limits: %w", state.ErrNotFound)
 }
 
-// storeVersion exposes the replica's version vector sum on /v1/health, or nil
-// on SQLite where there is no replica and the field is 0.
+// startJoinGate brings up the replication join gate: the latch that keeps this
+// host from claiming another host's machines until its replica has caught up.
+//
+// It reads peers from the same subscription cache the router reads, and each
+// peer's vector from that peer's /v1/health on the plain listener. That route
+// is unauthenticated on purpose (every load balancer polls it), which is what
+// makes it usable here: a host that has not finished joining must not need a
+// key exchange, a mesh handshake or any specific peer in order to find out
+// whether it is behind.
+func startJoinGate(ctx context.Context, cfg *config.Config, f *fleet) *corrosion.JoinGate {
+	cs, ok := f.store.(*corrosion.Store)
+	if !ok {
+		// SQLite: no replica, nothing to catch up with, and self-heal on a
+		// single host is claiming its own machines back.
+		return corrosion.OpenJoinGate()
+	}
+	_, port, err := net.SplitHostPort(cfg.ListenAddr)
+	if err != nil || port == "" {
+		port = "8080"
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	return corrosion.RunJoinGate(ctx, cs, corrosion.JoinGateOptions{
+		Peers: func() []state.Host {
+			var out []state.Host
+			for _, h := range f.cache.LiveHosts(time.Now(), selfheal.DeadAfter) {
+				if h.ID != cfg.HostID && h.PublicIP != "" {
+					out = append(out, h)
+				}
+			}
+			return out
+		},
+		PeerVector: func(ctx context.Context, h state.Host) (map[string]int64, error) {
+			url := "http://" + net.JoinHostPort(h.PublicIP, port) + "/v1/health"
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+			if err != nil {
+				return nil, err
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				return nil, err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return nil, fmt.Errorf("peer %s health: %s", h.ID, resp.Status)
+			}
+			var health api.HealthResponse
+			if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&health); err != nil {
+				return nil, fmt.Errorf("peer %s health: %w", h.ID, err)
+			}
+			return health.StoreVersions, nil
+		},
+	})
+}
+
+// replication exposes how far the replica has caught up on /v1/health: the
+// version vector's sum, the vector per actor, and whether the join gate has
+// opened. Nil on SQLite, where there is no replica.
 //
 // A type assertion rather than a method on state.Store: replication is a
 // property of one backend, and putting it on the interface would make every
 // implementation answer a question only one of them has.
-func storeVersion(store state.Store) func(context.Context) (int64, error) {
+//
+// The vector is on the ONE route every host already polls rather than behind a
+// new one, because the peer reading it is a host that has not finished
+// joining: a new authenticated route would make the gate depend on a key
+// exchange, and the gate's whole job is to need nothing from anybody.
+func replication(store state.Store, gate *corrosion.JoinGate) func(context.Context) (int64, map[string]int64, bool, error) {
 	cs, ok := store.(*corrosion.Store)
 	if !ok {
 		return nil
 	}
-	return cs.Version
+	return func(ctx context.Context) (int64, map[string]int64, bool, error) {
+		vec, err := cs.VersionVector(ctx)
+		if err != nil {
+			return 0, nil, false, err
+		}
+		var sum int64
+		for _, v := range vec {
+			sum += v
+		}
+		return sum, vec, gate.Ready(), nil
+	}
 }
 
 // cachedMachineCPU answers a machine's last start from the subscription cache.

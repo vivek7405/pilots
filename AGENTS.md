@@ -106,7 +106,11 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
    `api_keys` and `org_quotas` on an admin-scoped request. Violating this
    does not error — it corrupts state silently through CRDT merges. A row is
    only safe for "any host" to write when it is written once, or has one
-   logical writer: then the merge has nothing to corrupt.
+   logical writer: then the merge has nothing to corrupt. And never a claim
+   before the join gate opens: a replica that has not caught up cannot tell a
+   dead host from one it has applied nothing from, so it may act on its own
+   rows and on the PRESENCE of a foreign row, never on the absence of one
+   (`internal/state/corrosion/joingate.go`, ARCHITECTURE.md rule 3).
 2. **The data plane never depends on the control plane.** Routing and wake
    read local state only. If that is not true of a change, the change is
    wrong.

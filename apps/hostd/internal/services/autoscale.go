@@ -69,6 +69,12 @@ func (m *Manager) RunAutoscaler(ctx context.Context, load Load) {
 }
 
 func (m *Manager) scaleOnce(ctx context.Context, load Load, idleSince map[string]time.Time) error {
+	// Arbitration is a hash over the live hosts, so a replica that has not
+	// caught up picks a different arbiter than the fleet does and scales a
+	// service some other host is already scaling.
+	if m.opts.Ready != nil && !m.opts.Ready() {
+		return nil
+	}
 	svcs, err := m.opts.Store.ListServices(ctx)
 	if err != nil {
 		return err

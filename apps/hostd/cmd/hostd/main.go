@@ -43,6 +43,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/selfheal"
 	"github.com/vivek7405/pilots/hostd/internal/services"
 	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/vivek7405/pilots/hostd/internal/state/corrosion"
 	"github.com/vivek7405/pilots/hostd/internal/usage"
 	"github.com/vivek7405/pilots/hostd/internal/volumes"
 )
@@ -412,6 +413,10 @@ func run() error {
 	// carries gossip and forwarded requests, so it comes up before anything
 	// that rides it.
 	var f *fleet
+	// The join gate starts open and is replaced below on a fleet host. A
+	// single box has no replica to catch up with, and the machines self-heal
+	// claims there are its own.
+	joinGate := corrosion.OpenJoinGate()
 	if cfg.Fleet() {
 		f = &fleet{store: store, cache: cache}
 		if cfg.MeshEnabled {
@@ -422,6 +427,11 @@ func run() error {
 			defer dev.Close()
 			f.dev, f.keys = dev, meshKeys
 		}
+		// After the mesh, because the gate reads the hosts rows the cache
+		// fills from gossip, and before anything that may claim: the gate is
+		// what those callers ask. It does not delay notifyReady, so this host
+		// is serving its own machines while it catches up.
+		joinGate = startJoinGate(ctx, cfg, f)
 	}
 
 	guest := newGuestLoad()
@@ -484,6 +494,14 @@ func run() error {
 		// pool is live does the whole fleet rank -- where the winner cold-boots
 		// the machine from its disk.
 		routerOpts.RescuerFor = func(machineID string) (string, bool) {
+			// A held request for a machine whose owner is gone is exactly the
+			// decision a half-replicated replica gets wrong: the owner may be
+			// alive and merely unseen. Answering "no rescuer" takes the
+			// router's existing path, a 503 the client retries, instead of
+			// waking someone else's running machine a second time.
+			if !joinGate.Ready() {
+				return "", false
+			}
 			return selfheal.RescuerFor(machineID, f.cache.MachineVendor(machineID),
 				f.cache.LiveHosts(time.Now(), selfheal.DeadAfter))
 		}
@@ -507,6 +525,7 @@ func run() error {
 	rollout := services.New(services.Options{
 		HostID: cfg.HostID, Store: store, Machines: mgr,
 		Peers: peerCaller(f, cfg.AgentTokenSecret), Vendor: vendor,
+		Ready: joinGate.Ready,
 	})
 
 	// Only the arbiter for a service acts on it, so every host can run this
@@ -586,8 +605,8 @@ func run() error {
 
 	deps := api.Deps{
 		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink, HugePages: cfg.HugePages,
-		StoreVersion: storeVersion(store),
-		Builds:       builder, Rollout: rollout, Domain: cfg.WorkloadDomain, URL: publicURL,
+		Replication: replication(store, joinGate),
+		Builds:      builder, Rollout: rollout, Domain: cfg.WorkloadDomain, URL: publicURL,
 		APIHostname: cfg.APIHostname,
 		Peers:       peerLookup(f), PeerToken: api.PeerTokenFor(cfg.AgentTokenSecret),
 		Tenancy: tenancy, MachineCPU: machineCPU, BuildGate: &quota.HostGate{},
@@ -633,7 +652,7 @@ func run() error {
 		if err := startInternalListener(ctx, f.dev, internal); err != nil {
 			return err
 		}
-		startSelfHeal(ctx, cfg, f, mgr)
+		startSelfHeal(ctx, cfg, f, mgr, joinGate)
 	}
 
 	srv := &http.Server{

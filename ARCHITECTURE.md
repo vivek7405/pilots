@@ -65,6 +65,19 @@ compose fragment on the ordinary primitives, not a product tier. See
      cheaper half of that shape: a local read of both namespaces before the
      single-writer row is written, plus a deterministic lowest-id tie-break
      at read time for the cross-host race a local read cannot prevent.
+   - **Join gate.** Until a host's replica has caught up, it may act on its
+     own rows and on the PRESENCE of a foreign row, never on the ABSENCE of
+     one. A half-replicated replica cannot tell a dead host from one whose
+     rows it has not applied yet: both are an empty result, and the claim
+     that follows merges silently into a row a live host is still writing.
+     So a joining host serves its own machines, routes, wakes, meters and
+     answers DNS immediately, and holds back exactly three callers until it
+     has caught up: self-heal claims, the router's held-request rescue, and
+     autoscaler arbitration. Complete means no gaps in
+     `__corro_bookkeeping_gaps`, no SWIM member missing from the version
+     vector, and no live peer ahead of us on any actor. It latches once and
+     never re-closes, because a gate that could re-close would make liveness
+     depend on gossip. See `internal/state/corrosion/joingate.go`.
 4. **S3 is the only truth for machine state.** Hetzner Object Storage
    (S3-compatible, path-style; internal eu-central traffic is free — compute
    must live in FSN1/NBG1). Local NVMe is strictly a cache; the design test
@@ -420,7 +433,12 @@ POST   /v1/plan?app=                 {a tar of a directory, 2 GiB cap} ->
                                      the workspaces and the two Dockerfile rules
 GET    /v1/health                    liveness (unauthenticated); carries
                                      store_version, the sum of this replica's
-                                     version vector (0 on SQLite)
+                                     version vector (0 on SQLite), plus
+                                     store_versions (that vector per actor)
+                                     and replication_complete (the join gate;
+                                     always true on SQLite). A joining peer
+                                     reads the vector from here, which is why
+                                     it is on the one route that needs no key
 GET    /metrics                      Prometheus (unauthenticated)
                                      engine: pilots_uffd_*, pilots_snapshot_*
                                      host: pilots_machines{state},
@@ -431,7 +449,9 @@ GET    /metrics                      Prometheus (unauthenticated)
                                      pilots_nbd_cache_hits_total,
                                      pilots_nbd_cache_misses_total,
                                      pilots_router_inflight, pilots_slots_free,
-                                     pilots_quota_refusals_total{quota}
+                                     pilots_quota_refusals_total{quota},
+                                     pilots_replication_complete,
+                                     pilots_replication_gaps
 ```
 
 **Every non-2xx body is `{error, code, next, details}`.** `error` is a sentence
