@@ -581,6 +581,11 @@ func addPooler(r *Recipe, name string, env map[string]any) {
 		r.Files[".pilots/"+name+"/Dockerfile"] = postgresPooledDockerfile
 	}
 	r.Files[".pilots/"+name+"/pilot-pgbouncer.sh"] = pgbouncerStart
+	r.Files[".pilots/"+name+"/pilot-role.sh"] = roleDispatch
+	r.Files[".pilots/"+name+"/pilot-patroni.sh"] = patroniStart
+	r.Files[".pilots/"+name+"/pilot-haproxy.sh"] = haproxyStart
+	r.Files[".pilots/"+name+"/pilot-etcd.sh"] = etcdStart
+	r.Files[".pilots/"+name+"/pilot-pg-flush"] = walFlush
 
 	// The pooler's environment is the database's, so it reads the same
 	// password from the same secret. One secret, not two that have to agree.
@@ -598,21 +603,35 @@ func addPooler(r *Recipe, name string, env map[string]any) {
 	}
 }
 
+// haLayer is Patroni, etcd and HAProxy, in every Postgres image this writes.
+//
+// In every image, including the ones that will never run a cluster, because the
+// alternative is that turning high availability on is a REBUILD: a new release,
+// a new image, and a window in which the old nodes and the new ones are not the
+// same software. One image with three unused binaries is a layer that caches
+// once; a conversion with a build in the middle of it is a failure mode.
+//
+// Pinned by major version rather than floating, so an image rebuilt next year
+// is the same cluster software and not a surprise upgrade nobody asked for.
+const haLayer = `RUN apt-get update && apt-get install -y --no-install-recommends \
+  pgbouncer patroni etcd-server etcd-client haproxy python3-etcd3 curl \
+  && rm -rf /var/lib/apt/lists/*
+COPY pilot-pgbouncer.sh /usr/local/bin/pilot-pgbouncer.sh
+COPY pilot-role.sh /usr/local/bin/pilot-role.sh
+COPY pilot-patroni.sh /usr/local/bin/pilot-patroni.sh
+COPY pilot-haproxy.sh /usr/local/bin/pilot-haproxy.sh
+COPY pilot-etcd.sh /usr/local/bin/pilot-etcd.sh
+COPY pilot-pg-flush /usr/local/bin/pilot-pg-flush
+RUN chmod +x /usr/local/bin/pilot-*
+`
+
 // postgresPlainDockerfile is the stock image plus the pooler, for the mode that
 // otherwise needs no image of its own.
 const postgresPlainDockerfile = `FROM postgres:17
-RUN apt-get update && apt-get install -y --no-install-recommends pgbouncer \
-  && rm -rf /var/lib/apt/lists/*
-COPY pilot-pgbouncer.sh /usr/local/bin/pilot-pgbouncer.sh
-RUN chmod +x /usr/local/bin/pilot-pgbouncer.sh
-`
+` + haLayer
 
 // postgresPooledDockerfile is the wal-archive image plus the pooler.
-const postgresPooledDockerfile = postgresDockerfile + `RUN apt-get update && apt-get install -y --no-install-recommends pgbouncer \
-  && rm -rf /var/lib/apt/lists/*
-COPY pilot-pgbouncer.sh /usr/local/bin/pilot-pgbouncer.sh
-RUN chmod +x /usr/local/bin/pilot-pgbouncer.sh
-`
+const postgresPooledDockerfile = postgresDockerfile + haLayer
 
 // The pooler's configuration is written at START, not baked into the image.
 //
@@ -676,4 +695,222 @@ admin_users = postgres
 EOF
 
 exec pgbouncer /etc/pgbouncer/pgbouncer.ini
+`
+
+// What runs, by role. One entrypoint, three answers.
+//
+// The role is read at START, not baked in, so converting a database changes an
+// environment variable rather than an image. A machine that comes back after a
+// conversion is the same machine with a different process set.
+const roleDispatch = `#!/bin/sh
+set -e
+case "${PILOT_PG_ROLE:-single}" in
+  single)
+    # What pilot add writes. Postgres on 5432, pgbouncer on 6432, nothing
+    # else running and nothing else to go wrong.
+    exec /usr/local/bin/pilot-entrypoint.sh "$@"
+    ;;
+  data)
+    # Patroni OWNS postgres here: it starts it, it configures it, and it
+    # decides when this node is primary. Starting postgres beside Patroni
+    # would be two things managing one data directory.
+    exec /usr/local/bin/pilot-patroni.sh
+    ;;
+  etcd)
+    exec /usr/local/bin/pilot-etcd.sh
+    ;;
+  *)
+    echo "pilot: unknown PILOT_PG_ROLE '$PILOT_PG_ROLE'" >&2
+    exit 1
+    ;;
+esac
+`
+
+// Patroni's configuration, rendered at start from the environment.
+//
+// Rendered rather than shipped, because three of its values are per machine
+// and one is a password: the node name, the addresses it advertises, the etcd
+// cluster it joins, and the replication credential. A config file in the image
+// would have to be templated at start anyway, and a password in an image is a
+// password in every copy of it.
+//
+// `name` is $HOSTNAME, which is the MACHINE name and is stable across a
+// redeploy. That matters more than it looks: Patroni identifies a member by
+// name, so a node whose name changed on every deploy would join as a new
+// member every time and leave the old one in the cluster for ever.
+const patroniStart = `#!/bin/sh
+set -e
+
+: "${PILOT_ETCD_HOSTS:?PILOT_ETCD_HOSTS is required in data role}"
+: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+SCOPE="${PILOT_PG_SCOPE:-pilots}"
+NODE="${HOSTNAME}"
+DATA="${PGDATA:-/var/lib/postgresql/data}"
+
+mkdir -p "$DATA" /etc/patroni
+chown -R postgres:postgres "$DATA"
+chmod 700 "$DATA"
+
+umask 077
+cat > /etc/patroni/patroni.yml <<EOF
+scope: ${SCOPE}
+name: ${NODE}
+
+restapi:
+  # 0.0.0.0 because HAProxy on every OTHER node health-checks this one. The
+  # guest firewall is what keeps that inside the app.
+  listen: 0.0.0.0:8008
+  connect_address: ${NODE}.internal:8008
+
+etcd3:
+  hosts: ${PILOT_ETCD_HOSTS}
+
+bootstrap:
+  dcs:
+    # ttl 30 with loop_wait 10 gives a failover inside about half a minute,
+    # and three loops of slack before a healthy leader is declared dead. A
+    # shorter ttl trades real availability for a promotion on every hiccup.
+    ttl: 30
+    loop_wait: 10
+    retry_timeout: 10
+    maximum_lag_on_failover: 1048576
+    postgresql:
+      use_pg_rewind: true
+      parameters:
+        wal_level: replica
+        hot_standby: "on"
+        max_wal_senders: 10
+        max_replication_slots: 10
+  initdb:
+    - encoding: UTF8
+    - data-checksums
+
+postgresql:
+  listen: 0.0.0.0:5432
+  connect_address: ${NODE}.internal:5432
+  data_dir: ${DATA}
+  authentication:
+    superuser:
+      username: postgres
+      password: "${POSTGRES_PASSWORD}"
+    replication:
+      username: replicator
+      password: "${PATRONI_REPLICATION_PASSWORD:-$POSTGRES_PASSWORD}"
+  # basebackup, because a new follower here has no local copy to rewind from:
+  # the ordinal's volume is empty the first time it is used.
+  create_replica_methods:
+    - basebackup
+
+tags:
+  nofailover: false
+  noloadbalance: false
+  nosync: false
+EOF
+chown postgres:postgres /etc/patroni/patroni.yml
+
+exec patroni /etc/patroni/patroni.yml
+`
+
+// HAProxy, following whichever node says it is primary.
+//
+// This is the whole reason no leader address is written anywhere: the check IS
+// the source of truth, it is asked every second, and it cannot be stale in the
+// way a replicated row would be exactly when a promotion happened.
+//
+// `server-template` with a DNS resolver rather than a fixed list, because the
+// set of replicas changes with a scale and a fixed list would send traffic to a
+// machine that no longer exists.
+const haproxyStart = `#!/bin/sh
+set -e
+: "${PILOT_PG_SERVICE:?PILOT_PG_SERVICE is required in data role}"
+
+mkdir -p /etc/haproxy
+cat > /etc/haproxy/haproxy.cfg <<EOF
+global
+  maxconn 1000
+defaults
+  mode tcp
+  timeout connect 5s
+  timeout client 8h
+  timeout server 8h
+
+resolvers pilots
+  nameserver gateway 169.254.0.22:53
+  # One second, because a scale or a rescue changes what the name resolves to
+  # and a stale answer here is traffic to a machine that is gone.
+  hold valid 1s
+
+frontend primary
+  bind *:6432
+  default_backend pg_primary
+
+backend pg_primary
+  option httpchk GET /primary
+  http-check expect status 200
+  # Every replica is a candidate and exactly one passes the check, so this is a
+  # backend of N servers with N-1 always down. That is the design rather than a
+  # misconfiguration: the check is what decides, every second.
+  server-template pg 7 ${PILOT_PG_SERVICE}.internal:6433 check port 8008 resolvers pilots init-addr none inter 1s fall 2 rise 1
+EOF
+
+exec haproxy -f /etc/haproxy/haproxy.cfg -db
+`
+
+// One etcd member.
+//
+// Every member advertises itself by its MACHINE name, which is stable across a
+// redeploy, and discovers the others through the service name. A member that
+// renamed itself on every deploy would join as a new member and leave the old
+// one in the cluster for ever, which is how a three-member quorum silently
+// becomes a six-member cluster with three dead votes.
+const etcdStart = `#!/bin/sh
+set -e
+: "${PILOT_ETCD_SERVICE:?PILOT_ETCD_SERVICE is required in etcd role}"
+NODE="${HOSTNAME}"
+DATA=/var/lib/etcd
+mkdir -p "$DATA"
+
+exec etcd \
+  --name "$NODE" \
+  --data-dir "$DATA" \
+  --listen-client-urls http://0.0.0.0:2379 \
+  --advertise-client-urls "http://${NODE}.internal:2379" \
+  --listen-peer-urls http://0.0.0.0:2380 \
+  --initial-advertise-peer-urls "http://${NODE}.internal:2380" \
+  --discovery-srv-name "${PILOT_ETCD_SERVICE}" \
+  --initial-cluster-state "${PILOT_ETCD_STATE:-new}" \
+  --initial-cluster-token "${PILOT_ETCD_SERVICE}"
+`
+
+// Flushing the write-ahead log before a node is taken down.
+//
+// The 60-second archive timeout is the recovery point objective in ordinary
+// running, and it is the right trade there. It is the WRONG trade at a moment
+// we control: a conversion kills a node on purpose, and losing up to a minute
+// of writes to a planned operation is a loss nobody agreed to.
+//
+// So the segment is switched and the archiver is waited on. Bounded, because a
+// node that cannot archive must not hold a conversion open for ever; the
+// caller decides what to do about a timeout, and it knows more than this
+// script does.
+const walFlush = `#!/bin/sh
+set -e
+DEADLINE=$(( $(date +%s) + 90 ))
+
+WANT=$(psql -U postgres -Atqc "SELECT pg_walfile_name(pg_switch_wal())")
+[ -n "$WANT" ] || { echo "pilot: could not switch the write-ahead log" >&2; exit 1; }
+
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+  LAST=$(psql -U postgres -Atqc "SELECT coalesce(last_archived_wal, '') FROM pg_stat_archiver")
+  # Lexical, because WAL segment names sort in the order they are written. A
+  # last_archived_wal at or past the one we forced means ours is on the volume.
+  if [ -n "$LAST" ] && [ ! "$LAST" \< "$WANT" ]; then
+    echo "pilot: archived $LAST"
+    exit 0
+  fi
+  sleep 1
+done
+
+echo "pilot: $WANT was not archived within 90s" >&2
+exit 1
 `

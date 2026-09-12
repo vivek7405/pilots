@@ -1605,7 +1605,38 @@ replica takes the ordinary floor of zero; only a destroy or a self-heal claim
 moves a volume. A promoted volume-backed sandbox's release is the image it was
 created from. Availability across a deploy or a host death needs a volume per
 replica and application-level replication, Fly's answer too (at least two
-volumes per app), and is not built here.
+volumes per app), and for one case it IS built here: see below.
+
+**A volume per ordinal, for engines only.** A volume-backed service runs one
+replica, because two machines mounting one volume is two processes writing one
+filesystem. The exception is a service whose write-once `pilot.engine` label
+is `postgres` or `etcd`: it may run N replicas with N `service_volumes` rows,
+one per ordinal, which is the shape that table was always written for. The
+label is set by the recipe at create and can never be added later, so a
+hand-written service cannot reach this by editing a number: it is refused, and
+the refusal names the recipe.
+
+Postgres caps at 7 ordinals and etcd must be an odd number at most 9, which
+are not arbitrary — an even etcd has no majority it did not already have at
+one fewer, and a Postgres beyond 7 is a replication fan-out nobody should
+reach for without saying why.
+
+**High availability, and whose it is.** Patroni runs inside the machines, with
+its own etcd in the same app, and pilots does not participate in a single one
+of its decisions. What pilots operates is the machines, the volumes, the
+snapshots, the process supervisor and the placement of ordinals across
+distinct hosts. What it does not operate is Patroni's choice of leader, the
+tuning, or the three in the morning. That division is stated in `docs/honesty.md`
+and printed by the command that turns this on, because a platform that lets
+somebody believe otherwise has made the most expensive mistake available to it.
+
+**The leader address is not in Corrosion, deliberately.** `<name>.internal`
+keeps resolving to every data replica, and each replica runs HAProxy on the
+published port forwarding to whichever node answers 200 on Patroni's
+`/primary`. A leader recorded in a row would be a row written by whichever host
+noticed a promotion, which is a single-writer violation with a CRDT merge
+underneath it, and it would be stale exactly when it mattered. Following a
+health check costs one more process and is correct by construction.
 
 **Databases are the documented exception, and it is a default rather than a
 prohibition.** Per-write durability means an S3 round trip per fsync, which a

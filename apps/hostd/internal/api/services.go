@@ -158,11 +158,17 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return // 404 on unknown and on foreign alike; existence never leaks
 		}
-		if req.Replicas > 1 {
-			WriteError(w, http.StatusBadRequest, CodeBadRequest, "a service that "+
-				"mounts a volume runs exactly one replica: a volume is mounted by "+
-				"one machine at a time",
-				"a volume-backed service runs one replica; drop replicas or the volume", nil)
+		// An engine that replicates between its OWN ordinals is the one
+		// exception, and the label that says so is written once by the recipe
+		// at create. A hand-written service cannot reach this by editing a
+		// number, which is why the refusal names the recipe.
+		engine := ""
+		if req.Labels != nil {
+			engine = req.Labels["pilot.engine"]
+		}
+		if err := checkReplicatedVolumes(engine, req.Replicas); err != nil {
+			WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(),
+				nextReplicaHint(engine), nil)
 			return
 		}
 		if v.MachineID != "" {
@@ -496,7 +502,7 @@ func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
 	}
 
 	before := svc.Replicas
-	if err := d.applyServicePatch(svc, volumeID, req); err != nil {
+	if err := d.applyServicePatch(svc, volumeID, d.EngineOf(r.Context(), svc.ID), req); err != nil {
 		if errors.Is(err, errAddressSet) {
 			WriteError(w, http.StatusConflict, CodeConflict, err.Error(),
 				"add a custom domain instead", nil)
@@ -635,7 +641,10 @@ func checkSize(s *Size) error {
 //
 // One function on purpose: every rule about a legal service lives here, and a
 // new field is a case in this switch plus a line in UpdateServiceRequest.
-func (d Deps) applyServicePatch(svc *state.Service, volumeID string, req UpdateServiceRequest) error {
+// engine is the service's write-once pilot.engine label, resolved by the
+// caller. Passed rather than looked up, because this function is a pure merge
+// and a store read inside it would make every test of it need a store.
+func (d Deps) applyServicePatch(svc *state.Service, volumeID, engine string, req UpdateServiceRequest) error {
 	if req.Replicas != nil {
 		if *req.Replicas < 0 {
 			return errors.New("replicas cannot be negative")
@@ -718,9 +727,17 @@ func (d Deps) applyServicePatch(svc *state.Service, volumeID string, req UpdateS
 	// The other create-time rule. A volume is mounted by one machine, so a
 	// service that mounts one runs one replica; the create refused more and
 	// the patch must not admit it by the side door.
-	if volumeID != "" && svc.Replicas > 1 {
-		return fmt.Errorf("service mounts volume %s and runs exactly one replica: "+
-			"a volume is mounted by one machine at a time", volumeID)
+	//
+	// The engine exception applies here too, and it is READ from the stored
+	// label rather than taken from the request: a patch cannot add the label,
+	// so what is on the row is what the recipe wrote at create.
+	if volumeID != "" {
+		if err := checkReplicatedVolumes(engine, svc.Replicas); err != nil {
+			// The volume is named, because the caller asked for replicas and
+			// the answer depends on a volume they may not have been thinking
+			// about. "Which volume?" is the next question either way.
+			return fmt.Errorf("service mounts volume %s: %w", volumeID, err)
+		}
 	}
 	return nil
 }
@@ -878,12 +895,13 @@ func (d Deps) handlePromote(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if row.VolumeID != "" {
-		if req.Replicas > 1 {
-			WriteError(w, http.StatusBadRequest, CodeBadRequest, fmt.Sprintf(
-				"machine %s mounts volume %s, so the service it becomes runs exactly "+
-					"one replica: a volume is mounted by one machine at a time",
-				row.ID, row.VolumeID),
-				"a volume-backed service runs one replica; drop replicas or the volume", nil)
+		// A promotion cannot add the engine label either, so a promoted
+		// sandbox carries whatever it was created with -- which for anything
+		// but a recipe machine is nothing.
+		if err := checkReplicatedVolumes(d.EngineOf(r.Context(), row.ID), req.Replicas); err != nil {
+			WriteError(w, http.StatusBadRequest, CodeBadRequest,
+				fmt.Sprintf("machine %s mounts volume %s: %v", row.ID, row.VolumeID, err),
+				nextReplicaHint(d.EngineOf(r.Context(), row.ID)), nil)
 			return
 		}
 		// A volume-backed service is redeployed and rolled back by BOOTING
