@@ -268,6 +268,7 @@ func startSelfHeal(ctx context.Context, cfg *config.Config, f *fleet, mgr *machi
 			return memMiB <= freeMemMiB(cfg.HugePages)
 		},
 		Restore:        func(ctx context.Context, m *state.Machine) error { return mgr.Rescue(ctx, *m) },
+		BootOnVolume:   func(ctx context.Context, m *state.Machine) error { return mgr.RescueOnVolume(ctx, *m) },
 		RunningLocally: mgr.RunningIDs,
 		StopLocal:      mgr.StopLocal,
 	}

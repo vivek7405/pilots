@@ -77,6 +77,17 @@ type Options struct {
 	// Restore brings a rescued machine up here. It receives the row and
 	// nothing else -- everything host-local is minted fresh.
 	Restore func(ctx context.Context, m *state.Machine) error
+	// BootOnVolume rescues a volume-backed machine, which has no memory image
+	// and never will: it takes a release by booting its rootfs, because a
+	// memory image carries the volume drive in its device state.
+	//
+	// It owns its claim for the same reason Restore does: the claim and the
+	// start must happen under one per-machine lock, or something else decides
+	// the machine is free in between.
+	//
+	// nil on a host that cannot boot one; such a host leaves the machine for
+	// the next tick, which re-hashes over the live set.
+	BootOnVolume func(ctx context.Context, m *state.Machine) error
 
 	// RunningLocally lists the machines this host currently has processes for.
 	RunningLocally func() []string
@@ -303,6 +314,37 @@ func releaseLost(ctx context.Context, opts Options) {
 
 // rescue claims one machine and brings it up here.
 func rescue(ctx context.Context, opts Options, m state.Machine) {
+	// A VOLUME machine is rescued by BOOTING it, not by restoring it.
+	//
+	// It has no memory image and never will: a volume-backed machine takes a
+	// release by booting its rootfs, because a memory image carries the volume
+	// drive in its device state and could only be restored onto the same drive
+	// on the same host. So the branch below, which gives up on a machine with
+	// no snapshot, was giving up on exactly the machines whose data DID survive
+	// their host -- it is on a volume in object storage, which is the whole
+	// point of a volume.
+	//
+	// Everything that makes this safe is unchanged: the claim is still a
+	// dead-owner claim on a provably dead host, still made under the same lock,
+	// and the volume is still claimed before it is mounted. What differs is
+	// only what happens after the claim: a boot from the image the machine
+	// already names, rather than a restore of a snapshot that does not exist.
+	if m.MemBuildID == "" && m.VolumeID != "" && m.ImageRef != "" {
+		if opts.BootOnVolume == nil {
+			// A host that cannot boot one leaves it for a host that can; the
+			// next tick re-hashes over the live set.
+			return
+		}
+		slog.Info("rescuing a volume-backed machine by booting it on its volume",
+			"machine", m.ID, "dead_host", m.HostID, "volume", m.VolumeID)
+		if err := opts.BootOnVolume(ctx, &m); err != nil {
+			slog.Info("did not rescue a volume-backed machine", "machine", m.ID, "err", err)
+			return
+		}
+		slog.Info("machine rescued onto its volume", "machine", m.ID, "url", m.Domain)
+		return
+	}
+
 	// A machine with no memory image cannot be restored anywhere: it was never
 	// suspended or checkpointed, so there is nothing in object storage to
 	// bring back. Looping on it every tick forever helps nobody.
