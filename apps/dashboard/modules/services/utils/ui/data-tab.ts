@@ -17,6 +17,7 @@ import type { TabProps } from '#modules/services/utils/tabs.ts';
 import { engineOf, ENGINE_HELP } from '#modules/data/engines.ts';
 import { sectionEmpty, sectionGap, sectionHeading } from '#lib/utils/ui.ts';
 import '#modules/data/components/data-console.ts';
+import '#modules/data/components/engine-stats.ts';
 
 export function dataTab({ detail }: TabProps): TemplateResult {
   const { service, replicas } = detail;
@@ -32,6 +33,18 @@ export function dataTab({ detail }: TabProps): TemplateResult {
 
   return html`
     <div class=${sectionGap()}>
+      <section>
+        ${sectionHeading(
+          `${help.label} health`,
+          'The numbers only the engine knows, read by running its own client beside it.',
+        )}
+        ${running
+          ? html`<engine-stats service-id=${service.id}></engine-stats>`
+          : html`<p class="m-0 text-body text-muted-foreground">
+              Nothing is running, so there is nothing to ask.
+            </p>`}
+      </section>
+
       <section>
         ${sectionHeading('Data', help.what)}
         ${running
