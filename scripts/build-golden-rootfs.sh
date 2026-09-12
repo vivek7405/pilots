@@ -75,12 +75,27 @@ esac
 # would put us back where this started: a pin that asserts nothing while
 # host-bootstrap.sh still hard-fails anyone whose image does not match it.
 #
-# Making this hold everywhere means pinning the toolchain -- running the pack
-# inside a container with a known e2fsprogs -- which also gets reproducibility
-# ACROSS machines, something no combination of flags here can. That is not in
-# this change; see #108.
+# So the pack runs inside a PINNED container with a known e2fsprogs, which is
+# the only thing that gets reproducibility ACROSS machines -- no combination of
+# flags on the host can, because the flags are honoured by some builds and
+# ignored by others. `PACK_IMAGE` below is that pin, and it is the reason the
+# hash in `*.sha256` means the same bytes on a laptop, on a runner and on a
+# host, rather than the same bytes on one of them.
+#
+# `PACK_LOCAL=1` runs the pack on the host toolchain instead, for somebody
+# without Docker. The probe below then still says whether the result is
+# meaningful, which is what it was always for.
 : "${SOURCE_DATE_EPOCH:=1700000000}"
 export SOURCE_DATE_EPOCH
+
+# The pinned packing toolchain. debian:trixie-slim carries e2fsprogs 1.47.2 or
+# newer, which honours SOURCE_DATE_EPOCH; bookworm ships 1.47.0, which does
+# not, and is exactly the build that made this pin meaningless before.
+#
+# By DIGEST, not by tag: a tag is a moving target, and a pin that moves is a
+# pin that silently stops pinning. Update it deliberately, and regenerate both
+# .sha256 files in the same commit.
+: "${PACK_IMAGE:=debian:trixie-slim}"
 
 # Does THIS mke2fs actually produce the same bytes twice? Two 1 MiB
 # filesystems over an empty directory, a second apart so a clock that leaks in
@@ -100,7 +115,20 @@ reproducible_mke2fs() {
   [ "$a" = "$b" ]
 }
 
-if reproducible_mke2fs; then
+# Which toolchain packs: the pinned container by default, the host on request
+# or when there is no Docker to pin with.
+PACK_IN_CONTAINER=1
+if [ "${PACK_LOCAL:-0}" = "1" ]; then
+  PACK_IN_CONTAINER=0
+  echo "==> PACK_LOCAL=1: packing with this host's e2fsprogs"
+elif ! docker info >/dev/null 2>&1; then
+  PACK_IN_CONTAINER=0
+  echo "==> no usable Docker; packing with this host's e2fsprogs" >&2
+fi
+
+if [ "$PACK_IN_CONTAINER" = "1" ]; then
+  echo "==> packing inside $PACK_IMAGE, so the pin means the same bytes everywhere"
+elif reproducible_mke2fs; then
   echo "==> mke2fs is reproducible here; the pin this writes is meaningful"
 else
   echo "==> WARNING: this mke2fs ($(mke2fs -V 2>&1 | head -1)) does not honour" >&2
@@ -109,6 +137,7 @@ else
   echo "    Every host you ship this image to still gets identical bytes --" >&2
   echo "    host-bootstrap.sh copies one file -- but a rebuild will not" >&2
   echo "    reproduce the pin. e2fsprogs 1.47.4 honours it; 1.47.0 does not." >&2
+  echo "    Unset PACK_LOCAL and install Docker to pack in $PACK_IMAGE instead." >&2
 fi
 
 STAGED_BIN="scripts/rootfs/guest-agent"
@@ -145,10 +174,13 @@ rm -f "$OUT"
 # below is a separate shell, so exporting them out here is not enough to be
 # sure they arrive -- and if they silently did not, the build would still
 # succeed and just stop being reproducible.
-TAR="$TAR" ROOT="$ROOT" OUT="$OUT" SIZE_MB="$SIZE_MB" \
-  SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" FS_UUID="$FS_UUID" \
-  FS_HASH_SEED="$FS_HASH_SEED" fakeroot sh -euc '
-  tar -xf "$TAR" -C "$ROOT"
+# The pack body, written to a file so the same text runs on the host and inside
+# the container. One copy, because two copies of this would drift and the
+# symptom would be two images that differ for a reason nobody could see.
+PACK_SCRIPT="$(mktemp -t pilots-pack-XXXXXX.sh)"
+cat > "$PACK_SCRIPT" <<'PACK'
+set -eu
+tar -xf "$TAR" -C "$ROOT"
 
   # Docker bind-mounts /etc/resolv.conf during build, so it cannot be written
   # in the Dockerfile -- it has to be written here, after export.
@@ -165,9 +197,40 @@ TAR="$TAR" ROOT="$ROOT" OUT="$OUT" SIZE_MB="$SIZE_MB" \
   ln -sf /lib/systemd/systemd "$ROOT/sbin/init"
   rm -f "$ROOT/.dockerenv"
 
-  mke2fs -q -F -t ext4 -b 4096 -U "$FS_UUID" -E hash_seed="$FS_HASH_SEED" \
-    -d "$ROOT" "$OUT" "${SIZE_MB}M"
-'
+mke2fs -q -F -t ext4 -b 4096 -U "$FS_UUID" -E hash_seed="$FS_HASH_SEED" \
+  -d "$ROOT" "$OUT" "${SIZE_MB}M"
+PACK
+
+if [ "$PACK_IN_CONTAINER" = "1" ]; then
+  # The tar goes in, the image comes out, and nothing else is shared. The
+  # extraction happens INSIDE, under the container's own fakeroot, so the
+  # ownership and mode bits in the image are the tar's rather than whatever
+  # this host's umask and uid would have imposed.
+  PACK_DIR="$(mktemp -d -t pilots-pack-XXXXXX)"
+  cp "$TAR" "$PACK_DIR/rootfs.tar"
+  cp "$PACK_SCRIPT" "$PACK_DIR/pack.sh"
+  mkdir -p "$PACK_DIR/root"
+  docker run --rm \
+    -v "$PACK_DIR:/work" \
+    -e TAR=/work/rootfs.tar -e ROOT=/work/root -e OUT=/work/out.img \
+    -e SIZE_MB="$SIZE_MB" -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
+    -e FS_UUID="$FS_UUID" -e FS_HASH_SEED="$FS_HASH_SEED" \
+    "$PACK_IMAGE" sh -euc '
+      # Installed here rather than baked into an image of our own, so the pin
+      # is one upstream digest instead of a registry we would have to host.
+      apt-get -qq update >/dev/null
+      DEBIAN_FRONTEND=noninteractive apt-get -qq install -y --no-install-recommends         e2fsprogs fakeroot >/dev/null
+      mke2fs -V 2>&1 | head -1
+      fakeroot sh /work/pack.sh
+    '
+  mv "$PACK_DIR/out.img" "$OUT"
+  rm -rf "$PACK_DIR"
+else
+  TAR="$TAR" ROOT="$ROOT" OUT="$OUT" SIZE_MB="$SIZE_MB" \
+    SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" FS_UUID="$FS_UUID" \
+    FS_HASH_SEED="$FS_HASH_SEED" fakeroot sh "$PACK_SCRIPT"
+fi
+rm -f "$PACK_SCRIPT"
 
 sha256sum "$OUT" > "$OUT.sha256"
 
