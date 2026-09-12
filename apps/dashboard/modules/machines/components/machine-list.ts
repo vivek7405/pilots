@@ -37,6 +37,7 @@ import { inputClass } from '#components/ui/input.ts';
 import { kbdClass } from '#components/ui/kbd.ts';
 import { skeletonClass } from '#components/ui/skeleton.ts';
 import { toast } from '#components/ui/sonner.ts';
+import { isBuilder } from '#modules/machines/utils/builder.ts';
 import { resumeTier } from '#modules/machines/utils/resume.ts';
 import type { ResumeTier } from '#modules/machines/utils/resume.ts';
 import { statusLine } from '#modules/machines/utils/ui/status-line.ts';
@@ -82,6 +83,12 @@ const CHIPS: { key: string; label: string }[] = [
   { key: 'warm', label: 'Sleeping (resumes warm)' },
   { key: 'cold', label: 'Sleeping (starts fresh)' },
   { key: 'other', label: 'Other' },
+  // Builders are the one chip that REVEALS rather than narrows: they are out
+  // of every other chip, including All, because nobody created them and they
+  // have nothing a person can open. The count is what keeps them from being
+  // invisible -- a reader wondering why a build is slow can see that one
+  // exists and what state it is in without knowing the word for it first.
+  { key: 'builders', label: 'Builders' },
 ];
 
 /** What a chip that matched nothing says, so it never reads as an empty account. */
@@ -90,6 +97,7 @@ const NOTHING_MATCHED: Record<string, string> = {
   warm: 'No sandboxes are sleeping with their memory kept',
   cold: 'No sandboxes would start fresh when woken',
   other: 'Nothing is stopped or failed',
+  builders: 'Nothing has been built for this team yet',
   all: 'Nothing matches that filter',
 };
 
@@ -187,7 +195,7 @@ class MachineList extends WebComponent({
   }
 
   /**
-   * The rows this list is ABOUT, before any chip or filter.
+   * Every row this list could ever show, builders included.
    *
    * A sandboxes list holds only machines that belong to no service. The
    * property is not enough on its own: `initial` is seeded with the page's own
@@ -195,8 +203,21 @@ class MachineList extends WebComponent({
    * replaces them, so without this the overview's Sandboxes section filled
    * with service replicas the moment it hydrated.
    */
-  private base(): Machine[] {
+  private pool(): Machine[] {
     return this.sandboxes ? this.rows.filter((m) => !m.service_id) : this.rows;
+  }
+
+  /**
+   * The rows this list is ABOUT, before any filter or host select.
+   *
+   * Builders are OUT of every chip but their own. They are machines nobody
+   * asked for, with no URL and nothing to open, and a list that mixes them in
+   * makes a team of three services look like a team of six. Their chip is the
+   * only way to see them, which is the whole of "hidden by default".
+   */
+  private base(): Machine[] {
+    const pool = this.pool();
+    return this.chip === 'builders' ? pool.filter(isBuilder) : pool.filter((m) => !isBuilder(m));
   }
 
   /**
@@ -216,7 +237,10 @@ class MachineList extends WebComponent({
   private visible(): Machine[] {
     const needle = this.query.trim().toLowerCase();
     return this.base().filter((m) => {
-      if (this.chip !== 'all' && this.chipOf(m) !== this.chip) return false;
+      // `builders` is answered by `base()` itself, not by the resume tier: a
+      // builder is online or asleep like anything else, so testing its tier
+      // here would empty the chip that just revealed it.
+      if (this.chip !== 'all' && this.chip !== 'builders' && this.chipOf(m) !== this.chip) return false;
       if (this.host && m.host_id !== this.host) return false;
       if (needle) {
         // Labels join the haystack as k=v, so typing `team=a` filters on
@@ -260,10 +284,26 @@ class MachineList extends WebComponent({
     `;
   }
 
+  /**
+   * Every chip's count, and they do not add up to `all` on purpose.
+   *
+   * `builders` is counted off the whole pool rather than off `base()`, because
+   * `base()` shows builders only while their own chip is selected: counting
+   * there would make the number 0 until it is clicked, which is the one moment
+   * it is no longer needed.
+   */
   private counts(): Record<string, number> {
-    const base = this.base();
-    const out: Record<string, number> = { all: base.length, running: 0, warm: 0, cold: 0, other: 0 };
-    for (const m of base) {
+    const pool = this.pool();
+    const shown = pool.filter((m) => !isBuilder(m));
+    const out: Record<string, number> = {
+      all: shown.length,
+      running: 0,
+      warm: 0,
+      cold: 0,
+      other: 0,
+      builders: pool.length - shown.length,
+    };
+    for (const m of shown) {
       const key = this.chipOf(m);
       out[key] = (out[key] ?? 0) + 1;
     }
@@ -277,24 +317,31 @@ class MachineList extends WebComponent({
 
   render() {
     const all = this.base();
-    if (all.length === 0) {
+    const counts = this.counts();
+    // The never-created empty state belongs to the list a person MADE, so a
+    // team whose only row is a builder still gets it. The toolbar is kept
+    // above it whenever a builder exists, because the chip is the only way to
+    // reach one and an empty state that hides it would make the row
+    // unreachable rather than merely hidden. Selecting that chip skips this
+    // branch, or revealing a builder would answer "nothing here yet".
+    if (all.length === 0 && this.chip !== 'builders') {
       // An empty list on a page that rendered while the fleet was unreachable
       // is not the same as an org with no machines, but neither the socket nor
       // the SSR read can tell us which, so the skeleton only shows while the
       // socket has not connected yet.
-      if (!this.online && this.initial.length === 0) {
+      if (!this.online && this.initial.length === 0 && counts.builders === 0) {
         return html`<div class="grid gap-2" aria-busy="true" aria-label="Loading machines">
           ${[0, 1, 2].map(() => html`<div class=${cn(skeletonClass(), 'h-10 w-full')}></div>`)}
         </div>`;
       }
-      return emptyState(
+      const empty = emptyState(
         this.sandboxes ? 'No sandboxes yet.' : 'Nothing here yet.',
         { command: 'pilot machines create' },
       );
+      return counts.builders === 0 ? empty : html`${this.toolbar(counts, [])}${empty}`;
     }
 
     const rows = this.visible();
-    const counts = this.counts();
     const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
     const page = Math.min(this.page, pages - 1);
     const paged = rows.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE);
@@ -435,6 +482,9 @@ class MachineList extends WebComponent({
         header: 'Name',
         cell: (m: Machine) => html`
           <a href=${`/machines/${m.id}`} class="text-foreground">${m.name || m.id}</a>
+          ${isBuilder(m)
+            ? html`<span class=${cn(badgeClass({ variant: 'outline' }), 'ml-2 align-middle')}>builder</span>`
+            : ''}
           ${this.sandboxes || !m.service_id
             ? ''
             : html`<span class="block text-meta text-muted-foreground">${this.serviceName(m.service_id)}</span>`}
@@ -449,8 +499,11 @@ class MachineList extends WebComponent({
       },
       {
         header: 'URL',
+        // A builder answers no requests and is reachable by nothing a person
+        // could type, so the cell is blank even on the day the engine starts
+        // sending a URL for one. A link that goes nowhere is worse than none.
         cell: (m: Machine) =>
-          m.url
+          m.url && !isBuilder(m)
             ? html`<span class="flex items-center gap-1">
                 <a href=${m.url} rel="noopener" @click=${stop}>${m.url}</a>
                 <copy-button value=${m.url} label="URL"></copy-button>

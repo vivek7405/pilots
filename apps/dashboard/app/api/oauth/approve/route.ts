@@ -17,6 +17,7 @@
  */
 
 import { requireUser, roleOn } from '#modules/auth/session.server.ts';
+import { canAdministerOrg } from '#modules/orgs/roles.ts';
 import { issueCode } from '#modules/oauth/oauth.server.ts';
 import { verifyTicket } from '#modules/oauth/authorize.server.ts';
 
@@ -59,8 +60,9 @@ export async function POST(req: Request): Promise<Response> {
   const orgId = String(form.get('org') ?? '');
   const role = orgId ? await roleOn(user.id, orgId) : null;
   if (!role) return refuse(403, 'you are not a member of that team');
-  // Minting an admin key is an owner's act, the same rule the tokens form applies.
-  if (grant.scopes.includes('admin') && role !== 'owner') {
+  // Minting an admin key is an owner's act, the same rule the tokens form
+  // applies, read from the same predicate so the two cannot drift apart.
+  if (grant.scopes.includes('admin') && !canAdministerOrg(role)) {
     target.searchParams.set('error', 'access_denied');
     target.searchParams.set('error_description', 'only an org owner can grant an admin token');
     return seeOther(target.toString());

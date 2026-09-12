@@ -33,7 +33,11 @@ export async function listServicesWithStatus(): Promise<FleetStatus | SignedOut>
 
   const [services, machines, hosts, volumes] = await Promise.all([
     listServices(ctx.org.id).catch(() => [] as Service[]),
-    listMachines(ctx.org.id).catch(() => [] as Machine[]),
+    // With builders, because these rows seed `<machine-list>` and the live
+    // socket that replaces them asks for them too. The component hides them
+    // behind their own chip; the two reads must carry the same set or
+    // hydration would change the list under the reader.
+    listMachines(ctx.org.id, { builders: true }).catch(() => [] as Machine[]),
     fleet.hosts.list().catch(() => [] as Host[]),
     listVolumes(ctx.org.id).catch(() => [] as Volume[]),
   ]);

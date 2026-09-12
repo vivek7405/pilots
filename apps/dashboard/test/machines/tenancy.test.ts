@@ -61,7 +61,14 @@ test('the list is narrowed to the caller org, by asking the fleet for that org',
 
   const listCall = app.fleet.calls.find((c) => c.method === 'http.json');
   assert.ok(listCall, 'the route asked the fleet rather than filtering a full list itself');
-  assert.deepEqual(listCall.args[2], { org: orgA }, 'the org filter went to the engine');
+  // `include=builders` rides along because this list is what `<machine-list>`
+  // runs on and its builders chip is a count; the org filter is the part that
+  // is load-bearing here, and it still goes to the engine.
+  assert.deepEqual(
+    listCall.args[2],
+    { org: orgA, include: 'builders' },
+    'the org filter went to the engine',
+  );
 });
 
 test("a foreign machine is a 404 on GET, not a 403", async () => {

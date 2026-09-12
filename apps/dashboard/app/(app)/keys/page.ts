@@ -19,6 +19,7 @@ import type { KeyRow } from '#modules/keys/queries/list-keys.server.ts';
 import { createKey } from '#modules/keys/actions/create-key.server.ts';
 import { revokeKey } from '#modules/keys/actions/revoke-key.server.ts';
 import { SCOPES } from '#modules/keys/scopes.ts';
+import { canAdministerOrg } from '#modules/orgs/roles.ts';
 import { alertClass, alertDescriptionClass, alertTitleClass } from '#components/ui/alert.ts';
 import { badgeClass } from '#components/ui/badge.ts';
 import { buttonClass } from '#components/ui/button.ts';
@@ -148,7 +149,7 @@ export default async function KeysPage({ actionData }: PageProps) {
                   value=${scope}
                   data-slot="checkbox"
                   class=${checkboxClass()}
-                  ?disabled=${scope === 'admin' && ctx.role !== 'owner'}
+                  ?disabled=${scope === 'admin' && !canAdministerOrg(ctx.role)}
                 >
                 <span class="font-mono">${scope}</span>
               </label>

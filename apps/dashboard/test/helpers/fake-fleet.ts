@@ -66,6 +66,12 @@ export interface FleetData {
    * would close the socket before a test could type into it.
    */
   execHold: boolean;
+  /** Set to make `quotas.put` refuse, the way a negative limit does. */
+  quotaPutError: Error | null;
+  /** Every `POST /v1/builders/{host}/reset`, newest last. */
+  builderResets: { host: string; org?: string }[];
+  /** The epoch the next reset answers with, incremented per reset. */
+  builderEpoch: number;
   /** Set to make `services.create` refuse, the way a taken name does. */
   createServiceError: Error | null;
   /** Set to make `repos.connect` refuse, the way an unclaimable repo does. */
@@ -78,6 +84,17 @@ export interface FakeFleet {
   reset(): void;
   [group: string]: unknown;
 }
+
+/**
+ * A builder, by the one signal the engine uses.
+ *
+ * Spelled out here rather than imported from the app, so the fake asserts the
+ * CONTRACT rather than agreeing with whatever the app currently believes: if
+ * `modules/machines/utils/builder.ts` ever drifted from
+ * `quota.BuilderNamePrefix`, a fake that imported it would drift with it and
+ * every builders test would keep passing.
+ */
+const isBuilderRow = (m: { name?: string }) => (m.name ?? '').startsWith('builder-');
 
 let keyCounter = 0;
 
@@ -113,6 +130,9 @@ export function makeFakeFleet(): FakeFleet {
     execStdin: [],
     execResizes: [],
     execHold: false,
+    quotaPutError: null,
+    builderResets: [],
+    builderEpoch: 0,
     createServiceError: null,
     connectError: null,
   };
@@ -136,6 +156,9 @@ export function makeFakeFleet(): FakeFleet {
     state.execStdin.length = 0;
     state.execResizes.length = 0;
     state.execHold = false;
+    state.quotaPutError = null;
+    state.builderResets.length = 0;
+    state.builderEpoch = 0;
     state.createServiceError = null;
     state.connectError = null;
   };
@@ -202,10 +225,43 @@ export function makeFakeFleet(): FakeFleet {
         const org = init.query?.org as string | undefined;
         const narrow = <T extends { org_id?: string }>(rows: T[]) =>
           org ? rows.filter((r) => r.org_id === org) : rows;
-        if (path === '/v1/machines') return narrow(state.machines);
+        if (path === '/v1/machines') {
+          // The real route OMITS builders unless asked, so the fake must too:
+          // without this, a caller that forgot `?include=builders` would pass
+          // here and come back empty-handed against a host, and the one thing
+          // the builders chip needs is a count.
+          const asked = String(init.query?.include ?? '').split(',').includes('builders');
+          const rows = narrow(state.machines);
+          return asked ? rows : rows.filter((m) => !isBuilderRow(m));
+        }
         if (path === '/v1/services') return narrow(state.services);
         if (path === '/v1/volumes') return narrow(state.volumes);
         if (path === '/v1/domains') return [];
+        // Builders have no SDK method, so the dashboard reaches them through
+        // the transport and the fake answers the two routes by hand. The
+        // envelope is an OBJECT with a `builders` key, not a bare array, which
+        // is what `GET /v1/builders` returns: a fake that answered an array
+        // would let a query that forgot `.builders` pass here and return
+        // nothing against a real host.
+        // The real route answers an OBJECT with a `builders` key holding the
+        // same Machine objects `/v1/machines` returns, so the fake serves the
+        // builder rows out of `machines` rather than a parallel list that
+        // could disagree with it.
+        if (path === '/v1/builders') {
+          return { builders: narrow(state.machines).filter(isBuilderRow) };
+        }
+        const reset = /^\/v1\/builders\/([^/]+)\/reset$/.exec(path);
+        if (reset && method === 'POST') {
+          const host = decodeURIComponent(reset[1]!);
+          state.builderResets.push({ host, org });
+          state.builderEpoch += 1;
+          // The epoch moves even when there was nothing on that host to
+          // destroy, which is what the real handler does: "my layers are
+          // wrong" must not require knowing which host holds a machine.
+          const gone = narrow(state.machines).filter((m) => isBuilderRow(m) && m.host_id === host);
+          for (const m of gone) state.machines.splice(state.machines.indexOf(m), 1);
+          return { ok: true, epoch: state.builderEpoch, destroyed: gone.length };
+        }
         return [];
       },
     },
@@ -344,6 +400,20 @@ export function makeFakeFleet(): FakeFleet {
       get: async (org: string) => {
         record('quotas.get', org);
         return { ...state.quotas, org_id: org };
+      },
+      /**
+       * `PUT /v1/quotas/{org}`, which is how a plan reaches the fleet.
+       *
+       * It KEEPS what it was given, so a test can assert on the numbers the
+       * team is now held to rather than only on the fact a call was made: a
+       * plan written with a field the action forgot to map reads as zero on
+       * the real route, and that is a frozen team, not a missing feature.
+       */
+      put: async (org: string, quota: Omit<QuotaResponse, 'updated_at'>) => {
+        record('quotas.put', org, quota);
+        if (state.quotaPutError) throw state.quotaPutError;
+        state.quotas = { ...state.quotas, ...quota, org_id: org };
+        return state.quotas;
       },
     },
 
