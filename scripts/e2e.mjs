@@ -3936,7 +3936,7 @@ async function dataRouteAssertions() {
     // fleet gate, against its fake GitHub.
 
     await step('a {repo, ref} plan on a fleet with no GitHub App says what to send instead', async () => {
-      const { status, json } = await request('/v1/compose/plan', {
+      const { status, json } = await request('/v1/plan', {
         method: 'POST', body: { repo: 'owner/name', ref: 'main' },
       });
       assert(status === 503, `expected 503, got ${status}: ${JSON.stringify(json)}`);
@@ -4043,7 +4043,7 @@ async function dataRouteAssertions() {
       // 503 rather than 200 because this fleet has no App: the claim was
       // accepted and the route got as far as the fetch it cannot make. The
       // fetch itself is the fleet gate's, against its stand-in GitHub.
-      const { status, json } = await request('/v1/compose/plan', {
+      const { status, json } = await request('/v1/plan', {
         method: 'POST', key: repoKey, body: { repo: repoName, ref: 'main' },
       });
       assert(status === 503, `expected 503, got ${status}: ${JSON.stringify(json)}`);
