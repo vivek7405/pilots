@@ -4,14 +4,42 @@
  * without importing each other.
  */
 
+import type { Service } from '@pilots/sdk';
+
 import type { ServiceDetail } from '#modules/services/queries/get-service.server.ts';
+import { engineOf } from '#modules/data/engines.ts';
 
 /** The tabs this stage renders, in the order the strip shows them. */
-export const TABS = ['deployments', 'variables', 'metrics', 'terminal', 'settings'] as const;
+export const TABS = ['deployments', 'data', 'variables', 'metrics', 'terminal', 'settings'] as const;
 export type Tab = (typeof TABS)[number];
 
-export function tabOf(raw: unknown): Tab {
-  return (TABS as readonly string[]).includes(String(raw)) ? (raw as Tab) : 'deployments';
+/**
+ * The tabs that only a database has.
+ *
+ * Data is a query box, and there is nothing to query on a web server. Shown on
+ * every service it would be a box that answers every query with "not a
+ * database", which teaches a reader that the product is broken rather than that
+ * the tab is not for them.
+ */
+const DATABASE_TABS: readonly Tab[] = ['data'];
+
+/** The strip for THIS service: the database tabs only on a database. */
+export function tabsFor(service: Pick<Service, 'labels'>): readonly Tab[] {
+  if (engineOf(service)) return TABS;
+  return TABS.filter((t) => !DATABASE_TABS.includes(t));
+}
+
+/**
+ * The tab a URL names, narrowed to the ones this service actually has.
+ *
+ * A link to ?tab=data on a service that is not a database falls back rather
+ * than rendering a tab with no strip entry: a pasted link outliving a change is
+ * ordinary, and a page whose body and strip disagree is not.
+ */
+export function tabOf(raw: unknown, service?: Pick<Service, 'labels'>): Tab {
+  const wanted = (TABS as readonly string[]).includes(String(raw)) ? (raw as Tab) : 'deployments';
+  if (service && !tabsFor(service).includes(wanted)) return 'deployments';
+  return wanted;
 }
 
 /**

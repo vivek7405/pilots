@@ -13,7 +13,7 @@ import { html } from '@webjsdev/core';
 import type { TemplateResult } from '@webjsdev/core';
 import type { ServiceDetail } from '#modules/services/queries/get-service.server.ts';
 import { serviceHealth } from '#modules/services/utils/health.ts';
-import { TABS, tabHref } from '#modules/services/utils/tabs.ts';
+import { tabsFor, tabHref } from '#modules/services/utils/tabs.ts';
 import type { PanelErrors, Tab, TabProps } from '#modules/services/utils/tabs.ts';
 import { healthPills } from '#modules/services/utils/ui/health-pills.ts';
 import { currentReplicas } from '#modules/services/utils/replicas.ts';
@@ -21,6 +21,7 @@ import '#modules/apps/components/live-status.ts';
 import { deploymentsTab } from '#modules/services/utils/ui/deployments-tab.ts';
 import { variablesTab } from '#modules/services/utils/ui/variables-tab.ts';
 import { metricsTab } from '#modules/services/utils/ui/metrics-tab.ts';
+import { dataTab } from '#modules/services/utils/ui/data-tab.ts';
 import { settingsTab } from '#modules/services/utils/ui/settings-tab.ts';
 import { terminalTab } from '#modules/services/utils/ui/terminal-tab.ts';
 import { buttonClass } from '#components/ui/button.ts';
@@ -32,6 +33,7 @@ import '#components/copy-button.ts';
 
 const LABEL: Record<Tab, string> = {
   deployments: NOUN.Deployments,
+  data: 'Data',
   variables: 'Variables',
   metrics: 'Metrics',
   terminal: NOUN.Terminal,
@@ -50,6 +52,7 @@ export interface PanelContext {
 
 const TAB_RENDER: Record<Tab, (props: TabProps) => TemplateResult> = {
   deployments: deploymentsTab,
+  data: dataTab,
   variables: variablesTab,
   metrics: metricsTab,
   terminal: terminalTab,
@@ -128,7 +131,7 @@ export function servicePanel(detail: ServiceDetail, tab: Tab, ctx: PanelContext 
       </div>
 
       <nav aria-label="Service sections" class="-mx-5 flex gap-1 overflow-x-auto overflow-y-hidden border-b border-border px-5 sm:-mx-6 sm:px-6">
-        ${TABS.map(
+        ${tabsFor(service).map(
           (t) => html`<a
             href=${tabHref(detail, t, ctx.app)}
             aria-current=${t === tab ? 'page' : 'false'}

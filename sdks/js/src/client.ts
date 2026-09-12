@@ -43,6 +43,7 @@ import type {
   RepoLinkListResponse,
   RepoLinkResponse,
   RepoRef,
+  ServiceEnvResponse,
   ResizeMachineRequest,
   RevokeResponse,
   Service,
@@ -394,6 +395,17 @@ export class Services {
 
   get(id: string): Promise<Service> {
     return this.http.json<Service>('GET', `/v1/services/${encodeURIComponent(id)}`)
+  }
+
+  /**
+   * The service's environment WITH the values in it.
+   *
+   * The one call that answers with values; every other surface returns names.
+   * Needs a deploy-scoped key, which is the level that already sets them.
+   * Nothing caches the result: it exists for as long as the caller holds it.
+   */
+  env(id: string): Promise<ServiceEnvResponse> {
+    return this.http.json<ServiceEnvResponse>('GET', `/v1/services/${encodeURIComponent(id)}/env`)
   }
 
   /**
