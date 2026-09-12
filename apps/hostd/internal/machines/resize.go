@@ -42,11 +42,13 @@ import (
 // two cannot overlap, and the request that arrives during the window is held
 // by the router's wake path rather than refused.
 
-// MaxVCPUs and MaxMemMiB bound one machine, so a typo cannot ask for a machine
-// no host can hold and fail somewhere deep in the boot.
+// The bounds one machine is held to. Taken from the API package rather than
+// restated, so the resize route and the service's size cannot come to disagree
+// about how big a machine may be.
 const (
-	MaxVCPUs  = 64
-	MaxMemMiB = 262144
+	MaxVCPUs  = api.MaxVCPUs
+	MaxMemMiB = api.MaxMemMiB
+	MinMemMiB = api.MinMemMiB
 )
 
 // Resize boots a machine again at a new size, in place.
@@ -78,6 +80,18 @@ func (m *Manager) Resize(ctx context.Context, id string, vcpus, memMiB int) (*st
 	if vcpus == row.VCPUs && memMiB == row.MemMiB {
 		// Nothing to do, and a no-op must not cost the machine its memory.
 		return row, nil
+	}
+
+	// A replica belongs to its service, not to whoever holds its id. Resizing
+	// one behind the service's back would leave the fleet serving one request
+	// in three from a machine of a different size, and the next rollout would
+	// silently put it back, because a replica is created from the service's
+	// own size. So the caller is sent to the operation that resizes them all.
+	if row.ServiceID != "" {
+		return nil, fmt.Errorf("%w: %s is a replica of service %s; resize the "+
+			"service instead, with `pilot services scale %s --vcpus N --mem N`, "+
+			"so every replica moves together and the next rollout keeps the size",
+			api.ErrConflict, id, row.ServiceID, row.ServiceID)
 	}
 
 	// A checkpoint describes a machine of the old size and could never be
@@ -193,8 +207,9 @@ func validateSize(vcpus, memMiB int) error {
 	if (vcpus == 0) != (memMiB == 0) {
 		return nil
 	}
-	if vcpus > 0 && memMiB < 128 {
-		return fmt.Errorf("%w: %d MiB is too little for a guest to boot", ErrInvalid, memMiB)
+	if vcpus > 0 && memMiB < MinMemMiB {
+		return fmt.Errorf("%w: %d MiB is too little for a guest to boot; the smallest is %d",
+			ErrInvalid, memMiB, MinMemMiB)
 	}
 	return nil
 }

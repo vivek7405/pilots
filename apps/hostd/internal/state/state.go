@@ -242,6 +242,61 @@ type URLAuth struct {
 	UpdatedAt int64
 }
 
+// DefaultServiceVCPUs and DefaultServiceMemMiB are what a service's replicas
+// are, and always were, when nothing says otherwise. An absent service_sizes
+// row reads as these rather than as zero, so every service that predates the
+// table keeps the size it has been running at.
+const (
+	DefaultServiceVCPUs  = 1
+	DefaultServiceMemMiB = 512
+)
+
+// ServiceSize is how big a service's replicas are.
+//
+// ImageVCPUs and ImageMemMiB are the size the current release's memory image
+// was photographed at, which can differ from the size a replica is created
+// with: a resize changes the size first and re-photographs afterwards. A
+// replica may restore from that image only while the two agree, because a
+// Firecracker memory image cannot be loaded into a differently-sized VM. When
+// they disagree the replica boots from disk, which is slower and correct.
+type ServiceSize struct {
+	ServiceID   string
+	VCPUs       int
+	MemMiB      int
+	ImageVCPUs  int
+	ImageMemMiB int
+	UpdatedAt   int64
+}
+
+// Size is the ServiceSize as a replica is created at, with the defaults
+// already applied, so no caller has to remember what an absent row means.
+func (s *ServiceSize) Size() (vcpus, memMiB int) {
+	if s == nil {
+		return DefaultServiceVCPUs, DefaultServiceMemMiB
+	}
+	vcpus, memMiB = s.VCPUs, s.MemMiB
+	if vcpus <= 0 {
+		vcpus = DefaultServiceVCPUs
+	}
+	if memMiB <= 0 {
+		memMiB = DefaultServiceMemMiB
+	}
+	return vcpus, memMiB
+}
+
+// ImageMatchesSize reports whether the release's memory image was photographed
+// at the size replicas are created at now. False means a replica must boot
+// rather than restore.
+func (s *ServiceSize) ImageMatchesSize() bool {
+	if s == nil {
+		// Nothing recorded: every replica is the default size and every image
+		// was photographed at it, which is how it worked before the table.
+		return true
+	}
+	vcpus, memMiB := s.Size()
+	return s.ImageVCPUs == vcpus && s.ImageMemMiB == memMiB
+}
+
 type MachineCPU struct {
 	ID          string
 	Kind        string
@@ -519,6 +574,17 @@ type Store interface {
 	// router reads as public -- what every URL was before the table existed.
 	GetURLAuth(ctx context.Context, id string) (*URLAuth, error)
 	DeleteURLAuth(ctx context.Context, id string) error
+
+	// PutServiceSize records how big a service's replicas are. Written by the
+	// service's arbiter, the host that already writes the services row, so the
+	// merge has one writer.
+	PutServiceSize(ctx context.Context, s *ServiceSize, opts ...WriteOption) error
+	// GetServiceSize returns ErrNotFound when nothing is recorded, which reads
+	// as the defaults -- what every service was before the table existed.
+	GetServiceSize(ctx context.Context, serviceID string) (*ServiceSize, error)
+	// DeleteServiceSize drops the row for a service being removed, before the
+	// service row itself, for the reason DeleteLabels is.
+	DeleteServiceSize(ctx context.Context, serviceID string) error
 
 	PutCheckpoint(ctx context.Context, c *Checkpoint) error
 	ListCheckpoints(ctx context.Context, machineID string) ([]Checkpoint, error)
@@ -1081,6 +1147,43 @@ func (s *sqliteStore) GetURLAuth(ctx context.Context, id string) (*URLAuth, erro
 func (s *sqliteStore) DeleteURLAuth(ctx context.Context, id string) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM url_auth WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("state: delete url auth %q: %w", id, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) PutServiceSize(ctx context.Context, sz *ServiceSize, _ ...WriteOption) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO service_sizes (service_id, vcpus, mem_mib, image_vcpus, image_mem_mib, updated_at)
+		VALUES (?,?,?,?,?,?)
+		ON CONFLICT(service_id) DO UPDATE SET
+			vcpus=excluded.vcpus, mem_mib=excluded.mem_mib,
+			image_vcpus=excluded.image_vcpus, image_mem_mib=excluded.image_mem_mib,
+			updated_at=excluded.updated_at`,
+		sz.ServiceID, sz.VCPUs, sz.MemMiB, sz.ImageVCPUs, sz.ImageMemMiB, sz.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put service size %q: %w", sz.ServiceID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) GetServiceSize(ctx context.Context, serviceID string) (*ServiceSize, error) {
+	var sz ServiceSize
+	err := s.db.QueryRowContext(ctx, `
+		SELECT service_id, vcpus, mem_mib, image_vcpus, image_mem_mib, updated_at
+		FROM service_sizes WHERE service_id = ?`, serviceID).
+		Scan(&sz.ServiceID, &sz.VCPUs, &sz.MemMiB, &sz.ImageVCPUs, &sz.ImageMemMiB, &sz.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get service size %q: %w", serviceID, err)
+	}
+	return &sz, nil
+}
+
+func (s *sqliteStore) DeleteServiceSize(ctx context.Context, serviceID string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM service_sizes WHERE service_id = ?`, serviceID); err != nil {
+		return fmt.Errorf("state: delete service size %q: %w", serviceID, err)
 	}
 	return nil
 }

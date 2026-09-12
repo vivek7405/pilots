@@ -414,6 +414,32 @@ func (m *Manager) createReplica(ctx context.Context, svc *state.Service,
 	// added to a snapshot being restored, and Create restores whenever it sees
 	// a mem build regardless of the volume.
 	restore := rel.MemBuildID != "" && volumeID == ""
+
+	// How big this replica is comes from the service, so every replica of one
+	// service is the same size and a replica created later -- by the
+	// autoscaler, by self-heal, by a rollout -- is the size the service was
+	// last scaled to rather than the size it was first created at.
+	size, err := m.sizeOf(ctx, svc.ID)
+	if err != nil {
+		return nil, err
+	}
+	vcpus, memMiB := size.Size()
+
+	// A memory image is photographed at one size and Firecracker will not load
+	// it into a machine of another. So a release snapshotted BEFORE the last
+	// resize cannot be restored at the new size, however willing this host is.
+	// Booting from the rootfs is the documented slow path, and it is the only
+	// correct answer: restoring anyway fails deep inside Firecracker as a
+	// corrupt snapshot, naming nothing about the size.
+	if restore && !size.ImageMatchesSize() {
+		slog.Info("this release's memory image was photographed at another size; "+
+			"this replica boots from its rootfs",
+			"service", svc.ID, "release", rel.ID,
+			"image_vcpus", size.ImageVCPUs, "image_mem_mib", size.ImageMemMiB,
+			"vcpus", vcpus, "mem_mib", memMiB)
+		restore = false
+	}
+
 	if restore {
 		cpu, err := m.opts.Store.GetMachineCPU(ctx, rel.ID)
 		switch {
@@ -452,6 +478,8 @@ func (m *Manager) createReplica(ctx context.Context, svc *state.Service,
 		Knobs:   knobs,
 		Service: svc.ID,
 		Release: rel.ID,
+		VCPUs:   vcpus,
+		MemMiB:  memMiB,
 	}
 	if restore {
 		// The build pair from the release, not the rootfs alone.

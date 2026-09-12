@@ -472,3 +472,29 @@ CREATE TABLE IF NOT EXISTS url_auth (          -- writer: the host that writes t
   mode       TEXT,     -- public|org
   updated_at INTEGER
 );
+
+-- How big a service's replicas are. Absent means the defaults every service
+-- had before this table existed (1 vCPU, 512 MiB), so an old service reads
+-- correctly without being backfilled -- which matters because backfilling a
+-- live cr-sqlite table is the incident rule 6 exists to prevent.
+--
+-- A side table rather than two columns on `services`, for that same reason:
+-- `services` has rows.
+--
+-- image_vcpus and image_mem_mib are the size the release's MEMORY IMAGE was
+-- photographed at, which is NOT always the current size: a resize changes the
+-- size first and re-photographs after. A replica may only restore from that
+-- image when the two agree, because Firecracker cannot load a memory image
+-- into a differently-sized VM. When they disagree the replica boots instead,
+-- which is slower and correct.
+--
+-- Writer: the service's arbiter, the one host that already writes the
+-- `services` row through forwardToArbiter, so the merge has a single writer.
+CREATE TABLE IF NOT EXISTS service_sizes (     -- writer: the service's arbiter
+  service_id    TEXT NOT NULL PRIMARY KEY,
+  vcpus         INTEGER,  -- what a replica is created with
+  mem_mib       INTEGER,
+  image_vcpus   INTEGER,  -- what the release's memory image was photographed at
+  image_mem_mib INTEGER,
+  updated_at    INTEGER
+);

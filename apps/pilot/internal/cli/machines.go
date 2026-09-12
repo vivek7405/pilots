@@ -100,6 +100,7 @@ func newMachinesCmd(env *Env) *cobra.Command {
 		newMachinesLifecycleCmd(env, "stop", "stop a machine", "Stop", "Stopping releases CPU and memory. The disk stays. `start` boots it again."),
 		newMachinesLifecycleCmd(env, "suspend", "suspend a machine to a memory snapshot", "Suspend", "Suspend captures memory so `wake` resumes where it left off, instantly.\nThis is what auto_stop does on idle."),
 		newMachinesLifecycleCmd(env, "wake", "wake a suspended machine", "Wake", "A request to the machine's URL wakes it on its own; this does it by hand."),
+		newMachinesResizeCmd(env),
 		newMachinesExecCmd(env),
 		newMachinesLogsCmd(env),
 		newMachinesCheckpointCmd(env),
@@ -465,6 +466,65 @@ func newMachinesDestroyCmd(env *Env) *cobra.Command {
 
 // newMachinesLifecycleCmd builds one of the four state changes, which differ
 // only in the verb and the SDK call.
+// newMachinesResizeCmd changes how big one machine is, keeping it the same
+// machine.
+//
+// The flags are `--vcpus` and `--mem` rather than a single size name, because
+// the two dimensions are priced separately and an application that needs more
+// memory rarely needs more CPU with it. Naming one leaves the other alone.
+func newMachinesResizeCmd(env *Env) *cobra.Command {
+	var (
+		vcpus int
+		mem   int
+	)
+	c := &cobra.Command{
+		Use:   "resize [machine]",
+		Short: "change a machine's vCPU count or memory",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			if vcpus == 0 && mem == 0 {
+				return fmt.Errorf("name a new size: --vcpus, --mem, or both")
+			}
+			client, err := env.Client()
+			if err != nil {
+				return err
+			}
+			m, err := machineArg(c, env, client, first(args))
+			if err != nil {
+				return err
+			}
+			out, err := client.Machines.Resize(c.Context(), m.ID, vcpus, mem)
+			if err != nil {
+				return err
+			}
+			if env.W.JSON {
+				return env.W.JSONValue(out)
+			}
+			env.W.Linef("resized %s to %d vCPU / %d MiB", out.ID, out.VCPUs, out.MemMiB)
+			return nil
+		},
+	}
+	c.Flags().IntVar(&vcpus, "vcpus", 0, "new vCPU count; unset leaves it alone")
+	c.Flags().IntVar(&mem, "mem", 0, "new memory in MiB; unset leaves it alone")
+	Describe(c, Doc{
+		How: "The machine keeps its id, its URL, its disk and its volume, and BOOTS\n" +
+			"again at the new size. It does not resume: a memory image describes a\n" +
+			"machine of one size and cannot be loaded into a machine of another, so\n" +
+			"whatever was in memory is lost and the processes start again.\n\n" +
+			"A replica of a service is refused here. Resize the service instead, with\n" +
+			"`pilot services scale`, so every replica moves together and the next\n" +
+			"rollout keeps the size.",
+		Examples: []string{
+			"pilot machines resize scratch --mem 2048",
+			"pilot machines resize scratch --vcpus 4 --mem 8192",
+		},
+		Related: []string{
+			"pilot services scale   resize every replica of a service at once",
+		},
+	})
+	return c
+}
+
 func newMachinesLifecycleCmd(env *Env, verb, short, method, how string) *cobra.Command {
 	c := &cobra.Command{
 		Use:   verb + " [machine]",

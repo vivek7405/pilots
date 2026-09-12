@@ -275,6 +275,31 @@ type ResizeMachineRequest struct {
 	MemMiB int `json:"mem_mib,omitempty"`
 }
 
+// The bounds one machine is held to, wherever a size is named: on a machine
+// resize, on a service's size, and on a create.
+//
+// They exist so a typo is refused at the edge rather than somewhere deep in a
+// boot, where it has already cost the machine whatever was in its memory. They
+// are deliberately generous -- larger than any host this runs on today -- so
+// the check catches mistakes rather than capacity, which is the quota's job.
+const (
+	MaxVCPUs  = 64
+	MaxMemMiB = 262144
+	// MinMemMiB is roughly what a Linux guest needs before the kernel gives up
+	// during boot rather than after.
+	MinMemMiB = 128
+)
+
+// Size is how big a machine is: the two dimensions that are priced, named
+// together wherever a service carries a size rather than a single machine.
+//
+// Zero on a dimension means "leave it as it is" on a request, and means the
+// default on a reply -- never a machine with no memory.
+type Size struct {
+	VCPUs  int `json:"vcpus"`
+	MemMiB int `json:"mem_mib"`
+}
+
 // UpdateMachineRequest is the one thing a machine changes after create.
 type UpdateMachineRequest struct {
 	URLAuth *string `json:"url_auth,omitempty"`
@@ -496,8 +521,12 @@ type Service struct {
 	// A NAME, never a value. "web dials db" is what the app grouping and a
 	// connection attempt already say out loud, so nothing here is a secret
 	// the caller could not have learned by reading its own compose file.
-	DependsOn    []string     `json:"depends_on,omitempty"`
-	Replicas     int          `json:"replicas"`
+	DependsOn []string `json:"depends_on,omitempty"`
+	Replicas  int      `json:"replicas"`
+	// Size is how big each replica is. Always spelled out, even for a service
+	// that has never been scaled, so a reader never has to know what the
+	// defaults were on the day the service was made.
+	Size         Size         `json:"size"`
 	Knobs        Knobs        `json:"knobs"`
 	Health       *HealthCheck `json:"health,omitempty"`
 	URL          string       `json:"url,omitempty"`
@@ -527,6 +556,9 @@ type CreateServiceRequest struct {
 	// DeployRequest.
 	Knobs  *Knobs       `json:"knobs,omitempty"`
 	Health *HealthCheck `json:"health,omitempty"`
+	// Size is how big each replica will be. Omitted means the defaults, which
+	// is what every service was before a service had a size.
+	Size *Size `json:"size,omitempty"`
 	// Domain is the subdomain label under the fleet's domain. Empty means one
 	// is minted from the name: the name itself when it is free, else the name
 	// and a four-character suffix. Set it to ask for an exact label, which is
@@ -586,6 +618,13 @@ type DeployRequest struct {
 	// the deploy is where they travel: {"min_machines_running":1} is how a
 	// replica is kept warm, and a redeploy with different knobs changes them.
 	Knobs json.RawMessage `json:"knobs,omitempty"`
+	// Size sets how big the replicas this deploy creates are.
+	//
+	// It rides on the deploy rather than being sent as a separate patch
+	// beforehand on purpose: a patch carrying a size runs a rollout of its
+	// own, so a compose file that changed both its image and its size would
+	// roll the service twice to arrive where one rollout could have put it.
+	Size *Size `json:"size,omitempty"`
 }
 
 // PromoteRequest turns a sandbox into a durable service. The machine's URL is
@@ -618,7 +657,16 @@ type RedeployRequest struct {
 // them if it had them. They travel on the deploy, and a body carrying one is a
 // 400 naming the field.
 type UpdateServiceRequest struct {
-	Replicas   *int              `json:"replicas,omitempty"`
+	Replicas *int `json:"replicas,omitempty"`
+	// Size changes how big every replica is. Zero on a dimension leaves that
+	// dimension alone, which is how "give it more memory" is said without
+	// restating the vCPU count.
+	//
+	// Applying it replaces the replicas one at a time, at the same release,
+	// and drops no request. A volume-backed service has a held window instead,
+	// because a volume has one writer and the replacement cannot mount it
+	// until the old machine has let go.
+	Size       *Size             `json:"size,omitempty"`
 	Health     *HealthCheck      `json:"health,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 	SecretEnv  map[string]string `json:"secret_env,omitempty"`

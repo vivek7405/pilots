@@ -1589,3 +1589,57 @@ func (s *Store) DeleteURLAuth(ctx context.Context, id string) error {
 	}
 	return nil
 }
+
+// PutServiceSize records how big a service's replicas are.
+//
+// The writer check is the service's, not a machine's: this row describes the
+// service, so the host allowed to write it is the same arbiter that writes the
+// services row. Any other host writing it would race through a CRDT merge, and
+// two hosts disagreeing about a size is a fleet running replicas of two sizes
+// with nothing to say which is right.
+func (s *Store) PutServiceSize(ctx context.Context, sz *state.ServiceSize, _ ...state.WriteOption) error {
+	if err := s.assertServiceWriter(ctx, sz.ServiceID); err != nil {
+		return err
+	}
+	_, err := s.client.Exec(ctx, `
+		INSERT INTO service_sizes (service_id, vcpus, mem_mib, image_vcpus, image_mem_mib, updated_at)
+		VALUES (?,?,?,?,?,?)
+		ON CONFLICT(service_id) DO UPDATE SET
+			vcpus=excluded.vcpus, mem_mib=excluded.mem_mib,
+			image_vcpus=excluded.image_vcpus, image_mem_mib=excluded.image_mem_mib,
+			updated_at=excluded.updated_at`,
+		sz.ServiceID, sz.VCPUs, sz.MemMiB, sz.ImageVCPUs, sz.ImageMemMiB, sz.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put service size %q: %w", sz.ServiceID, err)
+	}
+	return nil
+}
+
+func (s *Store) GetServiceSize(ctx context.Context, serviceID string) (*state.ServiceSize, error) {
+	rows, err := s.client.Query(ctx, `
+		SELECT service_id, vcpus, mem_mib, image_vcpus, image_mem_mib, updated_at
+		FROM service_sizes WHERE service_id = ?`, serviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, state.ErrNotFound
+	}
+	var sz state.ServiceSize
+	if err := rows.Scan(&sz.ServiceID, &sz.VCPUs, &sz.MemMiB,
+		&sz.ImageVCPUs, &sz.ImageMemMiB, &sz.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &sz, nil
+}
+
+func (s *Store) DeleteServiceSize(ctx context.Context, serviceID string) error {
+	if _, err := s.client.Exec(ctx, `DELETE FROM service_sizes WHERE service_id = ?`, serviceID); err != nil {
+		return fmt.Errorf("state: delete service size %q: %w", serviceID, err)
+	}
+	return nil
+}
