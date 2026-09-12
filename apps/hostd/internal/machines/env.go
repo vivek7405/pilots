@@ -223,9 +223,6 @@ func (m *Manager) deliverEnv(ctx context.Context, row *state.Machine,
 	if err != nil {
 		return err
 	}
-	if !needsInit(env, cmd, fromBuild) {
-		return nil
-	}
 	if env == nil {
 		// Never nil past here: nil is the agent's word for "this poke says
 		// nothing about the environment", which is what a wake sends and what
@@ -233,7 +230,24 @@ func (m *Manager) deliverEnv(ctx context.Context, row *state.Machine,
 		// environment, and that is an empty one rather than no statement.
 		env = map[string]string{}
 	}
+
+	// BEFORE the needsInit check, not after, and that ordering is the whole
+	// point. A bare sandbox has no service, no command and no build, so
+	// needsInit was false and this function returned having delivered nothing
+	// -- including the address of the broker the machine needs to ask for its
+	// own credentials. The guest came up with PILOT_BROKER_URL empty and every
+	// request it made was to a malformed URL.
+	//
+	// Every create now delivers at least these four, which is correct: knowing
+	// its own id and where to ask is not an environment a machine can be
+	// without. This function is the create path and nothing else reaches it
+	// (see callsites_test.go), so a wake still sends nil and still cannot
+	// overwrite a deployed environment.
 	m.addBrokerEnv(env, row)
+
+	if !needsInit(env, cmd, fromBuild) {
+		return nil
+	}
 
 	body, err := json.Marshal(initPayload{
 		TimestampNanos: time.Now().UnixNano(),
