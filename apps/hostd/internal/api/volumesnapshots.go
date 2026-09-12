@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/cron"
+	"github.com/vivek7405/pilots/hostd/internal/quota"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -46,6 +47,12 @@ type VolumePolicy struct {
 	Cron       string `json:"cron,omitempty"`
 	KeepDaily  int    `json:"keep_daily,omitempty"`
 	KeepWeekly int    `json:"keep_weekly,omitempty"`
+}
+
+// ForkVolumeRequest names the new volume a fork creates. Empty mints one from
+// the source's name and the snapshot's stamp.
+type ForkVolumeRequest struct {
+	Name string `json:"name,omitempty"`
 }
 
 // SnapshotListResponse is every snapshot of a volume, newest first.
@@ -159,6 +166,38 @@ func (d Deps) handleDeleteVolumeSnapshot(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleForkVolumeSnapshot makes a NEW volume from a snapshot.
+//
+// Separate from a restore because the two answer different questions. A restore
+// puts the data back and throws away what came after; a fork gives you both, so
+// the thing you are recovering FROM is still there to compare against.
+func (d Deps) handleForkVolumeSnapshot(w http.ResponseWriter, r *http.Request) {
+	v, ok := d.ownedVolume(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	if d.forwardToVolumeOwner(w, r, v.HostID) {
+		return
+	}
+	var req ForkVolumeRequest
+	if err := decodeBody(r, &req); err != nil {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(), NextBadBody, nil)
+		return
+	}
+	// A fork is a whole new volume, charged like one: it holds its own copy of
+	// the data, so a quota that only counted the original would let one
+	// recovery double an org's storage without admitting it.
+	if !d.checkQuota(w, r, quota.Delta{VolumeGiB: v.SizeMiB / 1024}) {
+		return
+	}
+	fork, err := d.Machines.ForkVolumeSnapshot(r.Context(), v.ID, r.PathValue("stamp"), req.Name)
+	if err != nil {
+		writeMapped(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, toAPIVolume(*fork, actingOrg(r)))
 }
 
 func (d Deps) handleGetVolumePolicy(w http.ResponseWriter, r *http.Request) {

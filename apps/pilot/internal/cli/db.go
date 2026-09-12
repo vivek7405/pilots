@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -177,4 +178,152 @@ func humanDuration(sec int64) string {
 	default:
 		return fmt.Sprintf("%dd", sec/86400)
 	}
+}
+
+// newDBCmd groups the database operations that are not ordinary machine
+// operations. Recovery is the only one so far, and it is here rather than under
+// `volumes` because what a person wants back is a database, not a disk.
+func newDBCmd(env *Env) *cobra.Command {
+	c := &cobra.Command{
+		Use:     "db",
+		Aliases: []string{"database"},
+		Short:   "database operations: recovery, above all",
+	}
+	Describe(c, Doc{
+		What: "What a database needs beyond what a machine needs. Chiefly getting\n" +
+			"back to a moment before something went wrong.",
+		Related: []string{
+			"pilot add       add a database to a project",
+			"pilot metrics   what the engine says about itself",
+		},
+	})
+	c.AddCommand(newDBRestoreCmd(env))
+	return c
+}
+
+func newDBRestoreCmd(env *Env) *cobra.Command {
+	var (
+		to     string
+		latest bool
+		name   string
+	)
+	c := &cobra.Command{
+		Use:   "restore <service>",
+		Short: "bring a Postgres back to a moment in the past",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			if to == "" && !latest {
+				return out.Failf("pass --to 2026-09-12T10:15:00Z, or --latest",
+					"name the moment to recover to")
+			}
+			if to != "" && latest {
+				return out.Failf("pass one of them", "--to and --latest contradict")
+			}
+			target := to
+			if latest {
+				target = "latest"
+			} else if _, err := time.Parse(time.RFC3339, to); err != nil {
+				return out.Failf("write it as 2026-09-12T10:15:00Z",
+					"--to %q is not an RFC 3339 time", to)
+			}
+
+			client, err := env.Client()
+			if err != nil {
+				return err
+			}
+			svc, err := resolveService(c.Context(), client, args[0])
+			if err != nil {
+				return err
+			}
+			if svc.Labels["pilot.engine"] != "postgres" {
+				return out.Failf("`pilot volumes snapshots restore` puts a volume back to a snapshot",
+					"%s is not a Postgres; point-in-time recovery needs an archived write-ahead log", svc.Name)
+			}
+			if svc.VolumeID == "" {
+				return out.Failf("check `pilot services info "+svc.Name+"`",
+					"%s has no archive volume to recover from", svc.Name)
+			}
+
+			// A NEW service, beside the old one, which is the whole point: a
+			// recovery you cannot compare against the original is a recovery
+			// you have to trust. The old database keeps serving throughout.
+			restoreName := name
+			if restoreName == "" {
+				restoreName = svc.Name + "-restore"
+			}
+
+			// The archive is FORKED rather than shared. Two Postgres processes
+			// writing one archive volume is a corrupted archive, and it would
+			// corrupt the one belonging to the database still serving.
+			env.W.Notef("snapshotting %s's archive", svc.Name)
+			snap, err := client.Volumes.Snapshot(c.Context(), svc.VolumeID)
+			if err != nil {
+				return err
+			}
+			env.W.Notef("forking the archive; this copies data, so it is not instant")
+			fork, err := client.Volumes.ForkSnapshot(c.Context(), svc.VolumeID,
+				snap.Snapshot, restoreName+"-archive")
+			if err != nil {
+				return err
+			}
+
+			// Created private, with the recovery target in its environment.
+			// The entrypoint reads it, untars the newest base at or before that
+			// moment, replays the archive and promotes -- and pg_isready passes
+			// only after the promotion, so the HEALTH GATE is the restore gate:
+			// a recovery that cannot reach its target never becomes a release.
+			restored, err := client.Services.Create(c.Context(), pilots.CreateServiceRequest{
+				Name: restoreName, App: svc.App, Release: svc.ReleaseID,
+				Replicas: 1, Volume: fork.ID, Private: true,
+				Env:    map[string]string{"PILOT_PG_RESTORE_TARGET": target},
+				Labels: map[string]string{"pilot.engine": "postgres"},
+			})
+			if err != nil {
+				return err
+			}
+
+			if env.W.JSON {
+				return env.W.JSONValue(map[string]any{
+					"service": restored, "archive_snapshot": snap.Snapshot, "volume": fork.ID,
+				})
+			}
+			env.W.Linef("recovering %s to %s as %s", svc.Name, target, restored.Name)
+			env.W.Notef("it is reachable at %s.internal once the recovery reaches its "+
+				"target; %s is untouched and still serving", restored.Name, svc.Name)
+			env.W.Notef("compare the two, then point your application at whichever is right")
+			return nil
+		},
+	}
+	f := c.Flags()
+	f.StringVar(&to, "to", "", "the moment to recover to, RFC 3339 (2026-09-12T10:15:00Z)")
+	f.BoolVar(&latest, "latest", false, "recover as far forward as the archive goes")
+	f.StringVar(&name, "name", "", "name the recovered service; defaults to <service>-restore")
+	Describe(c, Doc{
+		What: "Point-in-time recovery: a base backup, plus every write-ahead log\n" +
+			"segment archived after it, replayed up to the moment you name.",
+		When: "After a bad migration, a wrong DELETE, or anything else where the\n" +
+			"problem is that the data is now correct-looking and wrong.",
+		How: "The recovery runs as a NEW service beside the old one, on a FORK of the\n" +
+			"archive. The original keeps serving, and you can query both and compare\n" +
+			"before deciding anything.\n\n" +
+			"The archive is forked rather than shared because two Postgres processes\n" +
+			"writing one archive is a corrupted archive -- including the one\n" +
+			"belonging to the database still serving your application.\n\n" +
+			"Postgres only, and only in the default wal-archive mode. A\n" +
+			"durable-volume database recovers through `pilot volumes snapshots\n" +
+			"restore`, which goes back to a snapshot rather than to an arbitrary\n" +
+			"moment.",
+		Warning: "How far back you can go is bounded by the oldest base backup the\n" +
+			"archive still holds, which is four weeks by default.",
+		Examples: []string{
+			"pilot db restore postgres --to 2026-09-12T10:15:00Z",
+			"pilot db restore postgres --latest",
+			"pilot db restore postgres --to 2026-09-12T10:15:00Z --name before-migration",
+		},
+		Related: []string{
+			"pilot volumes snapshots   what the archive volume has",
+			"docs/honesty.md           how long each kind of recovery takes",
+		},
+	})
+	return c
 }

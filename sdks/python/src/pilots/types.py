@@ -179,6 +179,16 @@ class VolumePolicy:
 
 
 @dataclass
+class ForkVolumeRequest:
+    """Names the new volume a fork creates.
+
+    Empty mints one from the source's name and the snapshot's stamp.
+    """
+
+    name: str = ""
+
+
+@dataclass
 class SnapshotListResponse:
     """Every snapshot of a volume, newest first."""
 

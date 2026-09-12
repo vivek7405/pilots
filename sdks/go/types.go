@@ -581,6 +581,12 @@ type VolumePolicy struct {
 	KeepWeekly int    `json:"keep_weekly,omitempty"`
 }
 
+// ForkVolumeRequest names the new volume a fork creates. Empty mints one from
+// the source's name and the snapshot's stamp.
+type ForkVolumeRequest struct {
+	Name string `json:"name,omitempty"`
+}
+
 // SnapshotListResponse is every snapshot of a volume, newest first.
 type SnapshotListResponse struct {
 	VolumeID  string   `json:"volume_id"`
@@ -997,6 +1003,7 @@ var wireTypes = []any{
 	SnapshotResponse{},
 	VolumePolicy{},
 	ComposeRecipe{},
+	ForkVolumeRequest{},
 	SnapshotListResponse{},
 	DrainReport{},
 	TakeRequest{},

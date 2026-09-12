@@ -332,6 +332,9 @@ func Routes(d Deps) http.Handler {
 	// The schedule that takes them without being asked. Nobody takes a manual
 	// snapshot before the mistake.
 	mux.HandleFunc("DELETE /v1/volumes/{id}/snapshots/{stamp}", d.handleDeleteVolumeSnapshot)
+	// A NEW volume from a snapshot, which is what a recovery is built on: it
+	// leaves the thing you are recovering from in place to compare against.
+	mux.HandleFunc("POST /v1/volumes/{id}/snapshots/{stamp}/fork", d.handleForkVolumeSnapshot)
 	mux.HandleFunc("GET /v1/volumes/{id}/policy", d.handleGetVolumePolicy)
 	mux.HandleFunc("PUT /v1/volumes/{id}/policy", d.handlePutVolumePolicy)
 	// The volume drive as Firecracker holds it, not as hostd meant to set it.

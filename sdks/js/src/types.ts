@@ -226,6 +226,14 @@ export interface VolumePolicy {
   keep_weekly?: number
 }
 
+/**
+ * Names the new volume a fork creates. Empty mints one from the source's name
+ * and the snapshot's stamp.
+ */
+export interface ForkVolumeRequest {
+  name?: string
+}
+
 /** Every snapshot of a volume, newest first. */
 export interface SnapshotListResponse {
   volume_id: string

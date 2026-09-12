@@ -103,6 +103,65 @@ func (m *Manager) DeleteVolumeSnapshot(ctx context.Context, volumeID, stamp stri
 	return m.opts.Volumes.DeleteSnapshot(ctx, volumeID, stamp)
 }
 
+// ForkVolumeSnapshot makes a NEW volume holding one snapshot's contents.
+//
+// The operation a recovery is built on. Restoring IN PLACE replaces the data
+// you are trying to compare against; forking gives you both, which is what
+// somebody looking at a bad migration actually needs.
+//
+// This copies BYTES, and says so: JuiceFS slice ids are per filesystem, so a
+// new volume shares nothing with the old one. It is the one operation in this
+// file that is not metadata, and it is proportional to what was written.
+func (m *Manager) ForkVolumeSnapshot(ctx context.Context, volumeID, stamp, name string) (*state.Volume, error) {
+	if m.opts.Volumes == nil {
+		return nil, ErrNoVolumes
+	}
+	src, err := m.opts.Store.GetVolume(ctx, volumeID)
+	if err != nil {
+		return nil, err
+	}
+	if src.HostID != "" && src.HostID != m.opts.HostID {
+		return nil, fmt.Errorf("machines: volume %s is mounted on %s, not here: %w",
+			volumeID, src.HostID, state.ErrNotOwner)
+	}
+	// The snapshot has to exist before a volume is made for it, or a failure
+	// leaves an empty volume nobody asked for and nothing will clean up.
+	stamps, err := m.opts.Volumes.ListSnapshots(volumeID)
+	if err != nil {
+		return nil, err
+	}
+	found := false
+	for _, s := range stamps {
+		if s == stamp {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("machines: %s has no snapshot %s: %w", volumeID, stamp, ErrNotFound)
+	}
+
+	if name == "" {
+		name = src.Name + "-" + stamp
+	}
+	fork, err := m.CreateVolume(ctx, api.CreateVolumeRequest{
+		Name: name, SizeGiB: src.SizeMiB / 1024, MountPath: src.MountPath,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := m.opts.Volumes.CopySnapshotTo(ctx, volumeID, stamp, m.opts.Volumes.ImagePath(fork.ID)); err != nil {
+		// The volume exists and is empty, which is worse than not existing: it
+		// would be mounted, found blank, and quietly used. Destroyed here so a
+		// failed fork leaves nothing behind.
+		_ = m.releaseVolume(ctx, fork.ID)
+		return nil, fmt.Errorf("machines: fill %s from %s@%s: %w", fork.ID, volumeID, stamp, err)
+	}
+	slog.Info("forked a volume from a snapshot",
+		"from", volumeID, "snapshot", stamp, "to", fork.ID)
+	return fork, nil
+}
+
 // RestoreVolumeSnapshot puts a snapshot back as the volume's live image.
 //
 // A RUNNING machine is refused. Replacing the disk under a live guest is not a

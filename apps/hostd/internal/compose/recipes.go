@@ -211,9 +211,18 @@ func postgresRecipe(name, mode string, pool bool) *Recipe {
 			"healthcheck": healthcheck("pg_isready -U postgres"),
 			"x-pilots":    pilotsBlock("postgres", false),
 		}
+		// A weekly base backup, so point-in-time recovery never has to replay
+		// more than a week of write-ahead log. Without it the archive grows
+		// without bound and a recovery to last Tuesday replays from the day the
+		// database was created.
+		r.Service["x-pilots"].(map[string]any)["schedules"] = []map[string]any{
+			{"cron": "@weekly", "cmd": "/usr/local/bin/pilot-pg-basebackup"},
+		}
 		r.Volumes["pgarchive"] = struct{}{}
 		r.Files[".pilots/"+name+"/Dockerfile"] = postgresDockerfile
 		r.Files[".pilots/"+name+"/10-base-backup.sh"] = postgresBaseBackup
+		r.Files[".pilots/"+name+"/pilot-pg-basebackup"] = postgresPeriodicBackup
+		r.Files[".pilots/"+name+"/pilot-entrypoint.sh"] = postgresEntrypoint
 		r.Statement = "The data directory is local and write-ahead log segments ship to " +
 			"the volume every 60 seconds, so a host failure can lose up to a minute of " +
 			"writes. Commits do not wait for object storage. Use --durable-volume if a " +
@@ -357,6 +366,107 @@ func (r *Recipe) URLFor(password string) string {
 // there is a window whose segments belong to no backup.
 const postgresDockerfile = `FROM postgres:17
 COPY 10-base-backup.sh /docker-entrypoint-initdb.d/
+COPY pilot-pg-basebackup /usr/local/bin/pilot-pg-basebackup
+COPY pilot-entrypoint.sh /usr/local/bin/pilot-entrypoint.sh
+RUN chmod +x /usr/local/bin/pilot-pg-basebackup /usr/local/bin/pilot-entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/pilot-entrypoint.sh"]
+CMD ["postgres"]
+`
+
+// Taken weekly, so a recovery never replays more than a week of write-ahead
+// log, and pruned so the archive does not grow without bound.
+//
+// The pruning is the half that is easy to leave out and expensive to leave out.
+// Keeping four bases plus every segment since the oldest of them bounds the
+// archive at roughly a month; keeping every base forever bounds it at nothing,
+// and the volume fills with backups of a database that has since been dropped.
+//
+// WAL older than the OLDEST KEPT BASE is what gets deleted -- not WAL older
+// than some age. A segment older than the oldest base can never be replayed
+// onto anything, and a segment newer than it might be the one a recovery needs.
+const postgresPeriodicBackup = `#!/bin/sh
+set -e
+BASE="/archive/base/$(date -u +%Y%m%dT%H%M%SZ)"
+mkdir -p /archive/wal "$BASE"
+pg_basebackup -U postgres -D "$BASE" -Ft -z -X none
+
+# Keep the newest four. Sorted by name, which is the timestamp, so this needs
+# no stat and cannot disagree with the directory names.
+KEEP=4
+ls -1d /archive/base/*/ 2>/dev/null | sort -r | tail -n +$((KEEP + 1)) | while read -r old; do
+  rm -rf "$old"
+done
+
+# Then every segment older than what the oldest surviving base needs. The base
+# directory's own mtime is the moment it was taken, so a segment older than it
+# belongs to a backup that is gone.
+OLDEST=$(ls -1d /archive/base/*/ 2>/dev/null | sort | head -1)
+if [ -n "$OLDEST" ]; then
+  find /archive/wal -type f ! -newer "$OLDEST" -delete 2>/dev/null || true
+fi
+`
+
+// The entrypoint that turns an archive into a recovery.
+//
+// Wraps the stock one rather than replacing it: everything about initdb, the
+// temporary server and the init scripts stays exactly as the image intends, and
+// this adds one branch in front of it.
+//
+// The branch fires only when PILOT_PG_RESTORE_TARGET is set AND the data
+// directory is empty -- that second condition is what makes it safe to leave
+// the variable set. A restore that ran against a populated directory would
+// throw away a working database to replay an old one.
+//
+// pg_isready passes only after the recovery promotes, so the release health
+// gate IS the restore gate: a recovery that cannot reach its target never
+// becomes the running release.
+const postgresEntrypoint = `#!/bin/sh
+set -e
+
+if [ -n "$PILOT_PG_RESTORE_TARGET" ] && [ -z "$(ls -A "$PGDATA" 2>/dev/null)" ]; then
+  echo "pilot: restoring to $PILOT_PG_RESTORE_TARGET"
+
+  # The newest base taken AT OR BEFORE the target. A later one contains data
+  # from after the moment being recovered to, which cannot be replayed
+  # backwards.
+  WANT=$(echo "$PILOT_PG_RESTORE_TARGET" | tr -d ':-' | cut -c1-15)
+  BASE=""
+  for candidate in $(ls -1d /archive/base/*/ 2>/dev/null | sort); do
+    stamp=$(basename "$candidate")
+    if [ "$PILOT_PG_RESTORE_TARGET" = "latest" ] || [ "$stamp" \< "$WANT" ] || [ "$stamp" = "$WANT" ]; then
+      BASE="$candidate"
+    fi
+  done
+  if [ -z "$BASE" ]; then
+    echo "pilot: no base backup at or before $PILOT_PG_RESTORE_TARGET" >&2
+    exit 1
+  fi
+  echo "pilot: restoring from $BASE"
+
+  mkdir -p "$PGDATA"
+  for tarball in "$BASE"*.tar.gz; do
+    [ -f "$tarball" ] || continue
+    tar -xzf "$tarball" -C "$PGDATA"
+  done
+  chmod 700 "$PGDATA"
+
+  {
+    echo "restore_command = 'cp /archive/wal/%f \"%p\"'"
+    echo "recovery_target_action = 'promote'"
+    if [ "$PILOT_PG_RESTORE_TARGET" != "latest" ]; then
+      echo "recovery_target_time = '$PILOT_PG_RESTORE_TARGET'"
+    fi
+  } >> "$PGDATA/postgresql.auto.conf"
+
+  # The signal file is what tells Postgres this is a recovery rather than a
+  # crash. Without it the server starts normally on a data directory that is
+  # mid-restore, which is a corrupt database that reports itself healthy.
+  touch "$PGDATA/recovery.signal"
+fi
+
+# The stock entrypoint, unchanged. It skips initdb on a non-empty PGDATA, so
+# the restore above simply becomes the database it starts.
+exec docker-entrypoint.sh "$@"
 `
 
 const postgresBaseBackup = `#!/bin/sh

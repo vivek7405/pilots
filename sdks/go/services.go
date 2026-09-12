@@ -226,6 +226,19 @@ func (v *Volumes) DeleteSnapshot(ctx context.Context, id, snapshot string) error
 		"/v1/volumes/"+url.PathEscape(id)+"/snapshots/"+url.PathEscape(snapshot), nil, nil)
 }
 
+// ForkSnapshot makes a NEW volume holding a snapshot's contents, leaving the
+// original alone.
+//
+// What a recovery is built on: restoring in place replaces the data you are
+// trying to compare against, and a fork gives you both. It copies bytes, so it
+// is proportional to what the volume holds rather than instant.
+func (v *Volumes) ForkSnapshot(ctx context.Context, id, snapshot, name string) (*Volume, error) {
+	var out Volume
+	return &out, v.c.do(ctx, http.MethodPost,
+		"/v1/volumes/"+url.PathEscape(id)+"/snapshots/"+url.PathEscape(snapshot)+"/fork",
+		map[string]string{"name": name}, &out)
+}
+
 // Policy is a volume's snapshot schedule and retention. An empty one means no
 // schedule, which is what every volume has until somebody sets one.
 func (v *Volumes) Policy(ctx context.Context, id string) (*VolumePolicy, error) {
