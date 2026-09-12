@@ -510,7 +510,11 @@ type Release struct {
 // different vmstate would restore a guest whose registers describe a different
 // machine than its memory does.
 type ReleaseSnapshot struct {
-	ID           string // the release id
+	ID string // the release id
+	// ServiceID is carried rather than looked up, because this row is written
+	// before the release row exists: the checkpoint has to succeed before
+	// there is a release worth writing at all.
+	ServiceID    string
 	MachineID    string // the replica that was photographed
 	CheckpointID string
 	CreatedAt    int64
@@ -1445,9 +1449,9 @@ func (s *sqliteStore) PutReleaseSnapshot(ctx context.Context, r *ReleaseSnapshot
 	// release's vmstate does not move, and an upsert would let a later write
 	// point a release at registers belonging to a different capture.
 	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO release_snapshots (release_id, machine_id, checkpoint_id, created_at)
-		VALUES (?,?,?,?)`,
-		r.ID, r.MachineID, r.CheckpointID, r.CreatedAt)
+		INSERT INTO release_snapshots (release_id, service_id, machine_id, checkpoint_id, created_at)
+		VALUES (?,?,?,?,?)`,
+		r.ID, r.ServiceID, r.MachineID, r.CheckpointID, r.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("state: put release snapshot %q: %w", r.ID, err)
 	}
@@ -1457,9 +1461,9 @@ func (s *sqliteStore) PutReleaseSnapshot(ctx context.Context, r *ReleaseSnapshot
 func (s *sqliteStore) GetReleaseSnapshot(ctx context.Context, releaseID string) (*ReleaseSnapshot, error) {
 	var r ReleaseSnapshot
 	err := s.db.QueryRowContext(ctx, `
-		SELECT release_id, machine_id, checkpoint_id, created_at
+		SELECT release_id, service_id, machine_id, checkpoint_id, created_at
 		FROM release_snapshots WHERE release_id = ?`, releaseID).
-		Scan(&r.ID, &r.MachineID, &r.CheckpointID, &r.CreatedAt)
+		Scan(&r.ID, &r.ServiceID, &r.MachineID, &r.CheckpointID, &r.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}

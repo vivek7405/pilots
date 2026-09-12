@@ -686,8 +686,15 @@ CREATE TABLE IF NOT EXISTS service_sizes (     -- writer: the service's arbiter
 -- (rule 6). Write-once, by the host that photographed the release, which is
 -- the host that took the checkpoint -- so there is one writer and nothing for
 -- a merge to corrupt.
+--
+-- service_id is CARRIED on the row rather than read back from `releases`.
+-- This row is written while the release is being assembled, BEFORE the
+-- release row itself exists -- the checkpoint has to succeed before there is
+-- a release worth writing -- so a writer check that looked the release up
+-- would refuse every write it is meant to guard.
 CREATE TABLE IF NOT EXISTS release_snapshots ( -- writer: the host that photographed it (write-once)
   release_id    TEXT NOT NULL PRIMARY KEY,
+  service_id    TEXT,     -- carried, not looked up: see the note above
   machine_id    TEXT,     -- the replica that was photographed
   checkpoint_id TEXT,     -- the checkpoint whose vmstate this release restores
   created_at    INTEGER

@@ -1656,18 +1656,19 @@ func (s *Store) GetRelease(ctx context.Context, id string) (*state.Release, erro
 // by the host running that service's deploy, the one the service arbiter
 // already selected, so the writer is the same single writer and the merge has
 // nothing to resolve.
+//
+// The service comes from the ROW, not from a lookup of the release. This is
+// written while the release is still being assembled -- the checkpoint has to
+// succeed before there is a release worth writing -- so reading `releases`
+// here would refuse every write this guard exists to allow.
 func (s *Store) PutReleaseSnapshot(ctx context.Context, r *state.ReleaseSnapshot) error {
-	rel, err := s.GetRelease(ctx, r.ID)
-	if err != nil {
-		return err
-	}
-	if err := s.assertServiceWriter(ctx, rel.ServiceID); err != nil {
+	if err := s.assertServiceWriter(ctx, r.ServiceID); err != nil {
 		return err
 	}
 	if _, err := s.client.Exec(ctx, `
-		INSERT INTO release_snapshots (release_id, machine_id, checkpoint_id, created_at)
-		VALUES (?,?,?,?)`,
-		r.ID, r.MachineID, r.CheckpointID, r.CreatedAt); err != nil {
+		INSERT INTO release_snapshots (release_id, service_id, machine_id, checkpoint_id, created_at)
+		VALUES (?,?,?,?,?)`,
+		r.ID, r.ServiceID, r.MachineID, r.CheckpointID, r.CreatedAt); err != nil {
 		return fmt.Errorf("state: put release snapshot %q: %w", r.ID, err)
 	}
 	return nil
@@ -1675,7 +1676,7 @@ func (s *Store) PutReleaseSnapshot(ctx context.Context, r *state.ReleaseSnapshot
 
 func (s *Store) GetReleaseSnapshot(ctx context.Context, releaseID string) (*state.ReleaseSnapshot, error) {
 	rows, err := s.client.Query(ctx, `
-		SELECT release_id, machine_id, checkpoint_id, created_at
+		SELECT release_id, service_id, machine_id, checkpoint_id, created_at
 		FROM release_snapshots WHERE release_id = ?`, releaseID)
 	if err != nil {
 		return nil, err
@@ -1688,18 +1689,24 @@ func (s *Store) GetReleaseSnapshot(ctx context.Context, releaseID string) (*stat
 		return nil, state.ErrNotFound
 	}
 	var r state.ReleaseSnapshot
-	if err := rows.Scan(&r.ID, &r.MachineID, &r.CheckpointID, &r.CreatedAt); err != nil {
+	if err := rows.Scan(&r.ID, &r.ServiceID, &r.MachineID, &r.CheckpointID, &r.CreatedAt); err != nil {
 		return nil, err
 	}
 	return &r, nil
 }
 
 func (s *Store) DeleteReleaseSnapshot(ctx context.Context, releaseID string) error {
-	rel, err := s.GetRelease(ctx, releaseID)
+	// The snapshot row's own service, for the reason Put carries one: a
+	// delete usually runs while a release is being retired, and looking the
+	// release up would fail exactly when it has already gone.
+	snap, err := s.GetReleaseSnapshot(ctx, releaseID)
+	if errors.Is(err, state.ErrNotFound) {
+		return nil // nothing to delete, which is not a failure
+	}
 	if err != nil {
 		return err
 	}
-	if err := s.assertServiceWriter(ctx, rel.ServiceID); err != nil {
+	if err := s.assertServiceWriter(ctx, snap.ServiceID); err != nil {
 		return err
 	}
 	if _, err := s.client.Exec(ctx,

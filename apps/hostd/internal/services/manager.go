@@ -573,8 +573,8 @@ func (m *Manager) snapshotRelease(ctx context.Context, machineID string, rel *st
 	// restore from and cannot. Failing here leaves no release at all, and the
 	// deploy says why.
 	if err := m.opts.Store.PutReleaseSnapshot(ctx, &state.ReleaseSnapshot{
-		ID: rel.ID, MachineID: machineID, CheckpointID: ck.ID,
-		CreatedAt: time.Now().Unix(),
+		ID: rel.ID, ServiceID: rel.ServiceID, MachineID: machineID,
+		CheckpointID: ck.ID, CreatedAt: time.Now().Unix(),
 	}); err != nil {
 		return fmt.Errorf("record the release's vmstate: %w", err)
 	}

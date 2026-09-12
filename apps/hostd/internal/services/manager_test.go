@@ -323,6 +323,45 @@ func TestAReleaseWithNoSnapshotStillDeploys(t *testing.T) {
 	}
 }
 
+// A deploy records where its release keeps its vmstate, carrying the service.
+//
+// # Why the service id is on the row
+//
+// The writer guard on this table asks whether this host is the one that writes
+// that service, and the obvious way to answer is to read the release row and
+// take its service_id. That does not work here: this row is written from
+// inside snapshotRelease, which runs BEFORE the release row is written -- the
+// checkpoint has to succeed before there is a release worth writing at all.
+// A guard that looked the release up would refuse every write it exists to
+// allow, and a promote would come back 404 with nothing naming the cause.
+//
+// So the service travels on the row, and this test is what says so.
+func TestADeployRecordsWhereItsVMStateIsWithItsService(t *testing.T) {
+	ctx := context.Background()
+	m, _, store, svc := fixture(t, 2)
+
+	rel, err := m.Deploy(ctx, "svc-1", "rootfs-build", nil)
+	if err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	snap, err := store.GetReleaseSnapshot(ctx, rel.ID)
+	if err != nil {
+		t.Fatalf("a deployed release records no vmstate, so every replica of it "+
+			"will boot rather than restore: %v", err)
+	}
+	if snap.ServiceID != svc.ID {
+		t.Errorf("the snapshot row names service %q, want %q. Without it the "+
+			"writer guard has nothing to check against, because the release row "+
+			"does not exist yet when this is written", snap.ServiceID, svc.ID)
+	}
+	if snap.CheckpointID == "" || snap.MachineID == "" {
+		t.Errorf("the snapshot row names machine %q checkpoint %q; the vmstate "+
+			"key is built from both, so an empty one is an empty key",
+			snap.MachineID, snap.CheckpointID)
+	}
+}
+
 // The route is flipped only after the new replicas are healthy, and a deploy
 // that fails leaves the old release serving.
 func TestAFailedDeployDoesNotFlipTheRoute(t *testing.T) {
