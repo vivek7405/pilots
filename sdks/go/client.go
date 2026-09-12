@@ -137,6 +137,15 @@ func New(apiKey string, opts ...Option) *Client {
 func (c *Client) BaseURL() string { return c.baseURL }
 
 // APIKey is the key this client authenticates with.
+// Orgs is which orgs this key can act as, and which it is acting as now.
+//
+// For a client offering a switch. A tenant key answers with exactly its own,
+// because listing the fleet's other orgs to it would be a tenant oracle.
+func (c *Client) Orgs(ctx context.Context) (*OrgsResponse, error) {
+	var out OrgsResponse
+	return &out, c.do(ctx, http.MethodGet, "/v1/orgs", nil, &out)
+}
+
 func (c *Client) APIKey() string { return c.credential() }
 
 // credential is the bearer to send: the explicit key, or the machine's own

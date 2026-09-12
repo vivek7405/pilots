@@ -28,7 +28,7 @@ func newTUICmd(env *Env) *cobra.Command {
 			// one itself, so raw-mode handling lives in exactly one place.
 			// When the shell ends, the dashboard comes back where it was.
 			for {
-				exit, err := tui.Run(c.Context(), client)
+				exit, err := tui.Run(c.Context(), client, env.Org.Value, env.APIURL.Value)
 				if err != nil {
 					return err
 				}

@@ -130,6 +130,7 @@ func NewRoot(getenv config.Env) *cobra.Command {
 		InGroup(newLoginCmd(env, getenv), "account"),
 		InGroup(newLogoutCmd(env, getenv), "account"),
 		InGroup(newWhoamiCmd(env), "account"),
+		InGroup(newOrgsCmd(env, getenv), "account"),
 		InGroup(newUseCmd(env), "account"),
 		InGroup(newMCPCmd(env, getenv), "agents"),
 		InGroup(newInitCmd(env, getenv), "agents"),

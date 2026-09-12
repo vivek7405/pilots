@@ -240,6 +240,19 @@ export interface VolumePolicy {
 }
 
 /**
+ * Which orgs a key can act as, and which it is acting as now.
+ *
+ * NOT a list of teams: the fleet knows an org only as a string on a row. A
+ * tenant key gets exactly its own; an admin key gets the orgs that own
+ * something, plus `admin` to say it may act as one not listed.
+ */
+export interface OrgsResponse {
+  current: string
+  orgs: string[]
+  admin: boolean
+}
+
+/**
  * The compose text that turns one Postgres into a Patroni cluster.
  *
  * Returned as data rather than applied: the thing that edits somebody's compose

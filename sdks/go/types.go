@@ -789,6 +789,18 @@ type HealthResponse struct {
 // WhoamiResponse is what the caller's key resolves to on the host that
 // answered. OrgID is empty for a key that belongs to no org, which is the
 // bootstrap admin key's case.
+// OrgsResponse is which orgs a key can act as, and which it is acting as now.
+//
+// NOT a list of teams, and it cannot become one: the fleet knows an org only as
+// a string on a row, and who the people are lives elsewhere. A tenant key gets
+// exactly its own; an admin key gets the orgs that own something, plus Admin
+// true to say it may act as one not listed.
+type OrgsResponse struct {
+	Current string   `json:"current"`
+	Orgs    []string `json:"orgs"`
+	Admin   bool     `json:"admin"`
+}
+
 type WhoamiResponse struct {
 	OrgID  string   `json:"org_id"`
 	Scopes []string `json:"scopes"`
@@ -1137,6 +1149,7 @@ var wireTypes = []any{
 	SnapshotResponse{},
 	VolumePolicy{},
 	ComposeRecipe{},
+	OrgsResponse{},
 	ComposeHAFragment{},
 	MachineMetrics{},
 	GrantRequest{},

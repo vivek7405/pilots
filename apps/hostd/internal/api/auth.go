@@ -152,6 +152,9 @@ var scopePrefixes = []struct {
 	{"/v1/plan", ScopeMachines},
 	{"/v1/hosts", ScopeMachines},
 	{"/v1/whoami", ScopeMachines},
+	// The lowest scope, because it answers the same question whoami does with
+	// one more field: a key that can ask who it is can ask what it may act as.
+	{"/v1/orgs", ScopeMachines},
 	// The TENANT scrape. machines-scoped, because it answers the same question
 	// a machine list answers and is narrowed by the same rule: a key that
 	// cannot see a machine cannot see its numbers. Distinct from the host's own

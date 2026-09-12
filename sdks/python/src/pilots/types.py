@@ -182,6 +182,18 @@ class VolumePolicy:
 
 
 @dataclass
+class OrgsResponse:
+    """Which orgs a key can act as, and which it is acting as now.
+
+    Not a list of teams: the fleet knows an org only as a string on a row.
+    """
+
+    current: str = ""
+    orgs: list[str] = field(default_factory=list)
+    admin: bool = False
+
+
+@dataclass
 class ComposeHAFragment:
     """The compose text that turns one Postgres into a Patroni cluster.
 

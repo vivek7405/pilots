@@ -396,6 +396,10 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("POST /v1/machines/{id}/fork", d.handleForkMachine)
 	mux.HandleFunc("POST /v1/checkpoints/{id}/fork", d.handleForkCheckpoint)
 	mux.HandleFunc("GET /v1/whoami", d.handleWhoami)
+	// Which orgs this key can act as. NOT a list of teams: who the people are
+	// lives in the dashboard's own database, and the fleet knows an org only
+	// as a string on a row. See orgs.go.
+	mux.HandleFunc("GET /v1/orgs", d.handleListOrgs)
 
 	// The hosted MCP endpoint: the fleet toolset over Streamable HTTP, on
 	// every host, behind the same bearer key. See mcp.go. The well-known
