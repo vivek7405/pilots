@@ -56,6 +56,16 @@ type Recipe struct {
 	Mode string `json:"mode"`
 	// Service is the compose service block, ready to splice into a file.
 	Service map[string]any `json:"service"`
+	// Companions are further compose services the recipe declares, by name.
+	//
+	// One so far: the connection pooler. It is a SERVICE rather than something
+	// bolted onto the database's own block because that is what it is -- a
+	// second command over the same filesystem -- and the planner already folds
+	// services that share a build context into one machine with two processes
+	// (see group.go). So the pooler costs no second machine, no second image,
+	// no second rollout and no new concept; it reaches Postgres over the
+	// loopback of the guest they share.
+	Companions map[string]map[string]any `json:"companions,omitempty"`
 	// Volumes are the named volumes it declares.
 	Volumes map[string]struct{} `json:"volumes"`
 	// Files are extra files the fragment needs, by path relative to the
@@ -181,12 +191,23 @@ func postgresRecipe(name, mode string, pool bool) *Recipe {
 		ConnVar:     "DATABASE_URL",
 	}
 
+	// A database publishes NOTHING, in either mode.
+	//
+	// Publishing is about the router, and the router dials container port 8080.
+	// A database has nothing to answer there, so a file that publishes 5432 and
+	// not 8080 describes a service the router can never reach -- which the
+	// planner refuses, by name, and rightly.
+	//
+	// Not publishing costs nothing, because it was never what made the database
+	// reachable. Guest-to-guest traffic is plain IP over the mesh, so a peer
+	// dials <name>.internal:5432 whether compose mentions the port or not. The
+	// health gate is the `healthcheck` command, which runs inside the guest and
+	// has no port in it either.
 	if mode == ModeDurableVolume {
 		r.Service = map[string]any{
 			"image":       "postgres:17",
 			"environment": env,
 			"volumes":     []string{"pgdata:/var/lib/postgresql/data"},
-			"ports":       []string{port},
 			"healthcheck": healthcheck("pg_isready -U postgres"),
 			"x-pilots":    pilotsBlock("postgres", true),
 		}
@@ -207,7 +228,6 @@ func postgresRecipe(name, mode string, pool bool) *Recipe {
 			},
 			"environment": env,
 			"volumes":     []string{"pgarchive:/archive"},
-			"ports":       []string{port},
 			"healthcheck": healthcheck("pg_isready -U postgres"),
 			"x-pilots":    pilotsBlock("postgres", false),
 		}
@@ -230,6 +250,7 @@ func postgresRecipe(name, mode string, pool bool) *Recipe {
 	}
 
 	if pool {
+		addPooler(r, name, env)
 		// The connection string points at the POOLER, because that is what an
 		// application should be talking to: Postgres spends a process per
 		// connection, and an application that opens one per request exhausts
@@ -237,8 +258,9 @@ func postgresRecipe(name, mode string, pool bool) *Recipe {
 		// published too, for the migrations and admin tools that need it.
 		r.ConnVar = "DATABASE_URL"
 		r.URLTemplate = "postgres://postgres:PASSWORD@" + name + ".internal:6432/postgres"
-		r.Statement += " Connections go through pgbouncer on 6432; " +
-			name + ".internal:5432 is the direct address."
+		r.Statement += " Connections go through pgbouncer on 6432 in transaction " +
+			"mode; " + name + ".internal:5432 is the direct address, which is what " +
+			"migrations and any session-level feature must use."
 	} else {
 		r.URLTemplate = "postgres://postgres:PASSWORD@" + name + ".internal:" + port + "/postgres"
 	}
@@ -276,7 +298,13 @@ func simpleRecipe(engine, name string) *Recipe {
 		},
 		"redis": {
 			image: "redis:7", port: "6379", dataPath: "/data",
-			health: "redis-cli -a \"$REDIS_PASSWORD\" ping",
+			// $$ , not $ . A single dollar is a COMPOSE variable, substituted
+			// when the file is parsed, and the password is not in the
+			// environment of whoever runs `pilot deploy` -- so the file failed
+			// to load at all, with "unset variable REDIS_PASSWORD". Compose's
+			// own escape passes a literal $ through to the guest, where the
+			// variable does exist.
+			health: "redis-cli -a \"$$REDIS_PASSWORD\" ping",
 			env: map[string]any{
 				"REDIS_PASSWORD": "secret://redis_password",
 			},
@@ -298,7 +326,6 @@ func simpleRecipe(engine, name string) *Recipe {
 		"image":       sh.image,
 		"environment": sh.env,
 		"volumes":     []string{volumeNameFor(engine) + ":" + sh.dataPath},
-		"ports":       []string{sh.port},
 		"healthcheck": healthcheck(sh.health),
 		"x-pilots":    pilotsBlock(engine, true),
 	}
@@ -309,7 +336,10 @@ func simpleRecipe(engine, name string) *Recipe {
 		// lock cannot, and the recipe should not decide which this is.
 		svc["command"] = []string{
 			"redis-server", "--appendonly", "yes",
-			"--requirepass", "$REDIS_PASSWORD",
+			// $$ for the same reason the healthcheck uses it: a single dollar
+			// is substituted when compose PARSES the file, where the password
+			// does not exist. The guest gets a literal $ and expands it itself.
+			"--requirepass", "$$REDIS_PASSWORD",
 		}
 	}
 
@@ -480,4 +510,148 @@ set -e
 BASE="/archive/base/$(date -u +%Y%m%dT%H%M%SZ)"
 mkdir -p /archive/wal "$BASE"
 pg_basebackup -U postgres -D "$BASE" -Ft -z -X none
+`
+
+// addPooler turns a Postgres recipe into a database with a pooler beside it.
+//
+// # Why a second PROCESS and not a second machine
+//
+// A pooler is only worth having next to the database. Put it on its own
+// machine and every query pays a second network hop to save a connection, and
+// the pooler becomes a thing that can be down while the database is up. Here
+// it shares the guest, reaches Postgres over 127.0.0.1, and lives and dies
+// with it -- which is what an operator already assumes about it.
+//
+// The planner does this without a new concept: services that share a build
+// context become ONE machine with several processes (group.go). So the pooler
+// is written as an ordinary compose service that happens to build from the
+// same directory, and everything downstream -- the rollout, the health gate,
+// the snapshot, the volume -- is unchanged.
+//
+// # Why the database keeps the machine's port
+//
+// Only one process owns a machine's published port, and it must be the one the
+// health gate asks about. `pg_isready` on the database is the honest answer to
+// "is this service up"; a pooler that answers while the database behind it is
+// still recovering would let a broken release through. The pooler needs no
+// published port to be reachable: guest-to-guest traffic is plain IP on the
+// mesh, so 6432 answers on <name>.internal whether compose mentions it or not.
+//
+// # Why transaction mode
+//
+// Session mode pools almost nothing: a client that holds its connection holds
+// a server connection with it, which is the problem. Transaction mode is the
+// one that turns hundreds of client connections into a handful of server ones.
+// It costs the session-level features -- LISTEN/NOTIFY, session advisory
+// locks, temporary tables, SET that outlives a transaction -- and that cost is
+// why the direct address stays published and is named in the statement rather
+// than hidden.
+func addPooler(r *Recipe, name string, env map[string]any) {
+	// Pooling needs a build context, because the grouping rule is "same build
+	// context and same Dockerfile means one machine". In durable-volume mode
+	// the recipe otherwise runs the stock image, so it gains a Dockerfile that
+	// is that image plus pgbouncer.
+	if _, built := r.Service["build"]; !built {
+		delete(r.Service, "image")
+		r.Service["build"] = "./.pilots/" + name
+		r.Files[".pilots/"+name+"/Dockerfile"] = postgresPlainDockerfile
+	} else {
+		r.Files[".pilots/"+name+"/Dockerfile"] = postgresPooledDockerfile
+	}
+	r.Files[".pilots/"+name+"/pilot-pgbouncer.sh"] = pgbouncerStart
+
+	// The pooler's environment is the database's, so it reads the same
+	// password from the same secret. One secret, not two that have to agree.
+	if r.Companions == nil {
+		r.Companions = map[string]map[string]any{}
+	}
+	r.Companions[name+"-pool"] = map[string]any{
+		"build":       "./.pilots/" + name,
+		"command":     []string{"/usr/local/bin/pilot-pgbouncer.sh"},
+		"environment": env,
+		// Ordered, not raced: pgbouncer with no database behind it accepts
+		// connections and fails them, which looks like a broken application
+		// rather than a database that has not finished starting.
+		"depends_on": []string{name},
+	}
+}
+
+// postgresPlainDockerfile is the stock image plus the pooler, for the mode that
+// otherwise needs no image of its own.
+const postgresPlainDockerfile = `FROM postgres:17
+RUN apt-get update && apt-get install -y --no-install-recommends pgbouncer \
+  && rm -rf /var/lib/apt/lists/*
+COPY pilot-pgbouncer.sh /usr/local/bin/pilot-pgbouncer.sh
+RUN chmod +x /usr/local/bin/pilot-pgbouncer.sh
+`
+
+// postgresPooledDockerfile is the wal-archive image plus the pooler.
+const postgresPooledDockerfile = postgresDockerfile + `RUN apt-get update && apt-get install -y --no-install-recommends pgbouncer \
+  && rm -rf /var/lib/apt/lists/*
+COPY pilot-pgbouncer.sh /usr/local/bin/pilot-pgbouncer.sh
+RUN chmod +x /usr/local/bin/pilot-pgbouncer.sh
+`
+
+// The pooler's configuration is written at START, not baked into the image.
+//
+// It contains the database password, and an image is a thing that gets pushed,
+// cached, shared and inspected. Writing the file at start keeps the secret in
+// the machine that already holds it and nowhere else, and means rotating the
+// password is a restart rather than a rebuild.
+//
+// The userlist holds the password in the clear at mode 0600 inside the guest,
+// and auth is scram-sha-256 anyway: pgbouncer derives the SCRAM exchange from
+// the plaintext it holds, so nothing crosses the wire in the clear in either
+// direction -- not from the client to the pooler, and not from the pooler to
+// Postgres.
+const pgbouncerStart = `#!/bin/sh
+set -e
+
+mkdir -p /etc/pgbouncer /var/log/pgbouncer /var/run/pgbouncer
+
+# 0600 before the password is in it, not after: a file written world-readable
+# and then chmodded is world-readable for however long that takes.
+umask 077
+cat > /etc/pgbouncer/userlist.txt <<EOF
+"postgres" "$POSTGRES_PASSWORD"
+EOF
+
+cat > /etc/pgbouncer/pgbouncer.ini <<'EOF'
+[databases]
+* = host=127.0.0.1 port=5432
+
+[pgbouncer]
+listen_addr = *
+listen_port = 6432
+auth_type = scram-sha-256
+auth_file = /etc/pgbouncer/userlist.txt
+
+# Transaction mode is the one that pools: a client connection holds a server
+# connection only for the length of a transaction.
+pool_mode = transaction
+
+# default_pool_size is per user/database pair, and is the number that actually
+# bounds Postgres. 20 against the stock max_connections of 100 leaves headroom
+# for the direct address, for pilot metrics, and for a replica.
+default_pool_size = 20
+reserve_pool_size = 5
+reserve_pool_timeout = 3
+
+# max_client_conn is what the pooler is FOR: the number of application
+# connections it will hold on the handful of server connections above.
+max_client_conn = 1000
+
+# Protocol-level prepared statements survive transaction pooling from
+# pgbouncer 1.21. Without this, every client library that prepares (which is
+# most of them) errors on its second query.
+max_prepared_statements = 200
+
+# Logging to stderr, because the platform collects a process's stderr and a log
+# file inside a guest is a log nobody reads.
+logfile =
+pidfile =
+admin_users = postgres
+EOF
+
+exec pgbouncer /etc/pgbouncer/pgbouncer.ini
 `

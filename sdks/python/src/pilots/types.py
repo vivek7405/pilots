@@ -153,6 +153,7 @@ class ComposeRecipe:
     engine: str = ""
     mode: str = ""
     service: dict[str, Any] = field(default_factory=dict)
+    companions: dict[str, dict[str, Any]] = field(default_factory=dict)
     volumes: dict[str, Any] = field(default_factory=dict)
     files: dict[str, str] | None = None
     secret_names: list[str] = field(default_factory=list)

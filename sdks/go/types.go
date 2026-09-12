@@ -543,6 +543,11 @@ type ComposeRecipe struct {
 	Mode string `json:"mode"`
 	// Service is the compose service block, ready to splice into a file.
 	Service map[string]any `json:"service"`
+	// Companions are further compose services the recipe declares, by name.
+	// Splice each one in beside Service. They build from the same context, so
+	// the planner folds them into the database's own machine as extra
+	// processes rather than standing up a second one.
+	Companions map[string]map[string]any `json:"companions,omitempty"`
 	// Volumes are the named volumes it declares.
 	Volumes map[string]struct{} `json:"volumes"`
 	// Files are extra files the fragment needs, by path relative to the

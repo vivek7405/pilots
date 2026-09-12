@@ -195,6 +195,12 @@ export interface ComposeRecipe {
   mode: string
   /** The compose service block, ready to splice into a file. */
   service: Record<string, unknown>
+  /**
+   * Further compose services the recipe declares, by name. Splice each one in
+   * beside `service`. They build from the same context, so the planner folds
+   * them into the database's own machine as extra processes.
+   */
+  companions?: Record<string, Record<string, unknown>>
   /** The named volumes it declares. */
   volumes: Record<string, Record<string, never>>
   /** Extra files it needs, by path. Anything ending `.sh` is executable. */

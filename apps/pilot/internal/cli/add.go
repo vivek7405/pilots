@@ -254,6 +254,20 @@ func spliceRecipe(path, name string, recipe *pilots.ComposeRecipe) error {
 	if err := setInMap(doc, "services", name, recipe.Service); err != nil {
 		return err
 	}
+	// Companions go in beside it, refused the same way if one already exists:
+	// silently replacing a service somebody wrote is the one outcome an editing
+	// command must never have.
+	for _, companion := range sortedKeys(recipe.Companions) {
+		if existing := mapValue(doc, "services"); existing != nil {
+			if mapValue(existing, companion) != nil {
+				return out.Failf("pass --name to add it under another name",
+					"%s already has a service called %s", path, companion)
+			}
+		}
+		if err := setInMap(doc, "services", companion, recipe.Companions[companion]); err != nil {
+			return err
+		}
+	}
 	for vol := range recipe.Volumes {
 		if err := setInMap(doc, "volumes", vol, map[string]any{}); err != nil {
 			return err
