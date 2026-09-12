@@ -18,7 +18,12 @@ type Knobs struct {
 	AutoStart          bool   `json:"auto_start"`           // wake on an inbound request
 	MinMachinesRunning int    `json:"min_machines_running"` // 0 = scale to zero
 	SoftLimit          int    `json:"soft_limit"`
-	IdleTimeout        int    `json:"idle_timeout"` // seconds of quiet before suspend, 1..3600
+	// HardLimit is the concurrency the machine queues at and then refuses.
+	// soft_limit starts another replica; this one refuses. A request above it
+	// waits briefly for room and is then answered 503 with Retry-After. Zero
+	// is unlimited.
+	HardLimit   int `json:"hard_limit"`
+	IdleTimeout int `json:"idle_timeout"` // seconds of quiet before suspend, 1..3600
 	// Schedules are the machine's cron jobs; null (nil here) means none. On a
 	// deploy an absent key inherits the previous release's and an explicit
 	// empty list clears them, which is why KnobsPatch carries a pointer to a
@@ -66,6 +71,7 @@ type KnobsPatch struct {
 	AutoStart          *bool   `json:"auto_start,omitempty"`           // wake on an inbound request
 	MinMachinesRunning *int    `json:"min_machines_running,omitempty"` // 0 = scale to zero
 	SoftLimit          *int    `json:"soft_limit,omitempty"`
+	HardLimit          *int    `json:"hard_limit,omitempty"`
 	IdleTimeout        *int    `json:"idle_timeout,omitempty"` // seconds of quiet before suspend, 1..3600
 	// A pointer to a slice, not a slice: omitempty drops an empty slice, and
 	// an empty list is the one way to clear inherited schedules on a deploy.

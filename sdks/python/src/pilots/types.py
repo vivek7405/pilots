@@ -56,6 +56,7 @@ class Knobs:
     auto_start: bool = False
     min_machines_running: int = 0
     soft_limit: int = 0
+    hard_limit: int = 0
     idle_timeout: int = 0
     schedules: list[Schedule] = field(default_factory=list)
 

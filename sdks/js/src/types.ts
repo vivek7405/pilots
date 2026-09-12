@@ -30,6 +30,13 @@ export interface Knobs {
   auto_start: boolean
   min_machines_running: number
   soft_limit: number
+  /**
+   * Concurrency the machine queues at and then refuses. `soft_limit` says
+   * "start another replica"; this says "this one has had enough". A request
+   * above it waits briefly for room and is then answered 503 with
+   * `Retry-After`. Zero is unlimited.
+   */
+  hard_limit: number
   /** Seconds of quiet before the machine suspends, 1..3600 (default 60). */
   idle_timeout: number
   /**

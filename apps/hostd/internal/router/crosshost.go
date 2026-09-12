@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -282,7 +284,25 @@ func (r *Router) serveLocally(w http.ResponseWriter, req *http.Request, target *
 
 	// Counted while in flight so the idle monitor cannot suspend the machine
 	// mid-response, and recorded so it is not suspended immediately after.
-	r.opts.Manager.Begin(target.Machine.ID)
+	//
+	// A machine with a hard limit queues here instead of piling on. Counted on
+	// the OWNER host, which is where this runs: concurrency is a property of
+	// the guest, and a fleet-wide count would need a round trip per request to
+	// enforce a limit about one process.
+	knobs := api.ParseKnobs(target.Machine.KindKnobs)
+	if knobs.HardLimit > 0 {
+		if !r.opts.Manager.BeginLimited(ctx, target.Machine.ID, knobs.HardLimit, hardLimitQueue) {
+			metrics.RouterHardLimitRefusals.Inc()
+			// Retry-After, because this is a queue that drained too slowly
+			// rather than a machine that is broken. A client that backs off a
+			// second usually finds the replica the autoscaler just started.
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "machine is at its hard_limit; retry", http.StatusServiceUnavailable)
+			return
+		}
+	} else {
+		r.opts.Manager.Begin(target.Machine.ID)
+	}
 	defer r.opts.Manager.End(target.Machine.ID)
 	go r.opts.Manager.Touch(context.WithoutCancel(ctx), target.Machine.ID)
 

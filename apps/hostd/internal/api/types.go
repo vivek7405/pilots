@@ -25,6 +25,19 @@ type Knobs struct {
 	AutoStart          bool   `json:"auto_start"`           // wake on an inbound request
 	MinMachinesRunning int    `json:"min_machines_running"` // 0 = scale to zero
 	SoftLimit          int    `json:"soft_limit"`           // concurrency before starting another replica
+	// HardLimit is the concurrency a machine will QUEUE at and then refuse.
+	//
+	// soft_limit says "start another replica"; hard_limit says "this one has
+	// had enough". Without it a burst that outruns the autoscaler piles every
+	// request onto one guest, which serves all of them slowly rather than
+	// most of them well, and a machine with a slow dependency degrades into
+	// timeouts nobody can attribute.
+	//
+	// Above the limit a request waits briefly for room, and is refused with
+	// 503 and Retry-After when none comes. Zero is unlimited, which is what
+	// every existing machine's knobs decode to, so nothing changes until it
+	// is set.
+	HardLimit int `json:"hard_limit"`
 	// IdleTimeout is how many seconds of quiet the idle monitor waits before
 	// it suspends the machine. The machine's own activity -- a request, an
 	// exec, a session running a command -- restarts the wait, so this is the
@@ -147,6 +160,17 @@ func (k Knobs) Validate() error {
 	}
 	if k.SoftLimit < 0 {
 		return errors.New("soft_limit cannot be negative")
+	}
+	if k.HardLimit < 0 {
+		return errors.New("hard_limit cannot be negative")
+	}
+	// A hard limit under the soft one would refuse requests at a concurrency
+	// the autoscaler has not even reacted to yet, which reads as the platform
+	// dropping traffic rather than as a limit doing its job.
+	if k.HardLimit > 0 && k.SoftLimit > 0 && k.HardLimit < k.SoftLimit {
+		return fmt.Errorf("hard_limit is %d and soft_limit is %d; a machine cannot "+
+			"refuse below the concurrency that starts another replica",
+			k.HardLimit, k.SoftLimit)
 	}
 	if k.IdleTimeout < 1 || k.IdleTimeout > MaxIdleTimeoutSeconds {
 		return fmt.Errorf("idle_timeout is %d, want 1..%d seconds", k.IdleTimeout, MaxIdleTimeoutSeconds)

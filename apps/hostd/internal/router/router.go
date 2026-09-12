@@ -36,6 +36,15 @@ type Target struct {
 }
 
 // Options configures the router.
+// hardLimitQueue is how long a request waits for room on a machine at its
+// hard limit before it is refused.
+//
+// Ten seconds because that is comfortably longer than a replica takes to
+// start: the autoscaler reacts to soft_limit, and a request that waits out one
+// scale-up succeeds instead of failing. Longer would turn a limit into a
+// timeout, which is the failure it exists to prevent.
+const hardLimitQueue = 10 * time.Second
+
 type Options struct {
 	Domain string // e.g. "pilotrun.app"
 	// HostID identifies this host. A machine owned by another host is not

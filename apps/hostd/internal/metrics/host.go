@@ -78,6 +78,12 @@ var (
 	CertExpirySeconds = NewGauge(Default, "pilots_cert_expiry_seconds",
 		"Seconds until the fleet's wildcard certificate expires.")
 
+	// A machine refusing rather than queueing further. Above zero means a
+	// machine met its hard_limit and the autoscaler did not start a replica in
+	// time, which is a capacity question rather than a fault.
+	RouterHardLimitRefusals = NewCounter(Default, "pilots_router_hard_limit_refusals_total",
+		"Requests refused because a machine was at its hard_limit.")
+
 	ReplicationGaps = NewGauge(Default, "pilots_replication_gaps",
 		"Ranges of changes this replica knows it has not applied yet. "+
 			"Above zero means corrosion is still filling holes.")
