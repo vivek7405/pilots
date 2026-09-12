@@ -479,8 +479,32 @@ func (t cachedTenancy) OrgOf(ctx context.Context, id string) (string, bool) {
 	return row.OrgID, true
 }
 
-func (t cachedTenancy) Revoked(_ context.Context, hash string) (bool, error) {
-	return t.cache.Revoked(hash), nil
+// Revoked answers from the cache, and a MISS falls through to the store.
+//
+// A hit is authoritative and needs nothing else: a revocation is a tombstone,
+// it only ever appears, and un-revoking is minting a new key. So a cache that
+// says "revoked" is never wrong.
+//
+// A MISS is the dangerous direction, and it was being trusted. On the rig a
+// revoked key kept authenticating indefinitely: the tombstone was in the table,
+// gossiped to every host, and the cache's map did not have it -- so every
+// request answered 200, a hostd restart did not clear it, and nothing anywhere
+// said why. A key somebody revoked because it leaked went on working.
+//
+// The comment on the subscription says a rebuild re-reads the whole table so a
+// revocation cannot be missed by a gap. That is the intent; this is the belt to
+// its braces, and the reason to have one is that the failure is silent, total
+// and security-relevant. OrgOf already falls back exactly like this, and the
+// difference between them was an inconsistency rather than a decision.
+//
+// The cost is one local query per authenticated request whose key is NOT
+// revoked, which is nearly all of them. That is real and it is the right trade:
+// a revocation that does not revoke is not a performance problem.
+func (t cachedTenancy) Revoked(ctx context.Context, hash string) (bool, error) {
+	if t.cache.Revoked(hash) {
+		return true, nil
+	}
+	return t.store.IsRevoked(ctx, hash)
 }
 
 // Limits answers from the cache, and a MISS is authoritative -- which is the
