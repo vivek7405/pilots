@@ -463,8 +463,21 @@ func (p peerAPI) PostJSON(ctx context.Context, hostID, path string, body any) er
 // create, then exec, is the first thing an agent does, and the tenancy row is
 // written milliseconds before that call arrives. The fallback costs a query
 // only on the miss, so the steady state is still a map lookup.
+// tenancyCache is the three answers this type needs from the subscription
+// cache.
+//
+// An interface rather than the concrete cache, so the fallback behaviour can be
+// tested without a running Corrosion. That matters more than usual here: the
+// asymmetry between a cache hit and a cache miss is the whole correctness
+// argument for Revoked, and an argument nothing exercises is one that decays.
+type tenancyCache interface {
+	OrgOf(id string) (string, bool)
+	Revoked(hash string) bool
+	KeyLimits(hash string) (state.APIKeyLimits, bool)
+}
+
 type cachedTenancy struct {
-	cache *corrosion.Cache
+	cache tenancyCache
 	store state.Store
 }
 
