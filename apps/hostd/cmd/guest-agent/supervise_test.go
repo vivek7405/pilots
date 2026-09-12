@@ -299,3 +299,66 @@ func TestLogRingKeepsTheTailAndBoundsItself(t *testing.T) {
 		t.Errorf("the ring holds %d bytes, want it capped at %d", got, logRingSize)
 	}
 }
+
+// What a compose file with two services on one build context sends down: the
+// process set, in the environment the host delivers at every init.
+func TestDeclaredProcessesAreReadFromTheEnvironment(t *testing.T) {
+	specs, msg := declaredProcesses(map[string]string{
+		processesEnv: `[{"name":"web","cmd":"node server.js","port":true},
+		                {"name":"worker","cmd":"node worker.js","needs":["web"]}]`,
+	})
+	if msg != "" {
+		t.Fatalf("declaredProcesses: %s", msg)
+	}
+	if len(specs) != 2 || specs[0].Name != "web" || specs[1].Name != "worker" {
+		t.Fatalf("specs = %+v, want web and worker", specs)
+	}
+	if !specs[0].Port {
+		t.Error("web does not own the port")
+	}
+	if len(specs[1].Needs) != 1 || specs[1].Needs[0] != "web" {
+		t.Errorf("worker needs %v, want [web]", specs[1].Needs)
+	}
+}
+
+// A machine that runs one command has no set, and that is not an error.
+func TestNoDeclaredProcessesIsNotAnError(t *testing.T) {
+	specs, msg := declaredProcesses(map[string]string{"PORT": "8080"})
+	if msg != "" || len(specs) != 0 {
+		t.Errorf("declaredProcesses = %+v, %q; want nothing and no error", specs, msg)
+	}
+}
+
+// A list that cannot be read must fail loudly. Starting one process where the
+// compose file asked for three reads as the application failing rather than as
+// the platform dropping a declaration.
+func TestAnUnreadableProcessListIsReportedNotIgnored(t *testing.T) {
+	for _, raw := range []string{
+		`{not json`,
+		`[{"name":"web"}]`,
+		`[{"cmd":"node server.js"}]`,
+	} {
+		if _, msg := declaredProcesses(map[string]string{processesEnv: raw}); msg == "" {
+			t.Errorf("declaredProcesses(%q) reported no problem", raw)
+		}
+	}
+}
+
+func TestMergeEnvLayersTheProcessOverTheMachine(t *testing.T) {
+	got := mergeEnv(
+		map[string]string{"PORT": "8080", "NODE_ENV": "production"},
+		map[string]string{"PORT": "9090"},
+	)
+	if got["PORT"] != "9090" {
+		t.Errorf("PORT = %q; a process's own value must win", got["PORT"])
+	}
+	if got["NODE_ENV"] != "production" {
+		t.Errorf("NODE_ENV = %q; the machine's environment must survive", got["NODE_ENV"])
+	}
+	// No copy when the process names nothing, so the common case allocates
+	// nothing per process.
+	machine := map[string]string{"PORT": "8080"}
+	if out := mergeEnv(machine, nil); len(out) != 1 {
+		t.Errorf("mergeEnv with no process env = %v", out)
+	}
+}

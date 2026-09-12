@@ -158,6 +158,32 @@ type Step struct {
 	Private      bool   `json:"private,omitempty"`
 	CustomDomain string `json:"custom_domain,omitempty"`
 	PreDeploy    string `json:"pre_deploy,omitempty"`
+	// Processes is filled when SEVERAL compose services share one build
+	// context and therefore run as one machine. Empty is the ordinary case:
+	// one service, one machine, one process named app.
+	//
+	// Sharing a context is the signal, and it is the honest one. Two services
+	// built from the same directory are two commands over one filesystem,
+	// which is exactly a machine with two processes; two services with
+	// different images are two filesystems, which cannot be one machine
+	// without a container runtime in the guest, and this project does not have
+	// one on purpose. So the reading is mechanical rather than a heuristic,
+	// and the case it does not cover is refused rather than approximated.
+	Processes []Process `json:"processes,omitempty"`
+}
+
+// Process is one named command inside a machine that runs several.
+type Process struct {
+	Name string `json:"name"`
+	// Cmd is the service's command, already rendered the way the Dockerfile
+	// override is: a shell string the guest runs through /bin/sh -c.
+	Cmd string `json:"cmd,omitempty"`
+	// Needs is this process's depends_on, narrowed to processes in the SAME
+	// machine. A dependency on a service that became a different machine stays
+	// on the step's DependsOn, where the rollout orders it.
+	Needs []string `json:"needs,omitempty"`
+	// Port marks the one process that owns the machine's published port.
+	Port bool `json:"port,omitempty"`
 }
 
 // Plan is the ordered result: the app, and its services in dependency order.
@@ -303,7 +329,15 @@ func Compile(ctx context.Context, req Request) (*Plan, *PlanError, error) {
 		}
 		steps[name] = step
 	}
-	ordered, err := kahn(steps)
+	// Services sharing a build context are one machine with one process each.
+	// Before kahn, so the ordering runs over the machines that will actually
+	// be deployed rather than over the services that were written.
+	grouped, err := groupByContext(steps)
+	if err != nil {
+		return nil, &PlanError{Error: err.Error(), Code: api.CodeComposeInvalid,
+			Next: "give the services different build contexts, or resolve the conflict named above"}, nil
+	}
+	ordered, err := kahn(grouped)
 	if err != nil {
 		return nil, nil, err
 	}

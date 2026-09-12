@@ -30,6 +30,53 @@ import (
 // can write somewhere that is not the real /etc.
 var appDir = "/etc/pilot/app.d"
 
+// processesEnv is the variable a deploy's process set arrives in. It must
+// match compose.ProcessesEnv; the two are deliberately not a shared constant,
+// because this binary is copied INTO an image and cannot import hostd's
+// packages.
+const processesEnv = "PILOT_PROCESSES"
+
+// declaredProcesses reads the process set the deploy asked for.
+//
+// Absent is the ordinary case and not an error: a machine that runs one
+// command has no set. Present but unreadable IS an error, and a loud one. The
+// alternative is a machine that silently starts one process where the compose
+// file asked for three, which reads as the application failing rather than as
+// the platform dropping a declaration.
+func declaredProcesses(env map[string]string) ([]processSpec, string) {
+	raw := env[processesEnv]
+	if raw == "" {
+		return nil, ""
+	}
+	var specs []processSpec
+	if err := json.Unmarshal([]byte(raw), &specs); err != nil {
+		return nil, "this machine's process list is unreadable: " + err.Error()
+	}
+	for _, s := range specs {
+		if s.Name == "" || s.Cmd == "" {
+			// A named process with no command is a supervisor entry that can
+			// never start, reported once a second forever.
+			return nil, "this machine's process list has an entry with no name or no command"
+		}
+	}
+	return specs, ""
+}
+
+// mergeEnv layers a process's own environment over the machine's.
+func mergeEnv(machine, own map[string]string) map[string]string {
+	if len(own) == 0 {
+		return machine
+	}
+	out := make(map[string]string, len(machine)+len(own))
+	for k, v := range machine {
+		out[k] = v
+	}
+	for k, v := range own {
+		out[k] = v
+	}
+	return out
+}
+
 // saveProcess records a runtime registration for the next cold boot.
 func saveProcess(spec processSpec) error {
 	if err := os.MkdirAll(appDir, 0o700); err != nil {

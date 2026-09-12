@@ -307,21 +307,41 @@ func writeAppCmd(cmd string) error {
 var (
 	startApp = func() (bool, string) {
 		cmdline, env, err := readAppCmd()
+		// What a compose file with two services on one build context asked
+		// for, delivered in the environment the host hands this machine at
+		// every init. Read here rather than from the image, because it is
+		// configuration rather than content: the same image serves a machine
+		// with one process and a machine with three.
+		declared, derr := declaredProcesses(env)
+		if derr != "" {
+			return false, derr
+		}
 		saved := savedProcesses()
-		if (err != nil || cmdline == "") && len(saved) == 0 {
+		if (err != nil || cmdline == "") && len(saved) == 0 && len(declared) == 0 {
 			return false, "this image carries no application command"
 		}
 
-		// Several processes, or one registered at runtime on a previous boot.
-		// Supervised here rather than handed to systemd even on an image that
-		// has it: the unit knows one command, and splitting the set across two
-		// mechanisms would mean two answers to "what is running".
-		if len(saved) > 0 {
-			specs := saved
-			if cmdline != "" {
+		// Several processes, whether declared by the deploy or registered at
+		// runtime on a previous boot. Supervised here rather than handed to
+		// systemd even on an image that has it: the unit knows one command,
+		// and splitting the set across two mechanisms would mean two answers
+		// to "what is running".
+		if len(saved) > 0 || len(declared) > 0 {
+			specs := append([]processSpec{}, declared...)
+			specs = append(specs, saved...)
+			// The image's own command is the process `app` ONLY when the
+			// deploy declared no set of its own. A grouped deploy's processes
+			// already include everything the machine runs, and adding the
+			// image's CMD beside them would start one of them twice.
+			if cmdline != "" && len(declared) == 0 {
 				specs = append([]processSpec{{
 					Name: DefaultProcess, Cmd: cmdline, Env: env, Port: true,
-				}}, saved...)
+				}}, specs...)
+			}
+			for i := range specs {
+				// Every process inherits the machine's environment; a process
+				// that named its own keeps them on top.
+				specs[i].Env = mergeEnv(env, specs[i].Env)
 			}
 			return appSupervisor.startAll(specs)
 		}
