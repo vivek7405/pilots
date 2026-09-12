@@ -43,6 +43,46 @@ What the handler sees is a `GET` carrying `X-Pilot-Cron: <expression>`. The publ
 
 A replica with no traffic suspends after about 30 seconds of quiet and the next request wakes it; that is the default and it costs nothing while asleep. A worker that must keep running with nothing connected to it -- a queue consumer, a scheduler -- keeps one replica resident with `x-pilots: min_machines_running: 1` in its compose entry (or `auto_stop: off`). The scale-down window is the autoscaler's and is not a knob; `idle_timeout` is the sandbox timer (sandboxes.md). The keys are listed in compose.md.
 
+## Databases
+
+A database here is an ordinary service. `pilot add postgres` (also `mysql`, `redis`, `mongo`) writes a compose entry, a volume, a snapshot policy and a generated password into the project. Nothing about it is a second system: the same rollout, the same health gate, the same volume, the same snapshots. Nobody operates it for you, and `docs/honesty.md` says exactly which half is whose.
+
+The recipe carries a `pilot.engine` label, which is what makes the rest of this table work.
+
+| I need to... | Command | Note |
+| --- | --- | --- |
+| add one | `pilot add postgres` | writes the entry, the password and the durability statement; read that statement |
+| a session on it | `pilot db connect` | the engine's own client, over a tunnel, or inside the machine if you have neither the client nor the password |
+| what the engine says | `pilot metrics <service>` | connections against the limit, cache hits, commits against rollbacks |
+| recover to a moment | `pilot db restore <service> --to <RFC3339>` | Postgres in wal-archive mode; runs as a NEW service beside the old one |
+| a port held open | `pilot proxy` | for a tool that is not a shell |
+
+### Two addresses, and which is which
+
+A Postgres added with a pooler publishes two, and the difference is not cosmetic:
+
+| Variable | Port | For |
+| --- | --- | --- |
+| `DATABASE_URL` | 6432 | the application. pgbouncer in transaction mode, so hundreds of client connections sit on a handful of server ones |
+| `DATABASE_URL_DIRECT` | 5432 | migrations, `LISTEN`/`NOTIFY`, session advisory locks, temporary tables, and any `SET` meant to outlive a transaction |
+
+Transaction pooling is not a superset of a direct connection. A migration tool pointed at the pooler fails in ways that read as a broken migration rather than as a wrong address, which is why both are set and named rather than one being left to be rediscovered.
+
+### Durability, in one line each
+
+| Mode | Loses at most | Costs |
+| --- | --- | --- |
+| `wal-archive` (default) | 60 seconds of writes | nothing per commit; segments ship to the volume every minute |
+| `--durable-volume` | nothing | an object-storage round trip on every commit |
+
+The default is the first, because sixty seconds of exposure on a machine that has not crashed beats putting object-storage latency in the commit path of every write. Choose the other one deliberately.
+
+### Recovery
+
+`pilot db restore` replays the write-ahead log onto the newest base backup at or before the moment you name, as a NEW private service on a FORK of the archive volume. The original keeps serving throughout, so you can query both and compare before pointing anything at either. `pg_isready` passes only after the recovery promotes, so the release health gate is the restore gate: a recovery that never reaches its target never becomes a running release.
+
+How far back you can go is bounded by the oldest base backup the archive still holds, which is four weeks by default.
+
 ## The tools
 
 | I need to... | Tool | Note |
@@ -52,6 +92,7 @@ A replica with no traffic suspends after about 30 seconds of quiet and the next 
 | what has been deployed | `releases` | newest first, with `healthy` and the build each came from |
 | put the previous release back | `rollback` | changes what is serving; confirm first |
 | a replica's console | `logs` | pass a replica id from `service` |
+| where a database is | `database` | engine, addresses and the machine to exec in; never a password |
 
 ## Each answer and what to do
 
@@ -67,3 +108,5 @@ A replica with no traffic suspends after about 30 seconds of quiet and the next 
 - Do not roll back without confirming. It changes what is live for everyone.
 - Do not read env values from `service`. They are never returned; that is deliberate (secrets.md).
 - Do not `exec` a replica to read logs. `logs` is the console and needs no shell in the image.
+- Do not ask for a database password over the API or MCP. There is no route that returns one: passwords live in the operator's own credentials file and never in the fleet. To open a session, tell the operator to run `pilot db connect`.
+- Do not point a migration at `DATABASE_URL` on a pooled database. Transaction pooling drops the session state a migration relies on; use `DATABASE_URL_DIRECT`.

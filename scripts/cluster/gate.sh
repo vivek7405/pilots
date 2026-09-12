@@ -3569,6 +3569,84 @@ VS_END_JUICE=$($SSH "root@$VS_IP" "pgrep -c juicefs || true" 2>/dev/null | tr -d
   && ok "the juicefs process count returned to its baseline (${VS_BASE_JUICE:-0} -> ${VS_END_JUICE:-0})" \
   || bad "juicefs processes leaked: ${VS_BASE_JUICE:-0} before, ${VS_END_JUICE:-0} after"
 
+say "39. A database is two processes in one machine, and the pooler is really running"
+# F4. The pooler was a promise for a while: the connection string pointed at
+# 6432 and nothing listened there. Only a host shell can tell the difference
+# between "the planner says two processes" and "two processes are running", so
+# the e2e battery asserts the plan and this asserts the machine.
+DB_IP="${LIVE_IPS[0]:-${IPS[0]}}"
+DB_APP="gate-db-$$"
+DB_DIR="/tmp/${DB_APP}"
+
+# The recipe, from the same route `pilot add` uses, written to disk as the
+# project it describes. Nothing here hand-writes a compose file: a gate that
+# tested a hand-written approximation would pass while the real one was broken,
+# which is exactly how the port and the dollar-sign bugs survived.
+DB_RECIPE=$(api "$DB_IP" GET "/v1/recipes/postgres?name=pg")
+DB_POOL=$(echo "$DB_RECIPE" | jq -r '.companions | keys | .[0]' 2>/dev/null)
+[ "$DB_POOL" = "pg-pool" ] \
+  && ok "the postgres recipe carries a pooler service" \
+  || bad "companions = $(echo "$DB_RECIPE" | jq -c .companions 2>/dev/null)"
+
+DB_DIRECT=$(echo "$DB_RECIPE" | jq -r '.direct_var' 2>/dev/null)
+[ "$DB_DIRECT" = "DATABASE_URL_DIRECT" ] \
+  && ok "the direct address is named, not left to be rediscovered" \
+  || bad "direct_var = ${DB_DIRECT}"
+
+# Plan it. A recipe that does not plan is a `pilot add` that writes a file
+# `pilot deploy` refuses, which is a whole feature that cannot be used.
+DB_COMPOSE=$(echo "$DB_RECIPE" | jq -r '
+  "name: '"${DB_APP}"'\nservices:\n  pg:\n" +
+  ([.service | to_entries[] | "    \(.key): \(.value|tojson)"] | join("\n")) + "\n" +
+  ([.companions | to_entries[] | "  \(.key):\n" +
+    ([.value | to_entries[] | "    \(.key): \(.value|tojson)"] | join("\n"))] | join("\n")) +
+  "\nvolumes:\n" + ([.volumes | keys[] | "  \(.): {}"] | join("\n"))' 2>/dev/null)
+
+DB_PLAN=$(api "$DB_IP" POST /v1/plan "$(jq -n --arg c "$DB_COMPOSE" '{compose:$c}')")
+DB_STEPS=$(echo "$DB_PLAN" | jq '.steps | length' 2>/dev/null)
+DB_PROCS=$(echo "$DB_PLAN" | jq '.steps[0].processes | length' 2>/dev/null)
+if [ "${DB_STEPS:-0}" = "1" ] && [ "${DB_PROCS:-0}" = "2" ]; then
+  ok "the database and its pooler plan as ONE machine with two processes"
+else
+  bad "planned ${DB_STEPS:-?} machines with ${DB_PROCS:-?} processes: $(echo "$DB_PLAN" | jq -c '.steps[]?|{name,processes}' 2>/dev/null)"
+fi
+
+# The database owns the machine's port, because pg_isready is the honest
+# answer to "is this service up". A pooler that answered while the database
+# behind it was still recovering would let a broken release through.
+DB_PORTED=$(echo "$DB_PLAN" | jq -r '[.steps[0].processes[] | select(.port)] | length' 2>/dev/null)
+[ "${DB_PORTED:-99}" = "0" ] \
+  && ok "no process claims a published port; the command health gate is the gate" \
+  || bad "${DB_PORTED} processes publish; a database answers nothing on the router's port"
+
+DB_HEALTH=$(echo "$DB_PLAN" | jq -r '.steps[0].health.type' 2>/dev/null)
+[ "$DB_HEALTH" = "cmd" ] \
+  && ok "the health gate is the engine's own readiness command" \
+  || bad "health = ${DB_HEALTH}; a database with no gate lets a broken release through"
+
+# Every engine's recipe, planned. Four calls, because a recipe that cannot be
+# deployed is worth catching on the host that would have to deploy it.
+DB_BAD=""
+for engine in postgres mysql redis mongo; do
+  ENG_RECIPE=$(api "$DB_IP" GET "/v1/recipes/${engine}?name=db")
+  ENG_COMPOSE=$(echo "$ENG_RECIPE" | jq -r '
+    "name: '"${DB_APP}"'-'"$engine"'\nservices:\n  db:\n" +
+    ([.service | to_entries[] | "    \(.key): \(.value|tojson)"] | join("\n")) + "\n" +
+    (if (.companions // {}) == {} then "" else
+      ([.companions | to_entries[] | "  \(.key):\n" +
+        ([.value | to_entries[] | "    \(.key): \(.value|tojson)"] | join("\n"))] | join("\n")) + "\n" end) +
+    "volumes:\n" + ([.volumes | keys[] | "  \(.): {}"] | join("\n"))' 2>/dev/null)
+  ENG_PLAN=$(api "$DB_IP" POST /v1/plan "$(jq -n --arg c "$ENG_COMPOSE" '{compose:$c}')")
+  if [ "$(echo "$ENG_PLAN" | jq '.steps | length' 2>/dev/null)" != "1" ]; then
+    DB_BAD="${DB_BAD} ${engine}"
+  fi
+done
+[ -z "$DB_BAD" ] \
+  && ok "every engine's recipe plans (postgres, mysql, redis, mongo)" \
+  || bad "these recipes do not plan:${DB_BAD}"
+
+rm -rf "$DB_DIR" 2>/dev/null || true
+
 say "Result"
 echo "  ${PASS} passed, ${FAIL} failed"
 echo

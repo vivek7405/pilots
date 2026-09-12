@@ -27,10 +27,10 @@ import (
 // FleetTools are the tools that need only the API. They are what /mcp
 // serves, and the first half of what `pilot mcp` serves. Sorted.
 var FleetTools = []string{
-	"build_logs", "checkpoint", "create_machine", "destroy_machine", "diagnose",
-	"docs", "domains", "exec", "exec_stream", "fork", "init", "list_machines",
-	"list_services", "logs", "promote", "releases", "restore", "rollback",
-	"service", "status", "volumes",
+	"build_logs", "checkpoint", "create_machine", "database", "destroy_machine",
+	"diagnose", "docs", "domains", "exec", "exec_stream", "fork", "init",
+	"list_machines", "list_services", "logs", "promote", "releases", "restore",
+	"rollback", "service", "status", "volumes",
 }
 
 // LocalTools are the tools that need the agent's own filesystem: a directory
@@ -447,6 +447,33 @@ func RegisterFleetTools(s *mcp.Server, client *pilots.Client, opts Options) {
 			}, Constant("exec on any fork; each has its own id and URL"))
 		})
 
+	type databaseIn struct {
+		Service string `json:"service,omitempty" jsonschema:"a service id or name; omit when there is only one database"`
+	}
+	// The tool an agent needs before it can touch a database, and NOT a
+	// credential.
+	//
+	// It answers where the database is, what engine it runs and which address
+	// does what, and it deliberately answers none of "what is the password".
+	// The password is not in the fleet's reach: it lives in the credentials
+	// file on the operator's own machine, and an MCP server that could hand one
+	// back would turn every API key into a database password.
+	//
+	// So the next step is a command the PERSON runs. That is the honest shape
+	// for this one: an agent that cannot read the data cannot leak it, and an
+	// operator who wants it read out loud can run one line.
+	mcp.AddTool(s, &mcp.Tool{Name: "database", Title: "Find a database",
+		Description: "Where a database is, what engine it runs, and which address to use for what. " +
+			"Returns the .internal addresses -- the pooled one an application should use and the direct " +
+			"one migrations and anything using LISTEN/NOTIFY, session advisory locks or temporary tables " +
+			"must use -- plus the machine to exec in. It does NOT return a password: passwords live on the " +
+			"operator's own machine and never in the fleet. To open a session, tell the operator to run " +
+			"`pilot db connect <service>`."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in databaseIn) (*mcp.CallToolResult, any, error) {
+			return Wrap(func() (any, error) { return describeDatabase(ctx, client, in.Service) },
+				Constant("exec on the machine, or tell the operator to run `pilot db connect`"))
+		})
+
 	type promoteIn struct {
 		Machine      string `json:"machine" jsonschema:"a machine id or name"`
 		CustomDomain string `json:"custom_domain,omitempty"`
@@ -781,3 +808,83 @@ DOCS
          "volumes" | "domains" | "promote" | "errors" | "compose" }
   Load one. Two at most.
 `
+
+// DatabaseInfo is what an agent needs to reason about a database, and nothing
+// it could leak.
+type DatabaseInfo struct {
+	Service string `json:"service"`
+	Engine  string `json:"engine"`
+	Machine string `json:"machine,omitempty"`
+	// Address is where the application should connect, and Direct is where
+	// migrations and any session-level feature must connect. They differ only
+	// when the database has a pooler in front of it.
+	Address string `json:"address"`
+	Direct  string `json:"direct,omitempty"`
+	// Note says, in one line, why there are two of them.
+	Note string `json:"note,omitempty"`
+}
+
+// describeDatabase finds one database and says how to reach it.
+//
+// With no name it answers only when there is exactly one, and otherwise lists
+// what it found. Picking one of several because it sorts first is how an agent
+// ends up running a migration against the wrong database.
+func describeDatabase(ctx context.Context, client *pilots.Client, name string) (any, error) {
+	services, err := client.Services.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var found *pilots.Service
+	var databases []string
+	for i := range services {
+		svc := &services[i]
+		if svc.Labels["pilot.engine"] == "" {
+			continue
+		}
+		databases = append(databases, svc.Name)
+		if name == "" || svc.Name == name || svc.ID == name {
+			if found == nil || svc.Name == name || svc.ID == name {
+				found = svc
+			}
+		}
+	}
+	if len(databases) == 0 {
+		return nil, fmt.Errorf("no database in this org; `pilot add postgres` adds one")
+	}
+	if name == "" && len(databases) > 1 {
+		sort.Strings(databases)
+		return nil, fmt.Errorf("there are %d databases here (%s); name one",
+			len(databases), strings.Join(databases, ", "))
+	}
+	if found == nil {
+		return nil, fmt.Errorf("no database called %q; there is %s",
+			name, strings.Join(databases, ", "))
+	}
+
+	info := DatabaseInfo{Service: found.Name, Engine: found.Labels["pilot.engine"]}
+	port := map[string]string{
+		"postgres": "5432", "mysql": "3306", "redis": "6379", "mongo": "27017",
+	}[info.Engine]
+	info.Address = found.Name + ".internal:" + port
+	if info.Engine == "postgres" {
+		// The pooled address is the one an application should hold, and it is
+		// only there when a pooler was added. Saying so beats guessing: a
+		// connection to 6432 with nothing behind it fails in a way that reads
+		// as the database being down.
+		info.Direct = info.Address
+		info.Address = found.Name + ".internal:6432"
+		info.Note = "6432 is the pooler, if this database has one; 5432 is direct. " +
+			"Migrations, LISTEN/NOTIFY, session advisory locks and temporary tables " +
+			"need the direct address."
+	}
+	machines, err := client.Machines.List(ctx)
+	if err == nil {
+		for i := range machines {
+			if machines[i].ServiceID == found.ID && machines[i].State == "running" {
+				info.Machine = machines[i].ID
+				break
+			}
+		}
+	}
+	return info, nil
+}
