@@ -49,11 +49,36 @@ func (d Deps) machineCPU() MachineCPUView {
 // startOf reads a machine's last start, or the zero row when nothing recorded
 // one. Absent is normal, not an error: it is what a machine that predates this
 // table reads as, and the API omits both fields.
+//
+// # Why a miss falls back to the store
+//
+// On a fleet the view is the subscription cache, which lags its own host's
+// writes by however long the subscription takes to deliver them. A CREATE
+// writes this row and then builds its response, so it was reading a cache that
+// had not seen the write yet and answering with no last_start at all -- for the
+// one machine whose start it had just recorded. A second later a GET showed it.
+//
+// A client cannot tell "this machine has no recorded start" from "ask again in
+// a moment", so it reads the create as a cold boot that never happened. The
+// store is local, authoritative and already open; consulting it on a miss costs
+// one query in the rare case and removes the race entirely.
+//
+// Cache FIRST, because on a fleet most reads are for machines this host does
+// not own and the cache is the only place their row is.
 func (d Deps) startOf(ctx context.Context, id string) state.MachineCPU {
 	view := d.machineCPU()
 	if view == nil {
 		return state.MachineCPU{}
 	}
-	row, _ := view.MachineCPU(ctx, id)
-	return row
+	if row, ok := view.MachineCPU(ctx, id); ok && row.LastStart != "" {
+		return row
+	}
+	if d.Store == nil {
+		return state.MachineCPU{}
+	}
+	row, err := d.Store.GetMachineCPU(ctx, id)
+	if err != nil || row == nil {
+		return state.MachineCPU{}
+	}
+	return *row
 }
