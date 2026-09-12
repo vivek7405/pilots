@@ -266,6 +266,15 @@ const (
 	URLAuthOrg    = "org"
 )
 
+// ResizeMachineRequest is POST /v1/machines/{id}/resize.
+//
+// Either field may be omitted to leave that dimension alone, which is how
+// "give it more memory" is said without restating the vCPU count.
+type ResizeMachineRequest struct {
+	VCPUs  int `json:"vcpus,omitempty"`
+	MemMiB int `json:"mem_mib,omitempty"`
+}
+
 // UpdateMachineRequest is the one thing a machine changes after create.
 type UpdateMachineRequest struct {
 	URLAuth *string `json:"url_auth,omitempty"`

@@ -38,6 +38,8 @@ type fakeManager struct {
 	processes      string
 	processActions []string
 	processLogTail int
+	// resizedTo is the size the last resize asked for, as {vcpus, mem_mib}.
+	resizedTo [2]int
 }
 
 func newFakeManager() *fakeManager {
@@ -90,6 +92,25 @@ func (f *fakeManager) Logs(context.Context, string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return []byte(f.logs), f.err
+}
+
+// Resize records the size it was asked for, so a test can assert the request
+// reached the manager rather than only that the route answered.
+func (f *fakeManager) Resize(_ context.Context, _ string, vcpus, memMiB int) (*state.Machine, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resizedTo = [2]int{vcpus, memMiB}
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := *f.machine
+	if vcpus > 0 {
+		out.VCPUs = vcpus
+	}
+	if memMiB > 0 {
+		out.MemMiB = memMiB
+	}
+	return &out, nil
 }
 
 func (f *fakeManager) Processes(context.Context, string) ([]byte, error) {

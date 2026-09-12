@@ -51,11 +51,15 @@ func TestEnvIsDeliveredFromTheCreatePathAndNowhereElse(t *testing.T) {
 		},
 		{
 			callee: "bootMachine",
-			want:   []string{"Redeploy", "startNewMachine"},
+			want:   []string{"Redeploy", "Resize", "startNewMachine"},
 			why: "the same back door, by the other create path -- and from a " +
 				"redeploy, which is a create of the process: the old one was " +
 				"killed, the new one starts from another image and has to be " +
-				"handed its environment exactly as a first boot is",
+				"handed its environment exactly as a first boot is. A RESIZE " +
+				"is the same shape for the same reason: a memory image cannot " +
+				"be loaded into a machine of another size, so the old process " +
+				"is killed and a new one boots from the SAME image and needs " +
+				"its environment delivered exactly as a first boot does",
 		},
 		{
 			// The dispatcher is the choke point both paths go through, so the

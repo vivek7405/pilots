@@ -44,6 +44,7 @@ from .types import (
     RepoLinkListResponse,
     RepoLinkResponse,
     RepoRef,
+    ResizeMachineRequest,
     RevokeResponse,
     Service,
     UpdateMachineRequest,
@@ -228,6 +229,16 @@ class Machines:
 
     def start(self, id: str) -> None:
         self._http.none("POST", f"/v1/machines/{_seg(id)}/start")
+
+    def resize(self, id: str, vcpus: int = 0, mem_mib: int = 0) -> Machine:
+        """Boots a machine again at a new size, in place: same id, same URL, same disk, same volume.
+
+        A boot rather than a resume, because a memory image cannot be loaded into a
+        differently-sized VM, so the machine loses what was in memory. Leave a
+        dimension at zero to keep it as it is.
+        """
+        body = to_json(ResizeMachineRequest(vcpus=vcpus, mem_mib=mem_mib))
+        return from_json(Machine, self._http.json("POST", f"/v1/machines/{_seg(id)}/resize", json_body=body))
 
     def checkpoint(self, id: str, comment: str | None = None) -> Checkpoint:
         body = to_json(CheckpointRequest(comment=comment))

@@ -126,6 +126,13 @@ const (
 	URLAuthOrg    = "org"
 )
 
+// ResizeMachineRequest is POST /v1/machines/{id}/resize. Either field may be
+// omitted to leave that dimension alone.
+type ResizeMachineRequest struct {
+	VCPUs  int `json:"vcpus,omitempty"`
+	MemMiB int `json:"mem_mib,omitempty"`
+}
+
 // UpdateMachineRequest is PATCH /v1/machines/{id}: who may reach the URL.
 type UpdateMachineRequest struct {
 	URLAuth *string `json:"url_auth,omitempty"`
@@ -765,6 +772,7 @@ type RepoRef struct {
 // Knobs by TestKnobsPatchCoversEveryKnob instead.
 var wireTypes = []any{
 	UpdateMachineRequest{},
+	ResizeMachineRequest{},
 	Knobs{},
 	Schedule{},
 	Machine{},

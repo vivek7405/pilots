@@ -31,6 +31,11 @@ type Manager interface {
 	// Redeploy boots a machine again from another image, in place: same row,
 	// same URL, same volume. How a volume-backed service takes a release.
 	Redeploy(ctx context.Context, id string, req RedeployRequest) (*state.Machine, error)
+	// Resize boots a machine again at a new size, in place: same row, same
+	// URL, same disk, same volume. It is a boot rather than a restore because
+	// a memory image cannot be loaded into a differently-sized VM, so the
+	// machine loses what was in memory and nothing else.
+	Resize(ctx context.Context, id string, vcpus, memMiB int) (*state.Machine, error)
 	Checkpoint(ctx context.Context, machineID, comment string) (*state.Checkpoint, error)
 	ListCheckpoints(ctx context.Context, machineID string) ([]state.Checkpoint, error)
 	RestoreCheckpoint(ctx context.Context, checkpointID string) (*state.Machine, error)

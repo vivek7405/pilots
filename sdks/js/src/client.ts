@@ -38,6 +38,7 @@ import type {
   RepoLinkListResponse,
   RepoLinkResponse,
   RepoRef,
+  ResizeMachineRequest,
   RevokeResponse,
   Service,
   UpdateServiceRequest,
@@ -237,6 +238,17 @@ export class Machines {
 
   start(id: string): Promise<void> {
     return this.http.none('POST', `/v1/machines/${encodeURIComponent(id)}/start`)
+  }
+
+  /**
+   * Boots a machine again at a new size, in place: same id, same URL, same
+   * disk, same volume. Omit a dimension to leave it alone.
+   *
+   * A boot rather than a resume, because a memory image cannot be loaded into
+   * a differently-sized VM, so the machine loses what was in memory.
+   */
+  resize(id: string, req: ResizeMachineRequest): Promise<Machine> {
+    return this.http.json<Machine>('POST', `/v1/machines/${encodeURIComponent(id)}/resize`, { body: req })
   }
 
   checkpoint(id: string, req: CheckpointRequest = {}): Promise<Checkpoint> {

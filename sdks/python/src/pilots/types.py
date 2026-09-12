@@ -250,6 +250,21 @@ class RedeployRequest:
 
 
 @dataclass
+class ResizeMachineRequest:
+    """Boots a machine again at a NEW SIZE, in place: same id, same URL, same
+    disk, same volume.
+
+    A boot rather than a resume, because a memory image cannot be loaded into a
+    differently-sized VM, so whatever was in memory is lost. Zero on a dimension
+    leaves that dimension alone, which is how "give it more memory" is said
+    without restating the vCPU count.
+    """
+
+    vcpus: int = 0
+    mem_mib: int = 0
+
+
+@dataclass
 class Release:
     id: str = ""
     service_id: str = ""

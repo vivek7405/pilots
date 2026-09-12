@@ -218,6 +218,9 @@ func Routes(d Deps) http.Handler {
 	// non-snapshotting equivalents.
 	mux.HandleFunc("POST /v1/machines/{id}/suspend", d.handleSuspend)
 	mux.HandleFunc("POST /v1/machines/{id}/wake", d.handleWake)
+	// Vertical scaling. A boot rather than a resume, because a memory image
+	// cannot be loaded into a machine of another size.
+	mux.HandleFunc("POST /v1/machines/{id}/resize", d.handleResizeMachine)
 	// Redeploy is the rollout's: the same machine, booted from another image.
 	mux.HandleFunc("POST /v1/machines/{id}/redeploy", d.handleRedeploy)
 	// stop and start are suspend and wake under the names every other

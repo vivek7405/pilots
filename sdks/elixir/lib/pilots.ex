@@ -109,6 +109,21 @@ defmodule Pilots do
   @spec wake(client(), String.t()) :: result()
   def wake(client, id), do: HTTP.request(client, :post, "/v1/machines/#{seg(id)}/wake")
 
+  @doc """
+  Boots a machine again at a new size, in place: same id, same URL, same disk,
+  same volume.
+
+  A boot rather than a resume, because a memory image cannot be loaded into a
+  differently-sized VM, so the machine loses what was in memory. Omit a
+  dimension to leave it as it is.
+  """
+  @spec resize(client(), String.t(), keyword()) :: result()
+  def resize(client, id, opts \\ []) do
+    HTTP.request(client, :post, "/v1/machines/#{seg(id)}/resize",
+      body: to_body(vcpus: opts[:vcpus], mem_mib: opts[:mem_mib])
+    )
+  end
+
   @doc "Captures the machine, memory included, so it can be restored exactly."
   @spec checkpoint(client(), String.t(), String.t() | nil) :: result()
   def checkpoint(client, id, comment \\ nil) do

@@ -88,6 +88,18 @@ func (m *Machines) Start(ctx context.Context, id string) error {
 	return m.c.do(ctx, http.MethodPost, "/v1/machines/"+url.PathEscape(id)+"/start", nil, nil)
 }
 
+// Resize boots a machine again at a new size, in place: same id, same URL,
+// same disk, same volume.
+//
+// A boot rather than a resume, because a memory image cannot be loaded into a
+// differently-sized VM, so the machine loses what was in memory. Pass zero for
+// a dimension to leave it alone.
+func (m *Machines) Resize(ctx context.Context, id string, vcpus, memMiB int) (*Machine, error) {
+	var out Machine
+	return &out, m.c.do(ctx, http.MethodPost, "/v1/machines/"+url.PathEscape(id)+"/resize",
+		ResizeMachineRequest{VCPUs: vcpus, MemMiB: memMiB}, &out)
+}
+
 // Processes lists what a machine is running.
 //
 // A machine runs a NAMED SET of processes: an image's own command is the
