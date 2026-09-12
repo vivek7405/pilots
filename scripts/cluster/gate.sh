@@ -2841,6 +2841,155 @@ else
 fi
 rm -rf "$BM_TMP"
 
+# Sections 26 and 27 belong to the process-model and host-death work in the
+# same PR and are added there. 28 and 29 are the join gate's pair.
+
+say "28. A host that has not caught up serves its own machines and claims none"
+# The bug this gate exists for cannot be seen from the public API: a host with
+# a half-replicated replica reads another host's live machine as an orphan,
+# claims it, and the claim merges cleanly. Nothing errors. So the assertion is
+# on the host -- what it reports about itself, what it logs, and what it does
+# NOT write.
+#
+# The gate is held closed here by cutting this host's reach to its peers'
+# health route rather than by corrupting its replica: a peer that cannot be
+# asked is exactly the "I could not tell" case, and the gate's rule is that
+# not being able to tell reads as not caught up. One nft table, so the cleanup
+# is a single delete and a failure leaves nothing behind that survives a
+# reboot.
+JG_IP=""
+JG_PEERS=()
+for ip in "${IPS[@]}" ${NEW_IP:-}; do
+  curl -sf -m 5 "http://${ip}:8080/v1/health" >/dev/null 2>&1 || continue
+  if [ -z "$JG_IP" ]; then JG_IP="$ip"; else JG_PEERS+=("$ip"); fi
+done
+
+jg_cleanup() {
+  [ -n "$JG_IP" ] || return 0
+  $SSH "root@$JG_IP" "nft delete table inet gate_join 2>/dev/null; \
+    sed -i '/^PILOT_FAULTS=/d;/^PILOT_FAULT_SKIP_JOIN_GATE=/d' /etc/pilots/hostd.env 2>/dev/null; \
+    systemctl restart hostd" >/dev/null 2>&1
+  wait_serving "$JG_IP" 120 >/dev/null 2>&1
+}
+
+if [ -z "$JG_IP" ] || [ "${#JG_PEERS[@]}" -lt 1 ]; then
+  bad "need two live hosts for the join gate; have ${JG_IP:-none} and ${#JG_PEERS[@]} peers"
+else
+  # What this host owns BEFORE it is made to rejoin. The assertion below is
+  # that this set does not grow while the gate is closed.
+  JG_CLAIMED_BEFORE=$($SSH "root@$JG_IP" \
+    "curl -sf -m 5 http://127.0.0.1:8080/v1/machines -H 'Authorization: Bearer ${KEY}' | \
+     jq -r '[.machines[]? | select(.state != \"destroyed\")] | length'" 2>/dev/null | tr -d '[:space:]')
+
+  JG_RULES=""
+  for p in "${JG_PEERS[@]}"; do
+    JG_RULES="${JG_RULES}nft add rule inet gate_join out ip daddr ${p} tcp dport 8080 drop; "
+  done
+  $SSH "root@$JG_IP" "nft add table inet gate_join; \
+    nft add chain inet gate_join out '{ type filter hook output priority 0; }'; \
+    ${JG_RULES} systemctl restart hostd" >/dev/null 2>&1
+
+  if wait_serving "$JG_IP" 120; then
+    ok "the host still serves /v1/health while it is joining"
+  else
+    bad "the host stopped serving while its peers were unreachable"
+  fi
+
+  # 28a. It says so, on the one route that needs no key.
+  JG_COMPLETE=$(curl -sf -m 5 "http://${JG_IP}:8080/v1/health" | jq -r '.replication_complete' 2>/dev/null)
+  if [ "$JG_COMPLETE" = "false" ]; then
+    ok "replication_complete is false while a peer cannot be reached"
+  else
+    bad "replication_complete is ${JG_COMPLETE:-missing}; an unreachable peer is not evidence of catching up"
+  fi
+
+  # 28b. And it serves its own machines meanwhile: a joining host is degraded
+  # in exactly one way, not down.
+  if curl -sf -m 10 "http://${JG_IP}:8080/v1/machines" -H "$AUTH" >/dev/null 2>&1; then
+    ok "the joining host still answers for its own machines"
+  else
+    bad "the joining host stopped answering the machines route"
+  fi
+
+  # 28c. Self-heal runs and claims nothing. Two ticks is 20s; 40 leaves room.
+  sleep 40
+  JG_LOG=$($SSH "root@$JG_IP" \
+    "journalctl -u hostd --since '-2 min' --no-pager | grep -c 'replication not complete'" 2>/dev/null | tr -d '[:space:]')
+  if [ "${JG_LOG:-0}" -ge 1 ]; then
+    ok "self-heal logged that it claimed nothing this tick"
+  else
+    bad "nothing in the journal says self-heal held back; the gate may not be wired to it"
+  fi
+
+  JG_CLAIMED_AFTER=$($SSH "root@$JG_IP" \
+    "curl -sf -m 5 http://127.0.0.1:8080/v1/machines -H 'Authorization: Bearer ${KEY}' | \
+     jq -r '[.machines[]? | select(.state != \"destroyed\")] | length'" 2>/dev/null | tr -d '[:space:]')
+  if [ "${JG_CLAIMED_AFTER:-0}" = "${JG_CLAIMED_BEFORE:-0}" ]; then
+    ok "the joining host claimed no machines (${JG_CLAIMED_BEFORE:-0} before and after)"
+  else
+    bad "machines visible to the joining host went ${JG_CLAIMED_BEFORE:-0} -> ${JG_CLAIMED_AFTER:-0} while it was still joining"
+  fi
+
+  # 28d. And it opens once the peers answer again, rather than wedging.
+  $SSH "root@$JG_IP" "nft delete table inet gate_join" >/dev/null 2>&1
+  JG_OPENED=""
+  JG_START=$SECONDS
+  while [ $((SECONDS - JG_START)) -lt 90 ]; do
+    [ "$(curl -sf -m 5 "http://${JG_IP}:8080/v1/health" | jq -r '.replication_complete' 2>/dev/null)" = "true" ] \
+      && { JG_OPENED=yes; break; }
+    sleep 3
+  done
+  if [ -n "$JG_OPENED" ]; then
+    ok "the gate opened once the peers were reachable again"
+  else
+    bad "replication_complete never became true after the peers came back; the gate wedged"
+  fi
+fi
+
+say "29. The negative control: without the gate, the same host does claim"
+# Section 28 is worth nothing unless this run can also show the claim happening
+# when the gate is removed. Same host, same blocked peers, gate skipped behind
+# two flags that must BOTH be set (internal/state/corrosion/joingate.go). The
+# assertion is that the host now reports itself complete while a peer is
+# unreachable, which is the exact judgement 28a refuses to make.
+if [ -z "$JG_IP" ] || [ "${#JG_PEERS[@]}" -lt 1 ]; then
+  bad "no host to reproduce the ungated claim on"
+else
+  JG_RULES=""
+  for p in "${JG_PEERS[@]}"; do
+    JG_RULES="${JG_RULES}nft add rule inet gate_join out ip daddr ${p} tcp dport 8080 drop; "
+  done
+  $SSH "root@$JG_IP" "mkdir -p /etc/pilots && \
+    printf 'PILOT_FAULTS=1\nPILOT_FAULT_SKIP_JOIN_GATE=1\n' >> /etc/pilots/hostd.env; \
+    nft add table inet gate_join; \
+    nft add chain inet gate_join out '{ type filter hook output priority 0; }'; \
+    ${JG_RULES} systemctl restart hostd" >/dev/null 2>&1
+
+  if wait_serving "$JG_IP" 120; then
+    JG_FAULTED=$(curl -sf -m 5 "http://${JG_IP}:8080/v1/health" | jq -r '.replication_complete' 2>/dev/null)
+    if [ "$JG_FAULTED" = "true" ]; then
+      ok "with the gate skipped the host declares itself complete despite an unreachable peer"
+    else
+      bad "the fault flag did not skip the gate (replication_complete=${JG_FAULTED:-missing}); section 28 proves nothing"
+    fi
+  else
+    bad "hostd did not come back with the fault armed"
+  fi
+
+  jg_cleanup
+  JG_LEFT=$($SSH "root@$JG_IP" "grep -c PILOT_FAULT /etc/pilots/hostd.env" 2>/dev/null | tr -d '[:space:]')
+  JG_TABLE=$($SSH "root@$JG_IP" "nft list table inet gate_join >/dev/null 2>&1 && echo yes || echo no" 2>/dev/null | tr -d '[:space:]')
+  if [ "${JG_LEFT:-1}" = "0" ] && [ "$JG_TABLE" = "no" ]; then
+    ok "the fault flags and the nft table are gone from ${JG_IP}"
+  else
+    bad "cleanup left PILOT_FAULT lines (${JG_LEFT:-?}) or the gate_join table (${JG_TABLE}) on ${JG_IP}"
+  fi
+
+  JG_FINAL=$(curl -sf -m 5 "http://${JG_IP}:8080/v1/health" | jq -r '.replication_complete' 2>/dev/null)
+  [ "$JG_FINAL" = "true" ] && ok "the host is back to a real, unfaulted complete" \
+    || bad "the host did not return to complete after cleanup (${JG_FINAL:-missing})"
+fi
+
 say "Result"
 echo "  ${PASS} passed, ${FAIL} failed"
 echo
@@ -2850,4 +2999,7 @@ echo "  - the fleet is one host bigger (step 11), and cluster.env records it,"
 echo "    so the next run adds another. cluster-down.sh resets it."
 echo "  - one host was hard reset (step 19) after the NBD wedge was reproduced"
 echo "    on it on purpose; the fault flags were removed from its hostd.env first."
+echo "  - one host had its peers blocked and the join gate skipped (steps 28 and"
+echo "    29); both the nft table and the fault flags were removed and the host"
+echo "    reports a real replication_complete again."
 [ "$FAIL" = 0 ] || exit 1

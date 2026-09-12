@@ -188,6 +188,11 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
   Section 25 asserts no host runs a build daemon at all, and kills a builder
   machine mid-build: a build runs inside a microVM, so the wreckage of one
   belongs to that guest and nothing of it may survive on the host.
+  Sections 28 and 29 are the join gate and its negative control: a host whose
+  peers it cannot reach reports itself as still joining, keeps serving its own
+  machines, and claims none; with the gate skipped behind two fault flags, the
+  same host declares itself caught up, which is the judgement section 28
+  refuses to make.
 
 **Where a new test belongs** — the split is what can *observe* the assertion:
 

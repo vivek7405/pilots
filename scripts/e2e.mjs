@@ -195,6 +195,25 @@ async function processAssertions() {
     // cannot say which pool it is in makes every rescue's tier unknowable.
     assert(json?.cpu_vendor === 'GenuineIntel' || json?.cpu_vendor === 'AuthenticAMD',
       `cpu_vendor is ${JSON.stringify(json?.cpu_vendor)}, want the raw /proc/cpuinfo vendor_id`);
+    // The join gate. A host that has caught up says so, and a host that has
+    // not claims nothing -- so a box stuck at false is one that will never
+    // rescue anything, which is invisible without this field.
+    assert(json?.replication_complete === true,
+      `replication_complete is ${JSON.stringify(json?.replication_complete)}; ` +
+      'a host serving this battery has nothing left to join');
+    // The vector is what a joining peer compares against. Absent on SQLite,
+    // where there are no actors, so the assertion is on the type rather than
+    // on a count.
+    assert(json?.store_versions === undefined || typeof json.store_versions === 'object',
+      `store_versions is ${JSON.stringify(json?.store_versions)}, want an object or absent`);
+  });
+
+  await step('/metrics carries the join gate, complete and with no gaps', async () => {
+    const complete = await scrapeMetric('pilots_replication_complete');
+    const gaps = await scrapeMetric('pilots_replication_gaps');
+    assert(complete === 1,
+      `pilots_replication_complete = ${complete}, want 1 on a host that has joined`);
+    assert(gaps === 0, `pilots_replication_gaps = ${gaps}, want 0`);
   });
 
   await step('GET /metrics renders the host families and no per-machine label', async () => {

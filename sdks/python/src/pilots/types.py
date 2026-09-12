@@ -328,6 +328,8 @@ class HealthResponse:
     store_version: int = 0
     cpu_vendor: str = ""
     cpu_vendor_forced: bool | None = None
+    store_versions: dict[str, int] | None = None
+    replication_complete: bool = False
 
 
 @dataclass

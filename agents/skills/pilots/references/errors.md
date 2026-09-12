@@ -54,6 +54,7 @@ Every non-2xx body is the same four fields:
 | `build_failed` | read the log line carrying `error`, fix the Dockerfile, `build` again |
 | `unknown_framework` | write the Dockerfile from `details`, `build` with it, `deploy` with `name` and `build` |
 | `internal` | retry once; if it repeats, say so rather than working around it |
+| a 503 on a machine whose owner is gone | retry. The host that would bring it back is still joining the fleet and claims nothing until its replica has caught up. `GET /v1/health` on that host says `replication_complete: false` while this is true, and it clears itself within seconds |
 
 ## Do not
 
