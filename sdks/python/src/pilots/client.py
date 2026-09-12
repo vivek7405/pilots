@@ -47,6 +47,7 @@ from .types import (
     ResizeMachineRequest,
     RevokeResponse,
     Service,
+    Size,
     UpdateMachineRequest,
     UpdateServiceRequest,
     UsageResponse,
@@ -335,6 +336,26 @@ class Services:
         and take effect at the next deploy. ``knobs`` are refused here and
         travel on ``deploy``."""
         return from_json(Service, self._http.json("PATCH", f"/v1/services/{_seg(id)}", json_body=to_json(req)))
+
+    def scale(self, id: str, replicas: int = 0, vcpus: int = 0, mem_mib: int = 0) -> Service:
+        """Changes how big every replica is, and how many there are.
+
+        Leave anything at zero to leave it alone. A size change replaces the
+        replicas one at a time, at the same release, and drops no request: a
+        replica comes up at the new size, passes the same health gate a deploy's
+        does, and only then is an old one retired.
+
+        A volume-backed service has a held window instead of no window at all,
+        because a volume is mounted by one machine at a time and the
+        replacement cannot mount it until the old one has let go. Requests
+        arriving then are served late rather than refused.
+        """
+        req = UpdateServiceRequest()
+        if replicas > 0:
+            req.replicas = replicas
+        if vcpus > 0 or mem_mib > 0:
+            req.size = Size(vcpus=vcpus, mem_mib=mem_mib)
+        return self.patch(id, req)
 
     def releases(self, id: str) -> builtins.list[Release]:
         """Newest first."""

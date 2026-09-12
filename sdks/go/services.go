@@ -44,6 +44,29 @@ func (s *Services) Patch(ctx context.Context, id string, req UpdateServiceReques
 	return &out, s.c.do(ctx, http.MethodPatch, "/v1/services/"+url.PathEscape(id), req, &out)
 }
 
+// Scale changes how big every replica is, and how many there are.
+//
+// Pass zero for anything to leave it alone. A size change replaces the
+// replicas one at a time, at the same release, and drops no request: a replica
+// comes up at the new size, passes the same health gate a deploy's does, and
+// only then is an old one retired.
+//
+// A volume-backed service has a held window instead of no window at all,
+// because a volume is mounted by one machine at a time and the replacement
+// cannot mount it until the old one has let go. Requests arriving then are
+// held, the way a request that arrives while a machine is waking is held, so
+// they are served late rather than refused.
+func (s *Services) Scale(ctx context.Context, id string, replicas, vcpus, memMiB int) (*Service, error) {
+	req := UpdateServiceRequest{}
+	if replicas > 0 {
+		req.Replicas = &replicas
+	}
+	if vcpus > 0 || memMiB > 0 {
+		req.Size = &Size{VCPUs: vcpus, MemMiB: memMiB}
+	}
+	return s.Patch(ctx, id, req)
+}
+
 // Releases lists a service's releases, newest first.
 func (s *Services) Releases(ctx context.Context, id string) ([]Release, error) {
 	var out []Release

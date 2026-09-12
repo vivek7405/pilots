@@ -185,6 +185,7 @@ class Service:
     app: str | None = None
     depends_on: list[str] | None = None
     replicas: int = 0
+    size: Size = field(default_factory=lambda: Size())
     knobs: Knobs = field(default_factory=Knobs)
     health: HealthCheck | None = None
     url: str | None = None
@@ -214,6 +215,7 @@ class CreateServiceRequest:
     release: str | None = None
     build: str | None = None
     replicas: int | None = None
+    size: Size | None = None
     knobs: KnobsPatch | None = None
     health: HealthCheck | None = None
     domain: str | None = None
@@ -234,6 +236,7 @@ class DeployRequest:
     release: str | None = None
     build: str | None = None
     knobs: KnobsPatch | None = None
+    size: Size | None = None
 
 
 @dataclass
@@ -247,6 +250,19 @@ class PromoteRequest:
 class RedeployRequest:
     image: str = ""
     release: str | None = None
+
+
+@dataclass
+class Size:
+    """How big a machine is: the two dimensions that are priced, named together
+    wherever a service carries a size rather than a single machine.
+
+    Zero on a dimension means "leave it as it is" on a request, and means the
+    default on a reply, never a machine with no memory.
+    """
+
+    vcpus: int = 0
+    mem_mib: int = 0
 
 
 @dataclass
@@ -375,6 +391,7 @@ class HealthLast:
 @dataclass
 class UpdateServiceRequest:
     replicas: int | None = None
+    size: Size | None = None
     health: HealthCheck | None = None
     env: dict[str, str] | None = None
     secret_env: dict[str, str] | None = None

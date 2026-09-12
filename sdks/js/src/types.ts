@@ -226,6 +226,12 @@ export interface Service {
    */
   depends_on?: string[]
   replicas: number
+  /**
+   * How big each replica is. Always spelled out, even for a service that has
+   * never been scaled, so a reader never has to know what the defaults were on
+   * the day the service was made.
+   */
+  size: Size
   knobs: Knobs
   health?: HealthCheck
   url?: string
@@ -265,6 +271,11 @@ export interface CreateServiceRequest {
   release?: string
   build?: string
   replicas?: number
+  /**
+   * How big each replica will be. Omitted means the defaults, which is what
+   * every service was before a service had a size.
+   */
+  size?: Size
   /**
    * Accepted for wire compatibility and not persisted: a service row keeps no
    * knobs, so a policy set here goes nowhere and the deploy is where it
@@ -314,6 +325,15 @@ export interface DeployRequest {
    * A patch, so raising one field does not zero the three nobody mentioned.
    */
   knobs?: KnobsPatch
+  /**
+   * Sets how big the replicas this deploy creates are.
+   *
+   * It rides on the deploy rather than being sent as a separate patch
+   * beforehand: a patch carrying a size runs a rollout of its own, so a compose
+   * file that changed both its image and its size would roll the service twice
+   * to arrive where one rollout could have put it.
+   */
+  size?: Size
 }
 
 export interface PromoteRequest {
@@ -341,6 +361,18 @@ export interface RedeployRequest {
  * leaves that dimension alone, which is how "give it more memory" is said
  * without restating the vCPU count.
  */
+/**
+ * How big a machine is: the two dimensions that are priced, named together
+ * wherever a service carries a size rather than a single machine.
+ *
+ * Zero on a dimension means "leave it as it is" on a request, and means the
+ * default on a reply, never a machine with no memory.
+ */
+export interface Size {
+  vcpus: number
+  mem_mib: number
+}
+
 export interface ResizeMachineRequest {
   vcpus?: number
   mem_mib?: number
@@ -505,6 +537,16 @@ export interface HealthLast {
 
 export interface UpdateServiceRequest {
   replicas?: number
+  /**
+   * Changes how big every replica is. Zero on a dimension leaves that
+   * dimension alone.
+   *
+   * Applying it replaces the replicas one at a time, at the same release, and
+   * drops no request. A volume-backed service has a held window instead,
+   * because a volume has one writer and the replacement cannot mount it until
+   * the old machine has let go.
+   */
+  size?: Size
   health?: HealthCheck
   env?: Record<string, string>
   secret_env?: Record<string, string>

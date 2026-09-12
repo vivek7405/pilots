@@ -42,6 +42,7 @@ func newServicesCmd(env *Env) *cobra.Command {
 		newServicesReleasesCmd(env),
 		newServicesRollbackCmd(env),
 		newServicesSetCmd(env),
+		newServicesScaleCmd(env),
 	)
 	return c
 }
@@ -368,6 +369,84 @@ func newServicesSetCmd(env *Env) *cobra.Command {
 			"pilot services set web --env LOG_LEVEL=debug --unset-env DEBUG",
 			"pilot services set web --secret-env DATABASE_URL=postgres://...",
 			"pilot services set web --repo acme/shop --branch main --autodeploy true",
+		},
+	})
+	return c
+}
+
+// newServicesScaleCmd changes how big the replicas are and how many there are,
+// which is one command because they are one question: "how much service".
+//
+// `set --replicas` still works and is the same call. This exists because
+// "scale" is the word every operator reaches for, and because a size change
+// costs a rollout while the other fields on `set` do not -- a command whose
+// help can say so is better than a flag buried among eight that cannot.
+func newServicesScaleCmd(env *Env) *cobra.Command {
+	var (
+		replicas int
+		vcpus    int
+		mem      int
+	)
+	c := &cobra.Command{
+		Use:   "scale <service>",
+		Short: "change how big a service's replicas are, and how many",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			if !c.Flags().Changed("replicas") && vcpus == 0 && mem == 0 {
+				return out.Failf("pass --replicas, --vcpus or --mem",
+					"nothing to scale")
+			}
+			client, err := env.Client()
+			if err != nil {
+				return err
+			}
+			s, err := resolveService(c.Context(), client, args[0])
+			if err != nil {
+				return err
+			}
+			var req pilots.UpdateServiceRequest
+			if c.Flags().Changed("replicas") {
+				req.Replicas = &replicas
+			}
+			if vcpus > 0 || mem > 0 {
+				req.Size = &pilots.Size{VCPUs: vcpus, MemMiB: mem}
+			}
+			updated, err := client.Services.Patch(c.Context(), s.ID, req)
+			if err != nil {
+				return err
+			}
+			if env.W.JSON {
+				return env.W.JSONValue(updated)
+			}
+			env.W.Linef("%s now runs %d replica(s) at %d vCPU / %d MiB",
+				updated.Name, updated.Replicas, updated.Size.VCPUs, updated.Size.MemMiB)
+			return nil
+		},
+	}
+	f := c.Flags()
+	f.IntVar(&replicas, "replicas", 0, "how many replicas the fleet reconciles to")
+	f.IntVar(&vcpus, "vcpus", 0, "vCPUs per replica; unset leaves it alone")
+	f.IntVar(&mem, "mem", 0, "memory per replica in MiB; unset leaves it alone")
+	Describe(c, Doc{
+		How: "A SIZE change replaces the replicas one at a time, at the same release.\n" +
+			"A replica comes up at the new size, passes the same health gate a deploy\n" +
+			"gates on, and only then is an old one retired -- so no request is dropped\n" +
+			"and nothing is rebuilt.\n\n" +
+			"A service that mounts a VOLUME is the exception. A volume is mounted by\n" +
+			"one machine at a time, so the replacement cannot mount it until the old\n" +
+			"one has let go. Requests arriving in that window are HELD, the way a\n" +
+			"request that arrives while a machine is waking is held: served late,\n" +
+			"never refused.\n\n" +
+			"A replica count alone changes no machine's size and takes effect as the\n" +
+			"fleet reconciles.",
+		Examples: []string{
+			"pilot services scale web --mem 2048",
+			"pilot services scale web --vcpus 4 --mem 8192",
+			"pilot services scale web --replicas 3",
+		},
+		Related: []string{
+			"pilot machines resize   change ONE machine, outside a service",
+			"pilot services set      env, secrets, the connected repo, the address",
 		},
 	})
 	return c

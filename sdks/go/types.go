@@ -126,6 +126,16 @@ const (
 	URLAuthOrg    = "org"
 )
 
+// Size is how big a machine is: the two dimensions that are priced, named
+// together wherever a service carries a size rather than a single machine.
+//
+// Zero on a dimension means "leave it as it is" on a request, and means the
+// default on a reply -- never a machine with no memory.
+type Size struct {
+	VCPUs  int `json:"vcpus"`
+	MemMiB int `json:"mem_mib"`
+}
+
 // ResizeMachineRequest is POST /v1/machines/{id}/resize. Either field may be
 // omitted to leave that dimension alone.
 type ResizeMachineRequest struct {
@@ -279,8 +289,12 @@ type Service struct {
 	// address this service's environment references. Derived by hostd on
 	// every read from both halves of the environment and stored nowhere, so
 	// it reflects what the service is configured to dial right now.
-	DependsOn    []string     `json:"depends_on,omitempty"`
-	Replicas     int          `json:"replicas"`
+	DependsOn []string `json:"depends_on,omitempty"`
+	Replicas  int      `json:"replicas"`
+	// Size is how big each replica is. Always spelled out, even for a service
+	// that has never been scaled, so a reader never has to know what the
+	// defaults were on the day the service was made.
+	Size         Size         `json:"size"`
 	Knobs        Knobs        `json:"knobs"`
 	Health       *HealthCheck `json:"health,omitempty"`
 	URL          string       `json:"url,omitempty"`
@@ -310,6 +324,9 @@ type CreateServiceRequest struct {
 	// belongs. A patch for the same reason every other request's is.
 	Knobs  *KnobsPatch  `json:"knobs,omitempty"`
 	Health *HealthCheck `json:"health,omitempty"`
+	// Size is how big each replica will be. Omitted means the defaults, which
+	// is what every service was before a service had a size.
+	Size *Size `json:"size,omitempty"`
 	// Domain is the subdomain label under the fleet's domain. Empty means one
 	// is minted from the name: the name itself when it is free, else the name
 	// and a four-character suffix. Set it to ask for an exact label, which is
@@ -343,6 +360,13 @@ type DeployRequest struct {
 	// A patch, so raising one field does not zero the three the caller never
 	// mentioned. See KnobsPatch.
 	Knobs *KnobsPatch `json:"knobs,omitempty"`
+	// Size sets how big the replicas this deploy creates are.
+	//
+	// It rides on the deploy rather than being sent as a separate patch
+	// beforehand: a patch carrying a size runs a rollout of its own, so a
+	// compose file that changed both its image and its size would roll the
+	// service twice to arrive where one rollout could have put it.
+	Size *Size `json:"size,omitempty"`
 }
 
 // PromoteRequest turns a sandbox into a durable service. The machine's URL is
@@ -520,7 +544,15 @@ type DomainResponse struct {
 // stored and take effect at the next deploy. Knobs are refused here and travel
 // on the deploy.
 type UpdateServiceRequest struct {
-	Replicas   *int              `json:"replicas,omitempty"`
+	Replicas *int `json:"replicas,omitempty"`
+	// Size changes how big every replica is. Zero on a dimension leaves that
+	// dimension alone.
+	//
+	// Applying it replaces the replicas one at a time, at the same release,
+	// and drops no request. A volume-backed service has a held window instead,
+	// because a volume has one writer and the replacement cannot mount it
+	// until the old machine has let go.
+	Size       *Size             `json:"size,omitempty"`
 	Health     *HealthCheck      `json:"health,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 	SecretEnv  map[string]string `json:"secret_env,omitempty"`
@@ -773,6 +805,7 @@ type RepoRef struct {
 var wireTypes = []any{
 	UpdateMachineRequest{},
 	ResizeMachineRequest{},
+	Size{},
 	Knobs{},
 	Schedule{},
 	Machine{},

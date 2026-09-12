@@ -417,6 +417,29 @@ export class Services {
     return this.http.json<Service>('PATCH', `/v1/services/${encodeURIComponent(id)}`, { body: req })
   }
 
+  /**
+   * Changes how big every replica is, and how many there are. Omit anything to
+   * leave it alone.
+   *
+   * A size change replaces the replicas one at a time, at the same release, and
+   * drops no request: a replica comes up at the new size, passes the same
+   * health gate a deploy's does, and only then is an old one retired.
+   *
+   * A volume-backed service has a held window instead of no window at all,
+   * because a volume is mounted by one machine at a time and the replacement
+   * cannot mount it until the old one has let go. Requests arriving then are
+   * held the way a request during a wake is held, so they are served late
+   * rather than refused.
+   */
+  scale(id: string, opts: { replicas?: number; vcpus?: number; mem_mib?: number }): Promise<Service> {
+    const req: UpdateServiceRequest = {}
+    if (opts.replicas !== undefined) req.replicas = opts.replicas
+    if (opts.vcpus !== undefined || opts.mem_mib !== undefined) {
+      req.size = { vcpus: opts.vcpus ?? 0, mem_mib: opts.mem_mib ?? 0 }
+    }
+    return this.patch(id, req)
+  }
+
   /** Newest first. */
   releases(id: string): Promise<Release[]> {
     return this.http.json<Release[]>('GET', `/v1/services/${encodeURIComponent(id)}/releases`)

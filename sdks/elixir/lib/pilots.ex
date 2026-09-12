@@ -191,6 +191,29 @@ defmodule Pilots do
   def update_service(client, id, attrs),
     do: HTTP.request(client, :patch, "/v1/services/#{seg(id)}", body: to_body(attrs))
 
+  @doc """
+  Changes how big every replica is, and how many there are. Omit anything to
+  leave it alone.
+
+  A size change replaces the replicas one at a time, at the same release, and
+  drops no request: a replica comes up at the new size, passes the same health
+  gate a deploy's does, and only then is an old one retired.
+
+  A volume-backed service has a held window instead of no window at all,
+  because a volume is mounted by one machine at a time and the replacement
+  cannot mount it until the old one has let go. Requests arriving then are
+  served late rather than refused.
+  """
+  @spec scale(client(), String.t(), keyword()) :: result()
+  def scale(client, id, opts \\ []) do
+    size =
+      if opts[:vcpus] || opts[:mem_mib] do
+        %{vcpus: opts[:vcpus] || 0, mem_mib: opts[:mem_mib] || 0}
+      end
+
+    update_service(client, id, replicas: opts[:replicas], size: size)
+  end
+
   # -- builds ------------------------------------------------------------------
 
   @doc """
