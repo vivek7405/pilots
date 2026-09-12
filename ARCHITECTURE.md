@@ -1156,9 +1156,43 @@ election. The survivor set is filtered by `host_cpu` **inside that same
 hash**: the hosts of the memory image's own vendor pool are ranked first
 (tier 2), and only when none of them is live is the whole live set ranked
 (tier 3), where the winner cold-boots the machine from its disk instead of
-restoring it (rule 6). There is no second ranking and no placer. Placement double-booking is prevented by hosts being final
-authority on their own capacity (a create/rescue targeting a full host is
-refused and re-hashed).
+restoring it (rule 6).
+
+**Placement (create time) is a different question from self-heal**, and it has
+a different answer. Self-heal keeps the hash: it runs with no host to ask,
+because the host that knew is gone, and a deterministic slice is the only way
+survivors agree without electing anyone. A CREATE has the whole live fleet
+available, so it ranks.
+
+The ranking is a pure function of rows the receiving host already has in its
+local replica -- the live set, each host's `host_capacity`, and which builds
+each host has cached -- and it runs on whichever host took the request. No
+coordinator, because there is nothing to coordinate: two hosts ranking two
+creates differently is FINE, since the ranker only proposes. The target
+disposes. It admits the machine against its own free memory or refuses with
+507, and the ranker tries the next candidate (at most three, then it serves
+locally and lets its own admission answer).
+
+Highest headroom after placement wins, never tightest fit. Bin-packing a
+fleet of microVMs is how a platform ends up with every host at 95% and no room
+to absorb the next burst; spreading is what keeps a create from failing.
+A host that already holds every build the create needs gets a bounded bonus,
+because a cached build is the difference between a restore and a download,
+but the bonus can only break a near-tie -- never move a machine onto a host
+that cannot hold it. Exact ties fall back to `OwnerFor`, so the answer is
+deterministic and does not depend on the order rows arrived in.
+
+**Reclaimable memory is part of capacity.** A host counts, beside its free
+memory, the memory held by RUNNING machines that are idle enough for the idle
+monitor to suspend anyway. A create that fits within free plus reclaimable is
+admitted, suspending the idlest machines until it fits, rather than refused
+while the host holds gigabytes nobody is using. (Suspended machines are not
+counted: suspend kills the Firecracker process, so a suspended machine already
+holds no memory at all.)
+
+Placement double-booking is prevented by hosts being final authority on their
+own capacity, which is now enforced rather than assumed: before this, nothing
+on the create path read free memory.
 
 **Operations:** a host whose local replica is corrupt or hopelessly behind is
 re-seeded with `scripts/corrosion-reseed.sh <ip> --from <survivor>`, which

@@ -46,6 +46,21 @@ func TestOnlyTheMachineRankingIsVendorFiltered(t *testing.T) {
 		"serviceArbiter",      // internal/github: one host acts on a delivery
 		"runDomainVerifier",   // cmd/hostd: the domain row writer
 		"scaleOnce",           // internal/services: the autoscaler's arbiter
+		// internal/state: the create-time ranking's TIE-BREAK, and only that.
+		//
+		// It belongs in the unnarrowed list rather than the vendor-filtered
+		// one, and the difference matters. RankHosts has already applied the
+		// vendor filter itself, by the time it gets here -- a restore's
+		// candidates are its own pool and nothing else -- so narrowing again
+		// through MachineOwnerFor would filter an already-filtered set and
+		// mean nothing.
+		//
+		// More to the point, this call decides NOTHING durable. It orders
+		// hosts that scored exactly equal so that identical idle hosts spread
+		// instead of every create stacking on whichever id sorts first. The
+		// answer is a suggestion the target is free to refuse, so two hosts
+		// computing different orders costs one forward, not a corrupted row.
+		"RankHosts",
 	}
 	sort.Strings(want)
 	if got := callers["OwnerFor"]; strings.Join(got, ",") != strings.Join(want, ",") {

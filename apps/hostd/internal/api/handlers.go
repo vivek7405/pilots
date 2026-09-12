@@ -233,6 +233,19 @@ func decodeBody(r *http.Request, v any) error {
 // machines imports this package, not the other way round.
 var ErrConflict = errors.New("conflict")
 
+// ErrNoCapacity marks a create this host cannot hold, even after suspending
+// every idle machine it could.
+//
+// Not a failure and not the caller's fault: it is the fleet's honest answer to
+// "I have nowhere to put this". The ranker reads it and offers the create to
+// the next host; a client that has run out of hosts sees a 507 naming capacity
+// rather than a 500 naming whatever Firecracker said when it could not get the
+// memory.
+//
+// Lives here rather than in machines for the reason ErrConflict does: the
+// error mapper has to recognise it, and machines imports this package.
+var ErrNoCapacity = errors.New("no capacity")
+
 func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 	var req CreateMachineRequest
 	if err := decodeBody(r, &req); err != nil && !errors.Is(err, io.EOF) {

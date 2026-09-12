@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,8 +13,11 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
@@ -184,12 +189,66 @@ func heartbeatFor(cfg *config.Config, keys mesh.Keys, meshed bool) func() state.
 // RunHeartbeat writes before its first tick, so the row exists within
 // milliseconds of start and `pilot status` on a fresh single box lists the
 // host that answered it.
-func startHeartbeat(ctx context.Context, cfg *config.Config, store state.Store, keys mesh.Keys, meshed bool) {
-	go selfheal.RunHeartbeat(ctx, selfheal.Options{
+func startHeartbeat(ctx context.Context, cfg *config.Config, store state.Store,
+	keys mesh.Keys, meshed bool, mgr *machines.Manager) {
+
+	opts := selfheal.Options{
 		HostID:    cfg.HostID,
 		Store:     store,
 		Heartbeat: heartbeatFor(cfg, keys, meshed),
-	})
+	}
+	// A host with no machine manager -- every test of the heartbeat itself --
+	// publishes liveness and nothing else. Placement then treats it as a host
+	// that has reported nothing, which is exactly what it is.
+	if mgr != nil {
+		opts.Capacities = func() *state.HostCapacity { return mgr.Capacity(ctx) }
+		opts.CachedBuilds = cachedBuildsReporter(cfg)
+	}
+	go selfheal.RunHeartbeat(ctx, opts)
+}
+
+// cachedBuildsReporter lists the builds on local disk, and returns nil when
+// the set has not changed.
+//
+// Nil is the common answer and the important one: this row is gossiped in FULL
+// on every write, and a build cache changes far more often than placement
+// needs to hear about it. Writing it every five seconds would starve the apply
+// loop for every other row on the fleet, which is the C5 landmine.
+func cachedBuildsReporter(cfg *config.Config) func() []string {
+	var lastHash string
+	dir := filepath.Join(cfg.CacheRoot(), "builds")
+
+	return func() []string {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			// No cache directory yet is not an error: it is a host that has
+			// never built or restored anything. An empty set is the truth, and
+			// it is worth publishing once so a ranker stops giving this host
+			// an affinity bonus it does not deserve.
+			if !os.IsNotExist(err) {
+				return nil
+			}
+			entries = nil
+		}
+		ids := make([]string, 0, len(entries))
+		for _, e := range entries {
+			if e.IsDir() && e.Name() != "" {
+				ids = append(ids, e.Name())
+			}
+		}
+		sort.Strings(ids)
+		if len(ids) > state.MaxCachedBuildsPublished {
+			ids = ids[:state.MaxCachedBuildsPublished]
+		}
+
+		sum := sha256.Sum256([]byte(strings.Join(ids, ",")))
+		hash := hex.EncodeToString(sum[:])
+		if hash == lastHash {
+			return nil
+		}
+		lastHash = hash
+		return ids
+	}
 }
 
 // startSelfHeal runs the rescue loop. The heartbeat is started separately, by

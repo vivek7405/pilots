@@ -86,6 +86,26 @@ type Options struct {
 	// Heartbeat reports this host's identity and free capacity.
 	Heartbeat func() state.Host
 
+	// Capacities reports what this host can still hold, written beside the
+	// heartbeat so placement reads a figure as fresh as liveness itself. Nil
+	// on a host that publishes none, which is every host in a test that is not
+	// about placement.
+	//
+	// Separate from Heartbeat because the two rows have different jobs: the
+	// hosts row is the liveness signal every survivor reads to decide who is
+	// dead, and capacity is advisory. Folding capacity into the hosts row
+	// would also mean a column add on a table that has rows (rule 6).
+	Capacities func() *state.HostCapacity
+
+	// CachedBuilds reports the build ids this host holds on local disk, or nil
+	// when nothing has changed since the last tick.
+	//
+	// Nil is the common answer, and that is the point: this row is gossiped in
+	// FULL on every write, and a build cache changes far more often than
+	// placement needs to hear about it. Writing it every five seconds would
+	// starve the apply loop for every other row on the fleet.
+	CachedBuilds func() []string
+
 	// Now is overridable for tests.
 	Now func() time.Time
 }
@@ -118,6 +138,36 @@ func RunHeartbeat(ctx context.Context, opts Options) {
 			slog.Error("could not write this host's heartbeat; the fleet will "+
 				"shortly treat this host as dead", "err", err)
 		}
+		// Capacity and the cached-build set ride the same tick, AFTER the
+		// hosts row: a capacity row for a host the fleet does not yet believe
+		// in is a row no ranker will read, and writing it first would only
+		// widen that window.
+		//
+		// Neither failure is fatal here. A host that cannot publish its
+		// capacity is simply not preferred by placement, which is the safe
+		// direction; a host that cannot heartbeat at all is the serious case,
+		// and it is shouted about above.
+		if opts.Capacities != nil {
+			if c := opts.Capacities(); c != nil {
+				c.HostID = opts.HostID
+				c.UpdatedAt = opts.now().Unix()
+				if err := opts.Store.PutHostCapacity(ctx, c); err != nil && ctx.Err() == nil {
+					slog.Warn("could not publish this host's capacity; placement will "+
+						"not prefer it until this clears", "err", err)
+				}
+			}
+		}
+		if opts.CachedBuilds != nil {
+			if ids := opts.CachedBuilds(); ids != nil {
+				if err := opts.Store.PutHostBuilds(ctx, &state.HostBuilds{
+					HostID: opts.HostID, Builds: ids, UpdatedAt: opts.now().Unix(),
+				}); err != nil && ctx.Err() == nil {
+					slog.Warn("could not publish this host's cached builds; placement "+
+						"loses only the affinity bonus", "err", err)
+				}
+			}
+		}
+
 		// Ticked even when the write failed: what this watches is whether the
 		// LOOP is running. A store that refuses is loud already, in the line
 		// above and in every peer's view of this host. A loop that stopped

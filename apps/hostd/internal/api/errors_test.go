@@ -41,7 +41,7 @@ func TestEveryWriteErrorUsesAListedCode(t *testing.T) {
 		"CodeComposeInvalid": CodeComposeInvalid, "CodeUnknownFramework": CodeUnknownFramework,
 		"CodePlanMultiService": CodePlanMultiService, "CodeBuildFailed": CodeBuildFailed,
 		"CodeHealthGateFailed": CodeHealthGateFailed, "CodeRepoNotConnected": CodeRepoNotConnected,
-		"CodePayloadTooLarge": CodePayloadTooLarge,
+		"CodePayloadTooLarge": CodePayloadTooLarge, "CodeNoCapacity": CodeNoCapacity,
 	}
 
 	calls := 0

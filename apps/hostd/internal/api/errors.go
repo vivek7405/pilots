@@ -39,6 +39,10 @@ const (
 	// body limit is separate and larger: this is about what the fleet carries
 	// for the life of the object, not about one request. See payload.go.
 	CodePayloadTooLarge = "payload_too_large"
+	// CodeNoCapacity is a fleet with nowhere to put the machine. Carried on a
+	// 507, which is the one status that says "the request is fine, the server
+	// has no room" rather than blaming the caller or claiming a bug.
+	CodeNoCapacity = "no_capacity"
 )
 
 // Codes is the closed list, for the test that guards it and for the docs page
@@ -49,7 +53,7 @@ var Codes = []string{
 	CodeNotImplemented, CodeUnavailable, CodeInternal, CodePlanUnsupported,
 	CodeComposeInvalid, CodeUnknownFramework, CodePlanMultiService,
 	CodeBuildFailed, CodeHealthGateFailed, CodeRepoNotConnected,
-	CodePayloadTooLarge,
+	CodePayloadTooLarge, CodeNoCapacity,
 }
 
 // NextNotFound is the only next a 404 may carry. It is deliberately generic:
@@ -124,6 +128,15 @@ func mapError(err error) (int, ErrorResponse) {
 		return http.StatusBadRequest, ErrorResponse{
 			Error: err.Error(), Code: CodeBadRequest,
 			Next: "knobs are auto_stop (off or suspend), auto_start, min_machines_running, soft_limit, hard_limit, idle_timeout (1..3600 seconds), schedules",
+		}
+	case errors.Is(err, ErrNoCapacity):
+		// 507, the one status that says the request was fine and the server
+		// has no room. Not 503: nothing is temporarily unwell, the fleet is
+		// simply full, and the remedy is capacity rather than a retry.
+		return http.StatusInsufficientStorage, ErrorResponse{
+			Error: err.Error(), Code: CodeNoCapacity,
+			Next: "add a host, destroy machines you no longer need, or ask for a " +
+				"smaller one; pilot status shows what each host has free",
 		}
 	case errors.Is(err, ErrConflict):
 		// 409 rather than 400 or 403: nothing about the request is wrong and

@@ -19,6 +19,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -296,11 +297,17 @@ func run() error {
 		// Fleet-wide, so a host that rescues a machine can still reach it.
 		AgentTokenSecret: cfg.AgentTokenSecret,
 		Volumes:          volumeManager,
-		MachinePrefix:    machinePrefix,
-		Discovery:        discovery,
-		FleetKey:         fleetKey,
-		Usage:            ledger,
-		Vendor:           vendor,
+		// ONE reading of this host's free memory, shared by admission, the
+		// heartbeat and self-heal. Three components with their own readings
+		// would be three different answers to "is this host full", and
+		// placement would act on whichever it happened to ask.
+		FreeMemMiB:    func() int { return freeMemMiB(cfg.HugePages) },
+		CPUCount:      runtime.NumCPU(),
+		MachinePrefix: machinePrefix,
+		Discovery:     discovery,
+		FleetKey:      fleetKey,
+		Usage:         ledger,
+		Vendor:        vendor,
 		FCConfig: fc.Config{
 			KernelPath:     cfg.KernelPath,
 			TemplateRootfs: cfg.TemplateRootfs,
@@ -415,7 +422,7 @@ func run() error {
 	go mgr.RunReaper(ctx)
 	// Every host publishes its own row, fleet or not, so that GET /v1/hosts on
 	// any host lists at least the one answering.
-	startHeartbeat(ctx, cfg, store, meshKeys, meshed)
+	startHeartbeat(ctx, cfg, store, meshKeys, meshed, mgr)
 	// Never fc.UnconfiguredStore: a stub that fails every put would log a
 	// warning a minute on a single box that is configured exactly as intended.
 	// Nil instead, and the ledger says so once at start.

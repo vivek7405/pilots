@@ -843,6 +843,116 @@ func (s *Store) PutHostCPU(ctx context.Context, h *state.HostCPU) error {
 	return nil
 }
 
+// PutHostCapacity records what this host can still hold.
+//
+// Only the host it names may write it, the same rule host_cpu follows. A host
+// asserting another host's free memory would be asserting a fact it cannot
+// observe, and placement would then send machines somewhere on the strength of
+// it.
+func (s *Store) PutHostCapacity(ctx context.Context, c *state.HostCapacity) error {
+	if c.HostID != s.hostID {
+		return fmt.Errorf("state: host %s cannot write host %s's capacity row: %w",
+			s.hostID, c.HostID, state.ErrNotOwner)
+	}
+	draining := 0
+	if c.Draining {
+		draining = 1
+	}
+	_, err := s.client.Exec(ctx, `
+		INSERT INTO host_capacity (host_id, mem_free_mib, mem_reclaimable_mib,
+			cpu_count, vcpus_running, draining, updated_at)
+		VALUES (?,?,?,?,?,?,?)
+		ON CONFLICT(host_id) DO UPDATE SET
+			mem_free_mib=excluded.mem_free_mib,
+			mem_reclaimable_mib=excluded.mem_reclaimable_mib,
+			cpu_count=excluded.cpu_count, vcpus_running=excluded.vcpus_running,
+			draining=excluded.draining, updated_at=excluded.updated_at`,
+		c.HostID, c.MemFreeMiB, c.MemReclaimableMiB, c.CPUCount, c.VCPUsRunning,
+		draining, c.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put host capacity %q: %w", c.HostID, err)
+	}
+	return nil
+}
+
+func (s *Store) ListHostCapacity(ctx context.Context) ([]state.HostCapacity, error) {
+	rows, err := s.client.Query(ctx, `
+		SELECT host_id, mem_free_mib, mem_reclaimable_mib, cpu_count,
+		       vcpus_running, draining, updated_at
+		FROM host_capacity ORDER BY host_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []state.HostCapacity
+	for rows.Next() {
+		var c state.HostCapacity
+		var draining int
+		if err := rows.Scan(&c.HostID, &c.MemFreeMiB, &c.MemReclaimableMiB,
+			&c.CPUCount, &c.VCPUsRunning, &draining, &c.UpdatedAt); err != nil {
+			return nil, err
+		}
+		c.Draining = draining != 0
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// PutHostBuilds records which builds this host has cached.
+//
+// The caller writes it only when the set changed, because this row is gossiped
+// in full on every write and the cache changes far more often than placement
+// needs to know about.
+func (s *Store) PutHostBuilds(ctx context.Context, b *state.HostBuilds) error {
+	if b.HostID != s.hostID {
+		return fmt.Errorf("state: host %s cannot write host %s's build row: %w",
+			s.hostID, b.HostID, state.ErrNotOwner)
+	}
+	ids := b.Builds
+	if len(ids) > state.MaxCachedBuildsPublished {
+		ids = ids[:state.MaxCachedBuildsPublished]
+	}
+	blob, err := json.Marshal(ids)
+	if err != nil {
+		return fmt.Errorf("state: encode host builds %q: %w", b.HostID, err)
+	}
+	if _, err := s.client.Exec(ctx, `
+		INSERT INTO host_builds (host_id, builds, updated_at) VALUES (?,?,?)
+		ON CONFLICT(host_id) DO UPDATE SET
+			builds=excluded.builds, updated_at=excluded.updated_at`,
+		b.HostID, string(blob), b.UpdatedAt); err != nil {
+		return fmt.Errorf("state: put host builds %q: %w", b.HostID, err)
+	}
+	return nil
+}
+
+func (s *Store) ListHostBuilds(ctx context.Context) ([]state.HostBuilds, error) {
+	rows, err := s.client.Query(ctx,
+		`SELECT host_id, builds, updated_at FROM host_builds ORDER BY host_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []state.HostBuilds
+	for rows.Next() {
+		var b state.HostBuilds
+		var blob string
+		if err := rows.Scan(&b.HostID, &blob, &b.UpdatedAt); err != nil {
+			return nil, err
+		}
+		// A row that cannot be read is an EMPTY set, never an error: all it
+		// feeds is a placement bonus, so losing it costs a download while
+		// failing the read would cost the create.
+		if blob != "" {
+			_ = json.Unmarshal([]byte(blob), &b.Builds)
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) ListHostCPU(ctx context.Context) ([]state.HostCPU, error) {
 	rows, err := s.client.Query(ctx,
 		`SELECT host_id, vendor, cpu_template, updated_at FROM host_cpu ORDER BY host_id`)

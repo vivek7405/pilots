@@ -138,7 +138,7 @@ func TestASingleBoxListsItself(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	startHeartbeat(ctx, &config.Config{HostID: "host-a"}, store, mesh.Keys{}, false)
+	startHeartbeat(ctx, &config.Config{HostID: "host-a"}, store, mesh.Keys{}, false, nil)
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {

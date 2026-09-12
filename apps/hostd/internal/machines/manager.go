@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -108,6 +109,21 @@ type Options struct {
 	// Manager.token for why a rescued machine is unreachable without it.
 	AgentTokenSecret string
 
+	// FreeMemMiB reports how much memory this host can still give to guests,
+	// in the unit that actually backs them: MemAvailable ordinarily, and free
+	// hugepages on a host reserving a pool. Injected rather than read here so
+	// there is ONE reading of it on the host, shared by admission, the
+	// heartbeat and self-heal -- three components disagreeing about how full a
+	// host is would be three different placement answers.
+	//
+	// Nil reads as "unknown", which admits everything: a host that cannot
+	// measure itself must not refuse every create.
+	FreeMemMiB func() int
+
+	// CPUCount is how many CPUs this host has, used to normalise headroom so
+	// a large host and a small one are ranked fairly rather than by raw MiB.
+	CPUCount int
+
 	// Volumes creates and mounts persistent disks. Nil on a host with no
 	// object storage, where every volume operation is refused up front rather
 	// than failing somewhere inside a create.
@@ -174,6 +190,12 @@ type Manager struct {
 	// settleExit, and a gossiped row for a per-process policy would be a
 	// second copy of a contract. Destroy forgets the entry.
 	exits sync.Map // machine id -> time.Time
+
+	// draining is set while an operator is moving this host's machines off it.
+	// In memory rather than on a row, because it is a property of THIS
+	// process's willingness to take work: the replicated half lives in
+	// host_capacity, written from the same flag on the next heartbeat.
+	draining atomic.Bool
 }
 
 func New(opts Options) *Manager {
@@ -297,6 +319,20 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 		return nil, err
 	}
 	if err := m.validateMemMiB(orDefault(req.MemMiB, 512)); err != nil {
+		return nil, err
+	}
+
+	// Whether this host can hold it, asked BEFORE anything is written or
+	// booted. Until this existed nothing on the create path read free memory
+	// at all: a create landed wherever it was sent and a full host answered
+	// with whatever Firecracker failed with, which is a 500 describing a
+	// symptom rather than a 507 describing the fleet.
+	//
+	// This may suspend idle machines to make room, which is why it runs here
+	// and not in the API layer: the decision and the reclaim are the same
+	// decision, and splitting them would let a create be admitted against
+	// memory a second create had already taken.
+	if err := m.admit(ctx, orDefault(req.VCPUs, 1), orDefault(req.MemMiB, 512)); err != nil {
 		return nil, err
 	}
 

@@ -436,6 +436,51 @@ CREATE TABLE IF NOT EXISTS host_cpu (          -- writer: the host itself
   updated_at   INTEGER
 );
 
+-- What a host can still hold, for create-time placement.
+--
+-- A side table rather than columns on `hosts` for the reason host_cpu is one:
+-- `hosts` has rows, and a column add on a live cr-sqlite table backfills and
+-- gossips every one of them (rule 6).
+--
+-- mem_reclaimable_mib is the memory held by RUNNING machines this host would
+-- suspend anyway, were the idle timer to fire now. It is NOT suspended
+-- machines: suspend kills the Firecracker process, so a suspended machine
+-- already holds no memory. Counting it would double-count free memory and
+-- admit creates that then fail to boot.
+--
+-- draining is set by `pilot hosts drain`. A draining host is skipped by every
+-- ranker, which is what makes a drain converge rather than race the placer.
+--
+-- Writer: the host itself, on its heartbeat.
+CREATE TABLE IF NOT EXISTS host_capacity (     -- writer: the host itself
+  host_id             TEXT NOT NULL PRIMARY KEY,
+  mem_free_mib        INTEGER,
+  mem_reclaimable_mib INTEGER,
+  cpu_count           INTEGER,
+  vcpus_running       INTEGER,
+  draining            INTEGER,  -- 1 while the host is being drained
+  updated_at          INTEGER
+);
+
+-- Which builds a host already has on local disk.
+--
+-- Placement prefers a host that holds the builds a create needs, because a
+-- cached build is the difference between a restore and a download. A BONUS
+-- only: it breaks a near-tie and can never move a machine onto a host that
+-- cannot hold it, or the fleet would pack itself onto whichever host happened
+-- to build things.
+--
+-- Capped at the newest few hundred ids, deliberately. An unbounded row here is
+-- the C5 landmine: a large value gossiped on every change starves the apply
+-- loop for every other row.
+--
+-- Writer: the host itself, and only when the set actually changed.
+CREATE TABLE IF NOT EXISTS host_builds (       -- writer: the host itself
+  host_id    TEXT NOT NULL PRIMARY KEY,
+  builds     TEXT,     -- json array of build ids present on this host
+  updated_at INTEGER
+);
+
 -- Keyed like tenancy: the id of the object whose memory image this describes.
 -- A release's and a checkpoint's images are as vendor-locked as a machine's.
 -- last_start and last_start_at are written for machines only: the observable

@@ -205,6 +205,47 @@ type HostCPU struct {
 	UpdatedAt   int64
 }
 
+// HostCapacity is what a host can still hold, written by that host on its
+// heartbeat and read by every host that ranks a create.
+//
+// MemReclaimableMiB is memory held by RUNNING machines this host would suspend
+// anyway, were the idle timer to fire now. NOT suspended machines: suspend
+// kills the Firecracker process, so a suspended machine already holds no
+// memory, and counting it would double-count free memory and admit creates
+// that then fail to boot.
+type HostCapacity struct {
+	HostID            string
+	MemFreeMiB        int
+	MemReclaimableMiB int
+	CPUCount          int
+	VCPUsRunning      int
+	// Draining is set by an operator. A draining host is skipped by every
+	// ranker, which is what lets a drain converge instead of racing the
+	// placer for the machines it is trying to move off.
+	Draining  bool
+	UpdatedAt int64
+}
+
+// Headroom is the memory a placement may use: what is free now plus what this
+// host would free anyway.
+func (c HostCapacity) Headroom() int { return c.MemFreeMiB + c.MemReclaimableMiB }
+
+// HostBuilds is which builds a host already has on local disk, so a create can
+// prefer a host that need not download them.
+type HostBuilds struct {
+	HostID    string
+	Builds    []string
+	UpdatedAt int64
+}
+
+// MaxCachedBuildsPublished bounds how many build ids a host advertises.
+//
+// Not cosmetic. A cr-sqlite row is gossiped in full on every change, so an
+// unbounded value here starves the apply loop for every other row on the
+// fleet -- the C5 landmine. A few hundred ids is far more than a placement
+// decision needs and keeps the row small.
+const MaxCachedBuildsPublished = 256
+
 // The kinds of object a MachineCPU row can describe. Keyed like tenancy,
 // because a release's and a checkpoint's memory images are as vendor-locked as
 // a machine's and a mixed fleet could otherwise neither deploy nor roll back.
@@ -551,6 +592,15 @@ type Store interface {
 	// refuses a write about any host but itself, exactly as PutHost does.
 	PutHostCPU(ctx context.Context, h *HostCPU) error
 	ListHostCPU(ctx context.Context) ([]HostCPU, error)
+	// PutHostCapacity records what a host can still hold. Written only by the
+	// host it names, on its heartbeat.
+	PutHostCapacity(ctx context.Context, c *HostCapacity) error
+	ListHostCapacity(ctx context.Context) ([]HostCapacity, error)
+	// PutHostBuilds records which builds a host has cached. Written only by
+	// the host it names, and only when the set actually changed: this row is
+	// gossiped in full on every write.
+	PutHostBuilds(ctx context.Context, b *HostBuilds) error
+	ListHostBuilds(ctx context.Context) ([]HostBuilds, error)
 	// PutMachineCPU records the vendor that photographed a memory image. The
 	// writer is the host that writes the object row it describes, so a
 	// replicated store runs the same owner check that row's write runs.
@@ -1065,6 +1115,116 @@ func (s *sqliteStore) ListHostCPU(ctx context.Context) ([]HostCPU, error) {
 		out = append(out, h)
 	}
 	return out, rows.Err()
+}
+
+func (s *sqliteStore) PutHostCapacity(ctx context.Context, c *HostCapacity) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO host_capacity (host_id, mem_free_mib, mem_reclaimable_mib,
+			cpu_count, vcpus_running, draining, updated_at)
+		VALUES (?,?,?,?,?,?,?)
+		ON CONFLICT(host_id) DO UPDATE SET
+			mem_free_mib=excluded.mem_free_mib,
+			mem_reclaimable_mib=excluded.mem_reclaimable_mib,
+			cpu_count=excluded.cpu_count, vcpus_running=excluded.vcpus_running,
+			draining=excluded.draining, updated_at=excluded.updated_at`,
+		c.HostID, c.MemFreeMiB, c.MemReclaimableMiB, c.CPUCount, c.VCPUsRunning,
+		boolToInt(c.Draining), c.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put host capacity %q: %w", c.HostID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) ListHostCapacity(ctx context.Context) ([]HostCapacity, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT host_id, mem_free_mib, mem_reclaimable_mib, cpu_count,
+		       vcpus_running, draining, updated_at
+		FROM host_capacity ORDER BY host_id`)
+	if err != nil {
+		return nil, fmt.Errorf("state: list host capacity: %w", err)
+	}
+	defer rows.Close()
+
+	var out []HostCapacity
+	for rows.Next() {
+		var c HostCapacity
+		var draining int
+		if err := rows.Scan(&c.HostID, &c.MemFreeMiB, &c.MemReclaimableMiB,
+			&c.CPUCount, &c.VCPUsRunning, &draining, &c.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("state: scan host capacity: %w", err)
+		}
+		c.Draining = draining != 0
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (s *sqliteStore) PutHostBuilds(ctx context.Context, b *HostBuilds) error {
+	blob, err := encodeBuilds(b.Builds)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `
+		INSERT INTO host_builds (host_id, builds, updated_at) VALUES (?,?,?)
+		ON CONFLICT(host_id) DO UPDATE SET
+			builds=excluded.builds, updated_at=excluded.updated_at`,
+		b.HostID, blob, b.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put host builds %q: %w", b.HostID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) ListHostBuilds(ctx context.Context) ([]HostBuilds, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT host_id, builds, updated_at FROM host_builds ORDER BY host_id`)
+	if err != nil {
+		return nil, fmt.Errorf("state: list host builds: %w", err)
+	}
+	defer rows.Close()
+
+	var out []HostBuilds
+	for rows.Next() {
+		var b HostBuilds
+		var blob string
+		if err := rows.Scan(&b.HostID, &blob, &b.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("state: scan host builds: %w", err)
+		}
+		b.Builds = decodeBuilds(blob)
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
+// encodeBuilds caps and serialises the advertised build set. Capping here
+// rather than at every call site means no caller can accidentally publish an
+// unbounded row.
+func encodeBuilds(ids []string) (string, error) {
+	if len(ids) > MaxCachedBuildsPublished {
+		ids = ids[:MaxCachedBuildsPublished]
+	}
+	if len(ids) == 0 {
+		return "[]", nil
+	}
+	blob, err := json.Marshal(ids)
+	if err != nil {
+		return "", fmt.Errorf("state: encode host builds: %w", err)
+	}
+	return string(blob), nil
+}
+
+// decodeBuilds reads it back. A row that cannot be read is an EMPTY set, not
+// an error: the only thing it feeds is a placement bonus, and losing the bonus
+// costs a download while failing the read would cost the create.
+func decodeBuilds(blob string) []string {
+	if blob == "" {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(blob), &out); err != nil {
+		return nil
+	}
+	return out
 }
 
 func (s *sqliteStore) PutMachineCPU(ctx context.Context, c *MachineCPU, _ ...WriteOption) error {
