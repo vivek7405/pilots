@@ -30,7 +30,7 @@ import (
 // the one it was imported from.
 const exportSuffix = ".new"
 
-func (b *Builder) solveArgs(addr, contextDir, out, cacheDir, seedDir string) []string {
+func (b *Builder) solveArgs(addr, contextDir, out, cacheDir, seedDir, metadata string) []string {
 	args := []string{
 		"--addr", addr,
 		"build",
@@ -39,6 +39,15 @@ func (b *Builder) solveArgs(addr, contextDir, out, cacheDir, seedDir string) []s
 		"--local", "dockerfile=" + contextDir,
 		"--output", "type=tar,dest=" + out,
 		"--progress", "rawjson",
+	}
+
+	// The base image's own config, which the tar exporter does not carry.
+	// Without it `FROM postgres:17` builds a filesystem with no CMD, no ENV
+	// and no WORKDIR, and the machine has nothing to start. The frontend has
+	// already resolved it, so this asks for what it knows rather than pulling
+	// the image a second time. Written HOST-side, like every other path here.
+	if metadata != "" {
+		args = append(args, "--metadata-file", metadata)
 	}
 
 	// The cache is what makes a redeploy cheap. Both directories are on the
@@ -80,7 +89,39 @@ func (b *Builder) solveArgs(addr, contextDir, out, cacheDir, seedDir string) []s
 func (b *Builder) solve(ctx context.Context, addr, contextDir, out, cacheDir string,
 	record func(api.BuildLogLine)) error {
 
-	args := b.solveArgs(addr, contextDir, out, cacheDir, b.seedDir())
+	_, err := b.solveWithConfig(ctx, addr, contextDir, out, cacheDir, "", record)
+	return err
+}
+
+// solveWithConfig is solve plus the base image's config, when the daemon
+// reported one. A nil config is not an error: it means this build's exporter
+// or frontend did not publish the key, and the caller falls back to what the
+// Dockerfile itself declares, which is what every build did before.
+func (b *Builder) solveWithConfig(ctx context.Context, addr, contextDir, out, cacheDir, metadata string,
+	record func(api.BuildLogLine)) (*ImageConfig, error) {
+
+	if err := b.runSolve(ctx, addr, contextDir, out, cacheDir, metadata, record); err != nil {
+		return nil, err
+	}
+	if metadata == "" {
+		return nil, nil
+	}
+	cfg, err := readImageConfig(metadata)
+	if err != nil {
+		// Advisory, never fatal. The filesystem is built and correct; all that
+		// is missing is the base image's start command, and saying so beats
+		// failing a build that worked.
+		record(status("", "could not read the base image config from this build; "+
+			"the start command will come from the Dockerfile alone: "+err.Error()))
+		return nil, nil
+	}
+	return cfg, nil
+}
+
+func (b *Builder) runSolve(ctx context.Context, addr, contextDir, out, cacheDir, metadata string,
+	record func(api.BuildLogLine)) error {
+
+	args := b.solveArgs(addr, contextDir, out, cacheDir, b.seedDir(), metadata)
 	cmd := exec.CommandContext(ctx, b.opts.BuildctlBin, args...)
 	// Its own process group, so a timeout kills the whole build tree rather
 	// than leaving buildctl's children running against a daemon that has

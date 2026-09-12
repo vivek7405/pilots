@@ -1112,12 +1112,23 @@ the agent runs as a unit with `systemd-networkd-wait-online` masked.
 The `tar` exporter carries the filesystem and **no image metadata** — no CMD,
 ENTRYPOINT, WORKDIR or ENV. That is the price of taking the flattened
 filesystem instead of a layered image, and it leaves the agent nothing to
-exec once env has been delivered. So the build reads the start spec out of
-the **Dockerfile's final stage** and writes it into the image at
-`/etc/pilot-agent/start.json`, recording `from_dockerfile_only: true`. Read
-that field: a Dockerfile that inherits its command from its base image yields
-an empty spec, and a consumer must be able to tell that from "this
-application declares no start command" and fall back to the service spec.
+exec once env has been delivered. So the build writes a start spec into the
+image at `/etc/pilot-agent/start.json`, assembled from two sources: the
+**Dockerfile's final stage**, parsed here, and the **base image's own config**,
+which the frontend has already resolved and publishes through `buildctl
+--metadata-file` under `containerimage.config`. Without that second half
+`image: postgres:17` built a filesystem with nothing to run, which is the
+whole reason a stock image used to build and never start.
+
+The merge is Docker's own rule, per field: the Dockerfile wins what it names,
+the image fills the blanks, `ENV` merges key by key, and a Dockerfile
+`ENTRYPOINT` with no `CMD` **discards** the image's `CMD`, because those
+arguments were written for a different program. `PATH` is filled last. The
+spec records `from_dockerfile_only`, now meaningful rather than always true:
+false says the image's config was merged in, true says the build saw only the
+Dockerfile, which happens when the daemon published no config. A spec that
+still names nothing to start fails the build, where it is cheap to read,
+rather than the boot, where it is not.
 
 **A machine with its own image, or with a volume, BOOTS rather than
 restoring.** Both are forced. The golden template's memory describes the

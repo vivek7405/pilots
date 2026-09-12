@@ -116,7 +116,7 @@ const testBuilderAddr = "tcp://10.11.0.2:1234"
 // tenants' machines.
 func TestSolveDialsTheBuilderMachineAndNeverAHostSocket(t *testing.T) {
 	b := &Builder{opts: Options{}}
-	args := b.solveArgs(testBuilderAddr, "/work/context", "/work/rootfs.tar", "", "")
+	args := b.solveArgs(testBuilderAddr, "/work/context", "/work/rootfs.tar", "", "", "")
 
 	if args[0] != "--addr" || args[1] != testBuilderAddr {
 		t.Errorf("solve did not dial the builder machine: %v", args[:2])
@@ -128,7 +128,7 @@ func TestSolveDialsTheBuilderMachineAndNeverAHostSocket(t *testing.T) {
 
 func TestSolveUsesTheTarExporterAndMachineReadableProgress(t *testing.T) {
 	b := &Builder{opts: Options{}}
-	args := b.solveArgs(testBuilderAddr, "/work/context", "/work/rootfs.tar", "", "")
+	args := b.solveArgs(testBuilderAddr, "/work/context", "/work/rootfs.tar", "", "", "")
 	joined := strings.Join(args, " ")
 
 	if !strings.Contains(joined, "--output type=tar,dest=/work/rootfs.tar") {
@@ -152,7 +152,7 @@ func TestSolveUsesTheTarExporterAndMachineReadableProgress(t *testing.T) {
 func TestSolveArgsWireUpTheOrgsCacheDirectory(t *testing.T) {
 	b := &Builder{opts: Options{CacheDir: "/var/cache/pilots/build-cache"}}
 	dir := b.cacheDir("org_1", "df-abc")
-	joined := strings.Join(b.solveArgs(testBuilderAddr, "/ctx", "/out.tar", dir, ""), " ")
+	joined := strings.Join(b.solveArgs(testBuilderAddr, "/ctx", "/out.tar", dir, "", ""), " ")
 
 	for _, want := range []string{
 		// Exported BESIDE the directory it imports from, and swapped in
@@ -181,7 +181,7 @@ func TestSolveArgsWireUpTheOrgsCacheDirectory(t *testing.T) {
 func TestNoCredentialEverReachesTheDaemon(t *testing.T) {
 	b := &Builder{opts: Options{CacheDir: "/var/cache/pilots/build-cache"}}
 	joined := strings.Join(
-		b.solveArgs(testBuilderAddr, "/ctx", "/out.tar", b.cacheDir("org_1", "df-abc"), "/seed"), " ")
+		b.solveArgs(testBuilderAddr, "/ctx", "/out.tar", b.cacheDir("org_1", "df-abc"), "/seed", ""), " ")
 
 	for _, forbidden := range []string{
 		"access_key_id", "secret_access_key", "AWS_", "endpoint_url", "bucket=",
@@ -218,7 +218,7 @@ func TestTwoOrgsNeverShareACacheDirectory(t *testing.T) {
 func TestTheSharedSeedIsImportOnly(t *testing.T) {
 	b := &Builder{opts: Options{CacheDir: "/cache"}}
 	joined := strings.Join(
-		b.solveArgs(testBuilderAddr, "/ctx", "/out.tar", b.cacheDir("org_1", "df-abc"), "/cache/shared/node-base"), " ")
+		b.solveArgs(testBuilderAddr, "/ctx", "/out.tar", b.cacheDir("org_1", "df-abc"), "/cache/shared/node-base", ""), " ")
 
 	if !strings.Contains(joined, "--import-cache type=local,src=/cache/shared/node-base") {
 		t.Errorf("the shared seed was not imported: %s", joined)

@@ -1654,10 +1654,49 @@ async function buildAssertions() {
       const spec = JSON.parse(raw);
       assert(Array.isArray(spec.cmd) && spec.cmd.length > 0,
         `no start command in the image: ${raw}`);
-      assert(spec.from_dockerfile_only === true,
-        'the spec does not record that it only saw the Dockerfile, so a consumer ' +
+      // The fixture's Dockerfile declares its own CMD, so the spec is
+      // satisfied by the Dockerfile alone. What must be recorded either way is
+      // WHERE the values came from, since a consumer branches on it.
+      assert(typeof spec.from_dockerfile_only === 'boolean',
+        'the spec does not record where its values came from, so a consumer ' +
         'cannot tell "declares nothing" from "we could not see it"');
     });
+
+    // The half the Dockerfile cannot supply: the BASE image's own config.
+    // Before this, `image: postgres:17` built a filesystem with no CMD, no
+    // ENV and no WORKDIR, so the machine had nothing to start. The Dockerfile
+    // here declares none of those on purpose; every value asserted below can
+    // only have come from the image.
+    let stockMachine;
+    await step('a stock image keeps its own command, env and exposed port', async () => {
+      const res = await postTar('/v1/builds', tarball({
+        'Dockerfile': 'FROM postgres:17\nRUN echo stock > /etc/pilots-stock\n',
+      }));
+      const lines = await readNDJSON(res);
+      const last = lines[lines.length - 1];
+      assert(!last.error, `the stock-image build failed: ${last.error}`);
+      assert(last.result, 'the stock-image build produced no rootfs');
+
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST', body: { image: last.result, vcpus: 1, mem_mib: 512 },
+      });
+      assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
+      stockMachine = json;
+
+      const raw = await exec(json.id, 'cat /etc/pilot-agent/start.json');
+      const spec = JSON.parse(raw);
+      const argv = [...(spec.entrypoint ?? []), ...(spec.cmd ?? [])];
+      assert(argv.length > 0,
+        `a stock image produced no start command, so nothing can run: ${raw}`);
+      assert(spec.from_dockerfile_only === false,
+        'from_dockerfile_only is true for an image whose own config was merged in');
+      assert(spec.env?.PGDATA, `the image's own ENV was dropped: ${raw}`);
+      assert(spec.port === 5432,
+        `port is ${JSON.stringify(spec.port)}, want the image's exposed 5432`);
+    });
+    if (stockMachine) {
+      await request(`/v1/machines/${stockMachine.id}`, { method: 'DELETE' });
+    }
 
     await step("the built machine is running the build's own filesystem", async () => {
       assert(machine, 'no machine');
