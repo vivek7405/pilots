@@ -55,7 +55,20 @@ const forwardedHeader = ForwardedHeader
 // long-lived by design -- main.go sets no WriteTimeout for exactly that
 // reason -- and a machine's behavior must not depend on whether the client's
 // DNS pick happened to land on the owning host.
-const forwardTimeout = 120 * time.Second
+const forwardTimeout = HeldWakeWindow
+
+// HeldWakeWindow is how long a request to a sleeping machine is HELD.
+//
+// One number for both paths, deliberately. A request to a machine on this host
+// and a request to the same machine one host over must wait the same length of
+// time, or a client can tell where a machine is by how long it waits -- which
+// is the one thing the routing layer exists to hide.
+//
+// Long enough that a cold boot from object storage finishes inside it, and
+// short enough that a wake which will never finish ends as an error somebody
+// can act on rather than as a connection that hangs until a load balancer
+// gives up and reports something less useful.
+const HeldWakeWindow = 120 * time.Second
 
 // forwardTransport carries forwarded requests over the mesh. Shared, so
 // cross-host requests pool connections, and the place forwardTimeout is

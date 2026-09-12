@@ -417,7 +417,11 @@ func RegisterFleetTools(s *mcp.Server, client *pilots.Client, opts Options) {
 	}
 	mcp.AddTool(s, &mcp.Tool{Name: "restore", Title: "Restore a checkpoint",
 		Description: "Restore a checkpoint IN PLACE. The machine keeps its id, its URL and its agent token; " +
-			"nothing new is created, so every link to it still works."},
+			"nothing new is created, so every link to it still works. This never fails because a memory image is " +
+			"unavailable: memory snapshots do not cross the Intel/AMD line, and when no host of the image s CPU " +
+			"pool is live the machine cold-boots from its own disk instead, keeping its id, name, URL, volume and " +
+			"every byte on disk, and losing the processes and the memory they held. It reports last_start of " +
+			"cold_boot when that happened, so you can tell rather than inferring it from behaviour."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in restoreIn) (*mcp.CallToolResult, any, error) {
 			return Wrap(func() (any, error) { return client.Checkpoints.Restore(ctx, in.Checkpoint) }, Constant("status on the machine"))
 		})

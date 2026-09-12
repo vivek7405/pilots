@@ -410,9 +410,21 @@ func (r *Router) ensureAwake(ctx context.Context, m state.Machine) error {
 		}()
 	}
 
+	// The SAME window a forwarded request gets, and that is the point: which
+	// host a machine happens to be on must not change how long a client waits
+	// for it. A same-host wake with no bound of its own could hold a request
+	// for ever on a wake that never finishes, while the identical request to
+	// the identical machine one host over would end at 120 seconds. A client
+	// that can tell those apart can tell where a machine is, which is the one
+	// thing the routing layer exists to hide.
+	timer := time.NewTimer(HeldWakeWindow)
+	defer timer.Stop()
+
 	select {
 	case <-w.done:
 		return w.err
+	case <-timer.C:
+		return fmt.Errorf("router: machine %s did not wake within %s", m.ID, HeldWakeWindow)
 	case <-ctx.Done():
 		return ctx.Err()
 	}

@@ -110,3 +110,22 @@ line names what could not.
 
 Console logs are bounded at 16 MiB per machine and are NOT state. Wipe a host
 and the logs are gone while every machine restores exactly as before.
+
+## What a restore promises
+
+A restore never fails because a memory image is gone. Memory snapshots carry raw CPUID, so one is portable within a CPU vendor pool and never across it. When no host of that pool is live, the machine COLD-BOOTS from its own disk instead.
+
+| Survives a cold boot | Does not |
+| --- | --- |
+| the id, the name, the URL | the processes that were running |
+| the volume and every byte on disk | the memory they held |
+| the agent token | |
+
+The machine reports `last_start: cold_boot`, so tell the difference from that rather than from behaviour: a machine that came back without its running process is not broken, it is a machine whose pool had no live host.
+
+A request that arrives while a machine is asleep is HELD, not bounced, for up to 120 seconds. That is one number for a machine on the host you reached and for a machine one host over, so nothing a client can measure tells it where a sandbox lives.
+
+## Do not
+
+- Do not treat a `cold_boot` start as a failure. It is the documented outcome when a vendor pool has no live host, and everything on disk is intact.
+- Do not retry a request to a sleeping machine faster than the hold. It is already being held; a second request wakes nothing sooner and doubles the work.
