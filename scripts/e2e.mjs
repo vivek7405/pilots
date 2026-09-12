@@ -3396,6 +3396,75 @@ services:
       - postgres
 `;
 
+// B6. The addresses a tenant's outbound traffic leaves from.
+//
+// Runs on every fleet, configured or not, because the ABSENT case is the one
+// worth asserting: a fleet nobody told about egress must answer with an empty
+// set rather than an error or an invented address. A skip here would retire
+// that assertion on exactly the fleets where it matters.
+async function egressAddressAssertions() {
+  await step('/v1/egress answers, configured or not', async () => {
+    const { status, json } = await request('/v1/egress');
+    assert(status === 200, `expected 200, got ${status}: ${JSON.stringify(json)}`);
+    assert(typeof json.org_id === 'string' && json.org_id !== '',
+      `the response does not say whose addresses these are: ${JSON.stringify(json)}`);
+    assert(Array.isArray(json.addresses),
+      `addresses is not a list: ${JSON.stringify(json.addresses)}`);
+  });
+
+  const { json: first } = await request('/v1/egress');
+
+  if (!first.addresses.length) {
+    // The counterfactual, asserted rather than skipped. No host manages
+    // egress, so no machine may claim an address either -- a machine row
+    // naming one would mean the two halves disagree about what is configured.
+    await step('with no host managing egress, no machine claims an address', async () => {
+      const { status, json } = await request('/v1/machines');
+      assert(status === 200, `expected 200, got ${status}`);
+      const claiming = (json ?? []).filter((m) => m.egress);
+      assert(claiming.length === 0,
+        `${claiming.length} machine(s) name an egress address on a fleet where no host hands one out: ` +
+        claiming.slice(0, 3).map((m) => `${m.id}=${m.egress}`).join(', '));
+    });
+    console.log('  - per-org egress addresses not configured on this fleet (set PILOT_EGRESS_INTERFACE and PILOT_EGRESS_PREFIX6 to exercise them)');
+    return;
+  }
+
+  await step('every reported address is a distinct IPv6, one per host', async () => {
+    const hosts = new Set();
+    const addrs = new Set();
+    for (const a of first.addresses) {
+      assert(a.host_id, `an entry names no host: ${JSON.stringify(a)}`);
+      assert(a.ipv6 && a.ipv6.includes(':'), `host ${a.host_id} reported ${a.ipv6}, which is not IPv6`);
+      assert(!hosts.has(a.host_id), `host ${a.host_id} appears twice`);
+      assert(!addrs.has(a.ipv6), `${a.ipv6} is reported for two hosts; each derives from its own prefix`);
+      hosts.add(a.host_id);
+      addrs.add(a.ipv6);
+    }
+  });
+
+  await step('the address does not move between reads', async () => {
+    // The whole value of it: a tenant puts it in somebody else's firewall, so
+    // an address that moved would have to be re-allowlisted -- which is the
+    // cost this feature exists to remove.
+    const { json: again } = await request('/v1/egress');
+    const before = first.addresses.map((a) => `${a.host_id}=${a.ipv6}`).sort().join(',');
+    const after = (again.addresses ?? []).map((a) => `${a.host_id}=${a.ipv6}`).sort().join(',');
+    assert(before === after, `the set moved:\n  ${before}\n  ${after}`);
+  });
+
+  await step("a machine leaves from its own host's address", async () => {
+    const { status, json } = await request('/v1/machines');
+    assert(status === 200, `expected 200, got ${status}`);
+    const byHost = new Map(first.addresses.map((a) => [a.host_id, a.ipv6]));
+    for (const m of json ?? []) {
+      if (m.state === 'destroyed' || !byHost.has(m.host_id)) continue;
+      assert(m.egress === byHost.get(m.host_id),
+        `${m.id} is on ${m.host_id} and names ${m.egress}, but that host hands out ${byHost.get(m.host_id)}`);
+    }
+  });
+}
+
 async function dataRouteAssertions() {
   const tag = Math.random().toString(36).slice(2, 8);
   const created = [];
@@ -6276,6 +6345,7 @@ async function main() {
   // Before the FULL gate: the compose plan, the service patch and the shape of
   // the usage answer need no Firecracker, and the half that does says so.
   await dataRouteAssertions();
+  await egressAddressAssertions();
   await hostedMCPAssertions(FULL);
   if (FULL) {
     // The engine target or the degraded ceiling: enforce() needs to know

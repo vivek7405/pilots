@@ -87,6 +87,39 @@ class Machine:
     last_start_at: int | None = None
     labels: dict[str, str] | None = None
     url_auth: str | None = None
+    #: The address this machine's OUTBOUND traffic leaves from, when its host
+    #: manages egress. Shared with the org's other machines on the same host.
+    #: None means the host's shared address, which is what every machine had
+    #: before egress addresses existed.
+    egress: str | None = None
+
+
+@dataclass
+class EgressAddress:
+    """One host's answer for where an org's traffic leaves from.
+
+    There is no IPv4 counterpart and there will not be one: a v4 address is
+    purchased and scarce, and a bare-metal host has one, so v4 stays a shared
+    masquerade.
+    """
+
+    host_id: str = ""
+    ipv6: str = ""
+    interface: str | None = None
+
+
+@dataclass
+class EgressResponse:
+    """Every address an org's outbound traffic can leave from, one per host.
+
+    A set rather than one address, because the address is derived from the
+    HOST's prefix: an org running machines on three hosts leaves from three
+    addresses. It changes when a host joins or leaves the fleet and at no other
+    time, which is what makes it safe to put in somebody else's firewall.
+    """
+
+    org_id: str = ""
+    addresses: list[EgressAddress] = field(default_factory=list)
 
 
 @dataclass

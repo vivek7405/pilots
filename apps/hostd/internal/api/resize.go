@@ -57,6 +57,6 @@ func (d Deps) handleResizeMachine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), out.ID)
-	writeJSON(w, http.StatusOK, d.toAPI(*out, owner, d.startOf(r.Context(), out.ID),
+	writeJSON(w, http.StatusOK, d.toAPI(r.Context(), *out, owner, d.startOf(r.Context(), out.ID),
 		d.labelsOf(r.Context(), out.ID), d.urlAuthOf(r.Context(), out.ID)))
 }

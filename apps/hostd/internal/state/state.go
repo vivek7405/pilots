@@ -251,6 +251,18 @@ const (
 	DefaultServiceMemMiB = 512
 )
 
+// HostEgress is the IPv6 block one host hands per-org egress addresses out of.
+//
+// Read by whichever host is answering a request about a machine, which is why
+// it is replicated rather than kept in each host's own configuration: the
+// answering host is usually not the host the machine is on.
+type HostEgress struct {
+	HostID    string
+	Prefix6   string
+	Interface string
+	UpdatedAt int64
+}
+
 // ServiceSize is how big a service's replicas are.
 //
 // ImageVCPUs and ImageMemMiB are the size the current release's memory image
@@ -585,6 +597,17 @@ type Store interface {
 	// DeleteServiceSize drops the row for a service being removed, before the
 	// service row itself, for the reason DeleteLabels is.
 	DeleteServiceSize(ctx context.Context, serviceID string) error
+
+	// PutHostEgress records the prefix this host hands egress addresses out
+	// of. Written only by the host it names.
+	PutHostEgress(ctx context.Context, e *HostEgress, opts ...WriteOption) error
+	// ListHostEgress is every host that manages egress, for the route that
+	// reports a tenant every address they might leave from.
+	ListHostEgress(ctx context.Context) ([]HostEgress, error)
+	// GetHostEgress returns ErrNotFound for a host that manages none, which
+	// reads as "the shared host address" -- what every host did before.
+	GetHostEgress(ctx context.Context, hostID string) (*HostEgress, error)
+	DeleteHostEgress(ctx context.Context, hostID string) error
 
 	PutCheckpoint(ctx context.Context, c *Checkpoint) error
 	ListCheckpoints(ctx context.Context, machineID string) ([]Checkpoint, error)
@@ -1184,6 +1207,57 @@ func (s *sqliteStore) GetServiceSize(ctx context.Context, serviceID string) (*Se
 func (s *sqliteStore) DeleteServiceSize(ctx context.Context, serviceID string) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM service_sizes WHERE service_id = ?`, serviceID); err != nil {
 		return fmt.Errorf("state: delete service size %q: %w", serviceID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) PutHostEgress(ctx context.Context, e *HostEgress, _ ...WriteOption) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO host_egress (host_id, prefix6, interface, updated_at) VALUES (?,?,?,?)
+		ON CONFLICT(host_id) DO UPDATE SET
+			prefix6=excluded.prefix6, interface=excluded.interface, updated_at=excluded.updated_at`,
+		e.HostID, e.Prefix6, e.Interface, e.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put host egress %q: %w", e.HostID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) ListHostEgress(ctx context.Context) ([]HostEgress, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT host_id, prefix6, interface, updated_at FROM host_egress ORDER BY host_id`)
+	if err != nil {
+		return nil, fmt.Errorf("state: list host egress: %w", err)
+	}
+	defer rows.Close()
+	var out []HostEgress
+	for rows.Next() {
+		var e HostEgress
+		if err := rows.Scan(&e.HostID, &e.Prefix6, &e.Interface, &e.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (s *sqliteStore) GetHostEgress(ctx context.Context, hostID string) (*HostEgress, error) {
+	var e HostEgress
+	err := s.db.QueryRowContext(ctx, `
+		SELECT host_id, prefix6, interface, updated_at FROM host_egress WHERE host_id = ?`, hostID).
+		Scan(&e.HostID, &e.Prefix6, &e.Interface, &e.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get host egress %q: %w", hostID, err)
+	}
+	return &e, nil
+}
+
+func (s *sqliteStore) DeleteHostEgress(ctx context.Context, hostID string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM host_egress WHERE host_id = ?`, hostID); err != nil {
+		return fmt.Errorf("state: delete host egress %q: %w", hostID, err)
 	}
 	return nil
 }

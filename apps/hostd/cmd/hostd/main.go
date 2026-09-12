@@ -457,6 +457,10 @@ func run() error {
 		// session to it holds it. Read beside the filter that writes the
 		// counters.
 		go runActivity(ctx, view, locator, mgr, guest)
+		// Per-org outbound addresses, on a host that has been given a prefix.
+		// Behind the mesh check because the rules match a machine's MESH
+		// address: without a mesh identity there is nothing unique to match.
+		go runEgress(ctx, cfg.HostID, cfg.Egress, store, view, locator)
 	}
 
 	routerOpts := router.Options{

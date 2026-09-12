@@ -316,6 +316,9 @@ func Routes(d Deps) http.Handler {
 	// guarantee that fails silently.
 	mux.HandleFunc("GET /v1/machines/{id}/volume", d.handleMachineVolume)
 	mux.HandleFunc("GET /v1/hosts", d.handleListHosts)
+	// Every address the acting org's outbound traffic can leave from, which is
+	// what a tenant hands to anything that allowlists by source address.
+	mux.HandleFunc("GET /v1/egress", d.handleEgress)
 	mux.HandleFunc("GET /v1/whoami", d.handleWhoami)
 
 	// The hosted MCP endpoint: the fleet toolset over Streamable HTTP, on

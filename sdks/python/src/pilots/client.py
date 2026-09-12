@@ -32,6 +32,7 @@ from .types import (
     CreateVolumeRequest,
     DeployRequest,
     DomainResponse,
+    EgressResponse,
     ExecRequest,
     ExecResponse,
     HealthResponse,
@@ -394,6 +395,19 @@ class Hosts:
     def list(self) -> builtins.list[Host]:
         """The fleet as this host sees it, read from its local replica."""
         return [from_json(Host, h) for h in self._http.json("GET", "/v1/hosts") or []]
+
+    def egress(self) -> EgressResponse:
+        """Every address this org's outbound traffic can leave from.
+
+        What to hand anything that allowlists by source address. One entry per
+        host that manages egress, because the address is derived from the
+        host's own prefix; empty on a fleet where no host has been given one,
+        in which case traffic leaves from each host's shared address.
+
+        The set changes only when a host joins or leaves the fleet, never when
+        this org's machines are created, destroyed, resized, rolled or moved.
+        """
+        return from_json(EgressResponse, self._http.json("GET", "/v1/egress"))
 
 
 class APIKeys:

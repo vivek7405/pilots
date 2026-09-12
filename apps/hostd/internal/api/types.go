@@ -255,6 +255,15 @@ type Machine struct {
 	// URLAuth is who may reach the URL: "public" (the default) or "org", which
 	// makes the router ask for an API key of the owning org.
 	URLAuth string `json:"url_auth,omitempty"`
+	// Egress is the address this machine's OUTBOUND traffic leaves from, when
+	// its host manages egress. Derived from the host's prefix and the owning
+	// org, so it is shared with the org's other machines on the same host and
+	// survives every one of them being destroyed.
+	//
+	// Absent means the machine leaves from the host's shared address, which is
+	// what every machine did before egress addresses existed. GET /v1/egress
+	// lists the whole set, which is what a tenant allowlists.
+	Egress string `json:"egress,omitempty"`
 }
 
 // CreateMachineRequest creates a machine from exactly one source: a built
@@ -289,6 +298,32 @@ const (
 	// during boot rather than after.
 	MinMemMiB = 128
 )
+
+// EgressResponse is every address an org's outbound traffic can leave from,
+// one per host that manages egress.
+//
+// A set rather than a single address, because the address is derived from the
+// HOST's prefix: an org running machines on three hosts leaves from three
+// addresses. The set changes when a host joins or leaves the fleet and at no
+// other time -- not when the org's machines are created, destroyed, resized,
+// rolled or moved, which is what makes it safe to put in a firewall.
+//
+// Empty on a fleet where no host has been given an egress prefix, which is
+// every fleet until an operator configures one.
+type EgressResponse struct {
+	OrgID     string          `json:"org_id"`
+	Addresses []EgressAddress `json:"addresses"`
+}
+
+// EgressAddress is one host's answer.
+type EgressAddress struct {
+	HostID string `json:"host_id"`
+	// IPv6 is the address, a /128 out of the host's prefix. There is no IPv4
+	// counterpart and there will not be one: a v4 address is purchased and
+	// scarce, and a bare-metal host has one, so v4 stays a shared masquerade.
+	IPv6      string `json:"ipv6"`
+	Interface string `json:"interface,omitempty"`
+}
 
 // Size is how big a machine is: the two dimensions that are priced, named
 // together wherever a service carries a size rather than a single machine.

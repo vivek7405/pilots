@@ -112,6 +112,40 @@ export interface Machine {
   labels?: Record<string, string>
   /** Who may reach the URL: 'public' (the default) or 'org'. */
   url_auth?: 'public' | 'org'
+  /**
+   * The address this machine's OUTBOUND traffic leaves from, when its host
+   * manages egress. Shared with the org's other machines on the same host, and
+   * outliving every one of them.
+   *
+   * Absent means the machine leaves from the host's shared address, which is
+   * what every machine did before egress addresses existed.
+   */
+  egress?: string
+}
+
+/**
+ * Every address an org's outbound traffic can leave from, one per host that
+ * manages egress. `GET /v1/egress`.
+ *
+ * A set rather than one address, because the address is derived from the
+ * HOST's prefix: an org running machines on three hosts leaves from three
+ * addresses. It changes when a host joins or leaves the fleet and at no other
+ * time, which is what makes it safe to put in somebody else's firewall.
+ */
+export interface EgressResponse {
+  org_id: string
+  addresses: EgressAddress[]
+}
+
+/**
+ * One host's answer. There is no IPv4 counterpart and there will not be one: a
+ * v4 address is purchased and scarce, and a bare-metal host has one, so v4
+ * stays a shared masquerade.
+ */
+export interface EgressAddress {
+  host_id: string
+  ipv6: string
+  interface?: string
 }
 
 /** PATCH /v1/machines/{id}: who may reach the URL. */

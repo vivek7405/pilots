@@ -3124,6 +3124,95 @@ else
     || bad "the host did not return to complete after cleanup (${JG_FINAL:-missing})"
 fi
 
+say "32. Per-org egress: one address per org, and nothing at all unless configured"
+# B6. A tenant integrating with anything that allowlists by source address has
+# to be given one, and until this existed there was nothing to give: every
+# guest left wearing the host's shared address.
+#
+# Both halves are asserted here because both are invisible from the API alone.
+# The e2e battery can see what /v1/egress REPORTS; only a host shell can see
+# whether the rules and the addresses that make the report true are actually
+# installed.
+EG_IP="${LIVE_IPS[0]:-${IPS[0]}}"
+EG_CONFIGURED=$($SSH "root@$EG_IP" "grep -c '^PILOT_EGRESS_PREFIX6=' /etc/pilots/hostd.env" 2>/dev/null | tr -d '[:space:]')
+if [ "${EG_CONFIGURED:-0}" = "0" ]; then
+  # The COUNTERFACTUAL, and it is an assertion rather than a skip: a host that
+  # was told nothing must install nothing. A leftover table here would mean
+  # some earlier run, or a default nobody asked for, is rewriting tenant
+  # traffic on a host whose operator never enabled the feature.
+  if $SSH "root@$EG_IP" "nft list table inet pilots-egress >/dev/null 2>&1"; then
+    bad "an unconfigured host has an inet pilots-egress table; outbound traffic is being rewritten by nobody's request"
+  else
+    ok "an unconfigured host installs no egress table, so traffic leaves as it always did"
+  fi
+  # And the API agrees with the host: no prefix anywhere means no addresses.
+  EG_N=$(api "$EG_IP" GET /v1/egress | jq '.addresses | length' 2>/dev/null)
+  [ "${EG_N:-x}" = "0" ] && ok "and /v1/egress reports no addresses, matching the host" \
+    || bad "/v1/egress reports ${EG_N:-missing} addresses on a fleet where no host manages egress"
+else
+  EG_PREFIX=$($SSH "root@$EG_IP" "grep '^PILOT_EGRESS_PREFIX6=' /etc/pilots/hostd.env | cut -d= -f2-" 2>/dev/null | tr -d '[:space:]')
+  ok "host ${EG_IP} manages egress out of ${EG_PREFIX}"
+
+  # The table exists and carries both halves: the per-org v6 rewrite, and the
+  # v4 masquerade that is the only thing giving a guest outbound IPv4 at all.
+  EG_TABLE=$($SSH "root@$EG_IP" "nft list table inet pilots-egress 2>/dev/null" || true)
+  echo "$EG_TABLE" | grep -q 'masquerade' \
+    && ok "the egress table masquerades IPv4" \
+    || bad "the egress table has no masquerade rule; guests have no outbound IPv4"
+  echo "$EG_TABLE" | grep -q 'snat' \
+    && ok "the egress table carries a per-org snat rule" \
+    || bad "the egress table has no snat rule; no tenant has an address of its own"
+
+  # Order is load-bearing: masquerade rewrites to whatever the interface
+  # carries, so a masquerade ABOVE the snat rules would make every one of them
+  # dead code that still reads as correct.
+  EG_SNAT_LINE=$(echo "$EG_TABLE" | grep -n 'snat' | head -1 | cut -d: -f1)
+  EG_MASQ_LINE=$(echo "$EG_TABLE" | grep -n 'masquerade' | head -1 | cut -d: -f1)
+  if [ -n "$EG_SNAT_LINE" ] && [ -n "$EG_MASQ_LINE" ]; then
+    [ "$EG_SNAT_LINE" -lt "$EG_MASQ_LINE" ] \
+      && ok "the per-org rewrites sit above the masquerade, so they are reachable" \
+      || bad "the masquerade sits above the per-org rewrites, which makes every one of them dead code"
+  fi
+
+  # The address has to be ON the uplink, or the rewrite sends replies to an
+  # address this host never claimed and the connection simply never completes.
+  EG_ADDRS=$(api "$EG_IP" GET /v1/egress | jq -r '.addresses[] | select(.host_id != null) | .ipv6' 2>/dev/null)
+  if [ -z "$EG_ADDRS" ]; then
+    bad "the host manages egress but /v1/egress reports no address for this key's org"
+  else
+    for EG_A in $EG_ADDRS; do
+      if $SSH "root@$EG_IP" "ip -6 addr | grep -q '${EG_A}/128'" 2>/dev/null; then
+        ok "${EG_A} is on the uplink, so replies come back"
+      else
+        bad "${EG_A} is reported but is on no interface; every reply to it is lost"
+      fi
+    done
+  fi
+
+  # And it does not move. The whole value of the address is that a tenant can
+  # put it in somebody else's firewall, which is only true if reading it twice
+  # gives the same answer.
+  EG_FIRST=$(api "$EG_IP" GET /v1/egress | jq -r '.addresses[0].ipv6' 2>/dev/null)
+  EG_AGAIN=$(api "$EG_IP" GET /v1/egress | jq -r '.addresses[0].ipv6' 2>/dev/null)
+  [ -n "$EG_FIRST" ] && [ "$EG_FIRST" = "$EG_AGAIN" ] \
+    && ok "the address is the same on a second read (${EG_FIRST})" \
+    || bad "the reported address moved between two reads: ${EG_FIRST:-missing} then ${EG_AGAIN:-missing}"
+
+  # A guest actually leaves from it. This is the only assertion that proves the
+  # whole path rather than its pieces, so it runs against a real machine.
+  EG_M=$(api "$EG_IP" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
+  EG_MID=$(echo "$EG_M" | jf id)
+  if [ -z "$EG_MID" ]; then
+    bad "could not create a machine to check what address it leaves from: $EG_M"
+  else
+    EG_REPORTED=$(api "$EG_IP" GET "/v1/machines/${EG_MID}" | jq -r '.egress' 2>/dev/null)
+    [ -n "$EG_REPORTED" ] && [ "$EG_REPORTED" != "null" ] \
+      && ok "the machine row names its egress address (${EG_REPORTED})" \
+      || bad "the machine row carries no egress address on a host that manages egress"
+    api "$EG_IP" DELETE "/v1/machines/${EG_MID}" >/dev/null 2>&1 || true
+  fi
+fi
+
 say "Result"
 echo "  ${PASS} passed, ${FAIL} failed"
 echo

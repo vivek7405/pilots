@@ -490,6 +490,27 @@ CREATE TABLE IF NOT EXISTS url_auth (          -- writer: the host that writes t
 --
 -- Writer: the service's arbiter, the one host that already writes the
 -- `services` row through forwardToArbiter, so the merge has a single writer.
+-- The IPv6 block a host hands per-org egress addresses out of.
+--
+-- A tenant's outbound address is a pure function of this prefix and their org
+-- id, so there is nothing to allocate and no assignment to store. What DOES
+-- have to be shared is the prefix itself: any host may answer a request about
+-- any machine, and the answering host cannot know another host's prefix
+-- without reading it.
+--
+-- Absent means that host manages no egress, which is what every host did
+-- before this table, so nothing is backfilled. A side table rather than a
+-- column on `hosts` for the usual reason: `hosts` has rows (rule 6).
+--
+-- Writer: the host the row describes, which is the plainest single writer
+-- there is.
+CREATE TABLE IF NOT EXISTS host_egress (       -- writer: the host it describes
+  host_id    TEXT NOT NULL PRIMARY KEY,
+  prefix6    TEXT,     -- a routed /64, e.g. 2a01:4f8:1c17:abcd::/64
+  interface  TEXT,     -- the uplink it leaves by, for an operator reading this
+  updated_at INTEGER
+);
+
 CREATE TABLE IF NOT EXISTS service_sizes (     -- writer: the service's arbiter
   service_id    TEXT NOT NULL PRIMARY KEY,
   vcpus         INTEGER,  -- what a replica is created with

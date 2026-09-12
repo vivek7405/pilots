@@ -44,7 +44,7 @@ func (d Deps) handleListBuilders(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			continue
 		}
-		out = append(out, d.toAPI(row, owner, d.startOf(r.Context(), row.ID), nil, ""))
+		out = append(out, d.toAPI(r.Context(), row, owner, d.startOf(r.Context(), row.ID), nil, ""))
 	}
 	// By host, so two reads of an unchanged fleet agree and the dashboard's
 	// table does not reorder itself under the reader.

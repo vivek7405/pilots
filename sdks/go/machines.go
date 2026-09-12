@@ -194,3 +194,17 @@ func (h *Hosts) List(ctx context.Context) ([]Host, error) {
 	var out []Host
 	return out, h.c.do(ctx, http.MethodGet, "/v1/hosts", nil, &out)
 }
+
+// Egress is every address this org's outbound traffic can leave from.
+//
+// What to hand anything that allowlists by source address. One per host that
+// manages egress, because the address is derived from the host's own prefix;
+// empty on a fleet where no host has been given one, in which case traffic
+// leaves from each host's shared address.
+//
+// The set changes only when a host joins or leaves the fleet, never when this
+// org's machines are created, destroyed, resized, rolled or moved.
+func (h *Hosts) Egress(ctx context.Context) (*EgressResponse, error) {
+	var out EgressResponse
+	return &out, h.c.do(ctx, http.MethodGet, "/v1/egress", nil, &out)
+}

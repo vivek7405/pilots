@@ -1637,6 +1637,73 @@ func (s *Store) GetServiceSize(ctx context.Context, serviceID string) (*state.Se
 	return &sz, nil
 }
 
+// PutHostEgress records the prefix this host hands egress addresses out of.
+//
+// Only the host the row names may write it. The row says where one host's
+// traffic leaves from, and a second host writing it would be asserting a fact
+// about a machine it does not run -- which merges silently and then hands a
+// tenant an address on a host that never had it.
+func (s *Store) PutHostEgress(ctx context.Context, e *state.HostEgress, _ ...state.WriteOption) error {
+	if e.HostID != s.hostID {
+		return fmt.Errorf("state: host %s may not write %s's egress: %w",
+			s.hostID, e.HostID, state.ErrNotOwner)
+	}
+	_, err := s.client.Exec(ctx, `
+		INSERT INTO host_egress (host_id, prefix6, interface, updated_at) VALUES (?,?,?,?)
+		ON CONFLICT(host_id) DO UPDATE SET
+			prefix6=excluded.prefix6, interface=excluded.interface, updated_at=excluded.updated_at`,
+		e.HostID, e.Prefix6, e.Interface, e.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put host egress %q: %w", e.HostID, err)
+	}
+	return nil
+}
+
+func (s *Store) ListHostEgress(ctx context.Context) ([]state.HostEgress, error) {
+	rows, err := s.client.Query(ctx, `
+		SELECT host_id, prefix6, interface, updated_at FROM host_egress ORDER BY host_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []state.HostEgress
+	for rows.Next() {
+		var e state.HostEgress
+		if err := rows.Scan(&e.HostID, &e.Prefix6, &e.Interface, &e.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetHostEgress(ctx context.Context, hostID string) (*state.HostEgress, error) {
+	rows, err := s.client.Query(ctx, `
+		SELECT host_id, prefix6, interface, updated_at FROM host_egress WHERE host_id = ?`, hostID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, state.ErrNotFound
+	}
+	var e state.HostEgress
+	if err := rows.Scan(&e.HostID, &e.Prefix6, &e.Interface, &e.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &e, nil
+}
+
+func (s *Store) DeleteHostEgress(ctx context.Context, hostID string) error {
+	if _, err := s.client.Exec(ctx, `DELETE FROM host_egress WHERE host_id = ?`, hostID); err != nil {
+		return fmt.Errorf("state: delete host egress %q: %w", hostID, err)
+	}
+	return nil
+}
+
 func (s *Store) DeleteServiceSize(ctx context.Context, serviceID string) error {
 	if _, err := s.client.Exec(ctx, `DELETE FROM service_sizes WHERE service_id = ?`, serviceID); err != nil {
 		return fmt.Errorf("state: delete service size %q: %w", serviceID, err)

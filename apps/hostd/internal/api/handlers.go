@@ -80,10 +80,11 @@ type Manager interface {
 // orgID is passed in rather than looked up here: a list endpoint already knows
 // every row's owner from the pass it made to filter them, and re-asking per
 // row would turn one lookup into N.
-func (d Deps) toAPI(row state.Machine, orgID string, cpu state.MachineCPU, labels map[string]string, urlAuth string) Machine {
+func (d Deps) toAPI(ctx context.Context, row state.Machine, orgID string, cpu state.MachineCPU, labels map[string]string, urlAuth string) Machine {
 	return Machine{
 		Labels:  labels,
 		URLAuth: urlAuth,
+		Egress:  d.egressOf(ctx, row.HostID, orgID),
 		ID:      row.ID, Name: row.Name, HostID: row.HostID, State: row.State,
 		OrgID:        orgID,
 		Knobs:        ParseKnobs(row.KindKnobs),
@@ -180,7 +181,7 @@ func (d Deps) handleUpdateMachine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), row.ID)
-	writeJSON(w, http.StatusOK, d.toAPI(*row, owner, d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), *req.URLAuth))
+	writeJSON(w, http.StatusOK, d.toAPI(r.Context(), *row, owner, d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), *req.URLAuth))
 }
 
 // labelsOf reads an object's labels, and reads "none recorded" as none.
@@ -360,7 +361,7 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, http.StatusCreated, d.toAPI(*row, req.OrgID, d.startOf(r.Context(), row.ID), req.Labels, orDefaultMode(req.URLAuth)))
+	writeJSON(w, http.StatusCreated, d.toAPI(r.Context(), *row, req.OrgID, d.startOf(r.Context(), row.ID), req.Labels, orDefaultMode(req.URLAuth)))
 }
 
 // orDefault mirrors the machine manager's own defaulting, so the quota check
@@ -400,7 +401,7 @@ func (d Deps) handleListMachines(w http.ResponseWriter, r *http.Request) {
 		if !matchesLabels(labels, want) {
 			continue
 		}
-		out = append(out, d.toAPI(row, owner, d.startOf(r.Context(), row.ID), labels, d.urlAuthOf(r.Context(), row.ID)))
+		out = append(out, d.toAPI(r.Context(), row, owner, d.startOf(r.Context(), row.ID), labels, d.urlAuthOf(r.Context(), row.ID)))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -411,7 +412,7 @@ func (d Deps) handleGetMachine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), row.ID)
-	writeJSON(w, http.StatusOK, d.toAPI(*row, owner, d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), d.urlAuthOf(r.Context(), row.ID)))
+	writeJSON(w, http.StatusOK, d.toAPI(r.Context(), *row, owner, d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), d.urlAuthOf(r.Context(), row.ID)))
 }
 
 func (d Deps) handleDestroyMachine(w http.ResponseWriter, r *http.Request) {
@@ -593,7 +594,7 @@ func (d Deps) handleRedeploy(w http.ResponseWriter, r *http.Request) {
 		writeMapped(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, d.toAPI(*row, OrgID(r.Context()), d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), d.urlAuthOf(r.Context(), row.ID)))
+	writeJSON(w, http.StatusOK, d.toAPI(r.Context(), *row, OrgID(r.Context()), d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), d.urlAuthOf(r.Context(), row.ID)))
 }
 
 func (d Deps) handleCreateCheckpoint(w http.ResponseWriter, r *http.Request) {
@@ -661,7 +662,7 @@ func (d Deps) handleRestoreCheckpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), row.ID)
-	writeJSON(w, http.StatusOK, d.toAPI(*row, owner, d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), d.urlAuthOf(r.Context(), row.ID)))
+	writeJSON(w, http.StatusOK, d.toAPI(r.Context(), *row, owner, d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), d.urlAuthOf(r.Context(), row.ID)))
 }
 
 // handleCheckpointStatus lets a caller learn when a checkpoint became durable.

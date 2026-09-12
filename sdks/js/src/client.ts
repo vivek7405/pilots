@@ -26,6 +26,7 @@ import type {
   CreateVolumeRequest,
   DeployRequest,
   DomainResponse,
+  EgressResponse,
   ExecRequest,
   ExecResponse,
   HealthResponse,
@@ -496,6 +497,21 @@ export class Hosts {
   /** The fleet as this host sees it, read from its local replica. */
   list(): Promise<Host[]> {
     return this.http.json<Host[]>('GET', '/v1/hosts')
+  }
+
+  /**
+   * Every address this org's outbound traffic can leave from: what to hand
+   * anything that allowlists by source address.
+   *
+   * One entry per host that manages egress, because the address is derived
+   * from the host's own prefix. Empty on a fleet where no host has been given
+   * one, in which case traffic leaves from each host's shared address.
+   *
+   * The set changes only when a host joins or leaves the fleet, never when
+   * this org's machines are created, destroyed, resized, rolled or moved.
+   */
+  egress(): Promise<EgressResponse> {
+    return this.http.json<EgressResponse>('GET', '/v1/egress')
   }
 }
 
