@@ -6161,20 +6161,24 @@ async function brokerAssertions() {
       machine = json;
       created.push(machine.id);
 
-      const env = await execIn(machine.id, 'echo "$PILOT_BROKER_URL|$PILOT_MACHINE_ID|$PILOT_TOKEN_FILE"');
-      const [url, id, file] = env.trim().split('|');
-      assert(url.includes(':3002'), `PILOT_BROKER_URL = ${url}`);
-      assert(id === machine.id, `PILOT_MACHINE_ID = ${id}, want ${machine.id}`);
-      assert(file === '/run/pilot/token', `PILOT_TOKEN_FILE = ${file}`);
+      // The FILE, not an exec's environment. /etc/pilot/env is what the app
+      // unit loads (EnvironmentFile=), so an ad-hoc exec does not have these
+      // set -- and a test that read the exec's environment would be asserting
+      // something no application depends on.
+      const env = await execIn(machine.id, 'cat /etc/pilot/env 2>/dev/null || true');
+      assert(env.includes(':3002'), `no broker address in /etc/pilot/env:\n${env}`);
+      assert(env.includes(machine.id), `no machine id in /etc/pilot/env:\n${env}`);
+      assert(env.includes('/run/pilot/token'),
+        `no token file in /etc/pilot/env:\n${env}`);
     });
 
     // The one property the whole design rests on: nothing in the guest holds a
     // fleet credential. Not the environment, not the disk.
     await step('nothing in the guest holds a credential before a grant', async () => {
-      const env = await execIn(machine.id, 'echo "${PILOT_TOKEN:-unset}"');
-      assert(env.trim() === 'unset',
+      const env = await execIn(machine.id, 'cat /etc/pilot/env 2>/dev/null || true');
+      assert(!/^PILOT_TOKEN=/m.test(env),
         `PILOT_TOKEN is set inside the machine: a token in the environment is a ` +
-        `token in every snapshot of it`);
+        `token in every snapshot of it:\n${env}`);
       const found = await execIn(machine.id,
         'grep -rl pbt1 /etc /run 2>/dev/null | head -5; true');
       assert(found.trim() === '', `a token is already on disk: ${found}`);
@@ -6182,16 +6186,16 @@ async function brokerAssertions() {
 
     await step('deny by default: an ungranted machine gets nothing', async () => {
       const code = await execIn(machine.id,
-        'curl -s -o /dev/null -w %{http_code} "$PILOT_BROKER_URL/token"');
+        'curl -s -o /dev/null -w %{http_code} http://169.254.0.22:3002/token');
       assert(code.trim() === '403', `GET /token = ${code}, want 403 with no grant`);
       const secrets = await execIn(machine.id,
-        'curl -s -o /dev/null -w %{http_code} "$PILOT_BROKER_URL/secrets"');
+        'curl -s -o /dev/null -w %{http_code} http://169.254.0.22:3002/secrets');
       assert(secrets.trim() === '403', `GET /secrets = ${secrets}, want 403 with no grant`);
     });
 
     // Knowing your own id is not a credential, so identity answers regardless.
     await step('identity answers with no grant', async () => {
-      const body = await execIn(machine.id, 'curl -s "$PILOT_BROKER_URL/identity"');
+      const body = await execIn(machine.id, 'curl -s http://169.254.0.22:3002/identity');
       const identity = JSON.parse(body);
       assert(identity.machine_id === machine.id, `identity = ${body}`);
       assert(identity.api_url, `identity carries no api_url: ${body}`);
@@ -6214,7 +6218,7 @@ async function brokerAssertions() {
 
     let token = '';
     await step('the granted machine mints a token for itself', async () => {
-      const body = await execIn(machine.id, 'curl -s "$PILOT_BROKER_URL/token"');
+      const body = await execIn(machine.id, 'curl -s http://169.254.0.22:3002/token');
       const got = JSON.parse(body);
       token = got.token;
       assert(token.startsWith('pbt1.'), `token = ${body}`);
@@ -6261,7 +6265,7 @@ async function brokerAssertions() {
     });
 
     await step('a granted secret reaches the machine, and only through the broker', async () => {
-      const body = await execIn(machine.id, 'curl -s "$PILOT_BROKER_URL/secrets"');
+      const body = await execIn(machine.id, 'curl -s http://169.254.0.22:3002/secrets');
       const got = JSON.parse(body);
       assert(got.secrets.BROKER_CHECK === `value-${tag}`, `secrets = ${body}`);
 
@@ -6287,7 +6291,7 @@ async function brokerAssertions() {
       const { status } = await request(`/v1/machines/${machine.id}/secrets`, { method: 'DELETE' });
       assert(status === 204 || status === 200, `clear: HTTP ${status}`);
       const code = await execIn(machine.id,
-        'curl -s -o /dev/null -w %{http_code} "$PILOT_BROKER_URL/token"');
+        'curl -s -o /dev/null -w %{http_code} http://169.254.0.22:3002/token');
       assert(code.trim() === '403', `GET /token after a clear = ${code}, want 403`);
     });
   } finally {
