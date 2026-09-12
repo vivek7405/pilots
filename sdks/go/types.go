@@ -486,6 +486,21 @@ type Host struct {
 	BuildsCached int `json:"builds_cached,omitempty"`
 }
 
+// SnapshotResponse is one point-in-time copy of a volume.
+//
+// Snapshot is the stamp that names it, `20260912T101500Z`. It sorts lexically
+// in time order, so a list needs no separate ordering field.
+type SnapshotResponse struct {
+	VolumeID string `json:"volume_id"`
+	Snapshot string `json:"snapshot"`
+}
+
+// SnapshotListResponse is every snapshot of a volume, newest first.
+type SnapshotListResponse struct {
+	VolumeID  string   `json:"volume_id"`
+	Snapshots []string `json:"snapshots"`
+}
+
 // DrainReport is what draining a host did. POST /v1/hosts/{id}/drain.
 //
 // The machines in Moved are on other hosts now, with the same ids, names and
@@ -883,6 +898,8 @@ var wireTypes = []any{
 	Size{},
 	EgressResponse{},
 	EgressAddress{},
+	SnapshotResponse{},
+	SnapshotListResponse{},
 	DrainReport{},
 	TakeRequest{},
 	Knobs{},

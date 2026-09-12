@@ -26,7 +26,10 @@ func newVolumesCmd(env *Env) *cobra.Command {
 			"pilot machines destroy           does NOT delete an attached volume",
 		},
 	})
-	c.AddCommand(newVolumesListCmd(env), newVolumesCreateCmd(env))
+	c.AddCommand(
+		newVolumesListCmd(env), newVolumesCreateCmd(env),
+		newVolumesSnapshotCmd(env), newVolumesSnapshotsCmd(env), newVolumesRestoreCmd(env),
+	)
 	return c
 }
 

@@ -187,3 +187,35 @@ func (u *Usage) ByMachine(ctx context.Context, since, until int64) (*UsageRespon
 	pairs = append(pairs, [2]string{"by", "machine"})
 	return &out, u.c.do(ctx, http.MethodGet, query("/v1/usage", pairs...), nil, &out)
 }
+
+// Snapshot takes a point-in-time copy of a volume.
+//
+// A clone inside the volume's own filesystem, so no blocks move and it costs
+// milliseconds however large the volume is. A running machine is PAUSED for
+// the clone: a copy taken while the guest is writing captures a filesystem
+// mid-update, which mounts and then fails later.
+func (v *Volumes) Snapshot(ctx context.Context, id string) (*SnapshotResponse, error) {
+	var out SnapshotResponse
+	return &out, v.c.do(ctx, http.MethodPost,
+		"/v1/volumes/"+url.PathEscape(id)+"/snapshots", nil, &out)
+}
+
+// Snapshots lists a volume's snapshots, newest first.
+func (v *Volumes) Snapshots(ctx context.Context, id string) (*SnapshotListResponse, error) {
+	var out SnapshotListResponse
+	return &out, v.c.do(ctx, http.MethodGet,
+		"/v1/volumes/"+url.PathEscape(id)+"/snapshots", nil, &out)
+}
+
+// RestoreSnapshot puts a snapshot back as the volume's live image.
+//
+// Refused while a machine is RUNNING on the volume: replacing the disk under a
+// live guest corrupts it, because the guest's cached filesystem metadata
+// describes the image that was there a moment ago. A SUSPENDED machine is
+// allowed and loses its memory image, so it cold-boots onto the restored disk
+// rather than waking with stale filesystem state.
+func (v *Volumes) RestoreSnapshot(ctx context.Context, id, snapshot string) (*SnapshotResponse, error) {
+	var out SnapshotResponse
+	return &out, v.c.do(ctx, http.MethodPost,
+		"/v1/volumes/"+url.PathEscape(id)+"/snapshots/"+url.PathEscape(snapshot)+"/restore", nil, &out)
+}

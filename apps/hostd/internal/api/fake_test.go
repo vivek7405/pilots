@@ -40,6 +40,10 @@ type fakeManager struct {
 	processLogTail int
 	// resizedTo is the size the last resize asked for, as {vcpus, mem_mib}.
 	resizedTo [2]int
+	// The volume snapshot surface: what was taken, listed and restored.
+	volumeSnapshots   []string
+	snapshotted       []string
+	restoredSnapshots []string
 }
 
 func newFakeManager() *fakeManager {
@@ -207,3 +211,31 @@ func (f *fakeManager) AttachStream(http.ResponseWriter, *http.Request, string, s
 	return nil
 }
 func (f *fakeManager) KillSession(context.Context, string, string) error { return nil }
+
+// The volume snapshot surface, recorded rather than performed: what the API
+// tests assert is which volume was named and whether the owner-host forward
+// happened, not what juicefs did.
+func (f *fakeManager) SnapshotVolume(_ context.Context, volumeID string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return "", f.err
+	}
+	stamp := "20260912T101500Z"
+	f.volumeSnapshots = append([]string{stamp}, f.volumeSnapshots...)
+	f.snapshotted = append(f.snapshotted, volumeID)
+	return stamp, nil
+}
+
+func (f *fakeManager) ListVolumeSnapshots(context.Context, string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.volumeSnapshots, f.err
+}
+
+func (f *fakeManager) RestoreVolumeSnapshot(_ context.Context, volumeID, stamp string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.restoredSnapshots = append(f.restoredSnapshots, volumeID+"@"+stamp)
+	return f.err
+}

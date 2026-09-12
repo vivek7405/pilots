@@ -319,6 +319,12 @@ func Routes(d Deps) http.Handler {
 	// Volumes and fleet.
 	mux.HandleFunc("POST /v1/volumes", d.handleCreateVolume)
 	mux.HandleFunc("GET /v1/volumes", d.handleListVolumes)
+	// Point-in-time copies. Served by the host that MOUNTS the volume, because
+	// a snapshot is a clone inside the volume's own filesystem; a request
+	// elsewhere is forwarded there.
+	mux.HandleFunc("POST /v1/volumes/{id}/snapshots", d.handleCreateVolumeSnapshot)
+	mux.HandleFunc("GET /v1/volumes/{id}/snapshots", d.handleListVolumeSnapshots)
+	mux.HandleFunc("POST /v1/volumes/{id}/snapshots/{stamp}/restore", d.handleRestoreVolumeSnapshot)
 	// The volume drive as Firecracker holds it, not as hostd meant to set it.
 	// See MachineVolume: the difference between the two is a durability
 	// guarantee that fails silently.

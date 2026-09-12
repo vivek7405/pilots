@@ -95,6 +95,26 @@ class Machine:
 
 
 @dataclass
+class SnapshotResponse:
+    """One point-in-time copy of a volume.
+
+    ``snapshot`` is the stamp that names it, ``20260912T101500Z``. It sorts
+    lexically in time order, so a list needs no separate ordering field.
+    """
+
+    volume_id: str = ""
+    snapshot: str = ""
+
+
+@dataclass
+class SnapshotListResponse:
+    """Every snapshot of a volume, newest first."""
+
+    volume_id: str = ""
+    snapshots: list[str] = field(default_factory=list)
+
+
+@dataclass
 class DrainReport:
     """What draining a host did.
 

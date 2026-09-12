@@ -70,6 +70,15 @@ type Manager interface {
 	CreateVolume(ctx context.Context, req CreateVolumeRequest) (*state.Volume, error)
 	ListVolumes(ctx context.Context) ([]state.Volume, error)
 	MachineVolume(ctx context.Context, machineID string) (*MachineVolume, error)
+	// SnapshotVolume takes a point-in-time copy, pausing the guest for the
+	// clone when one is running: a clone taken while the guest writes captures
+	// a filesystem mid-update, which mounts and then fails later.
+	SnapshotVolume(ctx context.Context, volumeID string) (string, error)
+	ListVolumeSnapshots(ctx context.Context, volumeID string) ([]string, error)
+	// RestoreVolumeSnapshot puts a snapshot back as the live image. Refuses a
+	// running machine and drops a suspended one's memory image, which held
+	// cached filesystem state from the disk being replaced.
+	RestoreVolumeSnapshot(ctx context.Context, volumeID, stamp string) error
 }
 
 // toAPI converts a stored row to the wire shape.

@@ -133,6 +133,23 @@ export interface Machine {
  * time, which is what makes it safe to put in somebody else's firewall.
  */
 /**
+ * One point-in-time copy of a volume.
+ *
+ * `snapshot` is the stamp that names it, `20260912T101500Z`. It sorts
+ * lexically in time order, so a list needs no separate ordering field.
+ */
+export interface SnapshotResponse {
+  volume_id: string
+  snapshot: string
+}
+
+/** Every snapshot of a volume, newest first. */
+export interface SnapshotListResponse {
+  volume_id: string
+  snapshots: string[]
+}
+
+/**
  * What draining a host did. `POST /v1/hosts/{id}/drain`.
  *
  * The machines in `moved` are on other hosts now, with the same ids, names and
