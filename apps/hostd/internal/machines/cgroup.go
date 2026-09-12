@@ -39,12 +39,30 @@ var cgroupRoot = "/sys/fs/cgroup"
 
 // machineCgroup is the directory the jailer makes for one machine.
 //
-// The layout is the jailer's: <root>/<parent-cgroup>/<exec file name>/<id>.
-// Built from the same three values hostd passes it (see fc.jailerArgs), so the
-// two cannot drift without this failing loudly rather than silently writing
-// into the wrong slice.
+// TWO layouts, and which one you get depends on the jailer's version: older
+// builds nest the slice under the exec file's name,
+// <root>/pilots/<exec file name>/<id>, and current ones put it directly at
+// <root>/pilots/<id>. The rig runs the second. gate.sh has resolved this with a
+// `find` since it was written, for exactly this reason.
+//
+// Assuming one of them is how a reader of these numbers gets zeroes: a cgroup
+// path that does not exist reads as a machine using no CPU and no memory, which
+// is indistinguishable from an idle one and wrong in the direction nobody
+// checks. So both are tried, nested first because a host that has both wants
+// the one the jailer actually made.
 func machineCgroup(execFileName, machineID string) string {
-	return filepath.Join(cgroupRoot, "pilots", execFileName, machineID)
+	nested := filepath.Join(cgroupRoot, "pilots", execFileName, machineID)
+	if _, err := os.Stat(nested); err == nil {
+		return nested
+	}
+	flat := filepath.Join(cgroupRoot, "pilots", machineID)
+	if _, err := os.Stat(flat); err == nil {
+		return flat
+	}
+	// Neither exists. The nested one is returned so a caller that logs a
+	// failure names the path the jailer was asked for, which is the one worth
+	// looking at.
+	return nested
 }
 
 // joinHandlersToCgroup moves a machine's handler processes into its cgroup.
