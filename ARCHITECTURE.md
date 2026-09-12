@@ -1545,6 +1545,19 @@ One consequence to carry into operations: **a rescued database has a different
 RTO from every other machine.** Everything else restores instantly from its
 snapshot; a database restores and then replays WAL.
 
+**The honesty layer is part of the feature, not documentation added afterwards.**
+The decision not to build a managed-database tier is the right one -- fly built
+that company and wrote about what it cost -- but a platform that runs databases
+while leaving people to assume they are managed has made the most expensive
+mistake available to it. So the numbers above are surfaced where a USER meets
+them rather than only here: `pilot add` prints which durability mode was chosen
+and what it costs, every time and not behind a flag, and says in one line who
+operates what. `docs/honesty.md` is the long form -- what is automatic, what is
+not, exactly how much data each mode can lose, and how long each kind of
+recovery takes. It ends by saying that an application here talking to a managed
+database elsewhere is an ordinary configuration rather than a workaround,
+because the honest answer to "should we operate your database" is usually no.
+
 ---
 
 ## Authentication (first-class GitHub login)

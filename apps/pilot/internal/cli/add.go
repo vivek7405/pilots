@@ -149,6 +149,11 @@ func newAddCmd(env *Env, getenv config.Env) *cobra.Command {
 				env.W.Notef("add this to whichever service uses it:\n  environment:\n    %s", line)
 			}
 			env.W.Notef("then `pilot deploy` to bring it up")
+			// Said once, on the command that creates the expectation. A
+			// platform that lets somebody believe their database is operated
+			// for them has made the most expensive mistake available to it.
+			env.W.Notef("you operate this database; we operate the platform it runs on. " +
+				"docs/honesty.md says exactly which is which")
 			return nil
 		},
 	}
