@@ -779,6 +779,44 @@ with object storage fully intact — so it is the one piece of state whose
 durability is the operator's job, in the same trust class as the SSH key that
 runs the bootstrap. Rotation requires a re-seal sweep over the affected rows.
 
+### Machine observability
+
+Two endpoints, and neither touches the host's own `/metrics`, which stays
+unauthenticated and label-free because a label per machine multiplies every
+series by the machine count.
+
+- `GET /v1/machines/{id}/metrics` — one machine's CPU seconds and memory,
+  read from its cgroup by the host that owns it. A host asked about another's
+  machine forwards rather than answering with zeroes.
+- `GET /v1/metrics` — every machine a key can see, as Prometheus text. The
+  local replica says which machines those are and where they run, which never
+  leaves the host; the owners are then asked in parallel, once each, carrying
+  the caller's own bearer so each narrows by the same rule.
+
+**The CPU total is monotonic across suspend and wake.** A cgroup dies with a
+suspend and its counter restarts, so the total is persisted beside the machine
+and added back. A counter that goes down makes every rate over it negative and
+fires every alert built on it whenever a machine suspends.
+
+**An unreachable host is a named series, not a failed scrape.** A scrape that
+went blank because one host was slow would go blank exactly when somebody is
+looking at why a host is slow.
+
+**Console logs are host-local and bounded, and they are NOT machine state.**
+The live log rotates at 8 MiB and one rotation is kept, so no machine holds
+more than 16 MiB, on the machine's state directory. Rule 3 is unchanged by
+this: wipe a host and the logs are gone while every machine restores from
+object storage exactly as before. The rotation is copytruncate, and the serial
+log is opened `O_APPEND` for that reason — a plain descriptor keeps its own
+offset and would leave a multi-megabyte hole of zero bytes in front of every
+later line.
+
+A follow is resumable: `X-Pilot-Log-Offset` says where a body starts, `?offset=`
+says where to start it, `?tail=N` takes only the end, and `Accept:
+text/event-stream` carries the offset as each event's id so `Last-Event-ID` is
+an exact resume. The plain-text default is byte for byte what it was, because
+the CLI, three SDKs, the MCP tool and the dashboard all read it.
+
 ### Brokered credentials
 
 A machine holds no API key, and that is the point. A key baked into a guest is

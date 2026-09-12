@@ -193,6 +193,10 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
   is bar 4 as a test rather than a claim.
 - `scripts/cluster/gate.sh` is the fleet battery, a numbered `say` section per
   property, run against the local multi-node rig. It grows monotonically too.
+  Section 42 covers per-machine numbers and log rotation: the reported memory
+  against what the kernel itself says, a scrape on a host that does NOT own the
+  machine, and a console log that stays bounded with its writer still appending
+  at the new end after a rotation.
   Section 41 covers the credential broker: a socket bound inside one machine's
   namespace and in no other, nothing holding a token in the clear on the host,
   and a token minted on one host accepted by another with no lookup -- none of

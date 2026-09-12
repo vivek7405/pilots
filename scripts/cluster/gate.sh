@@ -3738,6 +3738,93 @@ else
   fi
 fi
 
+say "42. Per-machine numbers come from the kernel, and logs stay bounded"
+# B3. The e2e battery asserts the shape and the scoping. Only a host shell can
+# check the number against what the kernel actually says, and only a host shell
+# can see that a log was rotated rather than merely reported as rotated.
+MX_IP="${LIVE_IPS[0]:-${IPS[0]}}"
+MX_M=$(api "$MX_IP" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
+MX_ID=$(echo "$MX_M" | jf id)
+if [ -z "$MX_ID" ]; then
+  bad "could not create a machine to measure: $MX_M"
+else
+  # The API's number against the cgroup's own file. A reading that agreed with
+  # itself but not with the kernel would be a confident wrong answer, which is
+  # the only kind worth testing for here.
+  MX_SLICE=$($SSH "root@$MX_IP" "find /sys/fs/cgroup/pilots -maxdepth 3 -type d -name '${MX_ID}' 2>/dev/null | head -1" 2>/dev/null | tr -d '[:space:]')
+  if [ -z "$MX_SLICE" ]; then
+    bad "no cgroup slice for ${MX_ID}"
+  else
+    MX_KERNEL=$($SSH "root@$MX_IP" "cat ${MX_SLICE}/memory.current" 2>/dev/null | tr -d '[:space:]')
+    MX_API=$(api "$MX_IP" GET "/v1/machines/${MX_ID}/metrics" | jq -r '.memory_bytes' 2>/dev/null)
+    if [ -n "$MX_KERNEL" ] && [ -n "$MX_API" ] && [ "$MX_API" != "null" ] && [ "${MX_KERNEL:-0}" -gt 0 ]; then
+      # Within ten percent, because the two reads are moments apart on a
+      # running guest and an exact match would be a test that fails on timing.
+      MX_DIFF=$(( MX_API > MX_KERNEL ? MX_API - MX_KERNEL : MX_KERNEL - MX_API ))
+      MX_ALLOW=$(( MX_KERNEL / 10 ))
+      [ "$MX_DIFF" -le "$MX_ALLOW" ] \
+        && ok "the reported memory matches the kernel (api=${MX_API} kernel=${MX_KERNEL})" \
+        || bad "api=${MX_API} but the kernel says ${MX_KERNEL}"
+      echo "  MEASURED machine_memory_bytes=${MX_KERNEL}"
+    else
+      bad "could not compare (api=${MX_API} kernel=${MX_KERNEL})"
+    fi
+  fi
+
+  # A scrape on a host that does NOT own the machine still carries it. That is
+  # the whole promise of a fleet-wide scrape, and it is the half that cannot be
+  # tested on one host.
+  if [ "${#LIVE_IPS[@]}" -gt 1 ]; then
+    MX_OTHER="${LIVE_IPS[1]}"
+    MX_SCRAPE=$(curl -sk -H "Authorization: Bearer ${KEY}" "https://${MX_OTHER}:8080/v1/metrics" 2>/dev/null | grep -c "machine=\"${MX_ID}\"")
+    [ "${MX_SCRAPE:-0}" -ge 1 ] \
+      && ok "a scrape on a non-owner host carries a machine owned elsewhere" \
+      || bad "host ${MX_OTHER} scraped nothing for ${MX_ID}"
+  fi
+
+  # Twenty megabytes of console output, then the rotation. The assertion is on
+  # the FILES, because "the log was rotated" reported by the thing that rotates
+  # it is not evidence.
+  api "$MX_IP" POST "/v1/machines/${MX_ID}/exec" \
+    '{"cmd":"for i in $(seq 1 20000); do head -c 1000 /dev/zero | tr \"\\0\" \"x\" > /dev/console; echo >/dev/console; done","user":"root","timeout_ms":120000}' \
+    >/dev/null 2>&1 || true
+
+  # The idle monitor rotates on its own walk, so this waits for a tick rather
+  # than poking anything: a rotation that needed poking is one that would never
+  # happen on a real host.
+  sleep 35
+  MX_DIR="/var/lib/pilots/machines/${MX_ID}"
+  MX_LIVE=$($SSH "root@$MX_IP" "stat -c %s ${MX_DIR}/lifecycle.log 2>/dev/null || echo 0" 2>/dev/null | tr -d '[:space:]')
+  MX_ROTATED=$($SSH "root@$MX_IP" "stat -c %s ${MX_DIR}/lifecycle.log.1 2>/dev/null || echo 0" 2>/dev/null | tr -d '[:space:]')
+  MX_CEILING=$(( 8 * 1024 * 1024 ))
+  if [ "${MX_LIVE:-0}" -le "$MX_CEILING" ]; then
+    ok "the live console log is under the ceiling (${MX_LIVE} bytes)"
+  else
+    bad "the live log is ${MX_LIVE} bytes, over the ${MX_CEILING} ceiling"
+  fi
+  echo "  MEASURED console_log_live_bytes=${MX_LIVE:-0} console_log_rotated_bytes=${MX_ROTATED:-0}"
+
+  # At most two files, so at most 16 MiB per machine. A third would mean the
+  # rotation grows the directory rather than bounding it.
+  MX_FILES=$($SSH "root@$MX_IP" "ls ${MX_DIR}/lifecycle.log* 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
+  [ "${MX_FILES:-0}" -le 2 ] \
+    && ok "at most two console log files per machine" \
+    || bad "${MX_FILES} console log files for one machine"
+
+  # The writer survived the rotation. A plain O_WRONLY descriptor would have
+  # left a multi-megabyte hole of NUL bytes in front of every line after it,
+  # which is what this looks for.
+  api "$MX_IP" POST "/v1/machines/${MX_ID}/exec" \
+    '{"cmd":"echo AFTER-ROTATION > /dev/console","user":"root"}' >/dev/null 2>&1 || true
+  sleep 2
+  MX_HOLE=$($SSH "root@$MX_IP" "head -c 4096 ${MX_DIR}/lifecycle.log 2>/dev/null | tr -d '\\000' | wc -c" 2>/dev/null | tr -d '[:space:]')
+  [ "${MX_HOLE:-0}" -gt 0 ] \
+    && ok "the console keeps writing at the new end after a rotation" \
+    || bad "the log begins with NUL bytes: the writer kept its old offset"
+
+  api "$MX_IP" DELETE "/v1/machines/${MX_ID}" >/dev/null 2>&1 || true
+fi
+
 say "Result"
 echo "  ${PASS} passed, ${FAIL} failed"
 echo

@@ -6320,6 +6320,157 @@ async function sha256Hex(value) {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+// Per-machine numbers, and a log follow that can be resumed.
+//
+// The scoping assertion is the one that matters most here: a scrape is a new
+// way to read about machines, so it is a new way to read about somebody else's
+// machines if the narrowing is wrong. It is checked with a second org's key,
+// against the same host, which is exactly the shape a mistake would take.
+async function observabilityAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const created = [];
+
+  try {
+    let machine;
+    await step('a machine reports its own CPU and memory', async () => {
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST',
+        body: { name: `metrics-${tag}`, mem_mib: 512, knobs: { auto_stop: 'off' } },
+      });
+      assert(status === 201, `create: HTTP ${status} ${JSON.stringify(json)}`);
+      machine = json;
+      created.push(machine.id);
+
+      const got = await request(`/v1/machines/${machine.id}/metrics`);
+      assert(got.status === 200, `metrics: HTTP ${got.status} ${JSON.stringify(got.json)}`);
+      assert(got.json.machine_id === machine.id, `machine_id = ${got.json.machine_id}`);
+      assert(got.json.state === 'running', `state = ${got.json.state}`);
+      assert(got.json.memory_limit_bytes === 512 * 1024 * 1024,
+        `memory_limit_bytes = ${got.json.memory_limit_bytes}, want 512 MiB`);
+      assert(got.json.sampled_at > 0, 'the sample carries no time');
+    });
+
+    let before = 0;
+    await step('the scrape carries this machine, by id and by name', async () => {
+      const res = await fetch(`${API}/v1/metrics`, {
+        headers: { Authorization: `Bearer ${KEY}` },
+      });
+      assert(res.status === 200, `scrape: HTTP ${res.status}`);
+      const body = await res.text();
+      assert(body.includes(`machine="${machine.id}"`), `the scrape omits ${machine.id}`);
+      assert(body.includes(`name="metrics-${tag}"`), 'the scrape omits the name label');
+      assert(body.includes('# TYPE pilots_machine_cpu_seconds_total counter'),
+        'the CPU total is not typed as a counter, so nothing will rate it');
+      before = cpuFromExposition(body, machine.id);
+    });
+
+    // A counter has to go UP when work is done, or it is not measuring
+    // anything. Real CPU, burned on purpose.
+    await step('burning CPU raises the counter', async () => {
+      await request(`/v1/machines/${machine.id}/exec`, {
+        method: 'POST',
+        body: { cmd: 'timeout 3 sh -c "while :; do :; done" || true', user: 'root' },
+      });
+      const got = await request(`/v1/machines/${machine.id}/metrics`);
+      assert(got.status === 200, `metrics: HTTP ${got.status}`);
+      assert(got.json.cpu_seconds > before,
+        `cpu_seconds = ${got.json.cpu_seconds}, was ${before}: burning three ` +
+        `seconds of CPU did not move the counter`);
+      before = got.json.cpu_seconds;
+    });
+
+    // The whole reason the total is persisted. A counter that dipped here
+    // would make every rate over it negative and fire every alert built on it.
+    await step('a suspend and a wake never lower the counter', async () => {
+      await request(`/v1/machines/${machine.id}/suspend`, { method: 'POST' });
+      const asleep = await request(`/v1/machines/${machine.id}/metrics`);
+      assert(asleep.status === 200, `metrics while suspended: HTTP ${asleep.status}`);
+      assert(asleep.json.cpu_seconds >= before,
+        `cpu_seconds fell to ${asleep.json.cpu_seconds} from ${before} on suspend`);
+      assert(asleep.json.memory_bytes === 0,
+        `a suspended machine reports ${asleep.json.memory_bytes} bytes of memory`);
+
+      await request(`/v1/machines/${machine.id}/wake`, { method: 'POST' });
+      const awake = await request(`/v1/machines/${machine.id}/metrics`);
+      assert(awake.json.cpu_seconds >= before,
+        `cpu_seconds fell to ${awake.json.cpu_seconds} from ${before} across a wake`);
+    });
+
+    // A scrape is a new way to read about machines, so it is a new way to read
+    // about somebody else's if the narrowing is wrong.
+    await step('another org sees none of it', async () => {
+      const mint = await request('/v1/api-keys', {
+        method: 'POST',
+        body: { name: `metrics-other-${tag}`, scopes: ['machines'], org: `org-metrics-${tag}` },
+      });
+      assert(mint.status === 201, `mint: HTTP ${mint.status} ${JSON.stringify(mint.json)}`);
+      const other = mint.json.key ?? mint.json.token;
+      assert(other, `no key in ${JSON.stringify(mint.json)}`);
+
+      const res = await fetch(`${API}/v1/metrics`, {
+        headers: { Authorization: `Bearer ${other}` },
+      });
+      assert(res.status === 200, `the other org's scrape: HTTP ${res.status}`);
+      const body = await res.text();
+      assert(!body.includes(machine.id),
+        `a second org's scrape carries ${machine.id}`);
+
+      const direct = await request(`/v1/machines/${machine.id}/metrics`, { key: other });
+      assert(direct.status === 404,
+        `a second org read another org's metrics directly: ${direct.status}`);
+    });
+
+    await step('a log tail is the END of the log, and an offset resumes exactly', async () => {
+      for (let i = 0; i < 5; i += 1) {
+        await request(`/v1/machines/${machine.id}/exec`, {
+          method: 'POST',
+          body: { cmd: `echo marker-${tag}-${i} > /dev/console`, user: 'root' },
+        });
+      }
+      const whole = await fetch(`${API}/v1/machines/${machine.id}/logs`, {
+        headers: { Authorization: `Bearer ${KEY}` },
+      });
+      const text = await whole.text();
+      assert(whole.headers.get('x-pilot-log-offset') === '0',
+        `a whole log starts at ${whole.headers.get('x-pilot-log-offset')}, want 0`);
+
+      const tailed = await fetch(`${API}/v1/machines/${machine.id}/logs?tail=1`, {
+        headers: { Authorization: `Bearer ${KEY}` },
+      });
+      const tailBody = await tailed.text();
+      assert(tailBody.split('\n').filter((l) => l !== '').length <= 1,
+        `?tail=1 returned ${tailBody.split('\n').length} lines`);
+      assert(text.endsWith(tailBody), 'the tail is not the end of the log');
+
+      // The resume: start where a previous read ended and get exactly what
+      // came after, with nothing repeated and nothing skipped.
+      const half = Math.floor(text.length / 2);
+      const resumed = await fetch(`${API}/v1/machines/${machine.id}/logs?offset=${half}`, {
+        headers: { Authorization: `Bearer ${KEY}` },
+      });
+      assert(resumed.headers.get('x-pilot-log-offset') === String(half),
+        `the offset header says ${resumed.headers.get('x-pilot-log-offset')}, want ${half}`);
+      const rest = await resumed.text();
+      assert(text.slice(half) === rest,
+        'resuming at an offset did not return exactly the bytes after it');
+    });
+  } finally {
+    for (const id of created) {
+      await request(`/v1/machines/${id}`, { method: 'DELETE' }).catch(() => {});
+    }
+  }
+}
+
+// cpuFromExposition reads one machine's CPU total out of a scrape.
+function cpuFromExposition(body, machineID) {
+  for (const line of body.split('\n')) {
+    if (!line.startsWith('pilots_machine_cpu_seconds_total{')) continue;
+    if (!line.includes(`machine="${machineID}"`)) continue;
+    return Number(line.slice(line.lastIndexOf(' ') + 1));
+  }
+  return 0;
+}
+
 async function agentDeployAssertions(REFLINK) {
   const tag = Math.random().toString(36).slice(2, 8);
   const app = `gate-django-${tag}`;
@@ -6875,6 +7026,7 @@ async function main() {
     await volumeAssertions();
     await forkAssertions();
     await brokerAssertions();
+    await observabilityAssertions();
     await buildAssertions();
     await internalAssertions();
     await edgeAssertions();
