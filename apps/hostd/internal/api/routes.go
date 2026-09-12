@@ -281,6 +281,12 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("GET /v1/services/{id}/env", d.handleServiceEnv)
 	// What a machine, or every replica of a service, may ask its host's broker
 	// for. Deny by default: no row means no token and no secrets.
+	// What ONE machine is using, from the host that owns it.
+	mux.HandleFunc("GET /v1/machines/{id}/metrics", d.handleMachineMetrics)
+	// What ALL of a caller's machines are using, from any host. Not the host's
+	// own /metrics, which stays unauthenticated and label-free: see
+	// machinemetrics.go for why that decision is not being reversed.
+	mux.HandleFunc("GET /v1/metrics", d.handleTenantMetrics)
 	mux.HandleFunc("GET /v1/machines/{id}/secrets", d.handleGetMachineGrant)
 	mux.HandleFunc("PUT /v1/machines/{id}/secrets", d.handlePutMachineGrant)
 	mux.HandleFunc("DELETE /v1/machines/{id}/secrets", d.handleDeleteMachineGrant)

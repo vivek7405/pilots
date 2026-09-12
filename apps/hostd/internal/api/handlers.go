@@ -83,6 +83,11 @@ type Manager interface {
 	// holds a refcount on every block it references, so blocks the live volume
 	// has overwritten stay until the snapshot goes.
 	DeleteVolumeSnapshot(ctx context.Context, volumeID, stamp string) error
+	// Stats is what one machine is using, read from its cgroup on the host
+	// that owns it. A machine with no cgroup -- suspended, or a host that does
+	// not account that way -- is not an error: it reports its persisted CPU
+	// total and no memory, because that is what a suspended machine uses.
+	Stats(ctx context.Context, id string) (*Stats, error)
 	// ForkVolumeSnapshot makes a NEW volume holding a snapshot's contents,
 	// leaving the original alone. This copies bytes: slice ids are per
 	// filesystem, so a new volume shares nothing with the old one.

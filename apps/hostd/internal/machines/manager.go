@@ -757,6 +757,12 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 		slotIdx = fcm.Slot.Idx
 	}
 
+	// The CPU total, before the cgroup that holds it goes away. After a wake
+	// the kernel's counter restarts at zero, and a counter that restarts is a
+	// counter nothing can rate: every graph over it dips and every alert on it
+	// fires on an ordinary suspend.
+	m.PersistCPU(id)
+
 	// The guest must write out its page cache before we capture the disk, or
 	// the memory and disk images disagree about recent writes.
 	m.reclaimGuestMemory(ctx, id)

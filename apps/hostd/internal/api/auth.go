@@ -152,6 +152,12 @@ var scopePrefixes = []struct {
 	{"/v1/plan", ScopeMachines},
 	{"/v1/hosts", ScopeMachines},
 	{"/v1/whoami", ScopeMachines},
+	// The TENANT scrape. machines-scoped, because it answers the same question
+	// a machine list answers and is narrowed by the same rule: a key that
+	// cannot see a machine cannot see its numbers. Distinct from the host's own
+	// unauthenticated /metrics, which is not in this table because it is
+	// exempt.
+	{"/v1/metrics", ScopeMachines},
 	// The lowest scope opens the MCP endpoint; each tool then calls its own
 	// route back through this table with the same key, so a machines key
 	// reaches list_machines and is refused list_services, exactly as it

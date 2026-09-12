@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
@@ -305,4 +306,19 @@ func (f *fakeManager) ForkVolumeSnapshot(_ context.Context, volumeID, stamp, nam
 		out.Name = name
 	}
 	return &out, nil
+}
+
+// Stats answers a fixed sample. Fixed rather than zero so a test asserting the
+// shape can tell "the handler read the manager" from "the handler returned an
+// empty struct", which are the same thing when every field is zero.
+func (f *fakeManager) Stats(_ context.Context, id string) (*Stats, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &Stats{
+		CPUSeconds: 12.5, MemoryBytes: 64 << 20, MemoryLimitBytes: 512 << 20,
+		SampledAt: time.Unix(1700000000, 0),
+	}, nil
 }
