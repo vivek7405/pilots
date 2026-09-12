@@ -503,6 +503,22 @@ class ComposeStep:
     private: bool | None = None
     custom_domain: str | None = None
     pre_deploy: str | None = None
+    processes: list["ComposeProcess"] | None = None
+
+
+@dataclass
+class ComposeProcess:
+    """One named command inside a machine that runs several.
+
+    Filled when several compose services share one build context and therefore
+    run as one machine. The ordinary case is one service, one machine, one
+    process named ``app``, and this is then absent.
+    """
+
+    name: str = ""
+    cmd: str | None = None
+    needs: list[str] | None = None
+    port: bool | None = None
 
 
 @dataclass

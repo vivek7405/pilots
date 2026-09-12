@@ -655,6 +655,22 @@ export interface ComposeStep {
   private?: boolean
   custom_domain?: string
   pre_deploy?: string
+  /**
+   * Filled when SEVERAL compose services share one build context and therefore
+   * run as one machine with one process each. Absent is the ordinary case: one
+   * service, one machine, one process named `app`.
+   */
+  processes?: ComposeProcess[]
+}
+
+/** One named command inside a machine that runs several. */
+export interface ComposeProcess {
+  name: string
+  cmd?: string
+  /** Everything named here starts before this process does. */
+  needs?: string[]
+  /** Marks the one process that owns the machine's published port. */
+  port?: boolean
 }
 
 export interface ComposePlan {

@@ -667,6 +667,21 @@ type ComposeStep struct {
 	Private      bool   `json:"private,omitempty"`
 	CustomDomain string `json:"custom_domain,omitempty"`
 	PreDeploy    string `json:"pre_deploy,omitempty"`
+	// Processes is filled when SEVERAL compose services share one build
+	// context and therefore run as one machine with one process each. Empty is
+	// the ordinary case: one service, one machine, one process named app.
+	Processes []ComposeProcess `json:"processes,omitempty"`
+}
+
+// ComposeProcess is one named command inside a machine that runs several.
+type ComposeProcess struct {
+	Name string `json:"name"`
+	Cmd  string `json:"cmd,omitempty"`
+	// Needs orders the start within the machine: everything named here starts
+	// before this process does.
+	Needs []string `json:"needs,omitempty"`
+	// Port marks the one process that owns the machine's published port.
+	Port bool `json:"port,omitempty"`
 }
 
 type ComposePlan struct {
@@ -773,6 +788,7 @@ var wireTypes = []any{
 	ComposeBuild{},
 	ComposeVolume{},
 	ComposeStep{},
+	ComposeProcess{},
 	ComposePlan{},
 	ComposeUnsupported{},
 	ComposePlanError{},
