@@ -14,7 +14,8 @@ func quotaToAPI(q state.Quota) QuotaResponse {
 	return QuotaResponse{
 		OrgID: q.OrgID, MaxMachines: q.MaxMachines, MaxVCPUs: q.MaxVCPUs,
 		MaxMemMiB: q.MaxMemMiB, MaxVolumeGiB: q.MaxVolumeGiB,
-		MaxBuilds: q.MaxBuilds, UpdatedAt: q.UpdatedAt,
+		MaxBuilds: q.MaxBuilds, MaxSnapshotGiB: q.MaxSnapshotGiB,
+		UpdatedAt: q.UpdatedAt,
 	}
 }
 
@@ -47,7 +48,7 @@ func (d Deps) handlePutQuota(w http.ResponseWriter, r *http.Request) {
 	// frozen. Negative is not: it would read as an unreachable limit and
 	// silently admit everything.
 	for _, v := range []int{req.MaxMachines, req.MaxVCPUs, req.MaxMemMiB,
-		req.MaxVolumeGiB, req.MaxBuilds} {
+		req.MaxVolumeGiB, req.MaxBuilds, req.MaxSnapshotGiB} {
 		if v < 0 {
 			WriteError(w, http.StatusBadRequest, CodeBadRequest, "a quota cannot be negative",
 				"every limit is zero or more", nil)
@@ -58,7 +59,15 @@ func (d Deps) handlePutQuota(w http.ResponseWriter, r *http.Request) {
 	row := &state.Quota{
 		OrgID: org, MaxMachines: req.MaxMachines, MaxVCPUs: req.MaxVCPUs,
 		MaxMemMiB: req.MaxMemMiB, MaxVolumeGiB: req.MaxVolumeGiB,
-		MaxBuilds: req.MaxBuilds, UpdatedAt: time.Now().Unix(),
+		MaxBuilds: req.MaxBuilds, MaxSnapshotGiB: req.MaxSnapshotGiB,
+		UpdatedAt: time.Now().Unix(),
+	}
+	// Zero means the default here, not zero, unlike every other limit on this
+	// body. A client written against the previous shape sends no
+	// max_snapshot_gib at all, and reading that as "hold no checkpoints" would
+	// freeze an org's checkpoints the first time anybody touched its quota.
+	if row.MaxSnapshotGiB == 0 {
+		row.MaxSnapshotGiB = quota.Defaults.MaxSnapshotGiB
 	}
 	if err := d.Store.PutQuota(r.Context(), row); err != nil {
 		writeMapped(w, err)

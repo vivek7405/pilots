@@ -150,6 +150,12 @@ func run() error {
 		return fmt.Errorf("could not publish this host's cpu vendor: %w", err)
 	}
 
+	// Where this host stages checkpoints, so the snapshot quota counts the
+	// same directories the manager writes. Set once, here, rather than passed
+	// through every call: the quota package must not depend on machines, which
+	// depends on quota.
+	quota.SetCheckpointRoot(filepath.Join(cfg.CacheRoot(), "machines"))
+
 	uploader, err := newUploader(cfg)
 	if err != nil {
 		return err

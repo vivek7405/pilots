@@ -92,6 +92,7 @@ test('activating pro writes the plan and pushes its bundle to the fleet as the q
     max_mem_mib: PLANS.pro.quota.memMib,
     max_volume_gib: PLANS.pro.quota.storageGib,
     max_builds: PLANS.pro.quota.builds,
+    max_snapshot_gib: PLANS.pro.quota.snapshotGib,
   });
 
   const org = (await db.query.orgs.findMany()).find((o) => o.id === orgId)!;

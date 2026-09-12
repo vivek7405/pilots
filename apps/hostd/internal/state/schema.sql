@@ -354,6 +354,23 @@ CREATE TABLE IF NOT EXISTS org_quotas (          -- writer: any host, on an admi
   updated_at     INTEGER
 );
 
+-- How much object storage an org's checkpoints may hold.
+--
+-- A SEPARATE table rather than a column on org_quotas, and that is not a
+-- style choice: org_quotas carries rows on every running fleet, and cr-sqlite
+-- backfills every row of a table whose columns change and gossips the
+-- backfill. That is the fleet-wide storm that took fly down twice for ~11.5h
+-- (rule 6). A new table backfills nothing because it has no rows.
+--
+-- Read alongside org_quotas by GetQuota, so a caller sees one quota; an org
+-- with no row here has the default, exactly as an org with no org_quotas row
+-- does.
+CREATE TABLE IF NOT EXISTS org_snapshot_quotas (  -- writer: any host, on an admin-scoped request
+  org_id           TEXT NOT NULL PRIMARY KEY,
+  max_snapshot_gib INTEGER,
+  updated_at       INTEGER
+);
+
 -- Which repositories an org may ask this fleet to fetch.
 --
 -- The fleet's GitHub App holds an installation token for every repository it

@@ -627,7 +627,24 @@ func (s *Store) GetQuota(ctx context.Context, orgID string) (*state.Quota, error
 		&q.MaxVolumeGiB, &q.MaxBuilds, &q.UpdatedAt); err != nil {
 		return nil, err
 	}
-	return &q, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// The dual read for the snapshot limit, which lives in its own table
+	// because org_quotas has rows and a column add there is the cr-sqlite
+	// backfill rule 6 forbids. An org with no row here is every org that
+	// predates the table: it reads zero, which quota.Check takes as "use the
+	// default" rather than as "refuse everything".
+	snapRows, err := s.client.Query(ctx,
+		`SELECT max_snapshot_gib FROM org_snapshot_quotas WHERE org_id = ?`, orgID)
+	if err != nil {
+		return &q, nil
+	}
+	defer snapRows.Close()
+	if snapRows.Next() {
+		_ = snapRows.Scan(&q.MaxSnapshotGiB)
+	}
+	return &q, nil
 }
 
 // PutQuota updates in place, unlike the two tables above. One logical writer
@@ -644,6 +661,15 @@ func (s *Store) PutQuota(ctx context.Context, q *state.Quota) error {
 		q.MaxBuilds, q.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("state: put quota %q: %w", q.OrgID, err)
+	}
+	if _, err := s.client.Exec(ctx, `
+		INSERT INTO org_snapshot_quotas (org_id, max_snapshot_gib, updated_at)
+		VALUES (?,?,?)
+		ON CONFLICT(org_id) DO UPDATE SET
+			max_snapshot_gib=excluded.max_snapshot_gib,
+			updated_at=excluded.updated_at`,
+		q.OrgID, q.MaxSnapshotGiB, q.UpdatedAt); err != nil {
+		return fmt.Errorf("state: put snapshot quota %q: %w", q.OrgID, err)
 	}
 	return nil
 }

@@ -23,6 +23,12 @@ export interface QuotaBundle {
   storageGib: number;
   /** How many builds may run at the same time. */
   builds: number;
+  /**
+   * How much object storage this team's checkpoints may hold. Separate from
+   * `storageGib`, which is volumes: a checkpoint is billed and capped on its
+   * own because an agent can take one after every message.
+   */
+  snapshotGib: number;
 }
 
 export interface Plan {
@@ -44,14 +50,14 @@ export const PLANS: Record<PlanId, Plan> = {
     label: 'Free',
     blurb: 'Enough to build something real and keep it online.',
     usdPerMonth: 0,
-    quota: { instances: 5, vcpus: 8, memMib: 8_192, storageGib: 20, builds: 1 },
+    quota: { instances: 5, vcpus: 8, memMib: 8_192, storageGib: 20, builds: 1, snapshotGib: 20 },
   },
   pro: {
     id: 'pro',
     label: 'Pro',
     blurb: 'For a team running production work, with room to grow into.',
     usdPerMonth: 20,
-    quota: { instances: 50, vcpus: 64, memMib: 131_072, storageGib: 500, builds: 4 },
+    quota: { instances: 50, vcpus: 64, memMib: 131_072, storageGib: 500, builds: 4, snapshotGib: 200 },
   },
 };
 
@@ -85,6 +91,7 @@ export function quotaWire(org: string, quota: QuotaBundle): {
   max_mem_mib: number;
   max_volume_gib: number;
   max_builds: number;
+  max_snapshot_gib: number;
 } {
   return {
     org_id: org,
@@ -93,5 +100,6 @@ export function quotaWire(org: string, quota: QuotaBundle): {
     max_mem_mib: quota.memMib,
     max_volume_gib: quota.storageGib,
     max_builds: quota.builds,
+    max_snapshot_gib: quota.snapshotGib,
   };
 }

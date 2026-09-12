@@ -66,6 +66,7 @@ before(async () => {
     max_mem_mib: 8192,
     max_volume_gib: 100,
     max_builds: 4,
+    max_snapshot_gib: 50,
     updated_at: 0,
   };
 });

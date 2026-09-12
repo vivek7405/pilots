@@ -738,7 +738,12 @@ type QuotaResponse struct {
 	MaxMemMiB    int    `json:"max_mem_mib"`
 	MaxVolumeGiB int    `json:"max_volume_gib"`
 	MaxBuilds    int    `json:"max_builds"`
-	UpdatedAt    int64  `json:"updated_at,omitempty"`
+	// MaxSnapshotGiB is how much object storage this org's checkpoints may
+	// hold. Zero on a PUT means the default rather than none, because a client
+	// that sent the old body shape would otherwise freeze the org's
+	// checkpoints without meaning to.
+	MaxSnapshotGiB int   `json:"max_snapshot_gib"`
+	UpdatedAt      int64 `json:"updated_at,omitempty"`
 }
 
 // QuotaExceededResponse names the limit that refused a request, so a client is

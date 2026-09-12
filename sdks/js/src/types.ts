@@ -572,6 +572,12 @@ export interface QuotaResponse {
   max_mem_mib: number
   max_volume_gib: number
   max_builds: number
+  /**
+   * How much object storage this org's checkpoints may hold. Zero on a PUT
+   * means the default rather than none, so a client written against the older
+   * body shape does not freeze an org's checkpoints by omitting it.
+   */
+  max_snapshot_gib: number
   updated_at: number
 }
 

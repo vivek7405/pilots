@@ -429,6 +429,7 @@ class QuotaResponse:
     max_mem_mib: int = 0
     max_volume_gib: int = 0
     max_builds: int = 0
+    max_snapshot_gib: int = 0
     updated_at: int = 0
 
 

@@ -446,6 +446,12 @@ type Quota struct {
 	MaxVolumeGiB int
 	MaxBuilds    int
 	UpdatedAt    int64
+	// MaxSnapshotGiB is how much object storage this org's checkpoints may
+	// hold. It lives in its OWN table (org_snapshot_quotas), because
+	// org_quotas carries rows on every running fleet and a column add there is
+	// the cr-sqlite backfill rule 6 forbids. GetQuota reads both and PutQuota
+	// writes both, so a caller sees one quota.
+	MaxSnapshotGiB int
 }
 
 // Store is the swappable state backend.
@@ -1359,6 +1365,15 @@ func (s *sqliteStore) GetQuota(ctx context.Context, orgID string) (*Quota, error
 	if err != nil {
 		return nil, fmt.Errorf("state: get quota %q: %w", orgID, err)
 	}
+	// The dual read. An org with a quota but no snapshot row is every org that
+	// predates this table, and it gets zero here, which quota.Check reads as
+	// "use the default" rather than as "refuse everything".
+	var snap int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT max_snapshot_gib FROM org_snapshot_quotas WHERE org_id = ?`,
+		orgID).Scan(&snap); err == nil {
+		q.MaxSnapshotGiB = snap
+	}
 	return &q, nil
 }
 
@@ -1373,6 +1388,15 @@ func (s *sqliteStore) PutQuota(ctx context.Context, q *Quota) error {
 		q.MaxBuilds, q.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("state: put quota %q: %w", q.OrgID, err)
+	}
+	if _, err := s.db.ExecContext(ctx, `
+		INSERT INTO org_snapshot_quotas (org_id, max_snapshot_gib, updated_at)
+		VALUES (?,?,?)
+		ON CONFLICT(org_id) DO UPDATE SET
+			max_snapshot_gib=excluded.max_snapshot_gib,
+			updated_at=excluded.updated_at`,
+		q.OrgID, q.MaxSnapshotGiB, q.UpdatedAt); err != nil {
+		return fmt.Errorf("state: put snapshot quota %q: %w", q.OrgID, err)
 	}
 	return nil
 }

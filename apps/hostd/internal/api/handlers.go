@@ -600,6 +600,17 @@ func (d Deps) handleCreateCheckpoint(w http.ResponseWriter, r *http.Request) {
 	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
 		return
 	}
+	// A soft cap: what this checkpoint will weigh is unknown until it is
+	// taken, so the check admits while the org is under the line and overshoots
+	// by at most one checkpoint. Unbounded checkpointing is the case it
+	// catches; the retention policy is what bounds growth in the ordinary one.
+	if err := quota.Check(r.Context(), d.Store, actingOrg(r), quota.Delta{SnapshotGiB: 1}); err != nil {
+		if writeQuotaError(w, err) {
+			return
+		}
+		writeMapped(w, err)
+		return
+	}
 	ckpt, err := d.Machines.Checkpoint(r.Context(), r.PathValue("id"), req.Comment)
 	if err != nil {
 		writeMapped(w, err)
