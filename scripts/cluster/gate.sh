@@ -3647,6 +3647,97 @@ done
 
 rm -rf "$DB_DIR" 2>/dev/null || true
 
+say "41. The credential broker: bound per namespace, and nothing on disk"
+# A2. The e2e battery asserts what a machine can ask for. Only a host shell can
+# assert the two things that make those answers safe: that the socket exists
+# ONLY inside that machine's namespace, and that nothing on this host holds a
+# token in the clear.
+BK_IP="${LIVE_IPS[0]:-${IPS[0]}}"
+BK_M=$(api "$BK_IP" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
+BK_ID=$(echo "$BK_M" | jf id)
+if [ -z "$BK_ID" ]; then
+  bad "could not create a machine to broker for: $BK_M"
+else
+  # The namespace name is the machine id, the way every other section finds it.
+  BK_NS=$($SSH "root@$BK_IP" "ip netns list 2>/dev/null | grep -o '[^ ]*${BK_ID}[^ ]*' | head -1" 2>/dev/null | tr -d '[:space:]')
+  if [ -z "$BK_NS" ]; then
+    bad "no network namespace for ${BK_ID}"
+  else
+    # Bound INSIDE the namespace. This is the identity: a socket only that
+    # machine can reach, so the request path is the proof of who is asking.
+    BK_IN=$($SSH "root@$BK_IP" "ip netns exec ${BK_NS} ss -ltn 2>/dev/null | grep -c '169.254.0.22:3002'" 2>/dev/null | tr -d '[:space:]')
+    [ "${BK_IN:-0}" -ge 1 ] \
+      && ok "the broker is listening inside the machine's namespace" \
+      || bad "nothing on 169.254.0.22:3002 in ${BK_NS}"
+
+    # And NOT in the root namespace. A broker reachable from the host network
+    # would be reachable from every machine, which is the whole thing this
+    # design avoids.
+    BK_ROOT=$($SSH "root@$BK_IP" "ss -ltn 2>/dev/null | grep -c '169.254.0.22:3002'" 2>/dev/null | tr -d '[:space:]')
+    [ "${BK_ROOT:-0}" = "0" ] \
+      && ok "the broker is not bound in the root namespace" \
+      || bad "the broker is listening on the host network; every machine could reach it"
+  fi
+
+  # Granted, then asked for from inside, which is the only place it answers.
+  api "$BK_IP" PUT "/v1/machines/${BK_ID}/secrets" \
+    '{"scopes":["machines"],"secrets":{"GATE_BROKER_CHECK":"gate-value-41"}}' >/dev/null 2>&1
+  BK_TOKEN=$(api "$BK_IP" POST "/v1/machines/${BK_ID}/exec" \
+    '{"cmd":"curl -s \"$PILOT_BROKER_URL/token\"","user":"root"}' | jq -r '.stdout' 2>/dev/null | jq -r '.token' 2>/dev/null)
+  case "$BK_TOKEN" in
+    pbt1.*) ok "the machine minted its own token from inside its namespace" ;;
+    *) bad "no token: $BK_TOKEN" ;;
+  esac
+
+  # A token minted on THIS host is accepted by another, with no forward header
+  # and no row anywhere. That is the whole reason it is a signed claim.
+  if [ -n "$BK_TOKEN" ] && [ "${#LIVE_IPS[@]}" -gt 1 ]; then
+    BK_OTHER="${LIVE_IPS[1]}"
+    BK_CODE=$(curl -sk -o /dev/null -w '%{http_code}' \
+      -H "Authorization: Bearer ${BK_TOKEN}" "https://${BK_OTHER}:8080/v1/whoami" 2>/dev/null)
+    [ "$BK_CODE" = "200" ] \
+      && ok "a token minted on one host is accepted by another with no lookup" \
+      || bad "host ${BK_OTHER} answered ${BK_CODE} to a token minted on ${BK_IP}"
+  fi
+
+  # Nothing in the clear on the host. The grant is sealed before it is written,
+  # so a Corrosion replica read on any host yields ciphertext, and the token is
+  # never written at all.
+  BK_CLEAR=$($SSH "root@$BK_IP" "grep -c 'gate-value-41' /var/lib/pilots/*.db 2>/dev/null | paste -sd+ | bc" 2>/dev/null | tr -d '[:space:]')
+  [ "${BK_CLEAR:-0}" = "0" ] \
+    && ok "the granted value is nowhere in the clear on this host" \
+    || bad "the granted secret is readable in a local database"
+
+  BK_TOKENS=$($SSH "root@$BK_IP" "grep -c 'pbt1' /var/lib/pilots/*.db 2>/dev/null | paste -sd+ | bc" 2>/dev/null | tr -d '[:space:]')
+  [ "${BK_TOKENS:-0}" = "0" ] \
+    && ok "no minted token is stored anywhere; it is a claim, not a row" \
+    || bad "a broker token was written to a local database"
+
+  # hostd restarts, adopts the machine, and rebinds. Without this the broker
+  # would answer until the first restart and then silently stop, which is a
+  # failure nothing in the guest could explain.
+  $SSH "root@$BK_IP" "systemctl restart hostd" >/dev/null 2>&1
+  sleep 8
+  BK_AFTER=$(api "$BK_IP" POST "/v1/machines/${BK_ID}/exec" \
+    '{"cmd":"curl -s -o /dev/null -w %{http_code} \"$PILOT_BROKER_URL/identity\"","user":"root"}' \
+    | jq -r '.stdout' 2>/dev/null | tr -d '[:space:]')
+  [ "$BK_AFTER" = "200" ] \
+    && ok "the broker answers again after hostd restarts and adopts the machine" \
+    || bad "the broker did not come back after a restart (got ${BK_AFTER})"
+
+  api "$BK_IP" DELETE "/v1/machines/${BK_ID}" >/dev/null 2>&1 || true
+  sleep 3
+  # The socket goes with the namespace, and the goroutine with it. A listener
+  # left bound to a namespace that no longer exists is one per machine for the
+  # life of the process.
+  if [ -n "$BK_NS" ]; then
+    BK_GONE=$($SSH "root@$BK_IP" "ip netns list 2>/dev/null | grep -c ${BK_NS}" 2>/dev/null | tr -d '[:space:]')
+    [ "${BK_GONE:-0}" = "0" ] \
+      && ok "the namespace and its broker went with the machine" \
+      || bad "${BK_NS} survived the destroy"
+  fi
+fi
+
 say "Result"
 echo "  ${PASS} passed, ${FAIL} failed"
 echo

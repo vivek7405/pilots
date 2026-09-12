@@ -28,9 +28,9 @@ import (
 // serves, and the first half of what `pilot mcp` serves. Sorted.
 var FleetTools = []string{
 	"build_logs", "checkpoint", "create_machine", "database", "destroy_machine",
-	"diagnose", "docs", "domains", "exec", "exec_stream", "fork", "init",
-	"list_machines", "list_services", "logs", "promote", "releases", "restore",
-	"rollback", "service", "status", "volumes",
+	"diagnose", "docs", "domains", "exec", "exec_stream", "fork", "grant",
+	"grants", "init", "list_machines", "list_services", "logs", "promote",
+	"releases", "restore", "rollback", "service", "status", "volumes",
 }
 
 // LocalTools are the tools that need the agent's own filesystem: a directory
@@ -472,6 +472,77 @@ func RegisterFleetTools(s *mcp.Server, client *pilots.Client, opts Options) {
 		func(ctx context.Context, _ *mcp.CallToolRequest, in databaseIn) (*mcp.CallToolResult, any, error) {
 			return Wrap(func() (any, error) { return describeDatabase(ctx, client, in.Service) },
 				Constant("exec on the machine, or tell the operator to run `pilot db connect`"))
+		})
+
+	type grantIn struct {
+		Machine string            `json:"machine,omitempty" jsonschema:"a machine id or name; give this or service"`
+		Service string            `json:"service,omitempty" jsonschema:"a service id or name; every replica inherits it"`
+		Scopes  []string          `json:"scopes,omitempty" jsonschema:"scopes a token may carry: machines, deploy. Never admin"`
+		Secrets map[string]string `json:"secrets,omitempty" jsonschema:"NAME to value the machine may fetch from its broker"`
+	}
+	// Giving a machine the right to act for itself.
+	//
+	// The tool an agent reaches for when the thing it built has to call the API
+	// or hold a credential of its own. What it grants is deliberately narrow: a
+	// machine's token writes only to that machine and to its own service, and
+	// `admin` cannot be granted at all.
+	//
+	// REPLACES. Calling it with only scopes removes every granted secret, and
+	// the description says so, because an agent that expected a merge would
+	// silently take a secret away from a running application.
+	mcp.AddTool(s, &mcp.Tool{Name: "grant", Title: "Grant a machine its credentials",
+		Description: "Let a machine ask its host for an API token, for secrets, or both. A machine holds no key " +
+			"otherwise, which is deliberate: a key baked into a guest is a key in every snapshot and fork of it. " +
+			"Granted secrets never enter the machine's environment, so they are in no snapshot and on no disk " +
+			"inside it. This REPLACES the whole grant: pass everything you want it to have, because omitting a " +
+			"field removes what was there. You can grant only scopes your own key holds, and never admin. A " +
+			"machine's token may write only to that machine and its own service."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in grantIn) (*mcp.CallToolResult, any, error) {
+			return Wrap(func() (any, error) {
+				req := pilots.GrantRequest{Scopes: in.Scopes, Secrets: in.Secrets}
+				if in.Service != "" {
+					svc, err := ResolveService(ctx, client, in.Service)
+					if err != nil {
+						return nil, err
+					}
+					return client.Services.Grant(ctx, svc.ID, req)
+				}
+				if in.Machine == "" {
+					return nil, fmt.Errorf("name a machine or a service to grant")
+				}
+				m, err := ResolveMachine(ctx, client, in.Machine)
+				if err != nil {
+					return nil, err
+				}
+				return client.Machines.Grant(ctx, m.ID, req)
+			}, Constant("the machine picks it up within five minutes; exec `cat $PILOT_TOKEN_FILE` to see it arrive"))
+		})
+
+	type grantsIn struct {
+		Machine string `json:"machine,omitempty" jsonschema:"a machine id or name"`
+		Service string `json:"service,omitempty" jsonschema:"a service id or name"`
+	}
+	mcp.AddTool(s, &mcp.Tool{Name: "grants", Title: "What a machine may ask for",
+		Description: "The scopes and the secret NAMES granted to a machine or a service. Never the values: there " +
+			"is no route that returns one. What a machine is holding is a question its own broker answers, to it."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in grantsIn) (*mcp.CallToolResult, any, error) {
+			return Wrap(func() (any, error) {
+				if in.Service != "" {
+					svc, err := ResolveService(ctx, client, in.Service)
+					if err != nil {
+						return nil, err
+					}
+					return client.Services.GrantOf(ctx, svc.ID)
+				}
+				if in.Machine == "" {
+					return nil, fmt.Errorf("name a machine or a service")
+				}
+				m, err := ResolveMachine(ctx, client, in.Machine)
+				if err != nil {
+					return nil, err
+				}
+				return client.Machines.GrantOf(ctx, m.ID)
+			}, Constant("grant to change it"))
 		})
 
 	type promoteIn struct {

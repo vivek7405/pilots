@@ -6009,12 +6009,13 @@ const EXAMPLE_TWO_SERVICE = new URL('../packages/cli/examples/two-services-volum
 const MCP_TOOLS = [
   'build', 'build_logs', 'checkpoint', 'create_machine', 'database', 'deploy',
   'destroy_machine', 'diagnose', 'docs', 'domains', 'exec',
-  'exec_stream', 'fork', 'generate_dockerfile', 'init', 'list_machines', 'list_services',
+  'exec_stream', 'fork', 'generate_dockerfile', 'grant', 'grants', 'init',
+  'list_machines', 'list_services',
   'logs', 'plan', 'promote', 'pull_file', 'push_file', 'releases', 'restore',
   'rollback', 'service', 'status', 'volumes',
 ];
-// The six that read the agent's own filesystem. `pilot mcp` serves all 28;
-// the hosted endpoint on every host serves the other 22, because it has no
+// The six that read the agent's own filesystem. `pilot mcp` serves all 30;
+// the hosted endpoint on every host serves the other 24, because it has no
 // disk on the agent's side to read. One list, one subtraction, so the two
 // servers cannot drift apart without this file noticing.
 const MCP_LOCAL_TOOLS = ['build', 'deploy', 'generate_dockerfile', 'plan', 'pull_file', 'push_file'];
@@ -6136,6 +6137,186 @@ function indentBlock(block) {
   return Object.entries(block)
     .map(([k, v]) => `    ${k}: ${JSON.stringify(v)}\n`)
     .join('');
+}
+
+// The credential broker, driven the way a machine drives it: from inside.
+//
+// Everything here runs through exec, because that is the only vantage point
+// from which the claim can be tested at all. The broker is bound inside the
+// machine's own network namespace, so a request from this battery's own process
+// could never reach it, which is the property being asserted.
+async function brokerAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const created = [];
+
+  try {
+    let machine;
+    await step('a machine comes up knowing where its broker is', async () => {
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST',
+        body: { name: `broker-${tag}`, mem_mib: 512, knobs: { auto_stop: 'off' } },
+      });
+      assert(status === 201, `create: HTTP ${status} ${JSON.stringify(json)}`);
+      machine = json;
+      created.push(machine.id);
+
+      const env = await execIn(machine.id, 'echo "$PILOT_BROKER_URL|$PILOT_MACHINE_ID|$PILOT_TOKEN_FILE"');
+      const [url, id, file] = env.trim().split('|');
+      assert(url.includes(':3002'), `PILOT_BROKER_URL = ${url}`);
+      assert(id === machine.id, `PILOT_MACHINE_ID = ${id}, want ${machine.id}`);
+      assert(file === '/run/pilot/token', `PILOT_TOKEN_FILE = ${file}`);
+    });
+
+    // The one property the whole design rests on: nothing in the guest holds a
+    // fleet credential. Not the environment, not the disk.
+    await step('nothing in the guest holds a credential before a grant', async () => {
+      const env = await execIn(machine.id, 'echo "${PILOT_TOKEN:-unset}"');
+      assert(env.trim() === 'unset',
+        `PILOT_TOKEN is set inside the machine: a token in the environment is a ` +
+        `token in every snapshot of it`);
+      const found = await execIn(machine.id,
+        'grep -rl pbt1 /etc /run 2>/dev/null | head -5; true');
+      assert(found.trim() === '', `a token is already on disk: ${found}`);
+    });
+
+    await step('deny by default: an ungranted machine gets nothing', async () => {
+      const code = await execIn(machine.id,
+        'curl -s -o /dev/null -w %{http_code} "$PILOT_BROKER_URL/token"');
+      assert(code.trim() === '403', `GET /token = ${code}, want 403 with no grant`);
+      const secrets = await execIn(machine.id,
+        'curl -s -o /dev/null -w %{http_code} "$PILOT_BROKER_URL/secrets"');
+      assert(secrets.trim() === '403', `GET /secrets = ${secrets}, want 403 with no grant`);
+    });
+
+    // Knowing your own id is not a credential, so identity answers regardless.
+    await step('identity answers with no grant', async () => {
+      const body = await execIn(machine.id, 'curl -s "$PILOT_BROKER_URL/identity"');
+      const identity = JSON.parse(body);
+      assert(identity.machine_id === machine.id, `identity = ${body}`);
+      assert(identity.api_url, `identity carries no api_url: ${body}`);
+    });
+
+    await step('a grant is written, and reads back by name only', async () => {
+      const { status, json } = await request(`/v1/machines/${machine.id}/secrets`, {
+        method: 'PUT',
+        body: { scopes: ['machines'], secrets: { BROKER_CHECK: `value-${tag}` } },
+      });
+      assert(status === 200, `grant: HTTP ${status} ${JSON.stringify(json)}`);
+
+      const read = await request(`/v1/machines/${machine.id}/secrets`);
+      assert(read.status === 200, `read grant: HTTP ${read.status}`);
+      assert(read.json.secret_names.includes('BROKER_CHECK'),
+        `names = ${JSON.stringify(read.json.secret_names)}`);
+      assert(!JSON.stringify(read.json).includes(`value-${tag}`),
+        'reading a grant returned a VALUE; there is no route that may');
+    });
+
+    let token = '';
+    await step('the granted machine mints a token for itself', async () => {
+      const body = await execIn(machine.id, 'curl -s "$PILOT_BROKER_URL/token"');
+      const got = JSON.parse(body);
+      token = got.token;
+      assert(token.startsWith('pbt1.'), `token = ${body}`);
+      assert(got.scopes.includes('machines'), `scopes = ${JSON.stringify(got.scopes)}`);
+    });
+
+    await step('that token reads the org and acts on its own machine', async () => {
+      const me = await request('/v1/whoami', { key: token });
+      assert(me.status === 200, `whoami with a broker token: HTTP ${me.status}`);
+
+      const list = await request('/v1/machines', { key: token });
+      assert(list.status === 200, `list with a broker token: HTTP ${list.status}`);
+
+      const own = await request(`/v1/machines/${machine.id}`, { key: token });
+      assert(own.status === 200, `reading itself: HTTP ${own.status}`);
+    });
+
+    // The narrowing this whole feature exists for.
+    await step('that token cannot write to another machine', async () => {
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST', body: { name: `broker-sibling-${tag}`, mem_mib: 512 },
+      });
+      assert(status === 201, `sibling create: HTTP ${status} ${JSON.stringify(json)}`);
+      created.push(json.id);
+
+      const refused = await request(`/v1/machines/${json.id}/suspend`, {
+        method: 'POST', key: token,
+      });
+      assert(refused.status === 403,
+        `suspending a sibling with a broker token = ${refused.status}, want 403`);
+      assert(refused.json.code === 'self_only',
+        `code = ${refused.json.code}, want self_only`);
+
+      // A read of the same sibling still works: reads are org-wide on purpose.
+      const read = await request(`/v1/machines/${json.id}`, { key: token });
+      assert(read.status === 200,
+        `reading a sibling = ${read.status}; reads are deliberately org-wide`);
+    });
+
+    await step('that token cannot reach a scope it was not granted', async () => {
+      const refused = await request('/v1/services', { key: token });
+      assert(refused.status === 403,
+        `a machines-scoped broker token reached /v1/services: ${refused.status}`);
+    });
+
+    await step('a granted secret reaches the machine, and only through the broker', async () => {
+      const body = await execIn(machine.id, 'curl -s "$PILOT_BROKER_URL/secrets"');
+      const got = JSON.parse(body);
+      assert(got.secrets.BROKER_CHECK === `value-${tag}`, `secrets = ${body}`);
+
+      // The point of granting a secret rather than setting one: it is in no
+      // file inside the machine, so it is in no snapshot of it.
+      const onDisk = await execIn(machine.id,
+        `grep -rl "value-${tag}" /etc 2>/dev/null | head -3; true`);
+      assert(onDisk.trim() === '',
+        `the granted value is on disk at ${onDisk}; it must exist only in the answer`);
+    });
+
+    await step('revoking the token stops it, from local state alone', async () => {
+      const hash = await sha256Hex(token);
+      const { status } = await request(`/v1/api-keys/${hash}/revoke`, { method: 'POST' });
+      assert(status === 200 || status === 204, `revoke: HTTP ${status}`);
+
+      const refused = await request('/v1/machines', { key: token });
+      assert(refused.status === 401,
+        `a revoked broker token still works: ${refused.status}`);
+    });
+
+    await step('clearing the grant stops the next token', async () => {
+      const { status } = await request(`/v1/machines/${machine.id}/secrets`, { method: 'DELETE' });
+      assert(status === 204 || status === 200, `clear: HTTP ${status}`);
+      const code = await execIn(machine.id,
+        'curl -s -o /dev/null -w %{http_code} "$PILOT_BROKER_URL/token"');
+      assert(code.trim() === '403', `GET /token after a clear = ${code}, want 403`);
+    });
+  } finally {
+    for (const id of created) {
+      await request(`/v1/machines/${id}`, { method: 'DELETE' }).catch(() => {});
+    }
+  }
+}
+
+// execIn runs one shell command inside a machine and returns its stdout.
+//
+// A helper because every broker assertion is made from INSIDE: the broker is
+// bound in the machine's own namespace, so this battery's own process could
+// never reach it, which is exactly the property being asserted.
+async function execIn(machineID, cmd) {
+  const { status, json } = await request(`/v1/machines/${machineID}/exec`, {
+    method: 'POST', body: { cmd, user: 'root' },
+  });
+  assert(status === 200, `exec: HTTP ${status} ${JSON.stringify(json)}`);
+  assert(json.exit_code === 0,
+    `exec exited ${json.exit_code}: ${json.stderr || json.stdout}`);
+  return json.stdout ?? '';
+}
+
+// sha256Hex is how a token names itself to the revoke route, which takes the
+// hash rather than the token: a revocation request that carried the credential
+// would put it in a log line on the way past.
+async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
 async function agentDeployAssertions(REFLINK) {
@@ -6692,6 +6873,7 @@ async function main() {
     await timingAssertions();
     await volumeAssertions();
     await forkAssertions();
+    await brokerAssertions();
     await buildAssertions();
     await internalAssertions();
     await edgeAssertions();

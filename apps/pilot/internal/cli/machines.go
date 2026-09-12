@@ -92,6 +92,7 @@ func newMachinesCmd(env *Env) *cobra.Command {
 		},
 	})
 	c.AddCommand(
+		newGrantCmd(env, "machine"),
 		newMachinesListCmd(env),
 		newMachinesCreateCmd(env),
 		newMachinesInfoCmd(env),

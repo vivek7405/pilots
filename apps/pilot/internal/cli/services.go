@@ -37,6 +37,7 @@ func newServicesCmd(env *Env) *cobra.Command {
 		},
 	})
 	c.AddCommand(
+		newGrantCmd(env, "service"),
 		newServicesListCmd(env),
 		newServicesInfoCmd(env),
 		newServicesReleasesCmd(env),

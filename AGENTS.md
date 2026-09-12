@@ -107,7 +107,9 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
    owner, newest offer, machine not running), and
    the write-once rows in `tenancy`, `api_key_revocations` and
    `repo_links`, plus
-   `api_keys` and `org_quotas` on an admin-scoped request. Violating this
+   `api_keys` and `org_quotas` on an admin-scoped request, plus the object-row
+   side tables (`url_auth`, `broker_grants`), each written by the host that
+   writes the object row it describes. Violating this
    does not error — it corrupts state silently through CRDT merges. A row is
    only safe for "any host" to write when it is written once, or has one
    logical writer: then the merge has nothing to corrupt. And never a claim
@@ -191,6 +193,10 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
   is bar 4 as a test rather than a claim.
 - `scripts/cluster/gate.sh` is the fleet battery, a numbered `say` section per
   property, run against the local multi-node rig. It grows monotonically too.
+  Section 41 covers the credential broker: a socket bound inside one machine's
+  namespace and in no other, nothing holding a token in the clear on the host,
+  and a token minted on one host accepted by another with no lookup -- none of
+  which is observable from the public API alone.
   Section 22 covers the push path against `scripts/cluster/fake-github.py`,
   because a delivery has no client on the other end and nothing about it is
   observable from the public API alone. Section 23 kills a build's client
