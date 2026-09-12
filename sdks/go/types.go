@@ -486,6 +486,29 @@ type Host struct {
 	BuildsCached int `json:"builds_cached,omitempty"`
 }
 
+// DrainReport is what draining a host did. POST /v1/hosts/{id}/drain.
+//
+// The machines in Moved are on other hosts now, with the same ids, names and
+// URLs they had: that is what makes a drain invisible to the people using them.
+// Left are the ones no host would take, each with its reason -- a fleet-capacity
+// problem, reported rather than retried for ever.
+type DrainReport struct {
+	Moved  []string          `json:"moved"`
+	Left   []string          `json:"left,omitempty"`
+	Errors map[string]string `json:"errors,omitempty"`
+	// Draining stays true after a drain that left something behind, so the
+	// host goes on refusing new machines until an operator says otherwise.
+	Draining bool  `json:"draining"`
+	Started  int64 `json:"started"`
+}
+
+// TakeRequest is one host telling another to take a machine it has offered.
+// Internal: it travels over the mesh, and the offer row is what authorises the
+// move. No client sends this.
+type TakeRequest struct {
+	HandoffID string `json:"handoff_id"`
+}
+
 type HealthResponse struct {
 	OK     bool   `json:"ok"`
 	HostID string `json:"host_id"`
@@ -860,6 +883,8 @@ var wireTypes = []any{
 	Size{},
 	EgressResponse{},
 	EgressAddress{},
+	DrainReport{},
+	TakeRequest{},
 	Knobs{},
 	Schedule{},
 	Machine{},

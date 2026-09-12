@@ -132,6 +132,34 @@ export interface Machine {
  * addresses. It changes when a host joins or leaves the fleet and at no other
  * time, which is what makes it safe to put in somebody else's firewall.
  */
+/**
+ * What draining a host did. `POST /v1/hosts/{id}/drain`.
+ *
+ * The machines in `moved` are on other hosts now, with the same ids, names and
+ * URLs they had: that is what makes a drain invisible to the people using them.
+ * `left` are the ones no host would take, each with its reason.
+ */
+export interface DrainReport {
+  moved: string[]
+  left?: string[]
+  errors?: Record<string, string>
+  /**
+   * Stays true after a drain that left something behind, so the host goes on
+   * refusing new machines until an operator says otherwise.
+   */
+  draining: boolean
+  started: number
+}
+
+/**
+ * One host telling another to take a machine it has offered. Internal: it
+ * travels over the mesh, and the offer row is what authorises the move. No
+ * client sends this.
+ */
+export interface TakeRequest {
+  handoff_id: string
+}
+
 export interface EgressResponse {
   org_id: string
   addresses: EgressAddress[]

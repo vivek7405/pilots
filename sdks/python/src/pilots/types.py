@@ -95,6 +95,35 @@ class Machine:
 
 
 @dataclass
+class DrainReport:
+    """What draining a host did.
+
+    The machines in ``moved`` are on other hosts now, with the same ids, names
+    and URLs they had: that is what makes a drain invisible to the people using
+    them. ``left`` are the ones no host would take, each with its reason.
+    """
+
+    moved: list[str] = field(default_factory=list)
+    left: list[str] | None = None
+    errors: dict[str, str] | None = None
+    #: Stays true after a drain that left something behind, so the host goes on
+    #: refusing new machines until an operator says otherwise.
+    draining: bool = False
+    started: int = 0
+
+
+@dataclass
+class TakeRequest:
+    """One host telling another to take a machine it has offered.
+
+    Internal: it travels over the mesh, and the offer row is what authorises
+    the move. No client sends this.
+    """
+
+    handoff_id: str = ""
+
+
+@dataclass
 class EgressAddress:
     """One host's answer for where an org's traffic leaves from.
 

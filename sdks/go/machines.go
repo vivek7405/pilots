@@ -195,6 +195,34 @@ func (h *Hosts) List(ctx context.Context) ([]Host, error) {
 	return out, h.c.do(ctx, http.MethodGet, "/v1/hosts", nil, &out)
 }
 
+// Drain moves every machine off a host, so it can be rebooted or retired
+// without taking its machines down with it.
+//
+// Each machine is suspended on that host and restored on another, keeping its
+// id, its name and its URL. A request arriving mid-move is held and served
+// late, never refused. The host goes on refusing new machines afterwards,
+// which is the point; Undrain lets it take work again.
+//
+// Admin-scoped: a drain moves every org's machines at once.
+func (h *Hosts) Drain(ctx context.Context, hostID string) (*DrainReport, error) {
+	var out DrainReport
+	return &out, h.c.do(ctx, http.MethodPost,
+		"/v1/hosts/"+url.PathEscape(hostID)+"/drain", nil, &out)
+}
+
+// DrainStatus reports whether a host is draining and what is still on it.
+func (h *Hosts) DrainStatus(ctx context.Context, hostID string) (*DrainReport, error) {
+	var out DrainReport
+	return &out, h.c.do(ctx, http.MethodGet,
+		"/v1/hosts/"+url.PathEscape(hostID)+"/drain", nil, &out)
+}
+
+// Undrain lets a drained host take machines again. Nothing moves back.
+func (h *Hosts) Undrain(ctx context.Context, hostID string) error {
+	return h.c.do(ctx, http.MethodDelete,
+		"/v1/hosts/"+url.PathEscape(hostID)+"/drain", nil, nil)
+}
+
 // Egress is every address this org's outbound traffic can leave from.
 //
 // What to hand anything that allowlists by source address. One per host that
