@@ -667,3 +667,28 @@ CREATE TABLE IF NOT EXISTS service_sizes (     -- writer: the service's arbiter
   image_mem_mib INTEGER,
   updated_at    INTEGER
 );
+
+-- Where a release's Firecracker VMSTATE lives.
+--
+-- A release is a checkpoint: `snapshotRelease` proves one replica, checkpoints
+-- it, and records the checkpoint's two build ids on the release row. Those two
+-- are the guest's MEMORY and DISK. They are not the whole picture. Restoring
+-- also needs the vmstate -- device state and vcpu registers, a few kilobytes
+-- next to gigabytes of memory -- and that object is keyed by the machine and
+-- checkpoint it came from, neither of which the release row carries.
+--
+-- So a replica created from a release had no way to name the vmstate, passed
+-- an empty key, and failed inside the AWS SDK on "input member Key must not be
+-- empty" rather than on anything that named the missing piece. This table is
+-- the missing piece: release id to the pair the key is built from.
+--
+-- A side table because `releases` has rows, which closes it to column adds
+-- (rule 6). Write-once, by the host that photographed the release, which is
+-- the host that took the checkpoint -- so there is one writer and nothing for
+-- a merge to corrupt.
+CREATE TABLE IF NOT EXISTS release_snapshots ( -- writer: the host that photographed it (write-once)
+  release_id    TEXT NOT NULL PRIMARY KEY,
+  machine_id    TEXT,     -- the replica that was photographed
+  checkpoint_id TEXT,     -- the checkpoint whose vmstate this release restores
+  created_at    INTEGER
+);

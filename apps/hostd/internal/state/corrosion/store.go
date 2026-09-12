@@ -1649,6 +1649,66 @@ func (s *Store) GetRelease(ctx context.Context, id string) (*state.Release, erro
 	return r, rows.Err()
 }
 
+// PutReleaseSnapshot records which checkpoint's vmstate a release restores
+// from.
+//
+// Guarded like the release row itself, and for the same reason: it is written
+// by the host running that service's deploy, the one the service arbiter
+// already selected, so the writer is the same single writer and the merge has
+// nothing to resolve.
+func (s *Store) PutReleaseSnapshot(ctx context.Context, r *state.ReleaseSnapshot) error {
+	rel, err := s.GetRelease(ctx, r.ID)
+	if err != nil {
+		return err
+	}
+	if err := s.assertServiceWriter(ctx, rel.ServiceID); err != nil {
+		return err
+	}
+	if _, err := s.client.Exec(ctx, `
+		INSERT INTO release_snapshots (release_id, machine_id, checkpoint_id, created_at)
+		VALUES (?,?,?,?)`,
+		r.ID, r.MachineID, r.CheckpointID, r.CreatedAt); err != nil {
+		return fmt.Errorf("state: put release snapshot %q: %w", r.ID, err)
+	}
+	return nil
+}
+
+func (s *Store) GetReleaseSnapshot(ctx context.Context, releaseID string) (*state.ReleaseSnapshot, error) {
+	rows, err := s.client.Query(ctx, `
+		SELECT release_id, machine_id, checkpoint_id, created_at
+		FROM release_snapshots WHERE release_id = ?`, releaseID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, state.ErrNotFound
+	}
+	var r state.ReleaseSnapshot
+	if err := rows.Scan(&r.ID, &r.MachineID, &r.CheckpointID, &r.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+func (s *Store) DeleteReleaseSnapshot(ctx context.Context, releaseID string) error {
+	rel, err := s.GetRelease(ctx, releaseID)
+	if err != nil {
+		return err
+	}
+	if err := s.assertServiceWriter(ctx, rel.ServiceID); err != nil {
+		return err
+	}
+	if _, err := s.client.Exec(ctx,
+		`DELETE FROM release_snapshots WHERE release_id = ?`, releaseID); err != nil {
+		return fmt.Errorf("state: delete release snapshot %q: %w", releaseID, err)
+	}
+	return nil
+}
+
 func (s *Store) PutRelease(ctx context.Context, r *state.Release) error {
 	// A release inherits its service's writer rather than having an arbiter of
 	// its own: it is only ever written by the host running that service's

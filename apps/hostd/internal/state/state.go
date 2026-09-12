@@ -498,6 +498,24 @@ type Release struct {
 	CreatedAt int64
 }
 
+// ReleaseSnapshot names the vmstate a release restores from.
+//
+// A release carries two build ids, its memory and its disk. Restoring needs a
+// third artifact: the Firecracker vmstate, device state and vcpu registers,
+// kilobytes beside gigabytes. It is stored under the machine and checkpoint it
+// was captured from, and the release row names neither, so this row is the
+// only way back to it.
+//
+// Write-once: a release is photographed once, and re-pointing one at a
+// different vmstate would restore a guest whose registers describe a different
+// machine than its memory does.
+type ReleaseSnapshot struct {
+	ID           string // the release id
+	MachineID    string // the replica that was photographed
+	CheckpointID string
+	CreatedAt    int64
+}
+
 // Domain is a custom hostname pointed at a service.
 type Domain struct {
 	Hostname  string
@@ -720,6 +738,14 @@ type Store interface {
 	// alive while a fork still reads them.
 	ListLineage(ctx context.Context) ([]Lineage, error)
 	DeleteLineage(ctx context.Context, machineID string) error
+
+	// PutReleaseSnapshot records which checkpoint's vmstate a release
+	// restores from. Written once, by the host that photographed it.
+	PutReleaseSnapshot(ctx context.Context, r *ReleaseSnapshot) error
+	// GetReleaseSnapshot returns ErrNotFound for a release photographed
+	// before this row existed, whose replicas boot rather than restore.
+	GetReleaseSnapshot(ctx context.Context, releaseID string) (*ReleaseSnapshot, error)
+	DeleteReleaseSnapshot(ctx context.Context, releaseID string) error
 
 	PutHandoff(ctx context.Context, h *Handoff) error
 	// NewestHandoff is the most recent offer of a machine, or ErrNotFound
@@ -1410,6 +1436,44 @@ func (s *sqliteStore) ListLineage(ctx context.Context) ([]Lineage, error) {
 func (s *sqliteStore) DeleteLineage(ctx context.Context, machineID string) error {
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM machine_lineage WHERE id = ?`, machineID); err != nil {
 		return fmt.Errorf("state: delete lineage %q: %w", machineID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) PutReleaseSnapshot(ctx context.Context, r *ReleaseSnapshot) error {
+	// INSERT, never upsert, for the same reason lineage is not upserted: a
+	// release's vmstate does not move, and an upsert would let a later write
+	// point a release at registers belonging to a different capture.
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO release_snapshots (release_id, machine_id, checkpoint_id, created_at)
+		VALUES (?,?,?,?)`,
+		r.ID, r.MachineID, r.CheckpointID, r.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put release snapshot %q: %w", r.ID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) GetReleaseSnapshot(ctx context.Context, releaseID string) (*ReleaseSnapshot, error) {
+	var r ReleaseSnapshot
+	err := s.db.QueryRowContext(ctx, `
+		SELECT release_id, machine_id, checkpoint_id, created_at
+		FROM release_snapshots WHERE release_id = ?`, releaseID).
+		Scan(&r.ID, &r.MachineID, &r.CheckpointID, &r.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get release snapshot %q: %w", releaseID, err)
+	}
+	return &r, nil
+}
+
+func (s *sqliteStore) DeleteReleaseSnapshot(ctx context.Context, releaseID string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM release_snapshots WHERE release_id = ?`, releaseID)
+	if err != nil {
+		return fmt.Errorf("state: delete release snapshot %q: %w", releaseID, err)
 	}
 	return nil
 }

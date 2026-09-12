@@ -383,6 +383,20 @@ type CreateMachineRequest struct {
 	MemBuildID    string `json:"mem_build_id,omitempty"`
 	RootfsBuildID string `json:"rootfs_build_id,omitempty"`
 
+	// MemSnapKey is where the vmstate for that pair lives: device state and
+	// vcpu registers, kilobytes beside the gigabytes of memory the pair
+	// carries. A restore needs all three, and this is the one the build ids
+	// cannot name, because it is keyed by the machine and checkpoint it was
+	// captured from rather than by a build.
+	//
+	// NOT on the wire, deliberately. It is an object-storage key, and a
+	// client that could name one could point a restore at any object in the
+	// bucket. The rollout resolves it from the release's own row and the fork
+	// path from the checkpoint it just took; neither comes from a request
+	// body. A `json:"-"` field also stays out of the SDKs, which mirror this
+	// struct, so it cannot arrive from one by accident either.
+	MemSnapKey string `json:"-"`
+
 	// Service and Release record which service's rollout this machine belongs
 	// to, so a deploy can find its own replicas and a rollback can find the
 	// previous ones.

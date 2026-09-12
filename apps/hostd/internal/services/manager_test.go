@@ -173,6 +173,13 @@ func (f *fakeMachines) Checkpoint(ctx context.Context, id, comment string) (*sta
 
 func (f *fakeMachines) AppAddr(id string) (string, bool) { return "", false }
 
+// The real one is a pure function of the two ids, so the fake spells the same
+// layout rather than returning a sentinel: a test that asserts a replica
+// restores from the right vmstate is asserting this string.
+func (f *fakeMachines) CheckpointSnapKey(machineID, checkpointID string) string {
+	return "machines/" + machineID + "/checkpoints/" + checkpointID + "/snap.bin"
+}
+
 func (f *fakeMachines) ResetAgentToken(ctx context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -992,6 +999,10 @@ func TestAReplicaOnTheReleasesVendorRestores(t *testing.T) {
 		ID: rel.ID, Kind: state.KindRelease, Vendor: "AuthenticAMD"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.PutReleaseSnapshot(ctx, &state.ReleaseSnapshot{
+		ID: rel.ID, MachineID: "m-photographed", CheckpointID: "ck-1"}); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := m.createReplica(ctx, svc, rel, nil, ""); err != nil {
 		t.Fatalf("createReplica: %v", err)
@@ -1043,6 +1054,10 @@ func TestAnUnrecordedReleaseStillRestores(t *testing.T) {
 		RootfsBuildID: "rootfs-build", MemBuildID: "mem-build",
 	}
 	if err := store.PutRelease(ctx, rel); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutReleaseSnapshot(ctx, &state.ReleaseSnapshot{
+		ID: rel.ID, MachineID: "m-photographed", CheckpointID: "ck-1"}); err != nil {
 		t.Fatal(err)
 	}
 

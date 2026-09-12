@@ -30,7 +30,24 @@ import (
 // second delivery would hand an environment to a process that cannot read it,
 // which is the same reason the wake path does not deliver one either.
 func (m *Manager) createFromRelease(ctx context.Context, row *state.Machine,
-	token, memBuildID, rootfsBuildID string) (*fc.Machine, error) {
+	token, memBuildID, rootfsBuildID, snapKey string) (*fc.Machine, error) {
+
+	// Named here rather than discovered inside the restore. A restore needs
+	// THREE artifacts -- the memory image, the disk, and the vmstate holding
+	// device state and vcpu registers -- and only the first two are build ids.
+	// This path used to pass no vmstate key at all, so every restore from a
+	// release fetched the empty key and died inside the AWS SDK on "input
+	// member Key must not be empty": a message that names neither the release,
+	// the machine, nor the artifact that was missing.
+	//
+	// Refusing here instead. The caller knows which release it is starting and
+	// can say so, and a replica that cannot restore has a boot to fall back
+	// on, which is slower and correct.
+	if snapKey == "" {
+		return nil, fmt.Errorf("machines: %s restores memory build %s with no vmstate key; "+
+			"the release was photographed before its vmstate was recorded, so it can "+
+			"only be booted", row.ID, memBuildID)
+	}
 
 	t, err := m.EnsureTemplate(ctx)
 	if err != nil {
@@ -59,7 +76,7 @@ func (m *Manager) createFromRelease(ctx context.Context, row *state.Machine,
 		}
 	}
 
-	fcm, slot, err := m.restoreInstant(ctx, row, backends, "")
+	fcm, slot, err := m.restoreInstant(ctx, row, backends, snapKey)
 	if err != nil {
 		return nil, err
 	}

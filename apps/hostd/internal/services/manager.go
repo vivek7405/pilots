@@ -45,6 +45,13 @@ type MachineManager interface {
 	// AppAddr is where this host can reach the machine's application port,
 	// empty if it holds no slot for it.
 	AppAddr(machineID string) (string, bool)
+	// CheckpointSnapKey is where a checkpoint's Firecracker vmstate lives.
+	//
+	// A pure function of the two ids, exposed rather than duplicated: the
+	// layout belongs to the machines package, and a second spelling of an
+	// object key is a second thing to keep in step with the first. Reached
+	// through the interface because services does not import machines.
+	CheckpointSnapKey(machineID, checkpointID string) string
 	// ResetAgentToken puts the guest's credential back to the placeholder the
 	// golden template ships, so a machine restored from this one's snapshot
 	// can install its own the same way a template restore does.
@@ -478,6 +485,36 @@ func (m *Manager) createReplica(ctx context.Context, svc *state.Service,
 			restore = false
 		}
 	}
+
+	// The vmstate key, the third artifact a restore needs and the one the
+	// release's build ids cannot name.
+	var snapKey string
+	if restore {
+		snap, err := m.opts.Store.GetReleaseSnapshot(ctx, rel.ID)
+		switch {
+		case errors.Is(err, state.ErrNotFound):
+			// A release photographed before this row existed. Its vmstate
+			// object is still in the bucket, but nothing records the machine
+			// and checkpoint its key is built from, so it cannot be named --
+			// and a restore that cannot name its vmstate does not half-work,
+			// it fails on an empty object key. Boot from the rootfs, the same
+			// documented slow path a foreign vendor or a changed size takes.
+			slog.Info("a release does not record where its vmstate is; "+
+				"this replica boots from its rootfs",
+				"service", svc.ID, "release", rel.ID)
+			restore = false
+		case err != nil:
+			// Refused rather than guessed, for the reason the vendor read
+			// above gives: booting instead would silently turn every replica's
+			// sub-second restore into a cold boot for as long as the store is
+			// unwell, and nothing would say why.
+			return nil, fmt.Errorf("services: could not read where release %s keeps its "+
+				"vmstate, so whether it can be restored is unknown: %w", rel.ID, err)
+		default:
+			snapKey = m.opts.Machines.CheckpointSnapKey(snap.MachineID, snap.CheckpointID)
+		}
+	}
+
 	req := api.CreateMachineRequest{
 		App:    svc.App,
 		Image:  rel.RootfsBuildID,
@@ -497,6 +534,7 @@ func (m *Manager) createReplica(ctx context.Context, svc *state.Service,
 		req.Image = ""
 		req.MemBuildID = rel.MemBuildID
 		req.RootfsBuildID = rel.RootfsBuildID
+		req.MemSnapKey = snapKey
 	}
 	return m.opts.Machines.Create(ctx, req)
 }
@@ -521,6 +559,24 @@ func (m *Manager) snapshotRelease(ctx context.Context, machineID string, rel *st
 	rel.MemBuildID = ck.MemBuildID
 	if ck.RootfsBuildID != "" {
 		rel.RootfsBuildID = ck.RootfsBuildID
+	}
+	// The vmstate, which the two build ids above cannot name.
+	//
+	// A restore needs the memory image, the disk AND the device state plus
+	// vcpu registers. That third artifact is keyed by the machine and
+	// checkpoint it came from, so a replica holding only the build ids has no
+	// way to ask for it -- which is why every restore from a release used to
+	// fetch an empty key and fail inside the AWS SDK.
+	//
+	// Before the caller writes the release row: a release row naming a memory
+	// image whose vmstate is unrecorded is a release every replica tries to
+	// restore from and cannot. Failing here leaves no release at all, and the
+	// deploy says why.
+	if err := m.opts.Store.PutReleaseSnapshot(ctx, &state.ReleaseSnapshot{
+		ID: rel.ID, MachineID: machineID, CheckpointID: ck.ID,
+		CreatedAt: time.Now().Unix(),
+	}); err != nil {
+		return fmt.Errorf("record the release's vmstate: %w", err)
 	}
 	// Record which pool photographed it, before the caller writes the release
 	// row that names the build. A replica created on the other vendor reads

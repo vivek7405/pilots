@@ -32,6 +32,14 @@ func prefetchKey(machineID string) string {
 	return filepath.Join("machines", machineID, "suspend", "prefetch.txt")
 }
 
+// CheckpointSnapKey is checkpointSnapKey, for the one caller outside this
+// package that needs to name a checkpoint's vmstate: the rollout, which
+// resolves the key a replica restores a release from. It does not import this
+// package, so it asks the manager instead.
+func (m *Manager) CheckpointSnapKey(machineID, checkpointID string) string {
+	return checkpointSnapKey(machineID, checkpointID)
+}
+
 // checkpointSnapKey is where a checkpoint's vmstate lives. Written once under
 // its own id, so it is never overwritten by a later suspend.
 func checkpointSnapKey(machineID, checkpointID string) string {
@@ -58,9 +66,9 @@ func (m *Manager) startNewMachine(ctx context.Context, row *state.Machine,
 // startForRelease is the rollout's entry point: restore a machine from a
 // release's build pair rather than boot it from the release's image.
 func (m *Manager) startForRelease(ctx context.Context, row *state.Machine,
-	token, memBuildID, rootfsBuildID string) (*fc.Machine, error) {
+	token, memBuildID, rootfsBuildID, snapKey string) (*fc.Machine, error) {
 
-	return m.createFromRelease(ctx, row, token, memBuildID, rootfsBuildID)
+	return m.createFromRelease(ctx, row, token, memBuildID, rootfsBuildID, snapKey)
 }
 
 // createFromTemplate restores a brand-new machine from the golden template.

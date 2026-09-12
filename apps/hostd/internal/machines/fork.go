@@ -109,6 +109,14 @@ type forkSource struct {
 	// VolumeSnapshot is the point the forked volume is filled from, taken at
 	// the same moment as the memory image so the two agree.
 	VolumeSnapshot string
+	// SnapKey is the vmstate the forks restore: device state and vcpu
+	// registers, captured in the same instant as MemBuildID.
+	//
+	// The build ids cannot name it. It is keyed by the machine and checkpoint
+	// it was captured from, so it has to be carried from the moment the source
+	// is resolved, when both are still in hand. Every fork of one source
+	// restores the same one, which is what makes them the same machine.
+	SnapKey string
 }
 
 // resolveForkSource turns a request into the artifacts every fork restores.
@@ -126,6 +134,7 @@ func (m *Manager) resolveForkSource(ctx context.Context, req api.ForkOptions) (*
 		return &forkSource{
 			ParentID: ck.MachineID, CheckpointID: ck.ID,
 			MemBuildID: ck.MemBuildID, RootfsBuildID: ck.RootfsBuildID,
+			SnapKey:     checkpointSnapKey(ck.MachineID, ck.ID),
 			TemplateMem: row.TemplateMemBuildID, TemplateRootfs: row.TemplateRootfsBuildID,
 			VCPUs: row.VCPUs, MemMiB: row.MemMiB, App: row.App, VolumeID: row.VolumeID,
 		}, nil
@@ -162,6 +171,7 @@ func (m *Manager) resolveForkSource(ctx context.Context, req api.ForkOptions) (*
 		return &forkSource{
 			ParentID: req.Machine, CheckpointID: ck.ID,
 			MemBuildID: ck.MemBuildID, RootfsBuildID: ck.RootfsBuildID,
+			SnapKey:     checkpointSnapKey(req.Machine, ck.ID),
 			TemplateMem: fresh.TemplateMemBuildID, TemplateRootfs: fresh.TemplateRootfsBuildID,
 			VCPUs: fresh.VCPUs, MemMiB: fresh.MemMiB, App: fresh.App, VolumeID: fresh.VolumeID,
 		}, nil
@@ -188,9 +198,15 @@ func (m *Manager) resolveForkSource(ctx context.Context, req api.ForkOptions) (*
 			return nil, fmt.Errorf("%w: %s is suspended with no memory image, so there "+
 				"is nothing to fork from", api.ErrConflict, req.Machine)
 		}
+		// The SUSPEND image, not a checkpoint: a suspended machine's vmstate
+		// lives under its own id and is rewritten by each suspend. Read under
+		// the lock held above, with the build ids it belongs to, so the three
+		// artifacts a fork restores describe one instant. A suspend racing
+		// this would otherwise pair new registers with an old memory image.
 		return &forkSource{
 			ParentID:   req.Machine,
 			MemBuildID: fresh.MemBuildID, RootfsBuildID: fresh.RootfsBuildID,
+			SnapKey:     suspendSnapKey(req.Machine),
 			TemplateMem: fresh.TemplateMemBuildID, TemplateRootfs: fresh.TemplateRootfsBuildID,
 			VCPUs: fresh.VCPUs, MemMiB: fresh.MemMiB, App: fresh.App, VolumeID: fresh.VolumeID,
 		}, nil
@@ -221,6 +237,9 @@ func (m *Manager) forkOnce(ctx context.Context, req api.ForkOptions, src *forkSo
 		MemMiB:        src.MemMiB,
 		MemBuildID:    src.MemBuildID,
 		RootfsBuildID: src.RootfsBuildID,
+		// Without this the restore fetches an empty object key and dies inside
+		// the AWS SDK, having named neither the fork nor its source.
+		MemSnapKey: src.SnapKey,
 	}
 	row, err := m.Create(ctx, create)
 	if err != nil {
