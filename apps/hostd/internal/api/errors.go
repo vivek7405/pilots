@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/vivek7405/pilots/hostd/internal/state"
@@ -92,6 +93,22 @@ func WriteJSON(w http.ResponseWriter, status int, v any) { writeJSON(w, status, 
 // still find it, and nowhere else.
 func writeMapped(w http.ResponseWriter, err error) {
 	status, body := mapError(err)
+
+	// A 404 says nothing to the caller, on purpose, so it has to say something
+	// to the operator.
+	//
+	// A promote failed on a guard three layers down that could not read a row
+	// written eighteen lines later, and what came back was "not found; check
+	// the id" -- about a machine that was right there. The host's journal had
+	// nothing at all. The chain naming the actual row existed the whole time
+	// and was discarded at this line.
+	//
+	// INFO rather than WARN: most of these are a client asking about something
+	// it already destroyed, which is ordinary. What matters is that the text
+	// exists somewhere at all when the 404 is not ordinary.
+	if status == http.StatusNotFound {
+		slog.Info("answering not found", "cause", err.Error())
+	}
 	writeJSON(w, status, body)
 }
 
@@ -113,6 +130,13 @@ func mapError(err error) (int, ErrorResponse) {
 			Details: gate,
 		}
 	case errors.Is(err, state.ErrNotFound):
+		// The body stays opaque. TestWriteMappedLeaksNoInternals is a paid-for
+		// contract: the store's own "state: not found" once reached clients
+		// verbatim, and a 404 is also the answer another tenant's object gets,
+		// so a cause here would be a vocabulary leak on the one status that
+		// must not have one.
+		//
+		// The cause goes to the JOURNAL instead. See writeMapped.
 		return http.StatusNotFound, ErrorResponse{
 			Error: "not found", Code: CodeNotFound, Next: NextNotFound,
 		}
