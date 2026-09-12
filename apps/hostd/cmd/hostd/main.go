@@ -848,6 +848,15 @@ func settleReconciled(found []fc.Reconciled, root string, mgr *machines.Manager,
 		mgr.ExitedWhileDown(context.Background(), st)
 		_ = fc.ClearBreadcrumbs(filepath.Join(root, st.MachineID))
 	}
+
+	// After both loops, so every machine's liveness is already decided: an
+	// operation interrupted by the restart is settled against what adoption
+	// just found rather than against a guess. Adoption has never covered this
+	// -- it brings back machines that are still RUNNING, and says nothing
+	// about an operation that was half done when the daemon stopped.
+	if n := mgr.ResumeInterrupted(context.Background()); n > 0 {
+		slog.Info("settled operations interrupted by the last restart", "count", n)
+	}
 	return adopted
 }
 
