@@ -206,7 +206,8 @@ CREATE TABLE hosts    (id TEXT PRIMARY KEY, wg_addr TEXT, public_ip TEXT,
                        last_seen INTEGER);           -- writer: the host itself
 CREATE TABLE machines (id TEXT PRIMARY KEY, name TEXT, host_id TEXT,
                        state TEXT,   -- creating|running|suspended|stopped|error
-                       kind_knobs TEXT,  -- json: auto_stop/auto_start/min_machines_running/soft_limit
+                       kind_knobs TEXT,  -- json: auto_stop/auto_start/min_machines_running/
+                                         -- soft_limit/hard_limit/idle_timeout/schedules
                        image_ref TEXT, vcpus INTEGER, mem_mib INTEGER,
                        domain TEXT, custom_domain TEXT,
                        app_port INTEGER, agent_port INTEGER,
@@ -341,12 +342,63 @@ CREATE TABLE org_quotas (org_id TEXT PRIMARY KEY, max_machines INTEGER,
 
 #### Side tables that are never columns (rule 6)
 
-Two facts about a machine or a service were added after those tables held
-rows, so each is a keyed side table, written once at create by the host that
-writes the object row, under the same owner check `machine_cpu` uses, and
-deleted before the object row: `machine_labels` (`labels` on the API,
-`?label=k=v` on the lists, copied by promote) and `url_auth` (`url_auth` on
-the API; absent means public). A third fact would be a third table.
+Facts about a machine, a service or a host that were added after those tables
+held rows live in keyed side tables rather than new columns, written by the
+host that writes the object row, under the same owner check `machine_cpu`
+uses, and deleted before the object row:
+
+- `machine_labels` -- `labels` on the API, `?label=k=v` on the lists, copied
+  by promote. Written once at create.
+- `url_auth` -- `url_auth` on the API; absent means public. Written once at
+  create.
+- `service_sizes` -- how big a service's replicas are, plus the size the
+  release's memory image was photographed at. Absent reads as 1 vCPU / 512
+  MiB, which is what every service ran at before the table, so nothing is
+  backfilled. Written by the service's ARBITER, the host that already writes
+  the `services` row.
+- `host_egress` -- the routed IPv6 prefix a host hands per-org outbound
+  addresses out of. Written by the host it names. Replicated because the host
+  ANSWERING a request about a machine is usually not the host the machine runs
+  on, and it cannot derive the address without the prefix.
+
+The next such fact is the next table. A column add is never the answer.
+
+#### Concurrency limits, and the header that moves one request
+
+`soft_limit` says "start another replica"; `hard_limit` says "this one has had
+enough". Without the second, a burst that outruns the autoscaler piles every
+request onto one guest, which serves all of them slowly rather than most of
+them well -- and a machine with a slow dependency degrades into timeouts nobody
+can attribute to it. Above the hard limit a request waits briefly for room and
+is then refused with 503 and `Retry-After`. Zero is unlimited, which is what
+every knobs blob written before the field decodes to, so nothing changes until
+it is set.
+
+`Pilot-Replay` on a RESPONSE tells the router to serve this request again
+somewhere else and return that answer instead. Two forms, plus an optional
+opaque `state=` the app reads back on the second pass so it need not look
+the same thing up twice:
+
+```
+Pilot-Replay: machine=<name>      send it to this machine
+Pilot-Replay: elsewhere=true      send it to any other replica of this service
+Pilot-Replay: machine=db-2; state=<opaque>
+```
+
+The named machine must be in the caller's OWN org and its own app or service.
+That is the entire security model and it is checked at the edge rather than
+trusted: the header is written by a customer's process, so treating it as
+authority over routing would let one tenant aim traffic at another tenant's
+machine. Every refusal is a 502: a spelling the router does not understand, a
+machine in another org or app, and a body too large to send twice are all
+answered rather than guessed at, because a typo that silently routed traffic
+somewhere is worse than one that fails.
+
+Honoured ONCE: the replayed request has the header stripped, so two machines
+cannot bounce a request between them for ever. The machine it lands on sees
+`Pilot-Replay-Src` naming where it came from, and the client sees neither
+header. The body is buffered up to 1 MiB so it can be sent twice; a larger one
+is a 502 rather than a silently truncated retry.
 
 ### hostd HTTP API (public; every host serves it; bearer auth)
 
@@ -366,12 +418,24 @@ GET    /v1/machines/:id/logs?follow  stream; a follow ends on disconnect, destro
                                      or a read that keeps failing (it says so on
                                      the stream), never on suspend
 POST   /v1/machines/:id/suspend|wake|stop|start
+POST   /v1/machines/:id/resize       {vcpus?, mem_mib?} boot the same machine at a
+                                     new size, in place: same id, URL, disk and
+                                     volume. A BOOT, not a resume -- a memory image
+                                     cannot load into a differently-sized VM -- so
+                                     what was in memory is lost. Refuses a service
+                                     replica (409, naming `pilot services scale`)
+                                     and a machine that has checkpoints
 POST   /v1/machines/:id/redeploy     {image, release?}  boot the same machine
                                      from another image, in place (the rollout's;
                                      a peer call carries the fleet's peer token)
 POST   /v1/machines/:id/checkpoints  {comment?} → {id, seq}
 GET    /v1/machines/:id/checkpoints  list
 POST   /v1/checkpoints/:id/restore   in-place restore
+GET    /v1/egress                    {org_id, addresses:[{host_id, ipv6, interface}]}
+                                     every address this org's OUTBOUND traffic can
+                                     leave from, one per host that manages egress.
+                                     Empty unless a host is given PILOT_EGRESS_INTERFACE
+                                     and a routed /64 in PILOT_EGRESS_PREFIX6
 POST   /v1/builds                    {dockerfile-context tar} → streamed structured log → {rootfs_build_id}
        ?deploy=<service>             …and cut that service a release from the image,
                                      on this host, once (the last line carries `release`)
@@ -383,8 +447,19 @@ POST   /v1/services                  {name, release|build, replicas, health, dom
                                      mints none
 GET    /v1/services                  list
 GET    /v1/services/:id              info
-PATCH  /v1/services/:id              {replicas?, health?, env?, secret_env?, repo?,
-                                     branch?, autodeploy?, domain?}; domain is
+PATCH  /v1/services/:id              {replicas?, size?, health?, env?, secret_env?, repo?,
+                                     branch?, autodeploy?, domain?}; size is
+                                     {vcpus?, mem_mib?} and its application is a
+                                     ROLLOUT of the release the service is already
+                                     on: a replica comes up at the new size, passes
+                                     the same health gate, and only then is an old
+                                     one retired, so a stateless service drops no
+                                     request. A volume-backed one has a held window
+                                     instead, because a volume has one writer.
+                                     Quota is charged on the INCREASE alone, and the
+                                     shape is checked before the quota so an
+                                     impossible size is a 400 rather than a 429;
+                                     domain is
                                      accepted once, on a service that has none
                                      (409 on one that has, 400 on an empty
                                      string); env and secret_env
@@ -394,7 +469,10 @@ PATCH  /v1/services/:id              {replicas?, health?, env?, secret_env?, rep
                                      (they travel on the deploy); forwarded to the
                                      service's arbiter
 GET    /v1/services/:id/releases     newest first, [] for none
-POST   /v1/services/:id/deploy       health-gated cutover
+POST   /v1/services/:id/deploy       health-gated cutover; {size?} rides here rather
+                                     than as a patch beforehand, so a compose file
+                                     that changed both its image and its size costs
+                                     ONE rollout instead of two
 POST   /v1/services/:id/rollback
 POST   /v1/machines/:id/promote      {domain?} → service
 POST   /v1/volumes                   create JuiceFS volume
@@ -727,6 +805,36 @@ iptables SNAT/DNAT, which is rebuilt at restore — never inside the snapshot.
 Slot pool of 1024/host. In-netns nft table drops guest egress to
 RFC1918/loopback/link-local/ULA. All netns/tap/nft setup implemented in Go
 (netlink), not shelled bash.
+
+**Per-org egress addresses** (`inet pilots-egress`, ROOT namespace, off unless
+configured): a guest's packets reach the root namespace wearing the slot's
+`10.11` address and its own mesh `/128`, neither of which is routable off the
+host. Two rules answer that, in this order and only this order:
+
+1. Per-ORG source rewrite, IPv6. A machine's mesh address is rewritten to
+   `OrgAddr6(host prefix, org)` -- a pure hash of the host's routed `/64` and
+   the org id, so there is no allocator, no assignment row, and every host
+   computes the same answer without talking. The `/128` is also put ON the
+   uplink, or the rewrite would send every reply to an address this host never
+   claimed.
+2. IPv4 masquerade for `10.11.0.0/16`, scoped to the uplink. There is no
+   per-org IPv4 and there will not be one: a v4 address is purchased and
+   scarce, and a bare-metal host has one.
+
+The order is load-bearing. Masquerade rewrites to whatever the interface
+carries, so a masquerade placed first makes every per-org rule under it dead
+code that still reads as correct; `gate.sh` section 32 asserts the ordering
+rather than trusting it.
+
+Nothing happens unless a host is given both `PILOT_EGRESS_INTERFACE` and a
+globally routed `/64` in `PILOT_EGRESS_PREFIX6` -- half of that pair is a
+refused start, not a half-working host. A machine whose org is unknown gets no
+rule at all and keeps the shared address: inventing an org for it would put one
+tenant's traffic behind another tenant's allowlisted address.
+
+Per ORG rather than per machine because the allowlist entry has to outlive the
+machine. The set an operator allowlists is `GET /v1/egress` -- one address per
+host, changing only when a host joins or leaves the fleet.
 
 **The rootfs bind-mount trick** (a shared rootfs causes post-resume workqueue
 lockups; the snapshot bakes an absolute drive path): FC runs under
