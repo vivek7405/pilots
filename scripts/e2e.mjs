@@ -6405,7 +6405,7 @@ async function observabilityAssertions() {
     await step('another org sees none of it', async () => {
       const mint = await request('/v1/api-keys', {
         method: 'POST',
-        body: { name: `metrics-other-${tag}`, scopes: ['machines'], org: `org-metrics-${tag}` },
+        body: { org_id: `org_metrics_${tag}`, scopes: ['machines'] },
       });
       assert(mint.status === 201, `mint: HTTP ${mint.status} ${JSON.stringify(mint.json)}`);
       const other = mint.json.key ?? mint.json.token;
