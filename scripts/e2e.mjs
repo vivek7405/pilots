@@ -6471,6 +6471,106 @@ function cpuFromExposition(body, machineID) {
   return 0;
 }
 
+// The rule that lets a database scale and stops everything else scaling.
+//
+// Driven through the public API alone, because that is where the rule lives:
+// the label is written once at create and a patch cannot add it, so the whole
+// assertion is about what the API accepts from a client that tries.
+async function replicaRuleAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const created = [];
+  const volumes = [];
+
+  try {
+    // A hand-written volume service. Exactly what somebody scaling a database
+    // by editing a number would have.
+    let plain;
+    await step('a volume service without an engine label cannot scale', async () => {
+      const vol = await request('/v1/volumes', {
+        method: 'POST', body: { name: `rule-${tag}`, size_gib: 1 },
+      });
+      assert(vol.status === 201, `volume: HTTP ${vol.status} ${JSON.stringify(vol.json)}`);
+      volumes.push(vol.json.id);
+
+      const refused = await request('/v1/services', {
+        method: 'POST',
+        body: { name: `rule-${tag}`, app: `rule-${tag}`, replicas: 3, volume: vol.json.id },
+      });
+      assert(refused.status === 400,
+        `a hand-written volume service scaled to 3: HTTP ${refused.status}`);
+      // The refusal has to NAME the recipe. "Refused" teaches nothing, and
+      // this is the moment somebody decides whether the platform can do what
+      // they want at all.
+      assert(JSON.stringify(refused.json).includes('pilot add postgres'),
+        `the refusal does not name the recipe: ${JSON.stringify(refused.json)}`);
+
+      // One replica is fine, and that is the point of the rule rather than a
+      // carve-out: a volume is mounted by one machine.
+      const ok = await request('/v1/services', {
+        method: 'POST',
+        body: { name: `rule-${tag}`, app: `rule-${tag}`, replicas: 1, volume: vol.json.id },
+      });
+      assert(ok.status === 201, `one replica refused: HTTP ${ok.status} ${JSON.stringify(ok.json)}`);
+      plain = ok.json;
+      created.push(plain.id);
+    });
+
+    // And a patch cannot get there either, which is the side door the rule
+    // would otherwise have.
+    await step('a patch cannot scale it past one', async () => {
+      const refused = await request(`/v1/services/${plain.id}`, {
+        method: 'PATCH', body: { replicas: 3 },
+      });
+      assert(refused.status === 400,
+        `a patch scaled a volume service to 3: HTTP ${refused.status}`);
+    });
+
+    // The label cannot be ADDED, which is what makes the rule hold at all: if
+    // a patch could label a service postgres, every hand-written service could
+    // reach the exception in two calls.
+    await step('the engine label cannot be added to an existing service', async () => {
+      const res = await request(`/v1/services/${plain.id}`, {
+        method: 'PATCH', body: { labels: { 'pilot.engine': 'postgres' } },
+      });
+      if (res.status === 200) {
+        const after = await request(`/v1/services/${plain.id}`);
+        assert(after.json.labels?.['pilot.engine'] !== 'postgres',
+          'a patch added the engine label, so any service can now scale onto volumes');
+      }
+      // A refusal is equally correct; what must not happen is the label
+      // landing.
+    });
+
+    await step('the recipe fragment refuses a shape that cannot work', async () => {
+      const even = await request(`/v1/recipes/ha/pg?replicas=2&etcd=4`);
+      assert(even.status === 400, `an even etcd was admitted: HTTP ${even.status}`);
+      assert(JSON.stringify(even.json).includes('majority'),
+        `the refusal does not give the reason: ${JSON.stringify(even.json)}`);
+
+      const tooMany = await request(`/v1/recipes/ha/pg?replicas=9&etcd=3`);
+      assert(tooMany.status === 400, `nine data replicas were admitted: HTTP ${tooMany.status}`);
+
+      const good = await request(`/v1/recipes/ha/pg?replicas=2&etcd=3`);
+      assert(good.status === 200, `a sensible shape was refused: HTTP ${good.status}`);
+      assert(good.json.etcd_name === 'pg-etcd', `etcd_name = ${good.json.etcd_name}`);
+      // The statement is what somebody has to read before five machines
+      // appear on their bill, so its absence is a failure rather than a
+      // cosmetic gap.
+      assert((good.json.statement ?? '').includes('5'),
+        `the statement does not say how many machines: ${good.json.statement}`);
+      assert(good.json.secret_names?.includes('patroni_replication'),
+        `no replication secret named: ${JSON.stringify(good.json.secret_names)}`);
+    });
+  } finally {
+    for (const id of created) {
+      await request(`/v1/services/${id}`, { method: 'DELETE' }).catch(() => {});
+    }
+    for (const id of volumes) {
+      await request(`/v1/volumes/${id}`, { method: 'DELETE' }).catch(() => {});
+    }
+  }
+}
+
 async function agentDeployAssertions(REFLINK) {
   const tag = Math.random().toString(36).slice(2, 8);
   const app = `gate-django-${tag}`;
@@ -7016,6 +7116,7 @@ async function main() {
   await egressAddressAssertions();
   await placementAssertions();
   await recipeAssertions();
+  await replicaRuleAssertions();
   await hostedMCPAssertions(FULL);
   if (FULL) {
     // The engine target or the degraded ceiling: enforce() needs to know
