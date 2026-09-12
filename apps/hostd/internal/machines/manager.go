@@ -480,7 +480,8 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 	// memory image yet, and the pair is the fast path when it does.
 	var fcm *fc.Machine
 	if req.MemBuildID != "" {
-		fcm, err = m.startForRelease(ctx, row, token, req.MemBuildID, req.RootfsBuildID, req.MemSnapKey)
+		fcm, err = m.startForRelease(ctx, row, token, req.MemBuildID, req.RootfsBuildID,
+			req.MemSnapKey, req.ImageToken)
 	} else {
 		fcm, err = m.startNewMachine(ctx, row, token, req.Volume, req.Image, env.Cmd)
 	}

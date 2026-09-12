@@ -397,6 +397,23 @@ type CreateMachineRequest struct {
 	// struct, so it cannot arrive from one by accident either.
 	MemSnapKey string `json:"-"`
 
+	// ImageToken is the agent credential the restored image ALREADY carries,
+	// used to authenticate the install of this machine's own.
+	//
+	// A release image carries the placeholder, because the rollout puts it
+	// back before photographing the replica. A FORK's image does not: it is a
+	// picture of a live machine, taken with that machine's own token inside
+	// it, and nothing reset it. Installing the fork's credential while
+	// authenticating as the placeholder is a 401, and the fork dies at
+	// "install agent token: status 401" having booted perfectly.
+	//
+	// Empty means the placeholder, which is every path but a fork.
+	//
+	// NOT on the wire, for the obvious reason: it is a credential, and a
+	// client that could name one could authenticate as any machine in the
+	// fleet. `json:"-"` also keeps it out of the SDKs that mirror this struct.
+	ImageToken string `json:"-"`
+
 	// Service and Release record which service's rollout this machine belongs
 	// to, so a deploy can find its own replicas and a rollback can find the
 	// previous ones.

@@ -164,6 +164,18 @@ func (m *Manager) resolveForkSource(ctx context.Context, req api.ForkOptions) (*
 		if err != nil {
 			return nil, fmt.Errorf("machines: checkpoint %s to fork it: %w", req.Machine, err)
 		}
+		// Checkpoint returns as soon as the artifacts are STAGED; the upload
+		// runs behind it. A fork restores from object storage, so starting one
+		// now races that upload and loses:
+		//
+		//   s3: not found: fc: artifact missing: .../checkpoints/<id>/snap.bin
+		//
+		// The wait belongs here rather than inside Checkpoint, which is right
+		// to return early for every caller that only wants a rollback point on
+		// this host.
+		if fcm, ok := m.get(req.Machine); ok {
+			fcm.AwaitCapture(captureDrain)
+		}
 		fresh, err := m.opts.Store.GetMachine(ctx, req.Machine)
 		if err != nil {
 			return nil, err
@@ -240,6 +252,10 @@ func (m *Manager) forkOnce(ctx context.Context, req api.ForkOptions, src *forkSo
 		// Without this the restore fetches an empty object key and dies inside
 		// the AWS SDK, having named neither the fork nor its source.
 		MemSnapKey: src.SnapKey,
+		// A fork's image is a picture of a LIVE machine, so it carries that
+		// machine's credential rather than the placeholder a release image is
+		// reset to. Authenticating as the placeholder is a 401.
+		ImageToken: m.token(src.ParentID),
 	}
 	row, err := m.Create(ctx, create)
 	if err != nil {

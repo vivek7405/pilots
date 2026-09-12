@@ -30,7 +30,7 @@ import (
 // second delivery would hand an environment to a process that cannot read it,
 // which is the same reason the wake path does not deliver one either.
 func (m *Manager) createFromRelease(ctx context.Context, row *state.Machine,
-	token, memBuildID, rootfsBuildID, snapKey string) (*fc.Machine, error) {
+	token, memBuildID, rootfsBuildID, snapKey, imageToken string) (*fc.Machine, error) {
 
 	// Named here rather than discovered inside the restore. A restore needs
 	// THREE artifacts -- the memory image, the disk, and the vmstate holding
@@ -81,7 +81,13 @@ func (m *Manager) createFromRelease(ctx context.Context, row *state.Machine,
 		return nil, err
 	}
 
-	if err := m.installToken(ctx, slot, token); err != nil {
+	// As the credential the IMAGE carries, which is the placeholder for a
+	// release and the parent's own token for a fork. See ImageToken.
+	authAs := imageToken
+	if authAs == "" {
+		authAs = templateToken
+	}
+	if err := m.installTokenAs(ctx, slot, authAs, token); err != nil {
 		m.releaseDiscovery(row.ID)
 		_ = fcm.Kill()
 		m.pool.Return(slot.Idx)

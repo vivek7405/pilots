@@ -66,9 +66,9 @@ func (m *Manager) startNewMachine(ctx context.Context, row *state.Machine,
 // startForRelease is the rollout's entry point: restore a machine from a
 // release's build pair rather than boot it from the release's image.
 func (m *Manager) startForRelease(ctx context.Context, row *state.Machine,
-	token, memBuildID, rootfsBuildID, snapKey string) (*fc.Machine, error) {
+	token, memBuildID, rootfsBuildID, snapKey, imageToken string) (*fc.Machine, error) {
 
-	return m.createFromRelease(ctx, row, token, memBuildID, rootfsBuildID, snapKey)
+	return m.createFromRelease(ctx, row, token, memBuildID, rootfsBuildID, snapKey, imageToken)
 }
 
 // createFromTemplate restores a brand-new machine from the golden template.
