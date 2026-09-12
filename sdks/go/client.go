@@ -50,6 +50,7 @@ type Client struct {
 	org string
 
 	Machines    *Machines
+	Builders    *Builders
 	Checkpoints *Checkpoints
 	Builds      *Builds
 	Services    *Services
@@ -109,6 +110,7 @@ func New(apiKey string, opts ...Option) *Client {
 		opt(c)
 	}
 	c.Machines = &Machines{c: c}
+	c.Builders = &Builders{c: c}
 	c.Checkpoints = &Checkpoints{c: c}
 	c.Builds = &Builds{c: c}
 	c.Services = &Services{c: c}

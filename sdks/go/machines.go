@@ -5,6 +5,7 @@ import (
 	"iter"
 	"net/http"
 	"net/url"
+	"strconv"
 )
 
 // Machines is the one primitive: a sandbox and a production service are the
@@ -77,13 +78,57 @@ func (m *Machines) Wake(ctx context.Context, id string) error {
 	return m.c.do(ctx, http.MethodPost, "/v1/machines/"+url.PathEscape(id)+"/wake", nil, nil)
 }
 
-// Stop is the non-snapshotting equivalent of Suspend.
+// Stop is Suspend under the name every other platform's CLI uses.
 func (m *Machines) Stop(ctx context.Context, id string) error {
 	return m.c.do(ctx, http.MethodPost, "/v1/machines/"+url.PathEscape(id)+"/stop", nil, nil)
 }
 
+// Start is Wake under the name every other platform's CLI uses.
 func (m *Machines) Start(ctx context.Context, id string) error {
 	return m.c.do(ctx, http.MethodPost, "/v1/machines/"+url.PathEscape(id)+"/start", nil, nil)
+}
+
+// Processes lists what a machine is running.
+//
+// A machine runs a NAMED SET of processes: an image's own command is the
+// process `app`, and a compose file or a runtime registration can add more.
+// The point of the names is that one can be restarted without touching the
+// others.
+func (m *Machines) Processes(ctx context.Context, id string) ([]Process, error) {
+	var out struct {
+		Processes []Process `json:"processes"`
+	}
+	err := m.c.do(ctx, http.MethodGet, "/v1/machines/"+url.PathEscape(id)+"/processes", nil, &out)
+	return out.Processes, err
+}
+
+// StartProcess, StopProcess and RestartProcess act on ONE process. Restarting
+// the dev server in a machine must not take down the database beside it.
+func (m *Machines) StartProcess(ctx context.Context, id, name string) error {
+	return m.processAction(ctx, id, name, "start")
+}
+
+func (m *Machines) StopProcess(ctx context.Context, id, name string) error {
+	return m.processAction(ctx, id, name, "stop")
+}
+
+func (m *Machines) RestartProcess(ctx context.Context, id, name string) error {
+	return m.processAction(ctx, id, name, "restart")
+}
+
+func (m *Machines) processAction(ctx context.Context, id, name, action string) error {
+	return m.c.do(ctx, http.MethodPost,
+		"/v1/machines/"+url.PathEscape(id)+"/processes/"+url.PathEscape(name)+"/"+action, nil, nil)
+}
+
+// ProcessLogs is one process's captured output, most recent last. tail is a
+// line count; zero means everything the guest still holds.
+func (m *Machines) ProcessLogs(ctx context.Context, id, name string, tail int) (string, error) {
+	path := "/v1/machines/" + url.PathEscape(id) + "/processes/" + url.PathEscape(name) + "/logs"
+	if tail > 0 {
+		path = query(path, [2]string{"tail", strconv.Itoa(tail)})
+	}
+	return m.c.text(ctx, http.MethodGet, path)
 }
 
 // Checkpoint records a restorable point. ResumeGapMS on the response is how

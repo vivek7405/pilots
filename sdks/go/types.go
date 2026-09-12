@@ -153,6 +153,28 @@ type CreateMachineRequest struct {
 	URLAuth   string            `json:"url_auth,omitempty"` // public|org; default public
 }
 
+// Process is one of the named processes a machine runs.
+//
+// A machine runs a SET of them: an image's own command is the process "app",
+// and a compose file or a runtime registration can add more. The names are
+// what make it possible to restart a dev server without taking down the
+// database beside it.
+type Process struct {
+	Name string `json:"name"`
+	Cmd  string `json:"cmd"`
+	// State is "running" or "stopped".
+	State string `json:"state"`
+	// PID inside the guest. Zero when the process is stopped.
+	PID int `json:"pid,omitempty"`
+	// Restarts counts how often the supervisor brought it back after an exit
+	// nobody asked for. Climbing steadily is a crash loop.
+	Restarts int `json:"restarts"`
+	// Needs names processes that must start before this one.
+	Needs []string `json:"needs,omitempty"`
+	// Port reports the one process that owns the machine's app port.
+	Port bool `json:"port,omitempty"`
+}
+
 // ExecRequest runs a command inside a machine, buffered.
 type ExecRequest struct {
 	Cmd       string            `json:"cmd"`
