@@ -72,6 +72,9 @@ var ErrInvalid = errors.New("machines: invalid request")
 type Options struct {
 	HostID string
 	Domain string // e.g. "pilotrun.app"
+	// APIURL is the fleet's API address, handed to every guest so a client
+	// inside one does not have to construct it and cannot construct it wrongly.
+	APIURL string
 	// APIHostname is the name the control API answers on, e.g.
 	// "api.pilotrun.app". dispatch claims it before the workload suffix, so
 	// the machine name that would produce it is reserved -- see

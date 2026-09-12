@@ -47,13 +47,10 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
-// Port is where the broker listens inside every machine's namespace.
-//
-// Beside the guest agent on 3001 rather than sharing it, because the agent is
-// reached BY hostd and this is reached FROM the guest: one is a service hostd
-// authenticates to, the other is a service that authenticates nobody. Putting
-// both on one port would mean one handler holding both rules.
-const Port = 3002
+// Port is where the broker listens inside every machine's namespace. Declared
+// in netns with the other constant addresses, so the guest side and the host
+// side cannot disagree about it.
+const Port = netns.BrokerPort
 
 // Sealer opens the sealed half of a grant. The fleet key, in practice.
 type Sealer interface {

@@ -286,6 +286,7 @@ func run() error {
 	mgr := machines.New(machines.Options{
 		HostID: cfg.HostID,
 		Domain: cfg.WorkloadDomain,
+		APIURL: "https://" + cfg.APIHostname,
 		// dispatch claims this hostname before the workload suffix, so the
 		// name under it is not a tenant's to take. Passed rather than
 		// hardcoded so the reservation follows PILOT_API_HOSTNAME.

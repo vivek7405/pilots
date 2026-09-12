@@ -203,6 +203,12 @@ func applyInit(req initRequest) (initResponse, error) {
 		}
 	}
 
+	// Every poke is a moment this machine began running: a create, a wake, a
+	// cold boot. Starting the refresh here rather than at process start means a
+	// restored machine fetches its OWN token from the socket bound in its own
+	// namespace, which is why a fork does not inherit the source's.
+	startBrokerRefresh()
+
 	resp := initResponse{OK: true}
 	if req.StartApp {
 		resp.AppStarted, resp.AppReason = startApp()
