@@ -308,6 +308,24 @@ type URLAuth struct {
 	UpdatedAt int64
 }
 
+// BrokerGrant is what a machine may ask its host's broker for.
+//
+// A machine holds no API key; it asks, and this says what the answer may be.
+// Absent, or present with both Scopes and Sealed empty, means NO. Deny by
+// default is the whole shape: a machine nobody granted anything to reaches
+// nothing, and there is no state in the guest that could change that.
+//
+// Sealed is a seal.Seal of a json name-to-value map, never plaintext, because
+// this row gossips to every host like every other one.
+type BrokerGrant struct {
+	ID        string
+	Kind      string // machine|service
+	OrgID     string
+	Scopes    []string
+	Sealed    string
+	UpdatedAt int64
+}
+
 // DefaultServiceVCPUs and DefaultServiceMemMiB are what a service's replicas
 // are, and always were, when nothing says otherwise. An absent service_sizes
 // row reads as these rather than as zero, so every service that predates the
@@ -746,6 +764,14 @@ type Store interface {
 	// router reads as public -- what every URL was before the table existed.
 	GetURLAuth(ctx context.Context, id string) (*URLAuth, error)
 	DeleteURLAuth(ctx context.Context, id string) error
+	// PutBrokerGrant records what a machine or service may ask the broker for.
+	// Replace semantics: the grant handed in is the whole grant, because a
+	// merge of two partial grants is a permission nobody wrote.
+	PutBrokerGrant(ctx context.Context, g *BrokerGrant, opts ...WriteOption) error
+	// GetBrokerGrant returns ErrNotFound when nothing is granted, which every
+	// caller must read as DENY rather than as an error to report.
+	GetBrokerGrant(ctx context.Context, id string) (*BrokerGrant, error)
+	DeleteBrokerGrant(ctx context.Context, id string) error
 
 	// PutServiceSize records how big a service's replicas are. Written by the
 	// service's arbiter, the host that already writes the services row, so the
@@ -1612,6 +1638,56 @@ func (s *sqliteStore) DeleteURLAuth(ctx context.Context, id string) error {
 		return fmt.Errorf("state: delete url auth %q: %w", id, err)
 	}
 	return nil
+}
+
+func (s *sqliteStore) PutBrokerGrant(ctx context.Context, g *BrokerGrant, _ ...WriteOption) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO broker_grants (id, kind, org_id, scopes, sealed, updated_at) VALUES (?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, org_id=excluded.org_id,
+			scopes=excluded.scopes, sealed=excluded.sealed, updated_at=excluded.updated_at`,
+		g.ID, g.Kind, g.OrgID, strings.Join(g.Scopes, ","), g.Sealed, g.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put broker grant %q: %w", g.ID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) GetBrokerGrant(ctx context.Context, id string) (*BrokerGrant, error) {
+	var g BrokerGrant
+	var scopes string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, kind, org_id, scopes, sealed, updated_at FROM broker_grants WHERE id = ?`, id).
+		Scan(&g.ID, &g.Kind, &g.OrgID, &scopes, &g.Sealed, &g.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("state: get broker grant %q: %w", id, err)
+	}
+	g.Scopes = SplitScopes(scopes)
+	return &g, nil
+}
+
+func (s *sqliteStore) DeleteBrokerGrant(ctx context.Context, id string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM broker_grants WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("state: delete broker grant %q: %w", id, err)
+	}
+	return nil
+}
+
+// SplitScopes reads the stored csv, dropping empties.
+//
+// An empty string must become an EMPTY slice rather than a slice holding one
+// empty scope: the latter is a grant that looks non-empty to every caller that
+// checks length, which is the difference between deny and allow.
+func SplitScopes(raw string) []string {
+	out := []string{}
+	for _, part := range strings.Split(raw, ",") {
+		if part = strings.TrimSpace(part); part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
 }
 
 func (s *sqliteStore) PutServiceSize(ctx context.Context, sz *ServiceSize, _ ...WriteOption) error {

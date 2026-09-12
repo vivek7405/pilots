@@ -595,6 +595,32 @@ CREATE TABLE IF NOT EXISTS url_auth (          -- writer: the host that writes t
   updated_at INTEGER
 );
 
+-- What a machine may ask its host's broker for.
+--
+-- A machine holds no API key. It asks the broker hostd binds inside its own
+-- network namespace, and this row says what the answer may be: which scopes a
+-- token may carry, and which secret values may be handed over. Absent, or
+-- present with both fields empty, means NO -- deny by default, so a machine
+-- that nobody granted anything to can reach nothing.
+--
+-- `sealed` is a seal.Seal of a json name-to-value map, never plaintext: this
+-- table gossips to every host like every other one. These are the secrets that
+-- deliberately never reach /etc/pilot/env, so they are in no snapshot and on no
+-- disk inside the guest.
+--
+-- Keyed and written like url_auth above: the object's id, written by the host
+-- that writes its row, so the merge has one logical writer (invariant 1). A
+-- side table rather than columns on `machines`, because that table has rows and
+-- is therefore closed to column adds (rule 6).
+CREATE TABLE IF NOT EXISTS broker_grants (     -- writer: the host that writes the object row it describes
+  id         TEXT NOT NULL PRIMARY KEY,        -- machine or service id
+  kind       TEXT,     -- machine|service
+  org_id     TEXT,
+  scopes     TEXT,     -- csv of api scopes; empty means no token may be minted
+  sealed     TEXT,     -- seal.Seal of {name: value}; empty means no secrets
+  updated_at INTEGER
+);
+
 -- How big a service's replicas are. Absent means the defaults every service
 -- had before this table existed (1 vCPU, 512 MiB), so an old service reads
 -- correctly without being backfilled -- which matters because backfilling a

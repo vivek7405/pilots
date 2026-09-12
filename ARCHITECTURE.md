@@ -779,6 +779,45 @@ with object storage fully intact — so it is the one piece of state whose
 durability is the operator's job, in the same trust class as the SSH key that
 runs the bootstrap. Rotation requires a re-seal sweep over the affected rows.
 
+### Brokered credentials
+
+A machine holds no API key, and that is the point. A key baked into a guest is
+a key in every snapshot of it, in every fork of it, and in whatever the guest
+writes to object storage — and re-issuing one on restore, rescue or promote
+would be a fleet-wide re-issue path that has to be correct forever.
+
+Instead a machine ASKS. hostd binds a broker on the constant gateway address
+inside each machine's own network namespace (`169.254.0.22:3002`), so the only
+party that can reach a machine's broker socket is that machine. **The request
+path is the identity**: no credential is presented, because there is nothing a
+guest could present that a copy of that guest could not. A namespace is not a
+secret that can leak.
+
+- `GET /identity` — who this machine is, and where the API is.
+- `GET /token?scope=…` — a signed claim, valid 15 minutes, stored nowhere.
+- `GET /secrets` — the values granted to this machine, opened with the fleet
+  key. These are the secrets that never enter `/etc/pilot/env`, so they are in
+  no snapshot and on no disk.
+
+**Deny by default.** With no grant, both answer 403. A grant is written by an
+operator through `PUT /v1/machines/{id}/secrets` or the service equivalent, and
+a caller may only grant scopes it already holds. `admin` is never mintable.
+
+A token is a claim rather than a row: `pbt1.<claims>.<hmac>`, signed with a
+third label of the fleet's agent-token secret, so **every host verifies one
+without holding anything new and without a lookup**. Three things stop one, all
+from local state: its own expiry, the write-once revocation tombstone the
+`api_keys` revoke route already writes, and the machine row being `destroyed`.
+
+The grant lives in `broker_grants`, an object-row side table on the same terms
+as `url_auth`: one logical writer, the host that owns the row it describes.
+
+Two limits, stated rather than implied. A **compromised host** mints any token,
+which is the same trust class as the fleet key itself. And a **fork taken
+within a token's life** inherits that token for the rest of its life, in the
+same org — bounded by the 15 minutes and by the fact that a fork is already a
+copy of everything else the source had.
+
 ### Guest-agent protocol (inside every VM, port 3001)
 
 `GET /health` · `POST /init {timestamp_nanos}` (sets CLOCK_REALTIME — kvm-clock
@@ -1613,7 +1652,7 @@ because the honest answer to "should we operate your database" is usually no.
   the guest. `?token=` is deliberately not accepted: it lands in logs and in
   shell history.
 - Per-machine **agent tokens** (guest exec auth) are minted at create,
-  hashed into the machine row, never reused across machines.
+  hashed into the machine row (and a broker token, minted on request, is written nowhere), never reused across machines.
 
 ---
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/state"
@@ -2016,6 +2017,62 @@ func (s *Store) GetURLAuth(ctx context.Context, id string) (*state.URLAuth, erro
 func (s *Store) DeleteURLAuth(ctx context.Context, id string) error {
 	if _, err := s.client.Exec(ctx, `DELETE FROM url_auth WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("state: delete url auth %q: %w", id, err)
+	}
+	return nil
+}
+
+// PutBrokerGrant records what a machine or service may ask the broker for.
+//
+// The writer check is the same one url_auth makes, for the same reason: this
+// row describes an object, so the host allowed to write it is the host that
+// writes that object's row. A grant written by any other host would race
+// through a CRDT merge, and two hosts disagreeing about a permission is a
+// permission nobody granted.
+func (s *Store) PutBrokerGrant(ctx context.Context, g *state.BrokerGrant, opts ...state.WriteOption) error {
+	auth := state.ResolveAuth(opts)
+	if g.Kind == "service" {
+		if err := s.assertServiceWriter(ctx, g.ID); err != nil {
+			return err
+		}
+	} else if err := s.assertMachineOwner(ctx, g.ID, auth); err != nil {
+		return err
+	}
+	_, err := s.client.Exec(ctx, `
+		INSERT INTO broker_grants (id, kind, org_id, scopes, sealed, updated_at) VALUES (?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, org_id=excluded.org_id,
+			scopes=excluded.scopes, sealed=excluded.sealed, updated_at=excluded.updated_at`,
+		g.ID, g.Kind, g.OrgID, strings.Join(g.Scopes, ","), g.Sealed, g.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put broker grant %q: %w", g.ID, err)
+	}
+	return nil
+}
+
+func (s *Store) GetBrokerGrant(ctx context.Context, id string) (*state.BrokerGrant, error) {
+	rows, err := s.client.Query(ctx,
+		`SELECT id, kind, org_id, scopes, sealed, updated_at FROM broker_grants WHERE id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, state.ErrNotFound
+	}
+	var g state.BrokerGrant
+	var scopes string
+	if err := rows.Scan(&g.ID, &g.Kind, &g.OrgID, &scopes, &g.Sealed, &g.UpdatedAt); err != nil {
+		return nil, err
+	}
+	g.Scopes = state.SplitScopes(scopes)
+	return &g, nil
+}
+
+func (s *Store) DeleteBrokerGrant(ctx context.Context, id string) error {
+	if _, err := s.client.Exec(ctx, `DELETE FROM broker_grants WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("state: delete broker grant %q: %w", id, err)
 	}
 	return nil
 }
