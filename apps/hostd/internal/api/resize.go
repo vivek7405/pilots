@@ -19,6 +19,13 @@ func (d Deps) handleResizeMachine(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Only the owner can take a machine down and bring it up again, so the
+	// request goes there rather than being refused here. Without this the route
+	// answers ErrNotOwner on every host but one, and which host that is changes
+	// with a drain or a rescue -- a caller cannot be asked to know it.
+	if d.forwardToHost(w, r, row.HostID) {
+		return
+	}
 	var req ResizeMachineRequest
 	if err := decodeBody(r, &req); err != nil {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, "bad request body",

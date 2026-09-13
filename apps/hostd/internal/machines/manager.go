@@ -774,6 +774,17 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	// Not ours: say so rather than answering "done".
+	//
+	// Checked BEFORE the not-running branch below, because the two are
+	// indistinguishable from here: a machine running on another host is not in
+	// this host's map either, so it fell through to "already suspended" and the
+	// route answered 204. The caller believed it had stopped paying for a
+	// machine that was still running somewhere else.
+	if row.HostID != "" && row.HostID != m.opts.HostID {
+		return fmt.Errorf("machines: %s is held by %s, not this host: %w",
+			id, row.HostID, state.ErrNotOwner)
+	}
 	fcm, ok := m.get(id)
 	if !ok {
 		// Already suspended or stopped: nothing to do.
@@ -1019,6 +1030,25 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 	row, err := m.opts.Store.GetMachine(ctx, id)
 	if err != nil {
 		return err
+	}
+	// Not ours: refuse, exactly as Redeploy and Resize do.
+	//
+	// Without this the handoff guard above is the ONLY thing standing between a
+	// wake and a second Firecracker for one machine id. bringUp does not read
+	// host_id, so a wake arriving on any host but the owner restores the
+	// machine HERE while the owner is still running it: two processes on one
+	// rootfs, and on a volume-backed machine two writers on one disk. The row
+	// write afterwards is refused by the store's single-writer guard, which
+	// means the second copy is not even recorded -- it runs untracked, holding
+	// a netns slot, until something notices.
+	//
+	// It is reachable from the public API: POST /v1/machines/{id}/wake is
+	// served by every host, and the process routes reach it through agentJSON.
+	// The router never needs it, because it forwards to the owner before
+	// waking, and a rescue claims the row before restoring.
+	if row.HostID != "" && row.HostID != m.opts.HostID {
+		return fmt.Errorf("machines: %s is held by %s, not this host: %w",
+			id, row.HostID, state.ErrNotOwner)
 	}
 
 	start := time.Now()

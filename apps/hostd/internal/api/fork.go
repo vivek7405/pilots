@@ -47,6 +47,12 @@ func (d Deps) handleForkMachine(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// Forking a RUNNING machine checkpoints it first, and only its owner can do
+	// that. Forwarded rather than refused, so a caller never has to know which
+	// host is holding the source at this moment.
+	if d.forwardToHost(w, r, row.HostID) {
+		return
+	}
 	d.fork(w, r, state.Lineage{ParentID: row.ID})
 }
 
@@ -63,7 +69,11 @@ func (d Deps) handleForkCheckpoint(w http.ResponseWriter, r *http.Request) {
 		writeMapped(w, err)
 		return
 	}
-	if _, ok := d.ownedMachine(w, r, ck.MachineID); !ok {
+	row, ok := d.ownedMachine(w, r, ck.MachineID)
+	if !ok {
+		return
+	}
+	if d.forwardToHost(w, r, row.HostID) {
 		return
 	}
 	d.fork(w, r, state.Lineage{CheckpointID: ck.ID})
@@ -110,8 +120,12 @@ func (d Deps) fork(w http.ResponseWriter, r *http.Request, from state.Lineage) {
 		case res.Err != nil:
 			entry.Error = res.Err.Error()
 		case res.Machine != nil:
+			// Read rather than assumed public: a fork inherits its parent's URL
+			// gate, so reporting a constant here would tell a caller their fork
+			// is open when it is not.
 			m := d.toAPI(r.Context(), *res.Machine, actingOrg(r),
-				d.startOf(r.Context(), res.Machine.ID), nil, URLAuthPublic)
+				d.startOf(r.Context(), res.Machine.ID), nil,
+				d.urlAuthOf(r.Context(), res.Machine.ID))
 			entry.Machine = &m
 			made++
 		}
