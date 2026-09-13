@@ -127,6 +127,18 @@ func HAFragmentFor(name string, replicas, etcd int) (*HAFragment, error) {
 			"x-pilots": map[string]any{
 				"private":        true,
 				"durable_volume": true,
+				// etcd is its OWN machines, not processes inside the database.
+				//
+				// It shares the database's build context because it shares the
+				// database's image: the recipe bakes Patroni, etcd and HAProxy
+				// into every Postgres image and dispatches on PILOT_PG_ROLE at
+				// boot, so that a cluster can be turned on without a rebuild.
+				// The grouping rule reads a shared context as one machine, so
+				// without this the quorum was folded into the database itself
+				// and `pilot db ha` deployed a cluster with no etcd at all --
+				// having just told the user, in its confirmation prompt, that
+				// it would run N Postgres machines and M etcd machines.
+				"separate_machine": true,
 				// Labelled, because the replica rule reads this label and an
 				// etcd that could not scale past one would be a quorum of one.
 				"engine":   "etcd",

@@ -167,6 +167,12 @@ type Step struct {
 	// volume exists. Nil leaves whatever is already set, so a redeploy does
 	// not silently reset a schedule somebody tuned.
 	SnapshotPolicy *api.VolumePolicy `json:"snapshot_policy,omitempty"`
+	// SeparateMachine keeps this step out of the build-context grouping, for
+	// the one case that shares an image on purpose. See xPilots.
+	//
+	// Not serialised: it is an input to grouping, and by the time a plan is on
+	// the wire the grouping has already happened.
+	SeparateMachine bool `json:"-"`
 	// Processes is filled when SEVERAL compose services share one build
 	// context and therefore run as one machine. Empty is the ordinary case:
 	// one service, one machine, one process named app.
@@ -264,6 +270,21 @@ type xPilots struct {
 	// rather than set separately, because the thing that knows a database
 	// needs daily backups is the recipe that wrote the database.
 	Snapshots *xSnapshots `mapstructure:"snapshots"`
+	// SeparateMachine keeps this service out of the build-context grouping.
+	//
+	// The grouping rule reads a shared build context as "two commands over one
+	// filesystem", which is true of a web server and its worker and false of
+	// the one case that shares an image on purpose: the Postgres recipe bakes
+	// Patroni, etcd and HAProxy into EVERY image and picks a role at boot from
+	// PILOT_PG_ROLE, so the database and its etcd quorum are one image and
+	// must be several machines. Without this they were merged into one, and
+	// `pilot db ha` produced a plan with no etcd machines at all while telling
+	// the user their nodes were spread across hosts.
+	//
+	// Not inferred from the engine label: `<name>-pool` carries no label and
+	// must stay grouped with its database, so a label-based key would break
+	// the pooler to fix etcd. An opt-out is written where it is meant.
+	SeparateMachine bool `mapstructure:"separate_machine"`
 }
 
 // xSnapshots is one x-pilots.snapshots block, api.VolumePolicy spelled for
@@ -886,6 +907,7 @@ func toStep(name string, svc types.ServiceConfig) (Step, error) {
 	if x.Engine != "" {
 		step.Labels = map[string]string{"pilot.engine": x.Engine}
 	}
+	step.SeparateMachine = x.SeparateMachine
 	if x.Snapshots != nil && x.Snapshots.Cron != "" {
 		step.SnapshotPolicy = &api.VolumePolicy{
 			Cron:       x.Snapshots.Cron,

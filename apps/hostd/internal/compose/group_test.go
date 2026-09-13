@@ -134,10 +134,12 @@ name: demo
 services:
   web:
     build: .
+    command: node server.js
     environment:
       DATABASE_URL: postgres://a
   worker:
     build: .
+    command: node worker.js
     environment:
       DATABASE_URL: postgres://b
 `)
@@ -157,10 +159,12 @@ name: demo
 services:
   web:
     build: .
+    command: node server.js
     environment:
       NODE_ENV: production
   worker:
     build: .
+    command: node worker.js
     environment:
       NODE_ENV: production
 `)
@@ -180,9 +184,11 @@ name: demo
 services:
   web:
     build: .
+    command: node server.js
     ports: ["8080"]
   admin:
     build: .
+    command: node admin.js
     ports: ["8080", "4000"]
 `)
 	if planErr == nil {

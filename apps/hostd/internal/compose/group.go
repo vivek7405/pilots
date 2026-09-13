@@ -3,8 +3,11 @@ package compose
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
+
+	"github.com/vivek7405/pilots/hostd/internal/api"
 )
 
 // ProcessesEnv is the environment variable a machine's process set travels in.
@@ -54,7 +57,7 @@ func groupByContext(steps map[string]Step) (map[string]Step, error) {
 	var order []string
 	for _, name := range names {
 		step := steps[name]
-		if step.Build == nil {
+		if step.Build == nil || step.SeparateMachine {
 			continue
 		}
 		key := step.Build.Context + "\x00" + step.Build.Dockerfile
@@ -107,6 +110,20 @@ func mergeMembers(steps map[string]Step, members []string) (Step, error) {
 	var health = merged.Health
 	var dependsOn []string
 	var processes []Process
+	// Fields that belong to the MACHINE rather than to a process, collected
+	// across every member.
+	//
+	// merged starts as a copy of members[0], so anything not gathered here is
+	// silently the alphabetically-first member's answer and every other
+	// member's is discarded. Volumes is the one that costs data: a compose
+	// file with `web` and `worker` on one build context, where worker declares
+	// a volume, deployed one machine with web's volumes -- none -- and
+	// everything the worker wrote went to the copy-on-write rootfs and died
+	// with the next redeploy. Nothing said a volume had been dropped.
+	volumes := map[string]Volume{}
+	var knobs *api.Knobs
+	var snapshotPolicy *api.VolumePolicy
+	private, customDomain, preDeploy := merged.Private, merged.CustomDomain, merged.PreDeploy
 	replicas, vcpus, mem := 0, 0, 0
 	portOwner := ""
 
@@ -155,6 +172,55 @@ func mergeMembers(steps map[string]Step, members []string) (Step, error) {
 		processes = append(processes, Process{
 			Name: name, Cmd: commandOf(s), Needs: needs, Port: len(s.Ports) > 0,
 		})
+		// A volume is the machine's, so every member's travels. Two members
+		// naming one mount path with different volumes is refused for the
+		// reason two environments are: one machine has one filesystem, and
+		// silently taking one is a data-loss bug wearing a successful deploy.
+		for _, v := range s.Volumes {
+			if old, dup := volumes[v.MountPath]; dup && old != v {
+				return Step{}, fmt.Errorf("compose: %s and another service on the same "+
+					"build context both mount %s, from different volumes; they run as "+
+					"one machine and cannot have two. Mount it once, or give them "+
+					"different build contexts", name, v.MountPath)
+			}
+			volumes[v.MountPath] = v
+		}
+		// The rest of the machine's own policy, first writer wins and a
+		// disagreement is refused. These were dropped outright before.
+		if s.Knobs != nil {
+			if knobs != nil && !reflect.DeepEqual(*knobs, *s.Knobs) {
+				return Step{}, fmt.Errorf("compose: %s and another service on the same "+
+					"build context set different lifecycle knobs; they run as one "+
+					"machine and have one policy", name)
+			}
+			knobs = s.Knobs
+		}
+		if s.SnapshotPolicy != nil {
+			if snapshotPolicy != nil && !reflect.DeepEqual(*snapshotPolicy, *s.SnapshotPolicy) {
+				return Step{}, fmt.Errorf("compose: %s and another service on the same "+
+					"build context set different snapshot policies", name)
+			}
+			snapshotPolicy = s.SnapshotPolicy
+		}
+		if s.CustomDomain != "" {
+			if customDomain != "" && customDomain != s.CustomDomain {
+				return Step{}, fmt.Errorf("compose: %s and another service on the same "+
+					"build context set different custom domains; one machine has one "+
+					"address", name)
+			}
+			customDomain = s.CustomDomain
+		}
+		if s.PreDeploy != "" {
+			if preDeploy != "" && preDeploy != s.PreDeploy {
+				return Step{}, fmt.Errorf("compose: %s and another service on the same "+
+					"build context set different pre-deploy commands", name)
+			}
+			preDeploy = s.PreDeploy
+		}
+		// Private is the conservative direction: a group is private only when
+		// every member is, because one member that serves needs an address.
+		private = private && s.Private
+
 		// The machine is sized to hold every process, so the largest wins
 		// rather than the first.
 		if s.Replicas > replicas {
@@ -190,8 +256,33 @@ func mergeMembers(steps map[string]Step, members []string) (Step, error) {
 	if len(secrets) > 0 {
 		merged.SecretRefs = secrets
 	}
+	// Every member needs a command of its own, and this is checked LAST so a
+	// file with a real conflict in it reports the conflict rather than this.
+	//
+	// A process entry with an empty command is one the guest agent rejects on
+	// sight, and it rejects the whole list: the machine starts NOTHING, not
+	// this member and not the others, and the message names no service and
+	// says nothing about compose. This one names the service and the fix.
+	//
+	// There is no honest fallback. Every member of a group shares one image,
+	// so "inherit the image's own CMD" can be right for at most one of them
+	// and nothing says which; a member that runs the image default has to
+	// spell that default out.
+	for _, proc := range processes {
+		if proc.Cmd == "" {
+			return Step{}, fmt.Errorf("compose: %s shares a build context with another "+
+				"service, so they run as one machine with one process each, and it "+
+				"declares no command. Give it a `command:` (or an `entrypoint:`): a "+
+				"group cannot fall back to the image's own, because every member "+
+				"shares one image and only one of them could have it", proc.Name)
+		}
+	}
+
 	merged.Ports, merged.Health = ports, health
 	merged.Replicas, merged.VCPUs, merged.MemMiB = replicas, vcpus, mem
+	merged.Volumes = sortedVolumes(volumes)
+	merged.Knobs, merged.SnapshotPolicy = knobs, snapshotPolicy
+	merged.Private, merged.CustomDomain, merged.PreDeploy = private, customDomain, preDeploy
 	merged.DependsOn = dedupeSorted(dependsOn)
 	merged.Processes = processes
 	// The grouped step's own command is not one of the processes: each process
@@ -210,7 +301,26 @@ func mergeMembers(steps map[string]Step, members []string) (Step, error) {
 // correct. An empty answer means the service declared no command, so the
 // process runs whatever the image's own CMD is.
 func commandOf(s Step) string {
-	for _, line := range strings.Split(s.DockerfileAppend, "\n") {
+	// The append FIRST, because it is what the compose file overrode and an
+	// override beats what the image declared. Then the generated Dockerfile,
+	// which is where an `image:` step's own CMD lives -- omitting it meant a
+	// member that named an image and no command came out with an empty
+	// command, which is the case that starts nothing.
+	if cmd := lastCommandIn(s.DockerfileAppend); cmd != "" {
+		return cmd
+	}
+	return lastCommandIn(s.Dockerfile)
+}
+
+// lastCommandIn is the last CMD or ENTRYPOINT in a Dockerfile fragment,
+// rendered as a shell string.
+//
+// LAST, not first, because that is Docker's own rule: a later CMD replaces an
+// earlier one. Reading the first meant a fragment that overrode its own
+// command handed back the line the override was replacing.
+func lastCommandIn(text string) string {
+	out := ""
+	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(line)
 		rest, ok := strings.CutPrefix(line, "CMD ")
 		if !ok {
@@ -219,29 +329,75 @@ func commandOf(s Step) string {
 		if !ok {
 			continue
 		}
-		return shellFromJSONArray(strings.TrimSpace(rest))
+		out = shellFromJSONArray(strings.TrimSpace(rest))
 	}
-	return ""
+	return out
+}
+
+// sortedVolumes is the gathered volumes in mount-path order, so a plan is the
+// same on every host that renders it.
+func sortedVolumes(byPath map[string]Volume) []Volume {
+	if len(byPath) == 0 {
+		return nil
+	}
+	paths := make([]string, 0, len(byPath))
+	for path := range byPath {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	out := make([]Volume, 0, len(paths))
+	for _, path := range paths {
+		out = append(out, byPath[path])
+	}
+	return out
 }
 
 // shellFromJSONArray turns `["sh","-c","x"]` into a shell string. A value that
 // is not a JSON array is already one.
+//
+// PARSED as JSON and re-quoted, not split on commas. Splitting destroyed any
+// argument containing a space or a comma, and the postgres recipe has one:
+// archive_command=test ! -f /archive/wal/%f && cp %p /archive/wal/%f. Flattened
+// naively that becomes a string the guest's `sh -c` then splits on &&, so
+// postgres was exec'd with three stray argv entries and died with "too many
+// command-line arguments". recipes.go says a LIST was chosen precisely because
+// "a string would be re-split by whatever runs it"; this is the code that was
+// re-splitting it.
 func shellFromJSONArray(v string) string {
 	if !strings.HasPrefix(v, "[") {
 		return v
 	}
-	inner := strings.TrimSuffix(strings.TrimPrefix(v, "["), "]")
-	parts := strings.Split(inner, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		p = strings.TrimPrefix(p, `"`)
-		p = strings.TrimSuffix(p, `"`)
-		if p != "" {
-			out = append(out, p)
-		}
+	var argv []string
+	if err := json.Unmarshal([]byte(v), &argv); err != nil || len(argv) == 0 {
+		// Not a JSON array after all. Handed back as written, which is what a
+		// shell-form CMD already is.
+		return v
+	}
+	out := make([]string, 0, len(argv))
+	for _, a := range argv {
+		out = append(out, shellQuote(a))
 	}
 	return strings.Join(out, " ")
+}
+
+// shellQuote makes one argv element survive `sh -c`.
+//
+// Single quotes, because inside them a shell expands nothing at all -- no $,
+// no backtick, no backslash. An embedded single quote is closed, escaped and
+// reopened, which is the standard form and the only case that needs thought.
+// A word of plain characters is left bare so an ordinary command still reads
+// like one in a log.
+func shellQuote(s string) string {
+	if s == "" {
+		return "''"
+	}
+	if strings.IndexFunc(s, func(r rune) bool {
+		return !(r == '-' || r == '_' || r == '.' || r == '/' || r == '=' || r == ':' ||
+			(r >= '0' && r <= '9') || (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z'))
+	}) < 0 {
+		return s
+	}
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 // overridesWithoutCommand drops CMD and ENTRYPOINT from rendered overrides,
