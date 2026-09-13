@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/netns"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
@@ -29,6 +30,12 @@ const wakeInterval = tenantInterval
 // machine that is back. Nothing has to hold a connection open, and nothing has
 // to understand the protocol -- Postgres works exactly as HTTP does.
 func runWaker(ctx context.Context, hostID string, view fleetView, waker machineWaker) {
+	// The budget matters more here than anywhere else on the host. This loop
+	// is the only thing that wakes a machine somebody reached over .internal,
+	// and it does the waking INLINE: a WakeCounts() or a Wake() that blocks
+	// stops every such wake on the box while the process stays up and health
+	// answers 200. Without a budget the watchdog pets happily through it.
+	live := metrics.NewLoop("waker", 3*wakeInterval)
 	tick := time.NewTicker(wakeInterval)
 	defer tick.Stop()
 
@@ -48,6 +55,10 @@ func runWaker(ctx context.Context, hostID string, view fleetView, waker machineW
 		counts, err := netns.WakeCounts()
 		if err != nil {
 			slog.Debug("could not read wake counters", "err", err)
+			// A pass that could not read is still a pass: the loop is alive
+			// and the next tick will try again. Skipping the tick here would
+			// report a wedge for a counter file that is merely missing.
+			live.Tick()
 			continue
 		}
 
@@ -91,6 +102,7 @@ func runWaker(ctx context.Context, hostID string, view fleetView, waker machineW
 				delete(seen, id)
 			}
 		}
+		live.Tick()
 	}
 }
 

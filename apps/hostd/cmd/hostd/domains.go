@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -29,6 +30,10 @@ const verifyInterval = time.Minute
 // Only the service's arbiter acts, for the same reason it is the only writer
 // of the row.
 func runDomainVerifier(ctx context.Context, hostID string, store state.Store, domain string) {
+	// This is the loop whose silence is "certificate renewal silently stops",
+	// which is the failure metrics/liveness.go names in its own header. It had
+	// no budget, so the watchdog could not see it wedge.
+	beat := metrics.NewLoop("domain_verifier", 3*verifyInterval)
 	tick := time.NewTicker(verifyInterval)
 	defer tick.Stop()
 
@@ -39,12 +44,17 @@ func runDomainVerifier(ctx context.Context, hostID string, store state.Store, do
 		case <-tick.C:
 		}
 
+		// A pass that could not read the rows is still a pass -- the loop is
+		// alive and retries on the next tick -- so it ticks before giving up
+		// rather than reading as a wedge.
 		domains, err := store.ListDomains(ctx)
 		if err != nil {
+			beat.Tick()
 			continue
 		}
 		hosts, err := store.ListHosts(ctx)
 		if err != nil {
+			beat.Tick()
 			continue
 		}
 		live := state.LiveHosts(hosts)
@@ -73,5 +83,6 @@ func runDomainVerifier(ctx context.Context, hostID string, store state.Store, do
 			slog.Info("custom domain verified; certificates can now be issued for it",
 				"hostname", d.Hostname, "service", d.ServiceID)
 		}
+		beat.Tick()
 	}
 }

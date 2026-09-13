@@ -10,6 +10,7 @@ import (
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -54,6 +55,10 @@ type HostChangeNotifier interface {
 // dropping it early would cut the only link a host has while it is still the
 // only link.
 func Reconcile(ctx context.Context, dev *Device, hosts HostSource, selfID string, bootstrap []Peer) {
+	// A wedged Sync leaves the mesh on the peer set it last applied, so a host
+	// that joined afterwards is visible through Corrosion and unreachable
+	// through the mesh -- with this process healthy the whole time.
+	live := metrics.NewLoop("mesh_reconcile", 3*reconcileInterval)
 	tick := time.NewTicker(reconcileInterval)
 	defer tick.Stop()
 
@@ -68,6 +73,7 @@ func Reconcile(ctx context.Context, dev *Device, hosts HostSource, selfID string
 		if err := dev.Sync(withBootstrap(PeersFrom(hosts.Hosts(), selfID), bootstrap)); err != nil {
 			slog.Error("could not reconcile mesh peers", "err", err)
 		}
+		live.Tick()
 		select {
 		case <-ctx.Done():
 			return
