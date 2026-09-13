@@ -605,6 +605,12 @@ func startJoinGate(ctx context.Context, cfg *config.Config, f *fleet) *corrosion
 	}
 	client := &http.Client{Timeout: 3 * time.Second}
 	return corrosion.RunJoinGate(ctx, cs, corrosion.JoinGateOptions{
+		// A host with a bootstrap peer was told to join an existing fleet, so
+		// "no live hosts but me" is a replica that has not caught up rather
+		// than a fleet of one. Without this the gate opened on the first tick
+		// of a fresh host, because every input it reads comes from that same
+		// empty replica.
+		Joining: cfg.MeshBootstrap != "",
 		Peers: func() []state.Host {
 			var out []state.Host
 			for _, h := range f.cache.LiveHosts(time.Now(), selfheal.DeadAfter) {

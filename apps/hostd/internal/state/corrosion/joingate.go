@@ -2,6 +2,7 @@ package corrosion
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"sync"
@@ -92,13 +93,37 @@ func OpenJoinGate() *JoinGate {
 	return g
 }
 
+// errNoPeersYet is a host that was told to join a fleet and cannot yet see a
+// single member of it.
+//
+// Not an ordinary "still catching up": it means every input to the decision
+// below is being read from a replica that has learned nothing. Kept as an
+// error so the gate's own log line carries it.
+var errNoPeersYet = errors.New("this host was given a bootstrap peer and its " +
+	"replica has not yet produced any live host but itself")
+
 // JoinGateOptions is what the gate needs to decide. Every hook is supplied by
 // the caller so this package keeps its existing dependencies: the gate reads
 // the fleet through the same cache everything else does.
 type JoinGateOptions struct {
 	// Peers lists the live hosts OTHER than this one. Empty means a single-host
-	// fleet, which is complete immediately.
+	// fleet, which is complete immediately -- UNLESS Joining says otherwise.
 	Peers func() []state.Host
+	// Joining says this host was told to join an existing fleet, so an empty
+	// Peers is a replica that has learned nothing rather than a fleet of one.
+	//
+	// Without it the gate opened on the FIRST tick of a freshly started host:
+	// Peers comes from this host's own subscription cache, and Members and the
+	// gap count come from its own replica, so on a host that has received
+	// nothing every input said "caught up". The emptiest possible replica
+	// opened the gate fastest, which is the exact absence the gate exists to
+	// stop a host acting on.
+	//
+	// Set from the bootstrap peer: the one edge that is configured rather than
+	// discovered, and without which a new host can never join at all. A
+	// genuine single-host fleet has none, and is complete immediately and
+	// correctly.
+	Joining bool
 	// PeerVector fetches one peer's per-actor version vector, over whatever
 	// transport the caller uses (in hostd, the plain listener's /v1/health).
 	// An error, or a peer that does not answer, keeps the gate closed.
@@ -195,7 +220,27 @@ func joinState(ctx context.Context, store *Store, opts JoinGateOptions) (gaps, u
 	if opts.Peers == nil || opts.PeerVector == nil {
 		return gaps, unseen, 0, nil
 	}
-	for _, peer := range opts.Peers() {
+	peers := opts.Peers()
+	if len(peers) == 0 && opts.Joining {
+		// NOT complete, however empty the replica looks.
+		//
+		// Peers comes from this host's own subscription cache, so on a host
+		// that has just started and received nothing, it is empty -- and so is
+		// Members, and so is the gap count. Every input to the decision below
+		// therefore said "caught up", and the gate opened on the FIRST tick.
+		// The emptiest possible replica opened it fastest, which is the exact
+		// absence this gate exists to stop a host acting on: self-heal was
+		// then free to claim the machines of every host it "could not see",
+		// which was all of them.
+		//
+		// Joining is what separates that from a genuine single-host fleet,
+		// which has no peers and is complete immediately and correctly. It is
+		// set from the bootstrap peer -- the one edge that is configured
+		// rather than discovered, and without which a new host can never join
+		// at all.
+		return gaps, unseen, 0, errNoPeersYet
+	}
+	for _, peer := range peers {
 		theirs, perr := opts.PeerVector(ctx, peer)
 		if perr != nil {
 			behind++
