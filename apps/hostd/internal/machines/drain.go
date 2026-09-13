@@ -53,7 +53,10 @@ import (
 // Small. Each move is a suspend on this host and a restore on another, and
 // running twenty at once would make the drain a load spike on whichever host
 // is receiving them -- which is the host that just told the fleet it had room.
-const drainConcurrency = 4
+// A var rather than a const for ONE reason: a test pins it to 1 to assert the
+// order machines are handed off in, which is not observable while four move at
+// once. Nothing else writes it.
+var drainConcurrency = 4
 
 // handoffTimeout is how long the source waits for a target to take a machine
 // before offering it to somebody else.
@@ -162,10 +165,25 @@ func (m *Manager) Drain(ctx context.Context, pick func(state.Machine) (string, b
 	var wg sync.WaitGroup
 
 	for _, row := range mine {
+		// The slot is taken HERE, in the loop, and that is what makes the sort
+		// above mean anything.
+		//
+		// It used to be taken inside the goroutine, so every machine's
+		// goroutine was created at once and they raced for slots: which moved
+		// first was the Go scheduler's choice, not drainOrder's. The ordering
+		// this file opens by explaining -- suspended machines first, because
+		// moving one is a row write nobody sees; volume-backed ones last,
+		// because each costs an unmount, a mount and a boot -- was sorted,
+		// logged, and then discarded. A drain could start with the most
+		// customer-visible machine on the host.
+		//
+		// Blocking here also means the next goroutine is not created until a
+		// slot frees, so the order machines START in is the order they were
+		// sorted into.
+		sem <- struct{}{}
 		wg.Add(1)
 		go func(row state.Machine) {
 			defer wg.Done()
-			sem <- struct{}{}
 			defer func() { <-sem }()
 
 			err := m.handOff(ctx, row, pick)
