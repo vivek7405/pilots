@@ -38,9 +38,40 @@ func newLogRing() *logRing {
 	return &logRing{buf: make([]byte, 0, 4096)}
 }
 
+// Write accepts every byte and reports so, which is the whole of the io.Writer
+// contract and was the whole of the bug.
+//
+// # What went wrong
+//
+// The growth branch below re-slices p down to the bytes it has not consumed
+// yet, and the returns further down then reported len(p) -- the REMAINDER --
+// as the count for the original call. On the single write that crosses the
+// ring's cap, and only that one, this answered "I wrote 200" to a caller that
+// passed 300, with a nil error.
+//
+// io.Writer says that is a violation: a Write returning n < len(p) must return
+// a non-nil error. supervise.go wires this into io.MultiWriter alongside the
+// serial console, and MultiWriter enforces the contract by turning a short
+// count into io.ErrShortWrite. os/exec's output copier then aborts and closes
+// the read end of the child's pipe, so the supervised process is killed by
+// EPIPE on its next write -- after roughly one megabyte of output, which is to
+// say on every real application. The supervisor restarted it and the cycle
+// repeated, with nothing in the message pointing here, and `pilot logs` went
+// silent for a machine that was still running.
+//
+// # The fix
+//
+// The original length is captured before p is touched, and every path returns
+// it. A ring buffer DISCARDS by design -- that is what the cap is for -- and
+// discarding is not the same as declining to accept. This function consumes
+// everything it is handed; what it chooses to keep afterwards is its own
+// business and no concern of the caller's.
 func (r *logRing) Write(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+
+	// Before p is re-sliced below. Everything returns this.
+	n := len(p)
 
 	// Grow up to the cap, then switch to overwriting. Starting small keeps an
 	// idle machine's ten processes from reserving ten megabytes they never use.
@@ -56,7 +87,7 @@ func (r *logRing) Write(p []byte) (int, error) {
 			r.full, r.size, r.start = true, logRingSize, 0
 		}
 		if len(p) == 0 {
-			return len(take) + len(p), nil
+			return n, nil
 		}
 	}
 
@@ -66,13 +97,13 @@ func (r *logRing) Write(p []byte) (int, error) {
 	if len(p) >= logRingSize {
 		copy(r.buf, p[len(p)-logRingSize:])
 		r.start = 0
-		return len(p), nil
+		return n, nil
 	}
 	for _, b := range p {
 		r.buf[r.start] = b
 		r.start = (r.start + 1) % logRingSize
 	}
-	return len(p), nil
+	return n, nil
 }
 
 // Bytes returns the buffered output, oldest first.
