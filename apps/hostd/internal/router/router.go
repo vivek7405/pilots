@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/machines"
@@ -115,6 +116,8 @@ type Options struct {
 type Router struct {
 	opts  Options
 	wakes sync.Map // machine id -> *wakeOnce
+	// replayRR rotates which replica `elsewhere=true` picks. See otherReplica.
+	replayRR atomic.Uint32
 }
 
 func New(opts Options) *Router { return &Router{opts: opts} }
@@ -491,7 +494,7 @@ func (r *Router) replay(w http.ResponseWriter, req *http.Request, st *replayStat
 		return
 	}
 
-	next, err := r.replayTarget(want, st.answeredBy)
+	next, err := r.replayTarget(req.Context(), want, st.answeredBy)
 	if err != nil {
 		slog.Warn("a machine asked for a replay that was refused",
 			"machine", st.answeredBy.Machine.ID, "err", err)
@@ -513,7 +516,7 @@ func (r *Router) replay(w http.ResponseWriter, req *http.Request, st *replayStat
 // trusted from the header: the header was written by a customer's process, so
 // treating it as authority over routing would let one tenant's application aim
 // traffic at another tenant's machine.
-func (r *Router) replayTarget(want replayRequest, from *Target) (*Target, error) {
+func (r *Router) replayTarget(ctx context.Context, want replayRequest, from *Target) (*Target, error) {
 	if want.Elsewhere {
 		if from.Machine.ServiceID == "" {
 			return nil, errors.New("elsewhere needs a service, and this machine is not part of one")
@@ -531,6 +534,30 @@ func (r *Router) replayTarget(want replayRequest, from *Target) (*Target, error)
 	m, ok := r.opts.Lookup(want.Machine)
 	if !ok {
 		return nil, fmt.Errorf("no machine named %q", want.Machine)
+	}
+	// The ORG first, because nothing below it is a tenant boundary.
+	//
+	// `app` is a free-text string the client chooses at create; there is no
+	// apps table and nothing qualifies it by org, so two tenants that both call
+	// something "api" -- which is the name everybody reaches for -- shared an
+	// app by accident. `sameApp` alone therefore let one tenant's process aim a
+	// request at the other's machine, which is exactly what this function's own
+	// comment says it exists to prevent. Names are allocated fleet-wide, so the
+	// attacker needs no collision of its own: it names the victim's machine.
+	//
+	// OrgOf reads the local tenancy replica (rule 2), so this costs no network.
+	// A machine whose org cannot be resolved is refused rather than allowed:
+	// an unanswered question is not a match.
+	if r.opts.OrgOf == nil {
+		return nil, errors.New("this host cannot tell which org a machine belongs to")
+	}
+	mine, ok := r.opts.OrgOf(ctx, from.Machine.ID)
+	theirs, ok2 := r.opts.OrgOf(ctx, m.ID)
+	if !ok || !ok2 || mine == "" || mine != theirs {
+		// Deliberately the SAME message the app/service refusal gives, so the
+		// refusal is not an oracle telling one tenant that a name it guessed
+		// belongs to somebody else.
+		return nil, fmt.Errorf("%q is not in the same app or service", want.Machine)
 	}
 	// Same app, or same service. Both are the tenant's own namespace, and a
 	// machine that shares neither is somebody else's by construction.
@@ -552,7 +579,17 @@ func (r *Router) otherReplica(from *Target) (*Target, bool) {
 	if !ok {
 		return nil, false
 	}
-	for _, m := range replicas {
+	// Started from a rotating offset rather than from index 0.
+	//
+	// `elsewhere` means "any other replica", and answering it with the first
+	// one in the list made every replayed request in the fleet land on the same
+	// machine: an app that replays writes to a primary is fine, but one that
+	// replays to shed load was concentrating it instead. One counter per
+	// router, so the choice costs nothing and does not need per-service state.
+	n := len(replicas)
+	start := int(r.replayRR.Add(1))
+	for i := 0; i < n; i++ {
+		m := replicas[((start+i)%n+n)%n]
 		if m.ID != from.Machine.ID && m.State == "running" {
 			return &Target{Machine: m, Port: from.Port}, true
 		}

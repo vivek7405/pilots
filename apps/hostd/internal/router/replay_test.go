@@ -54,6 +54,15 @@ func targetOf(name, app, service string) *Target {
 	}, Port: 8080}
 }
 
+// orgOf answers from a fixed table, and false for anything not in it, which is
+// what a tenancy row that has not replicated yet looks like.
+func orgOf(table map[string]string) func(context.Context, string) (string, bool) {
+	return func(_ context.Context, id string) (string, bool) {
+		org, ok := table[id]
+		return org, ok
+	}
+}
+
 // The whole security model. A header written by one tenant's process must not
 // be able to aim traffic at another tenant's machine.
 func TestAReplayCannotLeaveTheAppOrService(t *testing.T) {
@@ -68,21 +77,79 @@ func TestAReplayCannotLeaveTheAppOrService(t *testing.T) {
 			}
 			return state.Machine{}, false
 		},
+		OrgOf: orgOf(map[string]string{
+			"m_web": "org-1", "m_sibling": "org-1", "m_stranger": "org-1",
+		}),
 	})
 	from := targetOf("web", "shop", "")
+	ctx := context.Background()
 
-	if _, err := r.replayTarget(replayRequest{Machine: "sibling"}, from); err != nil {
+	if _, err := r.replayTarget(ctx, replayRequest{Machine: "sibling"}, from); err != nil {
 		t.Errorf("a machine in the same app was refused: %v", err)
 	}
-	_, err := r.replayTarget(replayRequest{Machine: "stranger"}, from)
+	_, err := r.replayTarget(ctx, replayRequest{Machine: "stranger"}, from)
 	if err == nil {
 		t.Fatal("a machine in another app was accepted")
 	}
 	if !strings.Contains(err.Error(), "same app or service") {
 		t.Errorf("the refusal does not say why: %v", err)
 	}
-	if _, err := r.replayTarget(replayRequest{Machine: "ghost"}, from); err == nil {
+	if _, err := r.replayTarget(ctx, replayRequest{Machine: "ghost"}, from); err == nil {
 		t.Error("a machine that does not exist was accepted")
+	}
+}
+
+// The ORG boundary, which the app check alone could not enforce.
+//
+// `app` is a free-text string the client picks at create, with no apps table
+// and nothing qualifying it by org, so two tenants that both call something
+// "api" shared an app by accident -- and the app check then read that accident
+// as permission. Names are allocated fleet-wide, so the attacker does not even
+// need a collision it controls: it names the victim's machine directly.
+func TestAReplayCannotLeaveTheOrg(t *testing.T) {
+	victim := targetOf("api-1", "api", "")
+	r := New(Options{
+		HostID: "host-a",
+		Lookup: func(name string) (state.Machine, bool) {
+			if name == "api-1" {
+				return victim.Machine, true
+			}
+			return state.Machine{}, false
+		},
+		// Same app name, different tenants.
+		OrgOf: orgOf(map[string]string{"m_mine": "org-attacker", "m_api-1": "org-victim"}),
+	})
+	from := targetOf("mine", "api", "")
+	ctx := context.Background()
+
+	_, err := r.replayTarget(ctx, replayRequest{Machine: "api-1"}, from)
+	if err == nil {
+		t.Fatal("a replay reached another org's machine through a shared app name")
+	}
+	// The refusal must not distinguish "yours, wrong app" from "somebody
+	// else's", or it is a cross-tenant name oracle.
+	if !strings.Contains(err.Error(), "same app or service") {
+		t.Errorf("the refusal tells the caller the name belongs to someone: %v", err)
+	}
+
+	// An org that cannot be resolved is refused too: an unanswered question is
+	// not a match.
+	r2 := New(Options{
+		HostID: "host-a",
+		Lookup: func(string) (state.Machine, bool) { return victim.Machine, true },
+		OrgOf:  orgOf(map[string]string{"m_mine": "org-attacker"}),
+	})
+	if _, err := r2.replayTarget(ctx, replayRequest{Machine: "api-1"}, from); err == nil {
+		t.Error("a replay was allowed to a machine whose org is unknown")
+	}
+
+	// And with no tenancy view at all, nothing is replayable by name.
+	r3 := New(Options{
+		HostID: "host-a",
+		Lookup: func(string) (state.Machine, bool) { return victim.Machine, true },
+	})
+	if _, err := r3.replayTarget(ctx, replayRequest{Machine: "api-1"}, from); err == nil {
+		t.Error("a replay was allowed on a host that cannot resolve orgs")
 	}
 }
 
@@ -102,7 +169,7 @@ func TestElsewherePicksAnotherReplica(t *testing.T) {
 	})
 	from := &Target{Machine: replicas[0], Port: 8080}
 
-	next, err := r.replayTarget(replayRequest{Elsewhere: true}, from)
+	next, err := r.replayTarget(context.Background(), replayRequest{Elsewhere: true}, from)
 	if err != nil {
 		t.Fatalf("elsewhere: %v", err)
 	}
@@ -115,7 +182,7 @@ func TestElsewherePicksAnotherReplica(t *testing.T) {
 
 	// A machine that is not part of a service has no elsewhere to go.
 	lone := targetOf("solo", "shop", "")
-	if _, err := r.replayTarget(replayRequest{Elsewhere: true}, lone); err == nil {
+	if _, err := r.replayTarget(context.Background(), replayRequest{Elsewhere: true}, lone); err == nil {
 		t.Error("elsewhere was accepted for a machine with no service")
 	}
 }
