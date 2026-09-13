@@ -2,6 +2,7 @@ package machines
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -229,6 +230,42 @@ func (m *Manager) resolveForkSource(ctx context.Context, req api.ForkOptions) (*
 	}
 }
 
+// parentGate is the URL mode the parent was set to, or "" when it has none.
+//
+// The distinction that matters is between "no row" and "could not ask". No row
+// is a real answer and means public; a store that failed is not an answer at
+// all, and reading it as public is how a gated machine gets published by a
+// transient fault.
+func (m *Manager) parentGate(ctx context.Context, parentID string) (string, error) {
+	u, err := m.opts.Store.GetURLAuth(ctx, parentID)
+	if errors.Is(err, state.ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if u == nil {
+		return "", nil
+	}
+	return u.Mode, nil
+}
+
+// destroyUngated removes a fork that could not be given its parent's gate.
+//
+// Best effort, and loud either way: if the destroy also fails there is an open
+// machine holding somebody's data and the only thing left to do is say so by
+// name, so an operator can remove it.
+func (m *Manager) destroyUngated(ctx context.Context, forkID, parentID string, cause error) {
+	if err := m.Destroy(context.WithoutCancel(ctx), forkID); err != nil {
+		slog.Error("a fork could not inherit its parent's URL gate AND could not be "+
+			"destroyed; it is PUBLIC and holds its parent's data -- destroy it",
+			"fork", forkID, "parent", parentID, "cause", cause, "err", err)
+		return
+	}
+	slog.Warn("destroyed a fork that could not be given its parent's URL gate",
+		"fork", forkID, "parent", parentID, "err", cause)
+}
+
 // forkOnce makes one machine from the resolved source.
 //
 // Deliberately Create's own path: the fork is a create whose image happens to
@@ -273,18 +310,33 @@ func (m *Manager) forkOnce(ctx context.Context, req api.ForkOptions, src *forkSo
 	//
 	// Copied rather than inherited by lookup, because the router reads one row
 	// per object on the hot path and a chain to walk there is a chain to walk
-	// on every request. Best effort in the same sense the lineage row below is,
-	// with one difference: this one is refused loudly, because the failure is a
-	// machine that is open when its parent was not.
-	if u, err := m.opts.Store.GetURLAuth(ctx, src.ParentID); err == nil &&
-		u != nil && u.Mode != "" && u.Mode != api.URLAuthPublic {
-
+	// on every request.
+	//
+	// Not best effort, and this is where it used to be. The read was
+	// `err == nil && ...`, so a store that could not answer produced a fork
+	// with no url_auth row -- and no row reads as PUBLIC. A read failure, the
+	// one moment nothing knows whether the parent was gated, was the moment
+	// the parent's data was published. The write failure was logged and
+	// carried on, under a comment claiming it was "refused loudly".
+	//
+	// Both now destroy the fork and fail the request. A fork that cannot be
+	// proved to carry its parent's gate must not exist: the parent's memory
+	// and the parent's disk are already inside it, and an open machine is not
+	// something to leave running while somebody reads a log.
+	mode, err := m.parentGate(ctx, src.ParentID)
+	if err != nil {
+		m.destroyUngated(ctx, row.ID, src.ParentID, err)
+		return nil, fmt.Errorf("machines: could not read the URL gate of %s, so this "+
+			"fork would be public without anything knowing whether its parent is: %w",
+			src.ParentID, err)
+	}
+	if mode != "" && mode != api.URLAuthPublic {
 		if err := m.opts.Store.PutURLAuth(ctx, &state.URLAuth{
-			ID: row.ID, Kind: "machine", Mode: u.Mode, UpdatedAt: time.Now().Unix(),
+			ID: row.ID, Kind: "machine", Mode: mode, UpdatedAt: time.Now().Unix(),
 		}); err != nil {
-			slog.Error("a fork did not inherit its parent's URL gate and is therefore "+
-				"PUBLIC; gate it or destroy it",
-				"fork", row.ID, "parent", src.ParentID, "mode", u.Mode, "err", err)
+			m.destroyUngated(ctx, row.ID, src.ParentID, err)
+			return nil, fmt.Errorf("machines: could not give this fork the %s gate its "+
+				"parent %s has: %w", mode, src.ParentID, err)
 		}
 	}
 

@@ -935,7 +935,23 @@ func (d Deps) handlePromote(w http.ResponseWriter, r *http.Request) {
 	// an org-gated sandbox becomes a public service the moment it is
 	// promoted, and every replica the service gains afterwards -- which
 	// carries no mode of its own -- would be reachable by anyone.
-	if mode := d.urlAuthOf(r.Context(), r.PathValue("id")); mode == URLAuthOrg {
+	//
+	// urlAuthFor, not urlAuthOf: this is a WRITE that decides who may reach a
+	// service, and the display helper answers "public" when it cannot tell. A
+	// store that failed for a moment therefore published the sandbox, and the
+	// promote reported success. The read is refused instead, which leaves the
+	// service promoted and ungated -- so the refusal says exactly that, with
+	// the command to fix it.
+	mode, err := d.urlAuthFor(r.Context(), r.PathValue("id"))
+	if err != nil {
+		WriteError(w, http.StatusServiceUnavailable, CodeUnavailable, fmt.Sprintf(
+			"%s was promoted to service %s, but who may reach its URL could not be "+
+				"read, so the gate was not carried over: %v", r.PathValue("id"), svc.ID, err),
+			"the service is running and PUBLIC; set the gate with "+
+				"`pilot services url-auth "+svc.ID+" org` if it should not be", nil)
+		return
+	}
+	if mode == URLAuthOrg {
 		if err := d.putURLAuth(r.Context(), &state.URLAuth{ID: svc.ID, Kind: "service", Mode: mode, UpdatedAt: time.Now().Unix()}); err != nil {
 			writeMapped(w, err)
 			return

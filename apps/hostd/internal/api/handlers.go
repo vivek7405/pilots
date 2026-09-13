@@ -157,16 +157,49 @@ func (d Deps) lineageOf(ctx context.Context, id string) (parent, checkpoint stri
 // machines show` prints: swallowed, a store hiccup told an operator their gated
 // machine was open to the world, and the obvious next move is to gate it again
 // and be told it already is.
+// urlAuthOf is the RENDERING answer: what to show a caller who asked what an
+// object's URL gate is.
+//
+// It falls back to public when it cannot tell, which is right for a field on a
+// response -- a page that renders nothing is worse than a page that renders a
+// default, and the caller can ask again. It is WRONG for any decision that
+// writes, and urlAuthFor is the one to use there.
+//
+// The split is the whole point. One helper served both a display path, where
+// "assume public" is harmless, and handlePromote's access-control write, where
+// it is unrecoverable: a store that could not answer turned an org-gated
+// sandbox into a public service, and every replica the service gained
+// afterwards carried no gate of its own and was reachable by anyone.
 func (d Deps) urlAuthOf(ctx context.Context, id string) string {
-	u, err := d.Store.GetURLAuth(ctx, id)
-	if err != nil && !errors.Is(err, state.ErrNotFound) {
+	mode, err := d.urlAuthFor(ctx, id)
+	if err != nil {
 		slog.Warn("could not read who may reach a URL; reporting it as public, "+
 			"which it may not be", "id", id, "err", err)
-	}
-	if err != nil || u == nil || u.Mode == "" {
 		return URLAuthPublic
 	}
-	return u.Mode
+	if mode == "" {
+		return URLAuthPublic
+	}
+	return mode
+}
+
+// urlAuthFor is the ENFORCING answer: the mode, or why it is not known.
+//
+// "No row" is a real answer and means public, so it comes back as an empty
+// mode and a nil error. A store that failed is not an answer, and a caller
+// about to write an access-control row has to treat it as one.
+func (d Deps) urlAuthFor(ctx context.Context, id string) (string, error) {
+	u, err := d.Store.GetURLAuth(ctx, id)
+	if errors.Is(err, state.ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if u == nil {
+		return "", nil
+	}
+	return u.Mode, nil
 }
 
 func validURLAuth(mode string) bool {

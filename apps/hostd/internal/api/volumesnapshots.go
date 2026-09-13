@@ -1,6 +1,7 @@
 package api
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -209,10 +210,21 @@ func (d Deps) handleGetVolumePolicy(w http.ResponseWriter, r *http.Request) {
 	// every host has it. Only the WRITE has to reach the mounting host, because
 	// only that host can act on the schedule.
 	p, err := d.Store.GetVolumePolicy(r.Context(), v.ID)
-	if err != nil {
+	switch {
+	case errors.Is(err, state.ErrNotFound):
 		// No policy is not an error: it is what every volume has until somebody
 		// sets one, and the honest answer is an empty policy.
 		writeJSON(w, http.StatusOK, VolumePolicy{})
+		return
+	case err != nil:
+		// A store that could not answer is NOT "no policy set". This is the
+		// surface somebody uses to check whether their backups are on, and
+		// every error collapsed into an empty policy and a 200 -- so a
+		// transient fault reported, indistinguishably from the truth, that a
+		// volume with a nightly schedule had none. The two readings of that
+		// are "panic" and "set one over the schedule that was already there".
+		WriteError(w, http.StatusServiceUnavailable, CodeUnavailable,
+			"could not read this volume's snapshot policy", "try again", nil)
 		return
 	}
 	writeJSON(w, http.StatusOK, VolumePolicy{
