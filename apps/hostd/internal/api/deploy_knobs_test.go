@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"sync"
 	"testing"
 
 	"github.com/vivek7405/pilots/hostd/internal/quota"
@@ -14,7 +15,14 @@ import (
 
 // recordingRollout answers a deploy and remembers the knobs it was handed, so
 // a test can tell "refused" from "accepted and quietly dropped".
+//
+// Guarded, because Deploy is called on the SERVER's goroutine while the test
+// reads these fields on its own -- and the deploy-on-verdict tests read them in
+// a spin loop precisely because the write happens after the response. Without
+// the mutex `go test -race` reports the race, and without the race detector the
+// spin loop can read a stale zero forever and fail a build that worked.
 type recordingRollout struct {
+	mu        sync.Mutex
 	deploys   int
 	lastKnobs json.RawMessage
 	// resizedTo is the size the last scale asked for, as {vcpus, mem_mib}, so
@@ -26,9 +34,25 @@ type recordingRollout struct {
 func (r *recordingRollout) Deploy(_ context.Context, serviceID, _ string,
 	knobs json.RawMessage) (*state.Release, error) {
 
+	r.mu.Lock()
 	r.deploys++
 	r.lastKnobs = knobs
+	r.mu.Unlock()
 	return &state.Release{ID: "rel_1", ServiceID: serviceID}, nil
+}
+
+// Deploys is how many deploys this rollout has been asked for.
+func (r *recordingRollout) Deploys() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.deploys
+}
+
+// LastKnobs is the knobs the last deploy carried.
+func (r *recordingRollout) LastKnobs() json.RawMessage {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastKnobs
 }
 
 func (r *recordingRollout) Rollback(context.Context, string) (*state.Release, error) {
@@ -122,7 +146,7 @@ func TestADeployWithMalformedKnobsIsRefused(t *testing.T) {
 			if rec.Code != http.StatusBadRequest {
 				t.Errorf("status = %d, want 400: %s", rec.Code, rec.Body.String())
 			}
-			if roll.deploys != 0 {
+			if roll.Deploys() != 0 {
 				t.Error("the rollout ran anyway, so replicas were made from knobs nobody could read")
 			}
 		})
@@ -140,10 +164,10 @@ func TestAPartialKnobsObjectStillDeploys(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
-	if want := `{"min_machines_running":1}`; string(roll.lastKnobs) != want {
+	if want := `{"min_machines_running":1}`; string(roll.LastKnobs()) != want {
 		t.Errorf("the rollout was handed %s, want %s -- validating must not "+
 			"rewrite the body into a full policy, or the merge zeroes the rest",
-			roll.lastKnobs, want)
+			roll.LastKnobs(), want)
 	}
 }
 
@@ -157,7 +181,7 @@ func TestADeployWithNoKnobsIsUnaffected(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
-	if len(roll.lastKnobs) != 0 {
-		t.Errorf("the rollout was handed %s, want nothing", roll.lastKnobs)
+	if len(roll.LastKnobs()) != 0 {
+		t.Errorf("the rollout was handed %s, want nothing", roll.LastKnobs())
 	}
 }

@@ -148,8 +148,8 @@ func TestABuildThatNamesAServiceCutsItsRelease(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
-	if roll.deploys != 1 {
-		t.Fatalf("the release was cut %d times, want exactly 1", roll.deploys)
+	if roll.Deploys() != 1 {
+		t.Fatalf("the release was cut %d times, want exactly 1", roll.Deploys())
 	}
 
 	lines := decodeNDJSON(t, rec.Body.String())
@@ -206,13 +206,13 @@ func TestTheReleaseIsCutAfterTheWatcherGoesAway(t *testing.T) {
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if roll.deploys > 0 {
+		if roll.Deploys() > 0 {
 			break
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if roll.deploys != 1 {
-		t.Fatalf("a build whose watcher went away cut %d releases, want exactly 1", roll.deploys)
+	if roll.Deploys() != 1 {
+		t.Fatalf("a build whose watcher went away cut %d releases, want exactly 1", roll.Deploys())
 	}
 	// One rollout, and the verdict is still readable by whoever comes back.
 	rlines := b.recorded()
@@ -240,8 +240,8 @@ func TestFollowingOneBuildTwiceCutsOneRelease(t *testing.T) {
 			t.Errorf("reader %d does not see the release: %+v", i, last)
 		}
 	}
-	if roll.deploys != 1 {
-		t.Fatalf("two readers produced %d releases, want exactly 1", roll.deploys)
+	if roll.Deploys() != 1 {
+		t.Fatalf("two readers produced %d releases, want exactly 1", roll.Deploys())
 	}
 }
 
@@ -286,8 +286,8 @@ func TestAFailedBuildThatAskedToDeployNeverReachesTheRollout(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
 	}
-	if roll.deploys != 0 {
-		t.Fatalf("a failed build deployed %d times", roll.deploys)
+	if roll.Deploys() != 0 {
+		t.Fatalf("a failed build deployed %d times", roll.Deploys())
 	}
 	lines := b.recorded()
 	if last := lines[len(lines)-1]; last.Code != CodeBuildFailed || last.Error == "" {
@@ -359,8 +359,8 @@ func TestARolloutDoesNotHoldTheBuildsSlot(t *testing.T) {
 	if code := <-deploying; code != http.StatusOK {
 		t.Fatalf("the deploying build got %d, want 200", code)
 	}
-	if roll.deploys != 1 {
-		t.Fatalf("the rollout ran %d times, want 1", roll.deploys)
+	if roll.Deploys() != 1 {
+		t.Fatalf("the rollout ran %d times, want 1", roll.Deploys())
 	}
 }
 
@@ -379,8 +379,8 @@ func TestABuildMayNotNameAServiceItCannotReach(t *testing.T) {
 	if len(b.recorded()) != 0 {
 		t.Errorf("a refused build still ran: %+v", b.recorded())
 	}
-	if roll.deploys != 0 {
-		t.Errorf("a refused build still deployed %d times", roll.deploys)
+	if roll.Deploys() != 0 {
+		t.Errorf("a refused build still deployed %d times", roll.Deploys())
 	}
 	if held, _ := b.state(); held {
 		t.Error("a build that never started held a log")

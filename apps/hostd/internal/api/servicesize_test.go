@@ -113,9 +113,9 @@ func TestADeployCarryingASizeWritesItBeforeRollingOut(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
 	}
-	if roll.deploys != 1 {
+	if roll.Deploys() != 1 {
 		t.Errorf("deploys = %d, want exactly one: a size on a deploy must not "+
-			"cost a second rollout", roll.deploys)
+			"cost a second rollout", roll.Deploys())
 	}
 	// Not through Resize: that would BE the second rollout.
 	if roll.resizedTo != [2]int{0, 0} {

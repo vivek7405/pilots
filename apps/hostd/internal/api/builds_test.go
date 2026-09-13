@@ -541,8 +541,8 @@ func TestAScopedKeyDeploysTheImageItBuilt(t *testing.T) {
 		t.Fatalf("deploying the image it just built: got %d, want 200 (%s)",
 			dep.Code, dep.Body.String())
 	}
-	if roll.deploys != 1 {
-		t.Fatalf("the deploy did not reach the rollout (%d deploys)", roll.deploys)
+	if roll.Deploys() != 1 {
+		t.Fatalf("the deploy did not reach the rollout (%d deploys)", roll.Deploys())
 	}
 	if mac := postJSON(t, h, "/v1/machines", "pilot_org1_deploy",
 		`{"vcpus":1,"mem_mib":512,"image":"`+image+`"}`); mac.Code != http.StatusCreated {
@@ -559,8 +559,8 @@ func TestAScopedKeyDeploysTheImageItBuilt(t *testing.T) {
 		t.Errorf("deploying another org's image: got %d (%s), want 404 build not found",
 			foreign.Code, foreign.Body.String())
 	}
-	if roll.deploys != 1 {
-		t.Errorf("a foreign image reached the rollout (%d deploys)", roll.deploys)
+	if roll.Deploys() != 1 {
+		t.Errorf("a foreign image reached the rollout (%d deploys)", roll.Deploys())
 	}
 	if boot := postJSON(t, h, "/v1/machines", "pilot_org2_deploy",
 		`{"vcpus":1,"mem_mib":512,"image":"`+image+`"}`); boot.Code != http.StatusNotFound {
