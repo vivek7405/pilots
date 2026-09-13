@@ -53,12 +53,28 @@ func (d Deps) askHostForMetrics(ctx context.Context, r *http.Request, hostID str
 	}
 	// Bounded, because this is a body from another machine and a scrape must
 	// not be a way to make a host allocate without limit.
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	//
+	// One byte past the cap is read so the cap can be DETECTED. A plain
+	// LimitReader stops mid-line and hands the parser a body that is simply
+	// shorter, so a host over the limit reported a partial set of its machines
+	// as if it were the whole set -- a wrong answer that reads exactly like a
+	// right one, which is the failure this file's own callers exist to avoid.
+	// Over the cap is an error, and the caller drops that host from the answer
+	// and says which.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, peerMetricsMaxBody+1))
 	if err != nil {
 		return nil, err
 	}
+	if len(body) > peerMetricsMaxBody {
+		return nil, fmt.Errorf("api: host %s answered more than %d bytes of metrics",
+			hostID, peerMetricsMaxBody)
+	}
 	return parseExposition(string(body)), nil
 }
+
+// peerMetricsMaxBody bounds one peer's exposition. Generous: a host holding a
+// thousand machines writes a few hundred kilobytes.
+const peerMetricsMaxBody = 8 << 20
 
 // parseExposition reads back what writeExposition wrote.
 //
