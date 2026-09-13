@@ -172,7 +172,12 @@ async function waitFor(fn, { timeoutMs = 120_000, everyMs = 500, what = 'conditi
     }
     await sleep(everyMs);
   }
-  throw new Error(`timed out waiting for ${what}${lastErr ? `: ${lastErr.message}` : ''}`);
+  // `what` may be a function, so a caller can describe the state it last saw
+  // rather than only what it was waiting for. A timeout that says "it did not
+  // happen" and nothing else costs whoever reads it a trip to a host's journal
+  // to learn which of several failures it was.
+  const subject = typeof what === 'function' ? what() : what;
+  throw new Error(`timed out waiting for ${subject}${lastErr ? `: ${lastErr.message}` : ''}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -5219,7 +5224,16 @@ async function quotaOrg() {
   return process.env.PILOTS_E2E_ORG ?? (await myOrg());
 }
 const QUOTA_HEADROOM = 2;
-const CLI = process.env.PILOT_CLI ?? 'pilot';
+// The CLI this section spawns.
+//
+// PILOT_BIN is the variable the rest of the battery uses (see CLI_BIN below),
+// and it is honoured here too. Two names for one binary is a trap that already
+// sprung: a run with PILOT_BIN set exercised the branch's CLI everywhere
+// EXCEPT this section, which silently spawned whatever `pilot` happened to be
+// on PATH -- so a fix to the CLI could land, be deployed, and still fail here
+// against a months-old install, with the failure reading as the fix not
+// working.
+const CLI = process.env.PILOT_CLI ?? process.env.PILOT_BIN ?? 'pilot';
 
 // mcpCall speaks one tools/call to a freshly spawned MCP server and returns
 // both the parsed result and every line the server put on stdout, because
@@ -5891,10 +5905,25 @@ async function exitAssertions() {
         sleep(15_000),
       ]);
 
+      // The last thing the row said, so a timeout names what happened rather
+      // than only that it did not.
+      //
+      // "timed out waiting for the panicked machine to come back" is true of a
+      // machine still booting, one parked in error, and one that came back by
+      // a path this does not accept -- three different bugs behind one
+      // sentence, and two investigations spent telling them apart by reading a
+      // host's journal. The row already knows.
+      let last = null;
       const { ms } = await timed(() => waitFor(async () => {
         const { json: now } = await request(`/v1/machines/${id}`);
+        last = now;
         return now?.state === 'running' && now?.last_start === 'cold_boot';
-      }, { timeoutMs: 90_000, everyMs: 1000, what: 'the panicked machine to come back' }));
+      }, {
+        timeoutMs: 90_000, everyMs: 1000,
+        what: () => `the panicked machine to come back (it is state=${last?.state} ` +
+          `last_start=${last?.last_start} rootfs_build=${JSON.stringify(last?.rootfs_build_id ?? '')} ` +
+          `mem_build=${JSON.stringify(last?.mem_build_id ?? '')})`,
+      }));
       enforce(reflink, ms, 30_000, 60_000, 30_000, 'exit recovery');
     });
 
