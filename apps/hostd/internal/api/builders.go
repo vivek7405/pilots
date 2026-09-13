@@ -79,6 +79,27 @@ func (d Deps) handleResetBuilder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	host := r.PathValue("host")
+	// The DESTROY belongs to the host that holds those builders.
+	//
+	// Destroy below writes the machine's rows, and a host writes only rows
+	// describing its own machines (invariant 1). Run here against another
+	// host's builder it either fails outright or writes a row this host does
+	// not own -- which does not error, it corrupts state through a CRDT merge.
+	// Either way the reset reported success and the wedged builder was still
+	// running, which is the one failure `pilot builder reset` exists to end.
+	//
+	// Only when the host is a peer this replica can actually place, though.
+	// The EPOCH half is org-wide and any host may bump it, and "my layers are
+	// wrong" has to be fixable without knowing which host holds a machine --
+	// so a name this fleet cannot resolve still advances the epoch here rather
+	// than refusing, exactly as it did before.
+	if host != "" && host != d.HostID && d.Peers != nil {
+		if _, reachable := d.Peers.InternalAddr(host); reachable {
+			if d.forwardToHost(w, r, host) {
+				return
+			}
+		}
+	}
 
 	// Destroy first, then bump. The other order would advance the epoch and
 	// then fail, leaving every host in the fleet to re-pull a cache for a

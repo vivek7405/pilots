@@ -172,7 +172,15 @@ func (r *Router) resolve(ctx context.Context, host string) (*Target, error) {
 	// has not delivered yet -- or one reached by custom domain -- still
 	// resolves.
 	if r.opts.Lookup != nil {
-		if m, ok := r.opts.Lookup(name); ok {
+		// The builder check belongs HERE as well as in the store loop below,
+		// and this is the path that actually runs. The cache is the steady
+		// state -- a miss is a row the subscription has not delivered yet --
+		// so a guard only in the fallback was a guard that almost never fired:
+		// a builder's address resolved, woke a quota-exempt machine nobody
+		// asked for, and reset the activity clock the stale-builder collector
+		// reads. An org can read its own builder's name out of the machine
+		// list, so that was reachable by anyone holding a key.
+		if m, ok := r.opts.Lookup(name); ok && !machines.IsBuilder(m.Name) {
 			return &Target{Machine: m, Port: port}, nil
 		}
 	}
