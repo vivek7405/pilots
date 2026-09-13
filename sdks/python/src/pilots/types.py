@@ -56,6 +56,7 @@ class Knobs:
     auto_start: bool = False
     min_machines_running: int = 0
     soft_limit: int = 0
+    hard_limit: int = 0
     idle_timeout: int = 0
     schedules: list[Schedule] = field(default_factory=list)
 
@@ -86,6 +87,277 @@ class Machine:
     last_start_at: int | None = None
     labels: dict[str, str] | None = None
     url_auth: str | None = None
+    #: The machine this one was FORKED from, and the checkpoint it was
+    #: restored from. None on a machine that was created rather than forked.
+    parent: str | None = None
+    checkpoint: str | None = None
+    #: The address this machine's OUTBOUND traffic leaves from, when its host
+    #: manages egress. Shared with the org's other machines on the same host.
+    #: None means the host's shared address, which is what every machine had
+    #: before egress addresses existed.
+    egress: str | None = None
+
+
+@dataclass
+class ForkRequest:
+    """Asks for N new machines from one machine's or checkpoint's exact state:
+    the source's processes already running, its memory already warm."""
+
+    name: str | None = None
+    count: int | None = None
+    volume: bool | None = None
+
+
+@dataclass
+class ForkEntry:
+    """One fork: the machine, or why it did not happen."""
+
+    machine: Machine | None = None
+    error: str | None = None
+
+
+@dataclass
+class ForkResponse:
+    """One entry per requested fork, in order.
+
+    Per-fork rather than one status for the request, because forks are
+    independent: nine that came up are worth having when the tenth did not.
+    """
+
+    forks: list[ForkEntry] = field(default_factory=list)
+
+
+@dataclass
+class SnapshotResponse:
+    """One point-in-time copy of a volume.
+
+    ``snapshot`` is the stamp that names it, ``20260912T101500Z``. It sorts
+    lexically in time order, so a list needs no separate ordering field.
+    """
+
+    volume_id: str = ""
+    snapshot: str = ""
+
+
+@dataclass
+class ComposeRecipe:
+    """The compose fragment for one database, with the durability decision made
+    and explained.
+
+    Fetched rather than built by the client: two copies of a recipe is two
+    places for it to drift from what the planner will accept. The password is
+    generated on the client and never crosses the wire -- ``secret_names`` says
+    what to make, and ``url_template`` carries ``PASSWORD`` where it goes.
+    """
+
+    engine: str = ""
+    mode: str = ""
+    service: dict[str, Any] = field(default_factory=dict)
+    companions: dict[str, dict[str, Any]] = field(default_factory=dict)
+    volumes: dict[str, Any] = field(default_factory=dict)
+    files: dict[str, str] | None = None
+    secret_names: list[str] = field(default_factory=list)
+    conn_var: str = ""
+    url_template: str = ""
+    direct_var: str = ""
+    direct_template: str = ""
+    #: What this mode costs and guarantees, in one line. Show it.
+    statement: str = ""
+
+
+@dataclass
+class VolumePolicy:
+    """How often a volume is snapshotted and how much is kept.
+
+    Two retention numbers rather than one, because they answer different
+    questions: how far back at a day's resolution, and how far back at all.
+
+    An empty ``cron`` means no schedule. Retention of zero and zero keeps
+    EVERYTHING, never nothing.
+    """
+
+    cron: str | None = None
+    keep_daily: int | None = None
+    keep_weekly: int | None = None
+
+
+@dataclass
+class OrgsResponse:
+    """Which orgs a key can act as, and which it is acting as now.
+
+    Not a list of teams: the fleet knows an org only as a string on a row.
+    """
+
+    current: str = ""
+    orgs: list[str] = field(default_factory=list)
+    admin: bool = False
+
+
+@dataclass
+class ComposeHAFragment:
+    """The compose text that turns one Postgres into a Patroni cluster.
+
+    Returned as data rather than applied: the client edits the file, where the
+    diff can be read before any of it is deployed.
+    """
+
+    service: dict[str, Any] = field(default_factory=dict)
+    etcd_name: str = ""
+    etcd: dict[str, Any] = field(default_factory=dict)
+    etcd_volume: str = ""
+    secret_names: list[str] = field(default_factory=list)
+    statement: str = ""
+
+
+@dataclass
+class MachineMetrics:
+    """One machine's CPU and memory, read from its cgroup on its owner.
+
+    ``cpu_seconds`` is monotonic across suspend and wake; ``memory_bytes`` is
+    zero while suspended, which is the truth rather than a gap.
+    """
+
+    machine_id: str = ""
+    name: str = ""
+    service_id: str = ""
+    state: str = ""
+    vcpus: int = 0
+    mem_mib: int = 0
+    cpu_seconds: float = 0.0
+    memory_bytes: int = 0
+    memory_limit_bytes: int = 0
+    sampled_at: int = 0
+
+
+@dataclass
+class GrantRequest:
+    """What a machine may ask its host's credential broker for.
+
+    Both fields replace. Merging two partial grants produces a permission
+    nobody wrote.
+    """
+
+    scopes: list[str] = field(default_factory=list)
+    secrets: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class GrantResponse:
+    """What is granted, without the values."""
+
+    id: str = ""
+    kind: str = ""
+    org_id: str = ""
+    scopes: list[str] = field(default_factory=list)
+    secret_names: list[str] = field(default_factory=list)
+    updated_at: int = 0
+
+
+@dataclass
+class BrokerClaims:
+    """What a machine's own token says about itself.
+
+    Never sent as a request body, and the signature is not carried: verifying
+    is hostd's, from a secret no client has.
+    """
+
+    v: int = 0
+    org: str = ""
+    machine: str = ""
+    service: str = ""
+    scopes: list[str] = field(default_factory=list)
+    iat: int = 0
+    exp: int = 0
+
+
+@dataclass
+class ServiceEnvResponse:
+    """A service's environment with the values in it.
+
+    Every other surface returns names only. Calling this is a deliberate act,
+    and ``sealed`` false on a service with a sealed half means the host could
+    not open it rather than that the environment is empty.
+    """
+
+    service_id: str = ""
+    env: dict[str, str] = field(default_factory=dict)
+    secret_env: dict[str, str] = field(default_factory=dict)
+    sealed: bool = False
+
+
+@dataclass
+class ForkVolumeRequest:
+    """Names the new volume a fork creates.
+
+    Empty mints one from the source's name and the snapshot's stamp.
+    """
+
+    name: str = ""
+
+
+@dataclass
+class SnapshotListResponse:
+    """Every snapshot of a volume, newest first."""
+
+    volume_id: str = ""
+    snapshots: list[str] = field(default_factory=list)
+
+
+@dataclass
+class DrainReport:
+    """What draining a host did.
+
+    The machines in ``moved`` are on other hosts now, with the same ids, names
+    and URLs they had: that is what makes a drain invisible to the people using
+    them. ``left`` are the ones no host would take, each with its reason.
+    """
+
+    moved: list[str] = field(default_factory=list)
+    left: list[str] | None = None
+    errors: dict[str, str] | None = None
+    #: Stays true after a drain that left something behind, so the host goes on
+    #: refusing new machines until an operator says otherwise.
+    draining: bool = False
+    started: int = 0
+
+
+@dataclass
+class TakeRequest:
+    """One host telling another to take a machine it has offered.
+
+    Internal: it travels over the mesh, and the offer row is what authorises
+    the move. No client sends this.
+    """
+
+    handoff_id: str = ""
+
+
+@dataclass
+class EgressAddress:
+    """One host's answer for where an org's traffic leaves from.
+
+    There is no IPv4 counterpart and there will not be one: a v4 address is
+    purchased and scarce, and a bare-metal host has one, so v4 stays a shared
+    masquerade.
+    """
+
+    host_id: str = ""
+    ipv6: str = ""
+    interface: str | None = None
+
+
+@dataclass
+class EgressResponse:
+    """Every address an org's outbound traffic can leave from, one per host.
+
+    A set rather than one address, because the address is derived from the
+    HOST's prefix: an org running machines on three hosts leaves from three
+    addresses. It changes when a host joins or leaves the fleet and at no other
+    time, which is what makes it safe to put in somebody else's firewall.
+    """
+
+    org_id: str = ""
+    addresses: list[EgressAddress] = field(default_factory=list)
 
 
 @dataclass
@@ -184,6 +456,7 @@ class Service:
     app: str | None = None
     depends_on: list[str] | None = None
     replicas: int = 0
+    size: Size = field(default_factory=lambda: Size())
     knobs: Knobs = field(default_factory=Knobs)
     health: HealthCheck | None = None
     url: str | None = None
@@ -213,6 +486,7 @@ class CreateServiceRequest:
     release: str | None = None
     build: str | None = None
     replicas: int | None = None
+    size: Size | None = None
     knobs: KnobsPatch | None = None
     health: HealthCheck | None = None
     domain: str | None = None
@@ -233,6 +507,7 @@ class DeployRequest:
     release: str | None = None
     build: str | None = None
     knobs: KnobsPatch | None = None
+    size: Size | None = None
 
 
 @dataclass
@@ -246,6 +521,34 @@ class PromoteRequest:
 class RedeployRequest:
     image: str = ""
     release: str | None = None
+
+
+@dataclass
+class Size:
+    """How big a machine is: the two dimensions that are priced, named together
+    wherever a service carries a size rather than a single machine.
+
+    Zero on a dimension means "leave it as it is" on a request, and means the
+    default on a reply, never a machine with no memory.
+    """
+
+    vcpus: int = 0
+    mem_mib: int = 0
+
+
+@dataclass
+class ResizeMachineRequest:
+    """Boots a machine again at a NEW SIZE, in place: same id, same URL, same
+    disk, same volume.
+
+    A boot rather than a resume, because a memory image cannot be loaded into a
+    differently-sized VM, so whatever was in memory is lost. Zero on a dimension
+    leaves that dimension alone, which is how "give it more memory" is said
+    without restating the vCPU count.
+    """
+
+    vcpus: int = 0
+    mem_mib: int = 0
 
 
 @dataclass
@@ -295,6 +598,17 @@ class Host:
     last_seen: int = 0
     alive: bool = False
     cpu_vendor: str | None = None
+    #: Memory held by RUNNING machines this host would suspend if it needed the
+    #: room. Placement counts it as available. Suspended machines are not
+    #: counted: their memory is already in mem_free_mib.
+    mem_reclaimable_mib: int = 0
+    #: The vCPUs this host's machines are configured with. A load signal rather
+    #: than a limit, because vCPUs are timeshared.
+    vcpus_running: int = 0
+    #: An operator is moving this host's machines off it; rankers skip it.
+    draining: bool = False
+    #: How many builds this host holds on local disk.
+    builds_cached: int = 0
 
 
 @dataclass
@@ -328,6 +642,8 @@ class HealthResponse:
     store_version: int = 0
     cpu_vendor: str = ""
     cpu_vendor_forced: bool | None = None
+    store_versions: dict[str, int] | None = None
+    replication_complete: bool = False
 
 
 @dataclass
@@ -357,6 +673,7 @@ class HealthLast:
 @dataclass
 class UpdateServiceRequest:
     replicas: int | None = None
+    size: Size | None = None
     health: HealthCheck | None = None
     env: dict[str, str] | None = None
     secret_env: dict[str, str] | None = None
@@ -427,7 +744,17 @@ class QuotaResponse:
     max_mem_mib: int = 0
     max_volume_gib: int = 0
     max_builds: int = 0
+    max_snapshot_gib: int = 0
     updated_at: int = 0
+    # What the org is holding right now, against those limits. Answered on GET
+    # and absent on PUT, because they are not settable. Counting machines
+    # yourself gives a different number: builders do not count against the
+    # quota.
+    used_machines: int = 0
+    used_vcpus: int = 0
+    used_mem_mib: int = 0
+    used_volume_gib: int = 0
+    used_snapshot_gib: int = 0
 
 
 @dataclass
@@ -447,6 +774,7 @@ class UsageTotals:
     vcpu_seconds: int = 0
     mib_seconds: int = 0
     volume_gib_seconds: int = 0
+    snapshot_gib_seconds: int = 0
 
 
 @dataclass
@@ -455,6 +783,7 @@ class UsageResponse:
     since: int = 0
     until: int = 0
     orgs: dict[str, UsageTotals] = field(default_factory=dict)
+    machines: dict[str, dict[str, UsageTotals]] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -501,6 +830,29 @@ class ComposeStep:
     private: bool | None = None
     custom_domain: str | None = None
     pre_deploy: str | None = None
+    #: Attached to the service at create, write-once. The database recipes set
+    #: ``pilot.engine``, which is how the data view knows a service is a
+    #: database and which one.
+    labels: dict[str, str] | None = None
+    #: The volume's snapshot schedule and retention. None leaves whatever is
+    #: set, so a redeploy does not reset a schedule somebody tuned.
+    snapshot_policy: VolumePolicy | None = None
+    processes: list["ComposeProcess"] | None = None
+
+
+@dataclass
+class ComposeProcess:
+    """One named command inside a machine that runs several.
+
+    Filled when several compose services share one build context and therefore
+    run as one machine. The ordinary case is one service, one machine, one
+    process named ``app``, and this is then absent.
+    """
+
+    name: str = ""
+    cmd: str | None = None
+    needs: list[str] | None = None
+    port: bool | None = None
 
 
 @dataclass

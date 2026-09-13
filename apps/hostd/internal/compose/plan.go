@@ -158,6 +158,41 @@ type Step struct {
 	Private      bool   `json:"private,omitempty"`
 	CustomDomain string `json:"custom_domain,omitempty"`
 	PreDeploy    string `json:"pre_deploy,omitempty"`
+	// Labels are attached to the service at create, write-once. The recipes
+	// set `pilot.engine`, which is how every later reader -- `pilot metrics`,
+	// the dashboard's data view, `pilot db restore` -- knows this service is a
+	// database and which one.
+	Labels map[string]string `json:"labels,omitempty"`
+	// SnapshotPolicy is the volume's schedule and retention, applied after the
+	// volume exists. Nil leaves whatever is already set, so a redeploy does
+	// not silently reset a schedule somebody tuned.
+	SnapshotPolicy *api.VolumePolicy `json:"snapshot_policy,omitempty"`
+	// Processes is filled when SEVERAL compose services share one build
+	// context and therefore run as one machine. Empty is the ordinary case:
+	// one service, one machine, one process named app.
+	//
+	// Sharing a context is the signal, and it is the honest one. Two services
+	// built from the same directory are two commands over one filesystem,
+	// which is exactly a machine with two processes; two services with
+	// different images are two filesystems, which cannot be one machine
+	// without a container runtime in the guest, and this project does not have
+	// one on purpose. So the reading is mechanical rather than a heuristic,
+	// and the case it does not cover is refused rather than approximated.
+	Processes []Process `json:"processes,omitempty"`
+}
+
+// Process is one named command inside a machine that runs several.
+type Process struct {
+	Name string `json:"name"`
+	// Cmd is the service's command, already rendered the way the Dockerfile
+	// override is: a shell string the guest runs through /bin/sh -c.
+	Cmd string `json:"cmd,omitempty"`
+	// Needs is this process's depends_on, narrowed to processes in the SAME
+	// machine. A dependency on a service that became a different machine stays
+	// on the step's DependsOn, where the rollout orders it.
+	Needs []string `json:"needs,omitempty"`
+	// Port marks the one process that owns the machine's published port.
+	Port bool `json:"port,omitempty"`
 }
 
 // Plan is the ordered result: the app, and its services in dependency order.
@@ -221,6 +256,22 @@ type xPilots struct {
 	SizeGiB   int          `mapstructure:"size_gib"`
 	PreDeploy string       `mapstructure:"pre_deploy"`
 	App       string       `mapstructure:"app"` // top-level only
+	// Engine names the database this service runs, which is what makes
+	// `pilot metrics` and the dashboard's data view know which client to use.
+	// Written by the recipes; a hand-written file may set it too.
+	Engine string `mapstructure:"engine"`
+	// Snapshots is the volume's schedule and retention. Carried on the SERVICE
+	// rather than set separately, because the thing that knows a database
+	// needs daily backups is the recipe that wrote the database.
+	Snapshots *xSnapshots `mapstructure:"snapshots"`
+}
+
+// xSnapshots is one x-pilots.snapshots block, api.VolumePolicy spelled for
+// mapstructure.
+type xSnapshots struct {
+	Cron       string `mapstructure:"cron"`
+	KeepDaily  int    `mapstructure:"keep_daily"`
+	KeepWeekly int    `mapstructure:"keep_weekly"`
 }
 
 // xSchedule is one x-pilots.schedules entry, api.Schedule spelled for
@@ -303,7 +354,15 @@ func Compile(ctx context.Context, req Request) (*Plan, *PlanError, error) {
 		}
 		steps[name] = step
 	}
-	ordered, err := kahn(steps)
+	// Services sharing a build context are one machine with one process each.
+	// Before kahn, so the ordering runs over the machines that will actually
+	// be deployed rather than over the services that were written.
+	grouped, err := groupByContext(steps)
+	if err != nil {
+		return nil, &PlanError{Error: err.Error(), Code: api.CodeComposeInvalid,
+			Next: "give the services different build contexts, or resolve the conflict named above"}, nil
+	}
+	ordered, err := kahn(grouped)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -818,6 +877,22 @@ func toStep(name string, svc types.ServiceConfig) (Step, error) {
 		PreDeploy:    x.PreDeploy,
 	}
 	step.Env, step.SecretRefs = envOf(svc)
+
+	// The engine label, and the snapshot schedule that goes with it. Both come
+	// from x-pilots rather than from compose's own `labels:`, which the planner
+	// refuses: a compose label is a Docker concept with Docker semantics, and
+	// borrowing it would make a file that means one thing here and another
+	// under docker compose.
+	if x.Engine != "" {
+		step.Labels = map[string]string{"pilot.engine": x.Engine}
+	}
+	if x.Snapshots != nil && x.Snapshots.Cron != "" {
+		step.SnapshotPolicy = &api.VolumePolicy{
+			Cron:       x.Snapshots.Cron,
+			KeepDaily:  x.Snapshots.KeepDaily,
+			KeepWeekly: x.Snapshots.KeepWeekly,
+		}
+	}
 
 	if svc.Build != nil {
 		// build: wins over image:, which in that case is only the tag the

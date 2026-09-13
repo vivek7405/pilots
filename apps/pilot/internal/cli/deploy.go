@@ -289,6 +289,23 @@ func executePlan(ctx context.Context, env *Env, client *pilots.Client, plan pilo
 		if err := runPreDeploy(ctx, env, client, plan.App, step, rootfs, sealed); err != nil {
 			return nil, err
 		}
+		// The snapshot schedule, once the volume exists to carry one. After the
+		// volume and before the deploy: a database that comes up before its
+		// backup policy does is a database with a window where a mistake is
+		// unrecoverable, and the window is exactly the first minutes, which is
+		// when mistakes happen.
+		//
+		// Best effort. A schedule that could not be set is worth saying out
+		// loud and is not worth failing a deploy over: the service still runs,
+		// and `pilot volumes policy` sets it in one command.
+		if volumeID != "" && step.SnapshotPolicy != nil {
+			if _, err := client.Volumes.SetPolicy(ctx, volumeID, *step.SnapshotPolicy); err != nil {
+				env.W.Notef("could not set %s's snapshot schedule (%v); "+
+					"set it with `pilot volumes policy %s --cron '%s'`",
+					step.Name, err, volumeID, step.SnapshotPolicy.Cron)
+			}
+		}
+
 		service, err := upsertService(ctx, client, plan.App, step, rootfs, sealed, existing, volumeID)
 		if err != nil {
 			return nil, err
@@ -499,12 +516,32 @@ func upsertService(ctx context.Context, client *pilots.Client, app string, step 
 			Name: step.Name, App: app, Build: rootfs, Replicas: step.Replicas,
 			Health: step.Health, Domain: step.Domain, Private: step.Private, CustomDomain: step.CustomDomain,
 			Volume: volumeID, Env: step.Env, SecretEnv: sealed, Knobs: step.Knobs,
+			Size: stepSize(step), Labels: step.Labels,
 		})
 	}
 	replicas := step.Replicas
+	// The size is NOT sent here. It rides on the deploy that follows, because
+	// a patch carrying a size runs a rollout of its own: a compose file that
+	// changed both its image and its `mem_limit` would roll the service twice
+	// to arrive where one rollout puts it.
 	return client.Services.Patch(ctx, existing.ID, pilots.UpdateServiceRequest{
 		Replicas: &replicas, Health: step.Health, Env: step.Env, SecretEnv: sealed,
 	})
+}
+
+// stepSize is the size a compose step asks for, or nil when it asks for the
+// defaults.
+//
+// The planner has always resolved `cpus` and `mem_limit` onto the step and
+// they have always reached nothing: a service had no size to put them in. Nil
+// rather than the defaults spelled out, so a compose file that says nothing
+// about size leaves the service's size alone rather than resetting it to the
+// default on every deploy.
+func stepSize(step *pilots.ComposeStep) *pilots.Size {
+	if step.VCPUs == pilots.DefaultVCPUs && step.MemMiB == pilots.DefaultMemMiB {
+		return nil
+	}
+	return &pilots.Size{VCPUs: step.VCPUs, MemMiB: step.MemMiB}
 }
 
 // waitForRelease polls until the release is current. The host flips

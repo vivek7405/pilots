@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 
 	"github.com/vivek7405/pilots/hostd/internal/state"
@@ -12,9 +13,13 @@ import (
 // which is what keeps the list a contract rather than a suggestion: a code an
 // SDK branches on is only useful if it cannot be invented at a call site.
 const (
-	CodeBadRequest       = "bad_request"
-	CodeUnauthorized     = "unauthorized"
-	CodeScopeRequired    = "scope_required"
+	CodeBadRequest    = "bad_request"
+	CodeUnauthorized  = "unauthorized"
+	CodeScopeRequired = "scope_required"
+	// CodeSelfOnly is a machine's own token reaching past the machine it was
+	// minted for. 403 rather than 404: the caller is in the org and can already
+	// see the object, so hiding it would teach nothing.
+	CodeSelfOnly         = "self_only"
 	CodeNotFound         = "not_found"
 	CodeConflict         = "conflict"
 	CodeVolumeInUse      = "volume_in_use"
@@ -35,6 +40,14 @@ const (
 	// the repository, not to hold a wider key, and a client that branches on
 	// codes has to be able to tell those two apart.
 	CodeRepoNotConnected = "repo_not_connected"
+	// CodePayloadTooLarge is a field too big to live in a replicated row. The
+	// body limit is separate and larger: this is about what the fleet carries
+	// for the life of the object, not about one request. See payload.go.
+	CodePayloadTooLarge = "payload_too_large"
+	// CodeNoCapacity is a fleet with nowhere to put the machine. Carried on a
+	// 507, which is the one status that says "the request is fine, the server
+	// has no room" rather than blaming the caller or claiming a bug.
+	CodeNoCapacity = "no_capacity"
 )
 
 // Codes is the closed list, for the test that guards it and for the docs page
@@ -45,6 +58,7 @@ var Codes = []string{
 	CodeNotImplemented, CodeUnavailable, CodeInternal, CodePlanUnsupported,
 	CodeComposeInvalid, CodeUnknownFramework, CodePlanMultiService,
 	CodeBuildFailed, CodeHealthGateFailed, CodeRepoNotConnected,
+	CodePayloadTooLarge, CodeNoCapacity, CodeSelfOnly,
 }
 
 // NextNotFound is the only next a 404 may carry. It is deliberately generic:
@@ -79,6 +93,22 @@ func WriteJSON(w http.ResponseWriter, status int, v any) { writeJSON(w, status, 
 // still find it, and nowhere else.
 func writeMapped(w http.ResponseWriter, err error) {
 	status, body := mapError(err)
+
+	// A 404 says nothing to the caller, on purpose, so it has to say something
+	// to the operator.
+	//
+	// A promote failed on a guard three layers down that could not read a row
+	// written eighteen lines later, and what came back was "not found; check
+	// the id" -- about a machine that was right there. The host's journal had
+	// nothing at all. The chain naming the actual row existed the whole time
+	// and was discarded at this line.
+	//
+	// INFO rather than WARN: most of these are a client asking about something
+	// it already destroyed, which is ordinary. What matters is that the text
+	// exists somewhere at all when the 404 is not ordinary.
+	if status == http.StatusNotFound {
+		slog.Info("answering not found", "cause", err.Error())
+	}
 	writeJSON(w, status, body)
 }
 
@@ -100,6 +130,13 @@ func mapError(err error) (int, ErrorResponse) {
 			Details: gate,
 		}
 	case errors.Is(err, state.ErrNotFound):
+		// The body stays opaque. TestWriteMappedLeaksNoInternals is a paid-for
+		// contract: the store's own "state: not found" once reached clients
+		// verbatim, and a 404 is also the answer another tenant's object gets,
+		// so a cause here would be a vocabulary leak on the one status that
+		// must not have one.
+		//
+		// The cause goes to the JOURNAL instead. See writeMapped.
 		return http.StatusNotFound, ErrorResponse{
 			Error: "not found", Code: CodeNotFound, Next: NextNotFound,
 		}
@@ -118,7 +155,23 @@ func mapError(err error) (int, ErrorResponse) {
 		// details; it is the caller's to fix, so it is a 400 that says how.
 		return http.StatusBadRequest, ErrorResponse{
 			Error: err.Error(), Code: CodeBadRequest,
-			Next: "knobs are auto_stop (off or suspend), auto_start, min_machines_running, soft_limit, idle_timeout (1..3600 seconds), schedules",
+			Next: "knobs are auto_stop (off or suspend), auto_start, min_machines_running, soft_limit, hard_limit, idle_timeout (1..3600 seconds), schedules",
+		}
+	case errors.Is(err, ErrNoCapacity):
+		// 507, the one status that says the request was fine and the server
+		// has no room. Not 503: nothing is temporarily unwell, the fleet is
+		// simply full, and the remedy is capacity rather than a retry.
+		return http.StatusInsufficientStorage, ErrorResponse{
+			Error: err.Error(), Code: CodeNoCapacity,
+			Next: "add a host, destroy machines you no longer need, or ask for a " +
+				"smaller one; pilot status shows what each host has free",
+		}
+	case errors.Is(err, ErrBadRequest):
+		// 400 and not 500. The request named something it may not name, and
+		// no retry of the same request will ever work.
+		return http.StatusBadRequest, ErrorResponse{
+			Error: err.Error(), Code: CodeBadRequest,
+			Next: "change the request; the message says which part is not allowed",
 		}
 	case errors.Is(err, ErrConflict):
 		// 409 rather than 400 or 403: nothing about the request is wrong and

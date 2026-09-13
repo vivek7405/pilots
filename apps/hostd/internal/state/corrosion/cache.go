@@ -714,13 +714,26 @@ func (c *Cache) MachineVendor(id string) string {
 // object has no row, which is public -- what every URL was before the mode
 // existed.
 func (c *Cache) URLAuth(id string) string {
+	mode, _ := c.URLAuthKnown(id)
+	return mode
+}
+
+// URLAuthKnown is URLAuth plus whether the cache actually has a row.
+//
+// The distinction is load-bearing and its absence was a security bug. URLAuth
+// answers "public" for an object it has never seen, which is indistinguishable
+// from an object somebody deliberately made public -- so a caller that trusted
+// it served a gated URL to anyone for as long as the subscription took to
+// deliver the row. A caller that DOES need to tell the two apart has to ask a
+// question that can say "I do not know", and this is it.
+func (c *Cache) URLAuthKnown(id string) (string, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	u, ok := c.urlAuth[id]
 	if !ok || u.Mode == "" {
-		return "public"
+		return "public", false
 	}
-	return u.Mode
+	return u.Mode, true
 }
 
 func (c *Cache) MachineCPU(id string) (state.MachineCPU, bool) {

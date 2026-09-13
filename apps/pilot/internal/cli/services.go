@@ -37,11 +37,14 @@ func newServicesCmd(env *Env) *cobra.Command {
 		},
 	})
 	c.AddCommand(
+		newGrantCmd(env, "service"),
+		newServiceMetricsCmd(env),
 		newServicesListCmd(env),
 		newServicesInfoCmd(env),
 		newServicesReleasesCmd(env),
 		newServicesRollbackCmd(env),
 		newServicesSetCmd(env),
+		newServicesScaleCmd(env),
 	)
 	return c
 }
@@ -113,6 +116,7 @@ func newServicesListCmd(env *Env) *cobra.Command {
 }
 
 func newServicesInfoCmd(env *Env) *cobra.Command {
+	var reveal bool
 	c := &cobra.Command{
 		Use:   "info <service>",
 		Short: "everything about one service",
@@ -126,7 +130,22 @@ func newServicesInfoCmd(env *Env) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// Variable NAMES come with the service and are printed below.
+			// VALUES are a second, deliberate request, which is the whole
+			// difference: `info` is a thing people run in front of other people
+			// and paste into tickets, and a command that printed passwords by
+			// default would put one in every screenshot.
+			var values *pilots.ServiceEnvResponse
+			if reveal {
+				values, err = client.Services.Env(c.Context(), s.ID)
+				if err != nil {
+					return err
+				}
+			}
 			if env.W.JSON {
+				if values != nil {
+					return env.W.JSONValue(map[string]any{"service": s, "env": values})
+				}
 				return env.W.JSONValue(s)
 			}
 			rows := [][]string{
@@ -161,10 +180,48 @@ func newServicesInfoCmd(env *Env) *cobra.Command {
 			for _, sched := range s.Knobs.Schedules {
 				rows = append(rows, []string{"SCHEDULE", scheduleLine(sched)})
 			}
-			return env.W.Table([]string{"", ""}, rows)
+			// Which half a variable is in is printed beside it, because it is
+			// the thing somebody reading this actually has to know: the sealed
+			// half survives a Corrosion replica read as ciphertext and the
+			// plaintext half does not.
+			if values != nil {
+				for _, name := range sortedKeys(values.Env) {
+					rows = append(rows, []string{"VARIABLE", name + "=" + values.Env[name]})
+				}
+				for _, name := range sortedKeys(values.SecretEnv) {
+					rows = append(rows, []string{"SECRET", name + "=" + values.SecretEnv[name]})
+				}
+			}
+			if err := env.W.Table([]string{"", ""}, rows); err != nil {
+				return err
+			}
+			if reveal {
+				env.W.Notef("those are real values; they are on your screen and in " +
+					"your scrollback now")
+			}
+			return nil
 		},
 	}
-	Describe(c, Doc{Examples: []string{"pilot services info web", "pilot services info web --json"}})
+	c.Flags().BoolVar(&reveal, "reveal", false, "print variable VALUES, not just their names")
+	Describe(c, Doc{
+		What: "Everything one service is: its address, its release, its replicas,\n" +
+			"its schedules, and the names of every variable set on it.",
+		How: "Values are not printed unless you ask. `info` is a command people run\n" +
+			"in front of other people and paste into tickets, so a password in its\n" +
+			"default output would end up in every screenshot of it.\n\n" +
+			"--reveal makes a second request for the values and prints them. The\n" +
+			"sealed half is opened by the host's fleet key, so a host without one\n" +
+			"says so rather than showing an empty environment.",
+		Examples: []string{
+			"pilot services info web",
+			"pilot services info web --reveal",
+			"pilot services info web --json",
+		},
+		Related: []string{
+			"pilot env set     change a variable",
+			"pilot db connect  a session on a database, with no value to copy",
+		},
+	})
 	return c
 }
 
@@ -373,6 +430,84 @@ func newServicesSetCmd(env *Env) *cobra.Command {
 	return c
 }
 
+// newServicesScaleCmd changes how big the replicas are and how many there are,
+// which is one command because they are one question: "how much service".
+//
+// `set --replicas` still works and is the same call. This exists because
+// "scale" is the word every operator reaches for, and because a size change
+// costs a rollout while the other fields on `set` do not -- a command whose
+// help can say so is better than a flag buried among eight that cannot.
+func newServicesScaleCmd(env *Env) *cobra.Command {
+	var (
+		replicas int
+		vcpus    int
+		mem      int
+	)
+	c := &cobra.Command{
+		Use:   "scale <service>",
+		Short: "change how big a service's replicas are, and how many",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			if !c.Flags().Changed("replicas") && vcpus == 0 && mem == 0 {
+				return out.Failf("pass --replicas, --vcpus or --mem",
+					"nothing to scale")
+			}
+			client, err := env.Client()
+			if err != nil {
+				return err
+			}
+			s, err := resolveService(c.Context(), client, args[0])
+			if err != nil {
+				return err
+			}
+			var req pilots.UpdateServiceRequest
+			if c.Flags().Changed("replicas") {
+				req.Replicas = &replicas
+			}
+			if vcpus > 0 || mem > 0 {
+				req.Size = &pilots.Size{VCPUs: vcpus, MemMiB: mem}
+			}
+			updated, err := client.Services.Patch(c.Context(), s.ID, req)
+			if err != nil {
+				return err
+			}
+			if env.W.JSON {
+				return env.W.JSONValue(updated)
+			}
+			env.W.Linef("%s now runs %d replica(s) at %d vCPU / %d MiB",
+				updated.Name, updated.Replicas, updated.Size.VCPUs, updated.Size.MemMiB)
+			return nil
+		},
+	}
+	f := c.Flags()
+	f.IntVar(&replicas, "replicas", 0, "how many replicas the fleet reconciles to")
+	f.IntVar(&vcpus, "vcpus", 0, "vCPUs per replica; unset leaves it alone")
+	f.IntVar(&mem, "mem", 0, "memory per replica in MiB; unset leaves it alone")
+	Describe(c, Doc{
+		How: "A SIZE change replaces the replicas one at a time, at the same release.\n" +
+			"A replica comes up at the new size, passes the same health gate a deploy\n" +
+			"gates on, and only then is an old one retired -- so no request is dropped\n" +
+			"and nothing is rebuilt.\n\n" +
+			"A service that mounts a VOLUME is the exception. A volume is mounted by\n" +
+			"one machine at a time, so the replacement cannot mount it until the old\n" +
+			"one has let go. Requests arriving in that window are HELD, the way a\n" +
+			"request that arrives while a machine is waking is held: served late,\n" +
+			"never refused.\n\n" +
+			"A replica count alone changes no machine's size and takes effect as the\n" +
+			"fleet reconciles.",
+		Examples: []string{
+			"pilot services scale web --mem 2048",
+			"pilot services scale web --vcpus 4 --mem 8192",
+			"pilot services scale web --replicas 3",
+		},
+		Related: []string{
+			"pilot machines resize   change ONE machine, outside a service",
+			"pilot services set      env, secrets, the connected repo, the address",
+		},
+	})
+	return c
+}
+
 func newPromoteCmd(env *Env) *cobra.Command {
 	var (
 		replicas int
@@ -457,9 +592,24 @@ func newStatusCmd(env *Env) *cobra.Command {
 				}
 				hostRows := make([][]string, 0, len(hosts))
 				for _, h := range hosts {
-					hostRows = append(hostRows, []string{h.ID, strconv.FormatBool(h.Alive), strconv.Itoa(h.CPUFree), strconv.Itoa(h.MemFreeMiB), orDash(h.CPUVendor)})
+					// RECLAIMABLE beside free, because they are one number as
+					// far as placement is concerned: a host with 512 MiB free
+					// and 8 GiB reclaimable will take an 4 GiB machine. Showing
+					// only the free column would have an operator reading a
+					// host as full that the fleet reads as roomy.
+					state := "-"
+					if h.Draining {
+						state = "draining"
+					}
+					hostRows = append(hostRows, []string{
+						h.ID, strconv.FormatBool(h.Alive), strconv.Itoa(h.CPUFree),
+						strconv.Itoa(h.MemFreeMiB), strconv.Itoa(h.MemReclaimableMiB),
+						orDash(h.CPUVendor), state,
+					})
 				}
-				if err := env.W.Table([]string{"HOST", "ALIVE", "CPU FREE", "MEM FREE MIB", "CPU"}, hostRows); err != nil {
+				if err := env.W.Table([]string{
+					"HOST", "ALIVE", "CPU FREE", "MEM FREE MIB", "RECLAIMABLE MIB", "CPU", "STATE",
+				}, hostRows); err != nil {
 					return err
 				}
 				env.W.Linef("")

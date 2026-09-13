@@ -15,7 +15,10 @@ export async function GET(req: Request): Promise<Response> {
   const ctx = await orgOr401(req);
   if (isResponse(ctx)) return ctx;
   try {
-    return jsonBody({ machines: await listMachines(ctx.org.id) });
+    // The same set the socket sends, builders included: this is the list
+    // `<machine-list>` falls back to, and it must not disagree with the feed
+    // that replaces it. The component is what hides them.
+    return jsonBody({ machines: await listMachines(ctx.org.id, { builders: true }) });
   } catch (err) {
     return fleetErrorResponse(err);
   }

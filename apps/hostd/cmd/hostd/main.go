@@ -19,12 +19,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/block"
+	"github.com/vivek7405/pilots/hostd/internal/broker"
 	"github.com/vivek7405/pilots/hostd/internal/build"
 	"github.com/vivek7405/pilots/hostd/internal/compose"
 	"github.com/vivek7405/pilots/hostd/internal/config"
@@ -43,6 +45,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/selfheal"
 	"github.com/vivek7405/pilots/hostd/internal/services"
 	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/vivek7405/pilots/hostd/internal/state/corrosion"
 	"github.com/vivek7405/pilots/hostd/internal/usage"
 	"github.com/vivek7405/pilots/hostd/internal/volumes"
 )
@@ -149,6 +152,12 @@ func run() error {
 		return fmt.Errorf("could not publish this host's cpu vendor: %w", err)
 	}
 
+	// Where this host stages checkpoints, so the snapshot quota counts the
+	// same directories the manager writes. Set once, here, rather than passed
+	// through every call: the quota package must not depend on machines, which
+	// depends on quota.
+	quota.SetCheckpointRoot(filepath.Join(cfg.CacheRoot(), "machines"))
+
 	uploader, err := newUploader(cfg)
 	if err != nil {
 		return err
@@ -238,7 +247,6 @@ func run() error {
 	}
 	responder := dns.New(dns.NewFleetResolver(view, locator), upstreams)
 	defer responder.Close()
-	var discovery machines.Discovery = responder
 
 	// The fleet key. Parsed at startup so a malformed one is a host that
 	// refuses to start rather than a create that fails much later, after a
@@ -247,6 +255,19 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	// The credential broker, beside the responder in every machine's namespace.
+	// Built here rather than earlier because it opens the sealed half of a
+	// grant, so it needs the fleet key that was just parsed.
+	credentials := broker.New(broker.Options{
+		Store: store, Seal: fleetKey, Tenant: api.StoreTenancy(store),
+		Key:    api.BrokerKeyFor(cfg.AgentTokenSecret),
+		APIURL: "https://" + cfg.APIHostname,
+	})
+	defer credentials.Close()
+	// One fan-out, so the machine lifecycle keeps knowing about exactly one
+	// thing that follows a namespace however many listeners live in there.
+	var discovery machines.Discovery = machines.Discoveries{responder, credentials}
+
 	if !fleetKey.IsSet() {
 		slog.Warn("no fleet key, so this host cannot store secrets: creates " +
 			"carrying secret_env will be refused. Set PILOT_FLEET_KEY to the " +
@@ -265,6 +286,7 @@ func run() error {
 	mgr := machines.New(machines.Options{
 		HostID: cfg.HostID,
 		Domain: cfg.WorkloadDomain,
+		APIURL: "https://" + cfg.APIHostname,
 		// dispatch claims this hostname before the workload suffix, so the
 		// name under it is not a tenant's to take. Passed rather than
 		// hardcoded so the reservation follows PILOT_API_HOSTNAME.
@@ -280,17 +302,26 @@ func run() error {
 		Chunks:        chunks,
 		BlockStore:    chunkReader(chunks),
 		NBDDevices:    devices,
-		// The handlers are separate processes and read builds themselves, so
-		// they need this daemon's storage credentials.
-		HandlerEnv: os.Environ(),
+		// An ALLOWLIST, not this daemon's environment. The handlers read their
+		// builds through a per-machine socket now, so nothing they do needs a
+		// storage credential, and a process sitting next to a guest holding
+		// keys to every tenant's bucket was a blast radius nobody was buying
+		// anything with. See internal/chunkserve.
+		HandlerEnv: machines.HandlerEnv(),
 		// Fleet-wide, so a host that rescues a machine can still reach it.
 		AgentTokenSecret: cfg.AgentTokenSecret,
 		Volumes:          volumeManager,
-		MachinePrefix:    machinePrefix,
-		Discovery:        discovery,
-		FleetKey:         fleetKey,
-		Usage:            ledger,
-		Vendor:           vendor,
+		// ONE reading of this host's free memory, shared by admission, the
+		// heartbeat and self-heal. Three components with their own readings
+		// would be three different answers to "is this host full", and
+		// placement would act on whichever it happened to ask.
+		FreeMemMiB:    func() int { return freeMemMiB(cfg.HugePages) },
+		CPUCount:      runtime.NumCPU(),
+		MachinePrefix: machinePrefix,
+		Discovery:     discovery,
+		FleetKey:      fleetKey,
+		Usage:         ledger,
+		Vendor:        vendor,
 		FCConfig: fc.Config{
 			KernelPath:     cfg.KernelPath,
 			TemplateRootfs: cfg.TemplateRootfs,
@@ -358,7 +389,7 @@ func run() error {
 	// Meter from the adopted set forward. The previous hostd's open intervals
 	// ended at its last tick, so the gap a restart leaves is bounded by one
 	// tick rather than by how long the process was down.
-	ledger.Recover(usageEntries(ctx, store, cfg.HostID))
+	ledger.Recover(usageEntries(ctx, store, cfg.HostID, mgr))
 
 	// Re-gossip this host's own rows. A write that reached the local replica
 	// and never left the host -- a partition, a wedge, a kill between the two
@@ -372,6 +403,13 @@ func run() error {
 				"err", err)
 		} else if n > 0 {
 			slog.Info("republished own rows", "count", n)
+			// A bulk write leaves SQLite's planner statistics describing the
+			// table as it was before. Fly watched that turn every read into a
+			// full scan, spike CPU and stop the WAL truncating until the disk
+			// filled (infra log, 2026-06-25).
+			if cs, ok := store.(*corrosion.Store); ok {
+				cs.Analyze(ctx)
+			}
 		}
 	}
 
@@ -398,7 +436,7 @@ func run() error {
 	go mgr.RunReaper(ctx)
 	// Every host publishes its own row, fleet or not, so that GET /v1/hosts on
 	// any host lists at least the one answering.
-	startHeartbeat(ctx, cfg, store, meshKeys, meshed)
+	startHeartbeat(ctx, cfg, store, meshKeys, meshed, mgr)
 	// Never fc.UnconfiguredStore: a stub that fails every put would log a
 	// warning a minute on a single box that is configured exactly as intended.
 	// Nil instead, and the ledger says so once at start.
@@ -412,6 +450,10 @@ func run() error {
 	// carries gossip and forwarded requests, so it comes up before anything
 	// that rides it.
 	var f *fleet
+	// The join gate starts open and is replaced below on a fleet host. A
+	// single box has no replica to catch up with, and the machines self-heal
+	// claims there are its own.
+	joinGate := corrosion.OpenJoinGate()
 	if cfg.Fleet() {
 		f = &fleet{store: store, cache: cache}
 		if cfg.MeshEnabled {
@@ -422,6 +464,11 @@ func run() error {
 			defer dev.Close()
 			f.dev, f.keys = dev, meshKeys
 		}
+		// After the mesh, because the gate reads the hosts rows the cache
+		// fills from gossip, and before anything that may claim: the gate is
+		// what those callers ask. It does not delay notifyReady, so this host
+		// is serving its own machines while it catches up.
+		joinGate = startJoinGate(ctx, cfg, f)
 	}
 
 	guest := newGuestLoad()
@@ -433,10 +480,33 @@ func run() error {
 		go runActivity(ctx, view, locator, mgr, guest)
 	}
 
+	// Outbound traffic: the shared masquerade always, per-org addresses when
+	// an operator has configured them.
+	//
+	// NOT behind the mesh check any more, and that was a real gap rather than
+	// tidying. The check was right when this loop only wrote per-org source
+	// rewrites, which match a machine's MESH address and are meaningless
+	// without one. It also installs the IPv4 masquerade, which matches a slot
+	// address and has nothing to do with the mesh -- so a host without a mesh
+	// prefix got no masquerade and its guests had no outbound IPv4 at all.
+	//
+	// Safe without a mesh: egressBindings skips a machine it cannot address,
+	// so the plan is empty and the table holds the masquerade alone, which is
+	// exactly right for that host.
+	go runEgress(ctx, cfg.HostID, cfg.Egress, store, view, locator)
+
+	// Set below when this host serves a router, and handed to the API so a
+	// mode change invalidates what the router memoised about it.
+	var urlAuth *urlAuthGate
+
 	routerOpts := router.Options{
 		Domain: cfg.WorkloadDomain,
 		HostID: cfg.HostID,
 		Store:  store,
+		// A machine being MOVED to another host: the row still names this one,
+		// so without this the request would be served here and wake a machine
+		// the target is claiming. See router.Options.HandingOff.
+		HandingOff: mgr.HandingOff,
 		// On a single box this reads the local SQLite store; a store error
 		// there means the host itself is broken, and the router has nothing
 		// better to say than public. On a fleet the cache below replaces it,
@@ -484,18 +554,25 @@ func run() error {
 		// pool is live does the whole fleet rank -- where the winner cold-boots
 		// the machine from its disk.
 		routerOpts.RescuerFor = func(machineID string) (string, bool) {
+			// A held request for a machine whose owner is gone is exactly the
+			// decision a half-replicated replica gets wrong: the owner may be
+			// alive and merely unseen. Answering "no rescuer" takes the
+			// router's existing path, a 503 the client retries, instead of
+			// waking someone else's running machine a second time.
+			if !joinGate.Ready() {
+				return "", false
+			}
 			return selfheal.RescuerFor(machineID, f.cache.MachineVendor(machineID),
 				f.cache.LiveHosts(time.Now(), selfheal.DeadAfter))
 		}
 		// The hot path reads the subscription cache, not the agent.
 		routerOpts.Lookup = f.cache.MachineByName
 		routerOpts.Service = f.cache.ServiceReplicas
-		// Who may reach a URL, from the same replica the rest of the hot path
-		// reads. A live query here would have a failure mode whose only two
-		// answers are serving a gated URL to anyone or refusing a public one.
-		routerOpts.URLAuthOf = func(_ context.Context, id string) string {
-			return f.cache.URLAuth(id)
-		}
+		// Who may reach a URL: the cache, and on a MISS the store, memoised so
+		// the hot path stays a map read. See urlauth.go for why the cache alone
+		// was serving gated URLs to anyone.
+		urlAuth = newURLAuthGate(f.cache.URLAuthKnown, store)
+		routerOpts.URLAuthOf = urlAuth.Mode
 	}
 	rtr := router.New(routerOpts)
 
@@ -507,7 +584,19 @@ func run() error {
 	rollout := services.New(services.Options{
 		HostID: cfg.HostID, Store: store, Machines: mgr,
 		Peers: peerCaller(f, cfg.AgentTokenSecret), Vendor: vendor,
+		Ready: joinGate.Ready,
 	})
+
+	// The manager is built long before this, because every netns slot's
+	// address derives from the mesh key and the key has to be loaded first. So
+	// the peer notifier is installed here, once there is a fleet to call.
+	if f != nil {
+		mgr.SetHandoffs(handoffCaller{peers: peerAPI{
+			cache: f.cache,
+			http:  &http.Client{Timeout: 2 * time.Minute},
+			token: api.PeerTokenFor(cfg.AgentTokenSecret),
+		}})
+	}
 
 	// Only the arbiter for a service acts on it, so every host can run this
 	// loop: they all see every service in their local replica, and all but one
@@ -578,18 +667,29 @@ func run() error {
 		// Without it a single box tells a developer https://<name> on a host
 		// that only listens plain on :8080.
 		URL: publicURL,
+		// Where a commit status points for this build's log. The same URL the
+		// MCP protected-resource document names, so there is one answer to
+		// "where is the dashboard" rather than two.
+		DashboardURL: dashboardURL(cfg),
 	}
 	// Nil on a fleet with no App, and the nil is kept VISIBLE below: assigning
 	// a nil *github.Stager to an interface field yields a non-nil interface
 	// holding a nil pointer, and the not_configured branch would never run.
 	stager := github.NewStager(ghDeps)
 
+	forgetURLAuth := func(string) {}
+	if urlAuth != nil {
+		forgetURLAuth = urlAuth.Forget
+	}
 	deps := api.Deps{
-		HostID: cfg.HostID, Store: store, Machines: mgr, Reflink: reflink, HugePages: cfg.HugePages,
-		StoreVersion: storeVersion(store),
-		Builds:       builder, Rollout: rollout, Domain: cfg.WorkloadDomain, URL: publicURL,
+		ForgetURLAuth: forgetURLAuth,
+		HostID:        cfg.HostID, Store: store, Machines: mgr, Reflink: reflink, HugePages: cfg.HugePages,
+		Replication: replication(store, joinGate),
+		Builds:      builder, Rollout: rollout, Domain: cfg.WorkloadDomain, URL: publicURL,
 		APIHostname: cfg.APIHostname,
 		Peers:       peerLookup(f), PeerToken: api.PeerTokenFor(cfg.AgentTokenSecret),
+		BrokerKey: api.BrokerKeyFor(cfg.AgentTokenSecret),
+		Placement: placementMetric{}, Drain: drainAdapter{mgr: mgr},
 		Tenancy: tenancy, MachineCPU: machineCPU, BuildGate: &quota.HostGate{},
 		// The key the boot path already holds, handed to the API too. Without
 		// this line every service create and patch carrying secret_env is
@@ -598,10 +698,11 @@ func run() error {
 		FleetKey:  sealerOrNil(fleetKey),
 		CPUVendor: vendor, CPUVendorForced: vendorForced,
 		Usage:   ledger,
-		Compose: compose.Handler(),
-		Plan:    detect.Handler(filepath.Join(cfg.CacheRoot(), "plan-work"), planStager(stager), store),
-		Lookup:  machineByName(f),
-		GitHub:  github.Handler(ghDeps),
+		Compose: compose.Handler(), Recipes: compose.RecipesHandler(),
+		HAFragment: compose.HAFragmentHandler(),
+		Plan:       detect.Handler(filepath.Join(cfg.CacheRoot(), "plan-work"), planStager(stager), store),
+		Lookup:     machineByName(f),
+		GitHub:     github.Handler(ghDeps),
 		// The hosted MCP endpoint dials this process back on its plain
 		// listener, and names the dashboard as the place a keyless client
 		// logs in.
@@ -633,7 +734,7 @@ func run() error {
 		if err := startInternalListener(ctx, f.dev, internal); err != nil {
 			return err
 		}
-		startSelfHeal(ctx, cfg, f, mgr)
+		startSelfHeal(ctx, cfg, f, mgr, joinGate)
 	}
 
 	srv := &http.Server{
@@ -674,6 +775,11 @@ func run() error {
 		"addr", ln.Addr().String(), "host_id", cfg.HostID, "domain", cfg.WorkloadDomain,
 		"url", publicURL.Of(cfg.APIHostname))
 	notifyReady()
+	// After readiness, so a slow start is never mistaken for a wedged loop.
+	// From here on the pet is withheld whenever one of hostd's loops stops
+	// ticking, which is what turns a daemon that is up but doing nothing into
+	// a daemon systemd restarts. See watchdog.go.
+	go runWatchdog(ctx)
 
 	select {
 	case err := <-errc:
@@ -730,7 +836,9 @@ func dispatch(cfg *config.Config, rtr http.Handler, ctrl http.Handler) http.Hand
 // The org and the volume size are read here rather than inside the ledger, so
 // internal/usage imports neither the store nor the API and stays a file
 // format with a clock.
-func usageEntries(ctx context.Context, store state.Store, hostID string) []usage.Entry {
+func usageEntries(ctx context.Context, store state.Store, hostID string,
+	mgr *machines.Manager) []usage.Entry {
+
 	rows, err := store.ListMachines(ctx)
 	if err != nil {
 		slog.Warn("could not list machines to resume metering; usage for "+
@@ -756,6 +864,11 @@ func usageEntries(ctx context.Context, store state.Store, hostID string) []usage
 			if v, verr := store.GetVolume(ctx, row.VolumeID); verr == nil && v != nil {
 				e.VolumeGiB = v.SizeMiB / 1024
 			}
+		}
+		// What this machine's checkpoints hold, so a restart resumes metering
+		// the storage rather than starting it again at zero.
+		if mgr != nil {
+			e.SnapshotMiB = mgr.SnapshotMiBOf(ctx, row.ID)
 		}
 		out = append(out, e)
 	}
@@ -814,6 +927,15 @@ func settleReconciled(found []fc.Reconciled, root string, mgr *machines.Manager,
 		mgr.ExitedWhileDown(context.Background(), st)
 		_ = fc.ClearBreadcrumbs(filepath.Join(root, st.MachineID))
 	}
+
+	// After both loops, so every machine's liveness is already decided: an
+	// operation interrupted by the restart is settled against what adoption
+	// just found rather than against a guess. Adoption has never covered this
+	// -- it brings back machines that are still RUNNING, and says nothing
+	// about an operation that was half done when the daemon stopped.
+	if n := mgr.ResumeInterrupted(context.Background()); n > 0 {
+		slog.Info("settled operations interrupted by the last restart", "count", n)
+	}
 	return adopted
 }
 
@@ -868,25 +990,9 @@ func newUploader(cfg *config.Config) (fc.Uploader, error) {
 
 // notifyReady tells systemd (Type=notify) that the process is serving. Done by
 // hand rather than with a dependency: it is one datagram on a unix socket.
-func notifyReady() {
-	sock := os.Getenv("NOTIFY_SOCKET")
-	if sock == "" {
-		return
-	}
-	// A leading '@' denotes an abstract socket, written as a NUL byte.
-	if sock[0] == '@' {
-		sock = "\x00" + sock[1:]
-	}
-	conn, err := net.Dial("unixgram", sock)
-	if err != nil {
-		slog.Warn("sd_notify dial failed", "err", err)
-		return
-	}
-	defer conn.Close()
-	if _, err := conn.Write([]byte("READY=1\n")); err != nil {
-		slog.Warn("sd_notify write failed", "err", err)
-	}
-}
+// notifyReady tells systemd the host is serving. One datagram, sent by
+// sdNotify in watchdog.go, which also carries the watchdog's conditional pet.
+func notifyReady() { sdNotify("READY=1\n") }
 
 // newCertStore opens the bucket certificates are shared through.
 //

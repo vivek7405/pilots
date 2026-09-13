@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -69,6 +70,61 @@ func (f *inFlight) count(id string) int {
 	return f.n[id]
 }
 
+// acquire takes a slot on a machine that has a hard limit, waiting briefly for
+// room rather than refusing the instant it is full.
+//
+// The wait is the difference between a limit and a cliff. A burst that crosses
+// the line for two hundred milliseconds should be served two hundred
+// milliseconds late, not refused: the autoscaler is already starting another
+// replica, and a request that waits is a request that succeeds. What the limit
+// exists to prevent is the queue growing without bound, which is why the wait
+// is short and ends in a refusal rather than in a longer wait.
+//
+// Reports false when the deadline passes or the caller goes away, and takes no
+// slot in that case.
+func (f *inFlight) acquire(ctx context.Context, id string, limit int, wait time.Duration) bool {
+	if limit <= 0 {
+		f.begin(id)
+		return true
+	}
+	deadline := time.Now().Add(wait)
+	for {
+		f.mu.Lock()
+		if f.n[id] < limit {
+			f.n[id]++
+			f.mu.Unlock()
+			return true
+		}
+		f.mu.Unlock()
+
+		// Polled rather than signalled by a condition variable. end() is on
+		// the hot path of every request the router serves, and making it wake
+		// waiters would put a lock handoff there for a case that is rare by
+		// construction: a machine at its hard limit is already the exception.
+		// The cost of polling is one wakeup every few milliseconds on exactly
+		// the requests that are already waiting.
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false
+		}
+		step := 5 * time.Millisecond
+		if remaining < step {
+			step = remaining
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(step):
+		}
+	}
+}
+
+// BeginLimited takes a slot on a machine, respecting its hard limit. False
+// means the machine is full and the caller must refuse.
+func (m *Manager) BeginLimited(ctx context.Context, id string, limit int, wait time.Duration) bool {
+	return m.flight.acquire(ctx, id, limit, wait)
+}
+
 // total is every machine's in-flight count summed, for pilots_router_inflight.
 // Summed here rather than published per machine: a series per machine is
 // exactly the cardinality the metrics package doc refuses.
@@ -110,6 +166,7 @@ func (m *Manager) Touch(ctx context.Context, id string) {
 
 // RunIdleMonitor suspends machines that have gone quiet, until ctx ends.
 func (m *Manager) RunIdleMonitor(ctx context.Context) {
+	live := metrics.NewLoop("idle_monitor", 3*idleCheckInterval)
 	ticker := time.NewTicker(idleCheckInterval)
 	defer ticker.Stop()
 
@@ -119,6 +176,7 @@ func (m *Manager) RunIdleMonitor(ctx context.Context) {
 			return
 		case <-ticker.C:
 			m.suspendIdleMachines(ctx)
+			live.Tick()
 		}
 	}
 }
@@ -132,6 +190,18 @@ func (m *Manager) suspendIdleMachines(ctx context.Context) {
 	// Published from the tick, not from the scrape: this is the one loop that
 	// already lists the host's rows, and a scrape must never query the store.
 	m.countByState(rows)
+
+	// Console logs, rotated on the same walk. This loop already lists exactly
+	// the rows a rotation needs, on a cadence already right for a file that
+	// takes hours to fill, so a second loop would be a second thing to keep
+	// alive for no gain.
+	mine := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if row.HostID == m.opts.HostID && row.State != state.StateDestroyed {
+			mine = append(mine, row.ID)
+		}
+	}
+	m.rotateLogs(mine)
 
 	for _, row := range rows {
 		if row.HostID != m.opts.HostID || row.State != StateRunning {
@@ -150,6 +220,12 @@ func (m *Manager) suspendIdleMachines(ctx context.Context) {
 	// Reuses the rows this tick already listed. A second ListMachines here
 	// would double the only store read the monitor makes.
 	m.destroyStaleBuilders(ctx, rows)
+
+	// Scheduled volume snapshots ride this loop rather than a ticker of their
+	// own. It already runs every few seconds over this host's state, and a
+	// second timer would be a second thing to keep alive and a second thing to
+	// notice when it stops.
+	m.snapshotDueVolumes(ctx)
 }
 
 // destroyStaleBuilders collects builders that have been suspended longer than
@@ -201,6 +277,13 @@ func (m *Manager) selectStaleBuilders(rows []state.Machine) []string {
 // alone would suspend one that is busy but generating no HTTP traffic. Only
 // the conjunction is safe.
 func (m *Manager) shouldSuspend(ctx context.Context, row state.Machine) bool {
+	// A machine being handed to another host is nobody's to suspend: the drain
+	// already suspended it, or is about to, and a second suspend racing the
+	// handoff would write a row the target is in the middle of claiming.
+	if _, moving := m.HandingOff(row.ID); moving {
+		return false
+	}
+
 	// Whose machine is this? Every running machine needs exactly one
 	// controller: two would race, none bills forever.
 	//

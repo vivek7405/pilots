@@ -42,6 +42,10 @@ type Deps struct {
 	// api.PublicURL). The zero value is the production shape -- https, no
 	// port -- so a fleet that does not set it comments what it always did.
 	URL api.PublicURL
+	// DashboardURL is where a commit status points for a build's log. Empty on
+	// a fleet with no dashboard, in which case the status still posts and
+	// carries no link: the state alone answers "did my push deploy".
+	DashboardURL string
 }
 
 // BuildRunner is the build surface, matching api.BuildRunner so the same
@@ -145,10 +149,23 @@ func (d Deps) onPush(ctx context.Context, ev Event) error {
 	org := d.orgOf(ctx, svc.ID)
 	d.warnUnclaimed(ctx, svc, org, ev.Repository.FullName)
 
+	// The installation's token, fetched once for every status this push
+	// posts. A failure here is not fatal: the deploy proceeds and simply goes
+	// unreported, which is what happened before statuses existed.
+	var token string
+	if d.App != nil {
+		if t, terr := d.App.InstallationToken(ctx, ev.Installation.ID); terr == nil {
+			token = t
+		}
+	}
+	repo := ev.Repository.FullName
+
 	build, step, err := d.buildRef(ctx, ev, ev.After, svc.App, org)
 	if err != nil {
+		d.status(ctx, token, repo, ev.After, "failure", "build failed: "+err.Error(), d.buildURL(build))
 		return err
 	}
+	d.status(ctx, token, repo, ev.After, "pending", "deploying "+svc.Name, d.buildURL(build))
 	// The health the plan worked out, when the service has none of its own.
 	// Without this a repository with no Dockerfile deploys and then gates on
 	// hostd's default check rather than on the readiness path its framework
@@ -170,8 +187,20 @@ func (d Deps) onPush(ctx context.Context, ev Event) error {
 	}
 	// A push carries no policy of its own; the replicas inherit whatever the
 	// previous release's carry.
-	_, err = d.Rollout.Deploy(ctx, svc.ID, build, nil)
-	return err
+	rel, err := d.Rollout.Deploy(ctx, svc.ID, build, nil)
+	if err != nil {
+		// The state a push deploy never had. A rollout that fails its health
+		// gate is the commonest way a deploy does not take, and it was
+		// invisible from the commit that caused it.
+		d.status(ctx, token, repo, ev.After, "failure", "deploy failed: "+err.Error(), d.buildURL(build))
+		return err
+	}
+	msg := "deployed " + svc.Name
+	if rel != nil && rel.ID != "" {
+		msg += " (" + rel.ID + ")"
+	}
+	d.status(ctx, token, repo, ev.After, "success", msg, d.buildURL(build))
+	return nil
 }
 
 // onPullRequest keeps a preview sandbox in step with a pull request.
@@ -203,11 +232,13 @@ func (d Deps) onPullRequest(ctx context.Context, ev Event) error {
 		// A pull request's one surface is its comment, so a refusal says so
 		// there. Otherwise the author sees a preview that never appeared and
 		// no reason anywhere they can reach.
-		if refusal := refusalOf(err); refusal != nil {
-			if token, terr := d.App.InstallationToken(ctx, ev.Installation.ID); terr == nil {
+		if token, terr := d.App.InstallationToken(ctx, ev.Installation.ID); terr == nil {
+			if refusal := refusalOf(err); refusal != nil {
 				_ = d.App.Comment(ctx, token, ev.Repository.FullName, ev.PullRequest.Number,
 					previewMarker, refusalComment(ev.PullRequest.Head.SHA, refusal))
 			}
+			d.status(ctx, token, ev.Repository.FullName, ev.PullRequest.Head.SHA,
+				"failure", "preview build failed: "+err.Error(), d.buildURL(build))
 		}
 		return err
 	}
@@ -233,6 +264,11 @@ func (d Deps) onPullRequest(ctx context.Context, ev Event) error {
 	if err != nil {
 		return err
 	}
+	// The status carries the preview's own URL rather than the build log's:
+	// on a pull request the thing the author wants to click is the running
+	// preview, and the comment beside it already links the same place.
+	d.status(ctx, token, ev.Repository.FullName, ev.PullRequest.Head.SHA,
+		"success", "preview ready", d.URL.Of(mach.Domain))
 	return d.App.Comment(ctx, token, ev.Repository.FullName, ev.PullRequest.Number,
 		previewMarker, d.previewComment(ev.PullRequest.Head.SHA, mach.Domain))
 }
@@ -491,8 +527,9 @@ func (d Deps) warnUnclaimed(ctx context.Context, svc *state.Service, org, repo s
 }
 
 // refuse records a refusal where a person can read it and returns it as an
-// error. There is no check-run integration, so the build log and the journal
-// are the two places this can live, and it lives in both.
+// error. The build log and the journal are the two places this can live, and
+// it lives in both; the caller turns it into a failed commit status, which is
+// the third place and the one somebody is actually looking at.
 func (d Deps) refuse(ctx context.Context, id, repo string, code, msg, next string) error {
 	d.Builds.RecordRefusal(id, api.BuildLogLine{
 		Step: id, Stream: "status", Line: "refused",

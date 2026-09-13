@@ -2,6 +2,7 @@ package fc
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -70,9 +71,14 @@ type InstantConfig struct {
 	// is the opposite: one key, rewritten on every suspend, so a cached copy
 	// silently restores the PREVIOUS suspend and loses everything since.
 	SnapImmutable bool
-	// Env is handed to the handler processes; they need the storage
-	// credentials.
+	// Env is handed to the handler processes. It is an ALLOWLIST rather than
+	// hostd's environment: a handler reads its builds through ChunksSock and
+	// holds no storage credential. See internal/chunkserve.
 	Env []string
+	// ChunksSock is the host socket the handlers read build chunks through.
+	// Empty makes them read object storage directly, which is what a handler
+	// started by a hostd predating the chunk service does.
+	ChunksSock string
 }
 
 // CowPath is where a machine's copy-on-write disk lives.
@@ -164,7 +170,7 @@ func RestoreInstant(ctx context.Context, cfg InstantConfig, dl Uploader,
 					ControlSock:      nbd.ControlSockFor(cfg.StateDir),
 					CacheRoot:        cfg.Backends.CacheRoot,
 				},
-				Env: cfg.Env, LogFile: logFile,
+				Env: cfg.Env, ChunksSock: cfg.ChunksSock, LogFile: logFile,
 			})
 			return perr
 		},
@@ -179,7 +185,7 @@ func RestoreInstant(ctx context.Context, cfg InstantConfig, dl Uploader,
 					PrefetchFile:  uffd.PrefetchFor(cfg.StateDir),
 					ControlSock:   uffd.ControlSockFor(cfg.StateDir),
 				},
-				Env: cfg.Env, LogFile: logFile,
+				Env: cfg.Env, ChunksSock: cfg.ChunksSock, LogFile: logFile,
 			})
 			return perr
 		},
@@ -777,6 +783,25 @@ func (m *Machine) finishCheckpoint(up Uploader, chunks Uploader, opts SnapshotOp
 	ctx := context.Background()
 
 	fail := func(err error) {
+		// A machine that went away mid-upload is not a failure to report.
+		//
+		// Destroy and Redeploy now drain this goroutine before removing the
+		// tree it reads, but a capture that outruns that bound still finds its
+		// directory gone -- and "checkpoint could not be completed" at ERROR,
+		// about a machine the caller deliberately destroyed, is noise that
+		// reads like a fault. The marker is worse than noise: it is written
+		// INTO the directory that was removed, so it either fails or
+		// resurrects a path nothing will ever clean up.
+		//
+		// The test is the directory rather than the error text, because the
+		// same disappearance arrives as three different messages depending on
+		// which step of the upload caught it.
+		if _, statErr := os.Stat(localDir); errors.Is(statErr, os.ErrNotExist) {
+			slog.Info("a checkpoint's upload stopped because its machine was "+
+				"destroyed or redeployed under it",
+				"machine", m.ID, "err", err)
+			return
+		}
 		slog.Error("checkpoint could not be completed", "machine", m.ID, "err", err)
 		_ = os.WriteFile(filepath.Join(localDir, failedMarker), []byte(err.Error()), 0o644)
 	}
@@ -812,12 +837,15 @@ func (m *Machine) finishCheckpoint(up Uploader, chunks Uploader, opts SnapshotOp
 	// buffer, and dropping its cache costs the next merge rather than saving
 	// anything.
 
+	var rootfsPacked int64
 	if ids.RootfsBuildID != uuid.Nil {
-		if _, _, err := block.Chunkify(ctx, block.ChunkifyOpts{
+		_, rootfsStats, cerr := block.Chunkify(ctx, block.ChunkifyOpts{
 			In:      filepath.Join(localDir, CowFile),
 			OutDir:  filepath.Join(opts.BuildDir, ids.RootfsBuildID.String()),
 			BuildID: ids.RootfsBuildID, ParentDir: opts.RootfsTemplateDir, Dirty: dirty,
-		}); err != nil {
+		})
+		rootfsPacked = rootfsStats.PackedBytes
+		if err := cerr; err != nil {
 			fail(err)
 			return
 		}
@@ -865,7 +893,16 @@ func (m *Machine) finishCheckpoint(up Uploader, chunks Uploader, opts SnapshotOp
 		return
 	}
 
-	if err := os.WriteFile(filepath.Join(localDir, durableMarker), nil, 0o644); err != nil {
+	// The marker carries what this checkpoint ADDED to storage: the packed
+	// bytes of both halves, which is the O(dirty) number rather than the
+	// apparent size of a sparse image. Written here because this is the only
+	// place that knows it, and read by StatusOf, which is what the metering
+	// asks. An empty marker, written by a host that predates this, reads as
+	// zero bytes and meters as nothing rather than failing.
+	marker, _ := json.Marshal(map[string]int64{
+		"bytes": memStats.PackedBytes + rootfsPacked,
+	})
+	if err := os.WriteFile(filepath.Join(localDir, durableMarker), marker, 0o644); err != nil {
 		slog.Error("could not mark checkpoint durable", "machine", m.ID, "err", err)
 	}
 
@@ -999,17 +1036,69 @@ func (m *Machine) makeMemoryResident() {
 
 // awaitCapture blocks until any background capture has finished.
 func (m *Machine) awaitCapture() {
+	m.AwaitCapture(0)
+}
+
+// AwaitCapture blocks until any background capture has finished, or until the
+// bound elapses. A bound of zero waits as long as it takes. It reports whether
+// the capture actually finished.
+//
+// # Why a destroy has to wait for this
+//
+// The expensive half of a checkpoint runs in the background, reading staged
+// copies out of the machine's cache directory. Destroy and Redeploy remove
+// that whole directory, and neither waited: the goroutine went on reading a
+// tree that had been deleted underneath it, and failed part-way through with
+//
+//	block: open .../checkpoints/<id>/rootfs.cow: no such file or directory
+//
+// The rig's journal carries thirteen of these over a week, in three flavours
+// -- rootfs.cow, snap.bin, builds.json -- which is the same race caught at
+// three different points in the upload. The builds.json one is a write whose
+// DIRECTORY is gone, which is what makes the diagnosis certain.
+//
+// Killing the VMM does not stop the capture. It reads files, not the guest,
+// so the wait belongs immediately before the removal rather than beside the
+// kill.
+//
+// # Why it is bounded here and not on the snapshot path
+//
+// A snapshot waiting for the previous one is waiting for work it is about to
+// compete with, and waiting longer is simply correct. A DESTROY that waits
+// forever is a destroy that never returns, and a caller who asked for a
+// machine to go away would rather it went away with an upload half finished
+// than not at all. The bound is generous enough that an ordinary capture
+// finishes inside it and short enough that a wedged one does not hold a
+// destroy open.
+func (m *Machine) AwaitCapture(bound time.Duration) bool {
 	m.captureMu.Lock()
 	done := m.captureDone
 	m.captureMu.Unlock()
 
 	if done == nil {
-		return
+		return true
 	}
 	start := time.Now()
-	<-done
-	slog.Debug("waited for the previous capture", "machine", m.ID,
-		"ms", time.Since(start).Milliseconds())
+	if bound <= 0 {
+		<-done
+		slog.Debug("waited for the previous capture", "machine", m.ID,
+			"ms", time.Since(start).Milliseconds())
+		return true
+	}
+
+	timer := time.NewTimer(bound)
+	defer timer.Stop()
+	select {
+	case <-done:
+		slog.Debug("waited for the previous capture", "machine", m.ID,
+			"ms", time.Since(start).Milliseconds())
+		return true
+	case <-timer.C:
+		slog.Warn("a background capture did not finish in time; continuing, so "+
+			"its upload may fail on files that are about to be removed",
+			"machine", m.ID, "waited_ms", time.Since(start).Milliseconds())
+		return false
+	}
 }
 
 // beginCapture marks a background capture as in flight.

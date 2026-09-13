@@ -41,9 +41,15 @@ type Process struct {
 // StartOptions describes a handler to launch.
 type StartOptions struct {
 	Config
-	// Env is passed through to the child, which needs the PILOT_S3_*
-	// credentials to open a remote build.
+	// Env is passed through to the child. It is an ALLOWLIST, not hostd's own
+	// environment: a handler reads its builds through ChunksSock and holds no
+	// storage credential at all. See internal/chunkserve.
 	Env []string
+	// ChunksSock is the host socket this handler reads build chunks through.
+	// Empty falls back to reading object storage directly, which needs the
+	// PILOT_S3_* credentials in Env and is how a handler adopted from before
+	// this existed keeps working.
+	ChunksSock string
 	// LogFile receives the handler's stderr. Without it a handler's failures
 	// are invisible: it is not attached to a terminal and hostd's own log is a
 	// different process's stream.
@@ -163,7 +169,19 @@ func argv(opts StartOptions) []string {
 	if opts.ReadOnly {
 		args = append(args, "--read-only")
 	}
+	if opts.ChunksSock != "" {
+		args = append(args, "--chunks-sock", opts.ChunksSock)
+	}
 	return args
+}
+
+// PID is the handler process's id, for putting it in the machine's cgroup.
+// Zero when the handler is not running.
+func (p *Process) PID() int {
+	if p == nil {
+		return 0
+	}
+	return p.pid
 }
 
 // Dirty asks the handler which blocks the machine has written.

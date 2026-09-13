@@ -109,6 +109,21 @@ defmodule Pilots do
   @spec wake(client(), String.t()) :: result()
   def wake(client, id), do: HTTP.request(client, :post, "/v1/machines/#{seg(id)}/wake")
 
+  @doc """
+  Boots a machine again at a new size, in place: same id, same URL, same disk,
+  same volume.
+
+  A boot rather than a resume, because a memory image cannot be loaded into a
+  differently-sized VM, so the machine loses what was in memory. Omit a
+  dimension to leave it as it is.
+  """
+  @spec resize(client(), String.t(), keyword()) :: result()
+  def resize(client, id, opts \\ []) do
+    HTTP.request(client, :post, "/v1/machines/#{seg(id)}/resize",
+      body: to_body(vcpus: opts[:vcpus], mem_mib: opts[:mem_mib])
+    )
+  end
+
   @doc "Captures the machine, memory included, so it can be restored exactly."
   @spec checkpoint(client(), String.t(), String.t() | nil) :: result()
   def checkpoint(client, id, comment \\ nil) do
@@ -175,6 +190,29 @@ defmodule Pilots do
   @spec update_service(client(), String.t(), keyword() | map()) :: result()
   def update_service(client, id, attrs),
     do: HTTP.request(client, :patch, "/v1/services/#{seg(id)}", body: to_body(attrs))
+
+  @doc """
+  Changes how big every replica is, and how many there are. Omit anything to
+  leave it alone.
+
+  A size change replaces the replicas one at a time, at the same release, and
+  drops no request: a replica comes up at the new size, passes the same health
+  gate a deploy's does, and only then is an old one retired.
+
+  A volume-backed service has a held window instead of no window at all,
+  because a volume is mounted by one machine at a time and the replacement
+  cannot mount it until the old one has let go. Requests arriving then are
+  served late rather than refused.
+  """
+  @spec scale(client(), String.t(), keyword()) :: result()
+  def scale(client, id, opts \\ []) do
+    size =
+      if opts[:vcpus] || opts[:mem_mib] do
+        %{vcpus: opts[:vcpus] || 0, mem_mib: opts[:mem_mib] || 0}
+      end
+
+    update_service(client, id, replicas: opts[:replicas], size: size)
+  end
 
   # -- builds ------------------------------------------------------------------
 

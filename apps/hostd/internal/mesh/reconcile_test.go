@@ -167,28 +167,53 @@ func TestParseBootstrapPeer(t *testing.T) {
 
 // A host that will never answer must not stay on the mesh.
 //
-// Corrosion gossips to every peer the mesh holds, and its outbound queue backs
-// up behind one that always times out -- until it starts DROPPING changes,
-// which it reports once and then carries on. The fleet looks healthy while
-// machine rows silently stop replicating: names do not resolve, and a tenant
-// filter built from a partial view drops legitimate traffic. A decommissioned
-// host did exactly that on the three-node rig.
-func TestALongDeadHostIsDroppedFromTheMesh(t *testing.T) {
+// A host that has been silent for a very long time is STILL carried, and that
+// is the whole point.
+//
+// Dropping it used to be the behaviour, and it could not recover: dropping a
+// peer removes the only path by which its heartbeat could arrive, so the row's
+// LastSeen can never advance, so the peer stays dropped. A fleet quiet for
+// longer than the window forgot itself permanently and in every direction at
+// once, and the first host -- which has no bootstrap peer to fall back on --
+// could not be reached again by anything short of re-imaging it.
+//
+// The rig reached exactly that state by sitting idle for a day and a half.
+//
+// What the window is FOR survives as a warning: a peer that never answers backs
+// up Corrosion's outbound queue until changes are dropped, and the fleet then
+// looks healthy while rows stop replicating. The remedy is removing the row of a
+// host that is genuinely gone, which the loop below already honours, because at
+// thirty-one minutes a decommissioned host and a rebooting one look identical
+// and only one of those two guesses can be undone.
+func TestALongSilentHostIsStillCarriedSoItCanComeBack(t *testing.T) {
 	now := time.Now()
 	key := wgtypes.Key{1, 2, 3}.String()
 	other := wgtypes.Key{4, 5, 6}.String()
 
 	hosts := []state.Host{
 		{ID: "host-live", WGPubKey: key, LastSeen: now.Unix()},
-		{ID: "host-gone", WGPubKey: other, LastSeen: now.Add(-2 * AbandonAfter).Unix()},
+		{ID: "host-quiet", WGPubKey: other, LastSeen: now.Add(-48 * time.Hour).Unix()},
 	}
 	peers := PeersFrom(hosts, "host-self")
 
-	if len(peers) != 1 {
-		t.Fatalf("got %d peers, want only the live one", len(peers))
+	if len(peers) != 2 {
+		t.Fatalf("got %d peers, want both: dropping the quiet one removes the only "+
+			"path by which its heartbeat could arrive, so it could never come back",
+			len(peers))
 	}
-	if peers[0].PublicKey.String() != key {
-		t.Errorf("kept the wrong peer: %s", peers[0].PublicKey)
+}
+
+// A row that is GONE stops being a peer, which is how a decommissioned host is
+// meant to leave: by being removed, not by being forgotten on a timer.
+func TestARemovedRowStopsBeingAPeer(t *testing.T) {
+	key := wgtypes.Key{1, 2, 3}.String()
+	peers := PeersFrom([]state.Host{{ID: "host-live", WGPubKey: key, LastSeen: time.Now().Unix()}}, "host-self")
+	if len(peers) != 1 {
+		t.Fatalf("got %d peers, want one", len(peers))
+	}
+	// The same fleet with the row removed.
+	if peers := PeersFrom(nil, "host-self"); len(peers) != 0 {
+		t.Errorf("got %d peers from an empty fleet", len(peers))
 	}
 }
 

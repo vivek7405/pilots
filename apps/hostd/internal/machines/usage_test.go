@@ -28,8 +28,8 @@ import (
 func TestEveryLifecycleWriteHasItsLedgerHook(t *testing.T) {
 	got := ledgerHooks(t)
 	want := map[string][]string{
-		"Open":       {"Create", "Rescue"},
-		"Transition": {"Redeploy", "Redeploy", "Redeploy", "RestoreCheckpoint", "RestoreCheckpoint", "Suspend", "Wake", "Wake", "settleExit"},
+		"Open":       {"Create", "Rescue", "Resize", "Take"},
+		"Transition": {"Redeploy", "Redeploy", "Redeploy", "Resize", "Resize", "RestoreCheckpoint", "RestoreCheckpoint", "Suspend", "Wake", "Wake", "settleExit"},
 		"Close":      {"Destroy", "StopLocal"},
 	}
 	for method, wantCallers := range want {
@@ -45,8 +45,20 @@ func TestEveryLifecycleWriteHasItsLedgerHook(t *testing.T) {
 	// boot that failed, running on one that worked. settleExit carries one:
 	// error, for a process that exited on its own; the restart that follows is
 	// Wake's own pair.
-	if len(got["Transition"]) != 9 {
-		t.Errorf("Transition has %d call sites, want nine", len(got["Transition"]))
+	//
+	// Take opens an interval for the same reason Rescue does: the machine is
+	// now this host's, and the host it came from closed its own interval when
+	// it suspended. The seam between the two is the handoff itself, so neither
+	// side double-bills and neither leaves a gap.
+	//
+	// Resize carries two Transitions and an Open, and the Open is what makes it
+	// different from a redeploy: the machine comes back at a DIFFERENT size, so
+	// the interval has to be REOPENED with the new figures rather than resumed
+	// with the old ones. A Transition alone would go on billing the old size
+	// for as long as the machine lived, which is the whole operation silently
+	// not having happened as far as an invoice is concerned.
+	if len(got["Transition"]) != 11 {
+		t.Errorf("Transition has %d call sites, want eleven", len(got["Transition"]))
 	}
 }
 

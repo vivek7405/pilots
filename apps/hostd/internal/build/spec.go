@@ -46,11 +46,127 @@ type StartSpec struct {
 	// exec's the argv directly would run a program named after the whole
 	// command line.
 	Shell bool `json:"shell,omitempty"`
-	// FromDockerfileOnly is always true and is there to be read. These values
-	// are what the context's Dockerfile declares; anything inherited from the
-	// base image is invisible here, so an empty Cmd means "not declared in
-	// this Dockerfile", never "this application has no start command".
+	// FromDockerfileOnly says where these values came from. True means they
+	// are what the context's Dockerfile declares and nothing else, so an empty
+	// Cmd means "not declared in this Dockerfile" rather than "this
+	// application has no start command". False means the base image's own
+	// config was merged in as well (MergeImageConfig), which is the normal
+	// case for a build whose daemon reported one.
 	FromDockerfileOnly bool `json:"from_dockerfile_only"`
+}
+
+// ImageConfig is the part of an OCI image config that says how to start it.
+//
+// This is what `FROM postgres:17` carries and a Dockerfile that adds only a
+// COPY does not: the tar exporter emits a filesystem, so without this the
+// image's own CMD, ENV, WORKDIR and USER are dropped and the machine has
+// nothing to run. Recovered from the build's metadata rather than by pulling
+// the image again, because the daemon has already resolved it.
+type ImageConfig struct {
+	Env          []string            `json:"Env,omitempty"`
+	Cmd          []string            `json:"Cmd,omitempty"`
+	Entrypoint   []string            `json:"Entrypoint,omitempty"`
+	WorkingDir   string              `json:"WorkingDir,omitempty"`
+	User         string              `json:"User,omitempty"`
+	ExposedPorts map[string]struct{} `json:"ExposedPorts,omitempty"`
+}
+
+// MergeImageConfig fills what the Dockerfile did not declare from the base
+// image's config.
+//
+// Per field, and the Dockerfile always wins the fields it names. That is
+// Docker's own rule: an ENTRYPOINT in the Dockerfile replaces the image's, and
+// -- the part that is easy to get wrong -- a Dockerfile ENTRYPOINT with no CMD
+// of its own DISCARDS the image's CMD, because the image's CMD was written as
+// arguments to the image's entrypoint and means nothing to a different one.
+//
+// Env is the exception that merges key by key rather than wholesale, since a
+// Dockerfile's ENV is written as an addition to the base image's environment,
+// not as a replacement for it.
+func (s StartSpec) MergeImageConfig(cfg *ImageConfig) StartSpec {
+	if cfg == nil {
+		return s
+	}
+	used := false
+
+	if len(s.Entrypoint) == 0 && len(s.Cmd) == 0 {
+		// Nothing declared here: take both, and the shell form with them. An
+		// image config's Cmd and Entrypoint are always exec form by the time
+		// they reach a config, so Shell stays false.
+		if len(cfg.Entrypoint) > 0 {
+			s.Entrypoint, used = append([]string(nil), cfg.Entrypoint...), true
+		}
+		if len(cfg.Cmd) > 0 {
+			s.Cmd, used = append([]string(nil), cfg.Cmd...), true
+		}
+		if used {
+			s.Shell = false
+		}
+	} else if len(s.Entrypoint) > 0 && len(s.Cmd) == 0 {
+		// A new entrypoint and no new arguments. The image's Cmd is NOT
+		// inherited: it was arguments to a different program.
+	} else if len(s.Entrypoint) == 0 && len(s.Cmd) > 0 && len(cfg.Entrypoint) > 0 {
+		// New arguments to the image's own entrypoint, which is what
+		// `FROM postgres:17` plus `CMD ["-c", "shared_buffers=256MB"]` means.
+		s.Entrypoint, used = append([]string(nil), cfg.Entrypoint...), true
+	}
+
+	if s.WorkDir == "" && cfg.WorkingDir != "" {
+		s.WorkDir, used = cfg.WorkingDir, true
+	}
+	if s.User == "" && cfg.User != "" {
+		s.User, used = cfg.User, true
+	}
+	if s.Port == 0 {
+		if p := lowestPort(cfg.ExposedPorts); p != 0 {
+			s.Port, used = p, true
+		}
+	}
+	if len(cfg.Env) > 0 {
+		env := make(map[string]string, len(s.Env)+len(cfg.Env))
+		for _, kv := range cfg.Env {
+			k, v, ok := strings.Cut(kv, "=")
+			if !ok || k == "" {
+				continue
+			}
+			env[k], used = v, true
+		}
+		// The Dockerfile's own ENV lands last, so it wins every key it names.
+		for k, v := range s.Env {
+			env[k] = v
+		}
+		s.Env = env
+	}
+
+	if used {
+		s.FromDockerfileOnly = false
+	}
+	return s
+}
+
+// lowestPort picks one port out of an image's ExposedPorts.
+//
+// Lowest rather than first: the map has no order, so "first" would differ
+// between two runs of the same build and the machine's published port would
+// move. An image exposing 5432 and 8080 gets 5432 every time.
+func lowestPort(ports map[string]struct{}) int {
+	best := 0
+	for spec := range ports {
+		// "5432/tcp", or bare "5432". UDP is skipped: the router speaks TCP,
+		// and a machine whose only exposed port is UDP has no port we can use.
+		portStr, proto, hasProto := strings.Cut(spec, "/")
+		if hasProto && proto != "tcp" {
+			continue
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(portStr))
+		if err != nil || n <= 0 || n > 65535 {
+			continue
+		}
+		if best == 0 || n < best {
+			best = n
+		}
+	}
+	return best
 }
 
 // Empty reports a spec that names no way to start anything.

@@ -48,6 +48,22 @@ func BearerHash(ctx context.Context) string {
 type principal struct {
 	OrgID  string
 	Scopes []string
+	// Self is the machine a BROKER token was minted for, empty for every
+	// ordinary key. It is what turns an org-wide key into a machine-wide one:
+	// reads stay org-wide, because a machine that can see its siblings can do
+	// nothing with that alone, and every WRITE is refused on anything but this
+	// machine and the service it belongs to.
+	Self        string
+	SelfService string
+}
+
+// Self is the machine a broker token was minted for, or empty.
+//
+// Empty is the ordinary case and means "not narrowed". A handler asking this
+// question must treat empty as "no restriction", never as "no machine".
+func Self(ctx context.Context) (machine, service string) {
+	p, _ := ctx.Value(principalKey).(principal)
+	return p.Self, p.SelfService
 }
 
 // OrgID returns the authenticated caller's org, if any.
@@ -136,12 +152,26 @@ var scopePrefixes = []struct {
 	{"/v1/plan", ScopeMachines},
 	{"/v1/hosts", ScopeMachines},
 	{"/v1/whoami", ScopeMachines},
+	// The lowest scope, because it answers the same question whoami does with
+	// one more field: a key that can ask who it is can ask what it may act as.
+	{"/v1/orgs", ScopeMachines},
+	// The TENANT scrape. machines-scoped, because it answers the same question
+	// a machine list answers and is narrowed by the same rule: a key that
+	// cannot see a machine cannot see its numbers. Distinct from the host's own
+	// unauthenticated /metrics, which is not in this table because it is
+	// exempt.
+	{"/v1/metrics", ScopeMachines},
 	// The lowest scope opens the MCP endpoint; each tool then calls its own
 	// route back through this table with the same key, so a machines key
 	// reaches list_machines and is refused list_services, exactly as it
 	// would be over plain HTTP.
 	{"/mcp", ScopeMachines},
 	{"/v1/builds", ScopeDeploy},
+	// Builders belong to the org whose builds run in them, so seeing and
+	// resetting one is a deploy-scoped act rather than an administrative one.
+	// Without this row the table falls through to admin, and unsticking your
+	// own build would need a key that can mint keys.
+	{"/v1/builders", ScopeDeploy},
 	// A deploy-scoped key READS its own connections here, because a caller
 	// refused a {repo, ref} build has to be able to see what it is connected
 	// to. Writing one is admin-scoped, checked in handleConnectRepo rather
@@ -247,6 +277,14 @@ func WithAuth(d Deps, next http.Handler) http.Handler {
 
 		sum := sha256.Sum256([]byte(key))
 		hash := hex.EncodeToString(sum[:])
+
+		// A BROKER token, minted for one machine by its own host. Recognised
+		// by its prefix so it is never hashed and looked up as a key -- there
+		// is no row to find, which is the point of it being a signed claim.
+		if strings.HasPrefix(key, BrokerTokenPrefix) {
+			d.authenticateBrokerToken(w, r, next, key, hash)
+			return
+		}
 
 		rec, err := d.Store.GetAPIKeyByHash(r.Context(), hash)
 		if err != nil {
@@ -399,4 +437,65 @@ func unauthorized(w http.ResponseWriter, challenge string) {
 	w.Header().Set("WWW-Authenticate", challenge)
 	WriteError(w, http.StatusUnauthorized, CodeUnauthorized, "unauthorized",
 		"pass an API key: pilot login, or set PILOT_API_KEY", nil)
+}
+
+// authenticateBrokerToken verifies a machine's own credential.
+//
+// Three checks beyond the signature, and all three read LOCAL state, so a
+// machine's token stops working everywhere within gossip latency without any
+// host having to be reachable:
+//
+//   - the revocation tombstone, the same one an API key is checked against, so
+//     `POST /v1/api-keys/{hash}/revoke` kills a broker token too;
+//   - the machine row, which must still exist and must not be destroyed, so
+//     destroying a machine ends its tokens at once rather than in fifteen
+//     minutes;
+//   - the tenancy claim, which must still say what the token says, so a token
+//     cannot outlive the org it was issued for.
+func (d Deps) authenticateBrokerToken(w http.ResponseWriter, r *http.Request,
+	next http.Handler, key, hash string) {
+	claims, err := VerifyBrokerToken(d.BrokerKey, key)
+	if err != nil {
+		unauthorized(w, d.challenge(r))
+		return
+	}
+
+	revoked, err := d.tenancy().Revoked(r.Context(), hash)
+	if err != nil {
+		WriteError(w, http.StatusInternalServerError, CodeInternal,
+			"auth lookup failed", NextInternal, nil)
+		return
+	}
+	if revoked {
+		unauthorized(w, d.challenge(r))
+		return
+	}
+
+	m, err := d.Store.GetMachine(r.Context(), claims.Machine)
+	if err != nil || m.State == state.StateDestroyed {
+		// A destroyed machine and a machine this host has never heard of get
+		// the same answer, which is the right one: neither is a caller.
+		unauthorized(w, d.challenge(r))
+		return
+	}
+	owner, known := d.tenancy().OrgOf(r.Context(), claims.Machine)
+	if !known || owner != claims.Org {
+		unauthorized(w, d.challenge(r))
+		return
+	}
+
+	if need, ok := scopeAllows(strings.Join(claims.Scopes, ","), r.URL.Path); !ok {
+		WriteError(w, http.StatusForbidden, CodeScopeRequired,
+			"scope "+need+" required",
+			"grant it: PUT /v1/machines/"+claims.Machine+"/secrets with scopes including "+need, nil)
+		return
+	}
+
+	ctx := context.WithValue(r.Context(), principalKey, principal{
+		OrgID: claims.Org, Scopes: claims.Scopes,
+		Self: claims.Machine, SelfService: claims.Service,
+	})
+	ctx = context.WithValue(ctx, bearerKey, key)
+	ctx = context.WithValue(ctx, bearerHashKey, hash)
+	next.ServeHTTP(w, r.WithContext(ctx))
 }

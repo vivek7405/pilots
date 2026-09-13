@@ -24,6 +24,58 @@ type fakeVolumes struct {
 	// the window in which two hosts can both mount one metadata database.
 	ownerAtAttach []string
 	store         state.Store
+	// checked records which volumes had their filesystem verified, and
+	// checkErr makes that check fail, so a test can assert a corrupt volume is
+	// never handed to a guest.
+	checked  []string
+	checkErr error
+	// snapshots is the fake's filesystem: volume id -> stamps, newest first.
+	snapshots map[string][]string
+	copied    []string
+	restored  []string
+	deleted   []string
+}
+
+// Check is the filesystem gate. Recorded rather than performed: what the tests
+// here care about is that it runs BEFORE a guest is given the image, and in
+// which order relative to the attach.
+func (f *fakeVolumes) Check(_ context.Context, id string) error {
+	f.checked = append(f.checked, id)
+	return f.checkErr
+}
+
+func (f *fakeVolumes) Snapshot(_ context.Context, id, stamp string) error {
+	if f.snapshots == nil {
+		f.snapshots = map[string][]string{}
+	}
+	f.snapshots[id] = append([]string{stamp}, f.snapshots[id]...)
+	return nil
+}
+
+func (f *fakeVolumes) ListSnapshots(id string) ([]string, error) {
+	return f.snapshots[id], nil
+}
+
+func (f *fakeVolumes) RestoreSnapshot(_ context.Context, id, stamp string) error {
+	f.restored = append(f.restored, id+"@"+stamp)
+	return nil
+}
+
+func (f *fakeVolumes) DeleteSnapshot(_ context.Context, id, stamp string) error {
+	kept := f.snapshots[id][:0]
+	for _, s := range f.snapshots[id] {
+		if s != stamp {
+			kept = append(kept, s)
+		}
+	}
+	f.snapshots[id] = kept
+	f.deleted = append(f.deleted, id+"@"+stamp)
+	return nil
+}
+
+func (f *fakeVolumes) CopySnapshotTo(_ context.Context, id, stamp, dest string) error {
+	f.copied = append(f.copied, id+"@"+stamp+" -> "+dest)
+	return nil
 }
 
 func (f *fakeVolumes) Create(_ context.Context, name string, sizeMiB int, mountPath string) (*state.Volume, error) {
@@ -337,5 +389,46 @@ func TestStopLocalReleasesTheVolumeFilesystem(t *testing.T) {
 	}
 	if row.HostID != "host-b" || row.VolumeID != "vol-1" {
 		t.Fatalf("StopLocal wrote to a row it does not own: %+v", *row)
+	}
+}
+
+// A volume's filesystem is checked before a guest is given it, and AFTER it is
+// mounted, which is the one moment it can be checked at all: the image is
+// readable and nothing is writing to it.
+func TestAVolumeIsCheckedAfterMountingAndBeforeUse(t *testing.T) {
+	ctx := context.Background()
+	m, fv, st := newVolumeTestManager(t)
+	if err := st.PutVolume(ctx, &state.Volume{ID: "vol-1", SizeMiB: 1024, MountPath: "/data"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := m.claimVolume(ctx, "vol-1", "m-1"); err != nil {
+		t.Fatalf("claimVolume: %v", err)
+	}
+	if len(fv.checked) != 1 || fv.checked[0] != "vol-1" {
+		t.Fatalf("checked = %v, want the volume checked exactly once", fv.checked)
+	}
+	if len(fv.attached) != 1 {
+		t.Fatalf("attached = %v", fv.attached)
+	}
+}
+
+// A filesystem the check cannot repair is NOT handed over.
+//
+// Mounting it would let the guest write on top of the damage, which turns a
+// filesystem a snapshot could have restored into one nothing can. The refusal
+// is the whole value: a host that died mid-write leaves an image that still
+// reports itself clean, so without the check this is invisible until the data
+// is gone.
+func TestACorruptVolumeIsNeverHandedToAGuest(t *testing.T) {
+	ctx := context.Background()
+	m, fv, st := newVolumeTestManager(t)
+	fv.checkErr = errors.New("volumes: filesystem check failed")
+	if err := st.PutVolume(ctx, &state.Volume{ID: "vol-1", SizeMiB: 1024, MountPath: "/data"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := m.claimVolume(ctx, "vol-1", "m-1"); err == nil {
+		t.Fatal("a volume that failed its filesystem check was handed over")
 	}
 }

@@ -37,6 +37,33 @@ export const users = table(
   (t) => [index(t.login)],
 );
 
+/**
+ * What a team is paying for, and who is collecting.
+ *
+ * A row per PAYING team, not per team: a personal org is always on the free
+ * plan and never gets one, so the absence of a row is itself the answer rather
+ * than a row that has to be read to learn nothing.
+ *
+ * `provider` is `none` and nothing else today. There is exactly one
+ * `PaymentProvider` implementation (`modules/billing/provider.server.ts`) and
+ * it makes no network call; this column is the seam a real one plugs into, and
+ * `provider_ref` is where that provider's own id for the account would go. A
+ * column standing in for an integration nobody has chosen is cheap; a schema
+ * change on a table with rows, once one is chosen, is not.
+ */
+export const billingAccounts = table('billing_accounts', {
+  id: uuidPk(),
+  /** A plan id from `modules/billing/plans.ts`. `free` or `pro` today. */
+  plan: text().notNull().default('free'),
+  /** `active`, or whatever a provider later reports. Never blank. */
+  status: text().notNull().default('active'),
+  provider: text().notNull().default('none'),
+  /** The provider's own id for this account. Null while the provider is `none`. */
+  providerRef: text(),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+});
+
 export const orgs = table(
   'orgs',
   {
@@ -45,6 +72,17 @@ export const orgs = table(
     name: text().notNull(),
     personal: bool().notNull().default(false),
     ownerId: integer().notNull(),
+    /**
+     * The team's `billing_accounts` row, or null for a team on the free plan
+     * that has never activated one -- which is every personal org, always.
+     *
+     * A plain column rather than a declared foreign key, matching every other
+     * cross-table id in this file (`memberships.org_id`, `api_keys.org_id`).
+     * SQLite cannot add a REFERENCES clause with ALTER TABLE, so declaring one
+     * here would turn a one-line column add into a table rebuild for a
+     * constraint nothing else in this schema asks for.
+     */
+    billingAccountId: text(),
     createdAt: createdAt(),
   },
   (t) => [index(t.ownerId)],
@@ -242,7 +280,7 @@ export const oauthCodes = table(
 );
 
 export const relations = defineRelations(
-  { users, orgs, memberships, apiKeys, usageSamples, repoConnections, serviceVariables, builds, oauthClients, oauthCodes },
+  { users, orgs, billingAccounts, memberships, apiKeys, usageSamples, repoConnections, serviceVariables, builds, oauthClients, oauthCodes },
   (r) => ({
     users: { memberships: r.many.memberships() },
     orgs: {
@@ -268,6 +306,7 @@ export const relations = defineRelations(
 // Derived types, never hand-written.
 export type User = typeof users.$inferSelect;
 export type Org = typeof orgs.$inferSelect;
+export type BillingAccount = typeof billingAccounts.$inferSelect;
 export type Membership = typeof memberships.$inferSelect;
 export type ApiKey = typeof apiKeys.$inferSelect;
 export type UsageSample = typeof usageSamples.$inferSelect;

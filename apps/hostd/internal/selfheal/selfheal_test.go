@@ -571,3 +571,58 @@ func TestSurvivorsPartitionAMixedVendorFleet(t *testing.T) {
 		}
 	}
 }
+
+// A host that has just joined must claim nothing until its replica has caught
+// up. It cannot tell a dead owner from one it has simply not applied any rows
+// from yet: both read as a host that is not in the live set, and the claim
+// that follows merges into a row the live owner is still writing.
+//
+// Releasing a machine this host has LOST is the exception and stays ungated.
+// That reads a foreign host id that is PRESENT in the row, which a partial
+// replica can under-report but never invent, and every moment it is deferred
+// is a moment two Firecrackers write the same disk.
+func TestTickClaimsNothingUntilReady(t *testing.T) {
+	now := time.Now()
+	orphan := machine("m-1", "host-dead")
+	orphan.MemBuildID = "b-1"
+	// A machine this host is running but no longer owns: the release half.
+	lost := machine("m-lost", "host-b")
+
+	store := newFakeStore(orphan, lost)
+	restores, stopped := 0, []string{}
+	ready := false
+
+	opts := Options{
+		HostID: "host-a",
+		Fleet: &fakeFleet{
+			machines: []state.Machine{orphan, lost},
+			hosts: []state.Host{host("host-a", now), host("host-b", now),
+				host("host-dead", now.Add(-5*time.Minute))},
+		},
+		Store:          store,
+		Now:            func() time.Time { return now },
+		Ready:          func() bool { return ready },
+		Restore:        func(context.Context, *state.Machine) error { restores++; return nil },
+		RunningLocally: func() []string { return []string{"m-lost"} },
+		StopLocal:      func(_ context.Context, id string) error { stopped = append(stopped, id); return nil },
+	}
+
+	Tick(context.Background(), opts)
+	if restores != 0 {
+		t.Errorf("restored %d machines while still joining; a live owner's machine may be among them", restores)
+	}
+	if got, err := store.GetMachine(context.Background(), "m-1"); err != nil {
+		t.Fatal(err)
+	} else if got.HostID != "host-dead" {
+		t.Errorf("host_id = %q while joining; the row must be left alone", got.HostID)
+	}
+	if len(stopped) != 1 || stopped[0] != "m-lost" {
+		t.Errorf("stopped = %v; releasing a machine we lost is a read of presence and is not gated", stopped)
+	}
+
+	ready = true
+	Tick(context.Background(), opts)
+	if restores != 1 {
+		t.Errorf("restored %d machines after the gate opened, want 1", restores)
+	}
+}

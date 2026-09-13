@@ -3,20 +3,28 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"runtime"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
+	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/config"
 	"github.com/vivek7405/pilots/hostd/internal/machines"
 	"github.com/vivek7405/pilots/hostd/internal/mesh"
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/router"
 	"github.com/vivek7405/pilots/hostd/internal/selfheal"
 	"github.com/vivek7405/pilots/hostd/internal/state"
@@ -182,19 +190,76 @@ func heartbeatFor(cfg *config.Config, keys mesh.Keys, meshed bool) func() state.
 // RunHeartbeat writes before its first tick, so the row exists within
 // milliseconds of start and `pilot status` on a fresh single box lists the
 // host that answered it.
-func startHeartbeat(ctx context.Context, cfg *config.Config, store state.Store, keys mesh.Keys, meshed bool) {
-	go selfheal.RunHeartbeat(ctx, selfheal.Options{
+func startHeartbeat(ctx context.Context, cfg *config.Config, store state.Store,
+	keys mesh.Keys, meshed bool, mgr *machines.Manager) {
+
+	opts := selfheal.Options{
 		HostID:    cfg.HostID,
 		Store:     store,
 		Heartbeat: heartbeatFor(cfg, keys, meshed),
-	})
+	}
+	// A host with no machine manager -- every test of the heartbeat itself --
+	// publishes liveness and nothing else. Placement then treats it as a host
+	// that has reported nothing, which is exactly what it is.
+	if mgr != nil {
+		opts.Capacities = func() *state.HostCapacity { return mgr.Capacity(ctx) }
+		opts.CachedBuilds = cachedBuildsReporter(cfg)
+	}
+	go selfheal.RunHeartbeat(ctx, opts)
+}
+
+// cachedBuildsReporter lists the builds on local disk, and returns nil when
+// the set has not changed.
+//
+// Nil is the common answer and the important one: this row is gossiped in FULL
+// on every write, and a build cache changes far more often than placement
+// needs to hear about it. Writing it every five seconds would starve the apply
+// loop for every other row on the fleet, which is the C5 landmine.
+func cachedBuildsReporter(cfg *config.Config) func() []string {
+	var lastHash string
+	dir := filepath.Join(cfg.CacheRoot(), "builds")
+
+	return func() []string {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			// No cache directory yet is not an error: it is a host that has
+			// never built or restored anything. An empty set is the truth, and
+			// it is worth publishing once so a ranker stops giving this host
+			// an affinity bonus it does not deserve.
+			if !os.IsNotExist(err) {
+				return nil
+			}
+			entries = nil
+		}
+		ids := make([]string, 0, len(entries))
+		for _, e := range entries {
+			if e.IsDir() && e.Name() != "" {
+				ids = append(ids, e.Name())
+			}
+		}
+		sort.Strings(ids)
+		if len(ids) > state.MaxCachedBuildsPublished {
+			ids = ids[:state.MaxCachedBuildsPublished]
+		}
+
+		sum := sha256.Sum256([]byte(strings.Join(ids, ",")))
+		hash := hex.EncodeToString(sum[:])
+		if hash == lastHash {
+			return nil
+		}
+		lastHash = hash
+		return ids
+	}
 }
 
 // startSelfHeal runs the rescue loop. The heartbeat is started separately, by
 // startHeartbeat, because every host writes its own row whether or not it is
 // part of a fleet.
-func startSelfHeal(ctx context.Context, cfg *config.Config, f *fleet, mgr *machines.Manager) {
+func startSelfHeal(ctx context.Context, cfg *config.Config, f *fleet, mgr *machines.Manager,
+	gate *corrosion.JoinGate) {
+
 	opts := selfheal.Options{
+		Ready:     gate.Ready,
 		HostID:    cfg.HostID,
 		Fleet:     f.cache,
 		Store:     f.store,
@@ -203,11 +268,23 @@ func startSelfHeal(ctx context.Context, cfg *config.Config, f *fleet, mgr *machi
 			return memMiB <= freeMemMiB(cfg.HugePages)
 		},
 		Restore:        func(ctx context.Context, m *state.Machine) error { return mgr.Rescue(ctx, *m) },
+		BootOnVolume:   func(ctx context.Context, m *state.Machine) error { return mgr.RescueOnVolume(ctx, *m) },
 		RunningLocally: mgr.RunningIDs,
 		StopLocal:      mgr.StopLocal,
 	}
 
-	go selfheal.RunRescue(ctx, opts)
+	// The first tick waits for the gate outright rather than being refused by
+	// it, so a joining host does not log a refusal every two seconds while it
+	// catches up. After that Ready is what each tick reads, because the loop
+	// outlives the join.
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-gate.Done():
+		}
+		selfheal.RunRescue(ctx, opts)
+	}()
 }
 
 // freeMemMiB reports how much memory this host can still give to guests.
@@ -386,8 +463,21 @@ func (p peerAPI) PostJSON(ctx context.Context, hostID, path string, body any) er
 // create, then exec, is the first thing an agent does, and the tenancy row is
 // written milliseconds before that call arrives. The fallback costs a query
 // only on the miss, so the steady state is still a map lookup.
+// tenancyCache is the three answers this type needs from the subscription
+// cache.
+//
+// An interface rather than the concrete cache, so the fallback behaviour can be
+// tested without a running Corrosion. That matters more than usual here: the
+// asymmetry between a cache hit and a cache miss is the whole correctness
+// argument for Revoked, and an argument nothing exercises is one that decays.
+type tenancyCache interface {
+	OrgOf(id string) (string, bool)
+	Revoked(hash string) bool
+	KeyLimits(hash string) (state.APIKeyLimits, bool)
+}
+
 type cachedTenancy struct {
-	cache *corrosion.Cache
+	cache tenancyCache
 	store state.Store
 }
 
@@ -402,8 +492,32 @@ func (t cachedTenancy) OrgOf(ctx context.Context, id string) (string, bool) {
 	return row.OrgID, true
 }
 
-func (t cachedTenancy) Revoked(_ context.Context, hash string) (bool, error) {
-	return t.cache.Revoked(hash), nil
+// Revoked answers from the cache, and a MISS falls through to the store.
+//
+// A hit is authoritative and needs nothing else: a revocation is a tombstone,
+// it only ever appears, and un-revoking is minting a new key. So a cache that
+// says "revoked" is never wrong.
+//
+// A MISS is the dangerous direction, and it was being trusted. On the rig a
+// revoked key kept authenticating indefinitely: the tombstone was in the table,
+// gossiped to every host, and the cache's map did not have it -- so every
+// request answered 200, a hostd restart did not clear it, and nothing anywhere
+// said why. A key somebody revoked because it leaked went on working.
+//
+// The comment on the subscription says a rebuild re-reads the whole table so a
+// revocation cannot be missed by a gap. That is the intent; this is the belt to
+// its braces, and the reason to have one is that the failure is silent, total
+// and security-relevant. OrgOf already falls back exactly like this, and the
+// difference between them was an inconsistency rather than a decision.
+//
+// The cost is one local query per authenticated request whose key is NOT
+// revoked, which is nearly all of them. That is real and it is the right trade:
+// a revocation that does not revoke is not a performance problem.
+func (t cachedTenancy) Revoked(ctx context.Context, hash string) (bool, error) {
+	if t.cache.Revoked(hash) {
+		return true, nil
+	}
+	return t.store.IsRevoked(ctx, hash)
 }
 
 // Limits answers from the cache, and a MISS is authoritative -- which is the
@@ -428,18 +542,88 @@ func (t cachedTenancy) Limits(_ context.Context, hash string) (*state.APIKeyLimi
 	return nil, fmt.Errorf("api key limits: %w", state.ErrNotFound)
 }
 
-// storeVersion exposes the replica's version vector sum on /v1/health, or nil
-// on SQLite where there is no replica and the field is 0.
+// startJoinGate brings up the replication join gate: the latch that keeps this
+// host from claiming another host's machines until its replica has caught up.
+//
+// It reads peers from the same subscription cache the router reads, and each
+// peer's vector from that peer's /v1/health on the plain listener. That route
+// is unauthenticated on purpose (every load balancer polls it), which is what
+// makes it usable here: a host that has not finished joining must not need a
+// key exchange, a mesh handshake or any specific peer in order to find out
+// whether it is behind.
+func startJoinGate(ctx context.Context, cfg *config.Config, f *fleet) *corrosion.JoinGate {
+	cs, ok := f.store.(*corrosion.Store)
+	if !ok {
+		// SQLite: no replica, nothing to catch up with, and self-heal on a
+		// single host is claiming its own machines back.
+		return corrosion.OpenJoinGate()
+	}
+	_, port, err := net.SplitHostPort(cfg.ListenAddr)
+	if err != nil || port == "" {
+		port = "8080"
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	return corrosion.RunJoinGate(ctx, cs, corrosion.JoinGateOptions{
+		Peers: func() []state.Host {
+			var out []state.Host
+			for _, h := range f.cache.LiveHosts(time.Now(), selfheal.DeadAfter) {
+				if h.ID != cfg.HostID && h.PublicIP != "" {
+					out = append(out, h)
+				}
+			}
+			return out
+		},
+		PeerVector: func(ctx context.Context, h state.Host) (map[string]int64, error) {
+			url := "http://" + net.JoinHostPort(h.PublicIP, port) + "/v1/health"
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+			if err != nil {
+				return nil, err
+			}
+			resp, err := client.Do(req)
+			if err != nil {
+				return nil, err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return nil, fmt.Errorf("peer %s health: %s", h.ID, resp.Status)
+			}
+			var health api.HealthResponse
+			if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&health); err != nil {
+				return nil, fmt.Errorf("peer %s health: %w", h.ID, err)
+			}
+			return health.StoreVersions, nil
+		},
+	})
+}
+
+// replication exposes how far the replica has caught up on /v1/health: the
+// version vector's sum, the vector per actor, and whether the join gate has
+// opened. Nil on SQLite, where there is no replica.
 //
 // A type assertion rather than a method on state.Store: replication is a
 // property of one backend, and putting it on the interface would make every
 // implementation answer a question only one of them has.
-func storeVersion(store state.Store) func(context.Context) (int64, error) {
+//
+// The vector is on the ONE route every host already polls rather than behind a
+// new one, because the peer reading it is a host that has not finished
+// joining: a new authenticated route would make the gate depend on a key
+// exchange, and the gate's whole job is to need nothing from anybody.
+func replication(store state.Store, gate *corrosion.JoinGate) func(context.Context) (int64, map[string]int64, bool, error) {
 	cs, ok := store.(*corrosion.Store)
 	if !ok {
 		return nil
 	}
-	return cs.Version
+	return func(ctx context.Context) (int64, map[string]int64, bool, error) {
+		vec, err := cs.VersionVector(ctx)
+		if err != nil {
+			return 0, nil, false, err
+		}
+		var sum int64
+		for _, v := range vec {
+			sum += v
+		}
+		return sum, vec, gate.Ready(), nil
+	}
 }
 
 // cachedMachineCPU answers a machine's last start from the subscription cache.
@@ -451,4 +635,54 @@ type cachedMachineCPU struct{ cache *corrosion.Cache }
 
 func (v cachedMachineCPU) MachineCPU(_ context.Context, id string) (state.MachineCPU, bool) {
 	return v.cache.MachineCPU(id)
+}
+
+// placementMetric reports where creates ended up.
+//
+// A type rather than a closure so the API package's dependency is an interface
+// it can be tested against, and so hostd's metric registry stays out of the
+// API package entirely.
+type placementMetric struct{}
+
+func (placementMetric) Observe(outcome string) {
+	metrics.PlacementOutcomes.With(outcome).Inc()
+}
+
+// drainAdapter is the machine manager as the API's Drainer.
+//
+// A thin shim rather than the manager implementing api.Drainer directly,
+// because the two disagree about one type on purpose: the manager reports a
+// drain in its own terms and the API reports it in wire terms, and neither
+// should have to carry the other's shape.
+type drainAdapter struct{ mgr *machines.Manager }
+
+func (d drainAdapter) Drain(ctx context.Context,
+	pick func(state.Machine) (string, bool)) (*api.DrainReport, error) {
+
+	got, err := d.mgr.Drain(ctx, pick)
+	if err != nil {
+		return nil, err
+	}
+	return &api.DrainReport{
+		Moved: got.Moved, Left: got.Left, Errors: got.Errors, Started: got.Started,
+	}, nil
+}
+
+func (d drainAdapter) Undrain()       { d.mgr.SetDraining(false) }
+func (d drainAdapter) Draining() bool { return d.mgr.Draining() }
+
+func (d drainAdapter) Take(ctx context.Context, machineID, handoffID string) error {
+	return d.mgr.Take(ctx, machineID, handoffID)
+}
+
+// handoffCaller tells a target host to take a machine, over the mesh.
+//
+// Best effort by construction: the offer ROW authorises the move, so a failed
+// call costs the source a wait rather than the handoff. That is why this
+// returns an error nobody treats as fatal.
+type handoffCaller struct{ peers peerAPI }
+
+func (h handoffCaller) Offer(ctx context.Context, hostID, machineID, handoffID string) error {
+	return h.peers.PostJSON(ctx, hostID, "/v1/machines/"+machineID+"/take",
+		api.TakeRequest{HandoffID: handoffID})
 }

@@ -109,12 +109,20 @@ func NewRoot(getenv config.Env) *cobra.Command {
 		InGroup(newProxyCmd(env), "sandbox"),
 		InGroup(newAttachCmd(env), "sandbox"),
 		InGroup(newSessionsCmd(env), "sandbox"),
+		InGroup(newProcessesCmd(env), "sandbox"),
 		InGroup(newDeployCmd(env, getenv), "deploy"),
+		InGroup(newAddCmd(env, getenv), "deploy"),
+		InGroup(newDBCmd(env, getenv), "deploy"),
 		InGroup(newServicesCmd(env), "deploy"),
+		InGroup(newBuildersCmd(env), "deploy"),
+		InGroup(newUsageCmd(env), "inspect"),
+		InGroup(newMetricsCmd(env), "inspect"),
 		InGroup(newPromoteCmd(env), "deploy"),
 		InGroup(newURLCmd(env), "deploy"),
 		InGroup(newTUICmd(env), "inspect"),
 		InGroup(newStatusCmd(env), "inspect"),
+		InGroup(newEgressCmd(env), "inspect"),
+		InGroup(newHostsCmd(env), "inspect"),
 		InGroup(newLogsCmd(env), "inspect"),
 		InGroup(newVolumesCmd(env), "storage"),
 		InGroup(newDomainsCmd(env), "storage"),
@@ -122,6 +130,7 @@ func NewRoot(getenv config.Env) *cobra.Command {
 		InGroup(newLoginCmd(env, getenv), "account"),
 		InGroup(newLogoutCmd(env, getenv), "account"),
 		InGroup(newWhoamiCmd(env), "account"),
+		InGroup(newOrgsCmd(env, getenv), "account"),
 		InGroup(newUseCmd(env), "account"),
 		InGroup(newMCPCmd(env, getenv), "agents"),
 		InGroup(newInitCmd(env, getenv), "agents"),
@@ -161,7 +170,17 @@ func Execute(ctx context.Context, getenv config.Env, args []string) int {
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return 130 // 128 + SIGINT
 	}
-	w := out.New(false)
+	// The mode the CALLER asked for, not a hardcoded false.
+	//
+	// This built a plain-text writer whatever the command line said, so
+	// `--json` produced a structured answer on success and a bare sentence on
+	// failure. Cobra has parsed the flag by now even when the command itself
+	// failed afterwards, so its own value is the truthful source.
+	jsonMode := false
+	if f := root.PersistentFlags().Lookup("json"); f != nil {
+		jsonMode = f.Value.String() == "true"
+	}
+	w := out.New(jsonMode)
 	w.WriteError(err)
 	return 1
 }

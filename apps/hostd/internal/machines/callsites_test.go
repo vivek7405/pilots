@@ -51,11 +51,19 @@ func TestEnvIsDeliveredFromTheCreatePathAndNowhereElse(t *testing.T) {
 		},
 		{
 			callee: "bootMachine",
-			want:   []string{"Redeploy", "startNewMachine"},
+			want:   []string{"Redeploy", "RescueOnVolume", "Resize", "startNewMachine"},
 			why: "the same back door, by the other create path -- and from a " +
 				"redeploy, which is a create of the process: the old one was " +
 				"killed, the new one starts from another image and has to be " +
-				"handed its environment exactly as a first boot is",
+				"handed its environment exactly as a first boot is. A RESIZE " +
+				"is the same shape for the same reason: a memory image cannot " +
+				"be loaded into a machine of another size, so the old process " +
+				"is killed and a new one boots from the SAME image and needs " +
+				"its environment delivered exactly as a first boot does. A " +
+				"RESCUE onto a volume is the same shape again, and the most " +
+				"clearly so: the old process went with its host, there is no " +
+				"memory image because a volume machine never has one, and the " +
+				"new process is a first boot in every sense that matters here",
 		},
 		{
 			// The dispatcher is the choke point both paths go through, so the
@@ -244,10 +252,13 @@ func TestNoRestoreSkipsTheVendorCheck(t *testing.T) {
 		},
 		{
 			callee: "bringUp",
-			want:   []string{"Rescue", "Wake"},
-			why: "these are the two paths that bring a suspended machine back " +
+			want:   []string{"Rescue", "Take", "Wake"},
+			why: "these are the paths that bring a suspended machine back " +
 				"locally; anything else reaching them is a bring-up outside the " +
-				"lock and the ledger hooks both of these own",
+				"lock and the ledger hooks these own. TAKE is the planned twin " +
+				"of Rescue: the same restore, authorised by an offer from a LIVE " +
+				"host rather than by the old owner being dead, and it holds the " +
+				"same lock and opens the same ledger interval",
 		},
 		{
 			callee: "bootFromDisk",

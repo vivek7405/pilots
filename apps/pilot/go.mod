@@ -14,6 +14,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/vivek7405/pilots/agents v0.0.0-00010101000000-000000000000
 	github.com/vivek7405/pilots/sdks/go v0.0.0-00010101000000-000000000000
+	go.yaml.in/yaml/v3 v3.0.5
 	golang.org/x/term v0.46.0
 )
 

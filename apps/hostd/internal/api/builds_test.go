@@ -34,6 +34,9 @@ type fakeBuilder struct {
 	// org's builder machine, so passing the wrong one would run one tenant's
 	// Dockerfile in another tenant's guest.
 	gotOrg string
+	// The cache generation a reset advances, and whose org it advanced.
+	epoch     int
+	bumpedOrg string
 
 	// recordEmitted mirrors the real builder, which appends a line to its log
 	// store before it emits. Opt-in, so the tests that hand BuildLog a fixed
@@ -64,6 +67,14 @@ func (f *fakeBuilder) BuildLog(_ context.Context, id string, follow bool) (
 		return nil, nil, false
 	}
 	return f.log, nil, true
+}
+
+// BumpEpoch records the reset, so a test can assert the cache generation
+// moved without a bucket behind it.
+func (f *fakeBuilder) BumpEpoch(_ context.Context, orgID string) (int, error) {
+	f.bumpedOrg = orgID
+	f.epoch++
+	return f.epoch, nil
 }
 
 func (f *fakeBuilder) RecordRefusal(_ string, line BuildLogLine) {
@@ -303,7 +314,8 @@ func (c *cancelProbeBuilder) BuildLog(context.Context, string, bool) (
 	return nil, nil, false
 }
 
-func (c *cancelProbeBuilder) RecordRefusal(string, BuildLogLine) {}
+func (c *cancelProbeBuilder) RecordRefusal(string, BuildLogLine)             {}
+func (c *cancelProbeBuilder) BumpEpoch(context.Context, string) (int, error) { return 1, nil }
 
 // The build must be able to read its context after the stream has started.
 //
@@ -764,9 +776,11 @@ func TestASecondOwnerWriteNeverFailsABuildThatSucceeded(t *testing.T) {
 	}
 }
 
-func (x *readingBuilder) RecordRefusal(string, BuildLogLine) {}
+func (x *readingBuilder) RecordRefusal(string, BuildLogLine)             {}
+func (x *readingBuilder) BumpEpoch(context.Context, string) (int, error) { return 1, nil }
 
-func (x *blockingBuilder) RecordRefusal(string, BuildLogLine) {}
+func (x *blockingBuilder) RecordRefusal(string, BuildLogLine)             {}
+func (x *blockingBuilder) BumpEpoch(context.Context, string) (int, error) { return 1, nil }
 
 // fakeStager stands in for the fetch and plan internal/github does, so the
 // route's branch can be tested with no App, no network and no repository.

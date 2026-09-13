@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/state"
@@ -161,9 +162,19 @@ func (s *Store) PutMachine(ctx context.Context, m *state.Machine, opts ...state.
 // back.
 func (s *Store) ClaimMachine(ctx context.Context, id, newHostID, newState string, opts ...state.WriteOption) error {
 	auth := state.ResolveAuth(opts)
+
+	// A planned handoff: a LIVE host offered this machine, so liveness is not
+	// the test. The OFFER is, and every part of it is checked here rather than
+	// trusted from the caller -- this is the one path on which a running
+	// fleet's machine changes owner, so it is the one place a mistake would
+	// give two hosts one machine.
+	if auth.HandoffID != "" {
+		return s.claimByHandoff(ctx, id, newHostID, newState, auth.HandoffID)
+	}
+
 	if auth.DeadOwnerClaim == "" {
 		return fmt.Errorf("state: claiming %q needs WithDeadOwnerClaim naming the "+
-			"host it is taken from: %w", id, state.ErrNotOwner)
+			"host it is taken from, or WithHandoff naming an offer: %w", id, state.ErrNotOwner)
 	}
 
 	alive, err := s.hostIsLive(ctx, auth.DeadOwnerClaim)
@@ -186,6 +197,84 @@ func (s *Store) ClaimMachine(ctx context.Context, id, newHostID, newState string
 		// Someone else claimed it first, or it moved. Either way it is not
 		// ours and the next tick re-hashes.
 		return fmt.Errorf("state: claim machine %q: %w", id, state.ErrNotOwner)
+	}
+	return nil
+}
+
+// claimByHandoff takes a machine a live host offered.
+//
+// Five checks, and every one of them is load-bearing:
+//
+//  1. The offer exists. Without it there is nothing authorising this at all.
+//  2. It names THIS host. Otherwise any host could take a machine offered to
+//     somebody else by quoting the id.
+//  3. Its from_host is the machine's CURRENT owner. An offer made before the
+//     machine moved is stale, and honouring it would take the machine from
+//     whoever holds it now.
+//  4. It is the machine's NEWEST offer. A source that gave up on one target
+//     and offered the machine to another must not have the first target
+//     arrive late and take it.
+//  5. The machine is not running. The source suspends before it offers, so a
+//     running row means the offer has not been acted on by its writer yet --
+//     or the machine came back -- and taking it would leave two Firecrackers
+//     for one id.
+//
+// Gossip may deliver the offer before the suspended write that should precede
+// it; check 5 absorbs that by refusing until the machine is actually down, and
+// the caller retries.
+func (s *Store) claimByHandoff(ctx context.Context, id, newHostID, newState, handoffID string) error {
+	rows, err := s.client.Query(ctx, `
+		SELECT machine_id, from_host, to_host, seq FROM machine_handoffs WHERE id = ?`, handoffID)
+	if err != nil {
+		return err
+	}
+	var h state.Handoff
+	found := rows.Next()
+	if found {
+		if err := rows.Scan(&h.MachineID, &h.FromHost, &h.ToHost, &h.Seq); err != nil {
+			rows.Close()
+			return err
+		}
+	}
+	rows.Close()
+	if !found {
+		return fmt.Errorf("state: no handoff %q offers %q: %w", handoffID, id, state.ErrNotOwner)
+	}
+	if h.MachineID != id {
+		return fmt.Errorf("state: handoff %q offers %q, not %q: %w",
+			handoffID, h.MachineID, id, state.ErrNotOwner)
+	}
+	if h.ToHost != newHostID {
+		return fmt.Errorf("state: handoff %q offers %q to %s, not to %s: %w",
+			handoffID, id, h.ToHost, newHostID, state.ErrNotOwner)
+	}
+
+	newest, err := s.NewestHandoff(ctx, id)
+	if err != nil {
+		return err
+	}
+	if newest.ID != handoffID {
+		return fmt.Errorf("state: handoff %q for %q is superseded by %q: %w",
+			handoffID, id, newest.ID, state.ErrNotOwner)
+	}
+
+	// The UPDATE carries the rest: from_host must still be the owner, and the
+	// machine must not be running. Both in the WHERE clause rather than read
+	// first and checked, so there is no window between the check and the write
+	// for either to change.
+	res, err := s.client.Exec(ctx,
+		`UPDATE machines SET host_id = ?, state = ?, updated_at = ?
+		 WHERE id = ? AND host_id = ? AND state != ?`,
+		newHostID, newState, time.Now().Unix(), id, h.FromHost, state.StateRunning)
+	if err != nil {
+		return fmt.Errorf("state: claim machine %q by handoff: %w", id, err)
+	}
+	if res.RowsAffected == 0 {
+		// Either it is no longer on the offering host, or it is running. The
+		// caller retries: on a drain the source is about to suspend it, and
+		// gossip may simply not have caught up.
+		return fmt.Errorf("state: %q is not where handoff %q said, or is still "+
+			"running: %w", id, handoffID, state.ErrNotOwner)
 	}
 	return nil
 }
@@ -627,7 +716,24 @@ func (s *Store) GetQuota(ctx context.Context, orgID string) (*state.Quota, error
 		&q.MaxVolumeGiB, &q.MaxBuilds, &q.UpdatedAt); err != nil {
 		return nil, err
 	}
-	return &q, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// The dual read for the snapshot limit, which lives in its own table
+	// because org_quotas has rows and a column add there is the cr-sqlite
+	// backfill rule 6 forbids. An org with no row here is every org that
+	// predates the table: it reads zero, which quota.Check takes as "use the
+	// default" rather than as "refuse everything".
+	snapRows, err := s.client.Query(ctx,
+		`SELECT max_snapshot_gib FROM org_snapshot_quotas WHERE org_id = ?`, orgID)
+	if err != nil {
+		return &q, nil
+	}
+	defer snapRows.Close()
+	if snapRows.Next() {
+		_ = snapRows.Scan(&q.MaxSnapshotGiB)
+	}
+	return &q, nil
 }
 
 // PutQuota updates in place, unlike the two tables above. One logical writer
@@ -644,6 +750,15 @@ func (s *Store) PutQuota(ctx context.Context, q *state.Quota) error {
 		q.MaxBuilds, q.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("state: put quota %q: %w", q.OrgID, err)
+	}
+	if _, err := s.client.Exec(ctx, `
+		INSERT INTO org_snapshot_quotas (org_id, max_snapshot_gib, updated_at)
+		VALUES (?,?,?)
+		ON CONFLICT(org_id) DO UPDATE SET
+			max_snapshot_gib=excluded.max_snapshot_gib,
+			updated_at=excluded.updated_at`,
+		q.OrgID, q.MaxSnapshotGiB, q.UpdatedAt); err != nil {
+		return fmt.Errorf("state: put snapshot quota %q: %w", q.OrgID, err)
 	}
 	return nil
 }
@@ -817,6 +932,348 @@ func (s *Store) PutHostCPU(ctx context.Context, h *state.HostCPU) error {
 	return nil
 }
 
+// PutHostCapacity records what this host can still hold.
+//
+// Only the host it names may write it, the same rule host_cpu follows. A host
+// asserting another host's free memory would be asserting a fact it cannot
+// observe, and placement would then send machines somewhere on the strength of
+// it.
+func (s *Store) PutHostCapacity(ctx context.Context, c *state.HostCapacity) error {
+	if c.HostID != s.hostID {
+		return fmt.Errorf("state: host %s cannot write host %s's capacity row: %w",
+			s.hostID, c.HostID, state.ErrNotOwner)
+	}
+	draining := 0
+	if c.Draining {
+		draining = 1
+	}
+	_, err := s.client.Exec(ctx, `
+		INSERT INTO host_capacity (host_id, mem_free_mib, mem_reclaimable_mib,
+			cpu_count, vcpus_running, draining, updated_at)
+		VALUES (?,?,?,?,?,?,?)
+		ON CONFLICT(host_id) DO UPDATE SET
+			mem_free_mib=excluded.mem_free_mib,
+			mem_reclaimable_mib=excluded.mem_reclaimable_mib,
+			cpu_count=excluded.cpu_count, vcpus_running=excluded.vcpus_running,
+			draining=excluded.draining, updated_at=excluded.updated_at`,
+		c.HostID, c.MemFreeMiB, c.MemReclaimableMiB, c.CPUCount, c.VCPUsRunning,
+		draining, c.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put host capacity %q: %w", c.HostID, err)
+	}
+	return nil
+}
+
+func (s *Store) ListHostCapacity(ctx context.Context) ([]state.HostCapacity, error) {
+	rows, err := s.client.Query(ctx, `
+		SELECT host_id, mem_free_mib, mem_reclaimable_mib, cpu_count,
+		       vcpus_running, draining, updated_at
+		FROM host_capacity ORDER BY host_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []state.HostCapacity
+	for rows.Next() {
+		var c state.HostCapacity
+		var draining int
+		if err := rows.Scan(&c.HostID, &c.MemFreeMiB, &c.MemReclaimableMiB,
+			&c.CPUCount, &c.VCPUsRunning, &draining, &c.UpdatedAt); err != nil {
+			return nil, err
+		}
+		c.Draining = draining != 0
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+// PutHostBuilds records which builds this host has cached.
+//
+// The caller writes it only when the set changed, because this row is gossiped
+// in full on every write and the cache changes far more often than placement
+// needs to know about.
+// PutVolumePolicy records a volume's snapshot schedule.
+//
+// Guarded like the volume row itself: only the host that MOUNTS the volume may
+// write it, because that host is the only one that can act on the schedule. A
+// policy written by a host that does not hold the volume would be a schedule
+// nobody fires.
+func (s *Store) PutVolumePolicy(ctx context.Context, p *state.VolumePolicy) error {
+	if err := s.assertVolumeOwner(ctx, p.VolumeID); err != nil {
+		return err
+	}
+	if _, err := s.client.Exec(ctx, `
+		INSERT INTO volume_policies (volume_id, cron, keep_daily, keep_weekly, updated_at)
+		VALUES (?,?,?,?,?)
+		ON CONFLICT(volume_id) DO UPDATE SET
+			cron=excluded.cron, keep_daily=excluded.keep_daily,
+			keep_weekly=excluded.keep_weekly, updated_at=excluded.updated_at`,
+		p.VolumeID, p.Cron, p.KeepDaily, p.KeepWeekly, p.UpdatedAt); err != nil {
+		return fmt.Errorf("state: put volume policy %q: %w", p.VolumeID, err)
+	}
+	return nil
+}
+
+// assertVolumeOwner refuses a write about a volume this host does not hold.
+//
+// A volume with NO host is claimable: the write is part of creating it, or of
+// taking one nobody has mounted. What is refused is writing about a volume
+// another live host is using.
+func (s *Store) assertVolumeOwner(ctx context.Context, volumeID string) error {
+	v, err := s.GetVolume(ctx, volumeID)
+	if err != nil {
+		return err
+	}
+	if v.HostID != "" && v.HostID != s.hostID {
+		return fmt.Errorf("state: host %s does not mount volume %s (%s does): %w",
+			s.hostID, volumeID, v.HostID, state.ErrNotOwner)
+	}
+	return nil
+}
+
+func (s *Store) GetVolumePolicy(ctx context.Context, volumeID string) (*state.VolumePolicy, error) {
+	rows, err := s.client.Query(ctx, `
+		SELECT volume_id, cron, keep_daily, keep_weekly, updated_at
+		FROM volume_policies WHERE volume_id = ?`, volumeID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, state.ErrNotFound
+	}
+	var p state.VolumePolicy
+	if err := rows.Scan(&p.VolumeID, &p.Cron, &p.KeepDaily, &p.KeepWeekly, &p.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+func (s *Store) ListVolumePolicies(ctx context.Context) ([]state.VolumePolicy, error) {
+	rows, err := s.client.Query(ctx, `
+		SELECT volume_id, cron, keep_daily, keep_weekly, updated_at
+		FROM volume_policies ORDER BY volume_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []state.VolumePolicy
+	for rows.Next() {
+		var p state.VolumePolicy
+		if err := rows.Scan(&p.VolumeID, &p.Cron, &p.KeepDaily, &p.KeepWeekly, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteVolumePolicy(ctx context.Context, volumeID string) error {
+	if _, err := s.client.Exec(ctx, `DELETE FROM volume_policies WHERE volume_id = ?`, volumeID); err != nil {
+		return fmt.Errorf("state: delete volume policy %q: %w", volumeID, err)
+	}
+	return nil
+}
+
+// PutLineage records where a forked machine came from.
+//
+// Guarded like machine_labels: only the host that writes the FORK's machine
+// row may write its lineage, because the row describes that machine. Write-once
+// on top of that -- an upsert would let a later write change which builds are
+// pinned, and the pinning is the only thing keeping a live fork's memory image
+// from being discarded by its parent.
+func (s *Store) PutLineage(ctx context.Context, l *state.Lineage) error {
+	if err := s.assertMachineOwner(ctx, l.ID, state.WriteAuth{}); err != nil {
+		return err
+	}
+	if _, err := s.client.Exec(ctx, `
+		INSERT INTO machine_lineage (id, parent_id, checkpoint_id, mem_build_id,
+			rootfs_build_id, volume_snapshot, created_at)
+		VALUES (?,?,?,?,?,?,?)`,
+		l.ID, l.ParentID, l.CheckpointID, l.MemBuildID, l.RootfsBuildID,
+		l.VolumeSnapshot, l.CreatedAt); err != nil {
+		return fmt.Errorf("state: put lineage %q: %w", l.ID, err)
+	}
+	return nil
+}
+
+func (s *Store) GetLineage(ctx context.Context, machineID string) (*state.Lineage, error) {
+	rows, err := s.client.Query(ctx, `
+		SELECT id, parent_id, checkpoint_id, mem_build_id, rootfs_build_id,
+		       volume_snapshot, created_at
+		FROM machine_lineage WHERE id = ?`, machineID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, state.ErrNotFound
+	}
+	var l state.Lineage
+	if err := rows.Scan(&l.ID, &l.ParentID, &l.CheckpointID, &l.MemBuildID,
+		&l.RootfsBuildID, &l.VolumeSnapshot, &l.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &l, nil
+}
+
+func (s *Store) ListLineage(ctx context.Context) ([]state.Lineage, error) {
+	rows, err := s.client.Query(ctx, `
+		SELECT id, parent_id, checkpoint_id, mem_build_id, rootfs_build_id,
+		       volume_snapshot, created_at
+		FROM machine_lineage ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []state.Lineage
+	for rows.Next() {
+		var l state.Lineage
+		if err := rows.Scan(&l.ID, &l.ParentID, &l.CheckpointID, &l.MemBuildID,
+			&l.RootfsBuildID, &l.VolumeSnapshot, &l.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, l)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteLineage(ctx context.Context, machineID string) error {
+	if _, err := s.client.Exec(ctx, `DELETE FROM machine_lineage WHERE id = ?`, machineID); err != nil {
+		return fmt.Errorf("state: delete lineage %q: %w", machineID, err)
+	}
+	return nil
+}
+
+// PutHandoff offers a machine to another host.
+//
+// Only the machine's CURRENT owner may write it, which is the whole reason the
+// exception is safe: the offer is made by the host that already owns what it
+// describes, so nothing is asserted across a boundary. A host writing an offer
+// for somebody else's machine would be inventing permission for a third host
+// to take it.
+func (s *Store) PutHandoff(ctx context.Context, h *state.Handoff) error {
+	if h.FromHost != s.hostID {
+		return fmt.Errorf("state: host %s may not offer a machine on %s's behalf: %w",
+			s.hostID, h.FromHost, state.ErrNotOwner)
+	}
+	if err := s.assertMachineOwner(ctx, h.MachineID, state.WriteAuth{}); err != nil {
+		return err
+	}
+	// INSERT, never upsert: write-once is what leaves a CRDT merge nothing to
+	// corrupt here.
+	if _, err := s.client.Exec(ctx, `
+		INSERT INTO machine_handoffs (id, machine_id, from_host, to_host, seq, created_at)
+		VALUES (?,?,?,?,?,?)`,
+		h.ID, h.MachineID, h.FromHost, h.ToHost, h.Seq, h.CreatedAt); err != nil {
+		return fmt.Errorf("state: put handoff %q: %w", h.ID, err)
+	}
+	return nil
+}
+
+func (s *Store) NewestHandoff(ctx context.Context, machineID string) (*state.Handoff, error) {
+	rows, err := s.client.Query(ctx, `
+		SELECT id, machine_id, from_host, to_host, seq, created_at
+		FROM machine_handoffs WHERE machine_id = ? ORDER BY seq DESC LIMIT 1`, machineID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, state.ErrNotFound
+	}
+	var h state.Handoff
+	if err := rows.Scan(&h.ID, &h.MachineID, &h.FromHost, &h.ToHost, &h.Seq, &h.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &h, nil
+}
+
+func (s *Store) ListHandoffs(ctx context.Context) ([]state.Handoff, error) {
+	rows, err := s.client.Query(ctx, `
+		SELECT id, machine_id, from_host, to_host, seq, created_at
+		FROM machine_handoffs ORDER BY machine_id, seq`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []state.Handoff
+	for rows.Next() {
+		var h state.Handoff
+		if err := rows.Scan(&h.ID, &h.MachineID, &h.FromHost, &h.ToHost, &h.Seq, &h.CreatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeleteHandoff(ctx context.Context, id string) error {
+	if _, err := s.client.Exec(ctx, `DELETE FROM machine_handoffs WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("state: delete handoff %q: %w", id, err)
+	}
+	return nil
+}
+
+func (s *Store) PutHostBuilds(ctx context.Context, b *state.HostBuilds) error {
+	if b.HostID != s.hostID {
+		return fmt.Errorf("state: host %s cannot write host %s's build row: %w",
+			s.hostID, b.HostID, state.ErrNotOwner)
+	}
+	ids := b.Builds
+	if len(ids) > state.MaxCachedBuildsPublished {
+		ids = ids[:state.MaxCachedBuildsPublished]
+	}
+	blob, err := json.Marshal(ids)
+	if err != nil {
+		return fmt.Errorf("state: encode host builds %q: %w", b.HostID, err)
+	}
+	if _, err := s.client.Exec(ctx, `
+		INSERT INTO host_builds (host_id, builds, updated_at) VALUES (?,?,?)
+		ON CONFLICT(host_id) DO UPDATE SET
+			builds=excluded.builds, updated_at=excluded.updated_at`,
+		b.HostID, string(blob), b.UpdatedAt); err != nil {
+		return fmt.Errorf("state: put host builds %q: %w", b.HostID, err)
+	}
+	return nil
+}
+
+func (s *Store) ListHostBuilds(ctx context.Context) ([]state.HostBuilds, error) {
+	rows, err := s.client.Query(ctx,
+		`SELECT host_id, builds, updated_at FROM host_builds ORDER BY host_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []state.HostBuilds
+	for rows.Next() {
+		var b state.HostBuilds
+		var blob string
+		if err := rows.Scan(&b.HostID, &blob, &b.UpdatedAt); err != nil {
+			return nil, err
+		}
+		// A row that cannot be read is an EMPTY set, never an error: all it
+		// feeds is a placement bonus, so losing it costs a download while
+		// failing the read would cost the create.
+		if blob != "" {
+			_ = json.Unmarshal([]byte(blob), &b.Builds)
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) ListHostCPU(ctx context.Context) ([]state.HostCPU, error) {
 	rows, err := s.client.Query(ctx,
 		`SELECT host_id, vendor, cpu_template, updated_at FROM host_cpu ORDER BY host_id`)
@@ -864,6 +1321,16 @@ func (s *Store) PutMachineCPU(ctx context.Context, c *state.MachineCPU, opts ...
 func (s *Store) assertMachineCPUWriter(ctx context.Context, c *state.MachineCPU, auth state.WriteAuth) error {
 	switch c.Kind {
 	case state.KindRelease:
+		// The service from the CALLER when it said so, because this row is
+		// written while the release is being assembled and the release row
+		// does not exist yet. Reading it back failed on every release: a
+		// promote surfaced that as a flat 404, and a deploy swallowed it as
+		// "this release has no memory image" -- which was false, and which
+		// left the CPU-vendor guard silently unarmed on every release the
+		// fleet ever cut.
+		if svc := auth.ForService; svc != "" {
+			return s.assertServiceWriter(ctx, svc)
+		}
 		rel, err := s.GetRelease(ctx, c.ID)
 		if err != nil {
 			return fmt.Errorf("state: cpu row for release %q: %w", c.ID, err)
@@ -1192,6 +1659,73 @@ func (s *Store) GetRelease(ctx context.Context, id string) (*state.Release, erro
 	return r, rows.Err()
 }
 
+// PutReleaseSnapshot records which checkpoint's vmstate a release restores
+// from.
+//
+// Guarded like the release row itself, and for the same reason: it is written
+// by the host running that service's deploy, the one the service arbiter
+// already selected, so the writer is the same single writer and the merge has
+// nothing to resolve.
+//
+// The service comes from the ROW, not from a lookup of the release. This is
+// written while the release is still being assembled -- the checkpoint has to
+// succeed before there is a release worth writing -- so reading `releases`
+// here would refuse every write this guard exists to allow.
+func (s *Store) PutReleaseSnapshot(ctx context.Context, r *state.ReleaseSnapshot) error {
+	if err := s.assertServiceWriter(ctx, r.ServiceID); err != nil {
+		return err
+	}
+	if _, err := s.client.Exec(ctx, `
+		INSERT INTO release_snapshots (release_id, service_id, machine_id, checkpoint_id, created_at)
+		VALUES (?,?,?,?,?)`,
+		r.ID, r.ServiceID, r.MachineID, r.CheckpointID, r.CreatedAt); err != nil {
+		return fmt.Errorf("state: put release snapshot %q: %w", r.ID, err)
+	}
+	return nil
+}
+
+func (s *Store) GetReleaseSnapshot(ctx context.Context, releaseID string) (*state.ReleaseSnapshot, error) {
+	rows, err := s.client.Query(ctx, `
+		SELECT release_id, service_id, machine_id, checkpoint_id, created_at
+		FROM release_snapshots WHERE release_id = ?`, releaseID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, state.ErrNotFound
+	}
+	var r state.ReleaseSnapshot
+	if err := rows.Scan(&r.ID, &r.ServiceID, &r.MachineID, &r.CheckpointID, &r.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+func (s *Store) DeleteReleaseSnapshot(ctx context.Context, releaseID string) error {
+	// The snapshot row's own service, for the reason Put carries one: a
+	// delete usually runs while a release is being retired, and looking the
+	// release up would fail exactly when it has already gone.
+	snap, err := s.GetReleaseSnapshot(ctx, releaseID)
+	if errors.Is(err, state.ErrNotFound) {
+		return nil // nothing to delete, which is not a failure
+	}
+	if err != nil {
+		return err
+	}
+	if err := s.assertServiceWriter(ctx, snap.ServiceID); err != nil {
+		return err
+	}
+	if _, err := s.client.Exec(ctx,
+		`DELETE FROM release_snapshots WHERE release_id = ?`, releaseID); err != nil {
+		return fmt.Errorf("state: delete release snapshot %q: %w", releaseID, err)
+	}
+	return nil
+}
+
 func (s *Store) PutRelease(ctx context.Context, r *state.Release) error {
 	// A release inherits its service's writer rather than having an arbiter of
 	// its own: it is only ever written by the host running that service's
@@ -1409,6 +1943,23 @@ func (s *Store) PutServiceVolume(ctx context.Context, sv *state.ServiceVolume) e
 }
 
 // DeleteServiceVolumes drops a service's bindings, beside DeleteService.
+// DeleteServiceVolume drops one ordinal's binding.
+//
+// The arbiter's write, like the put: the row names a service, so there is no
+// host column to enforce single-writer on and the service's arbiter is the one
+// party that may change it.
+func (s *Store) DeleteServiceVolume(ctx context.Context, serviceID string, ordinal int) error {
+	if err := s.assertServiceWriter(ctx, serviceID); err != nil {
+		return err
+	}
+	_, err := s.client.Exec(ctx,
+		`DELETE FROM service_volumes WHERE service_id = ? AND ordinal = ?`, serviceID, ordinal)
+	if err != nil {
+		return fmt.Errorf("state: unbind %s ordinal %d: %w", serviceID, ordinal, err)
+	}
+	return nil
+}
+
 func (s *Store) DeleteServiceVolumes(ctx context.Context, serviceID string) error {
 	if _, err := s.client.Exec(ctx,
 		`DELETE FROM service_volumes WHERE service_id = ?`, serviceID); err != nil {
@@ -1560,6 +2111,183 @@ func (s *Store) GetURLAuth(ctx context.Context, id string) (*state.URLAuth, erro
 func (s *Store) DeleteURLAuth(ctx context.Context, id string) error {
 	if _, err := s.client.Exec(ctx, `DELETE FROM url_auth WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("state: delete url auth %q: %w", id, err)
+	}
+	return nil
+}
+
+// PutBrokerGrant records what a machine or service may ask the broker for.
+//
+// The writer check is the same one url_auth makes, for the same reason: this
+// row describes an object, so the host allowed to write it is the host that
+// writes that object's row. A grant written by any other host would race
+// through a CRDT merge, and two hosts disagreeing about a permission is a
+// permission nobody granted.
+func (s *Store) PutBrokerGrant(ctx context.Context, g *state.BrokerGrant, opts ...state.WriteOption) error {
+	auth := state.ResolveAuth(opts)
+	if g.Kind == "service" {
+		if err := s.assertServiceWriter(ctx, g.ID); err != nil {
+			return err
+		}
+	} else if err := s.assertMachineOwner(ctx, g.ID, auth); err != nil {
+		return err
+	}
+	_, err := s.client.Exec(ctx, `
+		INSERT INTO broker_grants (id, kind, org_id, scopes, sealed, updated_at) VALUES (?,?,?,?,?,?)
+		ON CONFLICT(id) DO UPDATE SET kind=excluded.kind, org_id=excluded.org_id,
+			scopes=excluded.scopes, sealed=excluded.sealed, updated_at=excluded.updated_at`,
+		g.ID, g.Kind, g.OrgID, strings.Join(g.Scopes, ","), g.Sealed, g.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put broker grant %q: %w", g.ID, err)
+	}
+	return nil
+}
+
+func (s *Store) GetBrokerGrant(ctx context.Context, id string) (*state.BrokerGrant, error) {
+	rows, err := s.client.Query(ctx,
+		`SELECT id, kind, org_id, scopes, sealed, updated_at FROM broker_grants WHERE id = ?`, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, state.ErrNotFound
+	}
+	var g state.BrokerGrant
+	var scopes string
+	if err := rows.Scan(&g.ID, &g.Kind, &g.OrgID, &scopes, &g.Sealed, &g.UpdatedAt); err != nil {
+		return nil, err
+	}
+	g.Scopes = state.SplitScopes(scopes)
+	return &g, nil
+}
+
+func (s *Store) DeleteBrokerGrant(ctx context.Context, id string) error {
+	if _, err := s.client.Exec(ctx, `DELETE FROM broker_grants WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("state: delete broker grant %q: %w", id, err)
+	}
+	return nil
+}
+
+// PutServiceSize records how big a service's replicas are.
+//
+// The writer check is the service's, not a machine's: this row describes the
+// service, so the host allowed to write it is the same arbiter that writes the
+// services row. Any other host writing it would race through a CRDT merge, and
+// two hosts disagreeing about a size is a fleet running replicas of two sizes
+// with nothing to say which is right.
+func (s *Store) PutServiceSize(ctx context.Context, sz *state.ServiceSize, _ ...state.WriteOption) error {
+	if err := s.assertServiceWriter(ctx, sz.ServiceID); err != nil {
+		return err
+	}
+	_, err := s.client.Exec(ctx, `
+		INSERT INTO service_sizes (service_id, vcpus, mem_mib, image_vcpus, image_mem_mib, updated_at)
+		VALUES (?,?,?,?,?,?)
+		ON CONFLICT(service_id) DO UPDATE SET
+			vcpus=excluded.vcpus, mem_mib=excluded.mem_mib,
+			image_vcpus=excluded.image_vcpus, image_mem_mib=excluded.image_mem_mib,
+			updated_at=excluded.updated_at`,
+		sz.ServiceID, sz.VCPUs, sz.MemMiB, sz.ImageVCPUs, sz.ImageMemMiB, sz.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put service size %q: %w", sz.ServiceID, err)
+	}
+	return nil
+}
+
+func (s *Store) GetServiceSize(ctx context.Context, serviceID string) (*state.ServiceSize, error) {
+	rows, err := s.client.Query(ctx, `
+		SELECT service_id, vcpus, mem_mib, image_vcpus, image_mem_mib, updated_at
+		FROM service_sizes WHERE service_id = ?`, serviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, state.ErrNotFound
+	}
+	var sz state.ServiceSize
+	if err := rows.Scan(&sz.ServiceID, &sz.VCPUs, &sz.MemMiB,
+		&sz.ImageVCPUs, &sz.ImageMemMiB, &sz.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &sz, nil
+}
+
+// PutHostEgress records the prefix this host hands egress addresses out of.
+//
+// Only the host the row names may write it. The row says where one host's
+// traffic leaves from, and a second host writing it would be asserting a fact
+// about a machine it does not run -- which merges silently and then hands a
+// tenant an address on a host that never had it.
+func (s *Store) PutHostEgress(ctx context.Context, e *state.HostEgress, _ ...state.WriteOption) error {
+	if e.HostID != s.hostID {
+		return fmt.Errorf("state: host %s may not write %s's egress: %w",
+			s.hostID, e.HostID, state.ErrNotOwner)
+	}
+	_, err := s.client.Exec(ctx, `
+		INSERT INTO host_egress (host_id, prefix6, interface, updated_at) VALUES (?,?,?,?)
+		ON CONFLICT(host_id) DO UPDATE SET
+			prefix6=excluded.prefix6, interface=excluded.interface, updated_at=excluded.updated_at`,
+		e.HostID, e.Prefix6, e.Interface, e.UpdatedAt)
+	if err != nil {
+		return fmt.Errorf("state: put host egress %q: %w", e.HostID, err)
+	}
+	return nil
+}
+
+func (s *Store) ListHostEgress(ctx context.Context) ([]state.HostEgress, error) {
+	rows, err := s.client.Query(ctx, `
+		SELECT host_id, prefix6, interface, updated_at FROM host_egress ORDER BY host_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []state.HostEgress
+	for rows.Next() {
+		var e state.HostEgress
+		if err := rows.Scan(&e.HostID, &e.Prefix6, &e.Interface, &e.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, e)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetHostEgress(ctx context.Context, hostID string) (*state.HostEgress, error) {
+	rows, err := s.client.Query(ctx, `
+		SELECT host_id, prefix6, interface, updated_at FROM host_egress WHERE host_id = ?`, hostID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		return nil, state.ErrNotFound
+	}
+	var e state.HostEgress
+	if err := rows.Scan(&e.HostID, &e.Prefix6, &e.Interface, &e.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &e, nil
+}
+
+func (s *Store) DeleteHostEgress(ctx context.Context, hostID string) error {
+	if _, err := s.client.Exec(ctx, `DELETE FROM host_egress WHERE host_id = ?`, hostID); err != nil {
+		return fmt.Errorf("state: delete host egress %q: %w", hostID, err)
+	}
+	return nil
+}
+
+func (s *Store) DeleteServiceSize(ctx context.Context, serviceID string) error {
+	if _, err := s.client.Exec(ctx, `DELETE FROM service_sizes WHERE service_id = ?`, serviceID); err != nil {
+		return fmt.Errorf("state: delete service size %q: %w", serviceID, err)
 	}
 	return nil
 }

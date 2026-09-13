@@ -266,7 +266,16 @@ func Boot(ctx context.Context, cfg Config) (*Machine, error) {
 	}
 
 	serialLog := filepath.Join(cfg.StateDir, "lifecycle.log")
-	logFile, err := os.Create(serialLog)
+	// O_APPEND, never os.Create. The idle monitor rotates this file by copying
+	// its tail aside and TRUNCATING it, which keeps the inode so this
+	// descriptor keeps working -- but only because O_APPEND means every write
+	// goes to the current end. A plain O_WRONLY descriptor keeps its own
+	// offset and would write at the offset it had reached, leaving a
+	// multi-megabyte hole of zero bytes in front of every line after a
+	// rotation. O_TRUNC still empties it on a fresh boot, which is what
+	// os.Create did.
+	logFile, err := os.OpenFile(serialLog,
+		os.O_CREATE|os.O_WRONLY|os.O_APPEND|os.O_TRUNC, 0o644)
 	if err != nil {
 		_ = unstageVolume(chrootDir)
 		return nil, fmt.Errorf("fc: create serial log: %w", err)
@@ -354,9 +363,28 @@ func (m *Machine) configure(ctx context.Context, cfg Config) error {
 	}); err != nil {
 		return err
 	}
+	// Writeback, for the reason CacheTypeWriteback exists, applied to the one
+	// drive that was missing it.
+	//
+	// Firecracker's default is Unsafe, which does not advertise the VirtIO
+	// flush feature at all: a guest's fsync returns success with the data in
+	// the host's page cache over /dev/nbdN, and it reaches the handler only on
+	// writeback, tens of seconds later. So a guest could sync a file, lose
+	// power or panic two seconds afterwards, and the write was never there --
+	// on the ROOT disk, where a user's data lives unless they asked for a
+	// volume.
+	//
+	// The rule is already written on the Drive struct and the volume drive
+	// already follows it. The rootfs simply did not, so the whole product's
+	// durability claim was true of volumes and false of everything else.
+	//
+	// Measured on the rig: 25 MiB written and synced inside the guest left the
+	// copy-on-write file at zero bytes, and a blockdev --flushbufs on the HOST
+	// delivered all 26 MiB at once. The guest's flush moved nothing.
 	if err := m.Client.SetDrive(ctx, Drive{
 		DriveID: "rootfs", PathOnHost: BakedRootfsPath,
 		IsRootDevice: true, IsReadOnly: false,
+		CacheType: CacheTypeWriteback,
 	}); err != nil {
 		return err
 	}

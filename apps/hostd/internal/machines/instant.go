@@ -32,6 +32,14 @@ func prefetchKey(machineID string) string {
 	return filepath.Join("machines", machineID, "suspend", "prefetch.txt")
 }
 
+// CheckpointSnapKey is checkpointSnapKey, for the one caller outside this
+// package that needs to name a checkpoint's vmstate: the rollout, which
+// resolves the key a replica restores a release from. It does not import this
+// package, so it asks the manager instead.
+func (m *Manager) CheckpointSnapKey(machineID, checkpointID string) string {
+	return checkpointSnapKey(machineID, checkpointID)
+}
+
 // checkpointSnapKey is where a checkpoint's vmstate lives. Written once under
 // its own id, so it is never overwritten by a later suspend.
 func checkpointSnapKey(machineID, checkpointID string) string {
@@ -58,9 +66,9 @@ func (m *Manager) startNewMachine(ctx context.Context, row *state.Machine,
 // startForRelease is the rollout's entry point: restore a machine from a
 // release's build pair rather than boot it from the release's image.
 func (m *Manager) startForRelease(ctx context.Context, row *state.Machine,
-	token, memBuildID, rootfsBuildID string) (*fc.Machine, error) {
+	token, memBuildID, rootfsBuildID, snapKey, imageToken string) (*fc.Machine, error) {
 
-	return m.createFromRelease(ctx, row, token, memBuildID, rootfsBuildID)
+	return m.createFromRelease(ctx, row, token, memBuildID, rootfsBuildID, snapKey, imageToken)
 }
 
 // createFromTemplate restores a brand-new machine from the golden template.
@@ -301,7 +309,7 @@ func (m *Manager) restore(ctx context.Context, row *state.Machine, backends fc.B
 		return nil, nil, err
 	}
 
-	fcm, err := fc.RestoreInstant(ctx, fc.InstantConfig{
+	instant := fc.InstantConfig{
 		Config:        m.machineFCConfig(row, slot, mac),
 		Backends:      backends,
 		LocalDir:      localDir,
@@ -309,7 +317,19 @@ func (m *Manager) restore(ctx context.Context, row *state.Machine, backends fc.B
 		SnapKey:       snapKey,
 		SnapImmutable: immutable,
 		Env:           m.opts.HandlerEnv,
-	}, m.opts.Uploader, m.opts.BlockStore, m.opts.NBDDevices)
+	}
+	// Started before the handlers, since they dial it on their first read, and
+	// scoped to exactly the builds this machine was spawned with.
+	instant.ChunksSock = m.chunks.start(row.ID, instant.StateDir,
+		m.opts.BlockStore, allowedBuilds(instant))
+
+	fcm, err := fc.RestoreInstant(ctx, instant,
+		m.opts.Uploader, m.opts.BlockStore, m.opts.NBDDevices)
+	if fcm != nil {
+		// After the jailer has made the cgroup, so the boot ordering the
+		// handlers need is untouched. See cgroup.go.
+		m.joinHandlersToCgroup(fcm)
+	}
 	if err != nil {
 		_ = netns.Teardown(slot)
 		m.pool.Return(slot.Idx)

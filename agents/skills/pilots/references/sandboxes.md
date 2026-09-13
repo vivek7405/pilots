@@ -73,3 +73,59 @@ What none of them see is a process nothing is connected to: a daemon you started
 MCP: `create_machine` with `{ "idle_timeout": 1800 }`. The cap is an hour, so a forgotten value costs at most an hour per idle cycle. A worker that must run forever is a service, not a sandbox: `promote` it, then `x-pilots: min_machines_running: 1` in its compose file keeps one replica resident.
 
 Two things to know: a process that calls `setsid` leaves the session tree by definition, which is why the timeout exists; and a long sleep can drop outbound connections, so a client that resumes after an hour should expect to reconnect.
+
+## What a machine is using
+
+| I need to... | Do |
+| --- | --- |
+| one machine's CPU and memory | `metrics` tool, or `pilot machines metrics <m>` |
+| every machine of a team | `GET /v1/metrics`, Prometheus text, with a `machines` key |
+| the end of a log, not the boot | `pilot machines logs <m> --tail 50` |
+| resume a follow that dropped | `?offset=` with the `X-Pilot-Log-Offset` you last saw |
+
+CPU is a TOTAL in seconds, not a rate. Take two readings and divide by the time
+between them. It never goes down, including across a suspend, so a difference is
+always real work.
+
+Memory is zero while a machine is suspended. That is the truth rather than a
+gap: a suspended machine holds no memory, which is the point of suspending it.
+
+Memory near the ceiling is why a process was killed. CPU flat while a request
+hangs means it is waiting on something, not computing.
+
+```
+# Prometheus, scraping one team's machines from any host:
+scrape_configs:
+  - job_name: pilots
+    metrics_path: /v1/metrics
+    authorization:
+      credentials: <a machines-scoped key>
+    static_configs:
+      - targets: ['api.example.test']
+```
+
+A host that did not answer appears as `pilots_metrics_hosts_unreachable`. The
+scrape is still a 200: what could be read is more useful than nothing, and the
+line names what could not.
+
+Console logs are bounded at 16 MiB per machine and are NOT state. Wipe a host
+and the logs are gone while every machine restores exactly as before.
+
+## What a restore promises
+
+A restore never fails because a memory image is gone. Memory snapshots carry raw CPUID, so one is portable within a CPU vendor pool and never across it. When no host of that pool is live, the machine COLD-BOOTS from its own disk instead.
+
+| Survives a cold boot | Does not |
+| --- | --- |
+| the id, the name, the URL | the processes that were running |
+| the volume and every byte on disk | the memory they held |
+| the agent token | |
+
+The machine reports `last_start: cold_boot`, so tell the difference from that rather than from behaviour: a machine that came back without its running process is not broken, it is a machine whose pool had no live host.
+
+A request that arrives while a machine is asleep is HELD, not bounced, for up to 120 seconds. That is one number for a machine on the host you reached and for a machine one host over, so nothing a client can measure tells it where a sandbox lives.
+
+## Do not
+
+- Do not treat a `cold_boot` start as a failure. It is the documented outcome when a vendor pool has no live host, and everything on disk is intact.
+- Do not retry a request to a sleeping machine faster than the hold. It is already being held; a second request wakes nothing sooner and doubles the work.

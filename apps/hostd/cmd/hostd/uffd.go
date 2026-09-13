@@ -33,6 +33,8 @@ func runUffdHandler(args []string) error {
 		"fault order to replay, then rewrite with this run's order")
 	control := fs.String("control", "", "unix socket for hostd's requests")
 	readyFD := fs.Int("ready-fd", 0, "fd to signal once the socket is listening")
+	chunksSock := fs.String("chunks-sock", "",
+		"host socket to read build chunks through, instead of object storage")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -60,7 +62,7 @@ func runUffdHandler(args []string) error {
 
 	var store block.ObjectStore
 	if cfg.BuildID != uuid.Nil || cfg.ParentBuildID != uuid.Nil {
-		if store, err = newBlockStore(ctx); err != nil {
+		if store, err = openBlockStore(ctx, *chunksSock); err != nil {
 			return err
 		}
 	}

@@ -76,6 +76,30 @@ func (m *Machine) snapshotType(hostMem string, memMiB int) string {
 //
 // The guest is stopped for exactly this window, so everything that can happen
 // afterwards -- uploading, copying -- happens after the resume.
+// WhilePaused freezes the guest, runs fn, and resumes it.
+//
+// For work that has to see a filesystem nobody is writing to: a volume clone,
+// above all. A clone taken while the guest is writing captures ext4 mid-update
+// -- it mounts, and then fails somewhere later, on a fork nobody will connect
+// back to this moment.
+//
+// The resume is deferred, so it runs whether fn succeeded, failed or panicked.
+// A guest left paused is a machine that answers nothing and looks alive, which
+// is worse than either outcome of fn. A resume that itself fails is returned
+// alongside fn's error rather than instead of it: both are real, and the
+// paused guest is the more urgent of the two.
+func (m *Machine) WhilePaused(ctx context.Context, fn func() error) (err error) {
+	if perr := m.Client.Pause(ctx); perr != nil {
+		return fmt.Errorf("fc: pause %s: %w", m.ID, perr)
+	}
+	defer func() {
+		if rerr := m.Client.Resume(ctx); rerr != nil {
+			err = errors.Join(err, fmt.Errorf("fc: resume %s after a paused operation: %w", m.ID, rerr))
+		}
+	}()
+	return fn()
+}
+
 func (m *Machine) pauseAndSnapshot(ctx context.Context) (snapshotPaths, error) {
 	p := m.snapshotPaths()
 	kind := m.snapshotType(p.hostMem, m.MemMiB)

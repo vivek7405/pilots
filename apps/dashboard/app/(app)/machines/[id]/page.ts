@@ -18,6 +18,7 @@ import { cn } from '#lib/utils/cn.ts';
 import { NOUN } from '#lib/vocabulary.ts';
 import '#modules/logs/components/log-stream.ts';
 import '#components/terminal/machine-terminal.ts';
+import '#modules/machines/components/machine-stats.ts';
 import '#components/copy-button.ts';
 
 interface Checkpoint {
@@ -70,6 +71,11 @@ export default async function MachinePage({ params }: PageProps) {
     <section id="console" class="mt-8">
       ${sectionHeading(NOUN.Logs, 'Everything this instance has printed since it last started. That is all pilots keeps.')}
       <log-stream .sources=${[{ id: machine.id, service: machine.service_id ? 'Instance' : 'Sandbox', name: machine.name ?? machine.id }]}></log-stream>
+    </section>
+
+    <section id="resources" class="mt-8">
+      ${sectionHeading('Resources', 'What this instance is using right now, and what it is held to.')}
+      <machine-stats machine-id=${machine.id}></machine-stats>
     </section>
 
     <section class="mt-8">

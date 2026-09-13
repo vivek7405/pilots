@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	pilots "github.com/vivek7405/pilots/sdks/go"
 	"io"
 	"os"
 	"strings"
@@ -126,6 +127,10 @@ func (w *Writer) WriteError(err error) {
 	if err == nil {
 		return
 	}
+	if w.JSON {
+		w.writeErrorJSON(err)
+		return
+	}
 	fmt.Fprintf(w.Err, "error: %s\n", err.Error())
 	var f *Failure
 	if errors.As(err, &f) && f.Next != "" {
@@ -148,4 +153,61 @@ const ExitCodeEPIPE = 141
 // surfaces here instead.
 func IsEPIPE(err error) bool {
 	return errors.Is(err, syscall.EPIPE)
+}
+
+// writeErrorJSON puts a refusal on stderr as one JSON document.
+//
+// # Why --json has to do this
+//
+// Because --json is the machine-readable mode, and a machine that can parse
+// the answer but not the refusal has to fall back to scraping a sentence.
+// `pilot machines create --json` against a full quota printed
+//
+//	error: pilots: machines quota exceeded for this org: 2 of 2 used
+//
+// and nothing structured anywhere, so an agent could see THAT it failed and
+// not which ceiling, what the limit was, or how much was used -- all of which
+// the server had already said in the body.
+//
+// # Why the server's own body, verbatim
+//
+// Because the contract being kept is that HTTP, the CLI and the MCP server
+// report the SAME refusal. Re-deriving one from the typed error would be a
+// second spelling of the same thing, free to drift, and drift here means three
+// paths disagreeing about a limit. The SDK keeps the body it was given, so the
+// honest answer is to print it.
+//
+// A body that is absent or not JSON falls back to a minimal document, because
+// a caller in --json mode needs SOMETHING parseable on every path out.
+//
+// stderr, not stdout: the answer and the refusal stay on separate streams,
+// which is this package's first rule and is what lets `... --json | jq` work
+// whether or not the command succeeded.
+func (w *Writer) writeErrorJSON(err error) {
+	if body, ok := serverBody(err); ok {
+		fmt.Fprintln(w.Err, body)
+		return
+	}
+	doc := map[string]any{"error": err.Error()}
+	var f *Failure
+	if errors.As(err, &f) && f.Next != "" {
+		doc["next"] = f.Next
+	}
+	enc := json.NewEncoder(w.Err)
+	enc.SetIndent("", "  ")
+	_ = enc.Encode(doc)
+}
+
+// serverBody is the response the fleet actually sent, when this error carries
+// one and it is JSON.
+func serverBody(err error) (string, bool) {
+	var e *pilots.Error
+	if !errors.As(err, &e) || e.Body == "" {
+		return "", false
+	}
+	trimmed := strings.TrimSpace(e.Body)
+	if !json.Valid([]byte(trimmed)) {
+		return "", false
+	}
+	return trimmed, true
 }

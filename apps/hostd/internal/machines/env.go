@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
@@ -222,15 +223,30 @@ func (m *Manager) deliverEnv(ctx context.Context, row *state.Machine,
 	if err != nil {
 		return err
 	}
-	if !needsInit(env, cmd, fromBuild) {
-		return nil
-	}
 	if env == nil {
 		// Never nil past here: nil is the agent's word for "this poke says
 		// nothing about the environment", which is what a wake sends and what
 		// a create must never look like. A machine with no service row has no
 		// environment, and that is an empty one rather than no statement.
 		env = map[string]string{}
+	}
+
+	// BEFORE the needsInit check, not after, and that ordering is the whole
+	// point. A bare sandbox has no service, no command and no build, so
+	// needsInit was false and this function returned having delivered nothing
+	// -- including the address of the broker the machine needs to ask for its
+	// own credentials. The guest came up with PILOT_BROKER_URL empty and every
+	// request it made was to a malformed URL.
+	//
+	// Every create now delivers at least these four, which is correct: knowing
+	// its own id and where to ask is not an environment a machine can be
+	// without. This function is the create path and nothing else reaches it
+	// (see callsites_test.go), so a wake still sends nil and still cannot
+	// overwrite a deployed environment.
+	m.addBrokerEnv(env, row)
+
+	if !needsInit(env, cmd, fromBuild) {
+		return nil
 	}
 
 	body, err := json.Marshal(initPayload{
@@ -293,4 +309,56 @@ func (m *Manager) newServiceID(ctx context.Context) string {
 		return "svc_" + uuid.NewString()
 	}
 	return state.NewOwnedID("svc_", m.opts.HostID, state.LiveHosts(hosts))
+}
+
+// Where the broker is, so a guest can ask for its own credentials.
+//
+// # What is deliberately NOT here
+//
+// PILOT_TOKEN. A token in the environment is a token in /etc/pilot/env, which
+// is on disk in every snapshot of the machine and in every fork of it, and
+// which is stale fifteen minutes after it is written. What goes in is the
+// ADDRESS of the thing that mints one, which is a constant, is the same on
+// every host, and is safe to snapshot precisely because it is not a secret.
+//
+// The guest reaches this address because it is the gateway it already routes
+// to, and it can reach nothing else: the firewall allows exactly that /30. So
+// a machine does not have to be told a credential to be able to get one, and
+// a machine that was cloned gets its OWN, because the socket it reaches is the
+// one bound in its own namespace.
+const (
+	// BrokerEnvURL is where a guest asks.
+	BrokerEnvURL = "PILOT_BROKER_URL"
+	// BrokerEnvTokenFile is where the agent writes what it fetched. On tmpfs,
+	// so it dies with the boot rather than being restored into a later one.
+	BrokerEnvTokenFile = "PILOT_TOKEN_FILE"
+	// BrokerEnvMachine is the machine's own id, so a guest need not parse it
+	// out of a hostname or ask for it.
+	BrokerEnvMachine = "PILOT_MACHINE_ID"
+	// BrokerEnvAPI is the fleet's API, so a client does not construct it and
+	// cannot construct it wrongly.
+	BrokerEnvAPI = "PILOT_API_URL"
+	// BrokerTokenPath is the file the agent writes, 0600, on tmpfs.
+	BrokerTokenPath = "/run/pilot/token"
+)
+
+// addBrokerEnv adds the four constants, without overwriting anything the
+// operator set.
+//
+// Not overwriting matters: somebody pointing a machine at a different broker,
+// or at a different API, has a reason, and silently replacing their value with
+// ours would be a setting that cannot be set.
+func (m *Manager) addBrokerEnv(env map[string]string, row *state.Machine) {
+	set := func(name, value string) {
+		if value == "" {
+			return
+		}
+		if _, taken := env[name]; !taken {
+			env[name] = value
+		}
+	}
+	set(BrokerEnvMachine, row.ID)
+	set(BrokerEnvURL, "http://"+netns.TapHostIP+":"+strconv.Itoa(netns.BrokerPort))
+	set(BrokerEnvTokenFile, BrokerTokenPath)
+	set(BrokerEnvAPI, m.opts.APIURL)
 }

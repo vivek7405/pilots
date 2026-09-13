@@ -248,15 +248,11 @@ func (b *Builder) Build(ctx context.Context, id, orgID string, contextTar io.Rea
 		record(failure("receiving context", err))
 		return res, err
 	}
-	start := ParseStartSpec(string(dockerfile)).WithRuntimeDefaults()
-	if start.Empty() {
-		// Not a failure. The Dockerfile may inherit its command from its base
-		// image, which the tar exporter cannot show us -- but a deploy that
-		// then has nothing to run should be able to see that this was known at
-		// build time rather than discovered at boot.
-		record(status(id, "this Dockerfile declares no CMD or ENTRYPOINT; the "+
-			"start command will have to come from the service spec"))
-	}
+	// Parsed before the build, because it is the caller's Dockerfile either
+	// way and an unparseable one should not cost ten minutes. The base image's
+	// half is merged in AFTER the solve, since that is when the daemon has
+	// resolved it.
+	declared := ParseStartSpec(string(dockerfile))
 
 	// The daemon this build runs against is a machine, and it belongs to the
 	// org whose Dockerfile this is. Created or woken HERE, on the host that
@@ -279,10 +275,27 @@ func (b *Builder) Build(ctx context.Context, id, orgID string, contextTar io.Rea
 	b.pullCache(ctx, cacheDir, orgID, cacheName)
 
 	tarPath := filepath.Join(work, "rootfs.tar")
-	if err := b.solve(ctx, addr, ctxDir, tarPath, cacheDir, record); err != nil {
+	imageCfg, err := b.solveWithConfig(ctx, addr, ctxDir, tarPath, cacheDir,
+		filepath.Join(work, "metadata.json"), record)
+	if err != nil {
 		return res, err
 	}
 	b.pushCache(ctx, cacheDir, orgID, cacheName)
+
+	// The Dockerfile wins every field it names; the image fills the blanks;
+	// PATH is filled last. A spec that still names nothing to run is a real
+	// failure now rather than an advisory line: before the merge an empty
+	// spec could mean "the base image has one and we cannot see it", and that
+	// ambiguity is what this removes. The deploy that followed it failed at
+	// boot instead, which is a worse place to find out.
+	start := declared.MergeImageConfig(imageCfg).WithRuntimeDefaults()
+	if start.Empty() {
+		err := fmt.Errorf("this image declares no CMD or ENTRYPOINT, so there is " +
+			"nothing to start: add one to your Dockerfile, or set the start " +
+			"command on the service")
+		record(failure("packing rootfs", err))
+		return res, err
+	}
 
 	record(status(id, "packing rootfs"))
 	imagePath := filepath.Join(work, "rootfs.ext4")

@@ -22,18 +22,32 @@ type Rollout interface {
 	Deploy(ctx context.Context, serviceID, rootfsBuildID string, knobs json.RawMessage) (*state.Release, error)
 	Rollback(ctx context.Context, serviceID string) (*state.Release, error)
 	Promote(ctx context.Context, machineID string, req PromoteRequest) (*state.Service, error)
+	// Resize changes how big every replica is, by replacing them one at a
+	// time at the same release. Zero on a dimension leaves it alone.
+	Resize(ctx context.Context, serviceID string, vcpus, memMiB int) (*state.ServiceSize, error)
 }
 
 // serviceToAPI never returns env or env_sealed. The sealed blob is not a
 // secret to the fleet but it is not the client's either, and the plaintext
 // half has no business on a list endpoint.
-func (d Deps) serviceToAPI(svc state.Service, orgID string) Service {
+func (d Deps) serviceToAPI(ctx context.Context, svc state.Service, orgID string) Service {
 	out := Service{
 		ID: svc.ID, Name: svc.Name, OrgID: orgID, App: svc.App, ReleaseID: svc.ReleaseID,
 		Replicas: svc.Replicas, CustomDomain: svc.CustomDomain,
 		Repo: svc.Repo, Branch: svc.Branch, Autodeploy: svc.Autodeploy,
 		CreatedAt: svc.CreatedAt,
 	}
+	// Always spelled out, and read through the defaults, so a service that has
+	// never been scaled reports the size it is actually running at rather than
+	// two zeroes the caller has to know how to interpret. A store that cannot
+	// answer leaves the defaults rather than failing the read: the size is a
+	// detail of the service, and a blipped side-table read must not take a
+	// service page down.
+	sz, err := d.Store.GetServiceSize(ctx, svc.ID)
+	if err != nil {
+		sz = nil
+	}
+	out.Size.VCPUs, out.Size.MemMiB = sz.Size()
 	if svc.Health != "" {
 		var h HealthCheck
 		if json.Unmarshal([]byte(svc.Health), &h) == nil {
@@ -81,6 +95,12 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	// caller a service that is not the one they asked for.
 	if req.URLAuth != "" && req.URLAuth != URLAuthPublic && req.URLAuth != URLAuthOrg {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, "url_auth must be public or org", "pass url_auth: public, or url_auth: org", nil)
+		return
+	}
+	if !checkPayloadSize(w, map[string]any{
+		"env": req.Env, "secret_env": req.SecretEnv,
+		"knobs": req.Knobs, "health": req.Health, "labels": req.Labels,
+	}) {
 		return
 	}
 	if !checkLabels(w, req.Labels) {
@@ -138,11 +158,17 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return // 404 on unknown and on foreign alike; existence never leaks
 		}
-		if req.Replicas > 1 {
-			WriteError(w, http.StatusBadRequest, CodeBadRequest, "a service that "+
-				"mounts a volume runs exactly one replica: a volume is mounted by "+
-				"one machine at a time",
-				"a volume-backed service runs one replica; drop replicas or the volume", nil)
+		// An engine that replicates between its OWN ordinals is the one
+		// exception, and the label that says so is written once by the recipe
+		// at create. A hand-written service cannot reach this by editing a
+		// number, which is why the refusal names the recipe.
+		engine := ""
+		if req.Labels != nil {
+			engine = req.Labels["pilot.engine"]
+		}
+		if err := checkReplicatedVolumes(engine, req.Replicas); err != nil {
+			WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(),
+				nextReplicaHint(engine), nil)
 			return
 		}
 		if v.MachineID != "" {
@@ -193,11 +219,23 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// A service's replicas are machines, so a create is admitted against the
-	// same limits a create of that many machines would be. A replica boots
-	// with the manager's defaults, which is where these numbers come from.
+	// same limits a create of that many machines would be, AT THE SIZE the
+	// replicas will be: a service created at 8 GiB per replica asks for 8 GiB
+	// per replica, and admitting it at the default would let a create through
+	// that the first deploy cannot fulfil.
+	vcpus, memMiB := state.DefaultServiceVCPUs, state.DefaultServiceMemMiB
+	if req.Size != nil {
+		if err := checkSize(req.Size); err != nil {
+			WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(),
+				"size is {\"vcpus\":N,\"mem_mib\":N}; leave a dimension out for the default", nil)
+			return
+		}
+		vcpus = sizeOr(req.Size.VCPUs, vcpus)
+		memMiB = sizeOr(req.Size.MemMiB, memMiB)
+	}
 	req.OrgID = actingOrg(r)
 	if !d.checkQuota(w, r, quota.Delta{
-		Machines: req.Replicas, VCPUs: req.Replicas, MemMiB: req.Replicas * 512,
+		Machines: req.Replicas, VCPUs: req.Replicas * vcpus, MemMiB: req.Replicas * memMiB,
 	}) {
 		return
 	}
@@ -303,13 +341,30 @@ func (d Deps) handleCreateService(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if req.URLAuth == URLAuthOrg {
-		if err := d.Store.PutURLAuth(r.Context(), &state.URLAuth{ID: svc.ID, Kind: "service", Mode: URLAuthOrg, UpdatedAt: time.Now().Unix()}); err != nil {
+	// Written at create rather than applied as a scale: there are no replicas
+	// yet, so the first deploy simply creates them at this size and nothing is
+	// replaced. This is also why a compose file that names a size costs one
+	// rollout rather than two.
+	if req.Size != nil {
+		if err := d.Store.PutServiceSize(r.Context(), &state.ServiceSize{
+			ServiceID:   svc.ID,
+			VCPUs:       sizeOr(req.Size.VCPUs, state.DefaultServiceVCPUs),
+			MemMiB:      sizeOr(req.Size.MemMiB, state.DefaultServiceMemMiB),
+			ImageVCPUs:  sizeOr(req.Size.VCPUs, state.DefaultServiceVCPUs),
+			ImageMemMiB: sizeOr(req.Size.MemMiB, state.DefaultServiceMemMiB),
+			UpdatedAt:   time.Now().Unix(),
+		}); err != nil {
 			writeMapped(w, err)
 			return
 		}
 	}
-	out := d.serviceToAPI(*svc, req.OrgID)
+	if req.URLAuth == URLAuthOrg {
+		if err := d.putURLAuth(r.Context(), &state.URLAuth{ID: svc.ID, Kind: "service", Mode: URLAuthOrg, UpdatedAt: time.Now().Unix()}); err != nil {
+			writeMapped(w, err)
+			return
+		}
+	}
+	out := d.serviceToAPI(r.Context(), *svc, req.OrgID)
 	if volume != nil {
 		out.VolumeID = volume.ID
 	}
@@ -353,7 +408,7 @@ func (d Deps) handleListServices(w http.ResponseWriter, r *http.Request) {
 		if !visibleTo(owner, found, org, narrow) {
 			continue
 		}
-		row := d.serviceToAPI(svc, owner)
+		row := d.serviceToAPI(r.Context(), svc, owner)
 		row.VolumeID = mounts[svc.ID]
 		row.DependsOn = d.dependsOn(svc, groups[siblingKey{org: owner, app: svc.App}])
 		row.Labels = d.labelsOf(r.Context(), svc.ID)
@@ -383,7 +438,7 @@ func (d Deps) handleGetService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
-	out := d.serviceToAPI(*svc, owner)
+	out := d.serviceToAPI(r.Context(), *svc, owner)
 	out.VolumeID = volumeID
 	d.withEdges(r.Context(), &out, *svc, owner)
 	writeJSON(w, http.StatusOK, out)
@@ -447,7 +502,7 @@ func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
 	}
 
 	before := svc.Replicas
-	if err := d.applyServicePatch(svc, volumeID, req); err != nil {
+	if err := d.applyServicePatch(svc, volumeID, d.EngineOf(r.Context(), svc.ID), req); err != nil {
 		if errors.Is(err, errAddressSet) {
 			WriteError(w, http.StatusConflict, CodeConflict, err.Error(),
 				"add a custom domain instead", nil)
@@ -461,7 +516,7 @@ func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
 			WriteError(w, http.StatusBadRequest, CodeBadRequest, "url_auth must be public or org", "pass url_auth: public, or url_auth: org", nil)
 			return
 		}
-		if err := d.Store.PutURLAuth(r.Context(), &state.URLAuth{ID: svc.ID, Kind: "service", Mode: *req.URLAuth, UpdatedAt: time.Now().Unix()}); err != nil {
+		if err := d.putURLAuth(r.Context(), &state.URLAuth{ID: svc.ID, Kind: "service", Mode: *req.URLAuth, UpdatedAt: time.Now().Unix()}); err != nil {
 			writeMapped(w, err)
 			return
 		}
@@ -472,9 +527,36 @@ func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
 	// and the rollout creates machines through the manager rather than through
 	// the API, so without this a service created at one replica could be
 	// patched to a hundred and the next deploy would boot all hundred.
+	//
+	// Charged at the size this service's replicas actually are, not at the
+	// default: a service scaled to 8 GiB adding two replicas asks for 16 GiB,
+	// and charging it 1 GiB would admit a scale-up no host can hold.
+	curVCPUs, curMemMiB := d.sizeOf(r.Context(), svc.ID)
 	if grew := svc.Replicas - before; grew > 0 {
 		if !d.checkQuota(w, r, quota.Delta{
-			Machines: grew, VCPUs: grew, MemMiB: grew * 512,
+			Machines: grew, VCPUs: grew * curVCPUs, MemMiB: grew * curMemMiB,
+		}) {
+			return
+		}
+	}
+	// A size change is charged on the INCREASE alone, across every replica
+	// that will carry it. A shrink is never refused for being over a limit it
+	// is in the middle of getting under, which is the one moment a limit is
+	// most in the way.
+	//
+	// The SHAPE is checked before the quota, because 1000 vCPUs is a typo and
+	// not a capacity problem: answering it with "quota exceeded" would send
+	// the caller to raise a limit that would never have helped.
+	if req.Size != nil {
+		if err := checkSize(req.Size); err != nil {
+			WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(),
+				"size is {\"vcpus\":N,\"mem_mib\":N}; leave a dimension out to keep it", nil)
+			return
+		}
+		replicas := max(svc.Replicas, 1)
+		if !d.checkQuota(w, r, quota.Delta{
+			VCPUs:  replicas * max(sizeOr(req.Size.VCPUs, curVCPUs)-curVCPUs, 0),
+			MemMiB: replicas * max(sizeOr(req.Size.MemMiB, curMemMiB)-curMemMiB, 0),
 		}) {
 			return
 		}
@@ -483,11 +565,74 @@ func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
 		writeMapped(w, err)
 		return
 	}
+	// LAST, because it is the only field whose application replaces machines.
+	// Everything above is a row write that either lands or does not; this
+	// brings up replicas at the new size, proves each one serves, and retires
+	// the old ones, so it runs once the rest of the patch is settled and a
+	// failure here leaves the service running exactly as it was.
+	if req.Size != nil {
+		if d.Rollout == nil {
+			WriteError(w, http.StatusServiceUnavailable, CodeNotConfigured,
+				"this host cannot scale a service: no object storage is configured",
+				"scale from a host with object storage; pilot status lists hosts", nil)
+			return
+		}
+		if _, err := d.Rollout.Resize(r.Context(), svc.ID, req.Size.VCPUs, req.Size.MemMiB); err != nil {
+			writeMapped(w, err)
+			return
+		}
+	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
-	out := d.serviceToAPI(*svc, owner)
+	out := d.serviceToAPI(r.Context(), *svc, owner)
 	out.VolumeID = volumeID
 	d.withEdges(r.Context(), &out, *svc, owner)
 	writeJSON(w, http.StatusOK, out)
+}
+
+// sizeOf is how big a service's replicas are, with the defaults applied.
+//
+// A store error reads as the defaults rather than failing the caller: every
+// use here is an admission check or a display, and both are better slightly
+// stale than absent.
+func (d Deps) sizeOf(ctx context.Context, serviceID string) (vcpus, memMiB int) {
+	sz, err := d.Store.GetServiceSize(ctx, serviceID)
+	if err != nil {
+		sz = nil
+	}
+	return sz.Size()
+}
+
+// sizeOr resolves an omitted dimension to what the service already runs at.
+func sizeOr(asked, current int) int {
+	if asked <= 0 {
+		return current
+	}
+	return asked
+}
+
+// checkSize refuses a size no host could hold, at the API's edge rather than
+// somewhere inside a rollout, where a refused replica has already cost the
+// service a machine.
+//
+// The bounds are the machine's, because a replica IS a machine.
+func checkSize(s *Size) error {
+	if s.VCPUs < 0 || s.MemMiB < 0 {
+		return errors.New("a size cannot be negative")
+	}
+	if s.VCPUs == 0 && s.MemMiB == 0 {
+		return errors.New("size names neither dimension: set vcpus, mem_mib, or both")
+	}
+	if s.VCPUs > MaxVCPUs {
+		return fmt.Errorf("%d vCPUs is over the %d a machine may have", s.VCPUs, MaxVCPUs)
+	}
+	if s.MemMiB > MaxMemMiB {
+		return fmt.Errorf("%d MiB is over the %d a machine may have", s.MemMiB, MaxMemMiB)
+	}
+	if s.MemMiB > 0 && s.MemMiB < MinMemMiB {
+		return fmt.Errorf("%d MiB is too little for a guest to boot; the smallest is %d",
+			s.MemMiB, MinMemMiB)
+	}
+	return nil
 }
 
 // applyServicePatch applies the present fields onto the row and validates the
@@ -496,7 +641,10 @@ func (d Deps) handleUpdateService(w http.ResponseWriter, r *http.Request) {
 //
 // One function on purpose: every rule about a legal service lives here, and a
 // new field is a case in this switch plus a line in UpdateServiceRequest.
-func (d Deps) applyServicePatch(svc *state.Service, volumeID string, req UpdateServiceRequest) error {
+// engine is the service's write-once pilot.engine label, resolved by the
+// caller. Passed rather than looked up, because this function is a pure merge
+// and a store read inside it would make every test of it need a store.
+func (d Deps) applyServicePatch(svc *state.Service, volumeID, engine string, req UpdateServiceRequest) error {
 	if req.Replicas != nil {
 		if *req.Replicas < 0 {
 			return errors.New("replicas cannot be negative")
@@ -579,9 +727,17 @@ func (d Deps) applyServicePatch(svc *state.Service, volumeID string, req UpdateS
 	// The other create-time rule. A volume is mounted by one machine, so a
 	// service that mounts one runs one replica; the create refused more and
 	// the patch must not admit it by the side door.
-	if volumeID != "" && svc.Replicas > 1 {
-		return fmt.Errorf("service mounts volume %s and runs exactly one replica: "+
-			"a volume is mounted by one machine at a time", volumeID)
+	//
+	// The engine exception applies here too, and it is READ from the stored
+	// label rather than taken from the request: a patch cannot add the label,
+	// so what is on the row is what the recipe wrote at create.
+	if volumeID != "" {
+		if err := checkReplicatedVolumes(engine, svc.Replicas); err != nil {
+			// The volume is named, because the caller asked for replicas and
+			// the answer depends on a volume they may not have been thinking
+			// about. "Which volume?" is the next question either way.
+			return fmt.Errorf("service mounts volume %s: %w", volumeID, err)
+		}
 	}
 	return nil
 }
@@ -638,7 +794,7 @@ func (d Deps) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	// operator asking for a warm replica and being told it worked.
 	if _, err := DecodeKnobs(req.Knobs); err != nil {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(),
-			"knobs are auto_stop (off or suspend), auto_start, min_machines_running, soft_limit, idle_timeout (1..3600 seconds), schedules", nil)
+			"knobs are auto_stop (off or suspend), auto_start, min_machines_running, soft_limit, hard_limit, idle_timeout (1..3600 seconds), schedules", nil)
 		return
 	}
 	// The build becomes this service's root filesystem, so it is scoped like
@@ -646,10 +802,49 @@ func (d Deps) handleDeploy(w http.ResponseWriter, r *http.Request) {
 	if !d.ownedBuild(w, r, req.Build) {
 		return
 	}
+	// A size on the deploy is written BEFORE the rollout rather than applied
+	// as a scale of its own. The rollout that follows creates every replica at
+	// the new size, so a compose file that changed both its image and its size
+	// costs ONE rollout; sending the size as a patch first would roll the
+	// service once to change the size and again to change the image.
+	deployVCPUs, deployMemMiB := d.sizeOf(r.Context(), r.PathValue("id"))
+	if req.Size != nil {
+		if err := checkSize(req.Size); err != nil {
+			WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(),
+				"size is {\"vcpus\":N,\"mem_mib\":N}; leave a dimension out to keep it", nil)
+			return
+		}
+		deployVCPUs = sizeOr(req.Size.VCPUs, deployVCPUs)
+		deployMemMiB = sizeOr(req.Size.MemMiB, deployMemMiB)
+	}
 	// A rollout boots one extra machine before it retires the old one, so a
-	// deploy is admitted against one replica's worth of headroom.
-	if !d.checkQuota(w, r, quota.Delta{Machines: 1, VCPUs: 1, MemMiB: 512}) {
+	// deploy is admitted against one replica's worth of headroom -- at the
+	// size that replica will actually be.
+	if !d.checkQuota(w, r, quota.Delta{Machines: 1, VCPUs: deployVCPUs, MemMiB: deployMemMiB}) {
 		return
+	}
+	if req.Size != nil {
+		// The image size is left where it was on purpose. Until the rollout
+		// photographs a replica at the new size, the mismatch is what makes
+		// every replica boot rather than try to restore an image of the old
+		// size, which Firecracker would refuse at load.
+		existing, err := d.Store.GetServiceSize(r.Context(), r.PathValue("id"))
+		if err != nil {
+			existing = nil
+		}
+		row := &state.ServiceSize{
+			ServiceID: r.PathValue("id"), VCPUs: deployVCPUs, MemMiB: deployMemMiB,
+			ImageVCPUs:  state.DefaultServiceVCPUs,
+			ImageMemMiB: state.DefaultServiceMemMiB,
+			UpdatedAt:   time.Now().Unix(),
+		}
+		if existing != nil {
+			row.ImageVCPUs, row.ImageMemMiB = existing.ImageVCPUs, existing.ImageMemMiB
+		}
+		if err := d.Store.PutServiceSize(r.Context(), row); err != nil {
+			writeMapped(w, err)
+			return
+		}
 	}
 	rel, err := d.Rollout.Deploy(r.Context(), r.PathValue("id"), req.Build, req.Knobs)
 	if err != nil {
@@ -700,12 +895,13 @@ func (d Deps) handlePromote(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if row.VolumeID != "" {
-		if req.Replicas > 1 {
-			WriteError(w, http.StatusBadRequest, CodeBadRequest, fmt.Sprintf(
-				"machine %s mounts volume %s, so the service it becomes runs exactly "+
-					"one replica: a volume is mounted by one machine at a time",
-				row.ID, row.VolumeID),
-				"a volume-backed service runs one replica; drop replicas or the volume", nil)
+		// A promotion cannot add the engine label either, so a promoted
+		// sandbox carries whatever it was created with -- which for anything
+		// but a recipe machine is nothing.
+		if err := checkReplicatedVolumes(d.EngineOf(r.Context(), row.ID), req.Replicas); err != nil {
+			WriteError(w, http.StatusBadRequest, CodeBadRequest,
+				fmt.Sprintf("machine %s mounts volume %s: %v", row.ID, row.VolumeID, err),
+				nextReplicaHint(d.EngineOf(r.Context(), row.ID)), nil)
 			return
 		}
 		// A volume-backed service is redeployed and rolled back by BOOTING
@@ -740,7 +936,7 @@ func (d Deps) handlePromote(w http.ResponseWriter, r *http.Request) {
 	// promoted, and every replica the service gains afterwards -- which
 	// carries no mode of its own -- would be reachable by anyone.
 	if mode := d.urlAuthOf(r.Context(), r.PathValue("id")); mode == URLAuthOrg {
-		if err := d.Store.PutURLAuth(r.Context(), &state.URLAuth{ID: svc.ID, Kind: "service", Mode: mode, UpdatedAt: time.Now().Unix()}); err != nil {
+		if err := d.putURLAuth(r.Context(), &state.URLAuth{ID: svc.ID, Kind: "service", Mode: mode, UpdatedAt: time.Now().Unix()}); err != nil {
 			writeMapped(w, err)
 			return
 		}
@@ -751,7 +947,7 @@ func (d Deps) handlePromote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), svc.ID)
-	out := d.serviceToAPI(*svc, owner)
+	out := d.serviceToAPI(r.Context(), *svc, owner)
 	out.VolumeID = volumeID
 	d.withEdges(r.Context(), &out, *svc, owner)
 	writeJSON(w, http.StatusOK, out)

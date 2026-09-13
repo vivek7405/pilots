@@ -30,6 +30,13 @@ export interface Knobs {
   auto_start: boolean
   min_machines_running: number
   soft_limit: number
+  /**
+   * Concurrency the machine queues at and then refuses. `soft_limit` says
+   * "start another replica"; this says "this one has had enough". A request
+   * above it waits briefly for room and is then answered 503 with
+   * `Retry-After`. Zero is unlimited.
+   */
+  hard_limit: number
   /** Seconds of quiet before the machine suspends, 1..3600 (default 60). */
   idle_timeout: number
   /**
@@ -105,6 +112,302 @@ export interface Machine {
   labels?: Record<string, string>
   /** Who may reach the URL: 'public' (the default) or 'org'. */
   url_auth?: 'public' | 'org'
+  /**
+   * The machine this one was FORKED from, and the checkpoint it was restored
+   * from. Absent on a machine that was created rather than forked.
+   */
+  parent?: string
+  checkpoint?: string
+  /**
+   * The address this machine's OUTBOUND traffic leaves from, when its host
+   * manages egress. Shared with the org's other machines on the same host, and
+   * outliving every one of them.
+   *
+   * Absent means the machine leaves from the host's shared address, which is
+   * what every machine did before egress addresses existed.
+   */
+  egress?: string
+}
+
+/**
+ * Every address an org's outbound traffic can leave from, one per host that
+ * manages egress. `GET /v1/egress`.
+ *
+ * A set rather than one address, because the address is derived from the
+ * HOST's prefix: an org running machines on three hosts leaves from three
+ * addresses. It changes when a host joins or leaves the fleet and at no other
+ * time, which is what makes it safe to put in somebody else's firewall.
+ */
+/**
+ * Asks for N new machines from one machine's or checkpoint's exact state: the
+ * source's processes already running, its memory already warm.
+ */
+export interface ForkRequest {
+  /** The first fork's name; the rest take a suffix. Omitted mints one. */
+  name?: string
+  /** How many, default 1, capped at 100. */
+  count?: number
+  /**
+   * Fork the source's volume too. A source WITH a volume and this unset is
+   * refused rather than forked without it.
+   */
+  volume?: boolean
+}
+
+/**
+ * One entry per requested fork, in order. Per-fork rather than one status for
+ * the request, because forks are independent: nine that came up are worth
+ * having when the tenth did not.
+ */
+export interface ForkResponse {
+  forks: ForkEntry[]
+}
+
+/** One fork: the machine, or why it did not happen. */
+export interface ForkEntry {
+  machine?: Machine
+  error?: string
+}
+
+/**
+ * One point-in-time copy of a volume.
+ *
+ * `snapshot` is the stamp that names it, `20260912T101500Z`. It sorts
+ * lexically in time order, so a list needs no separate ordering field.
+ */
+export interface SnapshotResponse {
+  volume_id: string
+  snapshot: string
+}
+
+/**
+ * The compose fragment for one database, with the durability decision made and
+ * explained.
+ *
+ * Fetched rather than built by the client: two copies of a recipe is two places
+ * for it to drift from what the planner will accept. The password is generated
+ * on the client and never crosses the wire -- `secret_names` says what to make,
+ * and `url_template` carries `PASSWORD` where it goes.
+ */
+export interface ComposeRecipe {
+  engine: string
+  /** `wal-archive` or `durable-volume` for Postgres; `durable-volume` otherwise. */
+  mode: string
+  /** The compose service block, ready to splice into a file. */
+  service: Record<string, unknown>
+  /**
+   * Further compose services the recipe declares, by name. Splice each one in
+   * beside `service`. They build from the same context, so the planner folds
+   * them into the database's own machine as extra processes.
+   */
+  companions?: Record<string, Record<string, unknown>>
+  /** The named volumes it declares. */
+  volumes: Record<string, Record<string, never>>
+  /** Extra files it needs, by path. Anything ending `.sh` is executable. */
+  files?: Record<string, string>
+  /** The secrets to generate and store locally. */
+  secret_names: string[]
+  /** What an application reads to reach it, and its value with `PASSWORD` in it. */
+  conn_var: string
+  url_template: string
+  /**
+   * The second connection string, past the pooler, present only when there is
+   * a pooler. Transaction pooling is not a superset of a direct connection, so
+   * the address a migration must use is named rather than guessed.
+   */
+  direct_var?: string
+  direct_template?: string
+  /**
+   * What this mode costs and guarantees, in one line. Show it: a durability
+   * decision the operator did not read is one they did not make.
+   */
+  statement: string
+}
+
+/**
+ * How often a volume is snapshotted and how much is kept.
+ *
+ * Two retention numbers rather than one, because they answer different
+ * questions: how far back at a day's resolution, and how far back at all.
+ *
+ * An absent `cron` means no schedule. Retention of zero and zero keeps
+ * EVERYTHING, never nothing.
+ */
+export interface VolumePolicy {
+  cron?: string
+  keep_daily?: number
+  keep_weekly?: number
+}
+
+/**
+ * Which orgs a key can act as, and which it is acting as now.
+ *
+ * NOT a list of teams: the fleet knows an org only as a string on a row. A
+ * tenant key gets exactly its own; an admin key gets the orgs that own
+ * something, plus `admin` to say it may act as one not listed.
+ */
+export interface OrgsResponse {
+  current: string
+  orgs: string[]
+  admin: boolean
+}
+
+/**
+ * The compose text that turns one Postgres into a Patroni cluster.
+ *
+ * Returned as data rather than applied: the thing that edits somebody's compose
+ * file is their own client, where they can read the diff before deploying it.
+ */
+export interface ComposeHAFragment {
+  service: Record<string, unknown>
+  etcd_name: string
+  etcd: Record<string, unknown>
+  etcd_volume: string
+  /** Secrets to generate locally. The value never travels. */
+  secret_names: string[]
+  /** What the operator is told before any of it happens. */
+  statement: string
+}
+
+/**
+ * One machine's CPU and memory, read from its cgroup on the host that owns it.
+ *
+ * `cpu_seconds` is monotonic across suspend and wake: a counter that went down
+ * would make every rate over it negative and fire every alert on an ordinary
+ * suspend. `memory_bytes` is zero while suspended, which is the truth rather
+ * than a gap.
+ */
+export interface MachineMetrics {
+  machine_id: string
+  name?: string
+  service_id?: string
+  state: string
+  vcpus: number
+  mem_mib: number
+  cpu_seconds: number
+  memory_bytes: number
+  memory_limit_bytes: number
+  sampled_at: number
+}
+
+/**
+ * What a machine, or every replica of a service, may ask its host's credential
+ * broker for. Both fields REPLACE.
+ *
+ * Replace rather than merge, because merging two partial grants produces a
+ * permission nobody wrote.
+ */
+export interface GrantRequest {
+  /** Scopes a minted token may carry. Empty means no token. Never `admin`. */
+  scopes?: string[]
+  /**
+   * Secrets the machine may fetch from its broker. These never enter the
+   * machine's environment, so they are in no snapshot and on no disk in it.
+   */
+  secrets?: Record<string, string>
+}
+
+/** What is granted, without the values. Reading a grant answers with names. */
+export interface GrantResponse {
+  id: string
+  kind: string
+  org_id?: string
+  scopes: string[]
+  secret_names: string[]
+  updated_at?: number
+}
+
+/**
+ * What a machine's own token says about itself.
+ *
+ * Decodable by a client that wants to know when its token dies. Never sent as a
+ * request body, and the signature is not carried: verifying is hostd's, from a
+ * secret no client has.
+ */
+export interface BrokerClaims {
+  v: number
+  org: string
+  machine: string
+  service?: string
+  scopes: string[]
+  iat: number
+  exp: number
+}
+
+/**
+ * A service's environment WITH the values in it.
+ *
+ * Every other surface returns names only. This one exists so a password that
+ * was written can be recovered rather than kept somewhere worse, and calling it
+ * is a deliberate act. `env` and `secret_env` stay separate because the
+ * difference survives the round trip.
+ *
+ * `sealed` false on a service that has a sealed half means the host could not
+ * open it, which is a configuration problem rather than an empty environment.
+ */
+export interface ServiceEnvResponse {
+  service_id: string
+  env?: Record<string, string>
+  secret_env?: Record<string, string>
+  sealed: boolean
+}
+
+/**
+ * Names the new volume a fork creates. Empty mints one from the source's name
+ * and the snapshot's stamp.
+ */
+export interface ForkVolumeRequest {
+  name?: string
+}
+
+/** Every snapshot of a volume, newest first. */
+export interface SnapshotListResponse {
+  volume_id: string
+  snapshots: string[]
+}
+
+/**
+ * What draining a host did. `POST /v1/hosts/{id}/drain`.
+ *
+ * The machines in `moved` are on other hosts now, with the same ids, names and
+ * URLs they had: that is what makes a drain invisible to the people using them.
+ * `left` are the ones no host would take, each with its reason.
+ */
+export interface DrainReport {
+  moved: string[]
+  left?: string[]
+  errors?: Record<string, string>
+  /**
+   * Stays true after a drain that left something behind, so the host goes on
+   * refusing new machines until an operator says otherwise.
+   */
+  draining: boolean
+  started: number
+}
+
+/**
+ * One host telling another to take a machine it has offered. Internal: it
+ * travels over the mesh, and the offer row is what authorises the move. No
+ * client sends this.
+ */
+export interface TakeRequest {
+  handoff_id: string
+}
+
+export interface EgressResponse {
+  org_id: string
+  addresses: EgressAddress[]
+}
+
+/**
+ * One host's answer. There is no IPv4 counterpart and there will not be one: a
+ * v4 address is purchased and scarce, and a bare-metal host has one, so v4
+ * stays a shared masquerade.
+ */
+export interface EgressAddress {
+  host_id: string
+  ipv6: string
+  interface?: string
 }
 
 /** PATCH /v1/machines/{id}: who may reach the URL. */
@@ -219,6 +522,12 @@ export interface Service {
    */
   depends_on?: string[]
   replicas: number
+  /**
+   * How big each replica is. Always spelled out, even for a service that has
+   * never been scaled, so a reader never has to know what the defaults were on
+   * the day the service was made.
+   */
+  size: Size
   knobs: Knobs
   health?: HealthCheck
   url?: string
@@ -258,6 +567,11 @@ export interface CreateServiceRequest {
   release?: string
   build?: string
   replicas?: number
+  /**
+   * How big each replica will be. Omitted means the defaults, which is what
+   * every service was before a service had a size.
+   */
+  size?: Size
   /**
    * Accepted for wire compatibility and not persisted: a service row keeps no
    * knobs, so a policy set here goes nowhere and the deploy is where it
@@ -307,6 +621,15 @@ export interface DeployRequest {
    * A patch, so raising one field does not zero the three nobody mentioned.
    */
   knobs?: KnobsPatch
+  /**
+   * Sets how big the replicas this deploy creates are.
+   *
+   * It rides on the deploy rather than being sent as a separate patch
+   * beforehand: a patch carrying a size runs a rollout of its own, so a compose
+   * file that changed both its image and its size would roll the service twice
+   * to arrive where one rollout could have put it.
+   */
+  size?: Size
 }
 
 export interface PromoteRequest {
@@ -323,6 +646,32 @@ export interface PromoteRequest {
 export interface RedeployRequest {
   image: string
   release?: string
+}
+
+/**
+ * Boots a machine again at a NEW SIZE, in place: same id, same URL, same disk,
+ * same volume.
+ *
+ * A boot rather than a resume, because a memory image cannot be loaded into a
+ * differently-sized VM, so whatever was in memory is lost. Zero on a dimension
+ * leaves that dimension alone, which is how "give it more memory" is said
+ * without restating the vCPU count.
+ */
+/**
+ * How big a machine is: the two dimensions that are priced, named together
+ * wherever a service carries a size rather than a single machine.
+ *
+ * Zero on a dimension means "leave it as it is" on a request, and means the
+ * default on a reply, never a machine with no memory.
+ */
+export interface Size {
+  vcpus: number
+  mem_mib: number
+}
+
+export interface ResizeMachineRequest {
+  vcpus?: number
+  mem_mib?: number
 }
 
 export interface Release {
@@ -377,6 +726,23 @@ export interface Host {
    * /proc/cpuinfo vendor_id. Absent on a host that has not published it yet.
    */
   cpu_vendor?: string
+  /**
+   * Memory held by RUNNING machines this host would suspend if it needed the
+   * room. Placement counts it as available, so a host whose free memory looks
+   * small can still take a create. Suspended machines are not counted: their
+   * memory is already in `mem_free_mib`.
+   */
+  mem_reclaimable_mib: number
+  /**
+   * The vCPUs this host's machines are configured with. Oversubscription is
+   * normal, because vCPUs are timeshared, so this is a load signal rather than
+   * a limit.
+   */
+  vcpus_running: number
+  /** An operator is moving this host's machines off it; rankers skip it. */
+  draining?: boolean
+  /** How many builds this host holds on local disk. */
+  builds_cached?: number
 }
 
 /**
@@ -431,6 +797,19 @@ export interface HealthResponse {
   cpu_vendor: string
   /** True only when a fault flag is making this host lie about its CPU. */
   cpu_vendor_forced?: boolean
+  /**
+   * The same number broken out per actor: how far this replica has applied
+   * each host's changes, keyed by site id in hex. The sum answers "are we far
+   * apart"; this answers "on whose rows". Empty on a single-box SQLite host.
+   */
+  store_versions?: Record<string, number>
+  /**
+   * False while this host is still catching up with the fleet. Such a host
+   * serves its own machines normally and claims none of anybody else's, so it
+   * is healthy, not broken. Stuck false for more than a few seconds is a
+   * replication problem.
+   */
+  replication_complete: boolean
 }
 
 export interface ErrorResponse {
@@ -471,6 +850,16 @@ export interface HealthLast {
 
 export interface UpdateServiceRequest {
   replicas?: number
+  /**
+   * Changes how big every replica is. Zero on a dimension leaves that
+   * dimension alone.
+   *
+   * Applying it replaces the replicas one at a time, at the same release, and
+   * drops no request. A volume-backed service has a held window instead,
+   * because a volume has one writer and the replacement cannot mount it until
+   * the old machine has let go.
+   */
+  size?: Size
   health?: HealthCheck
   env?: Record<string, string>
   secret_env?: Record<string, string>
@@ -559,7 +948,24 @@ export interface QuotaResponse {
   max_mem_mib: number
   max_volume_gib: number
   max_builds: number
+  /**
+   * How much object storage this org's checkpoints may hold. Zero on a PUT
+   * means the default rather than none, so a client written against the older
+   * body shape does not freeze an org's checkpoints by omitting it.
+   */
+  max_snapshot_gib: number
   updated_at: number
+  /**
+   * What the org is holding right now, against those limits. Present on GET
+   * and absent on PUT, because they are not settable. Counting machines
+   * yourself gives a different number: builders do not count against the
+   * quota.
+   */
+  used_machines?: number
+  used_vcpus?: number
+  used_mem_mib?: number
+  used_volume_gib?: number
+  used_snapshot_gib?: number
 }
 
 export interface QuotaExceededResponse {
@@ -578,6 +984,12 @@ export interface UsageTotals {
   vcpu_seconds: number
   mib_seconds: number
   volume_gib_seconds: number
+  /**
+   * What this org's checkpoints held in object storage, accrued in EVERY
+   * machine state: the bytes are there whatever the guest is doing, which is
+   * why a stopped machine is not free.
+   */
+  snapshot_gib_seconds: number
 }
 
 export interface UsageResponse {
@@ -585,6 +997,12 @@ export interface UsageResponse {
   since: number
   until: number
   orgs: Record<string, UsageTotals>
+  /**
+   * The same accrual per machine, keyed by org and then by machine id. Present
+   * only for `by=machine`, because it is the larger answer and most callers
+   * want the invoice line rather than its derivation.
+   */
+  machines?: Record<string, Record<string, UsageTotals>>
 }
 
 // ---------------------------------------------------------------------------
@@ -642,6 +1060,33 @@ export interface ComposeStep {
   private?: boolean
   custom_domain?: string
   pre_deploy?: string
+  /**
+   * Attached to the service at create, write-once. The database recipes set
+   * `pilot.engine`, which is how the data view knows a service is a database
+   * and which one.
+   */
+  labels?: Record<string, string>
+  /**
+   * The volume's snapshot schedule and retention. Absent leaves whatever is
+   * set, so a redeploy does not reset a schedule somebody tuned.
+   */
+  snapshot_policy?: VolumePolicy
+  /**
+   * Filled when SEVERAL compose services share one build context and therefore
+   * run as one machine with one process each. Absent is the ordinary case: one
+   * service, one machine, one process named `app`.
+   */
+  processes?: ComposeProcess[]
+}
+
+/** One named command inside a machine that runs several. */
+export interface ComposeProcess {
+  name: string
+  cmd?: string
+  /** Everything named here starts before this process does. */
+  needs?: string[]
+  /** Marks the one process that owns the machine's published port. */
+  port?: boolean
 }
 
 export interface ComposePlan {

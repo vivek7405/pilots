@@ -2,8 +2,11 @@ package api
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
@@ -33,6 +36,25 @@ type fakeManager struct {
 	logs     string
 	logsErr  error
 	streamed []string
+	// The process surface, recorded so a test can assert WHICH process an
+	// action named rather than only that the call happened.
+	processes      string
+	processActions []string
+	processLogTail int
+	// resizedTo is the size the last resize asked for, as {vcpus, mem_mib}.
+	resizedTo [2]int
+	// forked records what each fork request asked for, so a test can assert
+	// the source and count reached the manager rather than only that the route
+	// answered. forkFails makes the Nth fork fail, for the assertion that one
+	// failure does not take its siblings with it.
+	forked    []ForkOptions
+	forkFails int
+	// The volume snapshot surface: what was taken, listed and restored.
+	volumeSnapshots   []string
+	snapshotted       []string
+	restoredSnapshots []string
+	deletedSnapshots  []string
+	forkedVolumes     []string
 }
 
 func newFakeManager() *fakeManager {
@@ -85,6 +107,50 @@ func (f *fakeManager) Logs(context.Context, string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return []byte(f.logs), f.err
+}
+
+// Resize records the size it was asked for, so a test can assert the request
+// reached the manager rather than only that the route answered.
+func (f *fakeManager) Resize(_ context.Context, _ string, vcpus, memMiB int) (*state.Machine, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.resizedTo = [2]int{vcpus, memMiB}
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := *f.machine
+	if vcpus > 0 {
+		out.VCPUs = vcpus
+	}
+	if memMiB > 0 {
+		out.MemMiB = memMiB
+	}
+	return &out, nil
+}
+
+func (f *fakeManager) Processes(context.Context, string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.processes == "" {
+		return []byte(`{"processes":[]}`), f.err
+	}
+	return []byte(f.processes), f.err
+}
+
+// ProcessAction records what was asked of which process, so a test can assert
+// that restarting one names that one and not the machine.
+func (f *fakeManager) ProcessAction(_ context.Context, machineID, name, action string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.processActions = append(f.processActions, machineID+" "+action+" "+name)
+	return f.err
+}
+
+func (f *fakeManager) ProcessLogs(_ context.Context, _, name string, tail int) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.processLogTail = tail
+	return []byte("logs of " + name), f.err
 }
 
 // ExecStream records the machine and answers 200. An httptest recorder cannot
@@ -156,3 +222,103 @@ func (f *fakeManager) AttachStream(http.ResponseWriter, *http.Request, string, s
 	return nil
 }
 func (f *fakeManager) KillSession(context.Context, string, string) error { return nil }
+
+// The volume snapshot surface, recorded rather than performed: what the API
+// tests assert is which volume was named and whether the owner-host forward
+// happened, not what juicefs did.
+func (f *fakeManager) SnapshotVolume(_ context.Context, volumeID string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return "", f.err
+	}
+	stamp := "20260912T101500Z"
+	f.volumeSnapshots = append([]string{stamp}, f.volumeSnapshots...)
+	f.snapshotted = append(f.snapshotted, volumeID)
+	return stamp, nil
+}
+
+func (f *fakeManager) ListVolumeSnapshots(context.Context, string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.volumeSnapshots, f.err
+}
+
+func (f *fakeManager) RestoreVolumeSnapshot(_ context.Context, volumeID, stamp string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.restoredSnapshots = append(f.restoredSnapshots, volumeID+"@"+stamp)
+	return f.err
+}
+
+// Fork answers with one machine per requested fork. forkFails makes that many
+// of them fail, from the first, so a test can check that the successful ones
+// still come back.
+func (f *fakeManager) Fork(_ context.Context, opts ForkOptions) ([]ForkOutcome, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.forked = append(f.forked, opts)
+	if f.err != nil {
+		return nil, f.err
+	}
+	count := opts.Count
+	if count <= 0 {
+		count = 1
+	}
+	out := make([]ForkOutcome, 0, count)
+	for i := range count {
+		if i < f.forkFails {
+			out = append(out, ForkOutcome{Err: errors.New("no room for this one")})
+			continue
+		}
+		row := *f.machine
+		row.ID = fmt.Sprintf("m_fork_%d", i)
+		row.Name = fmt.Sprintf("fork-%d", i)
+		out = append(out, ForkOutcome{Machine: &row})
+	}
+	return out, nil
+}
+
+func (f *fakeManager) DeleteVolumeSnapshot(_ context.Context, volumeID, stamp string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	kept := f.volumeSnapshots[:0]
+	for _, s := range f.volumeSnapshots {
+		if s != stamp {
+			kept = append(kept, s)
+		}
+	}
+	f.volumeSnapshots = kept
+	f.deletedSnapshots = append(f.deletedSnapshots, volumeID+"@"+stamp)
+	return f.err
+}
+
+func (f *fakeManager) ForkVolumeSnapshot(_ context.Context, volumeID, stamp, name string) (*state.Volume, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return nil, f.err
+	}
+	f.forkedVolumes = append(f.forkedVolumes, volumeID+"@"+stamp)
+	out := *f.volume
+	out.ID = "vol-fork"
+	if name != "" {
+		out.Name = name
+	}
+	return &out, nil
+}
+
+// Stats answers a fixed sample. Fixed rather than zero so a test asserting the
+// shape can tell "the handler read the manager" from "the handler returned an
+// empty struct", which are the same thing when every field is zero.
+func (f *fakeManager) Stats(_ context.Context, id string) (*Stats, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &Stats{
+		CPUSeconds: 12.5, MemoryBytes: 64 << 20, MemoryLimitBytes: 512 << 20,
+		SampledAt: time.Unix(1700000000, 0),
+	}, nil
+}

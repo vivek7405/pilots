@@ -172,7 +172,12 @@ async function waitFor(fn, { timeoutMs = 120_000, everyMs = 500, what = 'conditi
     }
     await sleep(everyMs);
   }
-  throw new Error(`timed out waiting for ${what}${lastErr ? `: ${lastErr.message}` : ''}`);
+  // `what` may be a function, so a caller can describe the state it last saw
+  // rather than only what it was waiting for. A timeout that says "it did not
+  // happen" and nothing else costs whoever reads it a trip to a host's journal
+  // to learn which of several failures it was.
+  const subject = typeof what === 'function' ? what() : what;
+  throw new Error(`timed out waiting for ${subject}${lastErr ? `: ${lastErr.message}` : ''}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +200,25 @@ async function processAssertions() {
     // cannot say which pool it is in makes every rescue's tier unknowable.
     assert(json?.cpu_vendor === 'GenuineIntel' || json?.cpu_vendor === 'AuthenticAMD',
       `cpu_vendor is ${JSON.stringify(json?.cpu_vendor)}, want the raw /proc/cpuinfo vendor_id`);
+    // The join gate. A host that has caught up says so, and a host that has
+    // not claims nothing -- so a box stuck at false is one that will never
+    // rescue anything, which is invisible without this field.
+    assert(json?.replication_complete === true,
+      `replication_complete is ${JSON.stringify(json?.replication_complete)}; ` +
+      'a host serving this battery has nothing left to join');
+    // The vector is what a joining peer compares against. Absent on SQLite,
+    // where there are no actors, so the assertion is on the type rather than
+    // on a count.
+    assert(json?.store_versions === undefined || typeof json.store_versions === 'object',
+      `store_versions is ${JSON.stringify(json?.store_versions)}, want an object or absent`);
+  });
+
+  await step('/metrics carries the join gate, complete and with no gaps', async () => {
+    const complete = await scrapeMetric('pilots_replication_complete');
+    const gaps = await scrapeMetric('pilots_replication_gaps');
+    assert(complete === 1,
+      `pilots_replication_complete = ${complete}, want 1 on a host that has joined`);
+    assert(gaps === 0, `pilots_replication_gaps = ${gaps}, want 0`);
   });
 
   await step('GET /metrics renders the host families and no per-machine label', async () => {
@@ -1635,10 +1659,49 @@ async function buildAssertions() {
       const spec = JSON.parse(raw);
       assert(Array.isArray(spec.cmd) && spec.cmd.length > 0,
         `no start command in the image: ${raw}`);
-      assert(spec.from_dockerfile_only === true,
-        'the spec does not record that it only saw the Dockerfile, so a consumer ' +
+      // The fixture's Dockerfile declares its own CMD, so the spec is
+      // satisfied by the Dockerfile alone. What must be recorded either way is
+      // WHERE the values came from, since a consumer branches on it.
+      assert(typeof spec.from_dockerfile_only === 'boolean',
+        'the spec does not record where its values came from, so a consumer ' +
         'cannot tell "declares nothing" from "we could not see it"');
     });
+
+    // The half the Dockerfile cannot supply: the BASE image's own config.
+    // Before this, `image: postgres:17` built a filesystem with no CMD, no
+    // ENV and no WORKDIR, so the machine had nothing to start. The Dockerfile
+    // here declares none of those on purpose; every value asserted below can
+    // only have come from the image.
+    let stockMachine;
+    await step('a stock image keeps its own command, env and exposed port', async () => {
+      const res = await postTar('/v1/builds', tarball({
+        'Dockerfile': 'FROM postgres:17\nRUN echo stock > /etc/pilots-stock\n',
+      }));
+      const lines = await readNDJSON(res);
+      const last = lines[lines.length - 1];
+      assert(!last.error, `the stock-image build failed: ${last.error}`);
+      assert(last.result, 'the stock-image build produced no rootfs');
+
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST', body: { image: last.result, vcpus: 1, mem_mib: 512 },
+      });
+      assert(status === 201, `expected 201, got ${status}: ${JSON.stringify(json)}`);
+      stockMachine = json;
+
+      const raw = await exec(json.id, 'cat /etc/pilot-agent/start.json');
+      const spec = JSON.parse(raw);
+      const argv = [...(spec.entrypoint ?? []), ...(spec.cmd ?? [])];
+      assert(argv.length > 0,
+        `a stock image produced no start command, so nothing can run: ${raw}`);
+      assert(spec.from_dockerfile_only === false,
+        'from_dockerfile_only is true for an image whose own config was merged in');
+      assert(spec.env?.PGDATA, `the image's own ENV was dropped: ${raw}`);
+      assert(spec.port === 5432,
+        `port is ${JSON.stringify(spec.port)}, want the image's exposed 5432`);
+    });
+    if (stockMachine) {
+      await request(`/v1/machines/${stockMachine.id}`, { method: 'DELETE' });
+    }
 
     await step("the built machine is running the build's own filesystem", async () => {
       assert(machine, 'no machine');
@@ -3338,6 +3401,303 @@ services:
       - postgres
 `;
 
+// B6. The addresses a tenant's outbound traffic leaves from.
+//
+// Runs on every fleet, configured or not, because the ABSENT case is the one
+// worth asserting: a fleet nobody told about egress must answer with an empty
+// set rather than an error or an invented address. A skip here would retire
+// that assertion on exactly the fleets where it matters.
+async function egressAddressAssertions() {
+  await step('/v1/egress answers, configured or not', async () => {
+    const { status, json } = await request('/v1/egress');
+    assert(status === 200, `expected 200, got ${status}: ${JSON.stringify(json)}`);
+    assert(typeof json.org_id === 'string' && json.org_id !== '',
+      `the response does not say whose addresses these are: ${JSON.stringify(json)}`);
+    assert(Array.isArray(json.addresses),
+      `addresses is not a list: ${JSON.stringify(json.addresses)}`);
+  });
+
+  const { json: first } = await request('/v1/egress');
+
+  if (!first.addresses.length) {
+    // The counterfactual, asserted rather than skipped. No host manages
+    // egress, so no machine may claim an address either -- a machine row
+    // naming one would mean the two halves disagree about what is configured.
+    await step('with no host managing egress, no machine claims an address', async () => {
+      const { status, json } = await request('/v1/machines');
+      assert(status === 200, `expected 200, got ${status}`);
+      const claiming = (json ?? []).filter((m) => m.egress);
+      assert(claiming.length === 0,
+        `${claiming.length} machine(s) name an egress address on a fleet where no host hands one out: ` +
+        claiming.slice(0, 3).map((m) => `${m.id}=${m.egress}`).join(', '));
+    });
+    console.log('  - per-org egress addresses not configured on this fleet (set PILOT_EGRESS_INTERFACE and PILOT_EGRESS_PREFIX6 to exercise them)');
+    return;
+  }
+
+  await step('every reported address is a distinct IPv6, one per host', async () => {
+    const hosts = new Set();
+    const addrs = new Set();
+    for (const a of first.addresses) {
+      assert(a.host_id, `an entry names no host: ${JSON.stringify(a)}`);
+      assert(a.ipv6 && a.ipv6.includes(':'), `host ${a.host_id} reported ${a.ipv6}, which is not IPv6`);
+      assert(!hosts.has(a.host_id), `host ${a.host_id} appears twice`);
+      assert(!addrs.has(a.ipv6), `${a.ipv6} is reported for two hosts; each derives from its own prefix`);
+      hosts.add(a.host_id);
+      addrs.add(a.ipv6);
+    }
+  });
+
+  await step('the address does not move between reads', async () => {
+    // The whole value of it: a tenant puts it in somebody else's firewall, so
+    // an address that moved would have to be re-allowlisted -- which is the
+    // cost this feature exists to remove.
+    const { json: again } = await request('/v1/egress');
+    const before = first.addresses.map((a) => `${a.host_id}=${a.ipv6}`).sort().join(',');
+    const after = (again.addresses ?? []).map((a) => `${a.host_id}=${a.ipv6}`).sort().join(',');
+    assert(before === after, `the set moved:\n  ${before}\n  ${after}`);
+  });
+
+  await step("a machine leaves from its own host's address", async () => {
+    const { status, json } = await request('/v1/machines');
+    assert(status === 200, `expected 200, got ${status}`);
+    const byHost = new Map(first.addresses.map((a) => [a.host_id, a.ipv6]));
+    for (const m of json ?? []) {
+      if (m.state === 'destroyed' || !byHost.has(m.host_id)) continue;
+      assert(m.egress === byHost.get(m.host_id),
+        `${m.id} is on ${m.host_id} and names ${m.egress}, but that host hands out ${byHost.get(m.host_id)}`);
+    }
+  });
+}
+
+// A3 and B5. Where a machine lands, and what happens when a host is emptied.
+//
+// Runs on every fleet. On a single box the assertions are about the SHAPE the
+// API reports rather than about spreading, and that is worth keeping: a lone
+// host still has to publish its capacity, or a second host joining would have
+// nothing to rank against.
+async function placementAssertions() {
+  await step('every host publishes what it can still hold', async () => {
+    const { status, json } = await request('/v1/hosts');
+    assert(status === 200, `expected 200, got ${status}`);
+    assert(Array.isArray(json) && json.length > 0, 'no hosts listed at all');
+    for (const h of json) {
+      assert(typeof h.mem_free_mib === 'number',
+        `host ${h.id} reports no free memory`);
+      assert(typeof h.mem_reclaimable_mib === 'number',
+        `host ${h.id} reports no reclaimable memory, so placement will never prefer it`);
+      assert(typeof h.vcpus_running === 'number',
+        `host ${h.id} reports no running vCPU count`);
+    }
+  });
+
+  await step('a machine no host could hold is refused with 507, not 500', async () => {
+    // The number is absurd on purpose: no host in any fleet has a terabyte to
+    // give one guest. Before admission existed this was created, booted, and
+    // failed with whatever Firecracker said about memory -- a 500 describing a
+    // symptom rather than an answer about capacity.
+    //
+    // Under a lifted memory quota, because the quota refuses a terabyte before
+    // placement ever sees it -- correctly, and that is a different assertion.
+    // What is under test here is the answer when the request is allowed and
+    // there is simply nowhere to put it.
+    const { status, json } = await withMemoryQuotaLifted(await myOrg(), () =>
+      request('/v1/machines', {
+        method: 'POST',
+        body: { name: `too-big-${Math.random().toString(36).slice(2, 8)}`, mem_mib: 1024 * 1024 },
+      }));
+    assert(status === 507, `expected 507, got ${status}: ${JSON.stringify(json)}`);
+    assert(json.code === 'no_capacity', `code = ${json.code}, want no_capacity`);
+    assert(typeof json.next === 'string' && json.next.length > 0,
+      'the refusal says nothing about what to do next');
+  });
+
+  const { json: hosts } = await request('/v1/hosts');
+  const live = (hosts ?? []).filter((h) => h.alive);
+  if (live.length < 2) {
+    // Not a skip of an assertion: on one host there is nowhere to spread TO,
+    // and the shape assertions above have already run.
+    console.log('  - placement spreading needs two live hosts; this fleet has ' + live.length);
+    return;
+  }
+
+  await step('creates through one host land on more than one', async () => {
+    // The gap this closes: a machine used to run wherever the client happened
+    // to point its CLI, so a fleet of five behaved like one host with four
+    // spares.
+    const tag = Math.random().toString(36).slice(2, 8);
+    const created = [];
+    const landed = new Set();
+    try {
+      for (let i = 0; i < 6; i++) {
+        const { status, json } = await request('/v1/machines', {
+          method: 'POST',
+          body: { name: `place-${tag}-${i}`, mem_mib: 512, knobs: { auto_stop: 'off' } },
+        });
+        assert(status === 201, `create ${i}: HTTP ${status} ${JSON.stringify(json)}`);
+        created.push(json.id);
+        landed.add(json.host_id);
+      }
+      assert(landed.size > 1,
+        `six creates all landed on ${[...landed].join(',')}; a fleet of ${live.length} must spread`);
+    } finally {
+      for (const id of created) await destroy(id);
+    }
+  });
+
+  await step('a draining host is given nothing, and takes work again after', async () => {
+    const victim = live[live.length - 1].id;
+    const tag = Math.random().toString(36).slice(2, 8);
+    const created = [];
+    try {
+      const drained = await request(`/v1/hosts/${encodeURIComponent(victim)}/drain`, { method: 'POST' });
+      assert(drained.status === 200, `drain: HTTP ${drained.status} ${JSON.stringify(drained.json)}`);
+      assert(drained.json.draining === true, 'the host is not marked draining');
+
+      // Every create now avoids it. That is what lets a drain converge rather
+      // than race the placer for the machines it is trying to move off.
+      for (let i = 0; i < 4; i++) {
+        const { status, json } = await request('/v1/machines', {
+          method: 'POST',
+          body: { name: `drain-${tag}-${i}`, mem_mib: 512, knobs: { auto_stop: 'off' } },
+        });
+        assert(status === 201, `create ${i}: HTTP ${status} ${JSON.stringify(json)}`);
+        created.push(json.id);
+        assert(json.host_id !== victim,
+          `${json.id} was placed on ${victim}, which is draining`);
+      }
+    } finally {
+      for (const id of created) await destroy(id);
+      // Leave the fleet usable whatever happened above.
+      await request(`/v1/hosts/${encodeURIComponent(victim)}/drain`, { method: 'DELETE' });
+    }
+
+    const after = await request(`/v1/hosts/${encodeURIComponent(victim)}/drain`);
+    assert(after.status === 200, `drain status: HTTP ${after.status}`);
+    assert(after.json.draining === false,
+      `${victim} is still draining after an undrain`);
+  });
+}
+
+// B8. New machines from an existing one's exact state.
+//
+// The assertion that matters is not "a machine appeared" -- a create does that
+// -- but that the fork starts from what the source had in MEMORY. A fork that
+// only carried the disk would be a create with extra steps.
+async function forkAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const created = [];
+
+  try {
+    let source;
+    await step('a machine with state in memory can be forked', async () => {
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST',
+        body: { name: `fork-src-${tag}`, mem_mib: 512, knobs: { auto_stop: 'off' } },
+      });
+      assert(status === 201, `create: HTTP ${status} ${JSON.stringify(json)}`);
+      source = json;
+      created.push(json.id);
+
+      const wrote = await request(`/v1/machines/${source.id}/exec`, {
+        method: 'POST',
+        body: { cmd: `echo forked-${tag} > /tmp/marker` },
+      });
+      assert(wrote.status === 200, `write a marker: HTTP ${wrote.status}`);
+    });
+
+    let forks = [];
+    await step('forking gives N machines, each with its own id and URL', async () => {
+      const { status, json } = await request(`/v1/machines/${source.id}/fork`, {
+        method: 'POST',
+        body: { count: 2 },
+      });
+      assert(status === 201, `fork: HTTP ${status} ${JSON.stringify(json)}`);
+      forks = (json.forks ?? []).filter((f) => f.machine).map((f) => f.machine);
+      for (const f of forks) created.push(f.id);
+
+      assert(forks.length === 2, `${forks.length} forks came up, want 2: ${JSON.stringify(json)}`);
+      const ids = new Set(forks.map((f) => f.id));
+      const urls = new Set(forks.map((f) => f.url));
+      assert(ids.size === 2, 'two forks share an id');
+      assert(urls.size === 2, 'two forks share a URL');
+      assert(!ids.has(source.id), 'a fork took the source machine\'s id');
+    });
+
+    await step('a fork starts from what the source had in memory', async () => {
+      for (const f of forks) {
+        const { status, json } = await request(`/v1/machines/${f.id}/exec`, {
+          method: 'POST',
+          body: { cmd: 'cat /tmp/marker' },
+        });
+        assert(status === 200, `exec on ${f.id}: HTTP ${status}`);
+        assert((json.stdout ?? '').includes(`forked-${tag}`),
+          `${f.id} does not carry the source's state: ${JSON.stringify(json.stdout)}`);
+      }
+    });
+
+    await step('a fork names the machine it came from', async () => {
+      const { status, json } = await request(`/v1/machines/${forks[0].id}`);
+      assert(status === 200, `read: HTTP ${status}`);
+      assert(json.parent === source.id,
+        `parent = ${json.parent}, want ${source.id}`);
+    });
+
+    await step('a fork outlives its parent', async () => {
+      // The fork faults pages out of the artifacts it was restored from until
+      // its own first suspend. Destroying the parent must not discard them, or
+      // the fork hangs on a page fault with nothing naming the cause.
+      const gone = await request(`/v1/machines/${source.id}`, { method: 'DELETE' });
+      assert(gone.status === 204 || gone.status === 200, `destroy the source: HTTP ${gone.status}`);
+
+      const { status, json } = await request(`/v1/machines/${forks[0].id}/exec`, {
+        method: 'POST',
+        body: { cmd: 'cat /tmp/marker' },
+      });
+      assert(status === 200, `exec after the parent was destroyed: HTTP ${status}`);
+      assert((json.stdout ?? '').includes(`forked-${tag}`),
+        'the fork broke when its parent was destroyed');
+    });
+
+    await step('a suspended machine forks without being woken', async () => {
+      const made = await request('/v1/machines', {
+        method: 'POST',
+        body: { name: `fork-sleep-${tag}`, mem_mib: 512, knobs: { auto_stop: 'off' } },
+      });
+      assert(made.status === 201, `create: HTTP ${made.status}`);
+      created.push(made.json.id);
+
+      const slept = await request(`/v1/machines/${made.json.id}/suspend`, { method: 'POST' });
+      assert(slept.status === 200 || slept.status === 204, `suspend: HTTP ${slept.status}`);
+
+      const { status, json } = await request(`/v1/machines/${made.json.id}/fork`, {
+        method: 'POST',
+        body: {},
+      });
+      assert(status === 201, `fork a suspended machine: HTTP ${status} ${JSON.stringify(json)}`);
+      for (const f of json.forks ?? []) {
+        if (f.machine) created.push(f.machine.id);
+      }
+
+      // And the source is STILL asleep. Waking it to fork it would make this
+      // cost what a wake costs, every time.
+      const after = await request(`/v1/machines/${made.json.id}`);
+      assert(after.json.state === 'suspended',
+        `the source is ${after.json.state}; forking woke it`);
+    });
+
+    await step('asking for more forks than allowed is refused', async () => {
+      const { status, json } = await request(`/v1/machines/${forks[0].id}/fork`, {
+        method: 'POST',
+        body: { count: 101 },
+      });
+      assert(status === 400, `expected 400, got ${status}: ${JSON.stringify(json)}`);
+    });
+  } finally {
+    for (const id of created) await destroy(id);
+  }
+}
+
 async function dataRouteAssertions() {
   const tag = Math.random().toString(36).slice(2, 8);
   const created = [];
@@ -3559,8 +3919,21 @@ async function dataRouteAssertions() {
       assert(res.status === 400, `expected 400, got ${res.status}: ${JSON.stringify(json)}`);
       assert(json.code === 'unknown_framework', `code = ${json.code}`);
       assert(json.next && json.next.length > 0, 'the refusal says nothing about what to do');
-      assert(json.details?.looked_for?.length === 10,
-        `looked_for = ${JSON.stringify(json.details?.looked_for)}`);
+      // A FLOOR and the entries that carry the meaning, not an exact count.
+      //
+      // The count was 10 and the list is 11: Remix 3 was added and the number
+      // was not, so this failed on a change that was entirely correct. An
+      // exact count here guards nothing -- the assertion is that the refusal
+      // NAMES what it looked for, so somebody can see why their directory was
+      // not recognised -- and it breaks every time a framework is added, which
+      // trains whoever hits it to edit the number without reading the test.
+      const lookedFor = json.details?.looked_for ?? [];
+      assert(lookedFor.length >= 8,
+        `looked_for = ${JSON.stringify(lookedFor)}`);
+      for (const marker of ['package.json', 'go.mod', 'Cargo.toml']) {
+        assert(lookedFor.some((entry) => entry.includes(marker)),
+          `the refusal never mentions ${marker}: ${JSON.stringify(lookedFor)}`);
+      }
       // The two rules travel on every refusal, because the model that has to
       // obey them may have loaded no documentation at all.
       assert(json.details?.rules?.length === 2,
@@ -4422,6 +4795,25 @@ async function machineCount(base = API) {
   return (json ?? []).length;
 }
 
+// How many machines an org is holding AS THE QUOTA COUNTS THEM.
+//
+// Not the same as the length of GET /v1/machines, and the difference is what
+// made the quota assertion below fail. A builder machine is visible in the
+// org's list and does not count against its quota: hostd creates one per org
+// per host to run that org's Dockerfile inside a microVM, and destroys it on
+// its own schedule, so an org sitting on its limit could never build again if
+// it counted. Deriving a baseline from the list therefore set the limit one
+// too high per builder, and the create that should have been refused was
+// admitted.
+//
+// So this asks the quota rather than re-deriving it. Two copies of a counting
+// rule is exactly the shape that produced the bug.
+async function quotaUsage(org, base = API) {
+  const { status, json } = await requestAt(base, `/v1/quotas/${org}`);
+  assert(status === 200, `GET /v1/quotas/${org}: HTTP ${status}`);
+  return json ?? {};
+}
+
 // metricValue reads one Prometheus sample from /metrics, or null when the
 // family is absent. Absent is still not a failure: a vec family renders
 // nothing until it has a series, so a caller that reads one carries a fallback
@@ -4614,6 +5006,45 @@ const SLOT_POOL = Number(process.env.PILOTS_E2E_SLOT_POOL ?? '') || 0;
 // have the memory free.
 const IMPOSSIBLE_MEM_MIB = 1024 * 1024 * 4; // 4 TiB
 
+// Run something with this org's memory quota lifted out of the way, then put
+// it back.
+//
+// The capacity assertions below ask for a machine no host could hold, and the
+// point is the CAPACITY refusal: 507, naming capacity, leaking no slot. But a
+// request that large trips the org's memory quota first -- correctly, since
+// that check is cheaper and more specific -- so what came back was a 429 about
+// mem_mib and the placement path was never reached at all. The assertion read
+// as a failure while both refusals were working exactly as designed.
+//
+// Lifting the ceiling is what makes the next check downstream the one under
+// test. Restored in a finally, because leaving an org with an unbounded memory
+// quota would quietly retire every quota assertion that runs after this one.
+let myOrgCache = null;
+async function myOrg() {
+  if (myOrgCache) return myOrgCache;
+  const me = await request('/v1/whoami');
+  assert(me.status === 200, `whoami: HTTP ${me.status}`);
+  assert(me.json?.org_id, `whoami named no org: ${JSON.stringify(me.json)}`);
+  myOrgCache = me.json.org_id;
+  return myOrgCache;
+}
+
+async function withMemoryQuotaLifted(org, body) {
+  const before = await request(`/v1/quotas/${org}`);
+  const saved = before.status === 200 ? before.json : null;
+  const lifted = { ...settableQuota(saved), max_mem_mib: IMPOSSIBLE_MEM_MIB * 4 };
+  const put = await request(`/v1/quotas/${org}`, { method: 'PUT', body: lifted });
+  assert(put.status >= 200 && put.status < 300,
+    `could not lift the memory quota of ${org}: HTTP ${put.status}`);
+  try {
+    return await body();
+  } finally {
+    if (saved) {
+      await request(`/v1/quotas/${org}`, { method: 'PUT', body: settableQuota(saved) });
+    }
+  }
+}
+
 async function capacityAssertions() {
   const tag = Math.random().toString(36).slice(2, 8);
   const created = [];
@@ -4633,10 +5064,14 @@ async function capacityAssertions() {
       const before = await freeSlots();
       console.log(`      capacity read from ${before.source} (${before.value})`);
 
-      const { status, json, text } = await request('/v1/machines', {
-        method: 'POST',
-        body: { name: `e2e-ceiling-${tag}`, vcpus: 1, mem_mib: IMPOSSIBLE_MEM_MIB },
-      });
+      // Lifted for the same reason the assertion above lifts it: a 4 TiB
+      // request trips the org's memory ceiling first, and this step is about
+      // the HOST's.
+      const { status, json, text } = await withMemoryQuotaLifted(await myOrg(), () =>
+        request('/v1/machines', {
+          method: 'POST',
+          body: { name: `e2e-ceiling-${tag}`, vcpus: 1, mem_mib: IMPOSSIBLE_MEM_MIB },
+        }));
       refusal = status;
       if (status >= 200 && status < 300) {
         if (json?.id) created.push(json.id);
@@ -4765,9 +5200,40 @@ async function capacityAssertions() {
 // CLI and MCP server (#32). Where a dependency is missing the step FAILS and
 // names it. It does not skip -- a battery that quietly stops asserting when a
 // dependency is late is how a whole section goes green while testing nothing.
-const QUOTA_ORG = process.env.PILOTS_E2E_ORG ?? 'org-e2e';
+// The org whose quota this section drives.
+//
+// The ACTING key's org, not a name nothing belongs to. This was hardcoded to
+// "org-e2e" while the battery's key acts as whatever `hostd bootstrap-key`
+// minted, so the quota was set on one org and the machines were created in
+// another: the ceiling could never be reached and "the create past the quota
+// succeeded" was structural rather than a bug in enforcement. Overridable for
+// a fleet that wants the assertion pointed somewhere specific.
+// settableQuota strips the half of a quota body that is answered, not set.
+//
+// GET reports usage beside the limits; PUT takes limits only. Echoing a body
+// back without this sends a limit called used_machines.
+function settableQuota(q) {
+  const out = { ...(q ?? {}) };
+  for (const k of Object.keys(out)) {
+    if (k.startsWith('used_') || k === 'updated_at' || k === 'org_id') delete out[k];
+  }
+  return out;
+}
+
+async function quotaOrg() {
+  return process.env.PILOTS_E2E_ORG ?? (await myOrg());
+}
 const QUOTA_HEADROOM = 2;
-const CLI = process.env.PILOT_CLI ?? 'pilot';
+// The CLI this section spawns.
+//
+// PILOT_BIN is the variable the rest of the battery uses (see CLI_BIN below),
+// and it is honoured here too. Two names for one binary is a trap that already
+// sprung: a run with PILOT_BIN set exercised the branch's CLI everywhere
+// EXCEPT this section, which silently spawned whatever `pilot` happened to be
+// on PATH -- so a fix to the CLI could land, be deployed, and still fail here
+// against a months-old install, with the failure reading as the fix not
+// working.
+const CLI = process.env.PILOT_CLI ?? process.env.PILOT_BIN ?? 'pilot';
 
 // mcpCall speaks one tools/call to a freshly spawned MCP server and returns
 // both the parsed result and every line the server put on stdout, because
@@ -4847,6 +5313,8 @@ async function quotaAssertions() {
   const created = [];
   const tag = Math.random().toString(36).slice(2, 8);
   let limit = 0;
+  // What the org's quota was before this section, restored in the finally.
+  let savedQuota = null;
 
   const run = (args, env) => new Promise((resolve) => {
     execFile(CLI, args, { env, timeout: 60_000 }, (error, stdout, stderr) => {
@@ -4858,14 +5326,29 @@ async function quotaAssertions() {
 
   try {
     await step('a machine quota can be set and filled to its limit', async () => {
-      const baseline = await machineCount();
+      const org = await quotaOrg();
+      const baseline = (await quotaUsage(org)).used_machines ?? 0;
       limit = baseline + QUOTA_HEADROOM;
 
-      const { status, text } = await request(`/v1/quotas/${QUOTA_ORG}`, {
-        method: 'PUT', body: { max_machines: limit }, raw: true,
+      // What the org was held to before this section, so the finally can put
+      // it back. Deleting the row instead would drop a fleet's real limits on
+      // the way out, which matters now that this runs against the acting org
+      // rather than a name nothing uses.
+      const before = await request(`/v1/quotas/${org}`);
+      savedQuota = before.status === 200 ? before.json : null;
+
+      // Only the MACHINE ceiling moves. A PUT replaces the row, so sending
+      // max_machines alone zeroes every other limit -- and with max_vcpus at
+      // zero the org cannot create, wake, or RECOVER anything until the
+      // teardown runs. That was invisible while this section pointed at an org
+      // nothing used; against the acting org it refused the panicked machine's
+      // own bring-up two sections later, and the failure read as a recovery
+      // bug rather than as this.
+      const { status, text } = await request(`/v1/quotas/${org}`, {
+        method: 'PUT', body: { ...settableQuota(savedQuota), max_machines: limit }, raw: true,
       });
       assert(status >= 200 && status < 300,
-        `PUT /v1/quotas/${QUOTA_ORG} returned HTTP ${status} (${text.slice(0, 200)}). ` +
+        `PUT /v1/quotas/${org} returned HTTP ${status} (${text.slice(0, 200)}). ` +
         'Quota enforcement is issue #30 (Phase 6a); this asserts nothing until it lands');
 
       for (let i = 0; i < QUOTA_HEADROOM; i++) {
@@ -4972,8 +5455,17 @@ async function quotaAssertions() {
     // The quota outlives the run otherwise, and the next run's "fill to the
     // limit" loop then hits 429 partway through against a ceiling this run
     // computed from a machine count that has since moved.
+    //
+    // PUT back what was there rather than DELETE. This now runs against the
+    // acting org, which on a real fleet has limits somebody chose, and a
+    // teardown that dropped them would leave the fleet on defaults.
     try {
-      await request(`/v1/quotas/${QUOTA_ORG}`, { method: 'DELETE' });
+      const org = await quotaOrg();
+      if (savedQuota) {
+        await request(`/v1/quotas/${org}`, { method: 'PUT', body: settableQuota(savedQuota) });
+      } else {
+        await request(`/v1/quotas/${org}`, { method: 'DELETE' });
+      }
     } catch { /* best effort, like every other teardown here */ }
   }
 }
@@ -5372,7 +5864,22 @@ async function exitAssertions() {
 
       // Written and synced before the kill, so "the disk survived" is a claim
       // about the guest's own writes rather than about the template.
+      //
+      // READ BACK, and a failure here fails HERE. This was fire-and-forget,
+      // and when the write did not happen the machine had genuinely nothing
+      // to recover from -- so hostd correctly refused, and the battery
+      // reported "timed out waiting for the panicked machine to come back"
+      // a hundred lines later. That sent two investigations at the recovery
+      // path, which was doing exactly the right thing with an empty disk.
+      //
+      // A precondition that is allowed to fail silently does not make the
+      // assertion below weaker, it makes it about something else.
       await exec(id, 'echo exit-marker > /var/tmp/marker-exit && sync');
+      const before = await exec(id, 'cat /var/tmp/marker-exit');
+      assert(before === 'exit-marker',
+        `the marker was not written before the panic, so there is nothing for ` +
+        `the recovery below to preserve and its result would mean nothing: ` +
+        `${JSON.stringify(before)}`);
 
       // A FAILURE, never a skip: a kernel with no CONFIG_MAGIC_SYSRQ cannot
       // panic on demand, and quietly returning here would retire every
@@ -5398,10 +5905,25 @@ async function exitAssertions() {
         sleep(15_000),
       ]);
 
+      // The last thing the row said, so a timeout names what happened rather
+      // than only that it did not.
+      //
+      // "timed out waiting for the panicked machine to come back" is true of a
+      // machine still booting, one parked in error, and one that came back by
+      // a path this does not accept -- three different bugs behind one
+      // sentence, and two investigations spent telling them apart by reading a
+      // host's journal. The row already knows.
+      let last = null;
       const { ms } = await timed(() => waitFor(async () => {
         const { json: now } = await request(`/v1/machines/${id}`);
+        last = now;
         return now?.state === 'running' && now?.last_start === 'cold_boot';
-      }, { timeoutMs: 90_000, everyMs: 1000, what: 'the panicked machine to come back' }));
+      }, {
+        timeoutMs: 90_000, everyMs: 1000,
+        what: () => `the panicked machine to come back (it is state=${last?.state} ` +
+          `last_start=${last?.last_start} rootfs_build=${JSON.stringify(last?.rootfs_build_id ?? '')} ` +
+          `mem_build=${JSON.stringify(last?.mem_build_id ?? '')})`,
+      }));
       enforce(reflink, ms, 30_000, 60_000, 30_000, 'exit recovery');
     });
 
@@ -5658,14 +6180,16 @@ const WORKSPACE_FIXTURE = new URL('../packages/cli/test/fixtures/workspace-app',
 const EXAMPLE_TWO_SERVICE = new URL('../packages/cli/examples/two-services-volume-secret', import.meta.url).pathname;
 
 const MCP_TOOLS = [
-  'build', 'build_logs', 'checkpoint', 'create_machine', 'deploy',
+  'build', 'build_logs', 'checkpoint', 'create_machine', 'database', 'deploy',
   'destroy_machine', 'diagnose', 'docs', 'domains', 'exec',
-  'exec_stream', 'generate_dockerfile', 'init', 'list_machines', 'list_services',
-  'logs', 'plan', 'promote', 'pull_file', 'push_file', 'releases', 'restore',
+  'exec_stream', 'fork', 'generate_dockerfile', 'grant', 'grants', 'init',
+  'list_machines', 'list_services',
+  'logs', 'metrics', 'plan', 'promote', 'pull_file', 'push_file', 'releases',
+  'restore',
   'rollback', 'service', 'status', 'volumes',
 ];
-// The six that read the agent's own filesystem. `pilot mcp` serves all 26;
-// the hosted endpoint on every host serves the other 20, because it has no
+// The six that read the agent's own filesystem. `pilot mcp` serves all 31;
+// the hosted endpoint on every host serves the other 25, because it has no
 // disk on the agent's side to read. One list, one subtraction, so the two
 // servers cannot drift apart without this file noticing.
 const MCP_LOCAL_TOOLS = ['build', 'deploy', 'generate_dockerfile', 'plan', 'pull_file', 'push_file'];
@@ -5674,6 +6198,554 @@ const MCP_HOSTED_TOOLS = MCP_TOOLS.filter((t) => !MCP_LOCAL_TOOLS.includes(t));
 // The text of a tool result, which is JSON in every case here.
 function toolText(result) {
   return (result.content ?? []).map((c) => c.text ?? '').join('');
+}
+
+// The database recipes, over the route both clients fetch them from.
+//
+// What this battery is really asserting is that `pilot add` writes a file
+// `pilot deploy` accepts. That was untrue for a while in a way no unit test
+// caught: every recipe published its engine's port, which the planner refuses
+// because the router dials 8080, and Redis spelled its password with a single
+// dollar, which compose substitutes at PARSE time from an environment that has
+// no such variable. Both produced a fragment that looked right field by field
+// and could not be deployed. So this fetches each recipe and plans it.
+async function recipeAssertions() {
+  const engines = ['postgres', 'mysql', 'redis', 'mongo'];
+  for (const engine of engines) {
+    let recipe;
+    await step(`a ${engine} recipe is served`, async () => {
+      const { status, json } = await request(`/v1/recipes/${engine}?name=db`);
+      assert(status === 200, `recipe ${engine}: HTTP ${status} ${JSON.stringify(json)}`);
+      recipe = json;
+      assert(recipe.engine === engine, `engine = ${recipe.engine}`);
+      assert(recipe.statement, 'no durability statement; that sentence is the point of a recipe');
+      assert(recipe.conn_var && recipe.url_template,
+        `${engine} names no connection variable`);
+      // The password is generated by the client. A recipe that carried one
+      // would have put it on the wire, which is the one thing this design is
+      // arranged to avoid.
+      assert(!JSON.stringify(recipe).includes('PASSWORD='),
+        `${engine} recipe carries a password`);
+      assert(recipe.url_template.includes('PASSWORD'),
+        `${engine} url_template has no PASSWORD placeholder to fill`);
+    });
+
+    await step(`a ${engine} recipe plans`, async () => {
+      let compose = `name: recipe-check\nservices:\n  db:\n${indentBlock(recipe.service)}`;
+      for (const [name, block] of Object.entries(recipe.companions ?? {})) {
+        compose += `  ${name}:\n${indentBlock(block)}`;
+      }
+      const volumes = Object.keys(recipe.volumes ?? {});
+      if (volumes.length) {
+        compose += 'volumes:\n' + volumes.map((v) => `  ${v}: {}\n`).join('');
+      }
+      const { status, json } = await request('/v1/compose/plan', {
+        method: 'POST', body: { compose },
+      });
+      assert(status === 200,
+        `the ${engine} recipe does not plan, so \`pilot add ${engine}\` writes a file ` +
+        `\`pilot deploy\` refuses: HTTP ${status} ${JSON.stringify(json)}`);
+      assert((json.steps ?? []).length === 1,
+        `${engine} planned ${json.steps?.length} steps, want one machine`);
+      // A database answers nothing on the router's port, so the command IS the
+      // gate. A recipe that planned without one would let a broken release
+      // through as healthy.
+      assert(json.steps[0].health?.type === 'cmd',
+        `${engine} carries no command health gate: ${JSON.stringify(json.steps[0].health)}`);
+      assert(!json.steps[0].ports?.length,
+        `${engine} publishes ${JSON.stringify(json.steps[0].ports)}; a database has ` +
+        'nothing to answer on the router\'s port');
+    });
+  }
+
+  // The pooler is the one place a recipe emits two services, and the whole
+  // design is that they become ONE machine. A pooler on its own machine still
+  // works and is still wrong: a network hop per query, and a thing that can be
+  // down while the database is up.
+  await step('a pooled postgres plans as one machine with two processes', async () => {
+    const { json: recipe } = await request('/v1/recipes/postgres?name=db&pool=true');
+    const companions = Object.keys(recipe.companions ?? {});
+    assert(companions.length === 1, `companions = ${JSON.stringify(companions)}, want the pooler`);
+    assert(recipe.direct_var === 'DATABASE_URL_DIRECT',
+      `direct_var = ${recipe.direct_var}; the address a migration needs must be named`);
+    assert(recipe.direct_template.includes(':5432'),
+      `direct_template = ${recipe.direct_template}, want the direct port`);
+    assert(recipe.url_template.includes(':6432'),
+      `url_template = ${recipe.url_template}, want the pooled port`);
+
+    let compose = `name: recipe-check\nservices:\n  db:\n${indentBlock(recipe.service)}`;
+    for (const [name, block] of Object.entries(recipe.companions)) {
+      compose += `  ${name}:\n${indentBlock(block)}`;
+    }
+    compose += 'volumes:\n' + Object.keys(recipe.volumes).map((v) => `  ${v}: {}\n`).join('');
+    const { status, json } = await request('/v1/compose/plan', { method: 'POST', body: { compose } });
+    assert(status === 200, `pooled postgres does not plan: HTTP ${status} ${JSON.stringify(json)}`);
+    assert(json.steps.length === 1,
+      `${json.steps.length} machines; the pooler must share the database's`);
+    const step0 = json.steps[0];
+    assert(step0.name === 'db',
+      `machine name = ${step0.name}, want db: a machine's name is its address`);
+    assert((step0.processes ?? []).length === 2,
+      `processes = ${JSON.stringify(step0.processes)}, want the database and the pooler`);
+    const pooler = step0.processes.find((p) => p.name === 'db-pool');
+    assert(pooler, `no pooler process: ${JSON.stringify(step0.processes)}`);
+    assert(!pooler.port, 'the pooler claims the machine\'s port; the database owns it');
+    assert((pooler.needs ?? []).includes('db'),
+      'the pooler does not wait for the database; it would accept connections and fail them');
+  });
+
+  await step('an unknown engine is refused with the list', async () => {
+    const { status, json } = await request('/v1/recipes/cockroach');
+    assert(status === 400, `HTTP ${status}`);
+    const text = JSON.stringify(json);
+    for (const engine of engines) {
+      assert(text.includes(engine), `the refusal does not name ${engine}: ${text}`);
+    }
+  });
+}
+
+// indentBlock renders a recipe's service block as compose YAML, indented to sit
+// under `services:`. JSON is valid YAML, so the block goes in as one flow
+// mapping rather than through a YAML writer this battery would otherwise need.
+function indentBlock(block) {
+  return Object.entries(block)
+    .map(([k, v]) => `    ${k}: ${JSON.stringify(v)}\n`)
+    .join('');
+}
+
+// The credential broker, driven the way a machine drives it: from inside.
+//
+// Everything here runs through exec, because that is the only vantage point
+// from which the claim can be tested at all. The broker is bound inside the
+// machine's own network namespace, so a request from this battery's own process
+// could never reach it, which is the property being asserted.
+async function brokerAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const created = [];
+
+  try {
+    let machine;
+    await step('a machine comes up knowing where its broker is', async () => {
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST',
+        body: { name: `broker-${tag}`, mem_mib: 512, knobs: { auto_stop: 'off' } },
+      });
+      assert(status === 201, `create: HTTP ${status} ${JSON.stringify(json)}`);
+      machine = json;
+      created.push(machine.id);
+
+      // The FILE, not an exec's environment. /etc/pilot/env is what the app
+      // unit loads (EnvironmentFile=), so an ad-hoc exec does not have these
+      // set -- and a test that read the exec's environment would be asserting
+      // something no application depends on.
+      const env = await execIn(machine.id, 'cat /etc/pilot/env 2>/dev/null || true');
+      assert(env.includes(':3002'), `no broker address in /etc/pilot/env:\n${env}`);
+      assert(env.includes(machine.id), `no machine id in /etc/pilot/env:\n${env}`);
+      assert(env.includes('/run/pilot/token'),
+        `no token file in /etc/pilot/env:\n${env}`);
+    });
+
+    // The one property the whole design rests on: nothing in the guest holds a
+    // fleet credential. Not the environment, not the disk.
+    await step('nothing in the guest holds a credential before a grant', async () => {
+      const env = await execIn(machine.id, 'cat /etc/pilot/env 2>/dev/null || true');
+      assert(!/^PILOT_TOKEN=/m.test(env),
+        `PILOT_TOKEN is set inside the machine: a token in the environment is a ` +
+        `token in every snapshot of it:\n${env}`);
+      const found = await execIn(machine.id,
+        'grep -rl pbt1 /etc /run 2>/dev/null | head -5; true');
+      assert(found.trim() === '', `a token is already on disk: ${found}`);
+    });
+
+    await step('deny by default: an ungranted machine gets nothing', async () => {
+      const code = await execIn(machine.id,
+        'curl -s -o /dev/null -w %{http_code} http://169.254.0.22:3002/token');
+      assert(code.trim() === '403', `GET /token = ${code}, want 403 with no grant`);
+      const secrets = await execIn(machine.id,
+        'curl -s -o /dev/null -w %{http_code} http://169.254.0.22:3002/secrets');
+      assert(secrets.trim() === '403', `GET /secrets = ${secrets}, want 403 with no grant`);
+    });
+
+    // Knowing your own id is not a credential, so identity answers regardless.
+    await step('identity answers with no grant', async () => {
+      const body = await execIn(machine.id, 'curl -s http://169.254.0.22:3002/identity');
+      const identity = JSON.parse(body);
+      assert(identity.machine_id === machine.id, `identity = ${body}`);
+      assert(identity.api_url, `identity carries no api_url: ${body}`);
+    });
+
+    await step('a grant is written, and reads back by name only', async () => {
+      const { status, json } = await request(`/v1/machines/${machine.id}/secrets`, {
+        method: 'PUT',
+        body: { scopes: ['machines'], secrets: { BROKER_CHECK: `value-${tag}` } },
+      });
+      assert(status === 200, `grant: HTTP ${status} ${JSON.stringify(json)}`);
+
+      const read = await request(`/v1/machines/${machine.id}/secrets`);
+      assert(read.status === 200, `read grant: HTTP ${read.status}`);
+      assert(read.json.secret_names.includes('BROKER_CHECK'),
+        `names = ${JSON.stringify(read.json.secret_names)}`);
+      assert(!JSON.stringify(read.json).includes(`value-${tag}`),
+        'reading a grant returned a VALUE; there is no route that may');
+    });
+
+    let token = '';
+    await step('the granted machine mints a token for itself', async () => {
+      const body = await execIn(machine.id, 'curl -s http://169.254.0.22:3002/token');
+      const got = JSON.parse(body);
+      token = got.token;
+      assert(token.startsWith('pbt1.'), `token = ${body}`);
+      assert(got.scopes.includes('machines'), `scopes = ${JSON.stringify(got.scopes)}`);
+    });
+
+    await step('that token reads the org and acts on its own machine', async () => {
+      const me = await request('/v1/whoami', { key: token });
+      assert(me.status === 200, `whoami with a broker token: HTTP ${me.status}`);
+
+      const list = await request('/v1/machines', { key: token });
+      assert(list.status === 200, `list with a broker token: HTTP ${list.status}`);
+
+      const own = await request(`/v1/machines/${machine.id}`, { key: token });
+      assert(own.status === 200, `reading itself: HTTP ${own.status}`);
+    });
+
+    // The narrowing this whole feature exists for.
+    await step('that token cannot write to another machine', async () => {
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST', body: { name: `broker-sibling-${tag}`, mem_mib: 512 },
+      });
+      assert(status === 201, `sibling create: HTTP ${status} ${JSON.stringify(json)}`);
+      created.push(json.id);
+
+      const refused = await request(`/v1/machines/${json.id}/suspend`, {
+        method: 'POST', key: token,
+      });
+      assert(refused.status === 403,
+        `suspending a sibling with a broker token = ${refused.status}, want 403`);
+      assert(refused.json.code === 'self_only',
+        `code = ${refused.json.code}, want self_only`);
+
+      // A read of the same sibling still works: reads are org-wide on purpose.
+      const read = await request(`/v1/machines/${json.id}`, { key: token });
+      assert(read.status === 200,
+        `reading a sibling = ${read.status}; reads are deliberately org-wide`);
+    });
+
+    await step('that token cannot reach a scope it was not granted', async () => {
+      const refused = await request('/v1/services', { key: token });
+      assert(refused.status === 403,
+        `a machines-scoped broker token reached /v1/services: ${refused.status}`);
+    });
+
+    await step('a granted secret reaches the machine, and only through the broker', async () => {
+      const body = await execIn(machine.id, 'curl -s http://169.254.0.22:3002/secrets');
+      const got = JSON.parse(body);
+      assert(got.secrets.BROKER_CHECK === `value-${tag}`, `secrets = ${body}`);
+
+      // The point of granting a secret rather than setting one: it is in no
+      // file inside the machine, so it is in no snapshot of it.
+      const onDisk = await execIn(machine.id,
+        `grep -rl "value-${tag}" /etc 2>/dev/null | head -3; true`);
+      assert(onDisk.trim() === '',
+        `the granted value is on disk at ${onDisk}; it must exist only in the answer`);
+    });
+
+    await step('revoking the token stops it, from local state alone', async () => {
+      const hash = await sha256Hex(token);
+      const { status } = await request(`/v1/api-keys/${hash}/revoke`, { method: 'POST' });
+      assert(status === 200 || status === 204, `revoke: HTTP ${status}`);
+
+      const refused = await request('/v1/machines', { key: token });
+      assert(refused.status === 401,
+        `a revoked broker token still works: ${refused.status}`);
+    });
+
+    await step('clearing the grant stops the next token', async () => {
+      const { status } = await request(`/v1/machines/${machine.id}/secrets`, { method: 'DELETE' });
+      assert(status === 204 || status === 200, `clear: HTTP ${status}`);
+      const code = await execIn(machine.id,
+        'curl -s -o /dev/null -w %{http_code} http://169.254.0.22:3002/token');
+      assert(code.trim() === '403', `GET /token after a clear = ${code}, want 403`);
+    });
+  } finally {
+    for (const id of created) {
+      await request(`/v1/machines/${id}`, { method: 'DELETE' }).catch(() => {});
+    }
+  }
+}
+
+// execIn runs one shell command inside a machine and returns its stdout.
+//
+// A helper because every broker assertion is made from INSIDE: the broker is
+// bound in the machine's own namespace, so this battery's own process could
+// never reach it, which is exactly the property being asserted.
+async function execIn(machineID, cmd) {
+  const { status, json } = await request(`/v1/machines/${machineID}/exec`, {
+    method: 'POST', body: { cmd, user: 'root' },
+  });
+  assert(status === 200, `exec: HTTP ${status} ${JSON.stringify(json)}`);
+  assert(json.exit_code === 0,
+    `exec exited ${json.exit_code}: ${json.stderr || json.stdout}`);
+  return json.stdout ?? '';
+}
+
+// sha256Hex is how a token names itself to the revoke route, which takes the
+// hash rather than the token: a revocation request that carried the credential
+// would put it in a log line on the way past.
+async function sha256Hex(value) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Per-machine numbers, and a log follow that can be resumed.
+//
+// The scoping assertion is the one that matters most here: a scrape is a new
+// way to read about machines, so it is a new way to read about somebody else's
+// machines if the narrowing is wrong. It is checked with a second org's key,
+// against the same host, which is exactly the shape a mistake would take.
+async function observabilityAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const created = [];
+
+  try {
+    let machine;
+    await step('a machine reports its own CPU and memory', async () => {
+      const { status, json } = await request('/v1/machines', {
+        method: 'POST',
+        body: { name: `metrics-${tag}`, mem_mib: 512, knobs: { auto_stop: 'off' } },
+      });
+      assert(status === 201, `create: HTTP ${status} ${JSON.stringify(json)}`);
+      machine = json;
+      created.push(machine.id);
+
+      const got = await request(`/v1/machines/${machine.id}/metrics`);
+      assert(got.status === 200, `metrics: HTTP ${got.status} ${JSON.stringify(got.json)}`);
+      assert(got.json.machine_id === machine.id, `machine_id = ${got.json.machine_id}`);
+      assert(got.json.state === 'running', `state = ${got.json.state}`);
+      assert(got.json.memory_limit_bytes === 512 * 1024 * 1024,
+        `memory_limit_bytes = ${got.json.memory_limit_bytes}, want 512 MiB`);
+      assert(got.json.sampled_at > 0, 'the sample carries no time');
+    });
+
+    let before = 0;
+    await step('the scrape carries this machine, by id and by name', async () => {
+      const res = await fetch(`${API}/v1/metrics`, {
+        headers: { Authorization: `Bearer ${KEY}` },
+      });
+      assert(res.status === 200, `scrape: HTTP ${res.status}`);
+      const body = await res.text();
+      assert(body.includes(`machine="${machine.id}"`), `the scrape omits ${machine.id}`);
+      assert(body.includes(`name="metrics-${tag}"`), 'the scrape omits the name label');
+      assert(body.includes('# TYPE pilots_machine_cpu_seconds_total counter'),
+        'the CPU total is not typed as a counter, so nothing will rate it');
+      before = cpuFromExposition(body, machine.id);
+    });
+
+    // A counter has to go UP when work is done, or it is not measuring
+    // anything. Real CPU, burned on purpose.
+    await step('burning CPU raises the counter', async () => {
+      await request(`/v1/machines/${machine.id}/exec`, {
+        method: 'POST',
+        body: { cmd: 'timeout 3 sh -c "while :; do :; done" || true', user: 'root' },
+      });
+      const got = await request(`/v1/machines/${machine.id}/metrics`);
+      assert(got.status === 200, `metrics: HTTP ${got.status}`);
+      assert(got.json.cpu_seconds > before,
+        `cpu_seconds = ${got.json.cpu_seconds}, was ${before}: burning three ` +
+        `seconds of CPU did not move the counter`);
+      before = got.json.cpu_seconds;
+    });
+
+    // The whole reason the total is persisted. A counter that dipped here
+    // would make every rate over it negative and fire every alert built on it.
+    await step('a suspend and a wake never lower the counter', async () => {
+      await request(`/v1/machines/${machine.id}/suspend`, { method: 'POST' });
+      const asleep = await request(`/v1/machines/${machine.id}/metrics`);
+      assert(asleep.status === 200, `metrics while suspended: HTTP ${asleep.status}`);
+      assert(asleep.json.cpu_seconds >= before,
+        `cpu_seconds fell to ${asleep.json.cpu_seconds} from ${before} on suspend`);
+      assert(asleep.json.memory_bytes === 0,
+        `a suspended machine reports ${asleep.json.memory_bytes} bytes of memory`);
+
+      await request(`/v1/machines/${machine.id}/wake`, { method: 'POST' });
+      const awake = await request(`/v1/machines/${machine.id}/metrics`);
+      assert(awake.json.cpu_seconds >= before,
+        `cpu_seconds fell to ${awake.json.cpu_seconds} from ${before} across a wake`);
+    });
+
+    // A scrape is a new way to read about machines, so it is a new way to read
+    // about somebody else's if the narrowing is wrong.
+    await step('another org sees none of it', async () => {
+      const mint = await request('/v1/api-keys', {
+        method: 'POST',
+        body: { org_id: `org_metrics_${tag}`, scopes: ['machines'] },
+      });
+      assert(mint.status === 201, `mint: HTTP ${mint.status} ${JSON.stringify(mint.json)}`);
+      const other = mint.json.key ?? mint.json.token;
+      assert(other, `no key in ${JSON.stringify(mint.json)}`);
+
+      const res = await fetch(`${API}/v1/metrics`, {
+        headers: { Authorization: `Bearer ${other}` },
+      });
+      assert(res.status === 200, `the other org's scrape: HTTP ${res.status}`);
+      const body = await res.text();
+      assert(!body.includes(machine.id),
+        `a second org's scrape carries ${machine.id}`);
+
+      const direct = await request(`/v1/machines/${machine.id}/metrics`, { key: other });
+      assert(direct.status === 404,
+        `a second org read another org's metrics directly: ${direct.status}`);
+    });
+
+    await step('a log tail is the END of the log, and an offset resumes exactly', async () => {
+      for (let i = 0; i < 5; i += 1) {
+        await request(`/v1/machines/${machine.id}/exec`, {
+          method: 'POST',
+          body: { cmd: `echo marker-${tag}-${i} > /dev/console`, user: 'root' },
+        });
+      }
+      const whole = await fetch(`${API}/v1/machines/${machine.id}/logs`, {
+        headers: { Authorization: `Bearer ${KEY}` },
+      });
+      const text = await whole.text();
+      assert(whole.headers.get('x-pilot-log-offset') === '0',
+        `a whole log starts at ${whole.headers.get('x-pilot-log-offset')}, want 0`);
+
+      const tailed = await fetch(`${API}/v1/machines/${machine.id}/logs?tail=1`, {
+        headers: { Authorization: `Bearer ${KEY}` },
+      });
+      const tailBody = await tailed.text();
+      assert(tailBody.split('\n').filter((l) => l !== '').length <= 1,
+        `?tail=1 returned ${tailBody.split('\n').length} lines`);
+      assert(text.endsWith(tailBody), 'the tail is not the end of the log');
+
+      // The resume: start where a previous read ended and get exactly what
+      // came after, with nothing repeated and nothing skipped.
+      const half = Math.floor(text.length / 2);
+      const resumed = await fetch(`${API}/v1/machines/${machine.id}/logs?offset=${half}`, {
+        headers: { Authorization: `Bearer ${KEY}` },
+      });
+      assert(resumed.headers.get('x-pilot-log-offset') === String(half),
+        `the offset header says ${resumed.headers.get('x-pilot-log-offset')}, want ${half}`);
+      const rest = await resumed.text();
+      assert(text.slice(half) === rest,
+        'resuming at an offset did not return exactly the bytes after it');
+    });
+  } finally {
+    for (const id of created) {
+      await request(`/v1/machines/${id}`, { method: 'DELETE' }).catch(() => {});
+    }
+  }
+}
+
+// cpuFromExposition reads one machine's CPU total out of a scrape.
+function cpuFromExposition(body, machineID) {
+  for (const line of body.split('\n')) {
+    if (!line.startsWith('pilots_machine_cpu_seconds_total{')) continue;
+    if (!line.includes(`machine="${machineID}"`)) continue;
+    return Number(line.slice(line.lastIndexOf(' ') + 1));
+  }
+  return 0;
+}
+
+// The rule that lets a database scale and stops everything else scaling.
+//
+// Driven through the public API alone, because that is where the rule lives:
+// the label is written once at create and a patch cannot add it, so the whole
+// assertion is about what the API accepts from a client that tries.
+async function replicaRuleAssertions() {
+  const tag = Math.random().toString(36).slice(2, 8);
+  const created = [];
+  const volumes = [];
+
+  try {
+    // A hand-written volume service. Exactly what somebody scaling a database
+    // by editing a number would have.
+    let plain;
+    await step('a volume service without an engine label cannot scale', async () => {
+      const vol = await request('/v1/volumes', {
+        method: 'POST', body: { name: `rule-${tag}`, size_gib: 1 },
+      });
+      assert(vol.status === 201, `volume: HTTP ${vol.status} ${JSON.stringify(vol.json)}`);
+      volumes.push(vol.json.id);
+
+      const refused = await request('/v1/services', {
+        method: 'POST',
+        body: { name: `rule-${tag}`, app: `rule-${tag}`, replicas: 3, volume: vol.json.id },
+      });
+      assert(refused.status === 400,
+        `a hand-written volume service scaled to 3: HTTP ${refused.status}`);
+      // The refusal has to NAME the recipe. "Refused" teaches nothing, and
+      // this is the moment somebody decides whether the platform can do what
+      // they want at all.
+      assert(JSON.stringify(refused.json).includes('pilot add postgres'),
+        `the refusal does not name the recipe: ${JSON.stringify(refused.json)}`);
+
+      // One replica is fine, and that is the point of the rule rather than a
+      // carve-out: a volume is mounted by one machine.
+      const ok = await request('/v1/services', {
+        method: 'POST',
+        body: { name: `rule-${tag}`, app: `rule-${tag}`, replicas: 1, volume: vol.json.id },
+      });
+      assert(ok.status === 201, `one replica refused: HTTP ${ok.status} ${JSON.stringify(ok.json)}`);
+      plain = ok.json;
+      created.push(plain.id);
+    });
+
+    // And a patch cannot get there either, which is the side door the rule
+    // would otherwise have.
+    await step('a patch cannot scale it past one', async () => {
+      const refused = await request(`/v1/services/${plain.id}`, {
+        method: 'PATCH', body: { replicas: 3 },
+      });
+      assert(refused.status === 400,
+        `a patch scaled a volume service to 3: HTTP ${refused.status}`);
+    });
+
+    // The label cannot be ADDED, which is what makes the rule hold at all: if
+    // a patch could label a service postgres, every hand-written service could
+    // reach the exception in two calls.
+    await step('the engine label cannot be added to an existing service', async () => {
+      const res = await request(`/v1/services/${plain.id}`, {
+        method: 'PATCH', body: { labels: { 'pilot.engine': 'postgres' } },
+      });
+      if (res.status === 200) {
+        const after = await request(`/v1/services/${plain.id}`);
+        assert(after.json.labels?.['pilot.engine'] !== 'postgres',
+          'a patch added the engine label, so any service can now scale onto volumes');
+      }
+      // A refusal is equally correct; what must not happen is the label
+      // landing.
+    });
+
+    await step('the recipe fragment refuses a shape that cannot work', async () => {
+      const even = await request(`/v1/recipes/ha/pg?replicas=2&etcd=4`);
+      assert(even.status === 400, `an even etcd was admitted: HTTP ${even.status}`);
+      assert(JSON.stringify(even.json).includes('majority'),
+        `the refusal does not give the reason: ${JSON.stringify(even.json)}`);
+
+      const tooMany = await request(`/v1/recipes/ha/pg?replicas=9&etcd=3`);
+      assert(tooMany.status === 400, `nine data replicas were admitted: HTTP ${tooMany.status}`);
+
+      const good = await request(`/v1/recipes/ha/pg?replicas=2&etcd=3`);
+      assert(good.status === 200, `a sensible shape was refused: HTTP ${good.status}`);
+      assert(good.json.etcd_name === 'pg-etcd', `etcd_name = ${good.json.etcd_name}`);
+      // The statement is what somebody has to read before five machines
+      // appear on their bill, so its absence is a failure rather than a
+      // cosmetic gap.
+      assert((good.json.statement ?? '').includes('5'),
+        `the statement does not say how many machines: ${good.json.statement}`);
+      assert(good.json.secret_names?.includes('patroni_replication'),
+        `no replication secret named: ${JSON.stringify(good.json.secret_names)}`);
+    });
+  } finally {
+    for (const id of created) {
+      await request(`/v1/services/${id}`, { method: 'DELETE' }).catch(() => {});
+    }
+    for (const id of volumes) {
+      await request(`/v1/volumes/${id}`, { method: 'DELETE' }).catch(() => {});
+    }
+  }
 }
 
 async function agentDeployAssertions(REFLINK) {
@@ -6218,6 +7290,10 @@ async function main() {
   // Before the FULL gate: the compose plan, the service patch and the shape of
   // the usage answer need no Firecracker, and the half that does says so.
   await dataRouteAssertions();
+  await egressAddressAssertions();
+  await placementAssertions();
+  await recipeAssertions();
+  await replicaRuleAssertions();
   await hostedMCPAssertions(FULL);
   if (FULL) {
     // The engine target or the degraded ceiling: enforce() needs to know
@@ -6226,6 +7302,9 @@ async function main() {
     await lifecycleAssertions();
     await timingAssertions();
     await volumeAssertions();
+    await forkAssertions();
+    await brokerAssertions();
+    await observabilityAssertions();
     await buildAssertions();
     await internalAssertions();
     await edgeAssertions();

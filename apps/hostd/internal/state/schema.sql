@@ -354,6 +354,23 @@ CREATE TABLE IF NOT EXISTS org_quotas (          -- writer: any host, on an admi
   updated_at     INTEGER
 );
 
+-- How much object storage an org's checkpoints may hold.
+--
+-- A SEPARATE table rather than a column on org_quotas, and that is not a
+-- style choice: org_quotas carries rows on every running fleet, and cr-sqlite
+-- backfills every row of a table whose columns change and gossips the
+-- backfill. That is the fleet-wide storm that took fly down twice for ~11.5h
+-- (rule 6). A new table backfills nothing because it has no rows.
+--
+-- Read alongside org_quotas by GetQuota, so a caller sees one quota; an org
+-- with no row here has the default, exactly as an org with no org_quotas row
+-- does.
+CREATE TABLE IF NOT EXISTS org_snapshot_quotas (  -- writer: any host, on an admin-scoped request
+  org_id           TEXT NOT NULL PRIMARY KEY,
+  max_snapshot_gib INTEGER,
+  updated_at       INTEGER
+);
+
 -- Which repositories an org may ask this fleet to fetch.
 --
 -- The fleet's GitHub App holds an installation token for every repository it
@@ -419,6 +436,128 @@ CREATE TABLE IF NOT EXISTS host_cpu (          -- writer: the host itself
   updated_at   INTEGER
 );
 
+-- What a host can still hold, for create-time placement.
+--
+-- A side table rather than columns on `hosts` for the reason host_cpu is one:
+-- `hosts` has rows, and a column add on a live cr-sqlite table backfills and
+-- gossips every one of them (rule 6).
+--
+-- mem_reclaimable_mib is the memory held by RUNNING machines this host would
+-- suspend anyway, were the idle timer to fire now. It is NOT suspended
+-- machines: suspend kills the Firecracker process, so a suspended machine
+-- already holds no memory. Counting it would double-count free memory and
+-- admit creates that then fail to boot.
+--
+-- draining is set by `pilot hosts drain`. A draining host is skipped by every
+-- ranker, which is what makes a drain converge rather than race the placer.
+--
+-- Writer: the host itself, on its heartbeat.
+CREATE TABLE IF NOT EXISTS host_capacity (     -- writer: the host itself
+  host_id             TEXT NOT NULL PRIMARY KEY,
+  mem_free_mib        INTEGER,
+  mem_reclaimable_mib INTEGER,
+  cpu_count           INTEGER,
+  vcpus_running       INTEGER,
+  draining            INTEGER,  -- 1 while the host is being drained
+  updated_at          INTEGER
+);
+
+-- Which builds a host already has on local disk.
+--
+-- Placement prefers a host that holds the builds a create needs, because a
+-- cached build is the difference between a restore and a download. A BONUS
+-- only: it breaks a near-tie and can never move a machine onto a host that
+-- cannot hold it, or the fleet would pack itself onto whichever host happened
+-- to build things.
+--
+-- Capped at the newest few hundred ids, deliberately. An unbounded row here is
+-- the C5 landmine: a large value gossiped on every change starves the apply
+-- loop for every other row.
+--
+-- Writer: the host itself, and only when the set actually changed.
+CREATE TABLE IF NOT EXISTS host_builds (       -- writer: the host itself
+  host_id    TEXT NOT NULL PRIMARY KEY,
+  builds     TEXT,     -- json array of build ids present on this host
+  updated_at INTEGER
+);
+
+-- One host OFFERING a machine to another, on a planned drain.
+--
+-- This is the third sanctioned exception to single-writer, and the only one
+-- where a LIVE host's machine changes owner. It exists because the alternative
+-- is worse: without it, a host reboot is customer-visible, since a machine only
+-- ever moved when its owner was provably dead.
+--
+-- Why it is safe where an ordinary cross-host write is not:
+--
+--   * WRITE-ONCE. A handoff row is inserted and never updated. A CRDT merge
+--     has nothing to corrupt in a row nobody rewrites.
+--   * The SOURCE writes it, and the source is the machine's current owner, so
+--     the row is written by the host that already owns what it describes.
+--   * The target's claim is checked against it: to_host must be the claimer,
+--     from_host must be the row's current owner, it must be the machine's
+--     newest offer, and the machine must not be running. A claim that fails
+--     any of those is refused exactly as a claim with no dead owner is.
+--
+-- seq orders repeated offers of one machine: a target that never took it is
+-- superseded by the next offer rather than racing it.
+--
+-- Reaped by their writer after a day, like destroyed machines.
+-- How often a volume is snapshotted, and how many snapshots are kept.
+--
+-- A scheduled snapshot is the difference between "you can roll back" and "you
+-- can roll back to a moment you thought to record". Nobody takes a manual
+-- snapshot before the mistake.
+--
+-- Retention is two numbers rather than one because the two questions are
+-- different: how far back can I go at a day's resolution, and how far back can
+-- I go at all. Keeping the newest N dailies plus the newest of each of M weeks
+-- answers both in bounded space.
+--
+-- A NEW table rather than columns on `volumes`, which has rows (rule 6).
+--
+-- Writer: the volume's host, which is the only host that can take the snapshot
+-- the policy describes.
+CREATE TABLE IF NOT EXISTS volume_policies (   -- writer: the volume's host_id
+  volume_id   TEXT NOT NULL PRIMARY KEY,
+  cron        TEXT,     -- five fields UTC, or @daily/@weekly/@hourly/@monthly
+  keep_daily  INTEGER,  -- the newest N snapshots
+  keep_weekly INTEGER,  -- plus the newest of each of the last M ISO weeks
+  updated_at  INTEGER
+);
+
+-- Where a forked machine came from.
+--
+-- A fork is a NEW machine restored from another machine's memory and disk: new
+-- id, new name, new URL, new token. What it shares with its parent is the
+-- artifacts it was restored from, and that sharing is the whole reason this
+-- table exists -- without a record of it, the parent's next suspend or destroy
+-- would discard builds the fork is still faulting pages out of.
+--
+-- A side table rather than a `parent` column on machines, because `machines`
+-- has rows (rule 6).
+--
+-- Write-once, by the fork's own host, which is the host that created the fork
+-- and therefore already writes its machine row.
+CREATE TABLE IF NOT EXISTS machine_lineage (   -- writer: the fork's host (write-once)
+  id              TEXT NOT NULL PRIMARY KEY,   -- the FORK's machine id
+  parent_id       TEXT,     -- the machine it came from, "" for a checkpoint with no live parent
+  checkpoint_id   TEXT,     -- the checkpoint it was restored from, "" for a suspend-image fork
+  mem_build_id    TEXT,     -- the artifacts it shares with its parent, and
+  rootfs_build_id TEXT,     -- which therefore must outlive the parent
+  volume_snapshot TEXT,     -- the volume snapshot its own volume was filled from
+  created_at      INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS machine_handoffs (  -- writer: the machine's owner (write-once)
+  id         TEXT NOT NULL PRIMARY KEY,        -- ho-<uuid>
+  machine_id TEXT,
+  from_host  TEXT,
+  to_host    TEXT,
+  seq        INTEGER,
+  created_at INTEGER
+);
+
 -- Keyed like tenancy: the id of the object whose memory image this describes.
 -- A release's and a checkpoint's images are as vendor-locked as a machine's.
 -- last_start and last_start_at are written for machines only: the observable
@@ -454,4 +593,109 @@ CREATE TABLE IF NOT EXISTS url_auth (          -- writer: the host that writes t
   kind       TEXT,     -- machine|service
   mode       TEXT,     -- public|org
   updated_at INTEGER
+);
+
+-- What a machine may ask its host's broker for.
+--
+-- A machine holds no API key. It asks the broker hostd binds inside its own
+-- network namespace, and this row says what the answer may be: which scopes a
+-- token may carry, and which secret values may be handed over. Absent, or
+-- present with both fields empty, means NO -- deny by default, so a machine
+-- that nobody granted anything to can reach nothing.
+--
+-- `sealed` is a seal.Seal of a json name-to-value map, never plaintext: this
+-- table gossips to every host like every other one. These are the secrets that
+-- deliberately never reach /etc/pilot/env, so they are in no snapshot and on no
+-- disk inside the guest.
+--
+-- Keyed and written like url_auth above: the object's id, written by the host
+-- that writes its row, so the merge has one logical writer (invariant 1). A
+-- side table rather than columns on `machines`, because that table has rows and
+-- is therefore closed to column adds (rule 6).
+CREATE TABLE IF NOT EXISTS broker_grants (     -- writer: the host that writes the object row it describes
+  id         TEXT NOT NULL PRIMARY KEY,        -- machine or service id
+  kind       TEXT,     -- machine|service
+  org_id     TEXT,
+  scopes     TEXT,     -- csv of api scopes; empty means no token may be minted
+  sealed     TEXT,     -- seal.Seal of {name: value}; empty means no secrets
+  updated_at INTEGER
+);
+
+-- How big a service's replicas are. Absent means the defaults every service
+-- had before this table existed (1 vCPU, 512 MiB), so an old service reads
+-- correctly without being backfilled -- which matters because backfilling a
+-- live cr-sqlite table is the incident rule 6 exists to prevent.
+--
+-- A side table rather than two columns on `services`, for that same reason:
+-- `services` has rows.
+--
+-- image_vcpus and image_mem_mib are the size the release's MEMORY IMAGE was
+-- photographed at, which is NOT always the current size: a resize changes the
+-- size first and re-photographs after. A replica may only restore from that
+-- image when the two agree, because Firecracker cannot load a memory image
+-- into a differently-sized VM. When they disagree the replica boots instead,
+-- which is slower and correct.
+--
+-- Writer: the service's arbiter, the one host that already writes the
+-- `services` row through forwardToArbiter, so the merge has a single writer.
+-- The IPv6 block a host hands per-org egress addresses out of.
+--
+-- A tenant's outbound address is a pure function of this prefix and their org
+-- id, so there is nothing to allocate and no assignment to store. What DOES
+-- have to be shared is the prefix itself: any host may answer a request about
+-- any machine, and the answering host cannot know another host's prefix
+-- without reading it.
+--
+-- Absent means that host manages no egress, which is what every host did
+-- before this table, so nothing is backfilled. A side table rather than a
+-- column on `hosts` for the usual reason: `hosts` has rows (rule 6).
+--
+-- Writer: the host the row describes, which is the plainest single writer
+-- there is.
+CREATE TABLE IF NOT EXISTS host_egress (       -- writer: the host it describes
+  host_id    TEXT NOT NULL PRIMARY KEY,
+  prefix6    TEXT,     -- a routed /64, e.g. 2a01:4f8:1c17:abcd::/64
+  interface  TEXT,     -- the uplink it leaves by, for an operator reading this
+  updated_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS service_sizes (     -- writer: the service's arbiter
+  service_id    TEXT NOT NULL PRIMARY KEY,
+  vcpus         INTEGER,  -- what a replica is created with
+  mem_mib       INTEGER,
+  image_vcpus   INTEGER,  -- what the release's memory image was photographed at
+  image_mem_mib INTEGER,
+  updated_at    INTEGER
+);
+
+-- Where a release's Firecracker VMSTATE lives.
+--
+-- A release is a checkpoint: `snapshotRelease` proves one replica, checkpoints
+-- it, and records the checkpoint's two build ids on the release row. Those two
+-- are the guest's MEMORY and DISK. They are not the whole picture. Restoring
+-- also needs the vmstate -- device state and vcpu registers, a few kilobytes
+-- next to gigabytes of memory -- and that object is keyed by the machine and
+-- checkpoint it came from, neither of which the release row carries.
+--
+-- So a replica created from a release had no way to name the vmstate, passed
+-- an empty key, and failed inside the AWS SDK on "input member Key must not be
+-- empty" rather than on anything that named the missing piece. This table is
+-- the missing piece: release id to the pair the key is built from.
+--
+-- A side table because `releases` has rows, which closes it to column adds
+-- (rule 6). Write-once, by the host that photographed the release, which is
+-- the host that took the checkpoint -- so there is one writer and nothing for
+-- a merge to corrupt.
+--
+-- service_id is CARRIED on the row rather than read back from `releases`.
+-- This row is written while the release is being assembled, BEFORE the
+-- release row itself exists -- the checkpoint has to succeed before there is
+-- a release worth writing -- so a writer check that looked the release up
+-- would refuse every write it is meant to guard.
+CREATE TABLE IF NOT EXISTS release_snapshots ( -- writer: the host that photographed it (write-once)
+  release_id    TEXT NOT NULL PRIMARY KEY,
+  service_id    TEXT,     -- carried, not looked up: see the note above
+  machine_id    TEXT,     -- the replica that was photographed
+  checkpoint_id TEXT,     -- the checkpoint whose vmstate this release restores
+  created_at    INTEGER
 );

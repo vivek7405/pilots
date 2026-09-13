@@ -78,8 +78,27 @@ function createClient(org?: string): PilotsClient {
  * outside this file changes.
  */
 
-export function listMachines(org: string): Promise<Machine[]> {
-  return fleet.http.json<Machine[]>('GET', '/v1/machines', { query: { org } });
+/**
+ * The org's machines.
+ *
+ * `GET /v1/machines` OMITS builders unless asked (`?include=builders`), which
+ * is right for every other client: a builder is a machine hostd made for
+ * itself, and the CLI, the SDKs and an agent should never have to filter one
+ * out. The dashboard is the exception, because `<machine-list>` renders a
+ * `builders` chip whose COUNT is the only way a reader learns one exists.
+ *
+ * So `builders: true` is passed by exactly the reads that feed that component
+ * -- the page's SSR snapshot and the live socket -- and by nothing else. The
+ * two must agree or hydration would add or drop rows. Every other caller stays
+ * on the default, and one of them matters: the check that refuses to delete a
+ * team while it still owns something must not count a builder, because a
+ * builder is not a thing any person can remove, and counting it would make
+ * such a team permanently undeletable.
+ */
+export function listMachines(org: string, opts: { builders?: boolean } = {}): Promise<Machine[]> {
+  const query: Record<string, string> = { org };
+  if (opts.builders) query.include = 'builders';
+  return fleet.http.json<Machine[]>('GET', '/v1/machines', { query });
 }
 
 export function listServices(org: string): Promise<Service[]> {

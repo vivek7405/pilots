@@ -148,6 +148,26 @@ func TestMintValidatesItsBody(t *testing.T) {
 		{"no scopes", testKey, `{"org_id":"org_new"}`, http.StatusBadRequest},
 		{"unknown scope", testKey, `{"org_id":"org_new","scopes":["root"]}`, http.StatusBadRequest},
 		{"non-admin", machinesKey, `{"org_id":"org_new","scopes":["machines"]}`, http.StatusForbidden},
+		// The org id reaches object keys, machine names and query filters, so
+		// what it may contain is not a matter of taste. A traversal in one is
+		// a traversal everywhere it is treated as a path segment.
+		{"a traversal", testKey, `{"org_id":"..","scopes":["machines"]}`, http.StatusBadRequest},
+		{"a traversal inside", testKey, `{"org_id":"a/../b","scopes":["machines"]}`, http.StatusBadRequest},
+		{"a slash", testKey, `{"org_id":"org/new","scopes":["machines"]}`, http.StatusBadRequest},
+		{"a dot", testKey, `{"org_id":"org.new","scopes":["machines"]}`, http.StatusBadRequest},
+		{"a space", testKey, `{"org_id":"org new","scopes":["machines"]}`, http.StatusBadRequest},
+		{"uppercase", testKey, `{"org_id":"OrgNew","scopes":["machines"]}`, http.StatusBadRequest},
+		{"too long", testKey, `{"org_id":"` + strings.Repeat("a", 64) + `","scopes":["machines"]}`, http.StatusBadRequest},
+		// And what must keep working: the ids this fleet already issues, and
+		// the UUIDs the dashboard mints.
+		{"an underscore id", testKey, `{"org_id":"org_new","scopes":["machines"]}`, http.StatusCreated},
+		{"a dashboard uuid", testKey,
+			`{"org_id":"3f2504e0-4f89-11d3-9a0c-0305e82c3301","scopes":["machines"]}`, http.StatusCreated},
+		// A UUID whose first group is all digits: it looks like a port
+		// selector to the machine-name rule, and must not be refused here,
+		// because an org id never stands alone as a hostname.
+		{"a uuid starting with digits", testKey,
+			`{"org_id":"12345678-4f89-11d3-9a0c-0305e82c3301","scopes":["machines"]}`, http.StatusCreated},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if rec := postJSON(t, h, "/v1/api-keys", tc.key, tc.body); rec.Code != tc.want {

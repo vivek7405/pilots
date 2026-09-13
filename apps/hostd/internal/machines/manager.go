@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -62,10 +63,18 @@ type Discovery interface {
 // this package.
 var ErrNotFound = fmt.Errorf("machines: %w", state.ErrNotFound)
 
+// ErrInvalid is a request this package refuses on its face, before anything is
+// asked of a guest: an unknown action, a missing name. Separate from
+// ErrNotFound so the API answers 400 rather than 404 for a caller mistake.
+var ErrInvalid = errors.New("machines: invalid request")
+
 // Options configures the manager.
 type Options struct {
 	HostID string
 	Domain string // e.g. "pilotrun.app"
+	// APIURL is the fleet's API address, handed to every guest so a client
+	// inside one does not have to construct it and cannot construct it wrongly.
+	APIURL string
 	// APIHostname is the name the control API answers on, e.g.
 	// "api.pilotrun.app". dispatch claims it before the workload suffix, so
 	// the machine name that would produce it is reserved -- see
@@ -93,13 +102,38 @@ type Options struct {
 	// served on. One pool per host, because the devices are a host resource.
 	NBDDevices *nbd.DevicePool
 
-	// HandlerEnv is passed to the block and fault servers, which need the
-	// object-storage credentials to read builds.
+	// HandlerEnv is passed to the block and fault servers. It is an ALLOWLIST
+	// built by HandlerEnv(), not this daemon's environment: those processes
+	// read their builds through a per-machine chunk socket and hold no storage
+	// credential. See chunks.go and internal/chunkserve.
 	HandlerEnv []string
 
 	// AgentTokenSecret derives each machine's guest credential. See
 	// Manager.token for why a rescued machine is unreachable without it.
 	AgentTokenSecret string
+
+	// FreeMemMiB reports how much memory this host can still give to guests,
+	// in the unit that actually backs them: MemAvailable ordinarily, and free
+	// hugepages on a host reserving a pool. Injected rather than read here so
+	// there is ONE reading of it on the host, shared by admission, the
+	// heartbeat and self-heal -- three components disagreeing about how full a
+	// host is would be three different placement answers.
+	//
+	// Nil reads as "unknown", which admits everything: a host that cannot
+	// measure itself must not refuse every create.
+	FreeMemMiB func() int
+
+	// CPUCount is how many CPUs this host has, used to normalise headroom so
+	// a large host and a small one are ranked fairly rather than by raw MiB.
+	CPUCount int
+
+	// Handoffs tells another host to take a machine this one is draining.
+	//
+	// A courtesy, not the mechanism: the offer ROW is what authorises the
+	// move, so a host that never receives the call still takes the machine
+	// when it notices the row. The call only makes the common case fast.
+	// Nil on a single box, where there is nowhere to hand anything.
+	Handoffs HandoffNotifier
 
 	// Volumes creates and mounts persistent disks. Nil on a host with no
 	// object storage, where every volume operation is refused up front rather
@@ -127,6 +161,11 @@ type Options struct {
 	// checks.
 	Usage *usage.Ledger
 
+	// Retention is the tiered checkpoint policy. The zero value is
+	// DefaultRetention: an hour of everything, a day of hourlies, a week of
+	// dailies. See retention.go.
+	Retention Retention
+
 	// Vendor is this host's CPU vendor, from cpuvendor.Detect: the raw
 	// /proc/cpuinfo vendor_id, GenuineIntel or AuthenticAMD. It decides which
 	// golden template pool this host builds into and whether a memory image
@@ -146,6 +185,10 @@ type Manager struct {
 	mu      sync.RWMutex
 	running map[string]*fc.Machine // machine id -> live process
 
+	// chunks serves each running machine's builds to its own handlers over a
+	// unix socket, so no handler holds a storage credential. See chunks.go.
+	chunks *chunkServers
+
 	locks  sync.Map // machine id -> *sync.Mutex
 	flight *inFlight
 
@@ -153,11 +196,36 @@ type Manager struct {
 	// away. See retiredUffd.
 	retired retiredUffd
 
+	// rootfsIDs memoises the content hash of each variant's ext4, keyed by
+	// path, size and mtime. Hashing a rootfs is milliseconds and the answer
+	// only changes when a host is given a new artifact, so it is computed once
+	// per version rather than once per create. See rootfsID.
+	rootfsIDMu sync.Mutex
+	rootfsIDs  map[string]string
+
 	// exits is the wall time of the last exit nobody asked for, per machine.
 	// In memory on purpose: its one reader is the crash-loop guard in
 	// settleExit, and a gossiped row for a per-process policy would be a
 	// second copy of a contract. Destroy forgets the entry.
 	exits sync.Map // machine id -> time.Time
+
+	// draining is set while an operator is moving this host's machines off it.
+	// In memory rather than on a row, because it is a property of THIS
+	// process's willingness to take work: the replicated half lives in
+	// host_capacity, written from the same flag on the next heartbeat.
+	draining atomic.Bool
+
+	// handingOff maps a machine id to the host it is moving to, while a drain
+	// is in flight. In memory because it is a property of THIS process's
+	// current operation: the durable half is the handoff row, and a restart
+	// mid-drain leaves the machine where it was rather than in a state nobody
+	// is acting on.
+	handingOff sync.Map // machine id -> target host id
+
+	// snapshotFired remembers which minute each volume's snapshot schedule
+	// last fired on, so the loop driving it can tick several times inside one
+	// minute and still fire once.
+	snapshotFired *snapshotFired
 }
 
 func New(opts Options) *Manager {
@@ -169,6 +237,9 @@ func New(opts Options) *Manager {
 		pool:    netns.NewPool(opts.PoolSize, opts.MachinePrefix),
 		running: make(map[string]*fc.Machine),
 		flight:  newInFlight(),
+		chunks:  newChunkServers(),
+
+		snapshotFired: newSnapshotFired(),
 	}
 }
 
@@ -215,8 +286,13 @@ func (m *Manager) put(id string, fcm *fc.Machine) {
 
 func (m *Manager) drop(id string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	delete(m.running, id)
+	m.mu.Unlock()
+	// The chunk socket goes with the process that read it. Here rather than in
+	// Destroy alone, because this is the ONE place a machine stops running: a
+	// socket left listening for a machine that is gone would answer a handler
+	// nobody is supervising.
+	m.chunks.close(id)
 }
 
 // GCOrphanInterfaces removes veth links belonging to no live machine.
@@ -275,6 +351,20 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 		return nil, err
 	}
 	if err := m.validateMemMiB(orDefault(req.MemMiB, 512)); err != nil {
+		return nil, err
+	}
+
+	// Whether this host can hold it, asked BEFORE anything is written or
+	// booted. Until this existed nothing on the create path read free memory
+	// at all: a create landed wherever it was sent and a full host answered
+	// with whatever Firecracker failed with, which is a 500 describing a
+	// symptom rather than a 507 describing the fleet.
+	//
+	// This may suspend idle machines to make room, which is why it runs here
+	// and not in the API layer: the decision and the reclaim are the same
+	// decision, and splitting them would let a create be admitted against
+	// memory a second create had already taken.
+	if err := m.admit(ctx, orDefault(req.VCPUs, 1), orDefault(req.MemMiB, 512)); err != nil {
 		return nil, err
 	}
 
@@ -390,7 +480,8 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 	// memory image yet, and the pair is the fast path when it does.
 	var fcm *fc.Machine
 	if req.MemBuildID != "" {
-		fcm, err = m.startForRelease(ctx, row, token, req.MemBuildID, req.RootfsBuildID)
+		fcm, err = m.startForRelease(ctx, row, token, req.MemBuildID, req.RootfsBuildID,
+			req.MemSnapKey, req.ImageToken)
 	} else {
 		fcm, err = m.startNewMachine(ctx, row, token, req.Volume, req.Image, env.Cmd)
 	}
@@ -431,6 +522,14 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 // shape: the process gone but the slot still held, the caches still on disk,
 // the row still in the store -- and Kill aggregates its own errors, so a single
 // stubborn namespace could strand everything else.
+// captureDrain is how long a destroy or a redeploy waits for a background
+// checkpoint upload before removing the files it is reading.
+//
+// Generous enough that an ordinary capture finishes inside it, short enough
+// that a wedged one cannot hold a destroy open. See fc.Machine.AwaitCapture
+// for what happens without the wait at all.
+const captureDrain = 30 * time.Second
+
 func (m *Manager) Destroy(ctx context.Context, id string) error {
 	lock := m.lockFor(id)
 	lock.Lock()
@@ -445,7 +544,23 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 
 	m.releaseDiscovery(id)
 
+	// The grant goes with the machine. A sealed blob that outlived the row it
+	// describes is a secret nothing lists and nothing will ever delete, and the
+	// id is reusable in principle, so leaving it is the one way a future
+	// machine could inherit a grant nobody wrote for it. Best effort: a destroy
+	// that could not clear a grant must still destroy the machine, and the
+	// broker refuses a destroyed machine anyway.
+	if m.opts.Store != nil {
+		if err := m.opts.Store.DeleteBrokerGrant(ctx, id); err != nil {
+			slog.Warn("could not clear a destroyed machine s broker grant", "machine", id, "err", err)
+		}
+	}
+
+	// Kept past the registry drop below, because the background capture
+	// outlives the process and the only handle to it is this one.
+	var capturing *fc.Machine
 	if fcm, ok := m.get(id); ok {
+		capturing = fcm
 		// The copy-on-write file holds every write since the last snapshot.
 		// Destroy is the ONLY point at which discarding it is correct.
 		defer fcm.DiscardCow()
@@ -456,6 +571,11 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 		if err := fcm.Kill(); err != nil {
 			errs = append(errs, fmt.Errorf("kill: %w", err))
 		}
+		// The sweep a per-pid teardown cannot make: one write the kernel
+		// applies to every member of the cgroup at once, so a handler wedged
+		// in an uninterruptible wait, or anything a guest escape left behind,
+		// goes with the machine rather than outliving it charged to nobody.
+		m.killCgroup(id)
 		// Release the slot and the registry entry regardless: the process is
 		// gone or unreachable either way, and holding them leaks a slot per
 		// failed destroy until the pool is exhausted.
@@ -479,6 +599,14 @@ func (m *Manager) Destroy(ctx context.Context, id string) error {
 	// live guest loses its last writes silently rather than failing.
 	if err := m.releaseVolume(ctx, row.VolumeID); err != nil {
 		errs = append(errs, fmt.Errorf("release volume: %w", err))
+	}
+
+	// A checkpoint's upload runs in the background out of the directories
+	// below, and killing the VMM does not stop it. Removing them under a live
+	// capture is what put thirteen "no such file or directory" failures in the
+	// rig's journal. Bounded, because a destroy must still finish.
+	if capturing != nil {
+		capturing.AwaitCapture(captureDrain)
 	}
 
 	if err := os.RemoveAll(m.stateDir(id)); err != nil {
@@ -657,6 +785,12 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 		slotIdx = fcm.Slot.Idx
 	}
 
+	// The CPU total, before the cgroup that holds it goes away. After a wake
+	// the kernel's counter restarts at zero, and a counter that restarts is a
+	// counter nothing can rate: every graph over it dips and every alert on it
+	// fires on an ordinary suspend.
+	m.PersistCPU(id)
+
 	// The guest must write out its page cache before we capture the disk, or
 	// the memory and disk images disagree about recent writes.
 	m.reclaimGuestMemory(ctx, id)
@@ -783,6 +917,19 @@ func (m *Manager) discardBuilds(ctx context.Context, ids ...string) {
 		if id == "" {
 			continue
 		}
+		// A build a FORK is still reading is not superseded, whatever the
+		// machine that made it thinks.
+		//
+		// A fork faults pages out of its parent's memory image until its own
+		// first suspend writes one of its own. Discarding it here would leave
+		// a live machine reading an object that is gone, which surfaces as the
+		// guest hanging on a page fault -- with nothing connecting it back to
+		// the unrelated machine that was suspended a moment earlier.
+		if m.buildReferenced(ctx, id) {
+			slog.Info("keeping a build a fork still reads",
+				"build", id)
+			continue
+		}
 		for _, name := range []string{id + "/header", id + "/data"} {
 			if err := deleter.Delete(ctx, name); err != nil {
 				slog.Warn("a superseded build was left in object storage",
@@ -790,6 +937,60 @@ func (m *Manager) discardBuilds(ctx context.Context, ids ...string) {
 			}
 		}
 	}
+}
+
+// buildReferenced reports whether a live forked machine still needs this build.
+//
+// Errs on the side of KEEPING. A build kept needlessly costs storage, which is
+// metered and visible; a build deleted while something reads it costs a machine,
+// and the failure appears nowhere near the cause. So an unreadable lineage
+// table, or an unreadable machine list, both read as "referenced".
+func (m *Manager) buildReferenced(ctx context.Context, buildID string) bool {
+	if buildID == "" {
+		return false
+	}
+	// A manager with no store has no lineage table, so there are no forks and
+	// nothing can be referencing anything. Not the same as "could not read":
+	// there is genuinely nothing to read.
+	if m.opts.Store == nil {
+		return false
+	}
+	rows, err := m.opts.Store.ListLineage(ctx)
+	if err != nil {
+		slog.Warn("could not check whether a build is still forked from; keeping it",
+			"build", buildID, "err", err)
+		return true
+	}
+	var holders []string
+	for _, l := range rows {
+		if l.MemBuildID == buildID || l.RootfsBuildID == buildID {
+			holders = append(holders, l.ID)
+		}
+	}
+	if len(holders) == 0 {
+		return false
+	}
+	// A lineage row outlives its machine until the reaper collects it, so the
+	// machine has to be asked whether it is still there. A destroyed fork pins
+	// nothing.
+	machines, err := m.opts.Store.ListMachines(ctx)
+	if err != nil {
+		slog.Warn("could not check whether a fork still exists; keeping its build",
+			"build", buildID, "err", err)
+		return true
+	}
+	alive := make(map[string]bool, len(machines))
+	for _, row := range machines {
+		if row.State != state.StateDestroyed {
+			alive[row.ID] = true
+		}
+	}
+	for _, id := range holders {
+		if alive[id] {
+			return true
+		}
+	}
+	return false
 }
 
 // Wake restores a suspended machine.
@@ -804,6 +1005,15 @@ func (m *Manager) Wake(ctx context.Context, id string) error {
 
 	if _, ok := m.get(id); ok {
 		return nil // another waker got there first
+	}
+
+	// A machine mid-handoff must not be woken HERE. Its memory image has
+	// already been offered to another host, and bringing it up on this one
+	// would leave two hosts believing they hold it the moment the target
+	// claims. The router forwards the request to the target instead, so the
+	// caller is held rather than refused.
+	if target, moving := m.HandingOff(id); moving {
+		return fmt.Errorf("%w: %s", ErrDraining, target)
 	}
 
 	row, err := m.opts.Store.GetMachine(ctx, id)
@@ -917,6 +1127,10 @@ func (m *Manager) Redeploy(ctx context.Context, id string, req api.RedeployReque
 		if slotIdx > 0 {
 			m.pool.Return(slotIdx)
 		}
+		// Before the cache below it is cleared, for the reason Destroy waits:
+		// a checkpoint's upload is still reading that tree and the kill does
+		// not stop it.
+		fcm.AwaitCapture(captureDrain)
 		// The copy-on-write file holds every write since the last snapshot,
 		// and the new image supersedes all of it. Discarded HERE rather than
 		// deferred the way Destroy defers it: the path is derived from the
@@ -1073,6 +1287,15 @@ func (m *Manager) Adopt(id string, fcm *fc.Machine, slotIdx int) error {
 // consuming every core or all remaining memory -- including hostd's own. The
 // limits were previously documented as mandatory and then never set from the
 // machine's shape, so only a pid cap was ever applied.
+// vmmOverheadMiB is the margin added to a guest's RAM when bounding the
+// machine's cgroup, for Firecracker's own allocations.
+//
+// It is the hypervisor's slice and NOT memory a guest can allocate, which is
+// why nothing reports it as the machine's limit: a 512 MiB guest told its
+// limit was 640 had already been OOM-killed at 512. See stats.go, where
+// reading memory.max instead of the row was exactly that bug.
+const vmmOverheadMiB = 128
+
 func (m *Manager) machineFCConfig(row *state.Machine, slot *netns.Slot, mac string) fc.Config {
 	cfg := m.opts.FCConfig
 	cfg.MachineID = row.ID
@@ -1084,7 +1307,6 @@ func (m *Manager) machineFCConfig(row *state.Machine, slot *netns.Slot, mac stri
 
 	// Memory: the guest's own size plus a margin for Firecracker's own
 	// allocations, so the VMM is not OOM-killed for doing its job.
-	const vmmOverheadMiB = 128
 	cfg.Limits.MemMaxB = int64(row.MemMiB+vmmOverheadMiB) * 1024 * 1024
 
 	// CPU: vcpus worth of a 100ms period, so a machine cannot exceed the cores

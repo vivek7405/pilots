@@ -85,7 +85,7 @@ func (m *Machines) ExecStream(ctx context.Context, id string, argv []string, opt
 	// dial, and cancelling it is Close's job.
 	streamCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	conn, _, err := websocket.Dial(ctx, target, &websocket.DialOptions{
-		HTTPHeader: http.Header{"Authorization": {"Bearer " + m.c.apiKey}},
+		HTTPHeader: http.Header{"Authorization": {"Bearer " + m.c.credential()}},
 	})
 	if err != nil {
 		cancel()

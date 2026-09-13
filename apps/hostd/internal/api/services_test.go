@@ -580,6 +580,9 @@ type promoteRollout struct{ promotes int }
 func (p *promoteRollout) Deploy(context.Context, string, string, json.RawMessage) (*state.Release, error) {
 	return &state.Release{ID: "rel_1"}, nil
 }
+func (p *promoteRollout) Resize(_ context.Context, id string, vcpus, memMiB int) (*state.ServiceSize, error) {
+	return &state.ServiceSize{ServiceID: id, VCPUs: vcpus, MemMiB: memMiB}, nil
+}
 func (p *promoteRollout) Rollback(context.Context, string) (*state.Release, error) {
 	return &state.Release{ID: "rel_1"}, nil
 }

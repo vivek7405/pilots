@@ -246,16 +246,17 @@ jobs:
 
   # Determinism, asserted by building the real image twice and diffing.
   #
-  # SKIPPED, loudly, on a runner whose mke2fs cannot deliver it. Ubuntu 24.04
-  # ships e2fsprogs 1.47.0, which ignores SOURCE_DATE_EPOCH and stamps the
-  # clock into the superblock and inodes; 1.47.4 honours it. Measured in a
-  # ubuntu:24.04 container, not inferred. So this job asserts the property
-  # where the toolchain can provide it and explains itself where it cannot,
-  # rather than failing for a reason no change to this repo could fix -- and
-  # it starts asserting on its own once the runner image moves on.
+  # This used to SKIP itself on a runner whose mke2fs could not deliver, which
+  # was every runner: Ubuntu 24.04 ships e2fsprogs 1.47.0, which ignores
+  # SOURCE_DATE_EPOCH and stamps the clock into the superblock and inodes.
+  # A check that skips itself on the only machine that always runs it is a
+  # check nobody is running.
   #
-  # The durable fix is to pin the toolchain by packing inside a container,
-  # which also buys reproducibility ACROSS machines. See #108.
+  # The pack now happens inside a PINNED container with a known e2fsprogs, so
+  # the runner's own toolchain no longer decides anything -- and the pin in
+  # *.sha256 means the same bytes on a laptop, on a runner and on a host,
+  # which no combination of flags on the host could buy. So this job fails
+  # rather than skips.
   #
   # Path-filtered: only these inputs can change the image, and it is two
   # four-minute builds when it does run.
@@ -282,34 +283,23 @@ jobs:
           else
             echo "ok=true" >> "$GITHUB_OUTPUT"
           fi
+      # The pack now runs inside a pinned container, so the RUNNER's own
+      # e2fsprogs no longer decides whether this check can mean anything. What
+      # it needs is Docker, which every GitHub runner has, and that is why this
+      # step fails rather than skipping: a check that skips itself on the one
+      # machine that always runs it is a check nobody is running.
       - id: capable
         if: steps.touched.outputs.ok == 'true'
-        name: can this runner build reproducibly at all
+        name: the pinned pack toolchain is reachable
         run: |
-          mke2fs -V 2>&1 | head -1
-          mkdir -p /tmp/probe/root
-          mke2fs -q -F -t ext4 -b 4096 -U 11111111-2222-3333-4444-555555555555 \
-            -E hash_seed=22222222-3333-4444-5555-666666666666 \
-            -d /tmp/probe/root /tmp/probe/a.img 1M
-          sleep 1
-          mke2fs -q -F -t ext4 -b 4096 -U 11111111-2222-3333-4444-555555555555 \
-            -E hash_seed=22222222-3333-4444-5555-666666666666 \
-            -d /tmp/probe/root /tmp/probe/b.img 1M
-          if [ "$(sha256sum < /tmp/probe/a.img)" = "$(sha256sum < /tmp/probe/b.img)" ]; then
-            echo "ok=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ok=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::This runner's mke2fs ignores SOURCE_DATE_EPOCH, so the"
-            echo "::notice::image cannot be byte-reproducible here and the check is"
-            echo "::notice::skipped rather than failed. Pinning the pack toolchain is"
-            echo "::notice::tracked on #108."
-          fi
-      - if: steps.touched.outputs.ok == 'true' && steps.capable.outputs.ok == 'true'
+          docker info >/dev/null
+          echo "packing inside the pinned image, so two builds must match"
+      - if: steps.touched.outputs.ok == 'true'
         uses: actions/setup-go@v5
         with:
           go-version: '1.26'
           cache-dependency-path: apps/hostd/go.sum
-      - if: steps.touched.outputs.ok == 'true' && steps.capable.outputs.ok == 'true'
+      - if: steps.touched.outputs.ok == 'true'
         name: build it twice and compare
         run: |
           scripts/build-golden-rootfs.sh
@@ -323,7 +313,8 @@ jobs:
             echo "::error::  second ${second%% *}"
             echo "::error::Something nondeterministic got back into"
             echo "::error::scripts/build-golden-rootfs.sh -- a random uuid, a hash"
-            echo "::error::seed, or a timestamp that is not clamped."
+            echo "::error::seed, or a timestamp that is not clamped. The pack"
+            echo "::error::toolchain itself is pinned, so it is not the packer."
             exit 1
           fi
           echo "both builds: ${first%% *}"

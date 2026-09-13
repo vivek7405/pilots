@@ -130,22 +130,37 @@ func ParseBootstrapPeer(spec string) (Peer, error) {
 // reading the table: trusting it would let a host publish someone else's
 // address and take over their traffic, since a row is only ever checked
 // against the host that wrote it.
-// AbandonAfter is how long a host must be silent before the mesh stops
-// carrying it as a peer.
+// ReportSilentAfter is how long a host must be silent before the mesh says so.
 //
-// Far longer than the liveness threshold on purpose. Thirty seconds of silence
-// means "do not send this host work"; it must not mean "forget how to reach
-// it", because a reboot, a partition or a slow upgrade all cross that line and
-// the host has to be reachable the moment it comes back.
+// It used to be how long before the mesh DROPPED it, and that could not
+// recover. Dropping a peer removes the only path by which its heartbeat could
+// arrive, so the row's LastSeen can never advance, so the peer stays dropped:
+// a fleet that is quiet for longer than this window forgets itself, permanently
+// and in every direction at once.
 //
-// The reason there is any limit at all is that a peer which will NEVER answer
-// is not free. Corrosion gossips to every peer the mesh holds, and its
-// outbound queue backs up behind one that always times out -- until it starts
-// DROPPING changes, which it reports once and then continues. The fleet then
-// looks healthy while machine rows silently stop replicating: names do not
-// resolve, and a tenant filter built from a partial view drops legitimate
-// traffic. That is what a decommissioned host did on this rig.
-const AbandonAfter = 30 * time.Minute
+// The rig reached exactly that state by sitting idle. Every host aged out every
+// other host, the first host had no bootstrap peer to fall back on, and no
+// amount of restarting or re-joining recovered it -- because the abandonment
+// was computed from a LastSeen that could not be refreshed without the peer
+// that had just been removed. Re-running the join did not help either: the
+// check reads the stale row, not the fresh intent.
+//
+// Far longer than the liveness threshold, and that part was always right.
+// Thirty seconds of silence means "do not send this host work"; it must not
+// mean "forget how to reach it", because a reboot, a partition or a slow
+// upgrade all cross that line and the host has to be reachable the moment it
+// comes back. The mistake was that thirty MINUTES came to mean exactly that.
+//
+// The real cost being avoided is still real: a peer that will NEVER answer is
+// not free, because Corrosion's outbound queue backs up behind one that always
+// times out until it starts DROPPING changes, and the fleet then looks healthy
+// while machine rows silently stop replicating. But the fix for a host that is
+// never coming back is to REMOVE ITS ROW, which is what decommissioning means
+// and which this loop already honours: a row that is gone stops being a peer on
+// the next reconcile. Ageing out a row that still exists cannot tell a
+// decommissioned host from a rebooting one, because at thirty-one minutes they
+// look identical -- and it guesses wrong in the direction that cannot be undone.
+const ReportSilentAfter = 30 * time.Minute
 
 // PeersFrom turns the fleet's host rows into mesh peers.
 func PeersFrom(hosts []state.Host, selfID string) []Peer {
@@ -156,14 +171,21 @@ func PeersFrom(hosts []state.Host, selfID string) []Peer {
 		if h.ID == selfID || h.WGPubKey == "" {
 			continue
 		}
-		if h.LastSeen > 0 && now.Sub(time.Unix(h.LastSeen, 0)) > AbandonAfter {
-			// Gone long enough to be gone. Said once per reconcile rather than
-			// silently, because the alternative failure -- replication quietly
-			// degrading fleet-wide -- names nothing at all.
-			slog.Warn("host has been silent long enough to stop carrying it on the mesh; "+
-				"gossip to a peer that never answers backs up until changes are dropped",
+		if h.LastSeen > 0 && now.Sub(time.Unix(h.LastSeen, 0)) > ReportSilentAfter {
+			// Reported, and still carried. Said once per reconcile rather than
+			// silently, because a peer that never answers does cost something:
+			// Corrosion's outbound queue backs up behind it until changes are
+			// dropped, and the fleet then looks healthy while rows stop
+			// replicating.
+			//
+			// The remedy is naming it here so an operator can REMOVE the row of
+			// a host that is genuinely gone. Dropping it automatically is what
+			// used to happen, and it removed the only path by which the host
+			// could ever come back.
+			slog.Warn("host has been silent a long time and is still carried on the mesh; "+
+				"if it is decommissioned, remove its row -- gossip to a peer that "+
+				"never answers backs up until changes are dropped",
 				"host", h.ID, "silent_for", now.Sub(time.Unix(h.LastSeen, 0)).Round(time.Second))
-			continue
 		}
 		key, err := wgtypes.ParseKey(h.WGPubKey)
 		if err != nil {

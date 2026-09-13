@@ -24,6 +24,22 @@ type VolumeManager interface {
 	Attach(ctx context.Context, v *state.Volume) error
 	Detach(ctx context.Context, id string) error
 	ImagePath(id string) string
+	// Check runs a filesystem check on a volume's image, before a guest is
+	// given it. A host that died mid-write leaves an image that still SAYS it
+	// is clean, so this is forced rather than conditional.
+	Check(ctx context.Context, id string) error
+	// Snapshot, ListSnapshots, RestoreSnapshot and CopySnapshotTo are the
+	// point-in-time surface. A snapshot is a clone inside the volume's own
+	// filesystem, so it is metadata and costs milliseconds; a copy crosses two
+	// filesystems and costs bytes.
+	Snapshot(ctx context.Context, id, stamp string) error
+	ListSnapshots(id string) ([]string, error)
+	RestoreSnapshot(ctx context.Context, id, stamp string) error
+	// DeleteSnapshot removes one, for retention. A snapshot holds blocks the
+	// live volume has overwritten, so deleting one is what actually frees
+	// storage rather than merely tidying a listing.
+	DeleteSnapshot(ctx context.Context, id, stamp string) error
+	CopySnapshotTo(ctx context.Context, id, stamp, destImage string) error
 }
 
 // ErrNoVolumes reports a host that cannot serve volumes at all.
@@ -106,6 +122,20 @@ func (m *Manager) claimVolume(ctx context.Context, volumeID, machineID string) (
 	// Only now: the row says this host owns it, so no other host will mount it
 	// while this one does.
 	if err := m.opts.Volumes.Attach(ctx, v); err != nil {
+		return nil, err
+	}
+
+	// And a filesystem check BEFORE the guest sees it.
+	//
+	// This is the one moment it can be done at all: the image is mounted and
+	// nothing is writing to it. A host that died mid-write leaves an ext4 that
+	// still reports itself clean, so the check is forced; handing that image to
+	// a guest lets it write on top of the damage and turns a filesystem a
+	// snapshot could have restored into one nothing can.
+	//
+	// Not run on a local wake, where the mount was never released, so the wake
+	// path's latency is untouched.
+	if err := m.opts.Volumes.Check(ctx, volumeID); err != nil {
 		return nil, err
 	}
 	return v, nil

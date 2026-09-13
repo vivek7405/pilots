@@ -33,6 +33,10 @@ type tab int
 const (
 	tabMachines tab = iota
 	tabServices
+	// tabCount is not a tab. It is what the cycling arithmetic reads, so
+	// adding one above is one line rather than one line plus two literals
+	// somebody has to remember to find.
+	tabCount
 )
 
 // snapshot is one fetch of the fleet, taken every tick on its own goroutine
@@ -98,9 +102,19 @@ type Model struct {
 	logFor  string
 	logAuto bool
 
+	// The workspace this session is showing, and where to reach the fleet.
+	//
+	// Held rather than asked for on every frame: the org is applied when the
+	// client is built, so the only way to know which one is showing is to
+	// remember which one was chosen. The base URL is kept because switching
+	// builds a NEW client and has to build it against the same fleet.
+	org     string
+	baseURL string
+
 	// Overlays and feedback.
-	confirm *confirmation
-	help    bool
+	confirm    *confirmation
+	workspaces *workspaces
+	help       bool
 	// busy is an action in flight, shown the moment a key is pressed so a
 	// slow one (a checkpoint takes seconds) never looks like a dead keypress.
 	busy    string
@@ -126,8 +140,17 @@ type confirmation struct {
 
 // New builds the model. The first snapshot is fetched on Init so the first
 // frame already has content rather than a spinner.
-func New(ctx context.Context, client *pilots.Client) *Model {
-	return &Model{ctx: ctx, client: client, st: newStyles(newPalette(true)), logAuto: true}
+// New builds the model.
+//
+// org and baseURL are handed in rather than read off the client, because a
+// client does not expose either: the org is folded into every request's query
+// string when the client is built, and switching workspace has to build a new
+// client against the same fleet.
+func New(ctx context.Context, client *pilots.Client, org, baseURL string) *Model {
+	return &Model{
+		ctx: ctx, client: client, org: org, baseURL: baseURL,
+		st: newStyles(newPalette(true)), logAuto: true,
+	}
 }
 
 func (m *Model) Init() tea.Cmd {
@@ -195,6 +218,15 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.fetchLogs(m.logFor))
 		}
 		return m, tea.Batch(cmds...)
+	case workspacesMsg:
+		// Only while the overlay is still open: a list that arrived after
+		// somebody dismissed it would reopen an overlay they closed.
+		if m.workspaces != nil {
+			got := workspaces(msg)
+			m.workspaces = &got
+		}
+		return m, nil
+
 	case snapshotMsg:
 		m.snap = snapshot(msg)
 		m.record()
@@ -363,6 +395,9 @@ func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.help = false
 		return m, nil
 	}
+	if cmd, handled := m.workspaceKeys(k); handled {
+		return m, cmd
+	}
 
 	switch k {
 	case "ctrl+c":
@@ -371,6 +406,12 @@ func (m *Model) key(msg tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "?":
 		m.help = true
 		return m, nil
+	case "w":
+		// Global, like ? and r: which workspace you are looking at is a
+		// question that can occur on any screen, and a binding that only
+		// worked on the dashboard would be one somebody learns twice.
+		m.workspaces = &workspaces{Current: m.org}
+		return m, m.fetchWorkspaces()
 	case "r":
 		m.setFlash("refreshing…")
 		return m, m.fetch()
@@ -395,10 +436,13 @@ func (m *Model) keyDashboard(k string) (tea.Model, tea.Cmd) {
 		m.quit = true
 		return m, tea.Quit
 	case "tab", "right", "l":
-		m.tab = (m.tab + 1) % 2
+		m.tab = (m.tab + 1) % tabCount
 		m.cursor, m.list.off = 0, 0
 	case "shift+tab", "left", "h":
-		m.tab = (m.tab + 1) % 2
+		// BACKWARDS. This read `(m.tab + 1)` too, so shift+tab did exactly
+		// what tab did: with two tabs both directions look the same, and the
+		// bug would only have shown itself on the day a third arrived.
+		m.tab = (m.tab + tabCount - 1) % tabCount
 		m.cursor, m.list.off = 0, 0
 	case "up", "k":
 		m.moveCursor(-1)
@@ -639,8 +683,8 @@ func (m *Model) serviceAction(k string, s *pilots.Service) (tea.Model, tea.Cmd) 
 func (m *Model) Result() Exit { return m.exit }
 
 // Run drives the program in the alternate screen and returns why it ended.
-func Run(ctx context.Context, client *pilots.Client) (Exit, error) {
-	m := New(ctx, client)
+func Run(ctx context.Context, client *pilots.Client, org, baseURL string) (Exit, error) {
+	m := New(ctx, client, org, baseURL)
 	p := tea.NewProgram(m, tea.WithContext(ctx))
 	if _, err := p.Run(); err != nil {
 		return Exit{}, err

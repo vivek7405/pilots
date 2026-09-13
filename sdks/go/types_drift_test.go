@@ -147,6 +147,34 @@ func TestTypesMirrorHostd(t *testing.T) {
 			t.Errorf("sdks/go/types.go: %s carries tags hostd no longer has: %v", name, extra)
 		}
 	}
+
+	// And the other direction, which is the one that was missing.
+	//
+	// The loop above walks hostd's TAGGED structs, and goStructs treats a
+	// struct with no tags at all as not a wire shape -- api.Deps, say. That is
+	// the right call for a struct nobody serves, and the wrong one for a
+	// struct somebody serves and forgot to tag: the two are indistinguishable
+	// from hostd's side, so the shape simply vanished from the comparison and
+	// its mirror here was checked against nothing.
+	//
+	// That happened. compose.HAFragment was served straight onto the wire with
+	// no tags, so it shipped Go field names while all four SDKs declared
+	// snake_case, and every client reading etcd_name got undefined. The drift
+	// test was green throughout, because an untagged hostd struct is invisible
+	// to it.
+	//
+	// A mirror with nothing behind it is the signal. It means either the
+	// hostd struct lost its tags, or it was renamed or deleted and this copy
+	// outlived it. All three are drift.
+	for name := range mine {
+		if _, ok := hostd[name]; ok {
+			continue
+		}
+		t.Errorf("sdks/go/types.go: %s is in wireTypes but hostd has no tagged struct "+
+			"of that name. Either the hostd struct lost its json tags -- in which case "+
+			"it is now serving Go field names and every SDK is wrong about it -- or it "+
+			"was renamed or removed and this mirror outlived it.", name)
+	}
 }
 
 func TestFrameConstantsMatchHostd(t *testing.T) {

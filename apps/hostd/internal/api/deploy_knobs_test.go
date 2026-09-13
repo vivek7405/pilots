@@ -17,6 +17,10 @@ import (
 type recordingRollout struct {
 	deploys   int
 	lastKnobs json.RawMessage
+	// resizedTo is the size the last scale asked for, as {vcpus, mem_mib}, so
+	// a test can assert the request reached the rollout rather than only that
+	// the route answered.
+	resizedTo [2]int
 }
 
 func (r *recordingRollout) Deploy(_ context.Context, serviceID, _ string,
@@ -33,6 +37,11 @@ func (r *recordingRollout) Rollback(context.Context, string) (*state.Release, er
 
 func (r *recordingRollout) Promote(context.Context, string, PromoteRequest) (*state.Service, error) {
 	return &state.Service{ID: "svc_1"}, nil
+}
+
+func (r *recordingRollout) Resize(_ context.Context, serviceID string, vcpus, memMiB int) (*state.ServiceSize, error) {
+	r.resizedTo = [2]int{vcpus, memMiB}
+	return &state.ServiceSize{ServiceID: serviceID, VCPUs: vcpus, MemMiB: memMiB}, nil
 }
 
 // deployServer is a host that can actually deploy: a service to deploy to, a

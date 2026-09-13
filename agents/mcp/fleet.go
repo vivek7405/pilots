@@ -27,10 +27,11 @@ import (
 // FleetTools are the tools that need only the API. They are what /mcp
 // serves, and the first half of what `pilot mcp` serves. Sorted.
 var FleetTools = []string{
-	"build_logs", "checkpoint", "create_machine", "destroy_machine", "diagnose",
-	"docs", "domains", "exec", "exec_stream", "init", "list_machines",
-	"list_services", "logs", "promote", "releases", "restore", "rollback",
-	"service", "status", "volumes",
+	"build_logs", "checkpoint", "create_machine", "database", "destroy_machine",
+	"diagnose", "docs", "domains", "exec", "exec_stream", "fork", "grant",
+	"grants", "init", "list_machines", "list_services", "logs", "metrics",
+	"promote", "releases", "restore", "rollback", "service", "status",
+	"volumes",
 }
 
 // LocalTools are the tools that need the agent's own filesystem: a directory
@@ -416,9 +417,156 @@ func RegisterFleetTools(s *mcp.Server, client *pilots.Client, opts Options) {
 	}
 	mcp.AddTool(s, &mcp.Tool{Name: "restore", Title: "Restore a checkpoint",
 		Description: "Restore a checkpoint IN PLACE. The machine keeps its id, its URL and its agent token; " +
-			"nothing new is created, so every link to it still works."},
+			"nothing new is created, so every link to it still works. This never fails because a memory image is " +
+			"unavailable: memory snapshots do not cross the Intel/AMD line, and when no host of the image s CPU " +
+			"pool is live the machine cold-boots from its own disk instead, keeping its id, name, URL, volume and " +
+			"every byte on disk, and losing the processes and the memory they held. It reports last_start of " +
+			"cold_boot when that happened, so you can tell rather than inferring it from behaviour."},
 		func(ctx context.Context, _ *mcp.CallToolRequest, in restoreIn) (*mcp.CallToolResult, any, error) {
 			return Wrap(func() (any, error) { return client.Checkpoints.Restore(ctx, in.Checkpoint) }, Constant("status on the machine"))
+		})
+
+	type forkIn struct {
+		Source string `json:"source" jsonschema:"a machine id or name, or a checkpoint id"`
+		Count  int    `json:"count,omitempty" jsonschema:"how many forks, default 1, up to 100"`
+		Name   string `json:"name,omitempty" jsonschema:"name the first fork; the rest take a suffix"`
+		Volume bool   `json:"volume,omitempty" jsonschema:"fork the source's volume too"`
+	}
+	mcp.AddTool(s, &mcp.Tool{Name: "fork", Title: "Fork a machine",
+		Description: "Make NEW machines from a machine's or checkpoint's exact state: the source's processes " +
+			"already running, its memory already warm. Use this when getting to a state is the expensive part " +
+			"-- installing dependencies, loading a model, reaching a reproduction -- and you want several " +
+			"machines that all start from there. A running source is checkpointed in place and keeps its id " +
+			"and URL; a suspended source is forked without being woken. Each fork is a separate machine with " +
+			"its own id and URL."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in forkIn) (*mcp.CallToolResult, any, error) {
+			return Wrap(func() (any, error) {
+				req := pilots.ForkRequest{Name: in.Name, Count: in.Count, Volume: in.Volume}
+				// A machine NAME wins over a checkpoint id, which is what an
+				// agent that typed a name expects. A source that resolves to no
+				// machine is tried as a checkpoint.
+				if m, err := ResolveMachine(ctx, client, in.Source); err == nil {
+					return client.Machines.Fork(ctx, m.ID, req)
+				}
+				return client.Checkpoints.Fork(ctx, in.Source, req)
+			}, Constant("exec on any fork; each has its own id and URL"))
+		})
+
+	type databaseIn struct {
+		Service string `json:"service,omitempty" jsonschema:"a service id or name; omit when there is only one database"`
+	}
+	// The tool an agent needs before it can touch a database, and NOT a
+	// credential.
+	//
+	// It answers where the database is, what engine it runs and which address
+	// does what, and it deliberately answers none of "what is the password".
+	// The password is not in the fleet's reach: it lives in the credentials
+	// file on the operator's own machine, and an MCP server that could hand one
+	// back would turn every API key into a database password.
+	//
+	// So the next step is a command the PERSON runs. That is the honest shape
+	// for this one: an agent that cannot read the data cannot leak it, and an
+	// operator who wants it read out loud can run one line.
+	mcp.AddTool(s, &mcp.Tool{Name: "database", Title: "Find a database",
+		Description: "Where a database is, what engine it runs, and which address to use for what. " +
+			"Returns the .internal addresses -- the pooled one an application should use and the direct " +
+			"one migrations and anything using LISTEN/NOTIFY, session advisory locks or temporary tables " +
+			"must use -- plus the machine to exec in. It does NOT return a password: passwords live on the " +
+			"operator's own machine and never in the fleet. To open a session, tell the operator to run " +
+			"`pilot db connect <service>`."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in databaseIn) (*mcp.CallToolResult, any, error) {
+			return Wrap(func() (any, error) { return describeDatabase(ctx, client, in.Service) },
+				Constant("exec on the machine, or tell the operator to run `pilot db connect`"))
+		})
+
+	// What a machine is USING, as opposed to what it was allotted.
+	//
+	// The tool for "why is this slow" and "why did this die": the allotment is
+	// already on the machine, and the difference between the two is the answer.
+	mcp.AddTool(s, &mcp.Tool{Name: "metrics", Title: "What a machine is using",
+		Description: "CPU seconds used and memory held now, against the ceilings, read from the machine s cgroup " +
+			"on the host that owns it. CPU is a TOTAL, not a rate: take two readings to get a rate. Memory is " +
+			"zero while a machine is suspended, which is the truth rather than a gap. Memory near the ceiling " +
+			"is why a process was killed; CPU flat while a request hangs means it is waiting, not computing."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in MachineIn) (*mcp.CallToolResult, any, error) {
+			return Wrap(func() (any, error) {
+				m, err := ResolveMachine(ctx, client, in.Machine)
+				if err != nil {
+					return nil, err
+				}
+				return client.Machines.Metrics(ctx, m.ID)
+			}, Constant("logs for what it printed, or exec to look inside"))
+		})
+
+	type grantIn struct {
+		Machine string            `json:"machine,omitempty" jsonschema:"a machine id or name; give this or service"`
+		Service string            `json:"service,omitempty" jsonschema:"a service id or name; every replica inherits it"`
+		Scopes  []string          `json:"scopes,omitempty" jsonschema:"scopes a token may carry: machines, deploy. Never admin"`
+		Secrets map[string]string `json:"secrets,omitempty" jsonschema:"NAME to value the machine may fetch from its broker"`
+	}
+	// Giving a machine the right to act for itself.
+	//
+	// The tool an agent reaches for when the thing it built has to call the API
+	// or hold a credential of its own. What it grants is deliberately narrow: a
+	// machine's token writes only to that machine and to its own service, and
+	// `admin` cannot be granted at all.
+	//
+	// REPLACES. Calling it with only scopes removes every granted secret, and
+	// the description says so, because an agent that expected a merge would
+	// silently take a secret away from a running application.
+	mcp.AddTool(s, &mcp.Tool{Name: "grant", Title: "Grant a machine its credentials",
+		Description: "Let a machine ask its host for an API token, for secrets, or both. A machine holds no key " +
+			"otherwise, which is deliberate: a key baked into a guest is a key in every snapshot and fork of it. " +
+			"Granted secrets never enter the machine's environment, so they are in no snapshot and on no disk " +
+			"inside it. This REPLACES the whole grant: pass everything you want it to have, because omitting a " +
+			"field removes what was there. You can grant only scopes your own key holds, and never admin. A " +
+			"machine's token may write only to that machine and its own service."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in grantIn) (*mcp.CallToolResult, any, error) {
+			return Wrap(func() (any, error) {
+				req := pilots.GrantRequest{Scopes: in.Scopes, Secrets: in.Secrets}
+				if in.Service != "" {
+					svc, err := ResolveService(ctx, client, in.Service)
+					if err != nil {
+						return nil, err
+					}
+					return client.Services.Grant(ctx, svc.ID, req)
+				}
+				if in.Machine == "" {
+					return nil, fmt.Errorf("name a machine or a service to grant")
+				}
+				m, err := ResolveMachine(ctx, client, in.Machine)
+				if err != nil {
+					return nil, err
+				}
+				return client.Machines.Grant(ctx, m.ID, req)
+			}, Constant("the machine picks it up within five minutes; exec `cat $PILOT_TOKEN_FILE` to see it arrive"))
+		})
+
+	type grantsIn struct {
+		Machine string `json:"machine,omitempty" jsonschema:"a machine id or name"`
+		Service string `json:"service,omitempty" jsonschema:"a service id or name"`
+	}
+	mcp.AddTool(s, &mcp.Tool{Name: "grants", Title: "What a machine may ask for",
+		Description: "The scopes and the secret NAMES granted to a machine or a service. Never the values: there " +
+			"is no route that returns one. What a machine is holding is a question its own broker answers, to it."},
+		func(ctx context.Context, _ *mcp.CallToolRequest, in grantsIn) (*mcp.CallToolResult, any, error) {
+			return Wrap(func() (any, error) {
+				if in.Service != "" {
+					svc, err := ResolveService(ctx, client, in.Service)
+					if err != nil {
+						return nil, err
+					}
+					return client.Services.GrantOf(ctx, svc.ID)
+				}
+				if in.Machine == "" {
+					return nil, fmt.Errorf("name a machine or a service")
+				}
+				m, err := ResolveMachine(ctx, client, in.Machine)
+				if err != nil {
+					return nil, err
+				}
+				return client.Machines.GrantOf(ctx, m.ID)
+			}, Constant("grant to change it"))
 		})
 
 	type promoteIn struct {
@@ -755,3 +903,83 @@ DOCS
          "volumes" | "domains" | "promote" | "errors" | "compose" }
   Load one. Two at most.
 `
+
+// DatabaseInfo is what an agent needs to reason about a database, and nothing
+// it could leak.
+type DatabaseInfo struct {
+	Service string `json:"service"`
+	Engine  string `json:"engine"`
+	Machine string `json:"machine,omitempty"`
+	// Address is where the application should connect, and Direct is where
+	// migrations and any session-level feature must connect. They differ only
+	// when the database has a pooler in front of it.
+	Address string `json:"address"`
+	Direct  string `json:"direct,omitempty"`
+	// Note says, in one line, why there are two of them.
+	Note string `json:"note,omitempty"`
+}
+
+// describeDatabase finds one database and says how to reach it.
+//
+// With no name it answers only when there is exactly one, and otherwise lists
+// what it found. Picking one of several because it sorts first is how an agent
+// ends up running a migration against the wrong database.
+func describeDatabase(ctx context.Context, client *pilots.Client, name string) (any, error) {
+	services, err := client.Services.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var found *pilots.Service
+	var databases []string
+	for i := range services {
+		svc := &services[i]
+		if svc.Labels["pilot.engine"] == "" {
+			continue
+		}
+		databases = append(databases, svc.Name)
+		if name == "" || svc.Name == name || svc.ID == name {
+			if found == nil || svc.Name == name || svc.ID == name {
+				found = svc
+			}
+		}
+	}
+	if len(databases) == 0 {
+		return nil, fmt.Errorf("no database in this org; `pilot add postgres` adds one")
+	}
+	if name == "" && len(databases) > 1 {
+		sort.Strings(databases)
+		return nil, fmt.Errorf("there are %d databases here (%s); name one",
+			len(databases), strings.Join(databases, ", "))
+	}
+	if found == nil {
+		return nil, fmt.Errorf("no database called %q; there is %s",
+			name, strings.Join(databases, ", "))
+	}
+
+	info := DatabaseInfo{Service: found.Name, Engine: found.Labels["pilot.engine"]}
+	port := map[string]string{
+		"postgres": "5432", "mysql": "3306", "redis": "6379", "mongo": "27017",
+	}[info.Engine]
+	info.Address = found.Name + ".internal:" + port
+	if info.Engine == "postgres" {
+		// The pooled address is the one an application should hold, and it is
+		// only there when a pooler was added. Saying so beats guessing: a
+		// connection to 6432 with nothing behind it fails in a way that reads
+		// as the database being down.
+		info.Direct = info.Address
+		info.Address = found.Name + ".internal:6432"
+		info.Note = "6432 is the pooler, if this database has one; 5432 is direct. " +
+			"Migrations, LISTEN/NOTIFY, session advisory locks and temporary tables " +
+			"need the direct address."
+	}
+	machines, err := client.Machines.List(ctx)
+	if err == nil {
+		for i := range machines {
+			if machines[i].ServiceID == found.ID && machines[i].State == "running" {
+				info.Machine = machines[i].ID
+				break
+			}
+		}
+	}
+	return info, nil
+}

@@ -32,6 +32,11 @@ var Defaults = state.Quota{
 	MaxMemMiB:    65536,
 	MaxVolumeGiB: 100,
 	MaxBuilds:    2,
+	// Fifty gibibytes of checkpoints. An ordinary machine's checkpoints are
+	// tens of megabytes each, because they diff against the template, so this
+	// is hundreds of them; what it stops is the unbounded case, an agent
+	// checkpointing after every message on a machine nobody destroys.
+	MaxSnapshotGiB: 50,
 }
 
 // Delta is what a request is about to add.
@@ -40,6 +45,11 @@ type Delta struct {
 	VCPUs     int
 	MemMiB    int
 	VolumeGiB int
+	// SnapshotGiB is what a checkpoint is about to add. In practice 1, since
+	// what a checkpoint will weigh is not known until it has been taken: the
+	// limit admits while the org is under the line and overshoots by at most
+	// one checkpoint, which is this package's soft-cap semantics.
+	SnapshotGiB int
 }
 
 // Exceeded names the limit that refused a request, so the client is told what
@@ -88,7 +98,14 @@ func limitsFor(ctx context.Context, st state.Store, orgID string) (state.Quota, 
 	if err != nil {
 		return state.Quota{}, fmt.Errorf("quota: get quota %q: %w", orgID, err)
 	}
-	return *q, nil
+	out := *q
+	// A row written before org_snapshot_quotas existed carries zero here, and
+	// zero would refuse every checkpoint. An unset limit is the default, the
+	// same reading an org with no quota row at all gets.
+	if out.MaxSnapshotGiB == 0 {
+		out.MaxSnapshotGiB = Defaults.MaxSnapshotGiB
+	}
+	return out, nil
 }
 
 // Check counts what an org already holds and refuses a delta that would take
@@ -117,16 +134,76 @@ func Check(ctx context.Context, st state.Store, orgID string, d Delta) error {
 		return err
 	}
 
-	owned, err := ownedIDs(ctx, st, orgID)
+	// Snapshots are counted only when the request adds some, because
+	// snapshotGiBOf walks every checkpoint this org owns and a create is on
+	// the sub-second budget. Every other number is cheap.
+	used, err := Used(ctx, st, orgID, d.SnapshotGiB > 0)
 	if err != nil {
 		return err
 	}
 
+	for _, c := range []struct {
+		name             string
+		used, add, limit int
+	}{
+		{"machines", used.Machines, d.Machines, limits.MaxMachines},
+		{"vcpus", used.VCPUs, d.VCPUs, limits.MaxVCPUs},
+		{"mem_mib", used.MemMiB, d.MemMiB, limits.MaxMemMiB},
+		{"volume_gib", used.VolumeGiB, d.VolumeGiB, limits.MaxVolumeGiB},
+		{"snapshot_gib", used.SnapshotGiB, d.SnapshotGiB, limits.MaxSnapshotGiB},
+	} {
+		if c.add > 0 && c.used+c.add > c.limit {
+			return &Exceeded{Quota: c.name, Limit: c.limit, Used: c.used}
+		}
+	}
+	return nil
+}
+
+// Usage is what an org is holding right now, in the units its limits are in.
+type Usage struct {
+	Machines    int
+	VCPUs       int
+	MemMiB      int
+	VolumeGiB   int
+	SnapshotGiB int
+}
+
+// Used counts what an org holds.
+//
+// # Why this is exported rather than inlined in Check
+//
+// Because the rules about what counts are not obvious, and they were in one
+// place that nobody could read. A builder does not count. A destroyed row does
+// not count. Volumes round down to whole gibibytes. Anything that wants to
+// answer "how much of my quota am I using" and does not go through this
+// function gets a different answer, and the difference only shows up as a
+// refusal that arrives one create early or one create late.
+//
+// That is not hypothetical: the battery derived the count itself from
+// GET /v1/machines, could not know about the builder rule, and so set a limit
+// one too high and watched a create it expected to be refused succeed.
+//
+// GET /v1/quotas/{org} now answers with this, so a caller never has to derive
+// it. A quota API that reports the ceiling and not the floor is half an API:
+// the number was already computed for the refusal and simply was not offered
+// until somebody hit it.
+//
+// withSnapshots skips the one expensive count. Callers on the create path pass
+// false unless the request adds snapshot bytes.
+func Used(ctx context.Context, st state.Store, orgID string, withSnapshots bool) (Usage, error) {
+	var u Usage
+	if orgID == "" {
+		return u, nil
+	}
+	owned, err := ownedIDs(ctx, st, orgID)
+	if err != nil {
+		return u, err
+	}
+
 	machines, err := st.ListMachines(ctx)
 	if err != nil {
-		return fmt.Errorf("quota: list machines: %w", err)
+		return u, fmt.Errorf("quota: list machines: %w", err)
 	}
-	var usedMachines, usedVCPUs, usedMem int
 	for _, m := range machines {
 		// A destroyed machine holds nothing. Its row lingers until the reaper
 		// collects it, and counting tombstones would make an org's limit fall
@@ -142,36 +219,29 @@ func Check(ctx context.Context, st state.Store, orgID string, d Delta) error {
 		if strings.HasPrefix(m.Name, BuilderNamePrefix) {
 			continue
 		}
-		usedMachines++
-		usedVCPUs += m.VCPUs
-		usedMem += m.MemMiB
+		u.Machines++
+		u.VCPUs += m.VCPUs
+		u.MemMiB += m.MemMiB
 	}
 
 	volumes, err := st.ListVolumes(ctx)
 	if err != nil {
-		return fmt.Errorf("quota: list volumes: %w", err)
+		return u, fmt.Errorf("quota: list volumes: %w", err)
 	}
-	usedVolume := 0
 	for _, v := range volumes {
 		if _, mine := owned[v.ID]; mine {
-			usedVolume += v.SizeMiB / 1024
+			u.VolumeGiB += v.SizeMiB / 1024
 		}
 	}
 
-	for _, c := range []struct {
-		name             string
-		used, add, limit int
-	}{
-		{"machines", usedMachines, d.Machines, limits.MaxMachines},
-		{"vcpus", usedVCPUs, d.VCPUs, limits.MaxVCPUs},
-		{"mem_mib", usedMem, d.MemMiB, limits.MaxMemMiB},
-		{"volume_gib", usedVolume, d.VolumeGiB, limits.MaxVolumeGiB},
-	} {
-		if c.add > 0 && c.used+c.add > c.limit {
-			return &Exceeded{Quota: c.name, Limit: c.limit, Used: c.used}
-		}
+	// What this org's checkpoints hold. Counted from the rows the same way
+	// everything else here is, rather than from a running total: a counter
+	// would drift the moment an upload failed or a retention pass deleted
+	// something, and nothing would ever correct it.
+	if withSnapshots {
+		u.SnapshotGiB = snapshotGiBOf(ctx, st, owned)
 	}
-	return nil
+	return u, nil
 }
 
 // ownedIDs is the set of object ids an org owns, from the tenancy table.

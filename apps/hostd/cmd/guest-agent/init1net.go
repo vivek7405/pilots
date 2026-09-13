@@ -70,6 +70,8 @@ func configureNetwork() {
 		return
 	}
 
+	globalScopeV4(link)
+
 	_, dst, err := net.ParseCIDR(peerPrefix)
 	if err != nil {
 		log.Printf("guest-agent: bad peer prefix %q: %v", peerPrefix, err)
@@ -90,5 +92,70 @@ func configureNetwork() {
 	}); err != nil && !errors.Is(err, unix.EEXIST) {
 		log.Printf("guest-agent: could not route %s via %s, so peers are "+
 			"unreachable by name: %v", peerPrefix, gateway6, err)
+	}
+}
+
+// globalScopeV4 puts eth0's IPv4 address into global scope.
+//
+// # The bug
+//
+// A guest could not reach the internet. Not slowly, not intermittently: every
+// outbound connection to a public address failed, on every machine, and had
+// since the addressing was chosen.
+//
+// The kernel's `ip=` boot argument gives eth0 169.254.0.21, and systemd-networkd
+// configures the same address in the golden rootfs. Both assign it LINK scope,
+// because 169.254.0.0/16 is link-local and that is what the address means. A
+// link-scoped address cannot be chosen as the source for a route to a GLOBAL
+// destination, so the guest had nothing to source from and built its packets
+// with source 0.0.0.0:
+//
+//	IP 0.0.0.0.50696 > 1.1.1.1.443: Flags [S]
+//
+// which the kernel drops as a martian before it leaves the namespace. Nothing
+// logged it anywhere. The packet capture on the tap is the only place it was
+// ever visible, and it took a masquerade fix and a forwarding fix -- both of
+// them genuinely necessary, neither of them sufficient -- before there was
+// anything downstream left to blame.
+//
+// # Why the address stays link-local
+//
+// Because that is the whole point of it: every guest in the fleet has the same
+// 169.254.0.21, and the host translates it per machine in namespace state that
+// is rebuilt on every restore. An address that were globally unique per machine
+// would go into the snapshot and break invariant 5. The scope is a statement
+// about how the KERNEL may use the address, and this one is used as a source
+// for traffic the namespace then translates -- so global is the truthful scope
+// here even though the range is not.
+//
+// Best effort, like the rest of this function: a machine that cannot reach the
+// internet is worse than one that can, and both are better than one that does
+// not boot.
+func globalScopeV4(link netlink.Link) {
+	addrs, err := netlink.AddrList(link, unix.AF_INET)
+	if err != nil {
+		log.Printf("guest-agent: could not list eth0's IPv4 addresses, so its "+
+			"scope is unchecked and outbound traffic may have no source: %v", err)
+		return
+	}
+	for _, addr := range addrs {
+		if addr.IP == nil || addr.IP.To4() == nil {
+			continue
+		}
+		if addr.Scope == int(unix.RT_SCOPE_UNIVERSE) {
+			continue // already global, which is every boot after the first
+		}
+		fixed := addr
+		fixed.Scope = int(unix.RT_SCOPE_UNIVERSE)
+		// Replace rather than delete-then-add: a window with no address at all
+		// is a window where the agent's own listener has nothing to bind, and
+		// this runs while the machine is coming up.
+		if err := netlink.AddrReplace(link, &fixed); err != nil {
+			log.Printf("guest-agent: could not put %s into global scope, so "+
+				"outbound connections will have no source address: %v", addr.IP, err)
+			continue
+		}
+		log.Printf("guest-agent: %s is now globally scoped, so the guest can "+
+			"source outbound traffic", addr.IP)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -31,12 +32,27 @@ type Manager interface {
 	// Redeploy boots a machine again from another image, in place: same row,
 	// same URL, same volume. How a volume-backed service takes a release.
 	Redeploy(ctx context.Context, id string, req RedeployRequest) (*state.Machine, error)
+	// Resize boots a machine again at a new size, in place: same row, same
+	// URL, same disk, same volume. It is a boot rather than a restore because
+	// a memory image cannot be loaded into a differently-sized VM, so the
+	// machine loses what was in memory and nothing else.
+	Resize(ctx context.Context, id string, vcpus, memMiB int) (*state.Machine, error)
 	Checkpoint(ctx context.Context, machineID, comment string) (*state.Checkpoint, error)
 	ListCheckpoints(ctx context.Context, machineID string) ([]state.Checkpoint, error)
 	RestoreCheckpoint(ctx context.Context, checkpointID string) (*state.Machine, error)
 	GetCheckpoint(ctx context.Context, checkpointID string) (*state.Checkpoint, error)
 	Exec(ctx context.Context, machineID string, req ExecRequest) (*ExecResponse, error)
 	Logs(ctx context.Context, machineID string) ([]byte, error)
+	// Processes answers what a machine is running, as the agent's own JSON.
+	// Passed through rather than re-encoded: the guest is the only thing that
+	// knows whether a pid is alive, so a shape assembled on the host would be
+	// a second copy of an answer that is stale the moment it is written.
+	Processes(ctx context.Context, machineID string) ([]byte, error)
+	// ProcessAction starts, stops or restarts one named process, leaving the
+	// machine's other processes alone.
+	ProcessAction(ctx context.Context, machineID, name, action string) error
+	// ProcessLogs is one process's captured output, most recent last.
+	ProcessLogs(ctx context.Context, machineID, name string, tail int) ([]byte, error)
 	// ExecStream proxies the agent's websocket exec stream onto w. An error is
 	// returned only before anything was written (a wake that failed, a machine
 	// that is not running); once the upgrade has been attempted it is nil.
@@ -55,6 +71,31 @@ type Manager interface {
 	CreateVolume(ctx context.Context, req CreateVolumeRequest) (*state.Volume, error)
 	ListVolumes(ctx context.Context) ([]state.Volume, error)
 	MachineVolume(ctx context.Context, machineID string) (*MachineVolume, error)
+	// SnapshotVolume takes a point-in-time copy, pausing the guest for the
+	// clone when one is running: a clone taken while the guest writes captures
+	// a filesystem mid-update, which mounts and then fails later.
+	SnapshotVolume(ctx context.Context, volumeID string) (string, error)
+	ListVolumeSnapshots(ctx context.Context, volumeID string) ([]string, error)
+	// RestoreVolumeSnapshot puts a snapshot back as the live image. Refuses a
+	// running machine and drops a suspended one's memory image, which held
+	// cached filesystem state from the disk being replaced.
+	RestoreVolumeSnapshot(ctx context.Context, volumeID, stamp string) error
+	// DeleteVolumeSnapshot removes one. This is what frees storage: a snapshot
+	// holds a refcount on every block it references, so blocks the live volume
+	// has overwritten stay until the snapshot goes.
+	DeleteVolumeSnapshot(ctx context.Context, volumeID, stamp string) error
+	// Stats is what one machine is using, read from its cgroup on the host
+	// that owns it. A machine with no cgroup -- suspended, or a host that does
+	// not account that way -- is not an error: it reports its persisted CPU
+	// total and no memory, because that is what a suspended machine uses.
+	Stats(ctx context.Context, id string) (*Stats, error)
+	// ForkVolumeSnapshot makes a NEW volume holding a snapshot's contents,
+	// leaving the original alone. This copies bytes: slice ids are per
+	// filesystem, so a new volume shares nothing with the old one.
+	ForkVolumeSnapshot(ctx context.Context, volumeID, stamp, name string) (*state.Volume, error)
+	// Fork makes new machines from one machine's or checkpoint's exact state:
+	// new ids, new names, new URLs, the source's processes already running.
+	Fork(ctx context.Context, opts ForkOptions) ([]ForkOutcome, error)
 }
 
 // toAPI converts a stored row to the wire shape.
@@ -65,10 +106,12 @@ type Manager interface {
 // orgID is passed in rather than looked up here: a list endpoint already knows
 // every row's owner from the pass it made to filter them, and re-asking per
 // row would turn one lookup into N.
-func (d Deps) toAPI(row state.Machine, orgID string, cpu state.MachineCPU, labels map[string]string, urlAuth string) Machine {
+func (d Deps) toAPI(ctx context.Context, row state.Machine, orgID string, cpu state.MachineCPU, labels map[string]string, urlAuth string) Machine {
+	parent, checkpoint := d.lineageOf(ctx, row.ID)
 	return Machine{
 		Labels:  labels,
 		URLAuth: urlAuth,
+		Egress:  d.egressOf(ctx, row.HostID, orgID),
 		ID:      row.ID, Name: row.Name, HostID: row.HostID, State: row.State,
 		OrgID:        orgID,
 		Knobs:        ParseKnobs(row.KindKnobs),
@@ -85,7 +128,21 @@ func (d Deps) toAPI(row state.Machine, orgID string, cpu state.MachineCPU, label
 		LastActivity: row.LastActivity,
 		LastStart:    cpu.LastStart,
 		LastStartAt:  cpu.LastStartAt,
+		Parent:       parent,
+		Checkpoint:   checkpoint,
 	}
+}
+
+// lineageOf is where a machine was forked from, or empty for one that was not.
+//
+// A store error reads as "not forked": the field is provenance, and a blipped
+// side-table read must not fail a machine read.
+func (d Deps) lineageOf(ctx context.Context, id string) (parent, checkpoint string) {
+	l, err := d.Store.GetLineage(ctx, id)
+	if err != nil || l == nil {
+		return "", ""
+	}
+	return l.ParentID, l.CheckpointID
 }
 
 // urlAuthOf reads who may reach an object's URL; nothing recorded is public,
@@ -160,12 +217,12 @@ func (d Deps) handleUpdateMachine(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, "url_auth must be public or org", "pass url_auth: public, or url_auth: org", nil)
 		return
 	}
-	if err := d.Store.PutURLAuth(r.Context(), &state.URLAuth{ID: row.ID, Kind: "machine", Mode: *req.URLAuth, UpdatedAt: time.Now().Unix()}); err != nil {
+	if err := d.putURLAuth(r.Context(), &state.URLAuth{ID: row.ID, Kind: "machine", Mode: *req.URLAuth, UpdatedAt: time.Now().Unix()}); err != nil {
 		writeMapped(w, err)
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), row.ID)
-	writeJSON(w, http.StatusOK, d.toAPI(*row, owner, d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), *req.URLAuth))
+	writeJSON(w, http.StatusOK, d.toAPI(r.Context(), *row, owner, d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), *req.URLAuth))
 }
 
 // labelsOf reads an object's labels, and reads "none recorded" as none.
@@ -216,6 +273,49 @@ func decodeBody(r *http.Request, v any) error {
 // here rather than in machines because writeErr has to recognise it and
 // machines imports this package, not the other way round.
 var ErrConflict = errors.New("conflict")
+
+// ErrNoCapacity marks a create this host cannot hold, even after suspending
+// every idle machine it could.
+//
+// Not a failure and not the caller's fault: it is the fleet's honest answer to
+// "I have nowhere to put this". The ranker reads it and offers the create to
+// the next host; a client that has run out of hosts sees a 507 naming capacity
+// rather than a 500 naming whatever Firecracker said when it could not get the
+// memory.
+//
+// Lives here rather than in machines for the reason ErrConflict does: the
+// error mapper has to recognise it, and machines imports this package.
+var ErrNoCapacity = errors.New("no capacity")
+
+// ErrBadRequest marks something the CALLER got wrong, reported from a layer
+// below the handler that read the body.
+//
+// A handler validates what it can see. Some rules live deeper -- a name
+// reserved for hostd's own machines, say -- and a plain error from down there
+// falls through the mapper to a 500 carrying the reason inside `details`. The
+// reason was right and the status was a lie: a 500 tells the caller the fleet
+// is broken and invites a retry, when the only thing that will help is a
+// different request.
+//
+// Lives here rather than in machines for the reason the two above do: the
+// mapper has to recognise it, and machines imports this package.
+var ErrBadRequest = errors.New("bad request")
+
+// putURLAuth writes who may reach an object's URL, and tells the router.
+//
+// Every write of a mode goes through here rather than calling the store
+// directly, for the reason the self-token check lives in ownedMachine: a list
+// of call sites goes out of date, and the one somebody adds next year would
+// leave the router answering with the mode the object used to have.
+func (d Deps) putURLAuth(ctx context.Context, u *state.URLAuth) error {
+	if err := d.Store.PutURLAuth(ctx, u); err != nil {
+		return err
+	}
+	if d.ForgetURLAuth != nil {
+		d.ForgetURLAuth(u.ID)
+	}
+	return nil
+}
 
 func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 	var req CreateMachineRequest
@@ -301,6 +401,12 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, "url_auth must be public or org", "pass url_auth: public, or url_auth: org", nil)
 		return
 	}
+	if !checkPayloadSize(w, map[string]any{
+		"env": req.Env, "secret_env": req.SecretEnv,
+		"knobs": req.Knobs, "labels": req.Labels,
+	}) {
+		return
+	}
 	if !checkLabels(w, req.Labels) {
 		return
 	}
@@ -322,6 +428,18 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// AFTER the quota, because the org and the key are only resolved here and
+	// a create the org may not have should be refused once, by the host that
+	// received it, rather than forwarded somewhere to be refused again.
+	//
+	// Before the manager, because the whole point is that another host may be
+	// the better place to run it. A volume-backed create is not forwarded: the
+	// volume is claimed by whichever host mounts it, and moving the create
+	// would move the claim without moving the data.
+	if req.Volume == "" && d.forwardCreate(w, r, req) {
+		return
+	}
+
 	row, err := d.Machines.Create(r.Context(), req)
 	if err != nil {
 		writeMapped(w, err)
@@ -334,12 +452,12 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if req.URLAuth == URLAuthOrg {
-		if err := d.Store.PutURLAuth(r.Context(), &state.URLAuth{ID: row.ID, Kind: "machine", Mode: URLAuthOrg, UpdatedAt: time.Now().Unix()}); err != nil {
+		if err := d.putURLAuth(r.Context(), &state.URLAuth{ID: row.ID, Kind: "machine", Mode: URLAuthOrg, UpdatedAt: time.Now().Unix()}); err != nil {
 			writeMapped(w, err)
 			return
 		}
 	}
-	writeJSON(w, http.StatusCreated, d.toAPI(*row, req.OrgID, d.startOf(r.Context(), row.ID), req.Labels, orDefaultMode(req.URLAuth)))
+	writeJSON(w, http.StatusCreated, d.toAPI(r.Context(), *row, req.OrgID, d.startOf(r.Context(), row.ID), req.Labels, orDefaultMode(req.URLAuth)))
 }
 
 // orDefault mirrors the machine manager's own defaulting, so the quota check
@@ -360,8 +478,17 @@ func (d Deps) handleListMachines(w http.ResponseWriter, r *http.Request) {
 	}
 	org, narrow := listOrg(r)
 	want := labelFilter(r)
+	builders := includeBuilders(r)
 	out := make([]Machine, 0, len(rows))
 	for _, row := range rows {
+		// A builder is infrastructure hostd made for itself, not something the
+		// org created, so it is absent unless asked for: an agent listing
+		// machines to pick one to exec into should not have to know to skip
+		// it, and a list that shows it invites someone to destroy the thing
+		// their next deploy needs. GET /v1/builders is where they are.
+		if !builders && isBuilder(row.Name) {
+			continue
+		}
 		owner, ok := d.visible(r, row.ID, org, narrow)
 		if !ok {
 			continue
@@ -370,7 +497,7 @@ func (d Deps) handleListMachines(w http.ResponseWriter, r *http.Request) {
 		if !matchesLabels(labels, want) {
 			continue
 		}
-		out = append(out, d.toAPI(row, owner, d.startOf(r.Context(), row.ID), labels, d.urlAuthOf(r.Context(), row.ID)))
+		out = append(out, d.toAPI(r.Context(), row, owner, d.startOf(r.Context(), row.ID), labels, d.urlAuthOf(r.Context(), row.ID)))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -381,7 +508,7 @@ func (d Deps) handleGetMachine(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), row.ID)
-	writeJSON(w, http.StatusOK, d.toAPI(*row, owner, d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), d.urlAuthOf(r.Context(), row.ID)))
+	writeJSON(w, http.StatusOK, d.toAPI(r.Context(), *row, owner, d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), d.urlAuthOf(r.Context(), row.ID)))
 }
 
 func (d Deps) handleDestroyMachine(w http.ResponseWriter, r *http.Request) {
@@ -563,7 +690,7 @@ func (d Deps) handleRedeploy(w http.ResponseWriter, r *http.Request) {
 		writeMapped(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, d.toAPI(*row, OrgID(r.Context()), d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), d.urlAuthOf(r.Context(), row.ID)))
+	writeJSON(w, http.StatusOK, d.toAPI(r.Context(), *row, OrgID(r.Context()), d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), d.urlAuthOf(r.Context(), row.ID)))
 }
 
 func (d Deps) handleCreateCheckpoint(w http.ResponseWriter, r *http.Request) {
@@ -573,6 +700,17 @@ func (d Deps) handleCreateCheckpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
+		return
+	}
+	// A soft cap: what this checkpoint will weigh is unknown until it is
+	// taken, so the check admits while the org is under the line and overshoots
+	// by at most one checkpoint. Unbounded checkpointing is the case it
+	// catches; the retention policy is what bounds growth in the ordinary one.
+	if err := quota.Check(r.Context(), d.Store, actingOrg(r), quota.Delta{SnapshotGiB: 1}); err != nil {
+		if writeQuotaError(w, err) {
+			return
+		}
+		writeMapped(w, err)
 		return
 	}
 	ckpt, err := d.Machines.Checkpoint(r.Context(), r.PathValue("id"), req.Comment)
@@ -620,7 +758,7 @@ func (d Deps) handleRestoreCheckpoint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner, _ := d.tenancy().OrgOf(r.Context(), row.ID)
-	writeJSON(w, http.StatusOK, d.toAPI(*row, owner, d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), d.urlAuthOf(r.Context(), row.ID)))
+	writeJSON(w, http.StatusOK, d.toAPI(r.Context(), *row, owner, d.startOf(r.Context(), row.ID), d.labelsOf(r.Context(), row.ID), d.urlAuthOf(r.Context(), row.ID)))
 }
 
 // handleCheckpointStatus lets a caller learn when a checkpoint became durable.
@@ -675,6 +813,23 @@ const logRowInterval = 5 * time.Second
 // file is nil rather than an error.
 const logFollowRetries = 10
 
+// Resuming a follow, and taking only the end of one.
+//
+// # Why an offset and not a cursor
+//
+// The log is one append-only file, so the byte offset IS the position, and a
+// client that knows it can resume exactly. A cursor would be a second identity
+// for the same number, kept correct on both sides. `X-Pilot-Log-Offset` says
+// where the body starts, `?offset=` says where to start it, and they are the
+// same units on purpose.
+//
+// # Why the plain-text default is untouched
+//
+// The CLI, three SDKs, the MCP tool and the dashboard route all read this body
+// as text today. A response that changed shape to add a feature none of them
+// asked for would break five clients to serve one. SSE is opt-in through
+// Accept, and everything else is a query parameter that defaults to what
+// happens now, byte for byte.
 func (d Deps) handleLogs(w http.ResponseWriter, r *http.Request) {
 	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
 		return
@@ -685,14 +840,166 @@ func (d Deps) handleLogs(w http.ResponseWriter, r *http.Request) {
 		writeMapped(w, err)
 		return
 	}
+
+	// Where this body starts. Computed before anything is written, because the
+	// header cannot be set after the first byte and a client resuming from the
+	// wrong number either repeats output or loses it.
+	start := int64(0)
+	if raw := r.URL.Query().Get("offset"); raw != "" {
+		if at, err := strconv.ParseInt(raw, 10, 64); err == nil && at >= 0 {
+			// Past the end is not an error: the file was rotated, or the client
+			// held an offset from a previous boot. Starting at zero and saying
+			// so is better than refusing, because the client wants the log.
+			if at <= int64(len(logs)) {
+				start = at
+			}
+		}
+	}
+	body := logs[start:]
+	if raw := r.URL.Query().Get("tail"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
+			body = lastLines(body, n)
+			start = int64(len(logs)) - int64(len(body))
+		}
+	}
+
+	if wantsSSE(r) {
+		d.streamLogEvents(w, r, id, logs, start, body)
+		return
+	}
+
+	w.Header().Set("X-Pilot-Log-Offset", strconv.FormatInt(start, 10))
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(logs)
+	_, _ = w.Write(body)
 
 	if !r.URL.Query().Has("follow") { // follow=1 and a bare follow both work
 		return
 	}
 	d.followLogs(w, r, id, int64(len(logs)))
+}
+
+// wantsSSE reports whether the client asked for server-sent events.
+//
+// Opt-in through Accept rather than a query parameter, because that is what
+// Accept is for and because an EventSource sends it without being told.
+func wantsSSE(r *http.Request) bool {
+	return strings.Contains(r.Header.Get("Accept"), "text/event-stream")
+}
+
+// lastLines is the final n lines of a body.
+//
+// Counted from the END, so a 40 MiB log costs one backwards scan rather than a
+// split of the whole thing into a slice nobody keeps.
+func lastLines(body []byte, n int) []byte {
+	if n <= 0 {
+		return nil
+	}
+	seen := 0
+	// A trailing newline terminates the last line rather than starting an empty
+	// one, so it is skipped before counting.
+	end := len(body)
+	if end > 0 && body[end-1] == '\n' {
+		end--
+	}
+	for i := end - 1; i >= 0; i-- {
+		if body[i] != '\n' {
+			continue
+		}
+		seen++
+		if seen == n {
+			return body[i+1:]
+		}
+	}
+	return body
+}
+
+// streamLogEvents serves the log as server-sent events.
+//
+// The id of each event is the offset AFTER it, which is what makes
+// `Last-Event-ID` a resume: the browser sends back the last id it saw, and that
+// is exactly where the next byte is. Nothing is repeated and nothing is
+// skipped, which a line-counting cursor could not promise.
+func (d Deps) streamLogEvents(w http.ResponseWriter, r *http.Request, id string,
+	logs []byte, start int64, body []byte) {
+
+	// Last-Event-ID wins over ?offset=: the browser sets it automatically on a
+	// reconnect, and that reconnect is precisely the case a client cannot
+	// intervene in to set a query parameter.
+	if raw := r.Header.Get("Last-Event-ID"); raw != "" {
+		if at, err := strconv.ParseInt(raw, 10, 64); err == nil && at >= 0 && at <= int64(len(logs)) {
+			start, body = at, logs[at:]
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Pilot-Log-Offset", strconv.FormatInt(start, 10))
+	w.WriteHeader(http.StatusOK)
+
+	flusher, _ := w.(http.Flusher)
+	flush := func() {
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+
+	offset := start
+	if len(body) > 0 {
+		offset += int64(len(body))
+		writeLogEvent(w, "log", offset, body)
+	}
+	flush()
+
+	if !r.URL.Query().Has("follow") {
+		return
+	}
+
+	poll := logFollowInterval
+	if d.LogFollowInterval > 0 {
+		poll = d.LogFollowInterval
+	}
+	ticker := time.NewTicker(poll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case <-ticker.C:
+		}
+		delta, err := d.Machines.LogTail(id, offset)
+		if err != nil {
+			// The file was rotated out from under this follow. `reset` with id
+			// 0 tells the client its offset is meaningless now, which is the
+			// one thing it cannot work out for itself: without it, it would
+			// resume from a byte in the middle of a line of different output.
+			writeLogEvent(w, "reset", 0, nil)
+			flush()
+			offset = 0
+			continue
+		}
+		if len(delta) == 0 {
+			continue
+		}
+		offset += int64(len(delta))
+		writeLogEvent(w, "log", offset, delta)
+		flush()
+	}
+}
+
+// writeLogEvent emits one event, splitting the payload into `data:` lines.
+//
+// Every line has to be prefixed, because SSE ends an event at a blank line: a
+// log chunk written raw would end its own event at the first blank line in the
+// output and the rest would be parsed as a new one.
+func writeLogEvent(w http.ResponseWriter, kind string, id int64, payload []byte) {
+	fmt.Fprintf(w, "event: %s\nid: %d\n", kind, id)
+	if len(payload) > 0 {
+		for _, line := range strings.Split(strings.TrimSuffix(string(payload), "\n"), "\n") {
+			fmt.Fprintf(w, "data: %s\n", line)
+		}
+	}
+	fmt.Fprint(w, "\n")
 }
 
 // followLogs streams the console log as it grows.
@@ -855,15 +1162,71 @@ func (d Deps) handleListHosts(w http.ResponseWriter, r *http.Request) {
 		writeMapped(w, err)
 		return
 	}
+	// What each host reports about its own capacity, joined in memory. Two
+	// list queries rather than two per row: a fleet read must not cost a query
+	// per host, and neither of these is large.
+	//
+	// Both best effort. A host whose capacity row cannot be read is still
+	// listed, with zeroes, because the hosts row is the answer to "who is in
+	// the fleet" and a missing side table must not remove anyone from it.
+	caps := map[string]state.HostCapacity{}
+	if rows, err := d.Store.ListHostCapacity(r.Context()); err == nil {
+		for _, c := range rows {
+			caps[c.HostID] = c
+		}
+	}
+	cached := map[string]int{}
+	if rows, err := d.Store.ListHostBuilds(r.Context()); err == nil {
+		for _, b := range rows {
+			cached[b.HostID] = len(b.Builds)
+		}
+	}
+
 	const aliveWindow = 30 * time.Second
 	out := make([]Host, 0, len(hosts))
 	for _, h := range hosts {
+		c := caps[h.ID]
+		// The capacity row's figure wins when there is one: it is what every
+		// ranker actually reads, and reporting the hosts row's older copy here
+		// would show an operator a different number from the one placement
+		// used.
+		free := h.MemFreeMiB
+		if c.UpdatedAt > 0 {
+			free = c.MemFreeMiB
+		}
 		out = append(out, Host{
 			ID: h.ID, PublicIP: h.PublicIP, WGAddr: h.WGAddr,
-			CPUFree: h.CPUFree, MemFreeMiB: h.MemFreeMiB, LastSeen: h.LastSeen,
-			Alive:     time.Since(time.Unix(h.LastSeen, 0)) < aliveWindow,
-			CPUVendor: h.Vendor,
+			CPUFree: h.CPUFree, MemFreeMiB: free, LastSeen: h.LastSeen,
+			Alive:             time.Since(time.Unix(h.LastSeen, 0)) < aliveWindow,
+			CPUVendor:         h.Vendor,
+			MemReclaimableMiB: c.MemReclaimableMiB,
+			VCPUsRunning:      c.VCPUsRunning,
+			Draining:          c.Draining,
+			BuildsCached:      cached[h.ID],
 		})
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// serveRecipes hands off to the injected generator, or says so when a host has
+// none. A nil handler is a test server rather than a real host, and a route
+// that answered 404 there would be a route nothing checks.
+func (d Deps) serveHAFragment(w http.ResponseWriter, r *http.Request) {
+	if d.HAFragment == nil {
+		WriteError(w, http.StatusServiceUnavailable, CodeNotConfigured,
+			"this host serves no database recipes",
+			"upgrade the host; every host with a compose planner has them", nil)
+		return
+	}
+	d.HAFragment(w, r)
+}
+
+func (d Deps) serveRecipes(w http.ResponseWriter, r *http.Request) {
+	if d.Recipes == nil {
+		WriteError(w, http.StatusServiceUnavailable, CodeNotConfigured,
+			"this host serves no database recipes",
+			"upgrade the host; every host with a compose planner has them", nil)
+		return
+	}
+	d.Recipes(w, r)
 }

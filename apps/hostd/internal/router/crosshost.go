@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -53,7 +55,20 @@ const forwardedHeader = ForwardedHeader
 // long-lived by design -- main.go sets no WriteTimeout for exactly that
 // reason -- and a machine's behavior must not depend on whether the client's
 // DNS pick happened to land on the owning host.
-const forwardTimeout = 120 * time.Second
+const forwardTimeout = HeldWakeWindow
+
+// HeldWakeWindow is how long a request to a sleeping machine is HELD.
+//
+// One number for both paths, deliberately. A request to a machine on this host
+// and a request to the same machine one host over must wait the same length of
+// time, or a client can tell where a machine is by how long it waits -- which
+// is the one thing the routing layer exists to hide.
+//
+// Long enough that a cold boot from object storage finishes inside it, and
+// short enough that a wake which will never finish ends as an error somebody
+// can act on rather than as a connection that hangs until a load balancer
+// gives up and reports something less useful.
+const HeldWakeWindow = 120 * time.Second
 
 // forwardTransport carries forwarded requests over the mesh. Shared, so
 // cross-host requests pool connections, and the place forwardTimeout is
@@ -183,6 +198,21 @@ func (r *Router) InternalHandler() http.Handler {
 func (r *Router) serveOrForward(w http.ResponseWriter, req *http.Request, target *Target) {
 	m := target.Machine
 
+	// A machine mid-DRAIN is a special case that has to come first: its row
+	// still names this host, and its memory image has already been offered to
+	// another one. Serving it here would wake a machine somebody else is in
+	// the middle of claiming; refusing would make a planned operation
+	// customer-visible, which is the whole thing a drain exists to avoid. So
+	// the request follows the machine.
+	if r.opts.HandingOff != nil {
+		if to, moving := r.opts.HandingOff(m.ID); moving && to != r.opts.HostID {
+			moved := m
+			moved.HostID = to
+			r.forwardToOwner(w, req, moved)
+			return
+		}
+	}
+
 	if m.HostID == "" || m.HostID == r.opts.HostID {
 		r.serveLocally(w, req, target)
 		return
@@ -282,9 +312,27 @@ func (r *Router) serveLocally(w http.ResponseWriter, req *http.Request, target *
 
 	// Counted while in flight so the idle monitor cannot suspend the machine
 	// mid-response, and recorded so it is not suspended immediately after.
-	r.opts.Manager.Begin(target.Machine.ID)
+	//
+	// A machine with a hard limit queues here instead of piling on. Counted on
+	// the OWNER host, which is where this runs: concurrency is a property of
+	// the guest, and a fleet-wide count would need a round trip per request to
+	// enforce a limit about one process.
+	knobs := api.ParseKnobs(target.Machine.KindKnobs)
+	if knobs.HardLimit > 0 {
+		if !r.opts.Manager.BeginLimited(ctx, target.Machine.ID, knobs.HardLimit, hardLimitQueue) {
+			metrics.RouterHardLimitRefusals.Inc()
+			// Retry-After, because this is a queue that drained too slowly
+			// rather than a machine that is broken. A client that backs off a
+			// second usually finds the replica the autoscaler just started.
+			w.Header().Set("Retry-After", "1")
+			http.Error(w, "machine is at its hard_limit; retry", http.StatusServiceUnavailable)
+			return
+		}
+	} else {
+		r.opts.Manager.Begin(target.Machine.ID)
+	}
 	defer r.opts.Manager.End(target.Machine.ID)
 	go r.opts.Manager.Touch(context.WithoutCancel(ctx), target.Machine.ID)
 
-	r.proxyTo(w, req, slot, target.Port)
+	r.proxyTo(w, req, slot, target.Port, target)
 }

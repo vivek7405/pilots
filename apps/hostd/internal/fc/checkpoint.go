@@ -1,6 +1,7 @@
 package fc
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 )
@@ -33,6 +34,11 @@ type CheckpointStatus struct {
 	// Failed is set when the background work gave up.
 	Failed bool   `json:"failed"`
 	Error  string `json:"error,omitempty"`
+	// Bytes is what this checkpoint ADDED to object storage: the packed bytes
+	// of both halves, which is the O(dirty) number rather than the apparent
+	// size of a sparse image. Zero on a checkpoint written before the marker
+	// carried it, which meters as nothing rather than failing.
+	Bytes int64 `json:"bytes,omitempty"`
 }
 
 // uploadSlots bounds concurrent background uploads.
@@ -51,8 +57,17 @@ var uploadSlots = make(chan struct{}, 1)
 func StatusOf(localDir string) CheckpointStatus {
 	var st CheckpointStatus
 
-	if _, err := os.Stat(filepath.Join(localDir, durableMarker)); err == nil {
+	if raw, err := os.ReadFile(filepath.Join(localDir, durableMarker)); err == nil {
 		st.Durable = true
+		// What the checkpoint added to storage, written by the upload that
+		// finished it. A marker with no body is one an older host wrote: it
+		// reads as zero, which meters as nothing rather than failing.
+		var body struct {
+			Bytes int64 `json:"bytes"`
+		}
+		if json.Unmarshal(raw, &body) == nil {
+			st.Bytes = body.Bytes
+		}
 	}
 	if raw, err := os.ReadFile(filepath.Join(localDir, failedMarker)); err == nil {
 		st.Failed = true

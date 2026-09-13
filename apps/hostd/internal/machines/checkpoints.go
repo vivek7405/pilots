@@ -63,6 +63,12 @@ func (m *Manager) Checkpoint(ctx context.Context, machineID, comment string) (*s
 	// copy is reused instead of re-downloaded.
 	localDir := m.checkpointDir(machineID, ckpt.ID)
 
+	// Recorded BEFORE the first side effect. A checkpoint interrupted between
+	// the freeze and the upload leaves a staging directory and a row that says
+	// nothing about it; this is what the next start reads to finish or abandon
+	// it. See opjournal.go, including why it cannot grow.
+	m.beginOp(machineID, opCheckpoint, ckpt.ID)
+
 	// Same reason as suspend: the disk image must agree with the memory image
 	// about what was written.
 	m.reclaimGuestMemory(ctx, machineID)
@@ -123,6 +129,7 @@ func (m *Manager) awaitDurable(checkpointID, machineID, localDir string) {
 		st := fc.StatusOf(localDir)
 		switch {
 		case st.Durable:
+			m.endOp(machineID)
 			ck, err := m.findCheckpoint(ctx, checkpointID)
 			if err != nil {
 				return
@@ -134,6 +141,10 @@ func (m *Manager) awaitDurable(checkpointID, machineID, localDir string) {
 			}
 			return
 		case st.Failed:
+			// Cleared on failure too: the outcome is decided and recorded, so
+			// a resume on the next start would retry something that already
+			// has an answer.
+			m.endOp(machineID)
 			slog.Error("checkpoint upload failed; it cannot be restored from "+
 				"another host", "checkpoint", checkpointID, "machine", machineID,
 				"err", st.Error)
@@ -182,6 +193,13 @@ func (m *Manager) RestoreCheckpoint(ctx context.Context, checkpointID string) (*
 	if err != nil {
 		return nil, err
 	}
+
+	// Recorded before the teardown, which is the first irreversible step. A
+	// restore killed between the old instance's death and the new row's write
+	// leaves a machine that is neither running nor recorded as stopped, and
+	// nothing else would ever notice. See opjournal.go.
+	m.beginOp(row.ID, opRestore, ckpt.ID)
+	defer m.endOp(row.ID)
 
 	// Tear the current instance down first. Its disk and memory are being
 	// replaced wholesale.

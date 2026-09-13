@@ -173,11 +173,89 @@ func (f *fakeMachines) Checkpoint(ctx context.Context, id, comment string) (*sta
 
 func (f *fakeMachines) AppAddr(id string) (string, bool) { return "", false }
 
+// The real one is a pure function of the two ids, so the fake spells the same
+// layout rather than returning a sentinel: a test that asserts a replica
+// restores from the right vmstate is asserting this string.
+func (f *fakeMachines) CheckpointSnapKey(machineID, checkpointID string) string {
+	return "machines/" + machineID + "/checkpoints/" + checkpointID + "/snap.bin"
+}
+
 func (f *fakeMachines) ResetAgentToken(ctx context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.log("reset-token:%s", id)
 	return nil
+}
+
+// cpuAuthStore records the WriteOptions each machine_cpu write carried.
+//
+// The sqlite store enforces no writer rule, so the only way to test that the
+// caller SAYS which service a release belongs to is to watch what it passes.
+// On corrosion that option is the whole difference between the write landing
+// and failing.
+type cpuAuthStore struct {
+	state.Store
+	mu    sync.Mutex
+	auths map[string]state.WriteAuth
+}
+
+func (s *cpuAuthStore) PutMachineCPU(ctx context.Context, c *state.MachineCPU,
+	opts ...state.WriteOption) error {
+
+	s.mu.Lock()
+	if s.auths == nil {
+		s.auths = map[string]state.WriteAuth{}
+	}
+	s.auths[c.ID] = state.ResolveAuth(opts)
+	s.mu.Unlock()
+	return s.Store.PutMachineCPU(ctx, c, opts...)
+}
+
+func (s *cpuAuthStore) authFor(id string) (state.WriteAuth, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.auths[id]
+	return a, ok
+}
+
+// A release's CPU-pool row names its service, because nothing can look it up.
+//
+// # The bug
+//
+// The driver's writer check read the release back to find its service. That
+// read cannot succeed: the row is written from inside snapshotRelease, while
+// the release is still being assembled, and the release row is written
+// afterwards. So the check failed on every release the fleet ever cut.
+//
+// A promote surfaced it as a flat HTTP 404 with nothing in the journal -- the
+// checkpoint had succeeded, and a missing local row became "not found; check
+// the id". A deploy swallowed it as a warning saying the release had no memory
+// image, which was false, and carried on with the CPU-vendor guard silently
+// unarmed: every later replica read no pool row, took that as "in no pool",
+// and restored a memory image that may have been photographed on the other
+// vendor.
+func TestAReleasesCPURowNamesItsService(t *testing.T) {
+	ctx := context.Background()
+	m, _, store, svc := fixture(t, 1)
+	spy := &cpuAuthStore{Store: store}
+	m.opts.Store = spy
+
+	rel, err := m.Deploy(ctx, "svc-1", "rootfs-build", nil)
+	if err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	auth, ok := spy.authFor(rel.ID)
+	if !ok {
+		t.Fatal("no CPU-pool row was written for the release, so nothing records " +
+			"which vendor photographed its memory image and the cross-vendor " +
+			"guard has nothing to read")
+	}
+	if auth.ForService != svc.ID {
+		t.Errorf("the write named service %q, want %q. Without it the driver "+
+			"falls back to reading the release, which does not exist yet",
+			auth.ForService, svc.ID)
+	}
 }
 
 func fixture(t *testing.T, replicas int) (*Manager, *fakeMachines, state.Store, *state.Service) {
@@ -313,6 +391,45 @@ func TestAReleaseWithNoSnapshotStillDeploys(t *testing.T) {
 		if e == "create:m-2:restore" {
 			t.Error("replica 2 restored from a release that has no memory image")
 		}
+	}
+}
+
+// A deploy records where its release keeps its vmstate, carrying the service.
+//
+// # Why the service id is on the row
+//
+// The writer guard on this table asks whether this host is the one that writes
+// that service, and the obvious way to answer is to read the release row and
+// take its service_id. That does not work here: this row is written from
+// inside snapshotRelease, which runs BEFORE the release row is written -- the
+// checkpoint has to succeed before there is a release worth writing at all.
+// A guard that looked the release up would refuse every write it exists to
+// allow, and a promote would come back 404 with nothing naming the cause.
+//
+// So the service travels on the row, and this test is what says so.
+func TestADeployRecordsWhereItsVMStateIsWithItsService(t *testing.T) {
+	ctx := context.Background()
+	m, _, store, svc := fixture(t, 2)
+
+	rel, err := m.Deploy(ctx, "svc-1", "rootfs-build", nil)
+	if err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	snap, err := store.GetReleaseSnapshot(ctx, rel.ID)
+	if err != nil {
+		t.Fatalf("a deployed release records no vmstate, so every replica of it "+
+			"will boot rather than restore: %v", err)
+	}
+	if snap.ServiceID != svc.ID {
+		t.Errorf("the snapshot row names service %q, want %q. Without it the "+
+			"writer guard has nothing to check against, because the release row "+
+			"does not exist yet when this is written", snap.ServiceID, svc.ID)
+	}
+	if snap.CheckpointID == "" || snap.MachineID == "" {
+		t.Errorf("the snapshot row names machine %q checkpoint %q; the vmstate "+
+			"key is built from both, so an empty one is an empty key",
+			snap.MachineID, snap.CheckpointID)
 	}
 }
 
@@ -992,6 +1109,10 @@ func TestAReplicaOnTheReleasesVendorRestores(t *testing.T) {
 		ID: rel.ID, Kind: state.KindRelease, Vendor: "AuthenticAMD"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.PutReleaseSnapshot(ctx, &state.ReleaseSnapshot{
+		ID: rel.ID, MachineID: "m-photographed", CheckpointID: "ck-1"}); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := m.createReplica(ctx, svc, rel, nil, ""); err != nil {
 		t.Fatalf("createReplica: %v", err)
@@ -1043,6 +1164,10 @@ func TestAnUnrecordedReleaseStillRestores(t *testing.T) {
 		RootfsBuildID: "rootfs-build", MemBuildID: "mem-build",
 	}
 	if err := store.PutRelease(ctx, rel); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutReleaseSnapshot(ctx, &state.ReleaseSnapshot{
+		ID: rel.ID, MachineID: "m-photographed", CheckpointID: "ck-1"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1194,4 +1319,25 @@ func TestAnErrorReplicaIsPrunedByTheSecondDeployAfterIt(t *testing.T) {
 	if got := eventsWithPrefix(fm, "destroy:m-1"); len(got) == 0 {
 		t.Errorf("the error replica survived the second deploy after it: %v", fm.events)
 	}
+}
+
+// CreateVolume records the volume and stores it, so an ordinal rollout can be
+// driven without a filesystem. The events log carries it, because WHEN a volume
+// is created relative to its binding is a property worth asserting: the binding
+// is write-once and naming a volume that does not exist could never be undone.
+func (f *fakeMachines) CreateVolume(ctx context.Context, req api.CreateVolumeRequest) (*state.Volume, error) {
+	f.mu.Lock()
+	f.next++
+	id := fmt.Sprintf("vol_%d", f.next)
+	f.events = append(f.events, "create-volume "+req.Name)
+	f.mu.Unlock()
+
+	v := &state.Volume{
+		ID: id, Name: req.Name, SizeMiB: req.SizeGiB * 1024,
+		MountPath: req.MountPath, CreatedAt: 1,
+	}
+	if err := f.store.PutVolume(ctx, v); err != nil {
+		return nil, err
+	}
+	return v, nil
 }

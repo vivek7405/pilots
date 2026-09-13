@@ -56,6 +56,13 @@ const (
 	// slot's host-facing IP.
 	GuestAppPort   = 8080
 	GuestAgentPort = 3001
+	// BrokerPort is where hostd hands a machine its own credentials, inside
+	// that machine's namespace. Beside the agent rather than sharing its port,
+	// because the agent is reached BY hostd and this is reached FROM the guest:
+	// one authenticates to hostd, the other authenticates nobody. Declared here
+	// with the other constant addresses so the guest side and the host side
+	// cannot disagree about it.
+	BrokerPort = 3002
 
 	// GuestBuildkitPort is the BuildKit daemon inside a builder machine.
 	// hostd's buildctl dials it the way the router dials the app port, and

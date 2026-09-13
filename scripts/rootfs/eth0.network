@@ -4,7 +4,6 @@
 Name=eth0
 
 [Network]
-Address=169.254.0.21/30
 Gateway=169.254.0.22
 # The IPv6 half of the same link, and constant for the same reason. The mesh
 # is IPv6, so a guest reaches its peers over v6 -- but it does so from an
@@ -19,6 +18,27 @@ DNS=169.254.0.22
 # There is no router on this link and no advertisement to accept. Left on, the
 # guest spends its boot waiting for one.
 IPv6AcceptRA=no
+
+# The IPv4 address in a section of its own, because it needs a Scope.
+#
+# 169.254.0.0/16 is link-local, so both the kernel's ip= argument and networkd
+# give this address LINK scope by default -- and a link-scoped address cannot
+# be selected as the source for a route to a global destination. The guest then
+# had nothing to source from and sent its SYNs from 0.0.0.0, which the kernel
+# drops as martians before they leave the namespace. Every guest's outbound
+# internet access was broken this way, silently, from the beginning.
+#
+# The address stays link-local on purpose: every guest in the fleet shares it,
+# and the host translates it per machine in namespace state rebuilt on every
+# restore, which is what keeps a snapshot host-agnostic. The scope says how the
+# kernel may USE the address, and this one is a source for traffic the
+# namespace then translates.
+#
+# The guest agent does the same thing at runtime (globalScopeV4), which covers
+# an image built from a user's Dockerfile, where networkd never runs at all.
+[Address]
+Address=169.254.0.21/30
+Scope=global
 
 # Peers live under fdcd::/16, reached through the same gateway. Note what is
 # NOT here: any address belonging to a host. hostd listens under fdcc::/16 and

@@ -537,6 +537,16 @@ only exist across hosts -- rescue, gossip, arbitration -- and the only thing
 that runs `scripts/cluster/gate.sh`. It is N Ubuntu VMs on a libvirt NAT
 bridge, each running the identical stack.
 
+A freshly started rig host reports `replication_complete: false` on
+`/v1/health` for its first seconds, and that is correct rather than broken. It
+is the join gate: until the replica has caught up the host serves its own
+machines, routes, wakes and answers DNS as usual, and claims none of anybody
+else's, because a half-replicated replica cannot tell a dead host from one
+whose rows it has not applied yet. A single box with SQLite reports `true`
+immediately, having nothing to join. The field staying false for minutes on a
+rig host means gossip is not reaching it; check that its peers answer
+`http://<peer>:8080/v1/health` from that host.
+
 It is not cheap, and it cannot be. Firecracker runs **nested** inside those
 VMs, and a guest's memory is resident in its host, so the default rig asks for
 **30 GiB of RAM, 12 vCPUs and 120 GiB of disk**. If that is more than you

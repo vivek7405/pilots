@@ -16,6 +16,11 @@ import (
 // Deps is what the handlers need from the rest of the process. It stays small
 // on purpose: anything reachable only from one host does not belong here.
 type Deps struct {
+	// ForgetURLAuth tells the router to drop what it memoised about an
+	// object's URL mode, because this host has just changed it. Nil on a host
+	// that serves no router, where there is nothing to tell.
+	ForgetURLAuth func(id string)
+
 	HostID   string
 	Store    state.Store
 	Machines Manager
@@ -24,9 +29,11 @@ type Deps struct {
 	// HugePages is this host's guest page size setting; see
 	// HealthResponse.HugePages.
 	HugePages bool
-	// StoreVersion reads the replica's version, for HealthResponse.StoreVersion.
-	// Nil on SQLite, where there is no replica and the field is 0.
-	StoreVersion func(context.Context) (int64, error)
+	// Replication reads how far this replica has caught up, for the three
+	// replication fields of HealthResponse: the version vector's sum, the
+	// vector itself, and whether the join gate has opened. Nil on SQLite,
+	// where there is no replica, the versions are empty and complete is true.
+	Replication func(context.Context) (int64, map[string]int64, bool, error)
 	// Builds turns a Dockerfile context into a rootfs build. Nil on a host
 	// with no object storage, where a build has nowhere to publish to.
 	Builds BuildRunner
@@ -64,17 +71,35 @@ type Deps struct {
 	// Peers resolves other hosts, so a service write that arrived at the
 	// wrong host can be forwarded to the one allowed to perform it.
 	Peers PeerLookup
+	// Placement counts where creates ended up, so an operator can see whether
+	// the fleet is spreading or whether every create is being served locally
+	// because no candidate would take it. Nil on a host with no metrics.
+	Placement Placement
+	// Drain empties THIS host on an operator's request, and takes machines
+	// another host is emptying. Nil on a host that cannot, which answers 501
+	// rather than pretending the route is absent.
+	Drain Drainer
 	// PeerToken authenticates a call from another host of this fleet on the
 	// internal listener. Derived from the agent-token secret every host
 	// already shares, and accepted only on a request that carries the
 	// forwarding marker, which the public listener strips. Empty on a single
 	// box, where there are no peers to authenticate.
 	PeerToken string
+	// BrokerKey signs and verifies broker tokens, derived once from the
+	// agent-token secret. Held as the derived key rather than the secret so
+	// nothing here can reach the guest credential or the peer token.
+	BrokerKey []byte
 	// Compose plans a compose file. Injected as a handler because the compose
 	// package imports this one for the wire structs its steps embed. Nil only
 	// in tests, where the route answers 503 rather than vanishing from the
 	// table -- a route that disappears in tests is a route nothing checks.
 	Compose http.HandlerFunc
+	// Recipes serves the database fragments `pilot add` and the dashboard
+	// splice into a compose file. Injected for the reason Compose is: the
+	// generator lives in internal/compose, which imports this package.
+	Recipes http.HandlerFunc
+	// HAFragment serves the Patroni conversion for one database.
+	HAFragment http.HandlerFunc
 	// Plan decides what a directory is and answers with a compose plan.
 	// Injected for the same reason Compose is: internal/detect imports this
 	// package for the wire structs, so the import cannot go both ways. Nil
@@ -153,7 +178,10 @@ func Routes(d Deps) http.Handler {
 			HugePages: d.HugePages,
 			CPUVendor: d.CPUVendor, CPUVendorForced: d.CPUVendorForced,
 		}
-		if d.StoreVersion != nil {
+		// True by default so a host with no replica (SQLite) is not reported
+		// as forever joining. A corrosion host overwrites this below.
+		resp.ReplicationComplete = true
+		if d.Replication != nil {
 			// Bounded, and short. The corrosion client sets no response
 			// timeout, so an agent that accepts the connection and then stops
 			// answering would hold this handler open until the client gave
@@ -166,10 +194,15 @@ func Routes(d Deps) http.Handler {
 			// still answers 200 and the version stays 0, because a health
 			// check that fails on a store hiccup takes the host out of
 			// rotation for a problem that is not the host's.
-			if v, err := d.StoreVersion(ctx); err != nil {
+			if v, vec, complete, err := d.Replication(ctx); err != nil {
 				slog.Warn("could not read the store version", "err", err)
+				// A replica that cannot be read has not been shown to be
+				// caught up, and this field is what a joining peer reads to
+				// decide whether IT may act. Unreadable answers as not
+				// complete, which is the direction that waits.
+				resp.ReplicationComplete = false
 			} else {
-				resp.StoreVersion = v
+				resp.StoreVersion, resp.StoreVersions, resp.ReplicationComplete = v, vec, complete
 			}
 		}
 		writeJSON(w, http.StatusOK, resp)
@@ -208,10 +241,29 @@ func Routes(d Deps) http.Handler {
 	// non-snapshotting equivalents.
 	mux.HandleFunc("POST /v1/machines/{id}/suspend", d.handleSuspend)
 	mux.HandleFunc("POST /v1/machines/{id}/wake", d.handleWake)
+	// Vertical scaling. A boot rather than a resume, because a memory image
+	// cannot be loaded into a machine of another size.
+	mux.HandleFunc("POST /v1/machines/{id}/resize", d.handleResizeMachine)
 	// Redeploy is the rollout's: the same machine, booted from another image.
 	mux.HandleFunc("POST /v1/machines/{id}/redeploy", d.handleRedeploy)
-	mux.HandleFunc("POST /v1/machines/{id}/stop", notImplemented)
-	mux.HandleFunc("POST /v1/machines/{id}/start", notImplemented)
+	// stop and start are suspend and wake under the names every other
+	// platform's CLI and SDK uses. They were 501 while the CLI and both SDKs
+	// already called them, so the commonest lifecycle pair in the product
+	// answered "not implemented" on a machine that could do it perfectly well.
+	// One behaviour, two spellings, rather than a second mechanism.
+	mux.HandleFunc("POST /v1/machines/{id}/stop", d.handleSuspend)
+	mux.HandleFunc("POST /v1/machines/{id}/start", d.handleWake)
+
+	// Builders: an org's build machines, and the reset that clears both the
+	// wedged one and every host's copy of its layer cache.
+	mux.HandleFunc("GET /v1/builders", d.handleListBuilders)
+	mux.HandleFunc("POST /v1/builders/{host}/reset", d.handleResetBuilder)
+
+	// Processes: what a machine runs, and how to bounce one of them without
+	// touching the others.
+	mux.HandleFunc("GET /v1/machines/{id}/processes", d.handleProcesses)
+	mux.HandleFunc("POST /v1/machines/{id}/processes/{name}/{action}", d.handleProcessAction)
+	mux.HandleFunc("GET /v1/machines/{id}/processes/{name}/logs", d.handleProcessLogs)
 
 	// Checkpoints. Restore is in place: same machine, same URL, same token.
 	mux.HandleFunc("POST /v1/machines/{id}/checkpoints", d.handleCreateCheckpoint)
@@ -229,6 +281,25 @@ func Routes(d Deps) http.Handler {
 	mux.HandleFunc("GET /v1/services/{id}", d.handleGetService)
 	mux.HandleFunc("PATCH /v1/services/{id}", d.handleUpdateService)
 	mux.HandleFunc("GET /v1/services/{id}/releases", d.handleListReleases)
+	// The ONE route that answers with variable VALUES. Every other surface
+	// returns names only, on purpose; this one exists so a password that was
+	// written can be recovered, rather than kept in a second place that is
+	// worse. See serviceenv.go.
+	mux.HandleFunc("GET /v1/services/{id}/env", d.handleServiceEnv)
+	// What a machine, or every replica of a service, may ask its host's broker
+	// for. Deny by default: no row means no token and no secrets.
+	// What ONE machine is using, from the host that owns it.
+	mux.HandleFunc("GET /v1/machines/{id}/metrics", d.handleMachineMetrics)
+	// What ALL of a caller's machines are using, from any host. Not the host's
+	// own /metrics, which stays unauthenticated and label-free: see
+	// machinemetrics.go for why that decision is not being reversed.
+	mux.HandleFunc("GET /v1/metrics", d.handleTenantMetrics)
+	mux.HandleFunc("GET /v1/machines/{id}/secrets", d.handleGetMachineGrant)
+	mux.HandleFunc("PUT /v1/machines/{id}/secrets", d.handlePutMachineGrant)
+	mux.HandleFunc("DELETE /v1/machines/{id}/secrets", d.handleDeleteMachineGrant)
+	mux.HandleFunc("GET /v1/services/{id}/secrets", d.handleGetServiceGrant)
+	mux.HandleFunc("PUT /v1/services/{id}/secrets", d.handlePutServiceGrant)
+	mux.HandleFunc("DELETE /v1/services/{id}/secrets", d.handleDeleteServiceGrant)
 	mux.HandleFunc("POST /v1/services/{id}/deploy", d.handleDeploy)
 	mux.HandleFunc("POST /v1/services/{id}/rollback", d.handleRollback)
 
@@ -282,12 +353,58 @@ func Routes(d Deps) http.Handler {
 	// Volumes and fleet.
 	mux.HandleFunc("POST /v1/volumes", d.handleCreateVolume)
 	mux.HandleFunc("GET /v1/volumes", d.handleListVolumes)
+	// Point-in-time copies. Served by the host that MOUNTS the volume, because
+	// a snapshot is a clone inside the volume's own filesystem; a request
+	// elsewhere is forwarded there.
+	mux.HandleFunc("POST /v1/volumes/{id}/snapshots", d.handleCreateVolumeSnapshot)
+	mux.HandleFunc("GET /v1/volumes/{id}/snapshots", d.handleListVolumeSnapshots)
+	mux.HandleFunc("POST /v1/volumes/{id}/snapshots/{stamp}/restore", d.handleRestoreVolumeSnapshot)
+	// The schedule that takes them without being asked. Nobody takes a manual
+	// snapshot before the mistake.
+	mux.HandleFunc("DELETE /v1/volumes/{id}/snapshots/{stamp}", d.handleDeleteVolumeSnapshot)
+	// A NEW volume from a snapshot, which is what a recovery is built on: it
+	// leaves the thing you are recovering from in place to compare against.
+	mux.HandleFunc("POST /v1/volumes/{id}/snapshots/{stamp}/fork", d.handleForkVolumeSnapshot)
+	mux.HandleFunc("GET /v1/volumes/{id}/policy", d.handleGetVolumePolicy)
+	mux.HandleFunc("PUT /v1/volumes/{id}/policy", d.handlePutVolumePolicy)
 	// The volume drive as Firecracker holds it, not as hostd meant to set it.
 	// See MachineVolume: the difference between the two is a durability
 	// guarantee that fails silently.
 	mux.HandleFunc("GET /v1/machines/{id}/volume", d.handleMachineVolume)
 	mux.HandleFunc("GET /v1/hosts", d.handleListHosts)
+	// Every address the acting org's outbound traffic can leave from, which is
+	// what a tenant hands to anything that allowlists by source address.
+	mux.HandleFunc("GET /v1/egress", d.handleEgress)
+	// The compose fragment for a database, with the durability decision made
+	// and explained. One generator, fetched by every client, because two
+	// copies of a recipe is two places for it to drift from what the planner
+	// will accept.
+	mux.HandleFunc("GET /v1/recipes/{engine}", d.serveRecipes)
+	// The compose fragment that turns one Postgres into a Patroni cluster.
+	// Beside the recipes, and for the same reason: the generator lives with
+	// the planner that has to accept its output.
+	mux.HandleFunc("GET /v1/recipes/ha/{name}", d.serveHAFragment)
+	// Emptying a host on purpose, so a reboot or a retirement is not an outage
+	// for the machines it happens to be holding. Admin-scoped: a drain moves
+	// every org's machines at once. Any host serves these; the named host does
+	// the work, because it is the only one allowed to offer its own machines.
+	mux.HandleFunc("POST /v1/hosts/{id}/drain", d.handleDrain)
+	mux.HandleFunc("GET /v1/hosts/{id}/drain", d.handleDrainStatus)
+	mux.HandleFunc("DELETE /v1/hosts/{id}/drain", d.handleUndrain)
+	// Internal: a draining host telling its target to take a machine. The
+	// OFFER row authorises the move, so this only saves the target from
+	// waiting to notice one.
+	mux.HandleFunc("POST /v1/machines/{id}/take", d.handleTake)
+	// New machines from an existing one's exact state: the source's processes
+	// already running, its memory already warm. A suspended source is forked
+	// without waking it.
+	mux.HandleFunc("POST /v1/machines/{id}/fork", d.handleForkMachine)
+	mux.HandleFunc("POST /v1/checkpoints/{id}/fork", d.handleForkCheckpoint)
 	mux.HandleFunc("GET /v1/whoami", d.handleWhoami)
+	// Which orgs this key can act as. NOT a list of teams: who the people are
+	// lives in the dashboard's own database, and the fleet knows an org only
+	// as a string on a row. See orgs.go.
+	mux.HandleFunc("GET /v1/orgs", d.handleListOrgs)
 
 	// The hosted MCP endpoint: the fleet toolset over Streamable HTTP, on
 	// every host, behind the same bearer key. See mcp.go. The well-known
