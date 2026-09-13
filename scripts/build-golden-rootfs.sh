@@ -234,7 +234,21 @@ if [ "$PACK_IN_CONTAINER" = "1" ]; then
     -e TAR=/work/rootfs.tar -e ROOT=/work/root -e OUT=/work/out.img \
     -e SIZE_MB="$SIZE_MB" -e SOURCE_DATE_EPOCH="$SOURCE_DATE_EPOCH" \
     -e FS_UUID="$FS_UUID" -e FS_HASH_SEED="$FS_HASH_SEED" \
+    -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
     "$PACK_IMAGE" sh -euc '
+      # Hand /work back to the invoking user on EVERY exit path.
+      #
+      # The container runs as root and extracts the tar into the bind mount, so
+      # everything it writes there is root-owned on the host. The caller then
+      # could not remove it: `rm -rf "$PACK_DIR"` failed with a screen of
+      # Permission denied, and because the script runs under `set -e` that made
+      # a build that had ALREADY produced a correct image exit 1 -- and leave
+      # two gigabytes of extracted rootfs in /tmp every time.
+      #
+      # A trap rather than a line at the end, because a pack that fails halfway
+      # leaves the same undeleteable tree, and that is exactly when somebody
+      # wants to look at what it left.
+      trap '"'"'chown -R "$HOST_UID:$HOST_GID" /work 2>/dev/null || true'"'"' EXIT
       # Installed here rather than baked into an image of our own, so the pin
       # is one upstream digest instead of a registry we would have to host.
       apt-get -qq update >/dev/null
