@@ -796,7 +796,33 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 	}
 	fcm, ok := m.get(id)
 	if !ok {
-		// Already suspended or stopped: nothing to do.
+		// "Not in this host's map" has TWO meanings, and this answered with
+		// the harmless one for both.
+		//
+		// A row that already says suspended or stopped is genuinely done.
+		// A row that says RUNNING with no process here is a row that is
+		// WRONG, and answering "done" without correcting it leaves the idle
+		// monitor to find it running again on its next pass and suspend it
+		// again -- for ever. Measured on a host carrying one such row: 29
+		// "machine suspended after going idle" lines for one machine in five
+		// minutes, every other line in the log, and not one of them changed
+		// anything. It is the same retry loop the ErrGuestGone branch below
+		// exists to stop, arriving by a different door.
+		//
+		// STOPPED, not suspended: suspended means there is a memory image to
+		// wake from, and a machine whose process and state directory are both
+		// gone has none. A stopped machine with auto_start cold boots from its
+		// rootfs on the next request, which is the documented slow path and
+		// the honest one.
+		if row.State == StateRunning {
+			row.State = StateStopped
+			if err := m.opts.Store.PutMachine(ctx, row); err != nil {
+				return fmt.Errorf("machines: %s has no process here and its row could "+
+					"not be corrected: %w", id, err)
+			}
+			slog.Info("a machine whose row said running has no process on this host; "+
+				"its row now says stopped", "machine", id)
+		}
 		return nil
 	}
 
