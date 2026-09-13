@@ -7,7 +7,7 @@
  * bought for convenience.
  */
 
-import { machineCredential } from './broker.ts'
+import { machineCredential, TOKEN_FILE_ENV } from './broker.ts'
 import type { BrokerCredential } from './broker.ts'
 import {
   ComposePlanError,
@@ -105,7 +105,27 @@ export class Http {
    * that fails with nothing in the body to explain it.
    */
   credential(): string {
-    return this.apiKey || this.broker?.value() || ''
+    const token = this.apiKey || this.broker?.value() || ''
+    if (!token) {
+      // The constructor's guard cannot catch this one, and that is why it is
+      // here. machineCredential() returns a credential whenever
+      // PILOT_TOKEN_FILE is SET -- it does not read the file -- so on a
+      // machine that has been granted nothing, `!this.broker` is false, the
+      // constructor is satisfied, and every request went out with
+      // `Authorization: Bearer ` and came back 401 with nothing saying why.
+      // That is word for word the failure the constructor comment says it
+      // exists to prevent, one env var away from where it looks for it.
+      //
+      // Thrown here rather than at construction because the file legitimately
+      // arrives late: the guest agent writes it during boot, so a client built
+      // before that is not yet wrong. By the time a request is made, it is.
+      throw new PilotsError(
+        'no credential: this machine has not been granted one, so '
+        + `${TOKEN_FILE_ENV} names a file with no token in it. Grant the machine, `
+        + 'or pass an API key: new PilotsClient(process.env.PILOT_API_KEY)',
+      )
+    }
+    return token
   }
 
   /**

@@ -66,9 +66,18 @@ export class BrokerCredential {
  * one" and a client outside a machine carries nothing extra.
  */
 export function machineCredential(): BrokerCredential | undefined {
-  const path = process.env.PILOT_TOKEN_FILE
+  const path = process.env[TOKEN_FILE_ENV]
   return path ? new BrokerCredential(path) : undefined
 }
+
+/**
+ * Where the guest agent writes this machine's token.
+ *
+ * Named here so the client can say it back in a refusal. A message that tells
+ * somebody their machine has no credential without naming the file they would
+ * look in is a message that costs them the next ten minutes.
+ */
+export const TOKEN_FILE_ENV = 'PILOT_TOKEN_FILE'
 
 /**
  * Whether this process runs in a pilots machine that has a broker to ask.
