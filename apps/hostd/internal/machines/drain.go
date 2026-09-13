@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/state"
@@ -62,6 +63,38 @@ const handoffTimeout = 60 * time.Second
 // that it is left suspended here and reported: a machine that no host will
 // take is a fleet-capacity problem, and spinning on it hides that.
 const maxHandoffTargets = 3
+
+// handoffSeq orders one machine's offers. A CLOCK, not the attempt number.
+//
+// This is what claimByHandoff's fourth check reads -- NewestHandoff is
+// `ORDER BY seq DESC LIMIT 1` -- and a handoff row is write-once, so the value
+// has to rise across every drain a machine ever goes through, not just within
+// one drain. The attempt number, 1..3, repeats: a machine drained once and
+// handed over on the second try left a seq 2 in the table, so its NEXT drain
+// wrote seq 1, NewestHandoff kept answering with the FIRST drain's offer, and
+// every claim was refused as superseded. The machine could never be handed over
+// again -- and by the time anyone found out it was suspended with its volume
+// already released.
+//
+// Microseconds from the wall clock, so it keeps rising across a hostd restart
+// and across the host a machine happens to be on, with a guard that makes it
+// strictly increasing within one process -- two offers in the same microsecond
+// is not something to leave to how fast a suspend happens to be. Only the ORDER
+// matters; nothing reads this as a time.
+func handoffSeq() int {
+	for {
+		last := lastHandoffSeq.Load()
+		next := time.Now().UnixMicro()
+		if next <= last {
+			next = last + 1
+		}
+		if lastHandoffSeq.CompareAndSwap(last, next) {
+			return int(next)
+		}
+	}
+}
+
+var lastHandoffSeq atomic.Int64
 
 // HandoffNotifier tells another host to take a machine.
 //
@@ -207,7 +240,7 @@ func (m *Manager) handOff(ctx context.Context, row state.Machine,
 // acted on the offer first would find a running machine and be refused, which
 // is exactly what the store's claim check is for, but the source should not be
 // the one creating that race.
-func (m *Manager) offerTo(ctx context.Context, row state.Machine, target string, seq int) error {
+func (m *Manager) offerTo(ctx context.Context, row state.Machine, target string, attempt int) error {
 	// Refuse every other lifecycle path for the duration. Without this a wake
 	// racing the handoff would bring the machine up here just as another host
 	// claims it, and both would believe they hold it.
@@ -255,14 +288,14 @@ func (m *Manager) offerTo(ctx context.Context, row state.Machine, target string,
 		MachineID: row.ID,
 		FromHost:  m.opts.HostID,
 		ToHost:    target,
-		Seq:       seq,
+		Seq:       handoffSeq(),
 		CreatedAt: time.Now().Unix(),
 	}
 	if err := m.opts.Store.PutHandoff(ctx, offer); err != nil {
 		return fmt.Errorf("offer the machine: %w", err)
 	}
-	slog.Info("offered a machine to another host",
-		"machine", row.ID, "target", target, "handoff", offer.ID, "seq", seq)
+	slog.Info("offered a machine to another host", "machine", row.ID,
+		"target", target, "handoff", offer.ID, "attempt", attempt, "seq", offer.Seq)
 
 	if m.opts.Handoffs != nil {
 		// Tell the target rather than waiting for it to notice. Best effort:
@@ -274,7 +307,21 @@ func (m *Manager) offerTo(ctx context.Context, row state.Machine, target string,
 		}
 	}
 
-	return m.awaitHandoff(ctx, row.ID, target)
+	if err := m.awaitHandoff(ctx, row.ID, target); err != nil {
+		return err
+	}
+
+	// The offer has done its work, so it goes. Not tidiness: a handoff row is
+	// write-once and nothing was deleting them, so `machine_handoffs` grew
+	// without bound and gossiped every row to every host -- the C5 landmine the
+	// schema's own comment names for host_builds, arrived at by a different
+	// route. Deleted AFTER the claim is visible, by the host that wrote it, so
+	// there is no window in which the target needs a row that is gone.
+	if err := m.opts.Store.DeleteHandoff(ctx, offer.ID); err != nil {
+		slog.Warn("could not clear a completed handoff offer",
+			"machine", row.ID, "handoff", offer.ID, "err", err)
+	}
+	return nil
 }
 
 // awaitHandoff waits until the local replica agrees the machine has moved.
