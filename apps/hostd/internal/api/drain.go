@@ -92,12 +92,21 @@ func (d Deps) handleDrainStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	// What is still here, so an operator can watch a drain converge rather
 	// than guess.
+	//
+	// A read that FAILS is reported, never rendered as an empty list. An empty
+	// Left is how this route says "the drain is done", so swallowing the error
+	// told an operator watching a reboot that the host was empty when nothing
+	// had been counted at all -- and the next thing they do is take the host
+	// down.
+	rows, err := d.Store.ListMachines(r.Context())
+	if err != nil {
+		writeMapped(w, err)
+		return
+	}
 	left := []string{}
-	if rows, err := d.Store.ListMachines(r.Context()); err == nil {
-		for _, row := range rows {
-			if row.HostID == r.PathValue("id") && row.State != state.StateDestroyed {
-				left = append(left, row.ID)
-			}
+	for _, row := range rows {
+		if row.HostID == r.PathValue("id") && row.State != state.StateDestroyed {
+			left = append(left, row.ID)
 		}
 	}
 	writeJSON(w, http.StatusOK, DrainReport{Draining: d.Drain.Draining(), Left: left})
