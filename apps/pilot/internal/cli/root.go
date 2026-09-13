@@ -170,7 +170,17 @@ func Execute(ctx context.Context, getenv config.Env, args []string) int {
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return 130 // 128 + SIGINT
 	}
-	w := out.New(false)
+	// The mode the CALLER asked for, not a hardcoded false.
+	//
+	// This built a plain-text writer whatever the command line said, so
+	// `--json` produced a structured answer on success and a bare sentence on
+	// failure. Cobra has parsed the flag by now even when the command itself
+	// failed afterwards, so its own value is the truthful source.
+	jsonMode := false
+	if f := root.PersistentFlags().Lookup("json"); f != nil {
+		jsonMode = f.Value.String() == "true"
+	}
+	w := out.New(jsonMode)
 	w.WriteError(err)
 	return 1
 }

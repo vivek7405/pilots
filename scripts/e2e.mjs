@@ -5850,7 +5850,22 @@ async function exitAssertions() {
 
       // Written and synced before the kill, so "the disk survived" is a claim
       // about the guest's own writes rather than about the template.
+      //
+      // READ BACK, and a failure here fails HERE. This was fire-and-forget,
+      // and when the write did not happen the machine had genuinely nothing
+      // to recover from -- so hostd correctly refused, and the battery
+      // reported "timed out waiting for the panicked machine to come back"
+      // a hundred lines later. That sent two investigations at the recovery
+      // path, which was doing exactly the right thing with an empty disk.
+      //
+      // A precondition that is allowed to fail silently does not make the
+      // assertion below weaker, it makes it about something else.
       await exec(id, 'echo exit-marker > /var/tmp/marker-exit && sync');
+      const before = await exec(id, 'cat /var/tmp/marker-exit');
+      assert(before === 'exit-marker',
+        `the marker was not written before the panic, so there is nothing for ` +
+        `the recovery below to preserve and its result would mean nothing: ` +
+        `${JSON.stringify(before)}`);
 
       // A FAILURE, never a skip: a kernel with no CONFIG_MAGIC_SYSRQ cannot
       // panic on demand, and quietly returning here would retire every
