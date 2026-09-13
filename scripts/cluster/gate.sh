@@ -3011,9 +3011,20 @@ if [ -z "$JG_IP" ] || [ "${#JG_PEERS[@]}" -lt 1 ]; then
 else
   # What this host owns BEFORE it is made to rejoin. The assertion below is
   # that this set does not grow while the gate is closed.
+  #
+  # `.[]` and not `.machines[]?`: GET /v1/machines answers with a bare ARRAY.
+  # Indexing an array with a string is a jq ERROR -- the `?` suppresses the
+  # iteration's errors, not the index's -- so jq exited 5, printed nothing,
+  # 2>/dev/null hid it, and both counts were the empty string. `${x:-0}` then
+  # made them both 0, and "claimed no machines (0 before and after)" passed on
+  # every run, including the runs where the gate was broken. The one assertion
+  # this section exists for could not fail.
   JG_CLAIMED_BEFORE=$($SSH "root@$JG_IP" \
     "curl -sf -m 5 http://127.0.0.1:8080/v1/machines -H 'Authorization: Bearer ${KEY}' | \
-     jq -r '[.machines[]? | select(.state != \"destroyed\")] | length'" 2>/dev/null | tr -d '[:space:]')
+     jq -r '[.[] | select(.state != \"destroyed\")] | length'" | tr -d '[:space:]')
+  if ! [ "${JG_CLAIMED_BEFORE:-}" -ge 0 ] 2>/dev/null; then
+    bad "could not count the joining host's machines before the gate closed (got '${JG_CLAIMED_BEFORE}'); the claim assertion below would pass on nothing"
+  fi
 
   JG_RULES=""
   for p in "${JG_PEERS[@]}"; do
@@ -3057,11 +3068,13 @@ else
 
   JG_CLAIMED_AFTER=$($SSH "root@$JG_IP" \
     "curl -sf -m 5 http://127.0.0.1:8080/v1/machines -H 'Authorization: Bearer ${KEY}' | \
-     jq -r '[.machines[]? | select(.state != \"destroyed\")] | length'" 2>/dev/null | tr -d '[:space:]')
-  if [ "${JG_CLAIMED_AFTER:-0}" = "${JG_CLAIMED_BEFORE:-0}" ]; then
-    ok "the joining host claimed no machines (${JG_CLAIMED_BEFORE:-0} before and after)"
+     jq -r '[.[] | select(.state != \"destroyed\")] | length'" | tr -d '[:space:]')
+  if ! [ "${JG_CLAIMED_AFTER:-}" -ge 0 ] 2>/dev/null; then
+    bad "could not count the joining host's machines after the gate closed (got '${JG_CLAIMED_AFTER}')"
+  elif [ "$JG_CLAIMED_AFTER" = "$JG_CLAIMED_BEFORE" ]; then
+    ok "the joining host claimed no machines (${JG_CLAIMED_BEFORE} before and after)"
   else
-    bad "machines visible to the joining host went ${JG_CLAIMED_BEFORE:-0} -> ${JG_CLAIMED_AFTER:-0} while it was still joining"
+    bad "machines visible to the joining host went ${JG_CLAIMED_BEFORE} -> ${JG_CLAIMED_AFTER} while it was still joining"
   fi
 
   # 28d. And it opens once the peers answer again, rather than wedging.
