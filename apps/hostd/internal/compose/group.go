@@ -74,6 +74,25 @@ func groupByContext(steps map[string]Step) (map[string]Step, error) {
 		if len(members) < 2 {
 			continue
 		}
+		// Two members that both PUBLISH are two machines, not one refusal.
+		//
+		// Grouping is an optimisation over what compose already means: each
+		// service is its own instance, and folding several onto one machine is
+		// worth doing when they are several commands over one filesystem. Two
+		// servers are not that. One machine has one address, so a machine
+		// cannot hold both -- and the honest answer to "which of these owns the
+		// port" is that neither does, because they were never one machine.
+		//
+		// This used to refuse the whole plan, and the file it refuses is the
+		// one that matters most: webjs's own compose.pilots.yaml deploys
+		// `website` and `gallery` from one build context, both on 8080, and
+		// `pilot deploy` answered "Only one process can own the machine's port"
+		// and stopped. The project's own dogfood file could not be deployed by
+		// the project. Declining to group costs the second machine's rootfs --
+		// which the build cache already shares -- and buys a deploy that works.
+		if publishers(steps, members) > 1 {
+			continue
+		}
 		merged, err := mergeMembers(steps, members)
 		if err != nil {
 			return nil, err
@@ -89,6 +108,21 @@ func groupByContext(steps map[string]Step) (map[string]Step, error) {
 		}
 	}
 	return out, nil
+}
+
+// publishers counts how many of these services declare a port.
+//
+// The count, not a boolean, because one publisher is the ordinary grouped case
+// -- a web server and its worker -- and it is only the SECOND that makes a
+// machine impossible.
+func publishers(steps map[string]Step, members []string) int {
+	n := 0
+	for _, name := range members {
+		if len(steps[name].Ports) > 0 {
+			n++
+		}
+	}
+	return n
 }
 
 // mergeMembers folds several services into one step with several processes.

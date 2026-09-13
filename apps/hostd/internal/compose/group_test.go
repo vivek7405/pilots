@@ -176,10 +176,21 @@ services:
 	}
 }
 
-// Only one process can own the machine's port, so two publishers is a question
-// the planner cannot answer and must not guess at.
-func TestTwoPublishingServicesOnOneContextAreRefused(t *testing.T) {
-	_, planErr := planText(t, `
+// Two publishers on one context are two MACHINES, not a refused plan.
+//
+// This asserted the refusal, and the refusal was wrong. Grouping is an
+// optimisation over what compose already means -- each service is its own
+// instance -- and it is worth doing when several services are several commands
+// over one filesystem. Two servers are not that: one machine has one address,
+// so neither owns the port because they were never one machine.
+//
+// The file that refusal blocked is the one that matters most. webjs's own
+// compose.pilots.yaml deploys `website` and `gallery` from one build context,
+// both on 8080, and `pilot deploy` answered "Only one process can own the
+// machine's port" and stopped -- the project's dogfood file, undeployable by
+// the project. See TestTheWebjsPilotsComposePlans, which plans that real file.
+func TestTwoPublishingServicesOnOneContextBecomeTwoMachines(t *testing.T) {
+	plan, planErr := planText(t, `
 name: demo
 services:
   web:
@@ -191,11 +202,45 @@ services:
     command: node admin.js
     ports: ["8080", "4000"]
 `)
-	if planErr == nil {
-		t.Fatal("two services on one context both published ports and the plan was accepted")
+	if planErr != nil {
+		t.Fatalf("two publishers on one context were refused: %+v", planErr)
 	}
-	if !strings.Contains(planErr.Error, "port") {
-		t.Errorf("the refusal does not explain the port conflict: %q", planErr.Error)
+	if len(plan.Steps) != 2 {
+		t.Fatalf("got %d steps, want two machines", len(plan.Steps))
+	}
+	for _, s := range plan.Steps {
+		if len(s.Processes) != 0 {
+			t.Errorf("%s was grouped anyway: %+v", s.Name, s.Processes)
+		}
+		if len(s.Ports) == 0 {
+			t.Errorf("%s lost its ports", s.Name)
+		}
+	}
+}
+
+// ONE publisher on a shared context still groups, which is the case the whole
+// feature exists for: a web server and its worker are two commands over one
+// filesystem, and that is a machine with two processes.
+func TestOnePublisherOnAContextStillGroups(t *testing.T) {
+	plan, planErr := planText(t, `
+name: demo
+services:
+  web:
+    build: .
+    command: node server.js
+    ports: ["8080"]
+  worker:
+    build: .
+    command: node worker.js
+`)
+	if planErr != nil {
+		t.Fatalf("plan refused: %+v", planErr)
+	}
+	if len(plan.Steps) != 1 {
+		t.Fatalf("got %d steps, want one machine with two processes", len(plan.Steps))
+	}
+	if len(plan.Steps[0].Processes) != 2 {
+		t.Errorf("processes = %+v, want the server and the worker", plan.Steps[0].Processes)
 	}
 }
 
