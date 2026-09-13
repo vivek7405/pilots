@@ -3,6 +3,7 @@ package netns
 import (
 	"crypto/sha256"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/netip"
 	"os"
@@ -199,6 +200,10 @@ func ApplyEgress(c EgressConfig, plan EgressPlan, uplink string) error {
 	if err := conn.Flush(); err != nil {
 		return fmt.Errorf("netns: apply the egress table: %w", err)
 	}
+	// A masquerade and a forwarding knob are still not enough if something
+	// else DROPS forwarded packets. Said here, because nothing else will.
+	warnIfForwardingIsDropped(conn)
+
 	if !c.Enabled() {
 		// No per-org addresses to put on the uplink, and nothing of ours up
 		// there to take down: assignEgressAddrs decides what is ours by the
@@ -206,6 +211,61 @@ func ApplyEgress(c EgressConfig, plan EgressPlan, uplink string) error {
 		return nil
 	}
 	return assignEgressAddrs(c, plan.Addrs)
+}
+
+// warnIfForwardingIsDropped reports a host whose firewall will drop the guest
+// traffic this file just arranged to masquerade.
+//
+// The comment above the ip_forward write says a guest could not reach the
+// internet "with the masquerade rule installed, correct, and scoped to the
+// right interface", and nothing said why. This is that same failure one layer
+// further out, and it is the common one: ufw sets the forward chain's policy
+// to drop, and so does Docker, and a laptop or a bare-metal host may well run
+// either. pilots cannot fix it from its own table -- in nftables a drop in ANY
+// base chain at the hook is final, so an accept in `pilots-egress` does not
+// save a packet that another chain's policy drops -- so the honest thing is to
+// say so.
+//
+// Worth a line because of how it presents. Every build that installs anything
+// hangs until its own timeout, DNS keeps working because hostd answers that
+// itself, and the guest looks alive in every way a client can see. Measured on
+// a host with ufw: a deploy sat for minutes with buildkit connected and no
+// output, and the only evidence anywhere was a packet counter on a reject
+// chain.
+//
+// A warning and not a refusal: a fleet with no internet-bound guests is a
+// legitimate configuration, and a host that refused to start over it would be
+// worse than one that says what is wrong.
+func warnIfForwardingIsDropped(conn *nftables.Conn) {
+	chains, err := conn.ListChains()
+	if err != nil {
+		// Not worth a word: the caller has already applied its rules, and a
+		// host that cannot list chains has a louder problem than this one.
+		return
+	}
+	for _, ch := range chains {
+		if ch.Hooknum == nil || *ch.Hooknum != *nftables.ChainHookForward {
+			continue
+		}
+		if ch.Policy == nil || *ch.Policy != nftables.ChainPolicyDrop {
+			continue
+		}
+		if ch.Table != nil && ch.Table.Name == egressTable {
+			continue // ours, and ours accepts
+		}
+		name := ch.Name
+		if ch.Table != nil {
+			name = ch.Table.Name + " " + name
+		}
+		slog.Warn("a firewall chain drops forwarded packets by default, so guests on "+
+			"this host have no outbound network however the masquerade is set up; "+
+			"every build that installs anything will hang rather than fail",
+			"chain", name,
+			"remedy", "allow forwarding for "+HostNetworkCIDR+
+				" (ufw: `ufw route allow from "+HostNetworkCIDR+"`, "+
+				"nft: add an accept for that source to the dropping chain)")
+		return
+	}
 }
 
 // UplinkInterface is the interface guest traffic leaves this host by.
