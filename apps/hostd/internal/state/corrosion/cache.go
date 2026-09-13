@@ -710,22 +710,20 @@ func (c *Cache) MachineVendor(id string) string {
 }
 
 // MachineCPU returns the whole recorded row, for the API's last_start fields.
-// URLAuth is who may reach an object's URL, from memory. Absent means the
-// object has no row, which is public -- what every URL was before the mode
-// existed.
-func (c *Cache) URLAuth(id string) string {
-	mode, _ := c.URLAuthKnown(id)
-	return mode
-}
 
-// URLAuthKnown is URLAuth plus whether the cache actually has a row.
+// URLAuthKnown is who may reach an object's URL, from memory, plus whether the
+// cache actually has a row for it.
 //
-// The distinction is load-bearing and its absence was a security bug. URLAuth
-// answers "public" for an object it has never seen, which is indistinguishable
-// from an object somebody deliberately made public -- so a caller that trusted
-// it served a gated URL to anyone for as long as the subscription took to
-// deliver the row. A caller that DOES need to tell the two apart has to ask a
-// question that can say "I do not know", and this is it.
+// The second return is load-bearing and its absence was a security bug. This
+// map answers "public" for an object it has never seen, which is
+// indistinguishable from an object somebody deliberately made public -- so a
+// caller that saw only the mode served a gated URL to anyone for as long as the
+// subscription took to deliver the row.
+//
+// There is deliberately NO single-return form. One existed, every caller moved
+// off it, and leaving it behind would leave the shape of the bug lying around
+// for the next caller to pick up: a question that cannot say "I do not know"
+// has no safe answer here.
 func (c *Cache) URLAuthKnown(id string) (string, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

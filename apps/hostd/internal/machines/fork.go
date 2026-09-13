@@ -262,6 +262,32 @@ func (m *Manager) forkOnce(ctx context.Context, req api.ForkOptions, src *forkSo
 		return nil, err
 	}
 
+	// The parent's URL GATE comes with it.
+	//
+	// A fork is a new machine with a new URL, but it is the parent's memory and
+	// the parent's disk: the same data, reachable at a new address. A parent
+	// somebody deliberately set to `org` forked into a machine with no url_auth
+	// row, and no row reads as public -- so forking a gated machine published
+	// its contents to anyone who had the fork's URL, silently, and the fork
+	// looked exactly like a machine whose owner had chosen public.
+	//
+	// Copied rather than inherited by lookup, because the router reads one row
+	// per object on the hot path and a chain to walk there is a chain to walk
+	// on every request. Best effort in the same sense the lineage row below is,
+	// with one difference: this one is refused loudly, because the failure is a
+	// machine that is open when its parent was not.
+	if u, err := m.opts.Store.GetURLAuth(ctx, src.ParentID); err == nil &&
+		u != nil && u.Mode != "" && u.Mode != api.URLAuthPublic {
+
+		if err := m.opts.Store.PutURLAuth(ctx, &state.URLAuth{
+			ID: row.ID, Kind: "machine", Mode: u.Mode, UpdatedAt: time.Now().Unix(),
+		}); err != nil {
+			slog.Error("a fork did not inherit its parent's URL gate and is therefore "+
+				"PUBLIC; gate it or destroy it",
+				"fork", row.ID, "parent", src.ParentID, "mode", u.Mode, "err", err)
+		}
+	}
+
 	// The lineage row LAST, after the machine exists, and best effort on the
 	// error. A fork with no lineage row still runs; what it loses is the
 	// pinning that keeps its parent's builds alive, and that is worth shouting

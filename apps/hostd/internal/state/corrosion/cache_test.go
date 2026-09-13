@@ -739,10 +739,15 @@ func TestCacheAnswersURLAuthFromMemory(t *testing.T) {
 		urlAuthRows: []string{`["m-gated","machine","org"]`},
 	})
 
-	if got := cache.URLAuth("m-gated"); got != "org" {
-		t.Errorf("a gated machine reads %q, want org", got)
+	got, known := cache.URLAuthKnown("m-gated")
+	if got != "org" || !known {
+		t.Errorf("a gated machine reads %q known=%v, want org true", got, known)
 	}
-	if got := cache.URLAuth("m-never-seen"); got != "public" {
-		t.Errorf("an object with no row reads %q, want public", got)
+	// The second return is the whole point: the mode alone is "public" here,
+	// and a caller that could not tell this apart from a deliberate public
+	// served a gated URL to anyone.
+	got, known = cache.URLAuthKnown("m-never-seen")
+	if got != "public" || known {
+		t.Errorf("an object with no row reads %q known=%v, want public false", got, known)
 	}
 }

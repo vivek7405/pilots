@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -104,8 +106,22 @@ func (g *urlAuthGate) Mode(ctx context.Context, id string) string {
 		return answer.mode
 	}
 
+	// An ERROR is not an absent row, and reading it as one is the same bug this
+	// file exists for, one layer down. ErrNotFound is a real answer -- the
+	// object has no gate, which is public. Anything else means the store could
+	// not answer, and a question nobody answered must not resolve to the
+	// permissive side: it is refused, and nothing is remembered, so the next
+	// request asks again rather than inheriting a guess for five seconds.
 	mode := api.URLAuthPublic
-	if u, err := g.store.GetURLAuth(ctx, id); err == nil && u != nil && u.Mode != "" {
+	u, err := g.store.GetURLAuth(ctx, id)
+	switch {
+	case errors.Is(err, state.ErrNotFound):
+		// No row: public, and worth memoising -- this is the common case.
+	case err != nil:
+		slog.Warn("could not read who may reach a URL; refusing anonymous access "+
+			"until the store answers", "id", id, "err", err)
+		return api.URLAuthOrg
+	case u != nil && u.Mode != "":
 		mode = u.Mode
 	}
 

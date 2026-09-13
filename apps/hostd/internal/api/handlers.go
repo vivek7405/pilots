@@ -147,8 +147,18 @@ func (d Deps) lineageOf(ctx context.Context, id string) (parent, checkpoint stri
 
 // urlAuthOf reads who may reach an object's URL; nothing recorded is public,
 // which is what every URL was before the table existed.
+//
+// A read that FAILED is not nothing recorded, and the difference is worth a log
+// line even here, where the answer is only rendered. This is what `pilot
+// machines show` prints: swallowed, a store hiccup told an operator their gated
+// machine was open to the world, and the obvious next move is to gate it again
+// and be told it already is.
 func (d Deps) urlAuthOf(ctx context.Context, id string) string {
 	u, err := d.Store.GetURLAuth(ctx, id)
+	if err != nil && !errors.Is(err, state.ErrNotFound) {
+		slog.Warn("could not read who may reach a URL; reporting it as public, "+
+			"which it may not be", "id", id, "err", err)
+	}
 	if err != nil || u == nil || u.Mode == "" {
 		return URLAuthPublic
 	}

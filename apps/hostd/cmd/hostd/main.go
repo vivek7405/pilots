@@ -513,7 +513,19 @@ func run() error {
 		// so the request path holds no query at all -- see routerOpts.URLAuthOf.
 		URLAuthOf: func(ctx context.Context, id string) string {
 			u, err := store.GetURLAuth(ctx, id)
-			if err != nil || u == nil || u.Mode == "" {
+			switch {
+			case errors.Is(err, state.ErrNotFound):
+				return api.URLAuthPublic // no row: public, as every URL was
+			case err != nil:
+				// A failed read is not an absent row. This closure IS the gate
+				// on a single box -- the fleet replaces it with urlAuthGate --
+				// so answering "public" here opens every gated URL for as long
+				// as the store is unwell, which is the direction you cannot
+				// take back.
+				slog.Error("could not read who may reach a URL; refusing anonymous "+
+					"access until the store answers", "id", id, "err", err)
+				return api.URLAuthOrg
+			case u == nil || u.Mode == "":
 				return api.URLAuthPublic
 			}
 			return u.Mode
