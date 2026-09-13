@@ -236,15 +236,40 @@ async function runRedis(req: QueryRequest, limit: number): Promise<QueryResult> 
 const MONGO_READS = new Set(['find', 'aggregate', 'count', 'distinct', 'listCollections']);
 const MONGO_WRITING_STAGES = new Set(['$out', '$merge']);
 
+/**
+ * The operations this driver can actually perform.
+ *
+ * A SECOND set, and the difference from `MONGO_READS` is the whole point. The
+ * allowlist said what was safe to run; it did not say what the code below
+ * knows how to run, and the two had drifted. `count`, `distinct` and
+ * `listCollections` passed the allowlist and then fell through to the `find`
+ * branch, so a count returned documents and the header said nothing was wrong.
+ * With Write on it was worse: the allowlist was skipped entirely, so an
+ * `insertOne` also ran as a find, answered 200, reported `wrote: true`, and
+ * changed nothing.
+ *
+ * An operation that reaches here and is in neither set is refused by name.
+ */
+const MONGO_IMPLEMENTED = new Set(['find', 'aggregate', 'count', 'distinct', 'listCollections']);
+
 async function runMongo(req: QueryRequest, limit: number): Promise<QueryResult> {
-  const parsed: { op?: string; filter?: unknown; pipeline?: Record<string, unknown>[] } = req.query.trim()
-    ? JSON.parse(req.query)
-    : { op: 'find', filter: {} };
+  const parsed: {
+    op?: string;
+    filter?: unknown;
+    pipeline?: Record<string, unknown>[];
+    field?: string;
+  } = req.query.trim() ? JSON.parse(req.query) : { op: 'find', filter: {} };
   const op = parsed.op ?? 'find';
   if (!req.write && !MONGO_READS.has(op)) {
     throw new Error(
       `${op} is not a read operation. Mongo has no read-only session, so this is an ` +
         'allowlist; turn on Write to run it.',
+    );
+  }
+  if (!MONGO_IMPLEMENTED.has(op)) {
+    throw new Error(
+      `${op} is not something this console can run. It understands ` +
+        `${[...MONGO_IMPLEMENTED].join(', ')}; use a Mongo client for anything else.`,
     );
   }
   if (op === 'aggregate') {
@@ -256,7 +281,12 @@ async function runMongo(req: QueryRequest, limit: number): Promise<QueryResult> 
       }
     }
   }
-  if (!req.target) throw new Error('name a collection');
+  // listCollections asks about the database, not about one collection, so it
+  // is the one operation that needs no target.
+  if (!req.target && op !== 'listCollections') throw new Error('name a collection');
+  if (op === 'distinct' && !parsed.field) {
+    throw new Error('distinct needs a field: {"op":"distinct","field":"status"}');
+  }
 
   const { MongoClient } = await import('mongodb');
   const client = new MongoClient(throughTunnel(req.url, req.tunnel), {
@@ -265,7 +295,37 @@ async function runMongo(req: QueryRequest, limit: number): Promise<QueryResult> 
   });
   try {
     await client.connect();
-    const collection = client.db().collection(req.target);
+    const db = client.db();
+
+    // The operations whose answer is not a list of documents are rendered
+    // here, each as the one column it actually produces. Folding them into the
+    // document path is what made a count look like a find.
+    if (op === 'count') {
+      const n = await db.collection(req.target as string).countDocuments((parsed.filter ?? {}) as object);
+      return { columns: ['count'], rows: [[String(n)]], truncated: false, wrote: false };
+    }
+    if (op === 'distinct') {
+      const values = await db
+        .collection(req.target as string)
+        .distinct(parsed.field as string, (parsed.filter ?? {}) as object);
+      return {
+        columns: [parsed.field as string],
+        rows: values.slice(0, limit).map((v) => [stringify(v)]),
+        truncated: values.length > limit,
+        wrote: false,
+      };
+    }
+    if (op === 'listCollections') {
+      const names = await db.listCollections().toArray();
+      return {
+        columns: ['name'],
+        rows: names.slice(0, limit).map((c) => [stringify(c.name)]),
+        truncated: names.length > limit,
+        wrote: false,
+      };
+    }
+
+    const collection = db.collection(req.target as string);
     const docs =
       op === 'aggregate'
         ? await collection.aggregate(parsed.pipeline ?? []).limit(limit + 1).toArray()
