@@ -240,20 +240,25 @@ func appendUnranked(out []string, hosts []Host) []string {
 // hasAllBuilds reports whether every build the create needs is already on the
 // host. All of them: having half is a download either way.
 func hasAllBuilds(have, want []string) bool {
-	if len(want) == 0 {
-		return false
-	}
 	set := make(map[string]bool, len(have))
 	for _, id := range have {
 		set[id] = true
 	}
+	// COUNTED rather than taken from len(want), because an id that is "" names
+	// no build. A request carrying nothing but empty ids has nothing cached,
+	// and len(want) > 0 let it collect the bonus from every host at once --
+	// uniform, so the ranking among scored hosts did not move, but
+	// affinityBonus is sixteen times placementTieTolerance and the tie branch
+	// compares raw differences, so it moved which hosts fell inside the tie.
+	wanted := 0
 	for _, id := range want {
 		if id == "" {
 			continue
 		}
+		wanted++
 		if !set[id] {
 			return false
 		}
 	}
-	return true
+	return wanted > 0
 }
