@@ -276,6 +276,41 @@ func TestAnOversizedBodyIsRefusedRatherThanEmptied(t *testing.T) {
 	}
 }
 
+// Refusing the REPLAY must not damage the request.
+//
+// The cap is about sending a body twice. Sending it ONCE is every upload over a
+// megabyte to every workload on the platform, and bufferBody had already read
+// the first megabyte off the body by the time it decided it was too large --
+// then dropped it. The guest got the request minus its opening megabyte while
+// Content-Length still promised the whole thing: a corrupt upload, or a 502,
+// silently, on a path no test covered with a large file.
+func TestAnOversizedBodyStillReachesTheMachineIntact(t *testing.T) {
+	big := strings.Repeat("x", replayMaxBody+1)
+
+	// Declared length: nothing is read at all, so the body is untouched.
+	req := httptest.NewRequest("POST", "/", strings.NewReader(big))
+	if _, err := bufferBody(req); err == nil {
+		t.Fatal("a body over the cap was buffered")
+	}
+	got, _ := io.ReadAll(req.Body)
+	if len(got) != len(big) {
+		t.Errorf("a declared-oversize body arrived %d bytes long, want %d", len(got), len(big))
+	}
+
+	// Chunked: the length is unknown, so the prefix has to be read to measure
+	// it -- and then put back in front of the rest.
+	req = httptest.NewRequest("POST", "/", io.NopCloser(strings.NewReader(big)))
+	req.ContentLength = -1
+	if _, err := bufferBody(req); err == nil {
+		t.Fatal("a chunked body over the cap was buffered")
+	}
+	got, _ = io.ReadAll(req.Body)
+	if string(got) != big {
+		t.Errorf("a chunked oversize body arrived %d bytes long, want %d: the "+
+			"prefix bufferBody read was dropped", len(got), len(big))
+	}
+}
+
 // The second machine is told where the request came from, so an app can tell a
 // replay from a first attempt and read back what it stashed.
 func TestTheSourceHeaderCarriesTheOriginAndState(t *testing.T) {

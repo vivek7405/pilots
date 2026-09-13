@@ -207,18 +207,44 @@ func srcHeader(from *Target, hostID, state string) string {
 // A request over the cap is NOT silently replayed with an empty body. That
 // would be a data-loss bug wearing an application bug's clothes: the second
 // machine would receive a POST with no content and answer something plausible.
+//
+// # The request itself is never damaged
+//
+// Only the REPLAY is refused past the cap. The FIRST attempt still carries the
+// whole body, and that is not a detail: this runs on every request to every
+// workload, so a bug here is every upload over a megabyte.
+//
+// Two halves. A body whose declared length is already over the cap is not read
+// at all, so an upload streams to the guest exactly as it did before this
+// function existed. A body with no declared length -- chunked -- has to be read
+// to be measured, and what was read is pushed back in front of the rest rather
+// than dropped: without that, the guest received the request minus its first
+// megabyte while Content-Length still promised all of it, which is a corrupt
+// upload or a 502, silently, on the one path nobody tests with a large file.
 func bufferBody(req *http.Request) ([]byte, error) {
 	if req.Body == nil || req.Body == http.NoBody {
 		return nil, nil
+	}
+	if req.ContentLength > replayMaxBody {
+		// Declared too large. Nothing is read, so nothing has to be put back.
+		return nil, fmt.Errorf("request body is over %d bytes", replayMaxBody)
 	}
 	buf, err := io.ReadAll(io.LimitReader(req.Body, replayMaxBody+1))
 	if err != nil {
 		return nil, err
 	}
 	if len(buf) > replayMaxBody {
+		rest := req.Body
+		req.Body = readCloser{Reader: io.MultiReader(bytes.NewReader(buf), rest), Closer: rest}
 		return nil, fmt.Errorf("request body is over %d bytes", replayMaxBody)
 	}
 	return buf, nil
+}
+
+// readCloser rejoins a body's unread tail to the prefix already read off it.
+type readCloser struct {
+	io.Reader
+	io.Closer
 }
 
 // rewind puts a buffered body back on a request so it can be sent again.
