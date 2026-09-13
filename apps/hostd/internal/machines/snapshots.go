@@ -60,6 +60,15 @@ func (f *snapshotFired) claim(volumeID string, minute time.Time) bool {
 	return true
 }
 
+// scheduledSnapshotTimeout bounds one scheduled snapshot, pause included.
+//
+// A clone is metadata only and returns in milliseconds, so this is not a
+// budget anything healthy approaches; it is the ceiling on how long a guest
+// may be held paused by a filesystem that has stopped answering. Comfortably
+// under the idle monitor's own liveness budget, so a hung snapshot fails and
+// is logged rather than taking the host down with it.
+const scheduledSnapshotTimeout = 20 * time.Second
+
 // snapshotDueVolumes takes the snapshots this minute calls for, and prunes.
 //
 // Called from the idle loop rather than given a ticker of its own: that loop
@@ -97,7 +106,23 @@ func (m *Manager) snapshotDueVolumes(ctx context.Context) {
 			continue
 		}
 
-		if _, err := m.SnapshotVolume(ctx, policy.VolumeID); err != nil {
+		// A deadline of its own, and it is load-bearing twice over.
+		//
+		// SnapshotVolume PAUSES the guest for the clone and resumes it from a
+		// defer -- a defer that only runs when the clone RETURNS. The clone is
+		// `juicefs clone` through exec.CommandContext, whose only deadline is
+		// this context, and the idle loop's context is the process's, which
+		// has none. So a juicefs that hangs left a customer's guest paused
+		// with nothing logged, wedged the idle monitor past its 30s liveness
+		// budget, and had the watchdog restart hostd -- KillMode=process, so
+		// the Firecracker survived the restart still paused.
+		//
+		// Everything else on this tick is a local read. This is the one entry
+		// whose duration is not ours to bound, so it is bounded here.
+		snapCtx, cancel := context.WithTimeout(ctx, scheduledSnapshotTimeout)
+		_, err = m.SnapshotVolume(snapCtx, policy.VolumeID)
+		cancel()
+		if err != nil {
 			slog.Error("a scheduled volume snapshot failed",
 				"volume", policy.VolumeID, "err", err)
 			continue
