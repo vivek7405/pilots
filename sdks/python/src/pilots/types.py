@@ -837,7 +837,7 @@ class ComposeStep:
     #: The volume's snapshot schedule and retention. None leaves whatever is
     #: set, so a redeploy does not reset a schedule somebody tuned.
     snapshot_policy: VolumePolicy | None = None
-    processes: list["ComposeProcess"] | None = None
+    processes: list[ComposeProcess] | None = None
 
 
 @dataclass
