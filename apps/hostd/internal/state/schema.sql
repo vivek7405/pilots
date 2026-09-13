@@ -481,28 +481,6 @@ CREATE TABLE IF NOT EXISTS host_builds (       -- writer: the host itself
   updated_at INTEGER
 );
 
--- One host OFFERING a machine to another, on a planned drain.
---
--- This is the third sanctioned exception to single-writer, and the only one
--- where a LIVE host's machine changes owner. It exists because the alternative
--- is worse: without it, a host reboot is customer-visible, since a machine only
--- ever moved when its owner was provably dead.
---
--- Why it is safe where an ordinary cross-host write is not:
---
---   * WRITE-ONCE. A handoff row is inserted and never updated. A CRDT merge
---     has nothing to corrupt in a row nobody rewrites.
---   * The SOURCE writes it, and the source is the machine's current owner, so
---     the row is written by the host that already owns what it describes.
---   * The target's claim is checked against it: to_host must be the claimer,
---     from_host must be the row's current owner, it must be the machine's
---     newest offer, and the machine must not be running. A claim that fails
---     any of those is refused exactly as a claim with no dead owner is.
---
--- seq orders repeated offers of one machine: a target that never took it is
--- superseded by the next offer rather than racing it.
---
--- Reaped by their writer after a day, like destroyed machines.
 -- How often a volume is snapshotted, and how many snapshots are kept.
 --
 -- A scheduled snapshot is the difference between "you can roll back" and "you
@@ -549,6 +527,28 @@ CREATE TABLE IF NOT EXISTS machine_lineage (   -- writer: the fork's host (write
   created_at      INTEGER
 );
 
+-- One host OFFERING a machine to another, on a planned drain.
+--
+-- This is the third sanctioned exception to single-writer, and the only one
+-- where a LIVE host's machine changes owner. It exists because the alternative
+-- is worse: without it, a host reboot is customer-visible, since a machine only
+-- ever moved when its owner was provably dead.
+--
+-- Why it is safe where an ordinary cross-host write is not:
+--
+--   * WRITE-ONCE. A handoff row is inserted and never updated. A CRDT merge
+--     has nothing to corrupt in a row nobody rewrites.
+--   * The SOURCE writes it, and the source is the machine's current owner, so
+--     the row is written by the host that already owns what it describes.
+--   * The target's claim is checked against it: to_host must be the claimer,
+--     from_host must be the row's current owner, it must be the machine's
+--     newest offer, and the machine must not be running. A claim that fails
+--     any of those is refused exactly as a claim with no dead owner is.
+--
+-- seq orders repeated offers of one machine: a target that never took it is
+-- superseded by the next offer rather than racing it.
+--
+-- Reaped by their writer after a day, like destroyed machines.
 CREATE TABLE IF NOT EXISTS machine_handoffs (  -- writer: the machine's owner (write-once)
   id         TEXT NOT NULL PRIMARY KEY,        -- ho-<uuid>
   machine_id TEXT,
@@ -621,23 +621,6 @@ CREATE TABLE IF NOT EXISTS broker_grants (     -- writer: the host that writes t
   updated_at INTEGER
 );
 
--- How big a service's replicas are. Absent means the defaults every service
--- had before this table existed (1 vCPU, 512 MiB), so an old service reads
--- correctly without being backfilled -- which matters because backfilling a
--- live cr-sqlite table is the incident rule 6 exists to prevent.
---
--- A side table rather than two columns on `services`, for that same reason:
--- `services` has rows.
---
--- image_vcpus and image_mem_mib are the size the release's MEMORY IMAGE was
--- photographed at, which is NOT always the current size: a resize changes the
--- size first and re-photographs after. A replica may only restore from that
--- image when the two agree, because Firecracker cannot load a memory image
--- into a differently-sized VM. When they disagree the replica boots instead,
--- which is slower and correct.
---
--- Writer: the service's arbiter, the one host that already writes the
--- `services` row through forwardToArbiter, so the merge has a single writer.
 -- The IPv6 block a host hands per-org egress addresses out of.
 --
 -- A tenant's outbound address is a pure function of this prefix and their org
@@ -659,6 +642,23 @@ CREATE TABLE IF NOT EXISTS host_egress (       -- writer: the host it describes
   updated_at INTEGER
 );
 
+-- How big a service's replicas are. Absent means the defaults every service
+-- had before this table existed (1 vCPU, 512 MiB), so an old service reads
+-- correctly without being backfilled -- which matters because backfilling a
+-- live cr-sqlite table is the incident rule 6 exists to prevent.
+--
+-- A side table rather than two columns on `services`, for that same reason:
+-- `services` has rows.
+--
+-- image_vcpus and image_mem_mib are the size the release's MEMORY IMAGE was
+-- photographed at, which is NOT always the current size: a resize changes the
+-- size first and re-photographs after. A replica may only restore from that
+-- image when the two agree, because Firecracker cannot load a memory image
+-- into a differently-sized VM. When they disagree the replica boots instead,
+-- which is slower and correct.
+--
+-- Writer: the service's arbiter, the one host that already writes the
+-- `services` row through forwardToArbiter, so the merge has a single writer.
 CREATE TABLE IF NOT EXISTS service_sizes (     -- writer: the service's arbiter
   service_id    TEXT NOT NULL PRIMARY KEY,
   vcpus         INTEGER,  -- what a replica is created with
