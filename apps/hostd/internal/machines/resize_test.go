@@ -151,3 +151,33 @@ func TestValidateSizeBounds(t *testing.T) {
 		})
 	}
 }
+
+// The refusals above say 400, and that has to be true where it is DECIDED.
+//
+// ErrInvalid was a bare errors.New, and api.mapError recognises wrapped
+// sentinels and nothing else -- so every refusal in this package reached the
+// caller as HTTP 500 "internal error" with the reason buried in
+// `details.cause`, while the test above happily asserted ErrInvalid and the doc
+// comment happily said 400. An assertion about a sentinel is not an assertion
+// about a status. This is the one that is.
+func TestEveryRefusalThisPackageMakesIsABadRequest(t *testing.T) {
+	if !errors.Is(ErrInvalid, api.ErrBadRequest) {
+		t.Fatal("ErrInvalid does not wrap api.ErrBadRequest, so api.mapError " +
+			"cannot see it and every caller mistake this package refuses comes " +
+			"back as a 500 inviting a retry that can never work")
+	}
+	// And it stays distinguishable from the other sentinel, which is the whole
+	// reason there are two of them.
+	if errors.Is(ErrInvalid, state.ErrNotFound) {
+		t.Error("ErrInvalid also reads as not-found; a bad size would answer 404")
+	}
+	for _, err := range []error{
+		validateSize(MaxVCPUs+1, 1024),
+		validateSize(-1, 1024),
+		validateSize(1, 64),
+	} {
+		if !errors.Is(err, api.ErrBadRequest) {
+			t.Errorf("%v does not reach the mapper as a bad request", err)
+		}
+	}
+}

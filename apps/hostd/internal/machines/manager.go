@@ -64,9 +64,18 @@ type Discovery interface {
 var ErrNotFound = fmt.Errorf("machines: %w", state.ErrNotFound)
 
 // ErrInvalid is a request this package refuses on its face, before anything is
-// asked of a guest: an unknown action, a missing name. Separate from
-// ErrNotFound so the API answers 400 rather than 404 for a caller mistake.
-var ErrInvalid = errors.New("machines: invalid request")
+// asked of a guest: an unknown action, a missing name, a size past the ceiling.
+// Separate from ErrNotFound so the API answers 400 rather than 404 for a caller
+// mistake.
+//
+// It WRAPS api.ErrBadRequest, the same way ErrNotFound wraps the store's
+// sentinel above, and for the same reason: the mapper recognises the wrapped
+// error and nothing else. A bare errors.New here read as an unrecognised error,
+// so every one of these -- 999 vCPUs, a negative size, an unknown process
+// action -- came back as HTTP 500 "internal error" with the real reason buried
+// in `details.cause`, telling the caller the fleet was broken and to retry when
+// the only thing that helps is a different request.
+var ErrInvalid = fmt.Errorf("machines: invalid request: %w", api.ErrBadRequest)
 
 // Options configures the manager.
 type Options struct {
