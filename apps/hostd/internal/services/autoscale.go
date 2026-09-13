@@ -281,13 +281,10 @@ func (m *Manager) scaleUp(ctx context.Context, svc *state.Service, machines []st
 		// and Wake restores the guest locally before any row write is refused,
 		// which means a second copy of a machine already running elsewhere.
 		// The waker enforces the same check for the same reason.
-		if mach.HostID != m.opts.HostID {
-			if err := m.remote(ctx, mach.HostID, mach.ID, "wake"); err != nil {
-				return fmt.Errorf("services: waking %s on %s: %w", mach.ID, mach.HostID, err)
-			}
-			return nil
+		if err := m.wakeOwned(ctx, mach); err != nil {
+			return fmt.Errorf("services: waking %s on %s: %w", mach.ID, mach.HostID, err)
 		}
-		return m.opts.Machines.Wake(ctx, mach.ID)
+		return nil
 	}
 	// A volume-backed service has one machine. If it exists and is not
 	// suspended it is running, or it belongs to a rollout or a rescue; a

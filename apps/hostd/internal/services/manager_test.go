@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -256,6 +257,97 @@ func TestAReleasesCPURowNamesItsService(t *testing.T) {
 			"falls back to reading the release, which does not exist yet",
 			auth.ForService, svc.ID)
 	}
+}
+
+// A lifecycle verb goes to the host that holds the machine.
+//
+// # The bug
+//
+// The manager refuses a machine this host does not hold, which is right: waking
+// one locally restores the guest before any row write is refused, so a second
+// copy runs untracked. But the rollout and rollback paths called the local
+// manager directly.
+//
+// A service's arbiter is hash(id) mod live_hosts and moves as hosts come and
+// go, while a drain or a self-heal moves replicas independently, so the host
+// running a rollback is routinely not the host holding its replicas. Rollback
+// hard-failed there: one replica elsewhere and the release never flipped, with
+// a 409 and a service left on the version it was rolling away from.
+//
+// autoscale.go had this right and said why. The other three call sites did not,
+// and all four share one helper now.
+func TestALifecycleVerbGoesToTheHostThatHoldsTheMachine(t *testing.T) {
+	m, _, _, _ := fixture(t, 1)
+	m.opts.HostID = "host-a"
+	peers := &recordingPeers{}
+	m.opts.Peers = peers
+
+	elsewhere := state.Machine{ID: "m-remote", HostID: "host-b"}
+	if err := m.wakeOwned(t.Context(), elsewhere); err != nil {
+		t.Fatalf("waking a machine on another host: %v", err)
+	}
+	if err := m.suspendOwned(t.Context(), elsewhere); err != nil {
+		t.Fatalf("suspending a machine on another host: %v", err)
+	}
+	want := []string{"host-b /v1/machines/m-remote/wake", "host-b /v1/machines/m-remote/suspend"}
+	if got := peers.posts; len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("posted %v, want %v. A verb aimed at the local manager for a "+
+			"machine another host holds is refused, and the whole operation fails",
+			got, want)
+	}
+}
+
+// And a machine this host DOES hold never leaves the process, or every rollout
+// would pay a round trip it does not need.
+func TestALifecycleVerbOnAnOwnedMachineStaysLocal(t *testing.T) {
+	m, fm, _, _ := fixture(t, 1)
+	m.opts.HostID = "host-a"
+	peers := &recordingPeers{}
+	m.opts.Peers = peers
+
+	mine := state.Machine{ID: "m-local", HostID: "host-a"}
+	if err := m.wakeOwned(t.Context(), mine); err != nil {
+		t.Fatalf("waking an owned machine: %v", err)
+	}
+	if len(peers.posts) != 0 {
+		t.Errorf("an owned machine was woken over the network: %v", peers.posts)
+	}
+	if !slices.Contains(fm.events, "wake:m-local") {
+		t.Errorf("the local manager was not asked to wake it: %v", fm.events)
+	}
+}
+
+// A row with no host at all is this host's problem, not a reason to post into
+// the void. Rows predating the host_id column look like this.
+func TestAMachineWithNoHostIsHandledLocally(t *testing.T) {
+	m, _, _, _ := fixture(t, 1)
+	m.opts.HostID = "host-a"
+	peers := &recordingPeers{}
+	m.opts.Peers = peers
+
+	if err := m.wakeOwned(t.Context(), state.Machine{ID: "m-old"}); err != nil {
+		t.Fatalf("waking a machine with no host: %v", err)
+	}
+	if len(peers.posts) != 0 {
+		t.Errorf("a hostless machine was posted to a peer: %v", peers.posts)
+	}
+}
+
+// recordingPeers notes where a verb was sent.
+type recordingPeers struct {
+	mu    sync.Mutex
+	posts []string
+}
+
+func (p *recordingPeers) Post(_ context.Context, hostID, path string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.posts = append(p.posts, hostID+" "+path)
+	return nil
+}
+
+func (p *recordingPeers) PostJSON(ctx context.Context, hostID, path string, _ any) error {
+	return p.Post(ctx, hostID, path)
 }
 
 func fixture(t *testing.T, replicas int) (*Manager, *fakeMachines, state.Store, *state.Service) {

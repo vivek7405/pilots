@@ -224,7 +224,7 @@ func (m *Manager) Deploy(ctx context.Context, serviceID, rootfsBuildID string,
 	// turn a five-second rollback into a rebuild. They are pruned on the NEXT
 	// successful deploy, which is also what bounds how many accumulate.
 	for _, mach := range previous {
-		if err := m.opts.Machines.Suspend(ctx, mach.ID); err != nil {
+		if err := m.suspendOwned(ctx, mach); err != nil {
 			slog.Warn("could not suspend a superseded replica",
 				"machine", mach.ID, "service", svc.ID, "err", err)
 		}
@@ -670,7 +670,7 @@ func (m *Manager) Rollback(ctx context.Context, serviceID string) (*state.Releas
 		}
 	} else {
 		for _, mach := range machines {
-			if err := m.opts.Machines.Wake(ctx, mach.ID); err != nil {
+			if err := m.wakeOwned(ctx, mach); err != nil {
 				return nil, fmt.Errorf("services: waking %s: %w", mach.ID, err)
 			}
 		}
@@ -694,7 +694,7 @@ func (m *Manager) Rollback(ctx context.Context, serviceID string) (*state.Releas
 			"superseded replicas to stop them: %w", target.ID, err)
 	}
 	for _, mach := range superseded {
-		if err := m.opts.Machines.Suspend(ctx, mach.ID); err != nil {
+		if err := m.suspendOwned(ctx, mach); err != nil {
 			slog.Warn("could not suspend a superseded replica after rollback",
 				"machine", mach.ID, "service", serviceID, "err", err)
 		}
@@ -825,6 +825,33 @@ func (m *Manager) replicaKnobs(ctx context.Context, svc *state.Service,
 }
 
 // remote asks another host to suspend or wake one of its machines.
+// wakeOwned and suspendOwned run a lifecycle verb on whichever host holds the
+// machine.
+//
+// Only the OWNER may run one. The manager refuses a machine this host does not
+// hold, and the service arbiter is hash(id) mod live_hosts, which moves as
+// hosts come and go -- while a drain or a self-heal moves replicas
+// independently. So the host running a rollout is routinely not the host
+// holding its replicas, and calling the local manager there fails the whole
+// operation with a 409.
+//
+// autoscale.go had this right and said why; the rollout and rollback paths
+// called the local manager directly. Rollback in particular hard-failed: one
+// replica on another host and the release never flipped.
+func (m *Manager) wakeOwned(ctx context.Context, mach state.Machine) error {
+	if mach.HostID != "" && mach.HostID != m.opts.HostID {
+		return m.remote(ctx, mach.HostID, mach.ID, "wake")
+	}
+	return m.opts.Machines.Wake(ctx, mach.ID)
+}
+
+func (m *Manager) suspendOwned(ctx context.Context, mach state.Machine) error {
+	if mach.HostID != "" && mach.HostID != m.opts.HostID {
+		return m.remote(ctx, mach.HostID, mach.ID, "suspend")
+	}
+	return m.opts.Machines.Suspend(ctx, mach.ID)
+}
+
 func (m *Manager) remote(ctx context.Context, hostID, machineID, action string) error {
 	if m.opts.Peers == nil {
 		return fmt.Errorf("services: %s is held by %s and this host cannot reach it",
