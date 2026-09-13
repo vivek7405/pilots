@@ -300,15 +300,29 @@ jobs:
           go-version: '1.26'
           cache-dependency-path: apps/hostd/go.sum
       - if: steps.touched.outputs.ok == 'true'
-        name: build it twice and compare
+        name: pack it twice and compare
         run: |
+          # ONE build, packed TWICE.
+          #
+          # This compared two full builds, and could not: the Dockerfile
+          # reaches the network in three places -- `FROM ubuntu:24.04` is a tag
+          # rather than a digest, `apt-get install` takes whatever the archive
+          # holds today, and the Node step pipes deb.nodesource.com's setup
+          # script into bash. Anything moving upstream between the two builds
+          # changed the image, so the check failed for a reason no commit could
+          # fix and was red on every run.
+          #
+          # What it always MEANT to test is in its own error text: that no
+          # random uuid, hash seed or unclamped timestamp gets back into
+          # build-golden-rootfs.sh. That is a property of the PACK, and packing
+          # one image twice tests exactly it.
           scripts/build-golden-rootfs.sh
           first=$(sha256sum < scripts/rootfs/golden.ext4)
           rm -f scripts/rootfs/golden.ext4
-          scripts/build-golden-rootfs.sh
+          REUSE_IMAGE=1 scripts/build-golden-rootfs.sh
           second=$(sha256sum < scripts/rootfs/golden.ext4)
           if [ "$first" != "$second" ]; then
-            echo "::error::Two builds of the same tree produced different images."
+            echo "::error::Packing one filesystem twice produced different images."
             echo "::error::  first  ${first%% *}"
             echo "::error::  second ${second%% *}"
             echo "::error::Something nondeterministic got back into"
@@ -317,7 +331,7 @@ jobs:
             echo "::error::toolchain itself is pinned, so it is not the packer."
             exit 1
           fi
-          echo "both builds: ${first%% *}"
+          echo "both packs: ${first%% *}"
 
   # The golden rootfs, built at a tag and pinned.
   #

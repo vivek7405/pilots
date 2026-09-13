@@ -62,8 +62,24 @@ case "$VARIANT" in
     ;;
 esac
 
-# Three knobs aimed at making the image byte-reproducible, so that rebuilding
-# it is idempotent and the pin in golden.ext4.sha256 can mean something.
+# Three knobs aimed at making the PACK byte-reproducible, so that packing one
+# filesystem twice is idempotent and the pin in golden.ext4.sha256 can mean
+# something.
+#
+# What they do NOT make reproducible is the image being packed. The Dockerfile
+# reaches the network in three places -- `FROM ubuntu:24.04` is a tag rather
+# than a digest, `apt-get install` takes whatever the archive holds today, and
+# the Node step pipes deb.nodesource.com's setup script into bash -- so two
+# builds separated by an upstream change produce different filesystems, and no
+# amount of clamping here can alter that.
+#
+# So the pin means "this ext4 is the one built from this tree at this commit,
+# on a machine whose upstream state matched". It is verified against the
+# artifact published at a tag, which is why host-bootstrap.sh offers to
+# download that artifact rather than telling everybody to rebuild. Making the
+# base system reproducible across time as well is a real and separate piece of
+# work: pin the digest, point apt at a snapshot archive, and install Node from
+# a checksummed tarball.
 #
 #   -U                 mke2fs otherwise picks a random filesystem UUID
 #   -E hash_seed=      the directory hash seed is otherwise random, even with -U
@@ -175,12 +191,32 @@ trap cleanup EXIT
 # that checks the image carries the agent this tree builds fails for a reason
 # that has nothing to do with the agent. With it the build is reproducible and
 # the pin means what it says.
-echo "==> building guest-agent (static)"
-( cd apps/hostd && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -trimpath -ldflags="-s -w" -o "../../$STAGED_BIN" ./cmd/guest-agent )
+# REUSE_IMAGE packs the image that is already built instead of building it.
+#
+# For ONE caller: the reproducibility check, which packs the same image twice
+# and compares. Two full builds cannot be compared, because the Dockerfile
+# reaches the network -- `FROM ubuntu:24.04` is a tag rather than a digest,
+# apt-get installs whatever the archive holds today, and the Node step pipes a
+# setup script from deb.nodesource.com into bash. Any of those moving between
+# two builds changes the image, which is a property of the base system rather
+# than of anything this script does.
+#
+# What this script CAN promise is that packing is deterministic: the same
+# filesystem in gives the same ext4 out, with no random uuid, hash seed or
+# unclamped timestamp getting back in. That is the promise the check tests, and
+# this is how it gets two packs of one image to compare.
+if [ "${REUSE_IMAGE:-0}" = "1" ]; then
+  docker image inspect "$IMAGE" >/dev/null 2>&1 \
+    || die "REUSE_IMAGE=1 but there is no $IMAGE to reuse; build it first"
+  echo "==> reusing the already-built $IMAGE"
+else
+  echo "==> building guest-agent (static)"
+  ( cd apps/hostd && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+      go build -trimpath -ldflags="-s -w" -o "../../$STAGED_BIN" ./cmd/guest-agent )
 
-echo "==> docker build $IMAGE ($VARIANT, -f $DOCKERFILE)"
-docker build -q -t "$IMAGE" -f "$DOCKERFILE" scripts/rootfs
+  echo "==> docker build $IMAGE ($VARIANT, -f $DOCKERFILE)"
+  docker build -q -t "$IMAGE" -f "$DOCKERFILE" scripts/rootfs
+fi
 
 echo "==> exporting container filesystem"
 CID="$(docker create "$IMAGE")"
