@@ -2,6 +2,7 @@ package machines
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -239,6 +241,51 @@ func TestLogTailReadsAnOffsetWithoutAStoreQuery(t *testing.T) {
 	}
 	if got, err := m.LogTail("m_1", 0); err != nil || string(got) != "abc" {
 		t.Errorf("after the row was deleted: %q, %v; want %q, nil", got, err, "abc")
+	}
+}
+
+// A rotation has to be REPORTED, because a follower cannot see one.
+//
+// rotateLog keeps the inode and truncates (logrotate.go says why: Firecracker
+// holds the descriptor open and a rename would leave it writing to the renamed
+// inode). So a follower's offset lands past the end of a now-empty file, and a
+// read there returns nothing and no error -- which every follow was reading as
+// "no new output". The follow went silent at the moment the log rotated and
+// then resumed mid-line once the file grew back past the stale offset, which is
+// exactly what the `reset` branch existed to prevent and was keyed on an error
+// that a rotation never produced.
+func TestLogTailReportsARotationRatherThanReadingItAsSilence(t *testing.T) {
+	m, _ := streamManager(t)
+
+	dir := m.stateDir("m_1")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "lifecycle.log")
+	if err := os.WriteFile(path, []byte("first generation\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	offset := int64(len("first generation\n"))
+	if got, err := m.LogTail("m_1", offset); err != nil || len(got) != 0 {
+		t.Fatalf("at the end of the file: %q, %v; want nothing, nil", got, err)
+	}
+
+	// copytruncate, exactly as rotateLog does it.
+	if err := os.Truncate(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.LogTail("m_1", offset); !errors.Is(err, api.ErrLogRotated) {
+		t.Fatalf("after a rotation: %v; want api.ErrLogRotated, or a follower "+
+			"reads the truncation as the machine going quiet", err)
+	}
+
+	// And the follow that starts again from zero sees the new generation.
+	if err := os.WriteFile(path, []byte("second generation\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := m.LogTail("m_1", 0)
+	if err != nil || string(got) != "second generation\n" {
+		t.Errorf("after resuming from zero: %q, %v", got, err)
 	}
 }
 

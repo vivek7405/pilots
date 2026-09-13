@@ -67,6 +67,10 @@ type Manager interface {
 	// new has been written. It reads the file and nothing else: a follow polls
 	// it twice a second, and whether the machine still exists is asked far
 	// more rarely and separately.
+	//
+	// ErrLogRotated when the file is shorter than the offset, which is the one
+	// thing a follower cannot work out for itself. Every other error is a read
+	// that failed and is reported as one.
 	LogTail(machineID string, offset int64) ([]byte, error)
 	CreateVolume(ctx context.Context, req CreateVolumeRequest) (*state.Volume, error)
 	ListVolumes(ctx context.Context) ([]state.Volume, error)
@@ -310,6 +314,18 @@ var ErrNoCapacity = errors.New("no capacity")
 // Lives here rather than in machines for the reason the two above do: the
 // mapper has to recognise it, and machines imports this package.
 var ErrBadRequest = errors.New("bad request")
+
+// ErrLogRotated says a console log is now SHORTER than the offset a follower
+// holds, so that offset means nothing.
+//
+// Distinct from a failed read because the answers are opposite: a rotation is
+// ordinary and the follow resumes from zero, while a read that failed is a
+// problem the reader has to be told about. Reading one as the other is how a
+// follow either went silent for ever or spun emitting resets.
+//
+// Lives here rather than in machines for the reason ErrBadRequest does: the
+// follow handlers have to recognise it, and machines imports this package.
+var ErrLogRotated = errors.New("the console log was rotated")
 
 // putURLAuth writes who may reach an object's URL, and tells the router.
 //
@@ -978,7 +994,7 @@ func (d Deps) streamLogEvents(w http.ResponseWriter, r *http.Request, id string,
 		case <-ticker.C:
 		}
 		delta, err := d.Machines.LogTail(id, offset)
-		if err != nil {
+		if errors.Is(err, ErrLogRotated) {
 			// The file was rotated out from under this follow. `reset` with id
 			// 0 tells the client its offset is meaningless now, which is the
 			// one thing it cannot work out for itself: without it, it would
@@ -987,6 +1003,16 @@ func (d Deps) streamLogEvents(w http.ResponseWriter, r *http.Request, id string,
 			flush()
 			offset = 0
 			continue
+		}
+		if err != nil {
+			// NOT a rotation. Reading every failure as one sent `reset` at the
+			// poll interval for the life of the connection and never ended it,
+			// which is a stream that says the log restarted, twice a second,
+			// for ever. A read that failed is said once and the stream closes.
+			slog.Warn("log follow read failed", "machine", id, "err", err)
+			writeLogEvent(w, "error", offset, []byte(err.Error()))
+			flush()
+			return
 		}
 		if len(delta) == 0 {
 			continue
@@ -1054,6 +1080,16 @@ func (d Deps) followLogs(w http.ResponseWriter, r *http.Request, id string, offs
 		}
 
 		delta, err := d.Machines.LogTail(id, offset)
+		if errors.Is(err, ErrLogRotated) {
+			// The log was rotated under this follow: the offset is past the end
+			// of a file that has just been truncated. Resume from the start,
+			// and say so, because output the reader never saw was rotated away
+			// and a silent jump would read as the machine going quiet.
+			_, _ = fmt.Fprint(w, "\n[pilots] the console log was rotated; following from the new start\n")
+			flush()
+			offset, fails = 0, 0
+			continue
+		}
 		if err != nil {
 			fails++
 			if fails == 1 {
