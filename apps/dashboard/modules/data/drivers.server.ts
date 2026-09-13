@@ -100,7 +100,28 @@ export async function runQuery(req: QueryRequest): Promise<QueryResult> {
 
 async function runPostgres(req: QueryRequest, limit: number): Promise<QueryResult> {
   const { Client } = await import('pg');
-  const client = new Client({ connectionString: throughTunnel(req.url, req.tunnel) });
+  const client = new Client({
+    connectionString: throughTunnel(req.url, req.tunnel),
+    // SESSION level, not transaction level, and this is the whole of the
+    // read-only guarantee.
+    //
+    // BEGIN READ ONLY on its own was escapable from the query box. The query
+    // carries no parameters, so node-postgres sends it over the SIMPLE query
+    // protocol, which permits several statements in one string -- and a query
+    // beginning `COMMIT;` ends the transaction the guard opened, leaving
+    // everything after it to run in a fresh read-write one. `COMMIT; DROP
+    // TABLE users;` with writes OFF dropped the table, and because a
+    // multi-statement simple query returns an ARRAY of results, the console
+    // reported "No rows." under a banner still reading "Read only. The
+    // database itself refuses a write."
+    //
+    // default_transaction_read_only is set for the connection, so every
+    // transaction on it starts read only however many the caller opens or
+    // closes. A COMMIT cannot clear it; only SET can, and SET is itself a
+    // write the engine refuses under it. MySQL below already used its
+    // session-level form and was never exposed.
+    options: req.write ? undefined : '-c default_transaction_read_only=on',
+  });
   await client.connect();
   try {
     // A transaction either way, so a read is a consistent snapshot and a write

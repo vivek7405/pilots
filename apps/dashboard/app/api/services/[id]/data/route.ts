@@ -8,6 +8,7 @@
 import type { RouteHandlerContext } from '@webjsdev/core';
 import { orgOr401, isResponse, jsonBody, notFoundResponse, readJson, str } from '#modules/http/guards.server.ts';
 import { assertOwned, fleetErrorResponse } from '#modules/fleet/org-filter.server.ts';
+import { canWriteData } from '#modules/orgs/roles.ts';
 import { fleetAs } from '#modules/fleet/client.server.ts';
 import { withTunnel } from '#modules/data/tunnel.server.ts';
 import { ENGINE_PORT, isEngine, runQuery } from '#modules/data/drivers.server.ts';
@@ -23,6 +24,16 @@ export async function POST(req: Request, { params }: RouteHandlerContext): Promi
   const write = raw.write === true;
   const limit = typeof raw.limit === 'number' ? raw.limit : 0;
   if (query === '') return jsonBody({ error: 'nothing to run' }, 400);
+
+  // Writing is owner-or-admin. The toggle in the UI is a courtesy; this is the
+  // control, and without it any member of the team could DROP a production
+  // table from the query box.
+  if (write && !canWriteData(ctx.role)) {
+    return jsonBody(
+      { error: 'writing to this database needs the owner or an admin' },
+      403,
+    );
+  }
 
   const client = fleetAs(ctx.org.id);
   try {

@@ -52,6 +52,22 @@ export function canAdministerOrg(role: Role): boolean {
   return role === 'owner';
 }
 
+/**
+ * Write to a team's production data from the Data console.
+ *
+ * Owner or admin, the same bar as adding and removing people. A member uses
+ * what the team owns; dropping its tables is not using it.
+ *
+ * This had no check at all: `write` was read off the request body after the
+ * org guard and nothing else, so any member could run a DELETE or a DROP
+ * against production -- while resetting a build cache, which rebuilds itself
+ * in minutes, was already gated. The damaging action was open and the harmless
+ * one was closed.
+ */
+export function canWriteData(role: Role): boolean {
+  return role === 'owner' || role === 'admin';
+}
+
 /** How a role is written on screen. */
 export function roleLabel(role: Role): string {
   return role === 'owner' ? 'Owner' : role === 'admin' ? 'Admin' : 'Member';
