@@ -144,31 +144,50 @@ func expiredSnapshots(stamps []string, keepDaily, keepWeekly int) []string {
 	sorted := append([]string(nil), stamps...)
 	sort.Sort(sort.Reverse(sort.StringSlice(sorted)))
 
+	// A name this code did not write is KEPT, whatever the policy says, and
+	// that is decided before either rule runs.
+	//
+	// It used to be decided inside the weekly branch, so a daily-only policy
+	// -- keep_daily: 7, keep_weekly: 0, which is what somebody asking for a
+	// week of backups writes -- never reached it. Any entry beside the
+	// snapshots whose name is not a timestamp then fell past the daily window
+	// onto the delete list, and DeleteSnapshot removes a directory. Deleting
+	// something unrecognised is how a retention policy becomes data loss, and
+	// a policy with no weekly rule did not ask to be reckless.
 	keep := map[string]bool{}
-	for i, stamp := range sorted {
-		if i < keepDaily {
+	type dated struct {
+		stamp string
+		at    time.Time
+	}
+	var known []dated
+	for _, stamp := range sorted {
+		at, err := time.Parse("20060102T150405Z", stamp)
+		if err != nil {
 			keep[stamp] = true
+			continue
+		}
+		known = append(known, dated{stamp, at})
+	}
+
+	// The daily window counts RECOGNISED snapshots only. Counting positions in
+	// the raw listing let a stray entry consume a slot, quietly retaining six
+	// days where seven were asked for.
+	for i, d := range known {
+		if i < keepDaily {
+			keep[d.stamp] = true
 		}
 	}
 	if keepWeekly > 0 {
 		weeks := map[string]bool{}
-		for _, stamp := range sorted {
-			at, err := time.Parse("20060102T150405Z", stamp)
-			if err != nil {
-				// A name this code did not write. Kept rather than deleted:
-				// deleting something unrecognised is how a retention policy
-				// turns into data loss.
-				keep[stamp] = true
-				continue
-			}
-			year, week := at.ISOWeek()
+		for _, d := range known {
+			year, week := d.at.ISOWeek()
 			key := time.Date(year, 1, 1, 0, 0, 0, 0, time.UTC).Format("2006") +
 				"-" + itoa(week)
 			if weeks[key] || len(weeks) >= keepWeekly {
 				continue
 			}
 			weeks[key] = true
-			keep[stamp] = true
+			keep[d.stamp] = true
 		}
 	}
 
