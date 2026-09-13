@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/state"
@@ -206,6 +207,16 @@ func (d Deps) forwardCreate(w http.ResponseWriter, r *http.Request, req CreateMa
 		}
 		d.observePlacement("forwarded")
 		for k, vs := range reply.Header {
+			// Not the framing headers. offerCreate read the body through a
+			// LimitReader, so the candidate's Content-Length is a promise this
+			// host may be unable to keep: Go honours an explicitly set one, so
+			// a reply past the cap would leave the client waiting for bytes
+			// that are never coming rather than seeing an error. Letting Go
+			// compute the length from what is actually written cannot
+			// disagree with the body.
+			if strings.EqualFold(k, "Content-Length") || strings.EqualFold(k, "Transfer-Encoding") {
+				continue
+			}
 			for _, v := range vs {
 				w.Header().Add(k, v)
 			}
