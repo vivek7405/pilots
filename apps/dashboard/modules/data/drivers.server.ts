@@ -130,7 +130,40 @@ async function runPostgres(req: QueryRequest, limit: number): Promise<QueryResul
     // function that writes, which no filter over the query text could match.
     await client.query(req.write ? 'BEGIN' : 'BEGIN READ ONLY');
     try {
-      const res = await client.query({ text: req.query, rowMode: 'array' });
+      // One statement per query, enforced by the SERVER, which is what closes
+      // the multi-statement hole rather than narrowing it.
+      //
+      // The session GUC above stops `COMMIT; DROP TABLE users;`, because a
+      // COMMIT cannot clear a GUC. It does not stop the same trick with one
+      // more statement in front of it: `SET` is not a write, so it is allowed
+      // inside a read-only transaction, it is session-scoped, and it survives
+      // the COMMIT that follows it. `SET default_transaction_read_only=off;
+      // COMMIT; DROP TABLE users;` therefore walked through the ceiling the
+      // connection was opened with -- and, like the original, through
+      // canWriteData, so a `member` could still drop a production table.
+      //
+      // The root cause is under both of them: with no `values`, node-pg's
+      // requiresPreparation() returns false (node_modules/pg/lib/query.js:54)
+      // and the text goes out on the SIMPLE protocol, which runs every
+      // `;`-separated statement in it. `queryMode: 'extended'` is the one
+      // switch that turns that off: Postgres then refuses the text outright
+      // with "cannot insert multiple commands into a prepared statement".
+      //
+      // Both stay. The GUC is the ceiling a single statement runs under; this
+      // is what stops a second statement existing. Neither is redundant, and
+      // this file's rule holds for both -- the enforcement is the engine's,
+      // never a regular expression over the query text.
+      //
+      // Bound to a name rather than passed as a literal because @types/pg has
+      // not caught up with pg 8.23's `queryMode`; an excess property on a
+      // fresh literal would pick the wrong overload, while the same object
+      // behind a name is simply assignable.
+      const ask = {
+        text: req.query,
+        rowMode: 'array' as const,
+        queryMode: 'extended' as const,
+      };
+      const res = await client.query(ask);
       await client.query('COMMIT');
       const fields = res.fields ?? [];
       const rows = (res.rows as unknown[][]) ?? [];
