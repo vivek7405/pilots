@@ -2,6 +2,7 @@ package router
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"net/http"
@@ -12,7 +13,6 @@ import (
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/metrics"
-	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
 // A machine lives on exactly one host, but a request for it can arrive at any
@@ -98,8 +98,8 @@ type Peers interface {
 // SNI and paying a second handshake for transport security WireGuard already
 // provides. TLS terminates once, at whichever host the client actually
 // reached.
-func (r *Router) forwardToOwner(w http.ResponseWriter, req *http.Request, m state.Machine) {
-	r.forwardTo(w, req, m, m.HostID)
+func (r *Router) forwardToOwner(w http.ResponseWriter, req *http.Request, t *Target) {
+	r.forwardTo(w, req, t, t.Machine.HostID)
 }
 
 // forwardTo proxies a request to a named host.
@@ -107,7 +107,8 @@ func (r *Router) forwardToOwner(w http.ResponseWriter, req *http.Request, m stat
 // The target is not always the owner. When the owner is gone the request goes
 // to whichever host is designated to rescue the machine, which is the only
 // host allowed to claim it -- see serveOrForward.
-func (r *Router) forwardTo(w http.ResponseWriter, req *http.Request, m state.Machine, hostID string) {
+func (r *Router) forwardTo(w http.ResponseWriter, req *http.Request, t *Target, hostID string) {
+	m := t.Machine
 	addr, ok := r.opts.Peers.InternalAddr(hostID)
 	if !ok {
 		slog.Error("cannot forward: the target host has no mesh address",
@@ -129,7 +130,27 @@ func (r *Router) forwardTo(w http.ResponseWriter, req *http.Request, m state.Mac
 		// it, and the application behind it builds URLs and sets cookies from
 		// what the user typed.
 	}
+	// The replay hook, the SAME one serveLocally installs, and it belongs here
+	// for the same two reasons.
+	//
+	// Without it a cross-host request was the one case where Pilot-Replay did
+	// nothing. The owning host's serveLocally sees no replay state -- the state
+	// is a context value on the EDGE's request and does not travel over HTTP --
+	// so it re-sets the header for the edge to act on, exactly as designed.
+	// The edge's forwarding proxy then had no ModifyResponse, so the header
+	// passed straight through: the application's routing instruction was
+	// silently ignored, and the header, which names an internal machine,
+	// reached the client. An app using fly-replay's idiom got a working replay
+	// or a silent no-op depending on which host the machine happened to be on,
+	// which is invariant 2 -- no request path may depend on a specific host --
+	// broken in the one direction hardest to notice.
+	proxy.ModifyResponse = captureReplay(req.Context(), t)
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+		if errors.Is(err, errReplay) {
+			// Not a failure: nothing has been written, and the edge is about
+			// to send the request to the machine the response named.
+			return
+		}
 		slog.Error("could not forward to the target host",
 			"machine", m.ID, "target", hostID, "addr", target.Host, "err", err)
 		http.Error(w, "machine unavailable", http.StatusBadGateway)
@@ -161,6 +182,55 @@ func (r *Router) InternalHandler() http.Handler {
 			http.Error(w, "unknown host", http.StatusNotFound)
 			return
 		}
+
+		// A machine this host is HANDING OFF must not be woken here, whoever
+		// asked.
+		//
+		// serveOrForward has always checked this; the internal listener did
+		// not. Every host answers for every machine, so most requests reach
+		// some other host first and arrive here forwarded -- and that path went
+		// straight to serveLocally, waking a machine another host was in the
+		// middle of claiming. The drain hold, bypassed by one hop.
+		if r.opts.HandingOff != nil {
+			if to, moving := r.opts.HandingOff(target.Machine.ID); moving && to != r.opts.HostID {
+				if req.Header.Get(drainHopHeader) != "" {
+					// Already one handoff hop deep. See drainHopHeader.
+					http.Error(w, "machine is being moved", http.StatusServiceUnavailable)
+					return
+				}
+				moved := *target
+				moved.Machine.HostID = to
+				req.Header.Set(drainHopHeader, r.opts.HostID)
+				r.forwardToOwner(w, req, &moved)
+				return
+			}
+		}
+
+		// A machine being handed TO this host is held, not refused.
+		//
+		// The source forwards the request the moment it suspends the machine,
+		// which is before the claim has committed here -- the row still names
+		// the source, so the check below would answer "machine is not served
+		// by this host". That is a 404 at the edge for a machine nobody has
+		// lost, produced by a maintenance operation whose entire promise is
+		// that a request arriving mid-move is HELD rather than failed.
+		//
+		// The marker only decides whether to WAIT; it grants nothing. The
+		// claim is still authorised by the offer row, which names who offered
+		// the machine, to whom, and whether the offer is the newest -- so a
+		// forged marker buys an attacker a bounded wait and then the same
+		// refusal.
+		if target.Machine.HostID != r.opts.HostID && req.Header.Get(drainHopHeader) != "" {
+			if fresh, ok := r.holdForClaim(req.Context(), req.Host); ok {
+				target = fresh
+			} else {
+				// Still not ours. 503 rather than 404: the machine exists, is
+				// not lost, and the next request will find it.
+				http.Error(w, "machine is being moved", http.StatusServiceUnavailable)
+				return
+			}
+		}
+
 		if target.Machine.HostID != r.opts.HostID {
 			// A peer forwards an orphan here when this host is the one
 			// designated to rescue it. Accept exactly that case: the owner
@@ -188,6 +258,58 @@ func (r *Router) InternalHandler() http.Handler {
 	})
 }
 
+// drainHopHeader marks the ONE extra forward a handoff is allowed.
+//
+// forwardedHeader bounds the graph at one edge, which is what stops two hosts
+// with disagreeing views from forwarding to each other. A handoff needs one
+// more: the edge forwards to the machine's owner, and by the time it lands
+// that owner may have handed the machine on. That second hop is bounded by
+// construction -- the marker is refused if it arrives twice -- so it cannot
+// become the loop the first rule exists to prevent.
+const drainHopHeader = "Pilot-Drain-Hop"
+
+// holdForClaim waits until this host owns the machine a peer is handing it,
+// re-resolving as it goes.
+//
+// A drain suspends the machine and forwards the in-flight request straight
+// away, so the request arrives here BEFORE Take has committed the claim: the
+// row still names the source. Refusing then turns a planned maintenance into a
+// 404 at the edge. Waiting costs the client the tail of one restore, which is
+// the cost the drain was designed around.
+//
+// Bounded, and the bound is the source's own: handoffTimeout in the machines
+// package is how long it waits for one target before offering the machine
+// elsewhere, so a hold past that is waiting on an offer that has been
+// withdrawn.
+func (r *Router) holdForClaim(ctx context.Context, host string) (*Target, bool) {
+	deadline := time.Now().Add(handoffHold)
+	for {
+		fresh, err := r.resolve(ctx, host)
+		if err == nil && fresh.Machine.HostID == r.opts.HostID {
+			return fresh, true
+		}
+		if time.Now().After(deadline) {
+			return nil, false
+		}
+		select {
+		case <-ctx.Done():
+			return nil, false
+		case <-time.After(handoffPoll):
+		}
+	}
+}
+
+// handoffHold is how long a request waits for a claim to land, and handoffPoll
+// is how often it looks.
+//
+// The hold matches the machines package's handoffTimeout for one target. Past
+// that the source has given up on this host too, so holding longer waits on
+// nothing.
+const (
+	handoffHold = 60 * time.Second
+	handoffPoll = 25 * time.Millisecond
+)
+
 // serveOrForward decides where a request goes.
 //
 // Three outcomes, and the third is the one that matters: if the owning host is
@@ -206,9 +328,15 @@ func (r *Router) serveOrForward(w http.ResponseWriter, req *http.Request, target
 	// the request follows the machine.
 	if r.opts.HandingOff != nil {
 		if to, moving := r.opts.HandingOff(m.ID); moving && to != r.opts.HostID {
-			moved := m
-			moved.HostID = to
-			r.forwardToOwner(w, req, moved)
+			moved := *target
+			moved.Machine.HostID = to
+			// MARKED, so the target knows to wait for its own claim rather
+			// than refusing a machine whose row still names this host. Without
+			// the marker the target's internal listener answered "machine is
+			// not served by this host" -- a 404 at the edge, out of a planned
+			// operation, which is the one thing a drain exists to avoid.
+			req.Header.Set(drainHopHeader, r.opts.HostID)
+			r.forwardToOwner(w, req, &moved)
 			return
 		}
 	}
@@ -218,7 +346,7 @@ func (r *Router) serveOrForward(w http.ResponseWriter, req *http.Request, target
 		return
 	}
 	if r.opts.Peers != nil && r.opts.Peers.IsLive(m.HostID) {
-		r.forwardToOwner(w, req, m)
+		r.forwardToOwner(w, req, target)
 		return
 	}
 
@@ -265,7 +393,7 @@ func (r *Router) rescueAndServe(w http.ResponseWriter, req *http.Request, target
 		}
 		slog.Info("forwarding to the host designated to rescue a machine",
 			"machine", m.ID, "dead_host", m.HostID, "rescuer", rescuer)
-		r.forwardTo(w, req, m, rescuer)
+		r.forwardTo(w, req, target, rescuer)
 		return
 	}
 
