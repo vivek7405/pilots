@@ -1,6 +1,7 @@
 package machines
 
 import (
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -87,7 +88,8 @@ func rotateLog(path string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if _, err := io.Copy(dst, src); err != nil {
+	copied, err := io.Copy(dst, src)
+	if err != nil {
 		dst.Close()
 		_ = os.Remove(tmp)
 		return false, err
@@ -103,10 +105,64 @@ func rotateLog(path string) (bool, error) {
 
 	// Truncate rather than replace: the writer holds this inode open, and an
 	// O_APPEND descriptor resumes at the new end of the file by definition.
-	if err := os.Truncate(path, 0); err != nil {
+	//
+	// But NOT to zero. Firecracker keeps appending throughout the copy above,
+	// and every byte it wrote after the read reached EOF was destroyed by a
+	// truncate that had no idea it was there -- an 8 MiB copy is seconds, and
+	// a guest panicking on its console during those seconds lost exactly the
+	// lines somebody was rotating the log to go and read. Nothing reported it;
+	// rotateLog returned true.
+	//
+	// So what arrived during the copy is carried to the front instead.
+	if err := carryTail(path, at+copied); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// carryTail truncates a log to just the bytes written past `from`, keeping them.
+//
+// Order matters. The file is truncated to the tail's LENGTH first, so the
+// writer's O_APPEND descriptor resumes past it; only then is the tail written
+// over the stale bytes underneath. Truncating to zero and then writing would
+// leave a window in which an append landed at offset 0 and was overwritten.
+//
+// A window remains, between reading the tail and the truncate, and it cannot
+// be closed without stopping the writer -- which is a running VM's console.
+// What it can be is SMALL: it was the whole copy, seconds for a large log, and
+// it is now one read and one truncate.
+func carryTail(path string, from int64) error {
+	f, err := os.OpenFile(path, os.O_RDWR, 0o644)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if info.Size() <= from {
+		// Nothing arrived during the copy, which is the ordinary case.
+		return f.Truncate(0)
+	}
+
+	// Bounded, because a writer that produced more than logKeep during one
+	// copy would otherwise be read wholly into memory. The LAST logKeep of it,
+	// for the reason the rotation keeps the end rather than the beginning.
+	start := from
+	if info.Size()-start > logKeep {
+		start = info.Size() - logKeep
+	}
+	tail := make([]byte, info.Size()-start)
+	if _, err := f.ReadAt(tail, start); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	if err := f.Truncate(int64(len(tail))); err != nil {
+		return err
+	}
+	_, err = f.WriteAt(tail, 0)
+	return err
 }
 
 // rotateLogs walks this host's machines once and rotates what is too big.

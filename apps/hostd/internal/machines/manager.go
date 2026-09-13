@@ -977,6 +977,11 @@ func (m *Manager) buildReferenced(ctx context.Context, buildID string) bool {
 	}
 	rows, err := m.opts.Store.ListLineage(ctx)
 	if err != nil {
+		// Counted, not only logged. Keeping the build is the right call --
+		// deleting one something reads costs a machine -- but it is also a
+		// leak, and a leak that shows up only as a warning per occurrence is
+		// one that gets found when the disk fills rather than when it starts.
+		metrics.BuildsKeptUnverified.Inc()
 		slog.Warn("could not check whether a build is still forked from; keeping it",
 			"build", buildID, "err", err)
 		return true
@@ -995,6 +1000,7 @@ func (m *Manager) buildReferenced(ctx context.Context, buildID string) bool {
 	// nothing.
 	machines, err := m.opts.Store.ListMachines(ctx)
 	if err != nil {
+		metrics.BuildsKeptUnverified.Inc()
 		slog.Warn("could not check whether a fork still exists; keeping its build",
 			"build", buildID, "err", err)
 		return true

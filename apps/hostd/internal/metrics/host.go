@@ -84,6 +84,19 @@ var (
 	RouterHardLimitRefusals = NewCounter(Default, "pilots_router_hard_limit_refusals_total",
 		"Requests refused because a machine was at its hard_limit.")
 
+	// Builds kept because the question "is anything still forked from this?"
+	// could not be answered.
+	//
+	// The answer on an unreadable store is deliberately "keep it": a build
+	// deleted while something reads it costs a machine, and the failure
+	// appears nowhere near the cause. But that direction leaks, and it leaked
+	// SILENTLY -- a store unwell for a week accumulated builds nothing would
+	// ever collect, with a warning per occurrence buried in a log nobody reads
+	// by volume. A counter climbing is the difference between a leak somebody
+	// finds and one that is found when the disk fills.
+	BuildsKeptUnverified = NewCounter(Default, "pilots_builds_kept_unverified_total",
+		"Builds retained because their reference count could not be read.")
+
 	// Where creates ended up. `local` means this host ranked itself best,
 	// `forwarded` means a peer took it, `fallback` means every candidate
 	// refused or was unreachable and this host served it anyway. A fleet whose
