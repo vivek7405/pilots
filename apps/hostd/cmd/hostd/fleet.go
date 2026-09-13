@@ -452,6 +452,47 @@ func (p peerAPI) PostJSON(ctx context.Context, hostID, path string, body any) er
 	return nil
 }
 
+// PostJSONReply is PostJSON that decodes the far side's answer.
+//
+// A create is the call that needs one: the id belongs to the host that made
+// the machine or the volume, and a rollout that placed one elsewhere cannot
+// gate, wait on or redeploy it without that id.
+func (p peerAPI) PostJSONReply(ctx context.Context, hostID, path string, body, out any) error {
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	url, err := p.peerURL(hostID, path)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	p.mark(req)
+
+	resp, err := p.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		// The far side's own message, not just its status: a placement refused
+		// for want of capacity reads very differently from one refused for
+		// want of an image, and a rollout that reports only "500" makes the
+		// operator go and find out by hand.
+		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+		return fmt.Errorf("hostd: %s %s: %s: %s", hostID, path, resp.Status,
+			strings.TrimSpace(string(snippet)))
+	}
+	if out == nil {
+		return nil
+	}
+	return json.NewDecoder(resp.Body).Decode(out)
+}
+
 // cachedTenancy answers org ownership and revocation from the subscription
 // cache, in the shape of cachedOwner: a mutex and a map lookup instead of a
 // query to the corrosion agent per authenticated request.

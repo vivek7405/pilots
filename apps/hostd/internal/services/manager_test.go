@@ -350,6 +350,10 @@ func (p *recordingPeers) PostJSON(ctx context.Context, hostID, path string, _ an
 	return p.Post(ctx, hostID, path)
 }
 
+func (p *recordingPeers) PostJSONReply(ctx context.Context, hostID, path string, _, _ any) error {
+	return p.Post(ctx, hostID, path)
+}
+
 func fixture(t *testing.T, replicas int) (*Manager, *fakeMachines, state.Store, *state.Service) {
 	t.Helper()
 	store, err := state.Open(":memory:")
@@ -864,6 +868,7 @@ type fakePeers struct {
 	postJSONs []string
 	bodies    []any
 	err       error
+	replies   int
 }
 
 func (p *fakePeers) Post(_ context.Context, hostID, path string) error {
@@ -875,6 +880,42 @@ func (p *fakePeers) PostJSON(_ context.Context, hostID, path string, body any) e
 	p.postJSONs = append(p.postJSONs, hostID+" "+path)
 	p.bodies = append(p.bodies, body)
 	return p.err
+}
+
+// PostJSONReply records the call the way PostJSON does and fills `out` with
+// whatever reply was queued, so a placed create can be driven without a peer.
+func (p *fakePeers) PostJSONReply(_ context.Context, hostID, path string, body, out any) error {
+	p.postJSONs = append(p.postJSONs, hostID+" "+path)
+	p.bodies = append(p.bodies, body)
+	if p.err != nil {
+		return p.err
+	}
+	p.fill(path, out)
+	return nil
+}
+
+// fill is what the far side would have answered. Ids are derived from the
+// call count so two creates never collide.
+func (p *fakePeers) fill(path string, out any) {
+	p.replies++
+	switch dst := out.(type) {
+	case *state.Machine:
+		dst.ID = fmt.Sprintf("m_remote_%d", p.replies)
+		dst.HostID = p.lastHost(path)
+	case *state.Volume:
+		dst.ID = fmt.Sprintf("v_remote_%d", p.replies)
+	}
+}
+
+func (p *fakePeers) lastHost(string) string {
+	if len(p.postJSONs) == 0 {
+		return ""
+	}
+	last := p.postJSONs[len(p.postJSONs)-1]
+	if i := strings.IndexByte(last, ' '); i > 0 {
+		return last[:i]
+	}
+	return last
 }
 
 // volumeFixture is one service that mounts one volume.

@@ -120,7 +120,22 @@ func (m *Manager) rollOutOnVolumes(ctx context.Context, svc *state.Service, rel 
 func (m *Manager) rollOutOrdinal(ctx context.Context, svc *state.Service, rel *state.Release,
 	health HealthSpec, knobs []byte, ordinal int) error {
 
-	volumeID, err := m.ensureOrdinalVolume(ctx, svc, ordinal)
+	// Where this ordinal belongs, computed the same way on every host.
+	//
+	// Nothing read this before. ordinalHost and OrdinalHostsFor existed, the
+	// file comment above explained at length why ordinals spread across hosts,
+	// and the only caller of either was their own test: every ordinal's volume
+	// and every ordinal's machine were created LOCALLY, on whichever host the
+	// rollout ran on. So `pilot db ha` built a three-node cluster on one box
+	// and printed a confirmation saying the nodes would be "placed on a
+	// different host where the fleet allows" -- which is the whole feature,
+	// and the one property a high-availability cluster is bought for.
+	//
+	// Empty when there is no live host list to hash over, which keeps the
+	// single-box case exactly as it was.
+	host := m.ordinalPlacement(ctx, svc.ID, ordinal)
+
+	volumeID, err := m.ensureOrdinalVolume(ctx, svc, ordinal, host)
 	if err != nil {
 		return err
 	}
@@ -130,7 +145,9 @@ func (m *Manager) rollOutOrdinal(ctx context.Context, svc *state.Service, rel *s
 		return err
 	}
 	if mach == nil {
-		created, err := m.createReplica(ctx, svc, rel, knobs, volumeID)
+		// On the volume's host, not on this one. A volume has exactly one
+		// writer, so the replica that mounts it has no choice of host.
+		created, err := m.createReplicaOn(ctx, svc, rel, knobs, volumeID, host)
 		if err != nil {
 			return err
 		}
@@ -156,9 +173,30 @@ func (m *Manager) rollOutOrdinal(ctx context.Context, svc *state.Service, rel *s
 	return withRelease(m.waitHealthy(ctx, mach.ID, health), svc.ID, rel.ID)
 }
 
+// ordinalPlacement is the host this ordinal belongs on, or "" when there is
+// nothing to place over.
+//
+// A failure to read the host list is NOT a placement: it returns "", which
+// keeps the ordinal here. Guessing a host from a partial view would put two
+// members of one cluster on one box while telling the operator they were
+// spread, which is worse than a cluster that is honestly local.
+func (m *Manager) ordinalPlacement(ctx context.Context, serviceID string, ordinal int) string {
+	hosts, err := m.opts.Store.ListHosts(ctx)
+	if err != nil {
+		slog.Warn("could not read the host list to place an ordinal; leaving it here",
+			"service", serviceID, "ordinal", ordinal, "err", err)
+		return ""
+	}
+	return ordinalHost(serviceID, ordinal, state.LiveHosts(hosts))
+}
+
 // ensureOrdinalVolume finds or creates the volume for one ordinal, and returns
 // its id.
-func (m *Manager) ensureOrdinalVolume(ctx context.Context, svc *state.Service, ordinal int) (string, error) {
+//
+// host is where the volume belongs. A volume is written by exactly one machine
+// on exactly one host, so creating it here and then placing the replica
+// elsewhere would be a cluster whose members cannot reach their own data.
+func (m *Manager) ensureOrdinalVolume(ctx context.Context, svc *state.Service, ordinal int, host string) (string, error) {
 	bindings, err := m.opts.Store.ListServiceVolumes(ctx)
 	if err != nil {
 		return "", err
@@ -174,11 +212,12 @@ func (m *Manager) ensureOrdinalVolume(ctx context.Context, svc *state.Service, o
 	// Named after the service and the ordinal, so somebody looking at a volume
 	// list can tell which member of which cluster it belongs to without
 	// following two rows to find out.
-	v, err := m.opts.Machines.CreateVolume(ctx, api.CreateVolumeRequest{
+	req := api.CreateVolumeRequest{
 		Name:      fmt.Sprintf("%s-%d", svc.Name, ordinal),
 		SizeGiB:   ordinalVolumeGiB,
 		MountPath: ordinalMountPath,
-	})
+	}
+	v, err := m.createVolumeOn(ctx, req, host)
 	if err != nil {
 		return "", fmt.Errorf("services: volume for ordinal %d: %w", ordinal, err)
 	}
@@ -188,6 +227,27 @@ func (m *Manager) ensureOrdinalVolume(ctx context.Context, svc *state.Service, o
 		return "", fmt.Errorf("services: binding ordinal %d to %s: %w", ordinal, v.ID, err)
 	}
 	return v.ID, nil
+}
+
+// createVolumeOn makes a volume here, or on the host a placement named.
+func (m *Manager) createVolumeOn(ctx context.Context, req api.CreateVolumeRequest,
+	hostID string) (*state.Volume, error) {
+
+	if hostID == "" || hostID == m.opts.HostID {
+		return m.opts.Machines.CreateVolume(ctx, req)
+	}
+	if m.opts.Peers == nil {
+		return nil, fmt.Errorf("services: the volume belongs on %s and this host "+
+			"cannot reach it", hostID)
+	}
+	var out state.Volume
+	if err := m.opts.Peers.PostJSONReply(ctx, hostID, "/v1/volumes", req, &out); err != nil {
+		return nil, err
+	}
+	if out.ID == "" {
+		return nil, fmt.Errorf("services: %s created a volume but named none", hostID)
+	}
+	return &out, nil
 }
 
 // machineForOrdinal is the machine mounting one ordinal's volume, or nil.

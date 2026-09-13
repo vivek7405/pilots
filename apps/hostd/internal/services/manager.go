@@ -90,6 +90,12 @@ type PeerCaller interface {
 	Post(ctx context.Context, hostID, path string) error
 	// PostJSON is Post with a body, for a call that names an image.
 	PostJSON(ctx context.Context, hostID, path string, body any) error
+	// PostJSONReply is PostJSON that decodes the far side's answer.
+	//
+	// Needed because an ordinal is PLACED: the rollout creates its volume and
+	// its replica on the host the placement names, and it cannot wait on, gate
+	// or redeploy either of them without the id the far side assigned.
+	PostJSONReply(ctx context.Context, hostID, path string, body, out any) error
 }
 
 type Manager struct {
@@ -429,6 +435,16 @@ func (m *Manager) redeploy(ctx context.Context, mach *state.Machine, rel *state.
 // slow path.
 func (m *Manager) createReplica(ctx context.Context, svc *state.Service,
 	rel *state.Release, knobs json.RawMessage, volumeID string) (*state.Machine, error) {
+	return m.createReplicaOn(ctx, svc, rel, knobs, volumeID, "")
+}
+
+// createReplicaOn is createReplica with a placement.
+//
+// hostID empty, or this host, creates here exactly as before. Anything else is
+// the ordinal path: the replica has to exist on the host the placement named,
+// because the volume it mounts is there and a volume has one writer.
+func (m *Manager) createReplicaOn(ctx context.Context, svc *state.Service,
+	rel *state.Release, knobs json.RawMessage, volumeID, hostID string) (*state.Machine, error) {
 
 	// Whether this replica restores the release's memory image or boots its
 	// rootfs is decided HERE, not by the caller, because two of the three
@@ -543,7 +559,26 @@ func (m *Manager) createReplica(ctx context.Context, svc *state.Service,
 		req.RootfsBuildID = rel.RootfsBuildID
 		req.MemSnapKey = snapKey
 	}
-	return m.opts.Machines.Create(ctx, req)
+	if hostID == "" || hostID == m.opts.HostID {
+		return m.opts.Machines.Create(ctx, req)
+	}
+	// Placed elsewhere. The far side runs the same handler a client's create
+	// reaches, so nothing about the machine differs except which host holds
+	// it -- and it answers with the row, which is the id every later step of
+	// this rollout needs.
+	if m.opts.Peers == nil {
+		return nil, fmt.Errorf("services: %s belongs on %s and this host cannot reach it",
+			svc.ID, hostID)
+	}
+	var out state.Machine
+	if err := m.opts.Peers.PostJSONReply(ctx, hostID, "/v1/machines", req, &out); err != nil {
+		return nil, fmt.Errorf("services: creating a replica of %s on %s: %w", svc.ID, hostID, err)
+	}
+	if out.ID == "" {
+		return nil, fmt.Errorf("services: %s created a replica of %s but named no machine",
+			hostID, svc.ID)
+	}
+	return &out, nil
 }
 
 // snapshotRelease freezes a proved replica into the release's build pair.
