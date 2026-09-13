@@ -54,9 +54,15 @@ import (
 // ignored, because two applications each pointing at the other is a loop the
 // platform would otherwise run until something times out.
 //
-// The body is buffered up to a megabyte so it can be sent twice. A larger
-// request is refused rather than silently replayed with an empty body, which
-// would be a data-loss bug that looks like an application bug.
+// A BOUNDED body is buffered up to a megabyte so it can be sent twice. A larger
+// one is refused rather than silently replayed with an empty body, which would
+// be a data-loss bug that looks like an application bug.
+//
+// A body with NO declared length -- chunked -- is not buffered at all. It
+// streams to the machine as it always did, and forfeits the replay. Holding one
+// at the edge to keep the feature available would mean every streaming upload
+// in the fleet waited for its client to finish before the app saw a byte, which
+// is a cost paid on every request to enable one most of them never use.
 
 const (
 	// ReplayHeader is what an application answers with to redirect a request.
@@ -225,6 +231,25 @@ func bufferBody(req *http.Request) ([]byte, error) {
 	if req.Body == nil || req.Body == http.NoBody {
 		return nil, nil
 	}
+	if req.ContentLength < 0 {
+		// UNKNOWN length -- chunked, or an upgrade -- and nothing is read.
+		//
+		// This used to read to EOF or to the cap before the guest saw a single
+		// byte, which turned every streaming upload into a staged one: an app
+		// receiving a chunked body could not begin work until the client had
+		// finished sending it, and a client that streams slowly held the
+		// request at the edge for as long as it liked. A path that streamed
+		// stopped streaming, on every request, to enable a feature most of
+		// them never use.
+		//
+		// The line is boundedness, not size. A declared length is a cost the
+		// client has already committed to and the cap refuses what is too big;
+		// an undeclared one is unbounded, and buffering it is the edge holding
+		// a stream open on an app's behalf. So this one streams, and forfeits
+		// the replay -- which the caller reports as a refusal naming the
+		// reason rather than as a silent no-op.
+		return nil, errStreamingBody
+	}
 	if req.ContentLength > replayMaxBody {
 		// Declared too large. Nothing is read, so nothing has to be put back.
 		return nil, fmt.Errorf("request body is over %d bytes", replayMaxBody)
@@ -240,6 +265,13 @@ func bufferBody(req *http.Request) ([]byte, error) {
 	}
 	return buf, nil
 }
+
+// errStreamingBody is a body that was deliberately not buffered, so the
+// request cannot be replayed. Distinct from "too large", because the two mean
+// different things to whoever reads the refusal: one is a limit to raise, the
+// other is a shape that cannot be replayed at any size.
+var errStreamingBody = errors.New("request body has no declared length, so it was " +
+	"streamed to the machine rather than held at the edge")
 
 // readCloser rejoins a body's unread tail to the prefix already read off it.
 type readCloser struct {

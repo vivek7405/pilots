@@ -459,9 +459,10 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// The body is buffered before the first attempt, because a replay has to
 	// send it again and a body can be read once. A request that carries none,
 	// which is most of them, costs nothing here.
+	// Buffered only when the body is BOUNDED. An unbounded one streams and
+	// gives up the replay; see bufferBody.
 	body, bodyErr := bufferBody(req)
-	tooLarge := bodyErr != nil
-	if !tooLarge {
+	if bodyErr == nil {
 		rewind(req, body)
 	}
 
@@ -475,8 +476,14 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// The machine asked for this request to be served somewhere else. Nothing
 	// of its own response reached the client: captureReplay closed it.
 	st.done = true
-	if tooLarge {
-		http.Error(w, "request is too large to replay", http.StatusBadGateway)
+	if bodyErr != nil {
+		// The machine asked for a replay of a request this edge cannot send
+		// again. Said in full rather than as one message for both reasons: a
+		// body over the cap is a limit somebody can raise, and a body with no
+		// declared length is a shape no cap would help with.
+		slog.Warn("a machine asked for a replay of a request that cannot be replayed",
+			"machine", st.answeredBy.Machine.ID, "err", bodyErr)
+		http.Error(w, "cannot replay this request: "+bodyErr.Error(), http.StatusBadGateway)
 		return
 	}
 	r.replay(w, req, st, body)
