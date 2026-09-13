@@ -90,6 +90,14 @@ func (g *JoinGate) open() {
 func OpenJoinGate() *JoinGate {
 	g := &JoinGate{done: make(chan struct{})}
 	g.open()
+	// The gauge too, because this IS the complete state and something reads
+	// it. Only RunJoinGate's loop set it, so a host that never runs that loop
+	// -- every SQLite host, which is every single box -- published
+	// replication_complete 0 for ever while /v1/health told the same caller it
+	// had joined. Two answers to one question, and the one on the dashboard
+	// was the wrong one.
+	metrics.ReplicationComplete.Set(1)
+	metrics.ReplicationGaps.Set(0)
 	return g
 }
 
