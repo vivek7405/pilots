@@ -130,7 +130,14 @@ func TestValidateSizeBounds(t *testing.T) {
 	}{
 		{"a normal size", 4, 4096, false},
 		{"the largest allowed", MaxVCPUs, MaxMemMiB, false},
-		{"only one dimension named", 0, 2048, false},
+		// A PARTIAL size is refused here, and that is the change. validateSize
+		// now takes a RESOLVED size -- both fields filled in from the row --
+		// so "one field named, the other zero" is a shape it should never see.
+		// Accepting it is what let the floor be skipped: the check ran before
+		// the fill, saw `0 vCPUs, 32 MiB`, read it as a partial and returned
+		// without checking anything. The edge check that a partial must pass
+		// is validateBounds, asserted below.
+		{"only one dimension named", 0, 2048, true},
 		{"neither dimension named", 0, 0, false},
 		{"more vCPUs than any host has", MaxVCPUs + 1, 1024, true},
 		{"more memory than any host has", 4, MaxMemMiB + 1, true},
@@ -179,5 +186,45 @@ func TestEveryRefusalThisPackageMakesIsABadRequest(t *testing.T) {
 		if !errors.Is(err, api.ErrBadRequest) {
 			t.Errorf("%v does not reach the mapper as a bad request", err)
 		}
+	}
+}
+
+// A partial resize passes the EDGE check and is refused by the RESOLVED one.
+//
+// This is the split that fixes the skipped floor. validateBounds answers what
+// needs no row -- negative, over the ceiling -- so a partial goes through it;
+// validateSize answers the size the machine will actually be given, which is
+// where the floor belongs.
+func TestAPartialSizePassesTheEdgeCheckAndNotTheResolvedOne(t *testing.T) {
+	if err := validateBounds(0, 2048); err != nil {
+		t.Errorf("the edge check refused a partial resize: %v", err)
+	}
+	if err := validateSize(0, 2048); err == nil {
+		t.Error("the resolved check accepted a size with no vCPUs")
+	}
+}
+
+// The floor applies to a partial resize once it is resolved.
+//
+// `--mem 32` names one field. Before the split, validateSize ran on `0, 32`,
+// took the partial branch and returned nil -- so the request was accepted, the
+// vCPU count was filled in from the row, and the machine was rebuilt at 32 MiB,
+// which no guest can boot. The one request shape the floor exists for was the
+// one shape that never reached it.
+func TestAPartialResizeStillMeetsTheMemoryFloor(t *testing.T) {
+	m, st := storeManager(t)
+	putResizable(t, st, &state.Machine{
+		ID: "m_small", HostID: "host-a", VCPUs: 2, MemMiB: 2048,
+	})
+
+	_, err := m.Resize(t.Context(), "m_small", 0, MinMemMiB-1)
+	if err == nil {
+		t.Fatal("a partial resize below the boot floor was accepted")
+	}
+	if !errors.Is(err, ErrInvalid) {
+		t.Errorf("refusal is %v, want ErrInvalid so the API answers 400", err)
+	}
+	if !strings.Contains(err.Error(), "boot") {
+		t.Errorf("the refusal does not say why: %v", err)
 	}
 }

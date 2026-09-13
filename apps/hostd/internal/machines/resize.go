@@ -55,7 +55,9 @@ const (
 //
 // Same row, same URL, same disk, same volume. Returns the updated row.
 func (m *Manager) Resize(ctx context.Context, id string, vcpus, memMiB int) (*state.Machine, error) {
-	if err := validateSize(vcpus, memMiB); err != nil {
+	// The bounds that need no row: negative, or over the ceiling. The FLOOR
+	// waits until the size is resolved; see below.
+	if err := validateBounds(vcpus, memMiB); err != nil {
 		return nil, err
 	}
 
@@ -80,6 +82,19 @@ func (m *Manager) Resize(ctx context.Context, id string, vcpus, memMiB int) (*st
 	if vcpus == row.VCPUs && memMiB == row.MemMiB {
 		// Nothing to do, and a no-op must not cost the machine its memory.
 		return row, nil
+	}
+
+	// The floor is checked HERE, on the size the machine will actually have.
+	//
+	// It used to be checked before the two zero-fills above, and validateSize
+	// returned early for a PARTIAL resize -- one field zero and the other not
+	// -- because zero there means "leave this one alone". That early return
+	// skipped the floor, so `--mem 32` on a machine with vCPUs was accepted,
+	// filled in from the row, and resized to a size no guest can boot. The one
+	// request shape the floor exists for was the one shape that never reached
+	// it.
+	if err := validateSize(vcpus, memMiB); err != nil {
+		return nil, err
 	}
 
 	// A replica belongs to its service, not to whoever holds its id. Resizing
@@ -187,9 +202,9 @@ func (m *Manager) Resize(ctx context.Context, id string, vcpus, memMiB int) (*st
 	return row, nil
 }
 
-// validateSize refuses a size no host could hold, at the API's edge rather
-// than somewhere inside a boot.
-func validateSize(vcpus, memMiB int) error {
+// validateBounds refuses what needs no row to refuse: a negative size, or one
+// over the ceiling. Checked at the API's edge, before any lock or store read.
+func validateBounds(vcpus, memMiB int) error {
 	if vcpus < 0 || memMiB < 0 {
 		return fmt.Errorf("%w: a size cannot be negative", ErrInvalid)
 	}
@@ -201,11 +216,27 @@ func validateSize(vcpus, memMiB int) error {
 		return fmt.Errorf("%w: %d MiB is over the %d a machine may have",
 			ErrInvalid, memMiB, MaxMemMiB)
 	}
+	return nil
+}
+
+// validateSize refuses a size no host could hold, on a RESOLVED size: both
+// fields filled in, which is what the machine will actually be given.
+//
+// The floor is why it has to be the resolved one. A partial resize names one
+// field and leaves the other zero, and zero there means "leave it alone" --
+// so a check run before the fill saw `0 vCPUs, 32 MiB`, read it as a partial,
+// and returned without checking anything. `--mem 32` was accepted and the
+// machine was rebuilt at a size no guest can boot.
+func validateSize(vcpus, memMiB int) error {
+	if err := validateBounds(vcpus, memMiB); err != nil {
+		return err
+	}
 	// A machine with memory and no vCPU, or the reverse, cannot boot. Zero on
-	// BOTH is how a caller says "change only the other one", which the caller
-	// above resolves before this runs.
+	// BOTH is how a caller says "change nothing", and the caller resolves both
+	// before this runs.
 	if (vcpus == 0) != (memMiB == 0) {
-		return nil
+		return fmt.Errorf("%w: a machine needs both vCPUs and memory; got %d and %d MiB",
+			ErrInvalid, vcpus, memMiB)
 	}
 	if vcpus > 0 && memMiB < MinMemMiB {
 		return fmt.Errorf("%w: %d MiB is too little for a guest to boot; the smallest is %d",

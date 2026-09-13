@@ -74,6 +74,34 @@ func (m *Manager) Fork(ctx context.Context, req api.ForkOptions) ([]api.ForkOutc
 		return nil, err
 	}
 
+	// The parent's VOLUME, once, for every fork in this request.
+	//
+	// forkSource has carried a VolumeSnapshot field since this feature was
+	// written, documented as "the point the forked volume is filled from,
+	// taken at the same moment as the memory image so the two agree". Nothing
+	// ever set it, and forkOnce built its create request with no volume at
+	// all -- so `volume: true` was accepted and ignored, and the fork came up
+	// with memory expecting a disk it did not have. That is word for word the
+	// failure the guard in resolveForkSource refuses when you DON'T ask for a
+	// volume, performed when you do.
+	//
+	// Taken here rather than per fork so all N are filled from ONE instant:
+	// the whole point of a fork is that every copy begins from the same
+	// moment, and N snapshots of a running parent are N different moments.
+	if source.VolumeID != "" {
+		if !req.Volume {
+			// The machine path already refuses this; the checkpoint path did
+			// not, so a fork of a checkpoint of a volume-backed machine went
+			// the same way silently.
+			return nil, errNeedsVolumeFlag(source.ParentID)
+		}
+		stamp, err := m.SnapshotVolume(ctx, source.VolumeID)
+		if err != nil {
+			return nil, fmt.Errorf("machines: snapshot %s to fork it: %w", source.VolumeID, err)
+		}
+		source.VolumeSnapshot = stamp
+	}
+
 	// In parallel, because the expensive part of each is a restore and they do
 	// not contend: every fork has its own slot, its own jailer root and its own
 	// handlers. Bounded by the count, which is bounded above.
@@ -89,6 +117,14 @@ func (m *Manager) Fork(ctx context.Context, req api.ForkOptions) ([]api.ForkOutc
 	}
 	wg.Wait()
 	return results, nil
+}
+
+// errNeedsVolumeFlag is the one refusal for forking a volume-backed machine
+// without asking for its volume. One text, because two copies of a message
+// explaining a subtle failure drift into two different explanations.
+func errNeedsVolumeFlag(id string) error {
+	return fmt.Errorf("%w: %s has a volume; fork it with volume: true, or the fork "+
+		"comes up with memory expecting a disk it does not have", api.ErrConflict, id)
 }
 
 // forkSource is what every fork of one request restores from.
@@ -146,9 +182,11 @@ func (m *Manager) resolveForkSource(ctx context.Context, req api.ForkOptions) (*
 		return nil, err
 	}
 	if row.VolumeID != "" && !req.Volume {
-		return nil, fmt.Errorf("%w: %s has a volume; fork it with volume: true, or "+
-			"the fork comes up with memory expecting a disk it does not have",
-			api.ErrConflict, req.Machine)
+		// Refused HERE as well as in Fork, so a machine fork is turned away
+		// before it pays for a checkpoint. Fork's copy is the complete one: it
+		// also covers a fork of a CHECKPOINT of a volume-backed machine, which
+		// this branch never sees.
+		return nil, errNeedsVolumeFlag(req.Machine)
 	}
 
 	switch row.State {
@@ -278,6 +316,10 @@ func (m *Manager) forkOnce(ctx context.Context, req api.ForkOptions, src *forkSo
 		name = fmt.Sprintf("%s-%d", name, i+1)
 	}
 
+	// volumeKept says the machine owns the forked volume now, so the cleanup
+	// below leaves it alone.
+	volumeKept := false
+
 	create := api.CreateMachineRequest{
 		Name:          name,
 		OrgID:         req.OrgID,
@@ -294,10 +336,31 @@ func (m *Manager) forkOnce(ctx context.Context, req api.ForkOptions, src *forkSo
 		// reset to. Authenticating as the placeholder is a 401.
 		ImageToken: m.token(src.ParentID),
 	}
+	// The fork's own volume, filled from the one snapshot taken above.
+	//
+	// Before the machine, so a failure here leaves nothing behind; after it,
+	// a failed volume would leave a machine expecting a disk that never
+	// arrived. The volume is released if the machine then fails, for the same
+	// reason ForkVolumeSnapshot destroys a volume it could not fill: an empty
+	// volume is worse than no volume, because it mounts.
+	if src.VolumeID != "" && src.VolumeSnapshot != "" {
+		vol, err := m.ForkVolumeSnapshot(ctx, src.VolumeID, src.VolumeSnapshot, "")
+		if err != nil {
+			return nil, fmt.Errorf("machines: fork the volume of %s: %w", src.ParentID, err)
+		}
+		create.Volume = vol.ID
+		defer func() {
+			if create.Volume != "" && !volumeKept {
+				_ = m.releaseVolume(context.WithoutCancel(ctx), vol.ID)
+			}
+		}()
+	}
+
 	row, err := m.Create(ctx, create)
 	if err != nil {
 		return nil, err
 	}
+	volumeKept = true
 
 	// The parent's URL GATE comes with it.
 	//
