@@ -161,6 +161,17 @@ var scopePrefixes = []struct {
 	// unauthenticated /metrics, which is not in this table because it is
 	// exempt.
 	{"/v1/metrics", ScopeMachines},
+	// A tenant's own outbound addresses, and the recipe text `pilot add` and
+	// `pilot db ha` fetch before they write a compose file.
+	//
+	// Missing rows, not a deliberate omission: the table defaults an unclaimed
+	// path to admin, so `pilot add postgres` -- the headline command of the
+	// database tier -- answered 403 for every key `pilot login` mints, which
+	// carries deploy. The battery could not catch it because AGENTS.md requires
+	// its key to be admin, which is the right call for a battery and makes it
+	// blind to this table by construction.
+	{"/v1/egress", ScopeMachines},
+	{"/v1/recipes", ScopeDeploy},
 	// The lowest scope opens the MCP endpoint; each tool then calls its own
 	// route back through this table with the same key, so a machines key
 	// reaches list_machines and is refused list_services, exactly as it

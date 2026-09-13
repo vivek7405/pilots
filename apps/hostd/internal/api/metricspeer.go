@@ -31,8 +31,19 @@ func (d Deps) askHostForMetrics(ctx context.Context, r *http.Request, hostID str
 		return nil, fmt.Errorf("api: no host %s in this fleet", hostID)
 	}
 
+	// The caller's OWN query string travels, ?org= above all.
+	//
+	// Without it the peer is asked a different question than the edge was. An
+	// admin key narrowed with ?org= is filtered correctly on the host that
+	// received the request and not at all on any other: listOrg sees no ?org=
+	// there, mayAccess stops narrowing, and the peer answers with every org's
+	// machines. The dashboard holds an admin key and narrows per tenant, so
+	// this showed one tenant another tenant's machine ids, names, CPU and
+	// memory. place.go already does this for creates and says so.
+	q := r.URL.Query()
+	q.Set("local", "1")
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		"http://"+addr+"/v1/metrics?local=1", nil)
+		"http://"+addr+"/v1/metrics?"+q.Encode(), nil)
 	if err != nil {
 		return nil, err
 	}

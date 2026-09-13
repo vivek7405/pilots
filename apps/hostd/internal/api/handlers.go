@@ -665,7 +665,15 @@ func (d Deps) machineIDByName(ctx context.Context, name string) (string, bool) {
 }
 
 func (d Deps) handleSuspend(w http.ResponseWriter, r *http.Request) {
-	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
+	row, ok := d.ownedMachine(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	// To the host that holds it, for the reason resize forwards: the manager
+	// now refuses a machine this host does not own, so without the hop this
+	// route answers 409 on every host but one -- and which host that is moves
+	// with a drain or a self-heal, so a caller cannot be asked to know it.
+	if d.forwardToHost(w, r, row.HostID) {
 		return
 	}
 	if err := d.Machines.Suspend(r.Context(), r.PathValue("id")); err != nil {
@@ -676,7 +684,15 @@ func (d Deps) handleSuspend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (d Deps) handleWake(w http.ResponseWriter, r *http.Request) {
-	if _, ok := d.ownedMachine(w, r, r.PathValue("id")); !ok {
+	row, ok := d.ownedMachine(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	// To the host that holds it, for the reason resize forwards: the manager
+	// now refuses a machine this host does not own, so without the hop this
+	// route answers 409 on every host but one -- and which host that is moves
+	// with a drain or a self-heal, so a caller cannot be asked to know it.
+	if d.forwardToHost(w, r, row.HostID) {
 		return
 	}
 	if err := d.Machines.Wake(r.Context(), r.PathValue("id")); err != nil {

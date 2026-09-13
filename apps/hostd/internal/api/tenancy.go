@@ -143,6 +143,22 @@ func (d Deps) ownedVolume(w http.ResponseWriter, r *http.Request, id string) (*s
 		notFound(w, "volume")
 		return nil, false
 	}
+	// The same self-token narrowing ownedMachine and ownedService apply.
+	//
+	// self.go argues that the check belongs in the chokepoints so no handler
+	// can be forgotten, and then this one was: there are THREE ownership
+	// resolvers, not two, and the volume-snapshot handlers all arrive here. A
+	// broker token could restore a sibling service's database to an old
+	// snapshot, delete every snapshot of it, or overwrite its backup schedule.
+	//
+	// A volume names no machine, so the object is compared against itself: a
+	// machine's token reaches a volume only through a route that already
+	// resolved the machine, never by naming the volume directly.
+	if !selfAllows(r, id, "") {
+		self, _ := Self(r.Context())
+		selfRefused(w, self)
+		return nil, false
+	}
 	return v, true
 }
 
