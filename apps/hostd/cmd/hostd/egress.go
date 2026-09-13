@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/mesh"
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/netns"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
@@ -40,6 +42,13 @@ func runEgress(ctx context.Context, hostID string, cfg netns.EgressConfig,
 			"interface", cfg.Interface, "prefix", cfg.Prefix6)
 		publishEgress(ctx, hostID, cfg, store)
 	}
+
+	// A liveness budget, because this loop is exactly the shape the watchdog
+	// exists for: it does netlink and nftables work on every pass, and a pass
+	// that wedges leaves the process healthy while every new machine on this
+	// host silently loses its outbound address. Restart=always catches a loop
+	// that dies; only a withheld pet catches one that stops.
+	live := metrics.NewLoop("egress", 3*egressInterval)
 
 	tick := time.NewTicker(egressInterval)
 	defer tick.Stop()
@@ -91,6 +100,10 @@ func runEgress(ctx context.Context, hostID string, cfg netns.EgressConfig,
 			}
 		}
 
+		// At the END of the pass, so a pass that hangs anywhere above is an
+		// overdue budget rather than a tick nobody counted.
+		live.Tick()
+
 		select {
 		case <-ctx.Done():
 			return
@@ -141,7 +154,25 @@ func egressBindings(ctx context.Context, hostID string, store state.Store,
 			continue
 		}
 		org := ""
-		if t, err := store.GetTenancy(ctx, m.ID); err == nil && t != nil {
+		t, err := store.GetTenancy(ctx, m.ID)
+		switch {
+		case errors.Is(err, state.ErrNotFound):
+			// Genuinely unowned -- a row from before tenancy existed. It leaves
+			// from the shared address, which is what it always did.
+		case err != nil:
+			// NOT the same thing, and reading it as the same thing is why this
+			// is spelled out. PlanEgress skips a binding with no org, so a
+			// tenancy read that merely FAILED took the machine's per-org rule
+			// out of the table: its traffic left from the host's shared address
+			// instead of the one its tenant published to their allowlist, and
+			// nothing anywhere said so. Said out loud, and the binding is
+			// dropped entirely so the previous rules stay in force rather than
+			// being replaced by a plan built from a half-read fleet.
+			slog.Error("could not read which org a machine belongs to; leaving its "+
+				"egress rules as they are rather than moving it to the shared address",
+				"machine", m.ID, "err", err)
+			continue
+		case t != nil:
 			org = t.OrgID
 		}
 		out = append(out, netns.EgressBinding{Machine6: addr, OrgID: org})
