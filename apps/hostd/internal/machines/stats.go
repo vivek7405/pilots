@@ -60,8 +60,9 @@ type persistedStats struct {
 	// same usec out of the same file and added it to a total that already
 	// contained it. Suspend then stop, suspend then checkpoint, or a suspend
 	// retried after a transient failure each charged the machine twice for its
-	// last waking period, and the error compounds: it is not a fixed offset but
-	// a doubling every time.
+	// last waking period. Measured: one period of 100 s read back as 200 s
+	// after the second call and 300 s after the third, because every repeat
+	// adds that whole period again.
 	//
 	// The inode is the discriminator, because the path is not. A cgroup
 	// directory removed and recreated at the same path gets a fresh inode from

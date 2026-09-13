@@ -64,11 +64,11 @@ func writeCPUStat(t *testing.T, dir string, usec int64, procs string) {
 // second PersistCPU read the SAME cumulative counter out of the SAME file and
 // added it to a total that already contained it. Suspend then stop, suspend
 // then checkpoint, or a suspend retried after a transient failure each doubled
-// the machine's recorded CPU -- and it compounds, because every repeat doubles
-// what is already there rather than adding a fixed offset.
+// the machine's recorded CPU, and every further repeat adds that whole period
+// again on top.
 //
-// This is a billing number. Dropping the FoldedIno check makes the total below
-// 200 s and then 400 s.
+// This is a billing number. Dropping the fold check makes the 100 s below read
+// back as 200 s and then 300 s, which is what this test measured.
 func TestPersistingTwiceDoesNotChargeTwice(t *testing.T) {
 	m, cgDir := cpuManager(t, "m_cpu1")
 	writeCPUStat(t, cgDir, 100_000_000, "4242\n") // 100 s
