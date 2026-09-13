@@ -12,6 +12,11 @@
 # then fails at runtime rather than at build time.
 set -euo pipefail
 
+# die stops with a reason. Used where a failure would otherwise carry on with
+# an empty path, which `set -e` does not catch inside a function called in a
+# conditional: errexit is suppressed for the whole call.
+die() { printf 'build-golden-rootfs: %s\n' "$*" >&2; exit 1; }
+
 cd "$(dirname "$0")/.."
 
 # Two variants come out of this one script, because everything below the
@@ -103,7 +108,12 @@ export SOURCE_DATE_EPOCH
 # a stated one.
 reproducible_mke2fs() {
   local d a b
-  d="$(mktemp -d)"
+  # Checked, because an unchecked mktemp is an `rm -rf ""` and, worse, a
+  # `mkdir -p "/root"` followed by two filesystem images written to the root of
+  # the host's disk and never cleaned up. `rm -rf ""` is a no-op, so the
+  # wreckage outlives the failure silently.
+  d="$(mktemp -d)" || return 1
+  [ -n "$d" ] || return 1
   mkdir -p "$d/root"
   mke2fs -q -F -t ext4 -b 4096 -U "$FS_UUID" -E hash_seed="$FS_HASH_SEED" \
     -d "$d/root" "$d/a.img" 1M 2>/dev/null || { rm -rf "$d"; return 1; }
@@ -141,13 +151,21 @@ else
 fi
 
 STAGED_BIN="scripts/rootfs/guest-agent"
-TAR="$(mktemp -t pilots-rootfs-XXXXXX.tar)"
-ROOT="$(mktemp -d -t pilots-rootfs-XXXXXX)"
+TAR="$(mktemp -t pilots-rootfs-XXXXXX.tar)" || die "could not make a temporary tar"
+ROOT="$(mktemp -d -t pilots-rootfs-XXXXXX)" || die "could not make a temporary root"
+[ -n "$TAR" ] && [ -n "$ROOT" ] || die "mktemp produced an empty path"
 CID=""
 
 cleanup() {
   [ -n "$CID" ] && docker rm -f "$CID" >/dev/null 2>&1 || true
-  rm -rf "$TAR" "$ROOT" "$STAGED_BIN"
+  # Each guarded: an empty variable makes `rm -rf` a no-op that LOOKS like a
+  # cleanup, so a run whose mktemp failed left its wreckage behind reporting
+  # success. Guarded here as well as at the assignment because cleanup runs on
+  # every exit path, including ones taken before those assignments.
+  [ -n "$TAR" ] && rm -rf "$TAR"
+  [ -n "$ROOT" ] && rm -rf "$ROOT"
+  [ -n "$STAGED_BIN" ] && rm -rf "$STAGED_BIN"
+  return 0
 }
 trap cleanup EXIT
 
@@ -206,7 +224,8 @@ if [ "$PACK_IN_CONTAINER" = "1" ]; then
   # extraction happens INSIDE, under the container's own fakeroot, so the
   # ownership and mode bits in the image are the tar's rather than whatever
   # this host's umask and uid would have imposed.
-  PACK_DIR="$(mktemp -d -t pilots-pack-XXXXXX)"
+  PACK_DIR="$(mktemp -d -t pilots-pack-XXXXXX)" || die "could not make a pack directory"
+  [ -n "$PACK_DIR" ] || die "mktemp produced an empty pack directory"
   cp "$TAR" "$PACK_DIR/rootfs.tar"
   cp "$PACK_SCRIPT" "$PACK_DIR/pack.sh"
   mkdir -p "$PACK_DIR/root"

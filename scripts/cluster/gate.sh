@@ -2922,12 +2922,28 @@ else
   # nobody.
   api "$HD_IP" DELETE "/v1/machines/${HD_ID}" >/dev/null 2>&1
   sleep 5
-  HD_LEFT=$($SSH "root@$HD_IP" \
-    "cat ${HD_SLICE}/cgroup.procs 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
-  if [ "${HD_LEFT:-0}" = 0 ]; then
-    ok "the slice is empty after the destroy"
+  # The answer has to distinguish "the slice is empty" from "I could not look".
+  #
+  # It used to be `cat .../cgroup.procs | wc -l`, which is 0 when the file is
+  # empty AND 0 when the path is wrong, the host is unreachable, or the ssh
+  # itself failed -- so the assertion passed on every one of those. It also ran
+  # with HD_SLICE possibly empty, in which case it counted `cat /cgroup.procs`,
+  # which is nothing, and reported success. A read that failed is not an
+  # answer, and this is the shell version of the bug this branch has been
+  # fixing in Go all week.
+  if [ -z "$HD_SLICE" ]; then
+    bad "no slice path for ${HD_ID}, so the destroy could not be checked"
   else
-    bad "${HD_LEFT} processes are still in ${HD_ID}'s slice after it was destroyed"
+    HD_LEFT=$($SSH "root@$HD_IP" \
+      "if [ -d '${HD_SLICE}' ]; then cat '${HD_SLICE}/cgroup.procs' 2>/dev/null | wc -l; else echo GONE; fi" \
+      2>/dev/null | tr -d '[:space:]')
+    case "$HD_LEFT" in
+      GONE) ok "the machine's slice is gone after the destroy" ;;
+      0)    ok "the slice is empty after the destroy" ;;
+      ''|*[!0-9]*)
+            bad "could not read ${HD_ID}'s slice after the destroy: '${HD_LEFT}'" ;;
+      *)    bad "${HD_LEFT} processes are still in ${HD_ID}'s slice after it was destroyed" ;;
+    esac
   fi
 fi
 
@@ -3730,7 +3746,7 @@ else
   if [ -n "$BK_TOKEN" ] && [ "${#LIVE_IPS[@]}" -gt 1 ]; then
     BK_OTHER="${LIVE_IPS[1]}"
     BK_CODE=$(curl -sk -o /dev/null -w '%{http_code}' \
-      -H "Authorization: Bearer ${BK_TOKEN}" "https://${BK_OTHER}:8080/v1/whoami" 2>/dev/null)
+      -H "Authorization: Bearer ${BK_TOKEN}" "http://${BK_OTHER}:8080/v1/whoami" 2>/dev/null)
     [ "$BK_CODE" = "200" ] \
       && ok "a token minted on one host is accepted by another with no lookup" \
       || bad "host ${BK_OTHER} answered ${BK_CODE} to a token minted on ${BK_IP}"
@@ -3812,7 +3828,7 @@ else
   # tested on one host.
   if [ "${#LIVE_IPS[@]}" -gt 1 ]; then
     MX_OTHER="${LIVE_IPS[1]}"
-    MX_SCRAPE=$(curl -sk -H "Authorization: Bearer ${KEY}" "https://${MX_OTHER}:8080/v1/metrics" 2>/dev/null | grep -c "machine=\"${MX_ID}\"")
+    MX_SCRAPE=$(curl -s -H "Authorization: Bearer ${KEY}" "http://${MX_OTHER}:8080/v1/metrics" 2>/dev/null | grep -c "machine=\"${MX_ID}\"")
     [ "${MX_SCRAPE:-0}" -ge 1 ] \
       && ok "a scrape on a non-owner host carries a machine owned elsewhere" \
       || bad "host ${MX_OTHER} scraped nothing for ${MX_ID}"
@@ -3861,6 +3877,32 @@ else
   api "$MX_IP" DELETE "/v1/machines/${MX_ID}" >/dev/null 2>&1 || true
 fi
 
+say "44. A host's reported reflink support is the truth"
+# The e2e battery chooses every timing budget from /v1/health's `reflink`, and
+# it cannot check that field: hostSharesExtents reads the same field, so
+# comparing the two is circular. Only a host shell can ask the filesystem
+# itself, which is why this half is here.
+#
+# A host that claims extent sharing and does not have it measures the engine
+# against targets its storage cannot reach, and the run fails for a reason no
+# engine change can fix. One that has it and denies it silently drops to the
+# degraded ceilings, so a real regression passes.
+RL_IP="${LIVE_IPS[0]:-${IPS[0]}}"
+RL_SAYS=$(api "$RL_IP" GET /v1/health | jq -r '.reflink' 2>/dev/null | tr -d '[:space:]')
+# What the filesystem actually does, asked by doing it on the machine store.
+RL_REAL=$($SSH "root@$RL_IP" "d=/var/lib/pilots/.gate44; rm -rf \$d; mkdir -p \$d && head -c 1048576 /dev/zero > \$d/a 2>/dev/null && { cp --reflink=always \$d/a \$d/b >/dev/null 2>&1 && echo true || echo false; }; rm -rf \$d" 2>/dev/null | tr -d '[:space:]')
+
+case "$RL_REAL" in
+  true|false)
+    [ "$RL_SAYS" = "$RL_REAL" ] \
+      && ok "/v1/health says reflink=${RL_SAYS} and the filesystem agrees" \
+      || bad "/v1/health says reflink=${RL_SAYS} but cp --reflink=always on the machine store says ${RL_REAL}"
+    ;;
+  *)
+    bad "could not test extent sharing on ${RL_IP}: '${RL_REAL}'"
+    ;;
+esac
+
 say "43. Postgres high availability: a killed leader, and the address that did not change"
 # F7. The e2e battery can see that a cluster comes up and serves. Only a host
 # shell can KILL a leader the way a host death kills one -- no shutdown, no
@@ -3870,17 +3912,22 @@ HA_IP="${LIVE_IPS[0]:-${IPS[0]}}"
 HA_SVC=$(api "$HA_IP" GET /v1/services | jq -r '[.[] | select(.labels["pilot.engine"] == "postgres")][0].id' 2>/dev/null)
 
 if [ -z "$HA_SVC" ] || [ "$HA_SVC" = "null" ]; then
-  # Not a failure: this section measures a cluster, and a rig with no database
-  # deployed has nothing to measure. Said out loud rather than passing quietly,
-  # because a section that reports nothing looks the same as one that passed.
-  say "   (no postgres service on this rig; deploy one to measure failover)"
+  # A block that cannot set itself up FAILS, it does not report nothing.
+  #
+  # This used to `say` and move on, on the reasoning that a rig with no
+  # database has nothing to measure. But a section that runs zero assertions
+  # scores zero either way, so "nobody deployed a database" and "high
+  # availability works" were the same line in the totals -- and AGENTS.md is
+  # explicit that a quiet early return retires every assertion below it at
+  # runtime. Deploy a cluster before running the gate; the failure says so.
+  bad "no postgres service on this rig, so failover was not measured: deploy one with \`pilot add postgres\` and \`pilot db ha enable\`"
 else
   HA_NODES=$(api "$HA_IP" GET /v1/machines | jq -r --arg s "$HA_SVC" \
     '[.[] | select(.service_id == $s and .state == "running")]' 2>/dev/null)
   HA_COUNT=$(echo "$HA_NODES" | jq 'length' 2>/dev/null)
 
   if [ "${HA_COUNT:-0}" -lt 2 ]; then
-    say "   (postgres is running one machine; \`pilot db ha enable\` makes it a cluster)"
+    bad "postgres is running one machine, so failover was not measured: make it a cluster with \`pilot db ha enable\`"
   else
     # Distinct hosts. Replicas of one service on one host are replicas that die
     # together, which is the whole reason the placement is derived per ordinal.

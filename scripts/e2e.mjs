@@ -1072,12 +1072,28 @@ async function timingAssertions() {
       });
     }
 
-    await step('a host that cannot share extents says so on /v1/health', async () => {
-      // Only meaningful where it is false; where it is true this asserts the
-      // field exists and is honest, which is what the branch above trusts.
-      const health = await request('/v1/health', { auth: false });
-      assert(typeof health.json?.reflink === 'boolean',
+    await step('/v1/health reports reflink as a stable boolean', async () => {
+      // Retitled to what it actually asserts. It was called "a host that
+      // cannot share extents says so on /v1/health" and checked only the
+      // field's TYPE, which is true whether the host shares extents or not --
+      // so the honesty it claimed to test was tested nowhere. It cannot be
+      // tested from here either: hostSharesExtents reads this very field, so
+      // comparing the two is circular. Proving the field true needs a host
+      // shell, and gate.sh section 44 is that half (AGENTS.md's split table).
+      //
+      // What IS assertable from the public API is that the answer exists and
+      // does not move: every timing budget below is chosen from this one
+      // field, so a value that differed between two reads would make the tier
+      // a coin toss.
+      const first = await request('/v1/health', { auth: false });
+      assert(typeof first.json?.reflink === 'boolean',
         '/v1/health does not report reflink support, so a degraded host is invisible');
+      const second = await request('/v1/health', { auth: false });
+      assert(second.json?.reflink === first.json?.reflink,
+        `/v1/health reported reflink ${first.json?.reflink} then ${second.json?.reflink}; `
+        + 'every timing budget in this tier is chosen from that field');
+      assert(first.json.reflink === reflink,
+        'the tier was chosen from a different answer than /v1/health now gives');
     });
 
     await step(`create is under ${METAL ? '500ms' : '1.5s'} (p50 of ${TIMING_SAMPLES})`, async () => {
