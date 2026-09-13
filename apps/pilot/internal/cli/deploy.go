@@ -383,6 +383,24 @@ func refuseVolumeChange(ctx context.Context, client *pilots.Client, app string, 
 	if wantName == "" {
 		wantName = "(no volume)"
 	}
+
+	// Two volumes can carry one name, and then this refusal printed that name
+	// twice: "mounts webjs-gallery-data and the compose file names
+	// webjs-gallery-data", which reads as a contradiction and says nothing
+	// about what to do. The comparison above is by ID and the message was by
+	// name, so the one case the message could not describe is the one where
+	// the names match and the volumes do not.
+	//
+	// When the names agree, the ids are what differ, so the ids are what the
+	// message has to carry -- along with the fact that a duplicate name is why
+	// it is being read at all.
+	if mountedName == wantName {
+		return out.Failf(
+			"destroy the volume this service is not using, or give the new one a different name",
+			"%s: mounts volume %s, and the compose file's %q resolves to %s -- "+
+				"two different volumes share that name",
+			step.Name, mounted, wantName, byName[wantName])
+	}
 	return out.Failf("a service's volume is set when it is created",
 		"%s: mounts %s and the compose file names %s", step.Name, mountedName, wantName)
 }
