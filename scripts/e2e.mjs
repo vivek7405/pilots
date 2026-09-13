@@ -5027,12 +5027,7 @@ async function myOrg() {
 async function withMemoryQuotaLifted(org, body) {
   const before = await request(`/v1/quotas/${org}`);
   const saved = before.status === 200 ? before.json : null;
-  const lifted = { ...(saved ?? {}), max_mem_mib: IMPOSSIBLE_MEM_MIB * 4 };
-  // The usage half of the body is answered, never settable; sending it back
-  // would be sending a limit named used_machines.
-  for (const k of Object.keys(lifted)) {
-    if (k.startsWith('used_') || k === 'updated_at' || k === 'org_id') delete lifted[k];
-  }
+  const lifted = { ...settableQuota(saved), max_mem_mib: IMPOSSIBLE_MEM_MIB * 4 };
   const put = await request(`/v1/quotas/${org}`, { method: 'PUT', body: lifted });
   assert(put.status >= 200 && put.status < 300,
     `could not lift the memory quota of ${org}: HTTP ${put.status}`);
@@ -5040,11 +5035,7 @@ async function withMemoryQuotaLifted(org, body) {
     return await body();
   } finally {
     if (saved) {
-      const restore = { ...saved };
-      for (const k of Object.keys(restore)) {
-        if (k.startsWith('used_') || k === 'updated_at' || k === 'org_id') delete restore[k];
-      }
-      await request(`/v1/quotas/${org}`, { method: 'PUT', body: restore });
+      await request(`/v1/quotas/${org}`, { method: 'PUT', body: settableQuota(saved) });
     }
   }
 }
@@ -5212,6 +5203,18 @@ async function capacityAssertions() {
 // another: the ceiling could never be reached and "the create past the quota
 // succeeded" was structural rather than a bug in enforcement. Overridable for
 // a fleet that wants the assertion pointed somewhere specific.
+// settableQuota strips the half of a quota body that is answered, not set.
+//
+// GET reports usage beside the limits; PUT takes limits only. Echoing a body
+// back without this sends a limit called used_machines.
+function settableQuota(q) {
+  const out = { ...(q ?? {}) };
+  for (const k of Object.keys(out)) {
+    if (k.startsWith('used_') || k === 'updated_at' || k === 'org_id') delete out[k];
+  }
+  return out;
+}
+
 async function quotaOrg() {
   return process.env.PILOTS_E2E_ORG ?? (await myOrg());
 }
@@ -5320,8 +5323,15 @@ async function quotaAssertions() {
       const before = await request(`/v1/quotas/${org}`);
       savedQuota = before.status === 200 ? before.json : null;
 
+      // Only the MACHINE ceiling moves. A PUT replaces the row, so sending
+      // max_machines alone zeroes every other limit -- and with max_vcpus at
+      // zero the org cannot create, wake, or RECOVER anything until the
+      // teardown runs. That was invisible while this section pointed at an org
+      // nothing used; against the acting org it refused the panicked machine's
+      // own bring-up two sections later, and the failure read as a recovery
+      // bug rather than as this.
       const { status, text } = await request(`/v1/quotas/${org}`, {
-        method: 'PUT', body: { max_machines: limit }, raw: true,
+        method: 'PUT', body: { ...settableQuota(savedQuota), max_machines: limit }, raw: true,
       });
       assert(status >= 200 && status < 300,
         `PUT /v1/quotas/${org} returned HTTP ${status} (${text.slice(0, 200)}). ` +
@@ -5438,11 +5448,7 @@ async function quotaAssertions() {
     try {
       const org = await quotaOrg();
       if (savedQuota) {
-        const restore = { ...savedQuota };
-        for (const k of Object.keys(restore)) {
-          if (k.startsWith('used_') || k === 'updated_at' || k === 'org_id') delete restore[k];
-        }
-        await request(`/v1/quotas/${org}`, { method: 'PUT', body: restore });
+        await request(`/v1/quotas/${org}`, { method: 'PUT', body: settableQuota(savedQuota) });
       } else {
         await request(`/v1/quotas/${org}`, { method: 'DELETE' });
       }
