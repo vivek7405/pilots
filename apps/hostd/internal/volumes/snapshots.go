@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/vivek7405/pilots/hostd/internal/api"
 )
 
 // Point-in-time copies of a volume, and forks from them.
@@ -59,7 +62,41 @@ var ErrVolumeCorrupt = errors.New("volumes: filesystem check failed")
 // volume.
 func SnapshotStamp(at time.Time) string { return at.UTC().Format("20060102T150405Z") }
 
+// ErrBadStamp is a stamp that is not one SnapshotStamp could have produced.
+//
+// It wraps api.ErrBadRequest so the refusal reaches the caller as a 400 saying
+// which part of the request is wrong, rather than as a 500.
+var ErrBadStamp = fmt.Errorf("volumes: %w: not a snapshot stamp", api.ErrBadRequest)
+
+// stampShape is exactly what SnapshotStamp writes: 20060102T150405Z.
+var stampShape = regexp.MustCompile(`^[0-9]{8}T[0-9]{6}Z$`)
+
+// ValidStamp refuses a stamp that could name anything but a snapshot.
+//
+// Checked in EVERY exported function that takes a stamp, not at the one call
+// site that was found to be dangerous, because the danger is in what
+// snapshotPath does with the string and any future function passing one has
+// the same hole. A stamp arrives from a URL path segment
+// (`DELETE /v1/volumes/{id}/snapshots/{stamp}`), and Go's ServeMux unescapes
+// each segment AFTER it splits them -- so `%2E%2E%2F%2E%2E` reaches PathValue
+// as `../..`, filepath.Join folds it, and DeleteSnapshot's RemoveAll then took
+// out a directory above the volume. As root. On the host.
+//
+// An allow-list of the one shape the platform writes, rather than a hunt for
+// the separators and dot segments that escape: a stamp is a timestamp, and
+// anything else is a caller trying something.
+func ValidStamp(stamp string) error {
+	if !stampShape.MatchString(stamp) {
+		return fmt.Errorf("%w: %q", ErrBadStamp, stamp)
+	}
+	return nil
+}
+
 // snapshotPath is where one snapshot's image lives inside the mount.
+//
+// Every caller has already run the stamp past ValidStamp. Nothing here can
+// re-check it -- it returns a string -- which is why the check is at the
+// package's edge instead.
 func (m *Manager) snapshotPath(id, stamp string) string {
 	return filepath.Join(m.MountPoint(id), SnapshotDir, stamp, ImageName)
 }
@@ -95,6 +132,9 @@ func fsckArgs(image string) []string {
 func (m *Manager) Snapshot(ctx context.Context, id, stamp string) error {
 	if stamp == "" {
 		stamp = SnapshotStamp(time.Now())
+	}
+	if err := ValidStamp(stamp); err != nil {
+		return err
 	}
 	dir := filepath.Dir(m.snapshotPath(id, stamp))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -144,6 +184,9 @@ func (m *Manager) ListSnapshots(id string) ([]string, error) {
 // image is replaced underneath is a corrupted filesystem, and the API refuses
 // that case rather than this function guessing at it.
 func (m *Manager) RestoreSnapshot(ctx context.Context, id, stamp string) error {
+	if err := ValidStamp(stamp); err != nil {
+		return err
+	}
 	src := m.snapshotPath(id, stamp)
 	if _, err := os.Stat(src); err != nil {
 		return fmt.Errorf("volumes: snapshot %s of %s: %w", stamp, id, err)
@@ -171,6 +214,9 @@ func (m *Manager) RestoreSnapshot(ctx context.Context, id, stamp string) error {
 // the bucket for as long as any snapshot points at them; deleting the clone is
 // what drops those refcounts and lets the space go.
 func (m *Manager) DeleteSnapshot(ctx context.Context, id, stamp string) error {
+	if err := ValidStamp(stamp); err != nil {
+		return err
+	}
 	dir := filepath.Dir(m.snapshotPath(id, stamp))
 	// RemoveAll rather than Remove: the directory holds the image and whatever
 	// else a future snapshot format puts beside it, and a half-deleted
@@ -192,6 +238,9 @@ func (m *Manager) DeleteSnapshot(ctx context.Context, id, stamp string) error {
 // --sparse=always so a volume that is mostly empty, which is most of them,
 // copies only what was written.
 func (m *Manager) CopySnapshotTo(ctx context.Context, id, stamp, destImage string) error {
+	if err := ValidStamp(stamp); err != nil {
+		return err
+	}
 	src := m.snapshotPath(id, stamp)
 	if _, err := os.Stat(src); err != nil {
 		return fmt.Errorf("volumes: snapshot %s of %s: %w", stamp, id, err)

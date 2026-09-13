@@ -234,3 +234,65 @@ type exitStatus int
 
 func (e exitStatus) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
 func (e exitStatus) ExitCode() int { return int(e) }
+
+// A stamp names a snapshot and nothing else.
+//
+// It arrives as a URL path segment, and Go's ServeMux unescapes each segment
+// AFTER it splits them: `%2E%2E%2F%2E%2E` reaches PathValue as `../..`, which
+// filepath.Join then folds away. Before ValidStamp, DeleteSnapshot's RemoveAll
+// took out a directory ABOVE the volume -- as root, on the host -- on one
+// request from anybody who owned a volume.
+//
+// Asserted on every exported function that takes a stamp, not just the one
+// that deleted: the hole is in what snapshotPath does with the string, so it
+// belongs to all of them.
+func TestASnapshotStampCannotEscapeItsVolume(t *testing.T) {
+	escapes := []string{
+		"..",
+		"../..",
+		"../../../../../../..",
+		"../../etc",
+		"/etc",
+		"a/b",
+		".",
+		"20260912T101500Z/../..",
+		"20260912t101500z",
+	}
+	for _, stamp := range escapes {
+		t.Run(fmt.Sprintf("%q", stamp), func(t *testing.T) {
+			m, rec := newTestManager(t)
+			ctx := context.Background()
+
+			for name, err := range map[string]error{
+				"Snapshot":        m.Snapshot(ctx, "vol-1", stamp),
+				"RestoreSnapshot": m.RestoreSnapshot(ctx, "vol-1", stamp),
+				"DeleteSnapshot":  m.DeleteSnapshot(ctx, "vol-1", stamp),
+				"CopySnapshotTo":  m.CopySnapshotTo(ctx, "vol-1", stamp, filepath.Join(t.TempDir(), "image.img")),
+			} {
+				if !errors.Is(err, ErrBadStamp) {
+					t.Errorf("%s(%q) = %v, want ErrBadStamp: this stamp escapes the "+
+						"snapshots directory and the operation runs as root", name, stamp, err)
+				}
+			}
+			for _, cmd := range rec.calls {
+				if strings.Contains(strings.Join(cmd.args, " "), "..") {
+					t.Errorf("a refused stamp still reached the filesystem: %s %v", cmd.name, cmd.args)
+				}
+			}
+		})
+	}
+}
+
+// And the shape the platform actually writes is accepted, so the guard is not
+// a guard against snapshots. An EMPTY stamp is the one value Snapshot fills in
+// for itself rather than refuses, because that is how the scheduler asks for
+// "now".
+func TestAWellFormedStampIsAccepted(t *testing.T) {
+	if err := ValidStamp(SnapshotStamp(time.Now())); err != nil {
+		t.Fatalf("the stamp this package writes was refused: %v", err)
+	}
+	m, _ := newTestManager(t)
+	if err := m.Snapshot(context.Background(), "vol-1", ""); err != nil {
+		t.Fatalf("Snapshot with no stamp was refused: %v", err)
+	}
+}
