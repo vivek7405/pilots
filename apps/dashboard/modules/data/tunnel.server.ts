@@ -49,6 +49,19 @@ export async function openTunnel(org: string, machineId: string, port: number): 
   const server: Server = createServer((socket: Socket) => {
     live.add(socket);
     socket.on('close', () => live.delete(socket));
+    // Attached BEFORE the await below, not inside its `then`.
+    //
+    // That await is a round trip to the fleet -- tens of milliseconds during
+    // which this socket would otherwise carry no error listener at all. A
+    // socket with none does not ignore an 'error' event, it THROWS one, out
+    // of a server process, so a client that resets in that window took the
+    // dashboard down rather than losing its own connection. `mongodb` opens
+    // several sockets through its topology layer and drops some of them
+    // immediately, which is this file's own reason for bridging at all.
+    //
+    // Replaced by `drop` once the remote exists, so the pair still ends
+    // together; until then destroying this side is the whole obligation.
+    socket.on('error', () => socket.destroy());
     client.machines
       .tcp(machineId, port)
       .then((remote) => {
