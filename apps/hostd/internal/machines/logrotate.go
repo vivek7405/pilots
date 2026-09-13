@@ -47,7 +47,19 @@ const (
 // deciding for itself whether anything happened.
 func rotateLog(path string) (bool, error) {
 	info, err := os.Stat(path)
-	if err != nil || info.Size() <= logRotateAt {
+	if err != nil {
+		// A machine with no console log yet is the ordinary case and the only
+		// failure that means "nothing to rotate". Every other one -- a
+		// permission change on the state dir, an EIO, a path that moved -- is
+		// a question nobody answered, and answering it with "not big enough"
+		// is how a log grows without bound while the one mechanism that would
+		// have said so reports success.
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if info.Size() <= logRotateAt {
 		return false, nil
 	}
 
