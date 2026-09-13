@@ -353,6 +353,35 @@ func setInMap(node *yaml.Node, outer, inner string, value any) error {
 		node.Content = append(node.Content,
 			&yaml.Node{Kind: yaml.ScalarNode, Value: outer}, parent)
 	}
+
+	// What SHAPE the existing key has, before writing into it.
+	//
+	// This walked Content two at a time as key, value, key, value and appended
+	// a pair at the end -- which is right for a mapping and corrupts anything
+	// else. Compose accepts `environment` in both forms, and the list one is
+	// the form most people write:
+	//
+	//	environment:
+	//	  - DATABASE_URL=postgres://...
+	//
+	// Against that sequence the loop compared an entry to a key name, matched
+	// nothing, and appended a bare scalar and an encoded value as two more
+	// list items -- so `pilot add` turned a working compose file into one that
+	// no longer parses as compose, with no way back but git. The same happened
+	// to `volumes:` written with nothing under it, which parses as a null
+	// scalar rather than an empty mapping.
+	switch {
+	case parent.Kind == yaml.MappingNode:
+		// The ordinary case, below.
+	case parent.Kind == yaml.SequenceNode:
+		return setInSequence(parent, outer, inner, value)
+	case parent.Kind == yaml.ScalarNode && (parent.Tag == "!!null" || parent.Value == ""):
+		parent.Kind, parent.Tag, parent.Value, parent.Content = yaml.MappingNode, "!!map", "", nil
+	default:
+		return out.Failf("write it as a mapping, or add the key by hand",
+			"%s in this compose file is a %s, which pilot cannot edit", outer, kindName(parent.Kind))
+	}
+
 	var encoded yaml.Node
 	if err := encoded.Encode(value); err != nil {
 		return err
@@ -368,6 +397,52 @@ func setInMap(node *yaml.Node, outer, inner string, value any) error {
 	parent.Content = append(parent.Content,
 		&yaml.Node{Kind: yaml.ScalarNode, Value: inner}, &encoded)
 	return nil
+}
+
+// setInSequence writes one entry into compose's LIST form, keeping the style
+// the file already uses.
+//
+// Only `KEY=value` lists, which is what compose's list form means for
+// environment. Rewriting the file into the mapping form instead would be a
+// diff nobody asked for over a file somebody wrote by hand.
+func setInSequence(parent *yaml.Node, outer, inner string, value any) error {
+	str, ok := value.(string)
+	if !ok {
+		return out.Failf("write it as a mapping, or add the key by hand",
+			"%s in this compose file is a list, and the value for %s is not a string",
+			outer, inner)
+	}
+	entry := inner + "=" + str
+	for i, item := range parent.Content {
+		if item.Kind != yaml.ScalarNode {
+			continue
+		}
+		// `KEY=` and `KEY` both name the key: compose reads a bare name as
+		// "take it from the environment", and setting it replaces that.
+		name, _, _ := strings.Cut(item.Value, "=")
+		if name == inner {
+			parent.Content[i] = &yaml.Node{Kind: yaml.ScalarNode, Value: entry}
+			return nil
+		}
+	}
+	parent.Content = append(parent.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: entry})
+	return nil
+}
+
+// kindName is a YAML node kind in the words somebody reading an error uses.
+func kindName(k yaml.Kind) string {
+	switch k {
+	case yaml.MappingNode:
+		return "mapping"
+	case yaml.SequenceNode:
+		return "list"
+	case yaml.ScalarNode:
+		return "single value"
+	case yaml.AliasNode:
+		return "YAML alias"
+	default:
+		return "value pilot does not recognise"
+	}
 }
 
 // sortedKeys iterates a map's keys in order, so two runs print the same thing.
