@@ -4,11 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
+	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/vivek7405/pilots/hostd/internal/naming"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -173,6 +178,18 @@ func (d Deps) forwardCreate(w http.ResponseWriter, r *http.Request, req CreateMa
 		return false
 	}
 
+	// NAMED before it is offered, if the caller did not name it.
+	//
+	// An unnamed create that times out mid-flight leaves a machine whose name
+	// this host never learns: nothing can look it up, nothing can remove it,
+	// and it is billed. With a name the outcome is checkable by the client and
+	// the duplicate is refused by the fleet-wide name check rather than
+	// created. Names are allocated at create, so this is a proposal exactly as
+	// it is on the local path.
+	if req.Name == "" {
+		req.Name = naming.Machine()
+	}
+
 	body, err := json.Marshal(req)
 	if err != nil {
 		return false
@@ -196,8 +213,31 @@ func (d Deps) forwardCreate(w http.ResponseWriter, r *http.Request, req CreateMa
 
 		status, reply, err := d.offerCreate(r, addr, body)
 		if err != nil {
-			// Unreachable, or it gave up. The next candidate gets the offer;
-			// this is exactly the case the ranking cannot predict.
+			if !neverArrived(err) {
+				// UNKNOWN, not failed. The request was written and the answer
+				// never came back -- a timeout, a reset mid-flight, a body
+				// that would not read -- so the candidate may well have made
+				// the machine and simply not said so in time.
+				//
+				// Offering it to the next host was the bug. That produced a
+				// SECOND machine, told the client about one of them, and left
+				// the first running, billed, and unreferenced by anything the
+				// client could name. The retry is refused instead, and because
+				// the create was named above, the answer says exactly what to
+				// look for.
+				d.observePlacement("unknown")
+				slog.Error("a create offer's outcome is unknown; not retrying it "+
+					"elsewhere", "candidate", hostID, "machine", req.Name, "err", err)
+				WriteError(w, http.StatusGatewayTimeout, CodeUnavailable, fmt.Sprintf(
+					"%s did not answer in time, and may or may not have created "+
+						"machine %s", hostID, req.Name),
+					"run `pilot machines show "+req.Name+"`: if it exists the create "+
+						"worked, and if it does not, create it again", nil)
+				return true
+			}
+			// It was never reached at all, so nothing was created and the next
+			// candidate gets the offer. This is exactly the case the ranking
+			// cannot predict.
 			continue
 		}
 		if status == http.StatusInsufficientStorage {
@@ -231,6 +271,39 @@ func (d Deps) forwardCreate(w http.ResponseWriter, r *http.Request, req CreateMa
 	// caller a 507 that says the fleet is full, which is a straight answer
 	// rather than a timeout.
 	d.observePlacement("fallback")
+	return false
+}
+
+// neverArrived reports that an offer certainly did not reach the candidate.
+//
+// The distinction decides whether the create may be retried elsewhere, and it
+// is the difference between "this host is down" and "this host may be building
+// the machine right now". Only a DIAL failure is certain: the connection was
+// never established, so no request was written and nothing was created.
+// Everything else -- a timeout, a reset after the request went out, a reply
+// that would not read -- leaves the outcome unknown, and a retry on an unknown
+// outcome is how one create becomes two machines.
+//
+// Deliberately conservative in the direction that costs a false error rather
+// than a duplicate: a create refused in error is retried by the client in a
+// second, while a machine created twice is billed and referenced by nothing.
+func neverArrived(err error) bool {
+	if err == nil {
+		return false
+	}
+	// A timeout is never safe, whatever it wraps: the request may have been
+	// written and the answer lost.
+	var timeout interface{ Timeout() bool }
+	if errors.As(err, &timeout) && timeout.Timeout() {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return false
+	}
+	var op *net.OpError
+	if errors.As(err, &op) {
+		return op.Op == "dial"
+	}
 	return false
 }
 
