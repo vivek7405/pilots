@@ -3,6 +3,7 @@ package corrosion
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -289,5 +290,39 @@ func TestOpenJoinGateIsAlreadyOpen(t *testing.T) {
 	g := OpenJoinGate()
 	if !g.Ready() || !waitReady(g, time.Second) {
 		t.Error("OpenJoinGate returned a closed gate")
+	}
+}
+
+// A busy fleet: the peer writes its own heartbeat row between every look, so
+// its view of its own actor is always a little ahead of this replica at the
+// moment it answers, and this replica applies that write a moment later. The
+// gate must still open. Reading this replica BEFORE asking the peer meant the
+// peer was always ahead, and the gate never opened while the fleet wrote.
+func TestJoinGateOpensWhileAPeerKeepsWriting(t *testing.T) {
+	store, agent := newTestStore(t, "host-a")
+	joinTables(t, agent)
+	agent.exec(t, `INSERT INTO crsql_db_versions VALUES (x'02', 1)`)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var mu sync.Mutex
+	version := int64(1)
+	g := RunJoinGate(ctx, store, JoinGateOptions{
+		Interval: 5 * time.Millisecond,
+		Peers:    func() []state.Host { return []state.Host{host("host-b", "10.0.0.2")} },
+		PeerVector: func(context.Context, state.Host) (map[string]int64, error) {
+			mu.Lock()
+			version++ // the peer's heartbeat, written just before it answers
+			v := version
+			mu.Unlock()
+			go func() { // and gossip delivers it here shortly after
+				time.Sleep(50 * time.Millisecond)
+				agent.exec(t, fmt.Sprintf(`UPDATE crsql_db_versions SET db_version = %d WHERE site_id = x'02' AND db_version < %d`, v, v))
+			}()
+			return map[string]int64{"02": v}, nil
+		},
+	})
+	if !waitReady(g, 3*time.Second) {
+		t.Error("the gate never opened while a replicating peer kept writing")
 	}
 }

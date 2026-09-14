@@ -207,62 +207,107 @@ func RunJoinGate(ctx context.Context, store *Store, opts JoinGateOptions) *JoinG
 
 // joinState runs one pass. The counts are for the log line and the gauge; the
 // error is why a pass could not decide, which reads as not complete.
+//
+// The PEERS are asked first, and this replica is then checked against what
+// they said, re-reading only its own vector while it catches up. The other
+// order never converged on a busy fleet: this replica's vector was read, then
+// each peer was asked in turn, and every peer writes its own hosts row on
+// every heartbeat -- so by the time a peer answered, its view of its own actor
+// had moved past the vector read a moment earlier, "behind" was non-zero on
+// every pass, and self-heal, the router's rescue and the autoscaler stayed
+// disabled after a restart for as long as the fleet was writing. Against a
+// snapshot of what the peers had, a replica that is replicating catches up
+// within the gossip delay; one that is not, does not, and the gate stays shut.
 func joinState(ctx context.Context, store *Store, opts JoinGateOptions) (gaps, unseen, behind int, err error) {
-	gaps, err = store.Gaps(ctx)
-	if err != nil {
-		return 0, 0, 0, err
+	var targets []map[string]int64
+	if opts.Peers != nil && opts.PeerVector != nil {
+		peers := opts.Peers()
+		if len(peers) == 0 && opts.Joining {
+			// NOT complete, however empty the replica looks.
+			//
+			// Peers comes from this host's own subscription cache, so on a host
+			// that has just started and received nothing, it is empty -- and so
+			// is Members, and so is the gap count. Every input to the decision
+			// below therefore said "caught up", and the gate opened on the FIRST
+			// tick. The emptiest possible replica opened it fastest, which is the
+			// exact absence this gate exists to stop a host acting on: self-heal
+			// was then free to claim the machines of every host it "could not
+			// see", which was all of them.
+			//
+			// Joining is what separates that from a genuine single-host fleet,
+			// which has no peers and is complete immediately and correctly. It
+			// is set from the bootstrap peer -- the one edge that is configured
+			// rather than discovered, and without which a new host can never
+			// join at all.
+			return 0, 0, 0, errNoPeersYet
+		}
+		for _, peer := range peers {
+			theirs, perr := opts.PeerVector(ctx, peer)
+			if perr != nil {
+				behind++
+				if err == nil {
+					err = perr
+				}
+				continue
+			}
+			targets = append(targets, theirs)
+		}
 	}
-	mine, err := store.VersionVector(ctx)
-	if err != nil {
-		return gaps, 0, 0, err
+
+	gaps, gerr := store.Gaps(ctx)
+	if gerr != nil {
+		return 0, 0, behind, gerr
 	}
-	members, err := store.Members(ctx)
-	if err != nil {
-		return gaps, 0, 0, err
+	mine, merr := store.VersionVector(ctx)
+	if merr != nil {
+		return gaps, 0, behind, merr
+	}
+	members, merr := store.Members(ctx)
+	if merr != nil {
+		return gaps, 0, behind, merr
 	}
 	for _, actor := range members {
 		if _, ok := mine[actor]; !ok {
 			unseen++
 		}
 	}
-	if opts.Peers == nil || opts.PeerVector == nil {
-		return gaps, unseen, 0, nil
-	}
-	peers := opts.Peers()
-	if len(peers) == 0 && opts.Joining {
-		// NOT complete, however empty the replica looks.
-		//
-		// Peers comes from this host's own subscription cache, so on a host
-		// that has just started and received nothing, it is empty -- and so is
-		// Members, and so is the gap count. Every input to the decision below
-		// therefore said "caught up", and the gate opened on the FIRST tick.
-		// The emptiest possible replica opened it fastest, which is the exact
-		// absence this gate exists to stop a host acting on: self-heal was
-		// then free to claim the machines of every host it "could not see",
-		// which was all of them.
-		//
-		// Joining is what separates that from a genuine single-host fleet,
-		// which has no peers and is complete immediately and correctly. It is
-		// set from the bootstrap peer -- the one edge that is configured
-		// rather than discovered, and without which a new host can never join
-		// at all.
-		return gaps, unseen, 0, errNoPeersYet
-	}
-	for _, peer := range peers {
-		theirs, perr := opts.PeerVector(ctx, peer)
-		if perr != nil {
-			behind++
-			if err == nil {
-				err = perr
-			}
-			continue
+
+	lagging := countBehind(mine, targets)
+	deadline := time.Now().Add(catchUpWait)
+	for lagging > 0 && time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return gaps, unseen, behind + lagging, ctx.Err()
+		case <-time.After(catchUpPoll):
 		}
+		if mine, merr = store.VersionVector(ctx); merr != nil {
+			return gaps, unseen, behind + lagging, merr
+		}
+		lagging = countBehind(mine, targets)
+	}
+	return gaps, unseen, behind + lagging, err
+}
+
+// How long one pass waits for this replica to reach what the peers reported,
+// and how often it looks. Long enough for gossip to deliver a heartbeat that
+// was written just before the peer answered; short enough that a replica
+// genuinely behind is reported on the next pass rather than hidden in this one.
+const (
+	catchUpWait = 3 * time.Second
+	catchUpPoll = 100 * time.Millisecond
+)
+
+// countBehind is how many peer snapshots name an actor this replica has not
+// applied as far.
+func countBehind(mine map[string]int64, targets []map[string]int64) int {
+	n := 0
+	for _, theirs := range targets {
 		for actor, v := range theirs {
 			if mine[actor] < v {
-				behind++
+				n++
 				break
 			}
 		}
 	}
-	return gaps, unseen, behind, err
+	return n
 }
