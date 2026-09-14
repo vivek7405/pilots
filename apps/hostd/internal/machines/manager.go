@@ -1367,6 +1367,10 @@ func (m *Manager) Adopt(id string, fcm *fc.Machine, slotIdx int) error {
 // reading memory.max instead of the row was exactly that bug.
 const vmmOverheadMiB = 128
 
+// handlerCPUs is the CPU quota a machine's cgroup carries beyond its vCPUs,
+// for the VMM threads and the page and block handlers. See machineFCConfig.
+const handlerCPUs = 2
+
 func (m *Manager) machineFCConfig(row *state.Machine, slot *netns.Slot, mac string) fc.Config {
 	cfg := m.opts.FCConfig
 	cfg.MachineID = row.ID
@@ -1380,10 +1384,20 @@ func (m *Manager) machineFCConfig(row *state.Machine, slot *netns.Slot, mac stri
 	// allocations, so the VMM is not OOM-killed for doing its job.
 	cfg.Limits.MemMaxB = int64(row.MemMiB+vmmOverheadMiB) * 1024 * 1024
 
-	// CPU: vcpus worth of a 100ms period, so a machine cannot exceed the cores
-	// it was sold.
+	// CPU: vcpus worth of a 100ms period, plus handlerCPUs of headroom.
+	//
+	// The guest still cannot exceed the cores it was sold: it has exactly
+	// VCPUs vCPU threads, and a thread cannot run on more than one core. The
+	// headroom is for what else lives in this cgroup -- Firecracker's VMM and
+	// I/O threads, and the uffd and nbd handlers, which joinHandlersToCgroup
+	// moves in for accounting. Without it all of them shared the guest's own
+	// quota, and a wake is exactly when they are busiest: the uffd replay
+	// installs the guest's working set while the guest runs. Measured on a
+	// 1-vCPU webjs replica, one 1.2 s wake was throttled in 9 CPU periods
+	// (4.3 s of throttled thread time), and the replay of 19.6k pages took
+	// 900 ms while starving the guest's own page faults.
 	const cpuPeriodUS = 100_000
-	cfg.Limits.CPUMax = fmt.Sprintf("%d %d", row.VCPUs*cpuPeriodUS, cpuPeriodUS)
+	cfg.Limits.CPUMax = fmt.Sprintf("%d %d", (row.VCPUs+handlerCPUs)*cpuPeriodUS, cpuPeriodUS)
 
 	if cfg.Limits.PidsMax == 0 {
 		cfg.Limits.PidsMax = 2048
