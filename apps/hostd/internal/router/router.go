@@ -661,6 +661,7 @@ func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, slot *netns.S
 	target := &url.URL{Scheme: "http", Host: agentAddr(slot)}
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Transport = guestTransport
 	proxy.Director = func(out *http.Request) {
 		out.URL.Scheme = target.Scheme
 		out.URL.Host = target.Host
