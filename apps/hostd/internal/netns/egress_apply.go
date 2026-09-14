@@ -253,6 +253,21 @@ func warnIfForwardingIsDropped(conn *nftables.Conn) {
 		if ch.Table != nil && ch.Table.Name == egressTable {
 			continue // ours, and ours accepts
 		}
+		if ch.Table != nil && ch.Table.Family == nftables.TableFamilyIPv6 {
+			// The masquerade this protects is IPv4, and an ip6 table never sees
+			// an IPv4 packet. ufw installs a drop-policy FORWARD in both, so
+			// without this the warning fired on every ufw host, remedy applied
+			// or not.
+			continue
+		}
+		if ch.Table != nil && tableAcceptsGuestSource(conn, ch.Table, chains) {
+			// The operator already made the exception, and the drop policy is
+			// never reached for guest traffic. Warning here was a plausible
+			// wrong answer: it fired on a laptop whose ufw carried exactly the
+			// `ufw route allow` this message recommends, while builds on it
+			// were reaching the internet.
+			continue
+		}
 		name := ch.Name
 		if ch.Table != nil {
 			name = ch.Table.Name + " " + name
@@ -266,6 +281,81 @@ func warnIfForwardingIsDropped(conn *nftables.Conn) {
 				"nft: add an accept for that source to the dropping chain)")
 		return
 	}
+}
+
+// tableAcceptsGuestSource reports whether any chain in a table has a rule that
+// accepts packets by a source match covering every guest address.
+//
+// A signal, not a proof: it does not follow jumps to show the rule is reached,
+// or rule out a drop ahead of it. It is the check the remedy in the warning
+// makes true -- `ufw route allow from 10.11.0.0/16` is one such rule in ufw's
+// own table -- so a host that followed the advice stops being told to.
+func tableAcceptsGuestSource(conn *nftables.Conn, table *nftables.Table, chains []*nftables.Chain) bool {
+	for _, ch := range chains {
+		if ch.Table == nil || ch.Table.Name != table.Name || ch.Table.Family != table.Family {
+			continue
+		}
+		rules, err := conn.GetRules(table, ch)
+		if err != nil {
+			continue
+		}
+		for _, r := range rules {
+			if ruleAcceptsGuestSource(r.Exprs) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ruleAcceptsGuestSource reports whether a rule's expressions match an IPv4
+// source prefix that covers HostNetworkCIDR and end in accept.
+//
+// Two encodings reach the kernel for the same prefix, and both are matched: a
+// load of exactly the prefix's bytes compared directly (what iptables-nft, and
+// so ufw, emits for a /16 or a /8), and a four-byte load masked by a bitwise
+// before the compare (what nft and this package emit).
+func ruleAcceptsGuestSource(exprs []expr.Any) bool {
+	_, guests, _ := net.ParseCIDR(HostNetworkCIDR)
+	guestBits, _ := guests.Mask.Size()
+	covers, accepts := false, false
+	for i, e := range exprs {
+		switch v := e.(type) {
+		case *expr.Verdict:
+			accepts = accepts || v.Kind == expr.VerdictAccept
+		case *expr.Payload:
+			if v.Base != expr.PayloadBaseNetworkHeader || v.Offset != srcOffset ||
+				v.Len == 0 || v.Len > 4 || i+1 >= len(exprs) {
+				continue
+			}
+			mask := net.CIDRMask(int(v.Len)*8, 32)[:v.Len]
+			next := exprs[i+1]
+			if bw, ok := next.(*expr.Bitwise); ok && i+2 < len(exprs) {
+				mask, next = bw.Mask, exprs[i+2]
+			}
+			cmp, ok := next.(*expr.Cmp)
+			if !ok || cmp.Op != expr.CmpOpEq || len(cmp.Data) != len(mask) {
+				continue
+			}
+			ones := 0
+			for _, b := range mask {
+				for ; b&0x80 != 0; b <<= 1 {
+					ones++
+				}
+			}
+			if ones > guestBits {
+				continue // narrower than the guest network: some guests are left out
+			}
+			match := true
+			for j := range mask {
+				if guests.IP.To4()[j]&mask[j] != cmp.Data[j] {
+					match = false
+				}
+			}
+			covers = covers || match
+		}
+	}
+	return covers && accepts
 }
 
 // UplinkInterface is the interface guest traffic leaves this host by.
