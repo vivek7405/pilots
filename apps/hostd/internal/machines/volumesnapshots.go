@@ -2,6 +2,7 @@ package machines
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -144,8 +145,19 @@ func (m *Manager) ForkVolumeSnapshot(ctx context.Context, volumeID, stamp, name 
 	if name == "" {
 		name = src.Name + "-" + stamp
 	}
+	// The fork belongs to the org that owns the volume it was forked from.
+	// Created without one, it had no tenancy row: the API answered 201 naming
+	// an org, and the org could then neither see the volume nor mount it,
+	// while the only key that could was an admin's.
+	org := ""
+	switch t, err := m.opts.Store.GetTenancy(ctx, volumeID); {
+	case err == nil:
+		org = t.OrgID
+	case !errors.Is(err, state.ErrNotFound):
+		return nil, fmt.Errorf("machines: resolve the org of volume %s: %w", volumeID, err)
+	}
 	fork, err := m.CreateVolume(ctx, api.CreateVolumeRequest{
-		Name: name, SizeGiB: src.SizeMiB / 1024, MountPath: src.MountPath,
+		Name: name, SizeGiB: src.SizeMiB / 1024, MountPath: src.MountPath, OrgID: org,
 	})
 	if err != nil {
 		return nil, err

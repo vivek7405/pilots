@@ -165,3 +165,31 @@ func TestAnUnreachablePlacementIsRefused(t *testing.T) {
 		t.Error("a replica for host-c was created here")
 	}
 }
+
+// An ordinal's volume belongs to the service's org, wherever it was created:
+// the org is never sent to a peer, so without this the volume was owned by
+// nobody and invisible to the org whose database lives on it.
+func TestAnOrdinalsVolumeIsOwnedByTheServicesOrg(t *testing.T) {
+	m, _, store, svc := fixture(t, 3)
+	ctx := context.Background()
+	if err := store.PutTenancy(ctx, &state.Tenancy{ID: svc.ID, OrgID: "org_db", Kind: "service"}); err != nil {
+		t.Fatal(err)
+	}
+	liveFleet(t, store, "host-a", "host-b", "host-c")
+	m.opts.Peers = &fakePeers{}
+
+	for _, host := range []string{"host-a", "host-c"} {
+		ordinal := 2
+		if host == "host-a" {
+			ordinal = 1
+		}
+		id, err := m.ensureOrdinalVolume(ctx, svc, ordinal, host)
+		if err != nil {
+			t.Fatalf("ensureOrdinalVolume on %s: %v", host, err)
+		}
+		tn, err := store.GetTenancy(ctx, id)
+		if err != nil || tn.OrgID != "org_db" {
+			t.Errorf("volume %s created on %s: tenancy %+v, %v; want org_db", id, host, tn, err)
+		}
+	}
+}

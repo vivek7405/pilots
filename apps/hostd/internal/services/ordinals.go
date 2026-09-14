@@ -221,6 +221,20 @@ func (m *Manager) ensureOrdinalVolume(ctx context.Context, svc *state.Service, o
 	if err != nil {
 		return "", fmt.Errorf("services: volume for ordinal %d: %w", ordinal, err)
 	}
+	// Owned by the service's org, written here rather than by the create. The
+	// create records an org only when the request names one, and the org is
+	// never sent over the wire to a peer, so an ordinal volume was owned by
+	// nobody: its org could not see it, and the quota never counted it. The
+	// row is write-once and any host may write it.
+	if org, err := m.orgOfService(ctx, svc.ID); err != nil {
+		return "", err
+	} else if org != "" {
+		if err := m.opts.Store.PutTenancy(ctx, &state.Tenancy{
+			ID: v.ID, OrgID: org, Kind: "volume", CreatedAt: time.Now().Unix(),
+		}); err != nil {
+			return "", fmt.Errorf("services: owning ordinal %d's volume %s: %w", ordinal, v.ID, err)
+		}
+	}
 	if err := m.opts.Store.PutServiceVolume(ctx, &state.ServiceVolume{
 		ServiceID: svc.ID, Ordinal: ordinal, VolumeID: v.ID, CreatedAt: time.Now().Unix(),
 	}); err != nil {
@@ -370,4 +384,16 @@ func (m *Manager) flushBeforeKill(ctx context.Context, mach *state.Machine) {
 	default:
 		slog.Info("flushed a node's write-ahead log before redeploying it", "machine", mach.ID)
 	}
+}
+
+// orgOfService is the org that owns a service, or "" for one that has none.
+func (m *Manager) orgOfService(ctx context.Context, serviceID string) (string, error) {
+	t, err := m.opts.Store.GetTenancy(ctx, serviceID)
+	if errors.Is(err, state.ErrNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("services: resolve the org of service %s: %w", serviceID, err)
+	}
+	return t.OrgID, nil
 }
