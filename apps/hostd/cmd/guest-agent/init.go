@@ -334,7 +334,6 @@ var (
 		// to "what is running".
 		if len(saved) > 0 || len(declared) > 0 {
 			specs := append([]processSpec{}, declared...)
-			specs = append(specs, saved...)
 			// The image's own command is the process `app` ONLY when the
 			// deploy declared no set of its own. A grouped deploy's processes
 			// already include everything the machine runs, and adding the
@@ -344,6 +343,7 @@ var (
 					Name: DefaultProcess, Cmd: cmdline, Env: env, Port: true,
 				}}, specs...)
 			}
+			specs = append(specs, withoutNamesIn(saved, specs)...)
 			for i := range specs {
 				// Every process inherits the machine's environment; a process
 				// that named its own keeps them on top.
@@ -403,4 +403,30 @@ func proxyToLocalPort(w http.ResponseWriter, r *http.Request, port string) {
 		})
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+// withoutNamesIn drops saved processes whose names the boot's own set already
+// uses, saying which.
+//
+// A runtime registration that reused a declared process's name, or `app`, was
+// saved and replayed beside it, and orderByNeeds refuses two processes with
+// one name by starting NOTHING: one registration stopped the whole machine
+// coming up. The deploy's declaration and the image's command are the ones
+// that stand; the registration is the one that loses.
+func withoutNamesIn(saved, taken []processSpec) []processSpec {
+	used := make(map[string]bool, len(taken))
+	for _, s := range taken {
+		used[s.Name] = true
+	}
+	out := make([]processSpec, 0, len(saved))
+	for _, s := range saved {
+		if used[s.Name] {
+			log.Printf("guest-agent: not starting the registered process %q: the "+
+				"deploy or the image already runs a process by that name", s.Name)
+			continue
+		}
+		used[s.Name] = true
+		out = append(out, s)
+	}
+	return out
 }

@@ -358,10 +358,19 @@ func (s *supervisor) register(spec processSpec) error {
 	if strings.ContainsAny(spec.Name, "/ \t\n") {
 		return fmt.Errorf("a process name may not contain a slash or a space")
 	}
+	// Neither the image's own process name nor one this machine already knows,
+	// running or not. A registration is saved and replayed at every cold boot
+	// beside the deploy's declared set, and a name used twice there used to
+	// start nothing at all; a stopped declared process was exactly the name
+	// this check let through. To replace a process, delete it first.
+	if spec.Name == DefaultProcess {
+		return fmt.Errorf("%q is the name of the image's own process; choose another", DefaultProcess)
+	}
 	s.mu.Lock()
-	if p, ok := s.procs[spec.Name]; ok && p.running {
+	if _, ok := s.procs[spec.Name]; ok {
 		s.mu.Unlock()
-		return fmt.Errorf("process %q is already running", spec.Name)
+		return fmt.Errorf("a process named %q already exists on this machine; delete it "+
+			"before registering another by that name", spec.Name)
 	}
 	s.mu.Unlock()
 
