@@ -1,6 +1,7 @@
 package machines
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"testing"
@@ -262,5 +263,27 @@ func TestAHostThatCannotMeasureItselfStillAdmits(t *testing.T) {
 
 	if err := m.admit(t.Context(), 4, 65536); err != nil {
 		t.Errorf("a host with no memory reading refused a create: %v", err)
+	}
+}
+
+// A machine is not suspended to make room while its guest reports a command
+// still running, however long it has been quiet over HTTP.
+func TestAdmissionDoesNotSuspendABusyGuest(t *testing.T) {
+	m, st := capManager(t, 256, 8)
+	idleMachine(t, st, "m_building", 1024, time.Hour)
+
+	orig := reclaimBusy
+	t.Cleanup(func() { reclaimBusy = orig })
+	reclaimBusy = func(context.Context, *Manager, state.Machine) bool { return true }
+
+	if err := m.admit(t.Context(), 1, 512); !errors.Is(err, api.ErrNoCapacity) {
+		t.Fatalf("err = %v, want ErrNoCapacity: the only reclaimable machine is busy", err)
+	}
+	row, err := st.GetMachine(t.Context(), "m_building")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.State != StateRunning {
+		t.Errorf("a busy machine was suspended to make room (state=%q)", row.State)
 	}
 }

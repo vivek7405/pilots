@@ -208,6 +208,18 @@ func (m *Manager) admit(ctx context.Context, vcpus, memMiB int) error {
 		if memMiB <= free+freed {
 			break
 		}
+		// The guest's own answer, asked now, for the one machine about to
+		// lose its memory. reclaimableNow skips it (a round trip per machine
+		// per heartbeat) and promises it is made here; it was not, so a
+		// machine quiet over HTTP but running a long command -- a build, a
+		// migration in a detached console -- was suspended mid-command to
+		// make room for another tenant's create. The idle monitor has always
+		// asked; this is the same question.
+		if reclaimBusy(ctx, m, row) {
+			slog.Info("left a machine running to make room elsewhere: its guest is busy",
+				"machine", row.ID)
+			continue
+		}
 		if err := m.Suspend(ctx, row.ID); err != nil {
 			// One machine that would not suspend is not the end of the
 			// attempt: the next one may free enough. It is logged because a
@@ -257,3 +269,15 @@ func (m *Manager) SetDraining(on bool) { m.draining.Store(on) }
 
 // Draining reports the flag.
 func (m *Manager) Draining() bool { return m.draining.Load() }
+
+// reclaimBusy reports whether a machine chosen for reclaim is doing something
+// the HTTP view cannot see: a request that arrived since the candidates were
+// read, or a console session still running a command in the guest. A variable
+// so a test can answer for the guest.
+var reclaimBusy = func(ctx context.Context, m *Manager, row state.Machine) bool {
+	if m.flight.count(row.ID) > 0 {
+		return true
+	}
+	slot, ok := m.SlotFor(row.ID)
+	return ok && m.sessionsBusy(ctx, row.ID, slot.AgentAddr())
+}
