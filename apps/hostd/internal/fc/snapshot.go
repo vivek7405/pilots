@@ -93,7 +93,12 @@ func (m *Machine) WhilePaused(ctx context.Context, fn func() error) (err error) 
 		return fmt.Errorf("fc: pause %s: %w", m.ID, perr)
 	}
 	defer func() {
-		if rerr := m.Client.Resume(ctx); rerr != nil {
+		// Never the caller's context. fn is exactly what runs a context out --
+		// a clone that hangs to its deadline, a client that disconnects -- and
+		// a resume sent on a context that is already done is never sent at
+		// all: the request fails before it leaves, and the guest stays paused
+		// for good, answering nothing while its row says running.
+		if rerr := m.Client.Resume(context.WithoutCancel(ctx)); rerr != nil {
 			err = errors.Join(err, fmt.Errorf("fc: resume %s after a paused operation: %w", m.ID, rerr))
 		}
 	}()
