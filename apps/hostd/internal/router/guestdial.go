@@ -33,24 +33,58 @@ var guestTransport = newGuestTransport(guestDialWindow)
 
 func newGuestTransport(window time.Duration) *http.Transport {
 	t := http.DefaultTransport.(*http.Transport).Clone()
-	dialer := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
+	dialer := &net.Dialer{KeepAlive: 30 * time.Second}
 	t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-		return dialGuest(ctx, dialer, network, addr, window)
+		return dialGuest(ctx, dialer.DialContext, network, addr, window)
 	}
 	return t
 }
 
-// dialGuest dials, retrying the two errors a guest that is still coming up
-// produces. Anything else -- a timeout, a cancelled request -- is returned at
-// once, because retrying it would only spend the client's time.
-func dialGuest(ctx context.Context, d *net.Dialer, network, addr string,
-	window time.Duration) (net.Conn, error) {
+// Per-attempt connect timeouts, shortest first.
+//
+// A guest is on this host, one veth away: a live one completes a handshake in
+// well under a millisecond. The danger is the one that is not live YET. A
+// resumed guest takes a few hundred milliseconds to start processing packets,
+// and a SYN sent into that window is simply lost -- no refusal, no error -- so
+// a plain connect sits in the kernel's initial SYN retransmit timeout, which
+// is one second. Traced on a laptop wake: the app answered a direct probe at
+// +687 ms, and the router's request, whose SYN had gone out at +140 ms, landed
+// at +1217 ms. Abandoning an unanswered attempt after 100 ms and sending a
+// fresh SYN takes that second back. Growing, so a guest that is merely slow to
+// accept is not hammered, and capped so the whole window still applies.
+var guestAttemptTimeouts = []time.Duration{
+	100 * time.Millisecond, 100 * time.Millisecond, 200 * time.Millisecond,
+	400 * time.Millisecond, time.Second,
+}
+
+// dialGuest dials, retrying what a guest that is still coming up produces: a
+// refusal, an unreachable address, or an attempt nobody answered. A cancelled
+// request is returned at once, because retrying it would only spend the
+// client's time.
+func dialGuest(ctx context.Context, dial func(context.Context, string, string) (net.Conn, error),
+	network, addr string, window time.Duration) (net.Conn, error) {
 	deadline := time.Now().Add(window)
 	backoff := 25 * time.Millisecond
-	for {
-		conn, err := d.DialContext(ctx, network, addr)
-		if err == nil || !guestNotReady(err) || time.Now().Add(backoff).After(deadline) {
+	for attempt := 0; ; attempt++ {
+		timeout := guestAttemptTimeouts[min(attempt, len(guestAttemptTimeouts)-1)]
+		if left := time.Until(deadline); left < timeout {
+			timeout = max(left, time.Millisecond)
+		}
+		actx, cancel := context.WithTimeout(ctx, timeout)
+		conn, err := dial(actx, network, addr)
+		cancel()
+		if err == nil {
+			return conn, nil
+		}
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		unanswered := actx.Err() != nil // this attempt's own timeout, not the request's
+		if (!guestNotReady(err) && !unanswered) || time.Now().Add(backoff).After(deadline) {
 			return conn, err
+		}
+		if unanswered {
+			continue // the timeout already waited; resend the SYN now
 		}
 		select {
 		case <-ctx.Done():
