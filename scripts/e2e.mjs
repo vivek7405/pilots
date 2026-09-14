@@ -612,6 +612,51 @@ async function lifecycleAssertions() {
       assert(after === 'absent', 'a file created after the checkpoint survived the rollback');
     });
 
+    // Nothing above reads a block back from disk: every assertion so far is
+    // served out of the guest's page cache, which came with its memory image.
+    // So memory and disk can disagree and every step still passes -- which is
+    // exactly how a template whose disk was chunked before boot shipped: ext4
+    // metadata in memory named blocks the disk never had, and only a guest
+    // that evicted its caches (a builder under build pressure) ever noticed.
+    // Dropping the caches makes the guest read its disk and nothing else.
+    const ext4Errors = async (mid) => Number(await exec(mid,
+      'dmesg | grep -ciE "ext4-fs (error|warning)" || true'));
+
+    await step("a machine's disk agrees with its memory once its caches are dropped", async () => {
+      await exec(id, 'sync; echo 3 > /proc/sys/vm/drop_caches');
+      const listed = await exec(id, 'ls /var/log/journal >/dev/null 2>&1 && echo ok || echo broken');
+      assert(listed === 'ok', 'the journal directory is unreadable from disk: the template disk does not match its memory');
+      const errors = await ext4Errors(id);
+      assert(errors === 0, `${errors} ext4 errors after reading the disk back`);
+    });
+
+    await step('a checkpoint taken right after a write restores that write from disk', async () => {
+      // Taken at once, while the write can still be in the host's page cache
+      // for the block device rather than in the handler's copy-on-write file.
+      const want = await exec(id,
+        'dd if=/dev/urandom of=/root/big bs=1M count=64 2>/dev/null; ' +
+        'mkdir -p /root/many && for i in $(seq 200); do echo $i > /root/many/f$i; done; ' +
+        'sha256sum /root/big | cut -d" " -f1');
+      const { status, json } = await request(`/v1/machines/${id}/checkpoints`, {
+        method: 'POST', body: { comment: 'integrity' },
+      });
+      assert(status === 201, `checkpoint: expected 201, got ${status}`);
+      await exec(id, 'rm -rf /root/big /root/many');
+
+      const restored = await request(`/v1/checkpoints/${json.id}/restore`, { method: 'POST' });
+      assert(restored.status === 200, `restore: expected 200, got ${restored.status}`);
+      await waitFor(async () => (await exec(id, 'test -e /root/big && echo yes || echo no')) === 'yes',
+        { what: 'the rollback to take effect' });
+
+      await exec(id, 'sync; echo 3 > /proc/sys/vm/drop_caches');
+      const got = await exec(id, 'sha256sum /root/big | cut -d" " -f1');
+      assert(got === want, `the restored file differs on disk: ${got} want ${want}`);
+      const files = await exec(id, 'ls /root/many | wc -l');
+      assert(files === '200', `${files} of 200 files survived the restore on disk`);
+      const errors = await ext4Errors(id);
+      assert(errors === 0, `${errors} ext4 errors after reading the restored disk back`);
+    });
+
     await step('suspend then wake preserves the URL and the machine works', async () => {
       await exec(id, 'echo survives-suspend > /root/marker.txt');
 

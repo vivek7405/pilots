@@ -56,7 +56,14 @@ var builderKnobs = json.RawMessage(
 func (m *Manager) EnsureBuilder(ctx context.Context, orgID string) (string, func(), error) {
 	name := BuilderName(orgID, m.opts.HostID)
 
-	id, stale, err := m.findBuilder(ctx, name)
+	// The current builder template, so a builder minted from an older one is
+	// recognised below. createBuilder needs it anyway; asking first costs a
+	// manifest read.
+	tmpl, err := m.EnsureBuilderTemplate(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	id, stale, err := m.findBuilder(ctx, name, tmpl.MemBuildID.String())
 	if err != nil {
 		return "", nil, err
 	}
@@ -64,7 +71,8 @@ func (m *Manager) EnsureBuilder(ctx context.Context, orgID string) (string, func
 		// The name is held by the stale row, so a create cannot proceed until
 		// it is gone. Failing here says so, rather than failing the create on
 		// a name conflict that reads as a second builder already existing.
-		slog.Warn("replacing a builder that can never start", "machine", s, "name", name)
+		slog.Warn("replacing a builder that failed or was made from an older builder template",
+			"machine", s, "name", name, "template", tmpl.MemBuildID)
 		if err := m.Destroy(ctx, s); err != nil {
 			return "", nil, fmt.Errorf("machines: clear the failed builder %s: %w", s, err)
 		}
@@ -144,7 +152,16 @@ func (m *Manager) EnsureBuilder(ctx context.Context, orgID string) (string, func
 // failing on this host until someone destroyed the machine by hand. A builder
 // holds nothing worth keeping -- the layer cache lives on the host -- so the
 // row is replaced rather than repaired.
-func (m *Manager) findBuilder(ctx context.Context, name string) (string, []string, error) {
+//
+// So is one pinned to a builder template other than the current one, unless it
+// is running. A builder carries its template's disk and userspace for life, so
+// a rebuilt builder image -- a new BuildKit, a new agent, or the fix for a
+// template whose memory and disk disagreed -- never reached a builder that
+// already existed. The last case is how this was found: a builder minted from
+// the broken template kept failing BuildKit reads with EBADMSG after the
+// template was fixed. A running one is left for its current build and
+// replaced the next time a build finds it asleep.
+func (m *Manager) findBuilder(ctx context.Context, name, templateMem string) (string, []string, error) {
 	rows, err := m.opts.Store.ListMachines(ctx)
 	if err != nil {
 		return "", nil, err
@@ -156,6 +173,11 @@ func (m *Manager) findBuilder(ctx context.Context, name string) (string, []strin
 			continue
 		}
 		if row.State == StateError {
+			stale = append(stale, row.ID)
+			continue
+		}
+		if _, running := m.get(row.ID); !running && templateMem != "" &&
+			row.TemplateMemBuildID != "" && row.TemplateMemBuildID != templateMem {
 			stale = append(stale, row.ID)
 			continue
 		}

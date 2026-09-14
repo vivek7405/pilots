@@ -68,7 +68,7 @@ func TestFindBuilderReplacesAFailedCreate(t *testing.T) {
 		}
 	}
 
-	id, stale, err := m.findBuilder(ctx, name)
+	id, stale, err := m.findBuilder(ctx, name, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestFindBuilderReplacesAFailedCreate(t *testing.T) {
 	if err := st.DeleteMachine(ctx, "m_failed"); err != nil {
 		t.Fatal(err)
 	}
-	id, stale, err = m.findBuilder(ctx, name)
+	id, stale, err = m.findBuilder(ctx, name, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,5 +102,34 @@ func TestWaitForBuildkitHonoursCancellation(t *testing.T) {
 	cancel()
 	if err := waitForBuildkitAddr(ctx, "127.0.0.1:1", time.Minute); err == nil {
 		t.Fatal("a cancelled wait reported success")
+	}
+}
+
+// A builder minted from an older builder template is replaced, so a rebuilt
+// builder image reaches it; a current one is reused.
+func TestFindBuilderReplacesOneFromAnOlderTemplate(t *testing.T) {
+	m, st := storeManager(t)
+	ctx := t.Context()
+	const name = "builder-org-host-a"
+	old := state.Machine{ID: "m_old", Name: name, HostID: "host-a",
+		State: StateSuspended, TemplateMemBuildID: "tmpl-v1"}
+	if err := st.PutMachine(ctx, &old); err != nil {
+		t.Fatal(err)
+	}
+
+	id, stale, err := m.findBuilder(ctx, name, "tmpl-v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "" || !reflect.DeepEqual(stale, []string{"m_old"}) {
+		t.Errorf("findBuilder = %q, %v; want the older-template builder replaced", id, stale)
+	}
+
+	id, stale, err = m.findBuilder(ctx, name, "tmpl-v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "m_old" || len(stale) != 0 {
+		t.Errorf("findBuilder = %q, %v; want a current builder reused", id, stale)
 	}
 }
