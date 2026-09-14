@@ -157,6 +157,10 @@ func dispatchSubcommand() bool {
 	)
 	switch os.Args[1] {
 	case nbd.SubcommandName:
+		// Before the rename below, which applies to the thread it runs on:
+		// this may re-execute the process, and the rename must land in the
+		// runtime that stays.
+		becomeIOFlusher()
 		run, name = runNBDHandler, nbd.ProcessName
 	case uffd.SubcommandName:
 		run, name = runUffdHandler, uffd.ProcessName
