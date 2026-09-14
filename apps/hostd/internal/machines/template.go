@@ -1,8 +1,10 @@
 package machines
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -16,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sys/unix"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/block"
@@ -393,6 +396,39 @@ func (m *Manager) materializeBuild(ctx context.Context, id uuid.UUID) error {
 // loadTemplate reads a previously built template, checking that the builds it
 // names are actually still on disk.
 func (m *Manager) loadTemplate(v variant) (*Template, error) {
+	t, err := m.loadTemplateManifest(v)
+	if err != nil {
+		return nil, err
+	}
+	// A template derived from an artifact this host no longer ships is
+	// reported as no template, which rebuilds -- the same answer a page-size
+	// mismatch gets, for a weaker but more insidious reason. A wrong page size
+	// fails loudly at restore. A stale userspace WORKS: it boots, it serves,
+	// it execs, and it answers every request the way it did before whatever
+	// the new artifact added. Nothing is red and the change simply never
+	// reached a guest.
+	//
+	// A rebuild costs minutes, once, when the artifact actually changes.
+	// An unstamped manifest counts as a mismatch once this host knows its own
+	// artifact: it is either from before stamping or adopted from a row that
+	// named no image, and in both cases nothing says it matches. Replacing it
+	// costs one adopt or one build.
+	if want := m.rootfsID(v); want != "" && t.RootfsID != want {
+		return nil, fmt.Errorf("machines: template was derived from rootfs %s, "+
+			"this host ships %s: %w", shortID(t.RootfsID), shortID(want), errTemplateRootfs)
+	}
+	return t, nil
+}
+
+// loadTemplateManifest is loadTemplate without the artifact check: the
+// manifest, its builds on disk, and its page size.
+//
+// For a caller that already knows which builds it needs and only asks whether
+// this host's manifest names them -- a wake, whose machine is pinned to its
+// template. Judging the artifact there answered nothing the pin had not, and
+// it hashed both rootfs images on the first wake of every hostd process while
+// the request waited.
+func (m *Manager) loadTemplateManifest(v variant) (*Template, error) {
 	raw, err := os.ReadFile(filepath.Join(m.templateRoot(v), templateFile))
 	if err != nil {
 		return nil, err
@@ -422,23 +458,6 @@ func (m *Manager) loadTemplate(v variant) (*Template, error) {
 			"runs %d KiB: %w", t.PageSizeKiB, want, errTemplatePageSize)
 	}
 
-	// A template derived from an artifact this host no longer ships is
-	// reported as no template, which rebuilds -- the same answer a page-size
-	// mismatch gets, for a weaker but more insidious reason. A wrong page size
-	// fails loudly at restore. A stale userspace WORKS: it boots, it serves,
-	// it execs, and it answers every request the way it did before whatever
-	// the new artifact added. Nothing is red and the change simply never
-	// reached a guest.
-	//
-	// A rebuild costs minutes, once, when the artifact actually changes.
-	// An unstamped manifest counts as a mismatch once this host knows its own
-	// artifact: it is either from before stamping or adopted from a row that
-	// named no image, and in both cases nothing says it matches. Replacing it
-	// costs one adopt or one build.
-	if want := m.rootfsID(v); want != "" && t.RootfsID != want {
-		return nil, fmt.Errorf("machines: template was derived from rootfs %s, "+
-			"this host ships %s: %w", shortID(t.RootfsID), shortID(want), errTemplateRootfs)
-	}
 	return &t, nil
 }
 
@@ -493,11 +512,10 @@ func (m *Manager) rootfsID(v variant) string {
 		return ""
 	}
 	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
+	sum, err := contentID(f, info.Size())
+	if err != nil {
 		return ""
 	}
-	sum := hex.EncodeToString(h.Sum(nil))
 
 	m.rootfsIDMu.Lock()
 	if m.rootfsIDs == nil {
@@ -506,6 +524,94 @@ func (m *Manager) rootfsID(v variant) string {
 	m.rootfsIDs[key] = sum
 	m.rootfsIDMu.Unlock()
 	return sum
+}
+
+// contentID hashes an image by its non-zero blocks.
+//
+// A plain sha256 reads the APPARENT size, and a rootfs is sparse: the builder
+// image is 32 GiB of which 260 MiB is data. rootfsID runs on the first
+// template lookup of every hostd process, and the create or wake that made it
+// waited -- 3 s on a laptop with the image in the page cache, and a restart's
+// first wake of a webjs replica measured at 18 to 32 s without it. Holes read
+// as zeros, so seeking past them loses nothing, and all-zero blocks inside
+// data extents are skipped too: that makes the id depend only on content, not
+// on which zero ranges a filesystem happened to allocate, so two hosts with
+// the same bytes still agree.
+func contentID(f *os.File, size int64) (string, error) {
+	const blk = 4096
+	h := sha256.New()
+	buf := make([]byte, 1<<20)
+	var idx [8]byte
+	zero := make([]byte, blk)
+
+	hashRange := func(start, end int64) error {
+		for off := start &^ (blk - 1); off < end; {
+			n := min(int64(len(buf)), (end-off+blk-1)&^(blk-1))
+			got, err := f.ReadAt(buf[:n], off)
+			if err != nil && !errors.Is(err, io.EOF) {
+				return err
+			}
+			if got == 0 {
+				return nil
+			}
+			// A short read is the end of the file: pad its last block with
+			// the zeros a reader past EOF would see.
+			full := (got + blk - 1) &^ (blk - 1)
+			clear(buf[got:full])
+			for i := 0; i < full; i += blk {
+				b := buf[i : i+blk]
+				if bytes.Equal(b, zero) {
+					continue
+				}
+				binary.LittleEndian.PutUint64(idx[:], uint64((off+int64(i))/blk))
+				h.Write(idx[:])
+				h.Write(b)
+			}
+			if int64(got) < n {
+				return nil
+			}
+			off += n
+		}
+		return nil
+	}
+
+	fd := int(f.Fd())
+	for off := int64(0); off < size; {
+		data, err := unix.Seek(fd, off, unix.SEEK_DATA)
+		if err != nil {
+			if errors.Is(err, unix.ENXIO) {
+				break // no data past off: the rest is a hole
+			}
+			// No SEEK_DATA on this filesystem: read everything.
+			if err := hashRange(off, size); err != nil {
+				return "", err
+			}
+			break
+		}
+		hole, err := unix.Seek(fd, data, unix.SEEK_HOLE)
+		if err != nil {
+			hole = size
+		}
+		if err := hashRange(data, min(hole, size)); err != nil {
+			return "", err
+		}
+		off = hole
+	}
+	binary.LittleEndian.PutUint64(idx[:], uint64(size))
+	h.Write(idx[:])
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// WarmTemplateIDs computes each variant's artifact id ahead of the first
+// create or wake, which would otherwise wait for it. Called once, in the
+// background, as hostd starts.
+func (m *Manager) WarmTemplateIDs() {
+	for _, v := range []variant{variantGolden, variantBuilder} {
+		start := time.Now()
+		id := m.rootfsID(v)
+		slog.Info("rootfs artifact id ready", "variant", v, "id", shortID(id),
+			"ms", time.Since(start).Milliseconds())
+	}
 }
 
 // errTemplatePageSize marks a template this host cannot restore because it was
@@ -725,7 +831,7 @@ func (m *Manager) templateFor(ctx context.Context, row *state.Machine) (*Templat
 	// The host's own template, when it happens to be the same one. Saves
 	// materialising what is already on disk, which is the common case.
 	for _, v := range []variant{variantGolden, variantBuilder} {
-		if t, err := m.loadTemplate(v); err == nil &&
+		if t, err := m.loadTemplateManifest(v); err == nil &&
 			t.MemBuildID == memID && t.RootfsBuildID == rootfsID {
 			return t, nil
 		}

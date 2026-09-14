@@ -787,6 +787,10 @@ func run() error {
 		"addr", ln.Addr().String(), "host_id", cfg.HostID, "domain", cfg.WorkloadDomain,
 		"url", publicURL.Of(cfg.APIHostname))
 	notifyReady()
+	// The rootfs artifact ids, before a create or a wake has to wait for them:
+	// the first template lookup of a process reads both images. See
+	// machines.contentID.
+	go mgr.WarmTemplateIDs()
 	// After readiness, so a slow start is never mistaken for a wedged loop.
 	// From here on the pet is withheld whenever one of hostd's loops stops
 	// ticking, which is what turns a daemon that is up but doing nothing into

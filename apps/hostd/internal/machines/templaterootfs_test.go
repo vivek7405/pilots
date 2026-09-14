@@ -123,3 +123,60 @@ func TestAnUnstampedTemplateIsReplacedOnceTheArtifactIsKnown(t *testing.T) {
 		t.Errorf("loadTemplate = %v for a template stamped with this host's artifact", err)
 	}
 }
+
+// The id depends on content alone: a sparse file and a fully allocated one
+// holding the same bytes agree, and changing one byte changes it.
+func TestContentIDIgnoresHowZerosAreStored(t *testing.T) {
+	dir := t.TempDir()
+	const size = 64 << 20
+
+	sparse := filepath.Join(dir, "sparse")
+	f, err := os.Create(sparse)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(size); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte("superblock"), 1024); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte("a file"), 40<<20); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+
+	dense := filepath.Join(dir, "dense")
+	body := make([]byte, size)
+	copy(body[1024:], "superblock")
+	copy(body[40<<20:], "a file")
+	if err := os.WriteFile(dense, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	id := func(path string) string {
+		t.Helper()
+		f, err := os.Open(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		info, _ := f.Stat()
+		got, err := contentID(f, info.Size())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if a, b := id(sparse), id(dense); a != b {
+		t.Errorf("the same bytes stored sparse and dense hash differently: %s vs %s", a, b)
+	}
+
+	body[40<<20] = 'A'
+	if err := os.WriteFile(dense, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if id(sparse) == id(dense) {
+		t.Error("a changed byte did not change the id")
+	}
+}
