@@ -169,6 +169,9 @@ func TestServerSentEventsAreNotBufferedByThePortProxy(t *testing.T) {
 // The 502 path, so the streaming tests above cannot pass by accident against
 // a proxy that answers everything.
 func TestThePortProxyAnswers502WhenNothingIsListening(t *testing.T) {
+	// An application that was not just started: a crashed one is answered at
+	// once, not held for the start window.
+	appStartedAt.Store(0)
 	agent := httptest.NewServer(withPortProxy(http.NotFoundHandler()))
 	defer agent.Close()
 
@@ -182,5 +185,45 @@ func TestThePortProxyAnswers502WhenNothingIsListening(t *testing.T) {
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusBadGateway {
 		t.Fatalf("status = %d, want 502", res.StatusCode)
+	}
+}
+
+// An application started a moment ago is waited for rather than answered 502:
+// a request held across a redeploy or a cold boot reaches the agent before the
+// application listens.
+func TestThePortProxyWaitsForAnAppThatWasJustStarted(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+	ln.Close() // refused until the app "comes up"
+
+	markAppStarting()
+	t.Cleanup(func() { appStartedAt.Store(0) })
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		app := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusTeapot)
+		})}
+		l, err := net.Listen("tcp", "127.0.0.1:"+port)
+		if err != nil {
+			return
+		}
+		t.Cleanup(func() { app.Close() })
+		_ = app.Serve(l)
+	}()
+
+	agent := httptest.NewServer(withPortProxy(http.NotFoundHandler()))
+	defer agent.Close()
+	req, _ := http.NewRequest("GET", agent.URL+"/", nil)
+	req.Header.Set(headerProxyPort, port)
+	res, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusTeapot {
+		t.Fatalf("status = %d, want the app's own answer once it listened", res.StatusCode)
 	}
 }

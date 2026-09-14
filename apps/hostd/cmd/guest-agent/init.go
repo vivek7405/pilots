@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -13,6 +16,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
+	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -211,6 +217,7 @@ func applyInit(req initRequest) (initResponse, error) {
 
 	resp := initResponse{OK: true}
 	if req.StartApp {
+		markAppStarting()
 		resp.AppStarted, resp.AppReason = startApp()
 	}
 	return resp, nil
@@ -387,6 +394,7 @@ func proxyToLocalPort(w http.ResponseWriter, r *http.Request, port string) {
 	target := &url.URL{Scheme: "http", Host: "127.0.0.1:" + port}
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Transport = appTransport
 	proxy.Director = func(req *http.Request) {
 		req.URL.Scheme = target.Scheme
 		req.URL.Host = target.Host
@@ -429,4 +437,57 @@ func withoutNamesIn(saved, taken []processSpec) []processSpec {
 		out = append(out, s)
 	}
 	return out
+}
+
+// appStartedAt is when the application was last started on purpose: at
+// create, at a cold boot, at a redeploy, or by a process start. Zero before
+// the first.
+var appStartedAt atomic.Int64
+
+func markAppStarting() { appStartedAt.Store(time.Now().UnixNano()) }
+
+// How long after a start a refused connection is read as "not listening YET",
+// and how long one request waits for it.
+const (
+	appStartGrace  = 60 * time.Second
+	appListenWait  = 30 * time.Second
+	appListenRetry = 50 * time.Millisecond
+)
+
+// appTransport reaches the application, waiting for it to listen when it was
+// started a moment ago.
+//
+// A request held across a redeploy or a cold boot is sent the moment the
+// machine answers, and the machine answers before its application does. It was
+// answered 502 "no application listening" -- a request the router had held for
+// exactly this, turned into an error a few hundred milliseconds early. That
+// window was hidden while the router's first connect sat in a one-second SYN
+// retransmit, and opened when that was fixed. Retrying the local connect is
+// safe for any request: nothing of it has reached the application. An
+// application that was NOT just started is answered at once, so a crashed one
+// is still a prompt 502 rather than a request held for nothing.
+var appTransport = func() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		deadline := time.Now().Add(appListenWait)
+		for {
+			conn, err := dialer.DialContext(ctx, network, addr)
+			if err == nil || !errors.Is(err, syscall.ECONNREFUSED) || !appJustStarted() ||
+				time.Now().After(deadline) {
+				return conn, err
+			}
+			select {
+			case <-ctx.Done():
+				return nil, err
+			case <-time.After(appListenRetry):
+			}
+		}
+	}
+	return t
+}()
+
+func appJustStarted() bool {
+	at := appStartedAt.Load()
+	return at != 0 && time.Since(time.Unix(0, at)) < appStartGrace
 }

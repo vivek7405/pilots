@@ -157,6 +157,7 @@ func (s *supervisor) startAll(specs []processSpec) (bool, string) {
 
 // startOne starts or replaces one named process.
 func (s *supervisor) startOne(spec processSpec) (bool, string) {
+	markAppStarting()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
