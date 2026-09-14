@@ -456,3 +456,31 @@ func TestSetParentRejectsTheWrongTemplate(t *testing.T) {
 		t.Errorf("the correct parent was rejected: %v", err)
 	}
 }
+
+// The host that chunkified a build is the host most likely to restore it next:
+// a suspend chunkifies into the build dir, and the wake opens that same dir as
+// its cache. Without a completion marker from Chunkify the wake re-downloaded
+// every byte it had just written -- 308 MiB per wake of a webjs replica.
+func TestRemoteBuildServesItsOwnChunkifyWithoutFetching(t *testing.T) {
+	dir := t.TempDir()
+	store := newFakeStore()
+	ctx := context.Background()
+
+	in := writeBlocks(t, dir, 1, 2, 3)
+	id := uuid.New()
+	buildDir := filepath.Join(dir, "builds")
+	publish(t, store, filepath.Join(buildDir, id.String()), in, id, "")
+
+	b, err := OpenRemoteBuild(ctx, store, id, buildDir)
+	if err != nil {
+		t.Fatalf("OpenRemoteBuild: %v", err)
+	}
+	defer b.Close()
+	if err := b.Prefault(ctx); err != nil {
+		t.Fatalf("Prefault: %v", err)
+	}
+	readWhole(t, b)
+	if store.ranges != 0 {
+		t.Errorf("a wake on the host that chunkified the build fetched %d ranges; want 0", store.ranges)
+	}
+}
