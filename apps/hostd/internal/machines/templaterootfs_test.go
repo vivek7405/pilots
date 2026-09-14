@@ -1,11 +1,15 @@
 package machines
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/vivek7405/pilots/hostd/internal/fc"
+	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
 // rootfsManager is a manager whose golden artifact is a file the test controls.
@@ -77,21 +81,45 @@ func TestAnUnreadableRootfsJudgesNothing(t *testing.T) {
 	}
 }
 
-// An adopted template carries no artifact id and is left alone.
+// The fleet row a template is published to is keyed by the artifact.
 //
-// It was built on another host out of that host's ext4. Judging it against
-// this host's would discard a working template over a question nobody asked.
-func TestATemplateWithNoRootfsIDIsNotJudged(t *testing.T) {
-	m, _ := rootfsManager(t, "userspace v1")
+// The row carries no column naming its image, so a single row per vendor pool
+// let a rebuilt golden image adopt the template of the image before it, for
+// ever: nothing ever built a new one, and neither a new agent nor a fixed
+// template capture reached a machine. With the artifact in the id, a new image
+// looks up a row that does not exist and builds its own.
+func TestTheFleetTemplateRowIsKeyedByTheArtifact(t *testing.T) {
+	m, path := rootfsManager(t, "userspace v1")
+	m.opts.Vendor = "AuthenticAMD"
 
-	adopted := &Template{PageSizeKiB: m.pageSizeKiB()}
-	if adopted.RootfsID != "" {
-		t.Fatal("an adopted template should carry no rootfs id")
+	first := m.templateRowID(variantGolden)
+	if first == state.GoldenTemplateFor("AuthenticAMD") {
+		t.Fatalf("row id %q names no artifact; a new image would adopt this one", first)
 	}
-	// The check the loader applies, spelled out: a template with no id is
-	// never a mismatch, whatever this host's artifact hashes to.
-	want := m.rootfsID(variantGolden)
-	if want != "" && adopted.RootfsID != "" && adopted.RootfsID != want {
-		t.Fatal("a template with no rootfs id was judged a mismatch")
+	if err := os.WriteFile(path, []byte("userspace v2"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if second := m.templateRowID(variantGolden); second == first {
+		t.Errorf("a new rootfs publishes to the same row %q as the old one", first)
+	}
+}
+
+// A manifest that names no artifact is not trusted once the host knows its
+// own: it was adopted from a row that named no image, or written before
+// stamping, and nothing says it matches what this host ships.
+func TestAnUnstampedTemplateIsReplacedOnceTheArtifactIsKnown(t *testing.T) {
+	m, _ := rootfsManager(t, "userspace v1")
+	unstamped := &Template{MemBuildID: uuid.New(), RootfsBuildID: uuid.New(), PageSizeKiB: m.pageSizeKiB()}
+	writeTemplate(t, m, unstamped)
+	if _, err := m.loadTemplate(variantGolden); !errors.Is(err, errTemplateRootfs) {
+		t.Errorf("loadTemplate = %v; an unstamped template was believed", err)
+	}
+
+	// And one stamped with this host's artifact is still served.
+	stamped := *unstamped
+	stamped.RootfsID = m.rootfsID(variantGolden)
+	writeTemplate(t, m, &stamped)
+	if _, err := m.loadTemplate(variantGolden); err != nil {
+		t.Errorf("loadTemplate = %v for a template stamped with this host's artifact", err)
 	}
 }

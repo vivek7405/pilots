@@ -134,12 +134,12 @@ func callersOf(t *testing.T, name string) []string {
 // is a path that burns a slot per wake -- #64 arriving again, with the name of
 // whoever added it.
 //
-// captureTemplateMemory is the sanctioned exception: the throwaway machine a
+// captureTemplate is the sanctioned exception: the throwaway machine a
 // golden template is photographed from has no row, so it has no reservation to
 // reuse, and it returns its index on the way out.
 func TestEveryBringUpGetsItsSlotThroughTakeSlot(t *testing.T) {
 	got := callersOf(t, "Take")
-	want := []string{"captureTemplateMemory", "takeSlot"}
+	want := []string{"captureTemplate", "takeSlot"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("pool.Take is called from %v, want exactly %v: a bring-up that "+
 			"takes its own index cannot consume the reservation a suspended "+

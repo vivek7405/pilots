@@ -115,12 +115,27 @@ func (m *Manager) templateRoot(v variant) string {
 	return filepath.Join(m.opts.CacheRoot, "template-"+string(v))
 }
 
-// templateRowID is the fleet row a variant publishes to, one per vendor pool.
+// templateRowID is the fleet row a variant publishes to: one per vendor pool
+// AND per rootfs artifact.
+//
+// Per artifact because the row has no column saying which image a template
+// was derived from, and adoption believed whatever row it found. Once a fleet
+// had a template, a rebuilt golden image never produced another: every host
+// adopted the old row, stamped nothing, and loadTemplate's artifact check had
+// nothing to compare. The new guest agent, and the fix for a template whose
+// memory and disk disagreed, never reached a machine. A column cannot be
+// added to a table that has rows (hard rule 6), and it does not need to be:
+// the artifact goes in the id, so a new image looks up a row that does not
+// exist yet and builds one, while hosts still on the old image keep theirs.
 func (m *Manager) templateRowID(v variant) string {
+	base := state.BuilderTemplateFor(m.opts.Vendor)
 	if v == variantGolden {
-		return state.GoldenTemplateFor(m.opts.Vendor)
+		base = state.GoldenTemplateFor(m.opts.Vendor)
 	}
-	return state.BuilderTemplateFor(m.opts.Vendor)
+	if id := m.rootfsID(v); len(id) >= 16 {
+		return base + "-" + id[:16]
+	}
+	return base
 }
 
 // variantRootfs is the ext4 a variant's disk half is chunkified from.
@@ -316,6 +331,9 @@ func (m *Manager) adoptFleetTemplate(ctx context.Context, v variant) (*Template,
 		SnapKey:     row.SnapKey,
 		CreatedAt:   row.CreatedAt,
 		PageSizeKiB: m.pageSizeKiB(),
+		// The row id is keyed by this host's artifact (templateRowID), so
+		// finding it at all says the template was derived from that artifact.
+		RootfsID: m.rootfsID(v),
 	}
 	if t.MemBuildID, err = uuid.Parse(row.MemBuildID); err != nil {
 		return nil, fmt.Errorf("machines: fleet template has an unusable memory build %q: %w",
@@ -413,7 +431,11 @@ func (m *Manager) loadTemplate(v variant) (*Template, error) {
 	// reached a guest.
 	//
 	// A rebuild costs minutes, once, when the artifact actually changes.
-	if want := m.rootfsID(v); want != "" && t.RootfsID != "" && t.RootfsID != want {
+	// An unstamped manifest counts as a mismatch once this host knows its own
+	// artifact: it is either from before stamping or adopted from a row that
+	// named no image, and in both cases nothing says it matches. Replacing it
+	// costs one adopt or one build.
+	if want := m.rootfsID(v); want != "" && t.RootfsID != want {
 		return nil, fmt.Errorf("machines: template was derived from rootfs %s, "+
 			"this host ships %s: %w", shortID(t.RootfsID), shortID(want), errTemplateRootfs)
 	}
@@ -539,30 +561,35 @@ func (m *Manager) buildTemplate(ctx context.Context, v variant) (*Template, erro
 		RootfsID: m.rootfsID(v),
 	}
 
-	// The disk template needs no VM at all: it is the variant's rootfs, chunked.
-	rootfsBuild := uuid.New()
-	if _, _, err := block.Chunkify(ctx, block.ChunkifyOpts{
-		In:      m.variantRootfs(v),
-		OutDir:  filepath.Join(m.buildDir(), rootfsBuild.String()),
-		BuildID: rootfsBuild,
-	}); err != nil {
-		return nil, fmt.Errorf("machines: chunkify the %s rootfs: %w", v, err)
+	// Checked before a slot, a namespace and a boot are spent on it: a host
+	// with no image for this variant fails here, saying which file.
+	if _, err := os.Stat(m.variantRootfs(v)); err != nil {
+		return nil, fmt.Errorf("machines: the %s rootfs: %w", v, err)
 	}
-	if err := m.uploadBuild(ctx, rootfsBuild); err != nil {
-		return nil, err
-	}
-	t.RootfsBuildID = rootfsBuild
-
-	memBuild, err := m.captureTemplateMemory(ctx, v, t.SnapKey)
+	memBuild, rootfsBuild, err := m.captureTemplate(ctx, v, t.SnapKey)
 	if err != nil {
 		return nil, err
 	}
 	t.MemBuildID = memBuild
+	t.RootfsBuildID = rootfsBuild
 	return t, nil
 }
 
-// captureTemplateMemory boots a throwaway machine and chunkifies its memory.
-func (m *Manager) captureTemplateMemory(ctx context.Context, v variant, snapKey string) (uuid.UUID, error) {
+// captureTemplate boots a throwaway machine and chunkifies its memory AND the
+// disk it booted on, both from the same pause.
+//
+// The disk used to be the variant's rootfs chunked before the machine ever
+// booted, on the reasoning that a guest which has only just booted has written
+// nothing worth keeping. It had written plenty: systemd-journald creates
+// /var/log/journal and its files during boot, and the memory image holds the
+// inodes and directory blocks for them. Paired with the pristine disk, every
+// machine created from the template carried caches naming blocks its disk did
+// not have. Nothing showed until the guest evicted those caches and read the
+// blocks back -- `ls /var/log/journal` answering "Structure needs cleaning" in
+// a brand-new sandbox after a drop_caches, and a 4 GiB builder under build
+// pressure logging "Directory block failed checksum" and failing BuildKit
+// reads with EBADMSG.
+func (m *Manager) captureTemplate(ctx context.Context, v variant, snapKey string) (uuid.UUID, uuid.UUID, error) {
 	row := &state.Machine{
 		// The prefix matters: it is how Manager.token knows this guest still
 		// carries the golden rootfs's placeholder credential.
@@ -574,16 +601,16 @@ func (m *Manager) captureTemplateMemory(ctx context.Context, v variant, snapKey 
 
 	slot, err := m.pool.Take(row.ID)
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, uuid.Nil, err
 	}
 	defer m.pool.Return(slot.Idx)
 
 	mac, err := fc.GenerateMAC()
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, uuid.Nil, err
 	}
 	if err := netns.Setup(slot, mac, m.opts.FCConfig.JailUID); err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, uuid.Nil, err
 	}
 
 	// The variant's own rootfs, not the host's default. Without this the
@@ -595,12 +622,12 @@ func (m *Manager) captureTemplateMemory(ctx context.Context, v variant, snapKey 
 	fcm, err := fc.Boot(ctx, fcCfg)
 	if err != nil {
 		_ = netns.Teardown(slot)
-		return uuid.Nil, fmt.Errorf("machines: boot the template machine: %w", err)
+		return uuid.Nil, uuid.Nil, fmt.Errorf("machines: boot the template machine: %w", err)
 	}
 	defer func() { _ = fcm.Kill() }()
 
 	if err := waitForAgent(ctx, slot.AgentAddr(), 60*time.Second); err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, uuid.Nil, err
 	}
 	// Let systemd finish converging. Snapshotting a guest mid-transition
 	// produces a template that restores into a machine which never finishes
@@ -608,7 +635,7 @@ func (m *Manager) captureTemplateMemory(ctx context.Context, v variant, snapKey 
 	select {
 	case <-time.After(settleTime):
 	case <-ctx.Done():
-		return uuid.Nil, ctx.Err()
+		return uuid.Nil, uuid.Nil, ctx.Err()
 	}
 
 	// Flush before the capture, or the memory image holds writes the disk
@@ -618,15 +645,31 @@ func (m *Manager) captureTemplateMemory(ctx context.Context, v variant, snapKey 
 
 	snapshot, err := fcm.CaptureTemplate(ctx, fc.SnapshotOpts{BuildDir: m.buildDir()})
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, uuid.Nil, err
+	}
+
+	// The disk the guest booted on, read while it is still paused, so it is
+	// the disk the memory image just described. Self-contained, with no
+	// parent: it IS the base every machine's disk is diffed against.
+	rootfsBuild := uuid.New()
+	if _, _, err := block.Chunkify(ctx, block.ChunkifyOpts{
+		In:      filepath.Join(fcm.ChrootDir, fc.BakedRootfsPath),
+		OutDir:  filepath.Join(m.buildDir(), rootfsBuild.String()),
+		BuildID: rootfsBuild,
+	}); err != nil {
+		return uuid.Nil, uuid.Nil, fmt.Errorf("machines: chunkify the %s template's booted disk: %w", v, err)
+	}
+
+	if err := m.uploadBuild(ctx, rootfsBuild); err != nil {
+		return uuid.Nil, uuid.Nil, err
 	}
 	if err := m.uploadBuild(ctx, snapshot.MemBuildID); err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, uuid.Nil, err
 	}
 	if err := m.opts.Uploader.PutFile(ctx, snapKey, snapshot.SnapPath); err != nil {
-		return uuid.Nil, fmt.Errorf("machines: upload the template vmstate: %w", err)
+		return uuid.Nil, uuid.Nil, fmt.Errorf("machines: upload the template vmstate: %w", err)
 	}
-	return snapshot.MemBuildID, nil
+	return snapshot.MemBuildID, rootfsBuild, nil
 }
 
 // execSync flushes the guest's page cache. Best effort, like the suspend path:
