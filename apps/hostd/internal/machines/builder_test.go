@@ -3,8 +3,11 @@ package machines
 import (
 	"context"
 	"net"
+	"reflect"
 	"testing"
 	"time"
+
+	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
 // A running machine is not the same as a daemon accepting connections. Without
@@ -44,6 +47,51 @@ func TestWaitForBuildkitGivesUp(t *testing.T) {
 	}
 	if time.Since(start) > 5*time.Second {
 		t.Fatalf("the wait overran its timeout by too much: %v", time.Since(start))
+	}
+}
+
+// A failed create leaves a builder row in the error state with no image to
+// start from. Reusing it failed every later build on "no usable memory build";
+// it has to be reported for replacement instead, while a healthy builder is
+// still reused and other hosts' rows are never touched.
+func TestFindBuilderReplacesAFailedCreate(t *testing.T) {
+	m, st := storeManager(t)
+	ctx := t.Context()
+	const name = "builder-org-host-a"
+	for _, row := range []state.Machine{
+		{ID: "m_failed", Name: name, HostID: "host-a", State: StateError},
+		{ID: "m_elsewhere", Name: name, HostID: "host-b", State: StateError},
+		{ID: "m_other_org", Name: "builder-other-host-a", HostID: "host-a", State: StateError},
+	} {
+		if err := st.PutMachine(ctx, &row); err != nil {
+			t.Fatalf("PutMachine %s: %v", row.ID, err)
+		}
+	}
+
+	id, stale, err := m.findBuilder(ctx, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "" {
+		t.Errorf("reused %q, a builder that can never start", id)
+	}
+	if !reflect.DeepEqual(stale, []string{"m_failed"}) {
+		t.Errorf("stale = %v, want only this host's failed row for this name", stale)
+	}
+
+	healthy := state.Machine{ID: "m_ok", Name: name, HostID: "host-a", State: StateSuspended}
+	if err := st.PutMachine(ctx, &healthy); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteMachine(ctx, "m_failed"); err != nil {
+		t.Fatal(err)
+	}
+	id, stale, err = m.findBuilder(ctx, name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "m_ok" || len(stale) != 0 {
+		t.Errorf("findBuilder = %q, %v; want the suspended builder and nothing to clear", id, stale)
 	}
 }
 
