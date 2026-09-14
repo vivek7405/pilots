@@ -89,6 +89,7 @@ func Run(ctx context.Context, cfg Config, store block.ObjectStore) error {
 		return err
 	}
 	defer rec.Close()
+	rec.seed(parsePrefetch(prefetch))
 
 	var stats Stats
 

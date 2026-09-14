@@ -94,10 +94,29 @@ func diffEntries(src block.Slicer, pageSize uint64) ([]entry, int) {
 	return out, dropped
 }
 
-// recorder appends the fault order to a file, for the next wake to replay.
+// prefetchRecordCap bounds how many pages a recorded fault order may carry.
+//
+// The order is carried forward from wake to wake (see recorder), so without a
+// bound a machine that touches a new page now and then grows its list for
+// ever, and every wake replays pages it stopped needing long ago. 32768 pages
+// is 128 MiB at 4 KiB: comfortably above the ~14k-page working set a webjs
+// replica resumes into, and a quarter of the default machine.
+const prefetchRecordCap = 1 << 15
+
+// recorder writes the fault order for the next wake to replay.
+//
+// It is SEEDED with the order this wake replayed, and only then appends the
+// pages the guest faulted on demand. Recording demand faults alone looks
+// equivalent and is not: a page the replay installed never faults, so it
+// dropped out of the next list, that wake demand-faulted it again, and the
+// list alternated between two halves of the working set for as long as the
+// machine lived. Measured on a webjs replica: 6023 pages replayed and 7839
+// faulted on demand at ~115 microseconds each, every wake, with the app
+// answering only once the faults tapered off 1.2 s in.
 type recorder struct {
 	mu   sync.Mutex
 	file *os.File
+	seen map[int64]struct{}
 }
 
 // newRecorder creates the capture file. A nil path disables recording.
@@ -112,7 +131,26 @@ func newRecorder(path string) (*recorder, error) {
 	if err != nil {
 		return nil, fmt.Errorf("uffd: create prefetch capture: %w", err)
 	}
-	return &recorder{file: f}, nil
+	return &recorder{file: f, seen: make(map[int64]struct{})}, nil
+}
+
+// seed writes the order being replayed as the head of the new recording, in
+// its own order and without duplicates, so the next wake replays it again
+// plus whatever this one had to fault in.
+func (r *recorder) seed(entries []entry) {
+	if r == nil || r.file == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	w := bufio.NewWriter(r.file)
+	for _, e := range entries {
+		if !r.admit(e.off) {
+			continue
+		}
+		fmt.Fprintf(w, "%d %d\n", e.off, e.length)
+	}
+	_ = w.Flush()
 }
 
 func (r *recorder) record(off, length int64) {
@@ -121,7 +159,20 @@ func (r *recorder) record(off, length int64) {
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if !r.admit(off) {
+		return
+	}
 	fmt.Fprintf(r.file, "%d %d\n", off, length)
+}
+
+// admit reports whether a page belongs in the recording, and remembers it if
+// so: not already in it, and the list not yet at its cap. Called with mu held.
+func (r *recorder) admit(off int64) bool {
+	if _, dup := r.seen[off]; dup || len(r.seen) >= prefetchRecordCap {
+		return false
+	}
+	r.seen[off] = struct{}{}
+	return true
 }
 
 func (r *recorder) Close() error {

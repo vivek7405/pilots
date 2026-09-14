@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/google/uuid"
@@ -462,5 +463,50 @@ func TestPrefaultDoesNotReplayADiffPageTheRecordedOrderCarries(t *testing.T) {
 	}
 	if kept := withoutRecorded(extra, nil); len(kept) != len(extra) {
 		t.Errorf("with nothing recorded, %d of %d extras survived", len(kept), len(extra))
+	}
+}
+
+// A page the replay installed never faults, so a recording of demand faults
+// alone forgets it, and the next wake faults it on demand again. The new
+// recording must carry the replayed order forward, then what faulted.
+func TestRecordingCarriesTheReplayedOrderForward(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prefetch.txt")
+	rec, err := newRecorder(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.seed([]entry{{off: 4096, length: 4096}, {off: 0, length: 4096}, {off: 4096, length: 4096}})
+	rec.record(8192, 4096) // faulted on demand this wake
+	rec.record(0, 4096)    // already carried
+	if err := rec.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	got := parsePrefetch(readPrefetch(path))
+	want := []entry{{off: 4096, length: 4096}, {off: 0, length: 4096}, {off: 8192, length: 4096}}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("recorded %v, want the replayed order deduplicated then the new fault: %v", got, want)
+	}
+}
+
+// And it stops growing at its cap, keeping the head: the earliest pages are
+// the ones a resume needs first.
+func TestRecordingIsCapped(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "prefetch.txt")
+	rec, err := newRecorder(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seed := make([]entry, prefetchRecordCap)
+	for i := range seed {
+		seed[i] = entry{off: int64(i) * 4096, length: 4096}
+	}
+	rec.seed(seed)
+	rec.record(int64(prefetchRecordCap)*4096, 4096)
+	rec.Close()
+
+	got := parsePrefetch(readPrefetch(path))
+	if len(got) != prefetchRecordCap || got[0].off != 0 {
+		t.Errorf("recorded %d entries starting at %d; want %d starting at 0", len(got), got[0].off, prefetchRecordCap)
 	}
 }
