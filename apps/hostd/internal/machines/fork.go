@@ -5,11 +5,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/vivek7405/pilots/hostd/internal/volumes"
 )
 
 // Making a new machine out of an existing one's exact state.
@@ -95,11 +97,16 @@ func (m *Manager) Fork(ctx context.Context, req api.ForkOptions) ([]api.ForkOutc
 			// the same way silently.
 			return nil, errNeedsVolumeFlag(source.ParentID)
 		}
-		stamp, err := m.SnapshotVolume(ctx, source.VolumeID)
-		if err != nil {
-			return nil, fmt.Errorf("machines: snapshot %s to fork it: %w", source.VolumeID, err)
+		// A running parent's volume was already photographed with its memory,
+		// in resolveForkSource. What is left is a SUSPENDED parent, whose
+		// volume cannot have moved since the suspend image was taken.
+		if source.VolumeSnapshot == "" {
+			stamp, err := m.SnapshotVolume(ctx, source.VolumeID)
+			if err != nil {
+				return nil, fmt.Errorf("machines: snapshot %s to fork it: %w", source.VolumeID, err)
+			}
+			source.VolumeSnapshot = stamp
 		}
-		source.VolumeSnapshot = stamp
 	}
 
 	// In parallel, because the expensive part of each is a restore and they do
@@ -168,6 +175,17 @@ func (m *Manager) resolveForkSource(ctx context.Context, req api.ForkOptions) (*
 			return nil, fmt.Errorf("machines: the machine checkpoint %s came from: %w",
 				req.Checkpoint, err)
 		}
+		if row.VolumeID != "" {
+			// A checkpoint photographs memory and the root disk, not the volume,
+			// so there is no volume image from that moment to give a fork. The
+			// volume as it is NOW has moved on, and pairing it with the
+			// checkpoint's memory is a guest whose cached filesystem describes
+			// another disk: it mounts, then fails somewhere later.
+			return nil, fmt.Errorf("%w: %s is a checkpoint of %s, which has a volume, and a "+
+				"checkpoint holds no image of the volume from that moment; fork the machine "+
+				"itself, which photographs its memory and its volume together",
+				api.ErrConflict, req.Checkpoint, ck.MachineID)
+		}
 		return &forkSource{
 			ParentID: ck.MachineID, CheckpointID: ck.ID,
 			MemBuildID: ck.MemBuildID, RootfsBuildID: ck.RootfsBuildID,
@@ -199,8 +217,25 @@ func (m *Manager) resolveForkSource(ctx context.Context, req api.ForkOptions) (*
 		// would deadlock on the very path this feature exists for. The
 		// checkpoint IS the consistency guarantee: it names a fixed pair of
 		// artifacts that a later suspend cannot move.
+		// With a volume, the volume is photographed INSIDE the same pause as the
+		// memory. Snapshotting it afterwards, as Fork did, took it while the
+		// guest kept writing: memory from one instant and a volume from a later
+		// one. The guest is paused here, the volume cloned, and the checkpoint
+		// taken while it is still paused -- its own pause finds the guest
+		// already stopped, and its resume is the only one.
+		volumeStamp := ""
+		if row.VolumeID != "" {
+			stamp, err := m.snapshotVolumeForFork(ctx, row)
+			if err != nil {
+				return nil, fmt.Errorf("machines: snapshot %s's volume to fork it: %w", req.Machine, err)
+			}
+			volumeStamp = stamp
+		}
 		ck, err := m.Checkpoint(ctx, req.Machine, "fork")
 		if err != nil {
+			if volumeStamp != "" {
+				m.resumeAfterForkSnapshot(ctx, req.Machine)
+			}
 			return nil, fmt.Errorf("machines: checkpoint %s to fork it: %w", req.Machine, err)
 		}
 		// Checkpoint returns as soon as the artifacts are STAGED; the upload
@@ -225,6 +260,7 @@ func (m *Manager) resolveForkSource(ctx context.Context, req api.ForkOptions) (*
 			SnapKey:     checkpointSnapKey(req.Machine, ck.ID),
 			TemplateMem: fresh.TemplateMemBuildID, TemplateRootfs: fresh.TemplateRootfsBuildID,
 			VCPUs: fresh.VCPUs, MemMiB: fresh.MemMiB, App: fresh.App, VolumeID: fresh.VolumeID,
+			VolumeSnapshot: volumeStamp,
 		}, nil
 
 	case StateSuspended:
@@ -429,4 +465,58 @@ func (m *Manager) Lineage(ctx context.Context, machineID string) *state.Lineage 
 		return nil
 	}
 	return l
+}
+
+// snapshotVolumeForFork pauses a running machine, flushes its volume image and
+// clones it, and returns the stamp with the guest LEFT PAUSED: the checkpoint
+// that follows photographs the same instant and resumes it.
+//
+// The flush is not optional. The volume drive writes through the host's page
+// cache for the image file, so a write the guest has completed can still be
+// only there, and a clone of the file would not have it while the memory image
+// believes it happened.
+func (m *Manager) snapshotVolumeForFork(ctx context.Context, row *state.Machine) (string, error) {
+	if m.opts.Volumes == nil {
+		return "", ErrNoVolumes
+	}
+	fcm, ok := m.get(row.ID)
+	if !ok {
+		return "", fmt.Errorf("machines: %s is not running here: %w", row.ID, ErrNotFound)
+	}
+	if err := fcm.Client.Pause(ctx); err != nil {
+		return "", fmt.Errorf("pause: %w", err)
+	}
+	stamp := volumes.SnapshotStamp(time.Now())
+	err := syncFile(m.opts.Volumes.ImagePath(row.VolumeID))
+	if err == nil {
+		err = m.opts.Volumes.Snapshot(ctx, row.VolumeID, stamp)
+	}
+	if err != nil {
+		m.resumeAfterForkSnapshot(ctx, row.ID)
+		return "", err
+	}
+	return stamp, nil
+}
+
+// resumeAfterForkSnapshot undoes snapshotVolumeForFork's pause when the fork
+// does not go on to take its checkpoint.
+func (m *Manager) resumeAfterForkSnapshot(ctx context.Context, id string) {
+	fcm, ok := m.get(id)
+	if !ok {
+		return
+	}
+	if err := fcm.Client.Resume(context.WithoutCancel(ctx)); err != nil {
+		slog.Error("a fork left its parent paused and could not resume it",
+			"machine", id, "err", err)
+	}
+}
+
+// syncFile flushes a file's page cache to its filesystem and waits.
+func syncFile(path string) error {
+	f, err := os.OpenFile(path, os.O_RDONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
 }

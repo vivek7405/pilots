@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -71,5 +72,25 @@ func TestOffersFromOlderHostsStillResume(t *testing.T) {
 	}
 	if !takeResumes(newID(handoffRunningPrefix)) || takeResumes(newID(handoffSuspendedPrefix)) {
 		t.Error("the running and suspended markers are read the wrong way round")
+	}
+}
+
+// A checkpoint holds memory and the root disk, not the volume, so a fork of a
+// checkpoint of a volume-backed machine would pair that memory with the
+// volume as it is now. Refused, rather than a fork that mounts and fails later.
+func TestForkingACheckpointOfAVolumeMachineIsRefused(t *testing.T) {
+	m, st := storeManager(t)
+	ctx := t.Context()
+	if err := st.PutMachine(ctx, &state.Machine{ID: "m_db", Name: "db", HostID: "host-a",
+		State: StateRunning, VolumeID: "vol_1", VCPUs: 1, MemMiB: 512}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutCheckpoint(ctx, &state.Checkpoint{ID: "ck-1", MachineID: "m_db", Seq: 1,
+		MemBuildID: "mem", CreatedAt: 1}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := m.Fork(ctx, api.ForkOptions{Checkpoint: "ck-1", Volume: true})
+	if !errors.Is(err, api.ErrConflict) {
+		t.Fatalf("Fork = %v, want ErrConflict", err)
 	}
 }
