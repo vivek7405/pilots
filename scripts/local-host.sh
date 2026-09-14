@@ -184,17 +184,43 @@ if [ ! -f "$GOLDEN_SRC" ]; then
   exit 1
 fi
 
-# Two gigabytes, so it is compared before it is copied, exactly as
-# host-bootstrap.sh compares before it scps. --reflink=auto makes the copy
-# instant on btrfs or xfs and a plain copy anywhere else.
-want="$(sha256sum "$GOLDEN_SRC" | cut -d' ' -f1)"
-have="$(sha256sum "$GOLDEN_DST" 2>/dev/null | cut -d' ' -f1 || true)"
-if [ "$want" = "$have" ]; then
-  echo "==> golden rootfs already in place at $GOLDEN_DST"
-else
-  echo "==> copying the golden rootfs (2 GiB) to $GOLDEN_DST"
-  cp --reflink=auto --sparse=always "$GOLDEN_SRC" "$GOLDEN_DST"
-fi
+# install_image SRC DST NAME: put SRC at DST, and hash nothing when nothing
+# changed.
+#
+# A stamp beside DST records the source's identity (device, inode, size, mtime)
+# and sha256 at the moment of the last successful copy, so a restart compares
+# a small file instead of re-deriving the answer -- the same shape as the layer
+# cache's .epoch file. Hashing was the old check, and sha256sum reads a sparse
+# file's APPARENT size: builder.ext4 is 32 GiB of mostly holes, so every start
+# read 64 GiB of zeros plus 6 GiB of golden before hostd was even exec'd, and
+# the script sat silent for minutes looking hung.
+#
+# A rebuilt image is a new file or a rewritten one, which moves its mtime, so
+# it is still detected. The stamp is removed BEFORE the copy and written only
+# after it succeeds: an interrupted copy leaves no stamp, and the next start
+# copies again rather than trusting a half-written file. Sets IMAGE_SHA to the
+# source's sha256 for the pin check below.
+install_image() {
+  local src="$1" dst="$2" name="$3" stamp="$2.stamp" ident
+  ident="$(stat -L -c '%d:%i:%s:%Y' "$src"):$(readlink -f "$src")"
+  if [ -f "$dst" ] && [ -f "$stamp" ] &&
+     [ "$(sed -n 1p "$stamp")" = "$ident" ] &&
+     [ "$(sed -n 3p "$stamp")" = "$(stat -c '%s:%Y' "$dst")" ]; then
+    IMAGE_SHA="$(sed -n 2p "$stamp")"
+    echo "==> $name rootfs already in place at $dst"
+    return
+  fi
+  rm -f "$stamp"
+  echo "==> hashing the $name rootfs, then copying it (sparse) to $dst"
+  IMAGE_SHA="$(sha256sum "$src" | cut -d' ' -f1)"
+  cp --reflink=auto --sparse=always "$src" "$dst"
+  printf '%s\n%s\n%s\n' "$ident" "$IMAGE_SHA" "$(stat -c '%s:%Y' "$dst")" >"$stamp"
+}
+
+# --reflink=auto makes the copy instant on btrfs or xfs and a plain copy
+# anywhere else.
+install_image "$GOLDEN_SRC" "$GOLDEN_DST" golden
+GOLDEN_SHA="$IMAGE_SHA"
 
 # The builder image, which is where a Dockerfile actually runs. Optional on a
 # laptop: without it every other path works and only builds refuse, which is a
@@ -202,19 +228,17 @@ fi
 if [ ! -f "$BUILDER_SRC" ]; then
   echo "==> no builder rootfs at $BUILDER_SRC; this host will refuse builds"
   echo "    build one with: VARIANT=builder scripts/build-golden-rootfs.sh"
-elif [ "$(sha256sum "$BUILDER_SRC" | cut -d' ' -f1)" = "$(sha256sum "$BUILDER_DST" 2>/dev/null | cut -d' ' -f1 || true)" ]; then
-  echo "==> builder rootfs already in place at $BUILDER_DST"
 else
-  echo "==> copying the builder rootfs (sparse) to $BUILDER_DST"
-  cp --reflink=auto --sparse=always "$BUILDER_SRC" "$BUILDER_DST"
+  install_image "$BUILDER_SRC" "$BUILDER_DST" builder
 fi
 
 # A local image is by definition built from this tree, so a difference from
 # the COMMITTED pin is expected and is a warning, not the refusal production
 # makes. What matters locally is that the guest agent inside the image is the
-# one this tree builds, and there is a test for exactly that.
-if [ -f "$REPO/scripts/rootfs/golden.ext4.sha256" ] &&
-   ! ( cd "$REPO" && sha256sum -c scripts/rootfs/golden.ext4.sha256 >/dev/null 2>&1 ); then
+# one this tree builds, and there is a test for exactly that. Compared against
+# the hash install_image already holds, so this reads no image either.
+pin="$REPO/scripts/rootfs/golden.ext4.sha256"
+if [ -f "$pin" ] && [ "$(cut -d' ' -f1 "$pin")" != "$GOLDEN_SHA" ]; then
   echo "    note: this image differs from the committed pin, which is normal for" >&2
   echo "    a locally built one. The check that matters here is:" >&2
   echo "      (cd apps/hostd && go test ./internal/build -run TestGoldenRootfsCarriesThisAgent)" >&2

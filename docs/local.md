@@ -223,8 +223,16 @@ sudo scripts/local-host.sh   # foreground, in a second shell
 It loads the `nbd` module if it is not loaded (a machine's disk is served over
 NBD, and a desktop kernel has the module built but not loaded — without it a
 create dies with "no network block devices exist" thirty seconds in), copies the
-golden image into `/var/lib/pilots/templates/` by reflink when its hash differs,
-writes `/etc/pilots/config` if there is none, and `exec`s hostd.
+golden and builder images into `/var/lib/pilots/templates/` by reflink when the
+source changed, writes `/etc/pilots/config` if there is none, and `exec`s hostd.
+
+"Changed" is decided by a `.stamp` beside each installed image, holding the
+source's inode, size and mtime plus its sha256 from the last copy. A restart
+with unchanged images reads the stamps and hashes nothing; a rebuilt image moves
+its mtime and is hashed and copied again. Delete the stamp to force a copy.
+Hashing on every start was the old check, and `sha256sum` reads a sparse file's
+apparent size, so the 32 GiB builder image alone kept the script silent for
+minutes before hostd was even started.
 
 It needs root for three things a user namespace cannot fake: the jailer, which
 is passed `--uid`, `--gid`, `--chroot-base-dir` and `--netns` and then
