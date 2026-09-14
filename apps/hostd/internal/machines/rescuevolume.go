@@ -108,6 +108,12 @@ func (m *Manager) RescueOnVolume(ctx context.Context, row state.Machine) error {
 	if err := m.opts.Store.PutMachine(ctx, fresh); err != nil {
 		return fmt.Errorf("machines: record %s as running here: %w", row.ID, err)
 	}
+	// Metered here from the running write, as Rescue does. Without it a
+	// database brought back onto a survivor ran with no interval open on this
+	// host, and every later Transition was a no-op, so its vCPU, memory and
+	// volume went unbilled until hostd next restarted.
+	m.opts.Usage.Open(fresh.ID, m.orgOf(ctx, fresh.ID), StateRunning, fresh.VCPUs,
+		fresh.MemMiB, m.volumeGiB(ctx, fresh.VolumeID))
 	// A cold boot, recorded as one, so a client can tell this machine came back
 	// without the processes it was running rather than discovering it from
 	// behaviour. The dead owner's claim carries, because the CPU row belongs to

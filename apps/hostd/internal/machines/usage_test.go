@@ -28,7 +28,7 @@ import (
 func TestEveryLifecycleWriteHasItsLedgerHook(t *testing.T) {
 	got := ledgerHooks(t)
 	want := map[string][]string{
-		"Open":       {"Create", "Rescue", "Resize", "Take", "Take"},
+		"Open":       {"Create", "Rescue", "RescueOnVolume", "Resize", "Take", "Take"},
 		"Transition": {"Redeploy", "Redeploy", "Redeploy", "Resize", "Resize", "RestoreCheckpoint", "RestoreCheckpoint", "Suspend", "Wake", "Wake", "settleExit"},
 		"Close":      {"Destroy", "StopLocal"},
 	}
@@ -45,6 +45,9 @@ func TestEveryLifecycleWriteHasItsLedgerHook(t *testing.T) {
 	// boot that failed, running on one that worked. settleExit carries one:
 	// error, for a process that exited on its own; the restart that follows is
 	// Wake's own pair.
+	//
+	// RescueOnVolume opens one for the same reason: the machine is running on
+	// this host now, and it had none here.
 	//
 	// Take opens an interval for the same reason Rescue does: the machine is
 	// now this host's, and the host it came from closed its own interval when
