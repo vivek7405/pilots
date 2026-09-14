@@ -54,7 +54,7 @@ func TestAdmissionTakesAMachineThatFits(t *testing.T) {
 	m, st := capManager(t, 8192, 8)
 	idleMachine(t, st, "m_idle", 2048, time.Hour)
 
-	if err := m.admit(t.Context(), 1, 1024); err != nil {
+	if err := admitNow(t, m, 1, 1024); err != nil {
 		t.Fatalf("a 1 GiB machine was refused by a host with 8 GiB free: %v", err)
 	}
 	// And the idle machine was left alone.
@@ -74,7 +74,7 @@ func TestAdmissionTakesAMachineThatFits(t *testing.T) {
 func TestAdmissionRefusesWhenThereIsNothingToReclaim(t *testing.T) {
 	m, _ := capManager(t, 512, 8)
 
-	err := m.admit(t.Context(), 1, 8192)
+	err := admitNow(t, m, 1, 8192)
 	if !errors.Is(err, api.ErrNoCapacity) {
 		t.Fatalf("err = %v, want ErrNoCapacity so the API answers 507", err)
 	}
@@ -86,10 +86,10 @@ func TestAdmissionRefusesWhenThereIsNothingToReclaim(t *testing.T) {
 func TestAdmissionRefusesMoreVCPUsThanTheHostHas(t *testing.T) {
 	m, _ := capManager(t, 65536, 4)
 
-	if err := m.admit(t.Context(), 16, 1024); !errors.Is(err, api.ErrNoCapacity) {
+	if err := admitNow(t, m, 16, 1024); !errors.Is(err, api.ErrNoCapacity) {
 		t.Errorf("err = %v; a 16-vCPU machine on a 4-CPU host must be refused", err)
 	}
-	if err := m.admit(t.Context(), 4, 1024); err != nil {
+	if err := admitNow(t, m, 4, 1024); err != nil {
 		t.Errorf("a machine using every CPU was refused: %v", err)
 	}
 }
@@ -100,11 +100,11 @@ func TestADrainingHostAdmitsNothing(t *testing.T) {
 	m, _ := capManager(t, 65536, 8)
 	m.SetDraining(true)
 
-	if err := m.admit(t.Context(), 1, 512); !errors.Is(err, api.ErrNoCapacity) {
+	if err := admitNow(t, m, 1, 512); !errors.Is(err, api.ErrNoCapacity) {
 		t.Errorf("err = %v; a draining host must admit nothing", err)
 	}
 	m.SetDraining(false)
-	if err := m.admit(t.Context(), 1, 512); err != nil {
+	if err := admitNow(t, m, 1, 512); err != nil {
 		t.Errorf("undraining did not restore admission: %v", err)
 	}
 }
@@ -261,7 +261,7 @@ func TestAHostThatCannotMeasureItselfStillAdmits(t *testing.T) {
 	t.Cleanup(func() { st.Close() })
 	m := &Manager{opts: Options{HostID: "host-a", Store: st}, flight: newInFlight()}
 
-	if err := m.admit(t.Context(), 4, 65536); err != nil {
+	if err := admitNow(t, m, 4, 65536); err != nil {
 		t.Errorf("a host with no memory reading refused a create: %v", err)
 	}
 }
@@ -276,7 +276,7 @@ func TestAdmissionDoesNotSuspendABusyGuest(t *testing.T) {
 	t.Cleanup(func() { reclaimBusy = orig })
 	reclaimBusy = func(context.Context, *Manager, state.Machine) bool { return true }
 
-	if err := m.admit(t.Context(), 1, 512); !errors.Is(err, api.ErrNoCapacity) {
+	if err := admitNow(t, m, 1, 512); !errors.Is(err, api.ErrNoCapacity) {
 		t.Fatalf("err = %v, want ErrNoCapacity: the only reclaimable machine is busy", err)
 	}
 	row, err := st.GetMachine(t.Context(), "m_building")
@@ -285,5 +285,42 @@ func TestAdmissionDoesNotSuspendABusyGuest(t *testing.T) {
 	}
 	if row.State != StateRunning {
 		t.Errorf("a busy machine was suspended to make room (state=%q)", row.State)
+	}
+}
+
+// admitNow runs one admission and releases its reservation at once, for a
+// test that asks only what admission decides.
+func admitNow(t *testing.T, m *Manager, vcpus, memMiB int) error {
+	t.Helper()
+	release, err := m.admit(t.Context(), vcpus, memMiB)
+	release()
+	return err
+}
+
+// Creates admitted at the same moment each read the same free figure, and a
+// new guest's memory faults in lazily, so the figure does not fall as they
+// start. Memory admitted to a create still coming up counts as taken.
+func TestConcurrentAdmissionsCannotShareOneFreeReading(t *testing.T) {
+	m, _ := capManager(t, 2048, 8)
+
+	var releases []func()
+	admitted := 0
+	for range 10 {
+		release, err := m.admit(t.Context(), 1, 512)
+		if err == nil {
+			admitted++
+			releases = append(releases, release)
+		}
+	}
+	if admitted != 4 {
+		t.Errorf("%d machines of 512 MiB admitted against 2048 MiB free, want 4", admitted)
+	}
+
+	for _, r := range releases {
+		r()
+		r() // a release is idempotent
+	}
+	if err := admitNow(t, m, 1, 2048); err != nil {
+		t.Errorf("after every create finished, the memory was not given back: %v", err)
 	}
 }

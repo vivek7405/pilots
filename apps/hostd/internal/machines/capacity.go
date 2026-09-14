@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
@@ -145,10 +146,39 @@ func (m *Manager) reclaimableNow(ctx context.Context, row state.Machine) bool {
 // Returns ErrNoCapacity when it cannot, which is a normal answer and not a
 // failure: the caller tries another host, and a client that has run out of
 // hosts gets a 507.
-func (m *Manager) admit(ctx context.Context, vcpus, memMiB int) error {
+//
+// On success it RESERVES the memory and returns the release, which the caller
+// runs when the machine is up or has failed to come up. Without the
+// reservation, creates running at the same moment each read the same free
+// figure -- and a new guest's memory is faulted in lazily, so the figure does
+// not drop as they start. A fork of count 100 admitted every one of them
+// against one reading, and the host went past its memory once their pages
+// faulted. Admission is serialised, and memory admitted but not yet running
+// counts as taken.
+func (m *Manager) admit(ctx context.Context, vcpus, memMiB int) (release func(), err error) {
+	release = func() {}
 	if memMiB <= 0 {
-		return nil
+		return release, nil
 	}
+	m.admitMu.Lock()
+	defer m.admitMu.Unlock()
+	if err := m.admitLocked(ctx, vcpus, memMiB); err != nil {
+		return release, err
+	}
+	m.reservedMiB += memMiB
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.admitMu.Lock()
+			m.reservedMiB -= memMiB
+			m.admitMu.Unlock()
+		})
+	}, nil
+}
+
+// admitLocked is admit's decision, with the reservations of creates still in
+// progress subtracted from what the host reports free. Called with admitMu held.
+func (m *Manager) admitLocked(ctx context.Context, vcpus, memMiB int) error {
 	if m.draining.Load() {
 		return fmt.Errorf("%w: this host is draining", ErrNoCapacity)
 	}
@@ -161,7 +191,7 @@ func (m *Manager) admit(ctx context.Context, vcpus, memMiB int) error {
 			ErrNoCapacity, vcpus, m.opts.CPUCount)
 	}
 
-	free := m.freeMemMiB()
+	free := m.freeMemMiB() - m.reservedMiB
 	if memMiB <= free {
 		return nil
 	}
@@ -236,7 +266,7 @@ func (m *Manager) admit(ctx context.Context, vcpus, memMiB int) error {
 	// Read the real figure again rather than trusting the arithmetic: the
 	// suspends actually happened, and what matters is what the kernel now
 	// says, not what this function expected them to free.
-	if memMiB > m.freeMemMiB() {
+	if memMiB > m.freeMemMiB()-m.reservedMiB {
 		return fmt.Errorf("%w: reclaimed %d MiB and still short of %d",
 			ErrNoCapacity, freed, memMiB)
 	}

@@ -209,6 +209,11 @@ type Manager struct {
 	// path, size and mtime. Hashing a rootfs is milliseconds and the answer
 	// only changes when a host is given a new artifact, so it is computed once
 	// per version rather than once per create. See rootfsID.
+	// admitMu serialises admission, and reservedMiB is the memory admitted
+	// to creates that have not finished coming up. See admit.
+	admitMu     sync.Mutex
+	reservedMiB int
+
 	rootfsIDMu sync.Mutex
 	rootfsIDs  map[string]string
 
@@ -373,9 +378,13 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 	// and not in the API layer: the decision and the reclaim are the same
 	// decision, and splitting them would let a create be admitted against
 	// memory a second create had already taken.
-	if err := m.admit(ctx, orDefault(req.VCPUs, 1), orDefault(req.MemMiB, 512)); err != nil {
+	release, err := m.admit(ctx, orDefault(req.VCPUs, 1), orDefault(req.MemMiB, 512))
+	if err != nil {
 		return nil, err
 	}
+	// Held until this create has a running machine or has given up; by then
+	// the host's own figure accounts for it.
+	defer release()
 
 	// The agent token is generated once and only its hash is stored. hostd
 	// keeps the plaintext in memory for as long as it drives this machine; a

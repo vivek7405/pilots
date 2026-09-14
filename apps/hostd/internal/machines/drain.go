@@ -397,9 +397,11 @@ func (m *Manager) Take(ctx context.Context, id, handoffID string) error {
 	// host. Only a machine that will run here needs the room.
 	resume := takeResumes(handoffID)
 	if resume {
-		if err := m.admit(ctx, row.VCPUs, row.MemMiB); err != nil {
+		release, err := m.admit(ctx, row.VCPUs, row.MemMiB)
+		if err != nil {
 			return fmt.Errorf("machines: take %s: %w", id, err)
 		}
+		defer release()
 	}
 
 	// Every check of the offer happens inside the store, against the rows
