@@ -44,6 +44,15 @@ func (c *chunkServers) start(machineID, stateDir string, store block.ObjectStore
 	if store == nil || len(allowed) == 0 {
 		return ""
 	}
+	// A previous server for this machine goes BEFORE the new one binds, never
+	// after. Both listen at the same path, and closing a server removes its
+	// path -- so closing the old one second deleted the socket the new one had
+	// just created. The one caller that starts twice is a create retrying
+	// against a re-derived template, and its handlers then failed on "dial
+	// chunks.sock: no such file or directory": the retry that exists to recover
+	// a create could never succeed.
+	c.close(machineID)
+
 	path := chunkserve.SocketPath(stateDir)
 	srv, err := chunkserve.New(machineID, path, store, allowed)
 	if err != nil {
@@ -52,9 +61,6 @@ func (c *chunkServers) start(machineID, stateDir string, store block.ObjectStore
 		return ""
 	}
 	c.mu.Lock()
-	if old := c.servers[machineID]; old != nil {
-		_ = old.Close()
-	}
 	c.servers[machineID] = srv
 	c.mu.Unlock()
 	return path

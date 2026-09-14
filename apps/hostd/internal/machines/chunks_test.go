@@ -1,6 +1,8 @@
 package machines
 
 import (
+	"context"
+	"net"
 	"os"
 	"strings"
 	"testing"
@@ -93,4 +95,34 @@ func TestAllowedBuildsIsTheFourTheSpawnNames(t *testing.T) {
 	if got := allowedBuilds(fc.InstantConfig{}); len(got) != 0 {
 		t.Errorf("allowedBuilds on a local-only machine = %v, want none", got)
 	}
+}
+
+type nopObjectStore struct{}
+
+func (nopObjectStore) Get(context.Context, string) ([]byte, error) { return nil, nil }
+func (nopObjectStore) GetRange(context.Context, string, int64, int64) ([]byte, error) {
+	return nil, nil
+}
+
+// A create that retries against a re-derived template starts the same
+// machine's chunk socket twice, at the same path. The second start must leave
+// a socket there: closing the first server after the second had bound deleted
+// it, and the retry's handlers then died on "no such file or directory".
+func TestChunkServerRestartKeepsTheSocket(t *testing.T) {
+	c := newChunkServers()
+	dir := t.TempDir()
+	allowed := []string{uuid.NewString()}
+
+	first := c.start("m_1", dir, nopObjectStore{}, allowed)
+	second := c.start("m_1", dir, nopObjectStore{}, allowed)
+	t.Cleanup(func() { c.close("m_1") })
+	if first == "" || second != first {
+		t.Fatalf("start returned %q then %q, want the same socket path twice", first, second)
+	}
+
+	conn, err := net.Dial("unix", second)
+	if err != nil {
+		t.Fatalf("the restarted chunk socket is not there to dial: %v", err)
+	}
+	_ = conn.Close()
 }
