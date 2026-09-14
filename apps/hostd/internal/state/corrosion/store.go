@@ -1749,6 +1749,19 @@ func (s *Store) PutRelease(ctx context.Context, r *state.Release) error {
 	return nil
 }
 
+// DeleteReleases drops a service's releases, guarded by the service's writer
+// like every other write to them. Called while the service row still exists,
+// because that row is what the guard resolves through.
+func (s *Store) DeleteReleases(ctx context.Context, serviceID string) error {
+	if err := s.assertServiceWriter(ctx, serviceID); err != nil {
+		return err
+	}
+	if _, err := s.client.Exec(ctx, `DELETE FROM releases WHERE service_id = ?`, serviceID); err != nil {
+		return fmt.Errorf("state: delete releases of %q: %w", serviceID, err)
+	}
+	return nil
+}
+
 func (s *Store) ReleasesFor(ctx context.Context, serviceID string) ([]state.Release, error) {
 	rows, err := s.client.Query(ctx, `SELECT `+releaseCols+
 		` FROM releases WHERE service_id = ? ORDER BY created_at DESC`, serviceID)

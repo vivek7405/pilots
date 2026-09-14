@@ -94,3 +94,51 @@ func TestForkingACheckpointOfAVolumeMachineIsRefused(t *testing.T) {
 		t.Fatalf("Fork = %v, want ErrConflict", err)
 	}
 }
+
+// Removing a service's last machine removes every row keyed on the service,
+// not only its labels and url auth: its size, its broker grant, its releases,
+// and each release's vmstate and CPU-pool rows all replicate to every host.
+func TestReleasingAServiceLeavesNoServiceRowsBehind(t *testing.T) {
+	m, st := storeManager(t)
+	ctx := t.Context()
+	svc := &state.Service{ID: "svc_gone", Name: "web", ReleaseID: "rel_2", Replicas: 1}
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(st.PutService(ctx, svc))
+	for _, id := range []string{"rel_1", "rel_2"} {
+		must(st.PutRelease(ctx, &state.Release{ID: id, ServiceID: svc.ID, CreatedAt: 1}))
+		must(st.PutReleaseSnapshot(ctx, &state.ReleaseSnapshot{ID: id, ServiceID: svc.ID,
+			MachineID: "m_1", CheckpointID: "ck_" + id, CreatedAt: 1}))
+		must(st.PutMachineCPU(ctx, &state.MachineCPU{ID: id, Kind: state.KindRelease, Vendor: "AuthenticAMD"}))
+	}
+	must(st.PutServiceSize(ctx, &state.ServiceSize{ServiceID: svc.ID, VCPUs: 1, MemMiB: 512}))
+	must(st.PutBrokerGrant(ctx, &state.BrokerGrant{ID: svc.ID, Kind: "service", OrgID: "org"}))
+	row := &state.Machine{ID: "m_1", Name: "web-1", HostID: "host-a", ServiceID: svc.ID, State: StateRunning}
+	must(st.PutMachine(ctx, row))
+
+	must(m.releaseService(ctx, row))
+
+	gone := func(what string, err error) {
+		t.Helper()
+		if !errors.Is(err, state.ErrNotFound) {
+			t.Errorf("%s survived the service's removal (err=%v)", what, err)
+		}
+	}
+	_, err := st.GetServiceSize(ctx, svc.ID)
+	gone("the service size", err)
+	_, err = st.GetBrokerGrant(ctx, svc.ID)
+	gone("the service broker grant", err)
+	for _, id := range []string{"rel_1", "rel_2"} {
+		_, err = st.GetReleaseSnapshot(ctx, id)
+		gone(id+"'s vmstate row", err)
+		_, err = st.GetMachineCPU(ctx, id)
+		gone(id+"'s cpu pool row", err)
+	}
+	if rels, err := st.ReleasesFor(ctx, svc.ID); err != nil || len(rels) != 0 {
+		t.Errorf("releases survived the service's removal: %v (err=%v)", rels, err)
+	}
+}

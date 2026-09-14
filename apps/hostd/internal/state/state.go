@@ -981,6 +981,10 @@ type Store interface {
 	// ReleasesFor returns a service's releases, newest first. The rollback
 	// target is the newest healthy release that is not the current one.
 	ReleasesFor(ctx context.Context, serviceID string) ([]Release, error)
+	// DeleteReleases drops every release of a service being removed. Nothing
+	// else ever deletes a release, so without this they outlived their
+	// service and were gossiped to every host for good.
+	DeleteReleases(ctx context.Context, serviceID string) error
 	// GetTemplate reads the fleet's golden template. ErrNotFound means no host
 	// has built one yet.
 	GetTemplate(ctx context.Context, id string) (*Template, error)
@@ -2334,6 +2338,13 @@ func (s *sqliteStore) PutRelease(ctx context.Context, r *Release) error {
 		r.ID, r.ServiceID, r.RootfsBuildID, r.MemBuildID, boolToInt(r.Healthy), r.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("state: put release %q: %w", r.ID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) DeleteReleases(ctx context.Context, serviceID string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM releases WHERE service_id = ?`, serviceID); err != nil {
+		return fmt.Errorf("state: delete releases of %q: %w", serviceID, err)
 	}
 	return nil
 }

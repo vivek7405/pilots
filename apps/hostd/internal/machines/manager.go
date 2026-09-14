@@ -690,6 +690,34 @@ func (m *Manager) releaseService(ctx context.Context, row *state.Machine) error 
 	// machine's own do: a replicated store resolves this row's writer by
 	// reading the service row, and a row left behind is gossiped to every
 	// host forever for a service that no longer exists.
+	//
+	// ALL of them. Only labels and url auth were deleted, so a removed
+	// service left its size, its broker grant, every release, and each
+	// release's vmstate and CPU-pool rows replicating fleet-wide for good --
+	// the unbounded gossip rule 6 exists to prevent. Releases before their
+	// rows' own side tables would orphan those, so each release's rows go
+	// first, then the releases, then the service's.
+	releases, err := m.opts.Store.ReleasesFor(ctx, row.ServiceID)
+	if err != nil {
+		return fmt.Errorf("list service %s releases: %w", row.ServiceID, err)
+	}
+	for _, rel := range releases {
+		if err := m.opts.Store.DeleteReleaseSnapshot(ctx, rel.ID); err != nil {
+			return fmt.Errorf("delete release %s vmstate: %w", rel.ID, err)
+		}
+		if err := m.opts.Store.DeleteMachineCPU(ctx, rel.ID); err != nil {
+			return fmt.Errorf("delete release %s cpu pool: %w", rel.ID, err)
+		}
+	}
+	if err := m.opts.Store.DeleteReleases(ctx, row.ServiceID); err != nil {
+		return fmt.Errorf("delete service %s releases: %w", row.ServiceID, err)
+	}
+	if err := m.opts.Store.DeleteServiceSize(ctx, row.ServiceID); err != nil {
+		return fmt.Errorf("delete service size %s: %w", row.ServiceID, err)
+	}
+	if err := m.opts.Store.DeleteBrokerGrant(ctx, row.ServiceID); err != nil {
+		return fmt.Errorf("delete service broker grant %s: %w", row.ServiceID, err)
+	}
 	if err := m.opts.Store.DeleteLabels(ctx, row.ServiceID); err != nil {
 		return fmt.Errorf("delete service labels %s: %w", row.ServiceID, err)
 	}
