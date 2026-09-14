@@ -353,6 +353,7 @@ func Routes(d Deps) http.Handler {
 	// Volumes and fleet.
 	mux.HandleFunc("POST /v1/volumes", d.handleCreateVolume)
 	mux.HandleFunc("GET /v1/volumes", d.handleListVolumes)
+	mux.HandleFunc("DELETE /v1/volumes/{id}", d.handleDeleteVolume)
 	// Point-in-time copies. Served by the host that MOUNTS the volume, because
 	// a snapshot is a clone inside the volume's own filesystem; a request
 	// elsewhere is forwarded there.

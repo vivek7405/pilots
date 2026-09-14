@@ -198,6 +198,8 @@ func (f *fakeManager) streamedMachines() []string {
 	defer f.mu.Unlock()
 	return append([]string(nil), f.streamed...)
 }
+func (f *fakeManager) DeleteVolume(_ context.Context, id string) error { return nil }
+
 func (f *fakeManager) CreateVolume(_ context.Context, req CreateVolumeRequest) (*state.Volume, error) {
 	f.volumesCreated++
 	f.lastCreateVolume = req

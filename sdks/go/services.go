@@ -221,6 +221,12 @@ func (v *Volumes) RestoreSnapshot(ctx context.Context, id, snapshot string) (*Sn
 		"/v1/volumes/"+url.PathEscape(id)+"/snapshots/"+url.PathEscape(snapshot)+"/restore", nil, &out)
 }
 
+// Delete removes a volume and every snapshot of it, for good. Refused while a
+// machine still has it attached.
+func (v *Volumes) Delete(ctx context.Context, id string) error {
+	return v.c.do(ctx, http.MethodDelete, "/v1/volumes/"+url.PathEscape(id), nil, nil)
+}
+
 // DeleteSnapshot removes one snapshot, freeing the blocks only it still holds.
 func (v *Volumes) DeleteSnapshot(ctx context.Context, id, snapshot string) error {
 	return v.c.do(ctx, http.MethodDelete,

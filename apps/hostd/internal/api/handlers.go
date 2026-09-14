@@ -73,6 +73,7 @@ type Manager interface {
 	// that failed and is reported as one.
 	LogTail(machineID string, offset int64) ([]byte, error)
 	CreateVolume(ctx context.Context, req CreateVolumeRequest) (*state.Volume, error)
+	DeleteVolume(ctx context.Context, id string) error
 	ListVolumes(ctx context.Context) ([]state.Volume, error)
 	MachineVolume(ctx context.Context, machineID string) (*MachineVolume, error)
 	// SnapshotVolume takes a point-in-time copy, pausing the guest for the

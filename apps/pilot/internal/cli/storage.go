@@ -24,10 +24,11 @@ func newVolumesCmd(env *Env) *cobra.Command {
 		Related: []string{
 			"pilot machines create --volume   attach one at create",
 			"pilot machines destroy           does NOT delete an attached volume",
+			"pilot volumes destroy            deletes a detached one, and its snapshots",
 		},
 	})
 	c.AddCommand(
-		newVolumesListCmd(env), newVolumesCreateCmd(env),
+		newVolumesListCmd(env), newVolumesCreateCmd(env), newVolumesDestroyCmd(env),
 		newVolumesSnapshotCmd(env), newVolumesSnapshotsCmd(env), newVolumesRestoreCmd(env),
 		newVolumesPolicyCmd(env),
 	)
@@ -67,6 +68,38 @@ func newVolumesListCmd(env *Env) *cobra.Command {
 		},
 	}
 	Describe(c, Doc{Examples: []string{"pilot volumes ls"}})
+	return c
+}
+
+func newVolumesDestroyCmd(env *Env) *cobra.Command {
+	c := &cobra.Command{
+		Use:     "destroy <volume>",
+		Aliases: []string{"rm"},
+		Short:   "delete a volume and its snapshots",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(c *cobra.Command, args []string) error {
+			client, err := env.Client()
+			if err != nil {
+				return err
+			}
+			if err := confirm(env, "destroy volume "+args[0]+"? Its data and every snapshot of it are deleted, and this cannot be undone."); err != nil {
+				return err
+			}
+			if err := client.Volumes.Delete(c.Context(), args[0]); err != nil {
+				return err
+			}
+			if env.W.JSON {
+				return env.W.JSONValue(map[string]string{"destroyed": args[0]})
+			}
+			env.W.Notef("destroyed volume %s", args[0])
+			return nil
+		},
+	}
+	Describe(c, Doc{
+		How: "Refused while a machine has the volume attached: destroy the machine\n" +
+			"first. The data and its snapshots are removed from object storage.",
+		Examples: []string{"pilot volumes destroy vol_3f2a -y"},
+	})
 	return c
 }
 

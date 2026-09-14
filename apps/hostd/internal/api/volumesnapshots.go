@@ -169,6 +169,26 @@ func (d Deps) handleDeleteVolumeSnapshot(w http.ResponseWriter, r *http.Request)
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// handleDeleteVolume removes a volume and every snapshot of it, for good.
+//
+// Refused while a machine still has it attached, which is what makes deleting
+// one a separate, deliberate act from destroying the machine that used it.
+// Served by the host mounting it, the only one that can stop what is writing.
+func (d Deps) handleDeleteVolume(w http.ResponseWriter, r *http.Request) {
+	v, ok := d.ownedVolume(w, r, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	if d.forwardToVolumeOwner(w, r, v.HostID) {
+		return
+	}
+	if err := d.Machines.DeleteVolume(r.Context(), v.ID); err != nil {
+		writeMapped(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // handleForkVolumeSnapshot makes a NEW volume from a snapshot.
 //
 // Separate from a restore because the two answer different questions. A restore

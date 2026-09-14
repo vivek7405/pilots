@@ -1599,11 +1599,27 @@ async function volumeAssertions() {
       assert(rootDev !== volDev,
         `${volume.mount_path} and / are the same device (${volDev}); the volume never mounted`);
     });
+
+    // Nothing could delete a volume, so a scaled-down database ordinal left its
+    // data in object storage for good. A delete is refused while a machine
+    // still uses the volume, which is what keeps it a deliberate act.
+    await step('a volume attached to a machine cannot be deleted', async () => {
+      const { status } = await request(`/v1/volumes/${volume.id}`, { method: 'DELETE' });
+      assert(status === 409, `DELETE of an attached volume: expected 409, got ${status}`);
+    });
   } finally {
     if (machine) {
       await request(`/v1/machines/${machine.id}`, { method: 'DELETE' });
     }
   }
+
+  await step('a detached volume is deleted and is gone from the list', async () => {
+    const { status } = await request(`/v1/volumes/${volume.id}`, { method: 'DELETE' });
+    assert(status === 204, `DELETE of a detached volume: expected 204, got ${status}`);
+    const { json } = await request('/v1/volumes');
+    const listed = (json?.volumes ?? json ?? []).some((v) => v.id === volume.id);
+    assert(!listed, 'the deleted volume is still listed');
+  });
 }
 
 async function buildAssertions() {
