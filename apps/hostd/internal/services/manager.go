@@ -582,7 +582,7 @@ func (m *Manager) createReplicaOn(ctx context.Context, svc *state.Service,
 }
 
 // snapshotRelease freezes a proved replica into the release's build pair.
-func (m *Manager) snapshotRelease(ctx context.Context, machineID string, rel *state.Release) error {
+func (m *Manager) snapshotRelease(ctx context.Context, machineID string, rel *state.Release) (err error) {
 	// Put the guest's credential back to the placeholder FIRST. Every replica
 	// restored from this image installs its own token by authenticating as the
 	// placeholder -- exactly how a golden-template restore does it -- and a
@@ -598,11 +598,7 @@ func (m *Manager) snapshotRelease(ctx context.Context, machineID string, rel *st
 	if ck.MemBuildID == "" {
 		return errors.New("checkpoint produced no memory build")
 	}
-	rel.MemBuildID = ck.MemBuildID
-	if ck.RootfsBuildID != "" {
-		rel.RootfsBuildID = ck.RootfsBuildID
-	}
-	// The vmstate, which the two build ids above cannot name.
+	// The vmstate, which the two build ids below cannot name.
 	//
 	// A restore needs the memory image, the disk AND the device state plus
 	// vcpu registers. That third artifact is keyed by the machine and
@@ -614,7 +610,32 @@ func (m *Manager) snapshotRelease(ctx context.Context, machineID string, rel *st
 	// image whose vmstate is unrecorded is a release every replica tries to
 	// restore from and cannot. Failing here leaves no release at all, and the
 	// deploy says why.
-	if err := m.opts.Store.PutReleaseSnapshot(ctx, &state.ReleaseSnapshot{
+	//
+	// REPLACED when the release already has one. A resize and a rollback both
+	// roll out a release that was photographed before, and photograph it
+	// again. The row is write-once so nothing can quietly point a release at
+	// another capture's registers -- but this IS the release's single writer
+	// replacing its own capture, and refusing it was worse than what the rule
+	// guards against: the insert failed, the caller only warned, and the
+	// release row went on to name the NEW memory image while this row still
+	// named the OLD checkpoint's vmstate, so every later replica restored one
+	// capture's memory into another's device state.
+	if _, err := m.opts.Store.GetReleaseSnapshot(ctx, rel.ID); err == nil {
+		if err := m.opts.Store.DeleteReleaseSnapshot(ctx, rel.ID); err != nil {
+			return fmt.Errorf("replace the release's previous vmstate: %w", err)
+		}
+		// From here the release's old memory image has no vmstate either, so
+		// a failure below must not leave rel naming it: its replicas boot
+		// rather than restore, which is slow and correct.
+		defer func() {
+			if err != nil {
+				rel.MemBuildID = ""
+			}
+		}()
+	} else if !errors.Is(err, state.ErrNotFound) {
+		return fmt.Errorf("read the release's previous vmstate: %w", err)
+	}
+	if err = m.opts.Store.PutReleaseSnapshot(ctx, &state.ReleaseSnapshot{
 		ID: rel.ID, ServiceID: rel.ServiceID, MachineID: machineID,
 		CheckpointID: ck.ID, CreatedAt: time.Now().Unix(),
 	}); err != nil {
@@ -623,11 +644,19 @@ func (m *Manager) snapshotRelease(ctx context.Context, machineID string, rel *st
 	// Record which pool photographed it, before the caller writes the release
 	// row that names the build. A replica created on the other vendor reads
 	// this and boots from the rootfs rather than failing at snapshot load.
-	if err := m.opts.Store.PutMachineCPU(ctx, &state.MachineCPU{
+	if err = m.opts.Store.PutMachineCPU(ctx, &state.MachineCPU{
 		ID: rel.ID, Kind: state.KindRelease, Vendor: m.opts.Vendor,
 		UpdatedAt: time.Now().Unix(),
 	}, state.WithService(rel.ServiceID)); err != nil {
 		return fmt.Errorf("record the release's cpu vendor: %w", err)
+	}
+	// The build ids LAST, once everything that describes them is recorded. The
+	// caller writes rel whether or not this returned an error, so assigning
+	// them first let a failed recording publish a memory image with no vmstate
+	// to go with it.
+	rel.MemBuildID = ck.MemBuildID
+	if ck.RootfsBuildID != "" {
+		rel.RootfsBuildID = ck.RootfsBuildID
 	}
 	return nil
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -19,16 +20,20 @@ import (
 // rollout's job is ordering and gating, and both are testable without a
 // Firecracker anywhere near them.
 type fakeMachines struct {
-	mu       sync.Mutex
-	store    state.Store
-	next     int
-	healthy  map[string]bool // machine -> passes its probe
-	events   []string        // ordered log of what happened, for assertions
-	failNth  int             // fail the Nth create (1-based), 0 = never
-	creates  int
-	noSnap   bool // Checkpoint produces no memory build
-	suspends []string
-	touches  []string
+	mu      sync.Mutex
+	store   state.Store
+	next    int
+	healthy map[string]bool // machine -> passes its probe
+	events  []string        // ordered log of what happened, for assertions
+	failNth int             // fail the Nth create (1-based), 0 = never
+	// distinctCaptures gives every checkpoint its own ids, for a test that has
+	// to tell a second photograph of a release from the first.
+	distinctCaptures bool
+	captures         int
+	creates          int
+	noSnap           bool // Checkpoint produces no memory build
+	suspends         []string
+	touches          []string
 	// healthyAfterRedeploy is what a redeployed machine's probe answers. False
 	// is how a test drives a failed gate onto the recovery path.
 	healthyAfterRedeploy bool
@@ -168,6 +173,11 @@ func (f *fakeMachines) Checkpoint(ctx context.Context, id, comment string) (*sta
 	f.log("checkpoint:%s", id)
 	if f.noSnap {
 		return &state.Checkpoint{ID: "ck-1", MachineID: id}, nil
+	}
+	if f.distinctCaptures {
+		f.captures++
+		n := strconv.Itoa(f.captures)
+		return &state.Checkpoint{ID: "ck-" + n, MachineID: id, MemBuildID: "mem-" + n, RootfsBuildID: "rootfs-" + n}, nil
 	}
 	return &state.Checkpoint{ID: "ck-1", MachineID: id, MemBuildID: "mem-1", RootfsBuildID: "rootfs-1"}, nil
 }
@@ -1473,4 +1483,29 @@ func (f *fakeMachines) CreateVolume(ctx context.Context, req api.CreateVolumeReq
 		return nil, err
 	}
 	return v, nil
+}
+
+// A resize and a rollback photograph a release that was photographed before.
+// The vmstate row must move with the memory image, or every later replica
+// restores one capture's memory into another's device state.
+func TestReleaseRePhotographedKeepsItsVmstateInStep(t *testing.T) {
+	m, fm, store, svc := fixture(t, 1)
+	fm.distinctCaptures = true
+	ctx := t.Context()
+	rel := &state.Release{ID: "rel-1", ServiceID: svc.ID, RootfsBuildID: "img"}
+
+	for want := 1; want <= 2; want++ {
+		if err := m.snapshotRelease(ctx, "m-1", rel); err != nil {
+			t.Fatalf("photograph %d: %v", want, err)
+		}
+		snap, err := store.GetReleaseSnapshot(ctx, rel.ID)
+		if err != nil {
+			t.Fatalf("photograph %d: %v", want, err)
+		}
+		n := strconv.Itoa(want)
+		if rel.MemBuildID != "mem-"+n || snap.CheckpointID != "ck-"+n {
+			t.Errorf("photograph %d: release names %s with vmstate from %s; want mem-%s with ck-%s",
+				want, rel.MemBuildID, snap.CheckpointID, n, n)
+		}
+	}
 }
