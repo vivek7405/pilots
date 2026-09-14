@@ -193,3 +193,35 @@ func TestAnOrdinalsVolumeIsOwnedByTheServicesOrg(t *testing.T) {
 		}
 	}
 }
+
+// Scaling an ordinal service down deletes the volumes above the new count,
+// not only their machines and bindings: a detached volume left behind is a
+// whole database copy in object storage that nothing can reach.
+func TestPruningOrdinalsDeletesTheirVolumes(t *testing.T) {
+	m, fm, store, svc := fixture(t, 3)
+	ctx := context.Background()
+	for ordinal, vol := range map[int]string{1: "vol_a", 2: "vol_b", 3: "vol_c"} {
+		if err := store.PutServiceVolume(ctx, &state.ServiceVolume{ServiceID: svc.ID, Ordinal: ordinal, VolumeID: vol}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := m.pruneOrdinals(ctx, svc, 1); err != nil {
+		t.Fatalf("pruneOrdinals: %v", err)
+	}
+	var deleted []string
+	for _, e := range fm.events {
+		if strings.HasPrefix(e, "delete-volume ") {
+			deleted = append(deleted, strings.TrimPrefix(e, "delete-volume "))
+		}
+	}
+	if strings.Join(deleted, ",") != "vol_c,vol_b" {
+		t.Errorf("deleted volumes %v, want vol_c then vol_b", deleted)
+	}
+	left, err := store.ListServiceVolumes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(left) != 1 || left[0].VolumeID != "vol_a" {
+		t.Errorf("bindings left %v, want only ordinal 1", left)
+	}
+}

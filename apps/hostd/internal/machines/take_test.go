@@ -142,3 +142,34 @@ func TestReleasingAServiceLeavesNoServiceRowsBehind(t *testing.T) {
 		t.Errorf("releases survived the service's removal: %v (err=%v)", rels, err)
 	}
 }
+
+// A volume is not deleted out from under a machine still using it; a free one
+// is removed from the host and from the store.
+func TestDeleteVolumeRefusesAnAttachedOneAndRemovesAFreeOne(t *testing.T) {
+	m, st := storeManager(t)
+	fv := &fakeVolumes{store: st}
+	m.opts.Volumes = fv
+	ctx := t.Context()
+	if err := st.PutMachine(ctx, &state.Machine{ID: "m_db", Name: "db", HostID: "host-a", State: StateRunning}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutVolume(ctx, &state.Volume{ID: "vol_1", Name: "data", MachineID: "m_db", HostID: "host-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DeleteVolume(ctx, "vol_1"); !errors.Is(err, api.ErrConflict) {
+		t.Fatalf("DeleteVolume on an attached volume = %v, want ErrConflict", err)
+	}
+
+	if err := st.PutVolume(ctx, &state.Volume{ID: "vol_1", Name: "data"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.DeleteVolume(ctx, "vol_1"); err != nil {
+		t.Fatalf("DeleteVolume on a free volume: %v", err)
+	}
+	if len(fv.removed) != 1 || fv.removed[0] != "vol_1" {
+		t.Errorf("host-side removal = %v, want vol_1", fv.removed)
+	}
+	if _, err := st.GetVolume(ctx, "vol_1"); !errors.Is(err, state.ErrNotFound) {
+		t.Errorf("the volume row survived: %v", err)
+	}
+}

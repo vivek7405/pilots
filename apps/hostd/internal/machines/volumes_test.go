@@ -31,9 +31,11 @@ type fakeVolumes struct {
 	checkErr error
 	// snapshots is the fake's filesystem: volume id -> stamps, newest first.
 	snapshots map[string][]string
-	copied    []string
-	restored  []string
-	deleted   []string
+	// removed records whole volumes deleted, as deleted records snapshots.
+	removed  []string
+	copied   []string
+	restored []string
+	deleted  []string
 }
 
 // Check is the filesystem gate. Recorded rather than performed: what the tests
@@ -98,6 +100,11 @@ func (f *fakeVolumes) Attach(ctx context.Context, v *state.Volume) error {
 
 func (f *fakeVolumes) Detach(_ context.Context, id string) error {
 	f.detached = append(f.detached, id)
+	return nil
+}
+
+func (f *fakeVolumes) Delete(_ context.Context, id string) error {
+	f.removed = append(f.removed, id)
 	return nil
 }
 

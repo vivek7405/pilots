@@ -322,6 +322,16 @@ func (m *Manager) pruneOrdinals(ctx context.Context, svc *state.Service, replica
 				continue
 			}
 		}
+		// The volume itself, as this function's own doc has always said. Only
+		// the machine and the binding went, and the destroy only detaches a
+		// volume, so every scale-down left a full database copy and its
+		// snapshots in object storage with nothing able to reach it. Before
+		// the binding: a delete that fails keeps the binding, and the next
+		// prune finds the ordinal above the count and tries again.
+		if err := m.opts.Machines.DeleteVolume(ctx, b.VolumeID); err != nil && !errors.Is(err, state.ErrNotFound) {
+			errs = append(errs, fmt.Errorf("deleting ordinal %d's volume %s: %w", b.Ordinal, b.VolumeID, err))
+			continue
+		}
 		if err := m.opts.Store.DeleteServiceVolume(ctx, svc.ID, b.Ordinal); err != nil {
 			errs = append(errs, fmt.Errorf("unbinding ordinal %d: %w", b.Ordinal, err))
 		}

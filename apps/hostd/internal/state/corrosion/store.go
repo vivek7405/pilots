@@ -1020,6 +1020,21 @@ func (s *Store) PutVolumePolicy(ctx context.Context, p *state.VolumePolicy) erro
 // A volume with NO host is claimable: the write is part of creating it, or of
 // taking one nobody has mounted. What is refused is writing about a volume
 // another live host is using.
+// DeleteVolume removes a volume's row. Guarded like its policy: only the host
+// mounting it, or any host when nobody does.
+func (s *Store) DeleteVolume(ctx context.Context, id string) error {
+	if err := s.assertVolumeOwner(ctx, id); err != nil {
+		if errors.Is(err, state.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if _, err := s.client.Exec(ctx, `DELETE FROM volumes WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("state: delete volume %q: %w", id, err)
+	}
+	return nil
+}
+
 func (s *Store) assertVolumeOwner(ctx context.Context, volumeID string) error {
 	v, err := s.GetVolume(ctx, volumeID)
 	if err != nil {

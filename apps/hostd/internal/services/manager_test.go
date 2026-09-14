@@ -1468,6 +1468,13 @@ func TestAnErrorReplicaIsPrunedByTheSecondDeployAfterIt(t *testing.T) {
 // driven without a filesystem. The events log carries it, because WHEN a volume
 // is created relative to its binding is a property worth asserting: the binding
 // is write-once and naming a volume that does not exist could never be undone.
+func (f *fakeMachines) DeleteVolume(ctx context.Context, id string) error {
+	f.mu.Lock()
+	f.events = append(f.events, "delete-volume "+id)
+	f.mu.Unlock()
+	return nil
+}
+
 func (f *fakeMachines) CreateVolume(ctx context.Context, req api.CreateVolumeRequest) (*state.Volume, error) {
 	f.mu.Lock()
 	f.next++

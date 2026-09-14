@@ -41,6 +41,7 @@ type MachineManager interface {
 	// CreateVolume makes one, for a service whose engine replicates between
 	// its own ordinals and therefore needs a volume per ordinal.
 	CreateVolume(ctx context.Context, req api.CreateVolumeRequest) (*state.Volume, error)
+	DeleteVolume(ctx context.Context, id string) error
 	Checkpoint(ctx context.Context, machineID, comment string) (*state.Checkpoint, error)
 	// AppAddr is where this host can reach the machine's application port,
 	// empty if it holds no slot for it.

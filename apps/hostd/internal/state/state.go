@@ -916,6 +916,9 @@ type Store interface {
 	// own a volume is not a bookkeeping error: they both mount its metadata
 	// database and destroy it.
 	PutVolume(ctx context.Context, v *Volume, opts ...WriteOption) error
+	// DeleteVolume removes a volume's row, once its objects are gone. Written
+	// only by the host that mounts it, or by any host when nobody does.
+	DeleteVolume(ctx context.Context, id string) error
 
 	// GetService reads a service row. ErrNotFound means the machine carries a
 	// service_id whose row has not arrived yet, which on a create is normal
@@ -1363,6 +1366,13 @@ func (s *sqliteStore) PutVolumePolicy(ctx context.Context, p *VolumePolicy) erro
 		p.VolumeID, p.Cron, p.KeepDaily, p.KeepWeekly, p.UpdatedAt)
 	if err != nil {
 		return fmt.Errorf("state: put volume policy %q: %w", p.VolumeID, err)
+	}
+	return nil
+}
+
+func (s *sqliteStore) DeleteVolume(ctx context.Context, id string) error {
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM volumes WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("state: delete volume %q: %w", id, err)
 	}
 	return nil
 }

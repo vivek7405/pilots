@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -110,6 +111,32 @@ func (m *Manager) Detach(ctx context.Context, id string) error {
 		return err
 	}
 	return m.stopReplication(ctx, id)
+}
+
+// Delete removes everything of a volume this host holds: its mount, its
+// metadata replication, and its local metadata, cache and configuration.
+//
+// Not its objects. Those are one prefix in the bucket (S3Prefix), which the
+// caller removes with the store it already holds, after this has stopped the
+// two things still writing there -- the mount and Litestream.
+//
+// The caller must have destroyed the machine first, for the reason Detach
+// gives.
+func (m *Manager) Delete(ctx context.Context, id string) error {
+	if err := m.Unmount(ctx, id); err != nil {
+		return err
+	}
+	if err := m.stopReplication(ctx, id); err != nil {
+		return err
+	}
+	for _, path := range []string{
+		filepath.Dir(m.MetaPath(id)), m.CacheDir(id), m.ConfigPath(id), m.MountPoint(id),
+	} {
+		if err := os.RemoveAll(path); err != nil {
+			return fmt.Errorf("volumes: remove %s: %w", path, err)
+		}
+	}
+	return nil
 }
 
 // createImage lays down the raw ext4 image the guest gets as /dev/vdb.
