@@ -167,6 +167,8 @@ func (f *fakeMachines) Exec(ctx context.Context, id string, req api.ExecRequest)
 	return &api.ExecResponse{ExitCode: 1, Stderr: "not ready"}, nil
 }
 
+func (f *fakeMachines) AwaitCheckpointDurable(context.Context, string, string) error { return nil }
+
 func (f *fakeMachines) Checkpoint(ctx context.Context, id, comment string) (*state.Checkpoint, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -43,6 +43,9 @@ type MachineManager interface {
 	CreateVolume(ctx context.Context, req api.CreateVolumeRequest) (*state.Volume, error)
 	DeleteVolume(ctx context.Context, id string) error
 	Checkpoint(ctx context.Context, machineID, comment string) (*state.Checkpoint, error)
+	// AwaitCheckpointDurable waits for a checkpoint's upload, which Checkpoint
+	// does not: it returns once the artifacts are staged.
+	AwaitCheckpointDurable(ctx context.Context, machineID, checkpointID string) error
 	// AppAddr is where this host can reach the machine's application port,
 	// empty if it holds no slot for it.
 	AppAddr(machineID string) (string, bool)
@@ -598,6 +601,13 @@ func (m *Manager) snapshotRelease(ctx context.Context, machineID string, rel *st
 	}
 	if ck.MemBuildID == "" {
 		return errors.New("checkpoint produced no memory build")
+	}
+	// Uploaded before anything can name it. Every later replica of this release
+	// restores from object storage, on this host or another, and Checkpoint
+	// returns while the upload is still running: replica two of a deploy
+	// failed on the release checkpoint's snap.bin not being there yet.
+	if err := m.opts.Machines.AwaitCheckpointDurable(ctx, machineID, ck.ID); err != nil {
+		return err
 	}
 	// The vmstate, which the two build ids below cannot name.
 	//

@@ -117,6 +117,41 @@ func (m *Manager) Checkpoint(ctx context.Context, machineID, comment string) (*s
 	return ckpt, nil
 }
 
+// AwaitCheckpointDurable blocks until a checkpoint's upload has completed, and
+// reports a failed or unfinished one as an error.
+//
+// For a caller that is about to restore the checkpoint somewhere: Checkpoint
+// returns as soon as the artifacts are staged, and a restore that starts before
+// the upload ends fails on "artifact missing". A release's later replicas are
+// exactly that caller -- replica two of a deploy failed with the release
+// checkpoint's snap.bin not yet in object storage.
+func (m *Manager) AwaitCheckpointDurable(ctx context.Context, machineID, checkpointID string) error {
+	localDir := m.checkpointDir(machineID, checkpointID)
+	deadline := time.Now().Add(checkpointDurableWait)
+	for {
+		st := fc.StatusOf(localDir)
+		switch {
+		case st.Durable:
+			return nil
+		case st.Failed:
+			return fmt.Errorf("machines: checkpoint %s could not be uploaded: %s", checkpointID, st.Error)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("machines: checkpoint %s was not uploaded within %s", checkpointID, checkpointDurableWait)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
+// checkpointDurableWait bounds AwaitCheckpointDurable. Generous: the upload is
+// a memory image and a disk diff, and a deploy waiting on it is still faster
+// than the replicas it saves from booting.
+const checkpointDurableWait = 5 * time.Minute
+
 // awaitDurable records a checkpoint as durable once its upload completes.
 //
 // Detached from the request that created the checkpoint: the caller already
