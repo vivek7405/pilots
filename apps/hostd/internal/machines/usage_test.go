@@ -28,7 +28,7 @@ import (
 func TestEveryLifecycleWriteHasItsLedgerHook(t *testing.T) {
 	got := ledgerHooks(t)
 	want := map[string][]string{
-		"Open":       {"Create", "Rescue", "Resize", "Take"},
+		"Open":       {"Create", "Rescue", "Resize", "Take", "Take"},
 		"Transition": {"Redeploy", "Redeploy", "Redeploy", "Resize", "Resize", "RestoreCheckpoint", "RestoreCheckpoint", "Suspend", "Wake", "Wake", "settleExit"},
 		"Close":      {"Destroy", "StopLocal"},
 	}
@@ -49,7 +49,9 @@ func TestEveryLifecycleWriteHasItsLedgerHook(t *testing.T) {
 	// Take opens an interval for the same reason Rescue does: the machine is
 	// now this host's, and the host it came from closed its own interval when
 	// it suspended. The seam between the two is the handoff itself, so neither
-	// side double-bills and neither leaves a gap.
+	// side double-bills and neither leaves a gap. It carries two: suspended,
+	// for a machine that was asleep before the drain and stays asleep here
+	// (storage only), and running, for one brought back up.
 	//
 	// Resize carries two Transitions and an Open, and the Open is what makes it
 	// different from a redeploy: the machine comes back at a DIFFERENT size, so
