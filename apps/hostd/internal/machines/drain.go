@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -275,7 +276,13 @@ func (m *Manager) offerTo(ctx context.Context, row state.Machine, target string,
 		return nil // it already left, which is the outcome we wanted
 	}
 
+	// Said in the offer id, because the row cannot say it: after the suspend
+	// below, a machine that was serving and one that had idled to sleep look
+	// the same, and the target must bring back only the first. The handoff
+	// table has held rows, so it cannot take a column (rule 6).
+	offerPrefix := handoffSuspendedPrefix
 	if fresh.State == StateRunning {
+		offerPrefix = handoffRunningPrefix
 		// The suspend IS the checkpoint the target restores. A named
 		// checkpoint would work and would add a row the tenant can see, for an
 		// operation they did not ask for.
@@ -302,7 +309,7 @@ func (m *Manager) offerTo(ctx context.Context, row state.Machine, target string,
 	}
 
 	offer := &state.Handoff{
-		ID:        newID("ho"),
+		ID:        newID(offerPrefix),
 		MachineID: row.ID,
 		FromHost:  m.opts.HostID,
 		ToHost:    target,
@@ -383,6 +390,18 @@ func (m *Manager) Take(ctx context.Context, id, handoffID string) error {
 		return nil // already ours
 	}
 
+	// Room for it, checked BEFORE the claim. Take used to bring a machine up
+	// with no capacity check at all, on a host a create would have refused;
+	// and after the claim a refusal leaves the row here with nowhere to run.
+	// Refused now, the offer times out at the source, which tries the next
+	// host. Only a machine that will run here needs the room.
+	resume := takeResumes(handoffID)
+	if resume {
+		if err := m.admit(ctx, row.VCPUs, row.MemMiB); err != nil {
+			return fmt.Errorf("machines: take %s: %w", id, err)
+		}
+	}
+
 	// Every check of the offer happens inside the store, against the rows
 	// rather than against anything the caller said. See claimByHandoff.
 	if err := m.opts.Store.ClaimMachine(ctx, id, m.opts.HostID, row.State,
@@ -409,6 +428,18 @@ func (m *Manager) Take(ctx context.Context, id, handoffID string) error {
 	// for; the row moved, which is all a drain owes it.
 	if fresh.State == StateStopped {
 		slog.Info("took a stopped machine", "machine", id, "handoff", handoffID)
+		return nil
+	}
+	// And one that was ASLEEP before the drain stays asleep: the row moves,
+	// and the next request wakes it here. Bringing every suspended machine up
+	// on the target turned a drain into a mass wake -- every scale-to-zero
+	// sandbox on the host running, billed and faulting its memory in, for
+	// traffic nobody sent.
+	if !resume {
+		m.opts.Usage.Open(fresh.ID, m.orgOf(ctx, fresh.ID), fresh.State, fresh.VCPUs,
+			fresh.MemMiB, m.volumeGiB(ctx, fresh.VolumeID))
+		slog.Info("took a suspended machine; it wakes here on its next request",
+			"machine", id, "handoff", handoffID)
 		return nil
 	}
 
@@ -467,4 +498,20 @@ func (m *Manager) HandingOff(id string) (string, bool) {
 	}
 	target, _ := v.(string)
 	return target, true
+}
+
+// The two kinds of offer, told apart by their id. See offerTo.
+const (
+	handoffRunningPrefix   = "ho-run"
+	handoffSuspendedPrefix = "ho-sus"
+)
+
+// takeResumes reports whether an offer is for a machine that was running when
+// its drain began, and so should be brought back up on the host that takes it.
+//
+// Only an offer marked suspended stays down. An id from a host that predates
+// the distinction ("ho-<hex>") resumes, which is what every offer did before,
+// so an older source's machine is never left down by a newer target.
+func takeResumes(handoffID string) bool {
+	return !strings.HasPrefix(handoffID, handoffSuspendedPrefix+"-")
 }

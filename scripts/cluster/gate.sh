@@ -3345,6 +3345,13 @@ else
     DR_BEFORE=$(api "$DR_ENTRY" GET "/v1/machines/${DR_ID}" | jf host_id)
     DR_URL_BEFORE=$(api "$DR_ENTRY" GET "/v1/machines/${DR_ID}" | jf url)
 
+    # And one ALREADY asleep when the drain starts. A drain must move it, not
+    # wake it: taking every suspended machine back up on the target turned a
+    # drain into a mass wake of every scale-to-zero sandbox on the host.
+    DR_S=$(api "$DR_FROM" POST /v1/machines '{"vcpus":1,"mem_mib":512}')
+    DR_SID=$(echo "$DR_S" | jf id)
+    [ -n "$DR_SID" ] && api "$DR_FROM" POST "/v1/machines/${DR_SID}/suspend" >/dev/null 2>&1
+
     # Drained through the OTHER host, which is the shape an operator uses: any
     # host serves the route and forwards it to the one named.
     DR_OUT=$(api "$DR_ENTRY" POST "/v1/hosts/${DR_HOSTID}/drain" '{}')
@@ -3359,6 +3366,18 @@ else
     [ -n "$DR_AFTER" ] && [ "$DR_AFTER" != "$DR_BEFORE" ] \
       && ok "the machine moved from ${DR_BEFORE} to ${DR_AFTER}" \
       || bad "the machine is still on ${DR_AFTER:-nowhere}, want anywhere but ${DR_BEFORE}"
+
+    if [ -z "$DR_SID" ]; then
+      bad "could not create the asleep machine to drain: $DR_S"
+    else
+      DR_S_ROW=$(api "$DR_ENTRY" GET "/v1/machines/${DR_SID}")
+      DR_S_HOST=$(echo "$DR_S_ROW" | jf host_id)
+      DR_S_STATE=$(echo "$DR_S_ROW" | jf state)
+      [ -n "$DR_S_HOST" ] && [ "$DR_S_HOST" != "$DR_BEFORE" ] && [ "$DR_S_STATE" = "suspended" ] \
+        && ok "a machine asleep before the drain moved to ${DR_S_HOST} and is still asleep" \
+        || bad "the asleep machine is on ${DR_S_HOST:-nowhere} in state ${DR_S_STATE:-unknown}; want another host, suspended"
+      api "$DR_ENTRY" DELETE "/v1/machines/${DR_SID}" >/dev/null 2>&1
+    fi
 
     # The whole promise of rule 4: the address does not change.
     [ "$DR_URL_BEFORE" = "$DR_URL_AFTER" ] \
