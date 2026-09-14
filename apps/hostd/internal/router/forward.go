@@ -146,13 +146,24 @@ const CronHeader = "X-Pilot-Cron"
 // both the forwarding and the liveness logic. The cron marker is forged for
 // the same reason and stripped in the same place, so the two can never
 // drift apart.
+//
+// So are the two replay and drain markers, which were missed. The router sets
+// Pilot-Replay-Src only on a request it replays, so on every other request a
+// client's copy reached the guest unchanged, and an app that trusts it -- the
+// header says which machine answered first and in what state -- was told
+// whatever the client liked. A client's Pilot-Drain-Hop made the edge treat a
+// first request as a second handoff hop and refuse it.
 func StripForwardMarker(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		req.Header.Del(forwardedHeader)
-		req.Header.Del(CronHeader)
+		for _, h := range internalMarkers {
+			req.Header.Del(h)
+		}
 		next.ServeHTTP(w, req)
 	})
 }
+
+// internalMarkers are the request headers only a host of this fleet may set.
+var internalMarkers = []string{forwardedHeader, CronHeader, ReplaySrcHeader, drainHopHeader}
 
 // InternalAPIHandler serves API calls forwarded by peers.
 //

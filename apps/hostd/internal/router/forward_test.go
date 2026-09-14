@@ -31,3 +31,24 @@ func TestThePublicListenerStripsBothMarkers(t *testing.T) {
 		t.Errorf("an ordinary header was stripped: %q", got)
 	}
 }
+
+// The replay and drain markers are fleet-internal too. A client's
+// Pilot-Replay-Src reached the guest on every request that was not replayed,
+// and a client's Pilot-Drain-Hop made the edge refuse a first request as a
+// second handoff hop.
+func TestThePublicListenerStripsTheReplayAndDrainMarkers(t *testing.T) {
+	var seen http.Header
+	h := StripForwardMarker(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Clone()
+	}))
+	req := httptest.NewRequest(http.MethodGet, "http://app.pilotrun.app/", nil)
+	req.Header.Set(ReplaySrcHeader, "machine=forged;state=admin")
+	req.Header.Set(drainHopHeader, "host-x")
+	h.ServeHTTP(httptest.NewRecorder(), req)
+
+	for _, name := range []string{ReplaySrcHeader, drainHopHeader} {
+		if got := seen.Get(name); got != "" {
+			t.Errorf("%s survived the public listener: %q", name, got)
+		}
+	}
+}
