@@ -2,13 +2,14 @@ package machines
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/vivek7405/pilots/hostd/internal/fc"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -126,6 +127,25 @@ func (m *Manager) Resize(ctx context.Context, id string, vcpus, memMiB int) (*st
 		"from_vcpus", row.VCPUs, "to_vcpus", vcpus,
 		"from_mem_mib", row.MemMiB, "to_mem_mib", memMiB)
 
+	// The disk first, while the guest is still there to flush it. The boot
+	// below comes up on the machine's own disk chain, so that chain has to
+	// hold every write -- including the ones since its last suspend, which
+	// live only in the copy-on-write file of the process about to be killed.
+	// This used to boot through bootMachine, which reflink-copies a fresh
+	// template or image: the id, the URL and the token survived, and every
+	// file the machine had written was gone.
+	var supersededDisk string
+	if fcm, ok := m.get(id); ok {
+		captured, err := m.captureDiskForResize(ctx, row, fcm)
+		if err != nil {
+			return nil, fmt.Errorf("machines: resize %s: its disk could not be "+
+				"captured, so it was left running at its old size: %w", id, err)
+		}
+		if captured != "" {
+			supersededDisk, row.RootfsBuildID = row.RootfsBuildID, captured
+		}
+	}
+
 	// Down exactly as Redeploy takes it down. Nothing is photographed: a
 	// photograph of the old size is a photograph nothing can load.
 	m.releaseDiscovery(id)
@@ -142,9 +162,8 @@ func (m *Manager) Resize(ctx context.Context, id string, vcpus, memMiB int) (*st
 			m.pool.Return(slotIdx)
 		}
 	}
-	// The memory image, and ONLY the memory image. The disk is what this
-	// machine keeps: its copy-on-write file carries every write since the last
-	// snapshot, and a resize is not a redeploy, so it stays.
+	// The memory image, and ONLY the memory image: it describes a machine of
+	// the old size. The disk is what this machine keeps.
 	superseded := row.MemBuildID
 	row.MemBuildID = ""
 
@@ -158,17 +177,11 @@ func (m *Manager) Resize(ctx context.Context, id string, vcpus, memMiB int) (*st
 		return nil, err
 	}
 
+	// The machine's own disk chain, booted with a kernel at the new size. The
+	// agent token is already on that disk, written at create and flushed by
+	// the sync above, so there is nothing to install.
 	token := m.token(id)
-	if token == templateToken {
-		token = newID("agt")
-		sum := sha256.Sum256([]byte(token))
-		row.AgentTokenHash = hex.EncodeToString(sum[:])
-	}
-
-	// Booted from the machine's OWN image, which is what makes this a resize
-	// rather than a redeploy: the disk it comes up on is the disk it went down
-	// with.
-	fcm, err := m.bootMachine(ctx, row, token, row.VolumeID, row.ImageRef, "")
+	fcm, err := m.bootFromDisk(ctx, row, fc.Backends{}, row.RootfsBuildID)
 	if err != nil {
 		row.State = StateError
 		stampSlot(row, nil)
@@ -196,6 +209,9 @@ func (m *Manager) Resize(ctx context.Context, id string, vcpus, memMiB int) (*st
 	// The old memory image only after the row no longer names it, so a failed
 	// write never leaves the row pointing at an object that is gone. It
 	// describes a machine of the old size and nothing can ever load it again.
+	if supersededDisk != "" {
+		m.discardBuilds(ctx, supersededDisk)
+	}
 	if superseded != "" {
 		m.discardBuilds(ctx, superseded)
 	}
@@ -252,4 +268,47 @@ func (m *Manager) orgOf(ctx context.Context, id string) string {
 		return t.OrgID
 	}
 	return ""
+}
+
+// captureDiskForResize stores a running machine's disk as a build and returns
+// its id, or "" when it wrote nothing since its last one.
+//
+// The guest is synced first, so writes still in its own page cache reach the
+// disk, then paused, so the capture describes one instant. It stays paused:
+// the caller kills it next. A failure resumes it, because the caller then
+// leaves it running at its old size rather than lose its disk.
+func (m *Manager) captureDiskForResize(ctx context.Context, row *state.Machine,
+	fcm *fc.Machine) (string, error) {
+
+	if fcm.Slot != nil {
+		m.execSync(ctx, row.ID, fcm.Slot)
+	}
+	t, err := m.templateFor(ctx, row)
+	if err != nil {
+		return "", err
+	}
+	if err := fcm.Client.Pause(ctx); err != nil {
+		return "", fmt.Errorf("pause: %w", err)
+	}
+	resume := func() {
+		if rerr := fcm.Client.Resume(context.WithoutCancel(ctx)); rerr != nil {
+			slog.Error("could not resume a machine whose resize was abandoned",
+				"machine", row.ID, "err", rerr)
+		}
+	}
+	rootfs, err := fcm.ChunkifyDisk(ctx, fc.SnapshotOpts{
+		RootfsTemplateDir: m.rootfsTemplateDir(t), BuildDir: m.buildDir(),
+	})
+	if err != nil {
+		resume()
+		return "", err
+	}
+	if rootfs == uuid.Nil {
+		return "", nil
+	}
+	if err := m.uploadBuild(ctx, rootfs); err != nil {
+		resume()
+		return "", err
+	}
+	return rootfs.String(), nil
 }
