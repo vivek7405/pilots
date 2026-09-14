@@ -98,10 +98,103 @@ export async function runQuery(req: QueryRequest): Promise<QueryResult> {
   }
 }
 
+/** The login a read-only query runs as when the stored credential is privileged. */
+export const PG_READONLY_ROLE = 'pilots_console_ro';
+
+/**
+ * The read-only role's password, derived from the stored connection string.
+ *
+ * Derived rather than stored, so there is no second secret to keep: anyone who
+ * can compute it already holds the superuser credential it is derived from.
+ * Hex, so it is safe to place in ALTER ROLE, which takes no bind parameters.
+ */
+export async function readOnlyRolePassword(url: string): Promise<string> {
+  const { createHash } = await import('node:crypto');
+  return createHash('sha256').update('pilots-console-readonly\0').update(url).digest('hex');
+}
+
+/** The stored connection string with its identity swapped for the read-only role. */
+export function asReadOnlyRole(url: string, password: string): string {
+  const parsed = new URL(url);
+  parsed.username = PG_READONLY_ROLE;
+  parsed.password = password;
+  return parsed.toString();
+}
+
+/**
+ * Whether a session may reach outside the database: a superuser, or a member
+ * of the roles that run server programs or read and write server files.
+ *
+ * A read-only transaction does not stop any of that. `COPY (SELECT 1) TO
+ * PROGRAM '...'` writes nothing to a table, so Postgres runs it inside a READ
+ * ONLY transaction, as the server's OS user -- and `pilot add` generates the
+ * `postgres` superuser, so a `member` denied writes could run a shell command
+ * on the database machine, or delete its data directory.
+ */
+export const PG_PRIVILEGED_SQL = `
+  SELECT r.rolsuper
+      OR (current_setting('server_version_num')::int >= 110000 AND (
+            pg_has_role(current_user, 'pg_execute_server_program', 'MEMBER')
+         OR pg_has_role(current_user, 'pg_read_server_files', 'MEMBER')
+         OR pg_has_role(current_user, 'pg_write_server_files', 'MEMBER'))) AS privileged,
+         current_setting('server_version_num')::int AS version
+    FROM pg_roles r WHERE r.rolname = current_user`;
+
+/**
+ * The connection string a read-only query must use.
+ *
+ * An unprivileged credential is used as it is: the engine's read-only
+ * transaction is then the whole guarantee. A privileged one is NOT, and
+ * switching role inside its session is not enough either -- the session user
+ * stays a superuser, and one statement can `set_config('role', ...)` back
+ * before a function that checks privilege at run time. So the query logs in
+ * as a separate role that is not a superuser and holds only pg_read_all_data,
+ * which no statement can raise. The role is created or corrected here, with
+ * the privileged credential, every time: that also takes back anything
+ * granted to it since.
+ */
+async function readOnlyConnection(url: string): Promise<string> {
+  const { Client } = await import('pg');
+  const admin = new Client({ connectionString: url });
+  await admin.connect();
+  try {
+    const res = await admin.query(PG_PRIVILEGED_SQL);
+    const { privileged, version } = res.rows[0] ?? { privileged: false, version: 0 };
+    if (!privileged) return url;
+    if (version < 140000) {
+      throw new Error(
+        'this database is reached with a superuser, and a read-only query ' +
+          'cannot be kept inside the database before Postgres 14 (no ' +
+          'pg_read_all_data role). Turn on writes to run it, or store a ' +
+          'credential that is not a superuser.',
+      );
+    }
+    const password = await readOnlyRolePassword(url);
+    const role = PG_READONLY_ROLE;
+    await admin.query(`DO $$ BEGIN
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${role}') THEN
+        CREATE ROLE ${role} LOGIN;
+      END IF; END $$`);
+    await admin.query(
+      `ALTER ROLE ${role} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE ` +
+        `NOREPLICATION NOBYPASSRLS PASSWORD '${password}'`,
+    );
+    await admin.query(`GRANT pg_read_all_data TO ${role}`);
+    await admin.query(
+      `REVOKE pg_execute_server_program, pg_read_server_files, ` +
+        `pg_write_server_files, pg_write_all_data FROM ${role}`,
+    );
+    return asReadOnlyRole(url, password);
+  } finally {
+    await admin.end();
+  }
+}
+
 async function runPostgres(req: QueryRequest, limit: number): Promise<QueryResult> {
   const { Client } = await import('pg');
+  const direct = throughTunnel(req.url, req.tunnel);
   const client = new Client({
-    connectionString: throughTunnel(req.url, req.tunnel),
+    connectionString: req.write ? direct : await readOnlyConnection(direct),
     // SESSION level, not transaction level, and this is the whole of the
     // read-only guarantee.
     //

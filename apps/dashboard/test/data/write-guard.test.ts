@@ -55,3 +55,38 @@ test('a read connects with default_transaction_read_only on', async () => {
       'multi-statement query beginning COMMIT; escapes the transaction guard',
   );
 });
+
+/**
+ * A read-only transaction does not keep a SUPERUSER inside the database.
+ *
+ * `COPY (SELECT 1) TO PROGRAM '...'` writes to no table, so Postgres runs it
+ * inside a READ ONLY transaction as the server's OS user, and `pilot add`
+ * generates the `postgres` superuser. Measured against postgres:16 with the
+ * old code: a read-only query created a file on the database machine and
+ * `pg_read_file('/etc/passwd')` returned its contents. A read now logs in as
+ * a role that is not a superuser, which no statement inside it can undo.
+ */
+test('a read-only query does not run with the stored superuser identity', async () => {
+  const { asReadOnlyRole, readOnlyRolePassword, PG_READONLY_ROLE } = await import(
+    '#modules/data/drivers.server.ts'
+  );
+  const url = 'postgres://postgres:supersecret@db.internal:5432/app?sslmode=disable';
+  const password = await readOnlyRolePassword(url);
+  assert.match(password, /^[0-9a-f]{64}$/, 'the derived password must be safe to inline in ALTER ROLE');
+  assert.equal(await readOnlyRolePassword(url), password, 'the password must be stable per credential');
+
+  const ro = new URL(asReadOnlyRole(url, password));
+  assert.equal(ro.username, PG_READONLY_ROLE);
+  assert.equal(ro.password, password);
+  assert.equal(ro.hostname, 'db.internal', 'only the identity moves');
+  assert.equal(ro.pathname, '/app');
+  assert.equal(ro.searchParams.get('sslmode'), 'disable');
+
+  const { readFile } = await import('node:fs/promises');
+  const src = await readFile(new URL('../../modules/data/drivers.server.ts', import.meta.url), 'utf8');
+  assert.match(
+    src,
+    /connectionString:\s*req\.write\s*\?\s*direct\s*:\s*await readOnlyConnection\(direct\)/,
+    'a read must go through readOnlyConnection, or a superuser credential runs it',
+  );
+});
