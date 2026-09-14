@@ -799,7 +799,7 @@ func newMachinesCheckpointsCmd(env *Env) *cobra.Command {
 func newMachinesRestoreCmd(env *Env) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "restore <checkpoint-id>",
-		Short: "bring a checkpoint back as a new machine",
+		Short: "roll a machine back to one of its checkpoints, in place",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(c *cobra.Command, args []string) error {
 			client, err := env.Client()
@@ -817,14 +817,15 @@ func newMachinesRestoreCmd(env *Env) *cobra.Command {
 		},
 	}
 	Describe(c, Doc{
-		How: "The restored machine is a NEW machine with its own name and URL; the\n" +
-			"one the checkpoint was taken from is untouched. Nothing is\n" +
-			"overwritten, so there is nothing to lose here.",
+		How: "Rolls the machine back IN PLACE: the same id, name and URL, with\n" +
+			"its memory and disk as they were at the checkpoint. Everything it\n" +
+			"wrote after the checkpoint is discarded. To keep the machine as it\n" +
+			"is and get a copy instead, create a new one from the checkpoint.",
 		Examples: []string{
 			"pilot machines restore ck-3a3077f4",
 		},
 		Related: []string{
-			"pilot machines create --checkpoint <id>   the same, with a name of your choosing",
+			"pilot machines create --checkpoint <id>   a NEW machine from the checkpoint, leaving this one untouched",
 		},
 	})
 	return c
