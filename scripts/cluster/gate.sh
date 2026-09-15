@@ -297,15 +297,24 @@ if [ -n "$A_IP" ]; then
   WEB_ID=$(echo "$WEB" | jf id); WEB_NAME=$(echo "$WEB" | jf name)
   WEB_HOST=$(echo "$WEB" | jf host_id)
   DB_BODY="{\"app\":\"${APP}\",\"vcpus\":1,\"mem_mib\":512,${KNOBS},\"cmd\":\"sleep 86400\",\"secret_env\":{\"DB_PASSWORD\":\"gate-secret-$$\"}}"
-  DB_ID=""; DB_NAME=""; DB_HOST=""
-  for _ in 1 2 3 4 5 6; do
+  # Get the db onto a host other than web's. The ranker reads GOSSIPED free
+  # memory, which lags a create by a heartbeat, so a db created right after web
+  # reads stale capacity and lands on the same (momentarily emptiest) host --
+  # and DELETING it just frees that host again, so a delete-and-retry loops
+  # forever on one host. Instead: pace each attempt so web's memory reservation
+  # reaches the gossip, and KEEP a colliding attempt as filler so its host keeps
+  # dropping until the next create ranks elsewhere. The fillers are cleaned up
+  # once the pair is chosen.
+  DB_ID=""; DB_NAME=""; DB_HOST=""; FILLERS=""
+  for _ in 1 2 3 4 5 6 7 8; do
+    sleep 12
     DB=$(api "$B_IP" POST /v1/machines "$DB_BODY")
     DB_ID=$(echo "$DB" | jf id); DB_NAME=$(echo "$DB" | jf name); DB_HOST=$(echo "$DB" | jf host_id)
     { [ -z "$DB_ID" ] || [ -z "$WEB_HOST" ] || [ "$DB_HOST" != "$WEB_HOST" ]; } && break
-    # Landed on web's host; drop it and let a new name hash elsewhere.
-    api "$B_IP" DELETE "/v1/machines/${DB_ID}" >/dev/null 2>&1
+    FILLERS="${FILLERS} ${DB_ID}" # keep it: it lowers this host's free for the next try
     DB_ID=""; DB_HOST=""
   done
+  for f in $FILLERS; do api "$B_IP" DELETE "/v1/machines/${f}" >/dev/null 2>&1; done
 
   if [ -z "$WEB_ID" ] || [ -z "$DB_ID" ]; then
     bad "could not create the pair (web='${WEB}' db='${DB}')"
