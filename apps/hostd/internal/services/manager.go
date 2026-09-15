@@ -566,6 +566,15 @@ func (m *Manager) createReplicaOn(ctx context.Context, svc *state.Service,
 	if hostID == "" || hostID == m.opts.HostID {
 		return m.opts.Machines.Create(ctx, req)
 	}
+	// A restore does not travel. MemSnapKey and ImageToken are `json:"-"`, so
+	// a placed restore would reach the far side with no vmstate key and be
+	// refused by createFromRelease as a 500 nobody can act on. Only a boot is
+	// placed today (the per-ordinal path, which always carries a volume); say
+	// so here rather than let the next caller find it.
+	if restore {
+		return nil, fmt.Errorf("services: a replica that restores %s cannot be placed on %s: "+
+			"the vmstate key does not travel; only a boot may be placed", rel.ID, hostID)
+	}
 	// Placed elsewhere. The far side runs the same handler a client's create
 	// reaches, so nothing about the machine differs except which host holds
 	// it -- and it answers with the row, which is the id every later step of
