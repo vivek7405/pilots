@@ -112,16 +112,17 @@ func run() error {
 		}
 	}
 
-	// Probe once, at startup, before anything can be created. The engine's
-	// image copies use --reflink=auto, which falls back to a full copy without
-	// reporting anything, so a host on the wrong filesystem is slow in a way
-	// that looks like nothing is wrong. Say it out loud instead.
+	// Probe once, at startup, and report it on /v1/health. It is a fact about
+	// the host an operator wants, not a precondition: no per-machine path
+	// copies a whole file any more, so create, wake and checkpoint meet
+	// their targets on any filesystem. The one whole-file copy left -- the
+	// template build, once per host -- is cheaper where extents are shared,
+	// and that is all the probe now says.
 	reflink := fc.SupportsReflink(cfg.ChrootBase)
 	if !reflink {
-		slog.Warn("this host's machine store cannot share extents, so every "+
-			"image copy is a real copy: create and checkpoint will be several "+
-			"times slower than the engine is designed for. Put "+
-			"PILOT_CHROOT_BASE on btrfs, or on XFS formatted with reflink=1.",
+		slog.Info("this host's machine store does not share extents; the "+
+			"once-per-host template build copies its image in full, and nothing "+
+			"per machine does",
 			"chroot_base", cfg.ChrootBase)
 	}
 

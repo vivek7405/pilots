@@ -1194,7 +1194,15 @@ set with no ordering.
 (28-byte BE requests / 16-byte BE replies); serves a block `Overlay` =
 template (read-through) + per-machine cow `Cache` (sparse mmap'd file +
 roaring bitmap of dirty 4KiB blocks; reads hit cache only if EVERY covered
-block is dirty, else fall through). Rehydrate-on-wake populates the cache
+block is dirty, else fall through). The template half is opened by whichever
+of its two names is usable: the local build directory when its
+`data.complete` marker says it is whole, and otherwise the same build in the
+bucket, served range-by-range and cached into that directory while a
+background prefault pulls the rest — so a host that has never held the
+template attaches at once and reads do not block on hydration. The marker,
+never a size, is what licenses reading a build directory locally: an
+interrupted pull leaves a full-length file of holes, and a build that is only
+partly here is refused as a chunkify parent rather than diffed against. Rehydrate-on-wake populates the cache
 from the machine's diff build BEFORE accepting requests, **skipping
 parent-pointing mappings** (marking them dirty would shadow template content
 with zeros). An all-zero diff yields a zero-length data object → S3 range GET

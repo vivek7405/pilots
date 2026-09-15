@@ -234,6 +234,11 @@ async function processAssertions() {
       'pilots_nbd_cache_misses_total',
       'pilots_router_inflight',
       'pilots_slots_free',
+      // The published root RPO and the freeze that pays for it. Rendered
+      // empty until a flush runs, but the family has to exist: an absent
+      // family is a flush loop that was never started.
+      'pilots_root_flush_lag_seconds',
+      'pilots_root_flush_pause_seconds',
     ]) {
       assert(text.includes(`# TYPE ${family} `), `${family} is missing from the scrape`);
     }
@@ -917,38 +922,40 @@ async function timed(fn) {
   return { ms: Number(process.hrtime.bigint() - started) / 1e6, result };
 }
 
-// Every assertion still asserts, on every host. Create and wake meet the
-// engine targets even without extent sharing -- the copy the engine really
-// runs skips zero blocks and costs ~134ms warm on ext4, so they are held to
-// the real budget everywhere. Only the checkpoint pause genuinely breaks: it
-// reflinks the snapshot and the cow while the guest is frozen, and without
-// extent sharing it stops being independent of machine size. That one gets a
-// ceiling measured on ext4 rather than no assertion at all.
+// Two tiers, not three. Every assertion asserts at the engine target on every
+// host, whatever its filesystem. A third, "degraded" tier existed because
+// create and checkpoint once copied whole files and a host that could not
+// share extents paid for it inside the pause; no engine path copies a whole
+// file any more -- a create restores over a shared build, a booted machine's
+// root is served from its build, and a checkpoint copies only the cow's dirty
+// ranges -- so a ceiling keyed on /v1/health.reflink would be a hole rather
+// than a tier. Reverting the dirty-range copy in fc/instant.go turns the
+// checkpoint assertion below red on ext4, which is the proof that the
+// dependency is actually gone rather than re-documented.
 //
-// On top of those two tiers sits the metal one. A dedicated host is held to
+// On top of the engine target sits the metal one. A dedicated host is held to
 // the SLO table -- create 500ms, wake 200ms, resume gap 500ms, release restore
 // 1s, promote 1.5s -- because that is the claim being sold, and a claim no
 // battery checks is a claim nobody owns. The switch is explicit rather than
-// inferred from the host, because extent sharing is necessary for those
-// numbers and nowhere near sufficient: a laptop cluster node on btrfs reports
-// reflink true and cannot create a machine in 500ms, so an auto-selected tier
-// would fail the laptop for a reason that has nothing to do with its storage.
-// PILOTS_E2E_METAL=1 says "hold me to metal"; /v1/health.reflink says "extents
-// are shared"; the run needs both, and the flag without the fact is a failed
-// step rather than a quiet downgrade.
+// inferred from the host: nothing the host reports says whether it is
+// dedicated hardware, a laptop cluster node cannot create a machine in 500ms
+// for reasons that have nothing to do with its storage, and an auto-selected
+// tier would fail it for the wrong reason. PILOTS_E2E_METAL=1 is the operator
+// asserting "hold me to metal", and that is the whole of its precondition.
 //
 // This lives at module scope so there is ONE tier rule. A second copy inside
 // the service battery would be a second copy of a contract, and the two would
 // disagree the first time either moved.
-function enforce(reflink, p50, budget, degraded, metal, what) {
-  const limit = METAL ? metal : reflink ? budget : degraded;
-  const tier = METAL ? 'metal SLO' : reflink ? 'engine target' : 'degraded ceiling';
+function enforce(p50, budget, metal, what) {
+  const limit = METAL ? metal : budget;
+  const tier = METAL ? 'metal SLO' : 'engine target';
   assert(p50 < limit,
     `${what} p50 was ${p50.toFixed(0)}ms, over the ${tier} of ${limit}ms`);
 }
 
-// Whether this host can share extents, which the engine's image copies depend
-// on. hostd probes it at startup and reports it; see fc.SupportsReflink.
+// Whether this host can share extents. hostd probes it at startup and reports
+// it (fc.SupportsReflink) because it is a true fact about the host that an
+// operator sizing one wants; no budget in this battery is chosen from it.
 async function hostSharesExtents() {
   const health = await request('/v1/health', { auth: false });
   return health.json?.reflink === true;
@@ -979,41 +986,28 @@ async function scrapeMetric(name) {
 
 async function timingAssertions() {
   const created = [];
+  // Read once, for the honesty step below: the field is reported and it must
+  // be stable, but nothing here picks a budget from it. The engine targets
+  // hold on every filesystem (see enforce), so a host that cannot share
+  // extents is measured, not excused.
   const reflink = await hostSharesExtents();
-
-  // The instant engine's targets assume a copy of a multi-gigabyte image is a
-  // metadata operation. On a filesystem that cannot share extents it is a real
-  // copy -- measured at 2.2s for a 2GiB rootfs -- which no amount of engine
-  // work can get back, so holding this host to the targets would only ever
-  // measure its filesystem.
-  //
-  // Nothing is retired: on any host that meets the engine's documented storage
-  // precondition the assertions below run exactly as they always have. Where
-  // the precondition is unmet the numbers are still measured and printed, and
-  // the battery asserts something the degraded case genuinely owes -- that the
-  // host SAYS it is degraded. A slow host that reported itself healthy is the
-  // failure worth catching here; a slow host that admits it is a filesystem
-  // choice, and it is visible.
   if (!reflink) {
-    console.log('      ! this host cannot share extents, so image copies are real copies.');
-    console.log('        The engine targets are replaced by the degraded ceilings below.');
-    console.log('        Put the machine store on btrfs, or on XFS made with -m reflink=1.');
+    console.log('      - this host does not share extents; the engine targets apply unchanged.');
   }
 
   // The tier rule itself is enforce(), at module scope.
 
   try {
-    // Before any timing runs, because the whole point of the metal tier is
-    // that it cannot be claimed by a host that has not earned it. A run that
-    // asked for metal budgets on a host without extent sharing is measuring
-    // the wrong machine, and downgrading it silently would produce a green
-    // run that proves nothing.
-    await step('PILOTS_E2E_METAL=1 is only valid on a host that shares extents', async () => {
-      assert(!METAL || reflink,
-        'PILOTS_E2E_METAL=1 but /v1/health reports reflink false: this host cannot '
-        + 'share extents, so the metal SLOs are unreachable for reasons the engine '
-        + 'cannot fix. Run without the flag, or put the machine store on btrfs or '
-        + 'on XFS made with -m reflink=1.');
+    // Before any timing runs, in the same position the old precondition
+    // step held so nothing below shifts. There is no host property to check
+    // any more -- the metal tier's precondition is the operator's word --
+    // so what the step does is say, out loud and up front, which numbers
+    // this run is about to be held to.
+    await step(`PILOTS_E2E_METAL=1 ${METAL ? 'holds' : 'would hold'} this host to the metal SLOs`, async () => {
+      const slos = { create: 500, wake: 200, 'checkpoint resume gap': 500, 'release restore': 1000, promote: 1500 };
+      console.log(`      ${METAL ? 'metal SLOs in force' : 'engine targets in force; metal SLOs'}: `
+        + Object.entries(slos).map(([k, v]) => `${k} ${v}ms`).join(', '));
+      assert(Object.values(slos).every((v) => v > 0), 'a metal SLO is unset');
     });
 
     // ---- tier 3: the cold boot ----------------------------------------
@@ -1094,7 +1088,7 @@ async function timingAssertions() {
         // which is the design, and it means the condition cannot be repeated
         // without another hostd restart.
         console.log(`      cold boot ${ms.toFixed(0)}ms (one sample; the condition is not repeatable)`);
-        enforce(reflink, ms, 25000, 30000, 5000, 'cold boot');
+        enforce(ms, 25000, 5000, 'cold boot');
       });
 
       await step('the next wake of a cold-booted machine is an ordinary restore', async () => {
@@ -1127,18 +1121,18 @@ async function timingAssertions() {
       // shell, and gate.sh section 44 is that half (AGENTS.md's split table).
       //
       // What IS assertable from the public API is that the answer exists and
-      // does not move: every timing budget below is chosen from this one
-      // field, so a value that differed between two reads would make the tier
-      // a coin toss.
+      // does not move. The field no longer selects a budget -- the engine
+      // targets hold on every filesystem -- but it is still a fact an
+      // operator reads, and a fact that differed between two reads would be
+      // no fact at all.
       const first = await request('/v1/health', { auth: false });
       assert(typeof first.json?.reflink === 'boolean',
-        '/v1/health does not report reflink support, so a degraded host is invisible');
+        '/v1/health does not report reflink support');
       const second = await request('/v1/health', { auth: false });
       assert(second.json?.reflink === first.json?.reflink,
-        `/v1/health reported reflink ${first.json?.reflink} then ${second.json?.reflink}; `
-        + 'every timing budget in this tier is chosen from that field');
+        `/v1/health reported reflink ${first.json?.reflink} then ${second.json?.reflink}`);
       assert(first.json.reflink === reflink,
-        'the tier was chosen from a different answer than /v1/health now gives');
+        '/v1/health gives a different answer than it did at the start of this battery');
     });
 
     await step(`create is under ${METAL ? '500ms' : '1.5s'} (p50 of ${TIMING_SAMPLES})`, async () => {
@@ -1152,7 +1146,7 @@ async function timingAssertions() {
       }
       const p50 = median(samples);
       console.log(`      create p50 ${p50.toFixed(0)}ms  [${samples.map((s) => s.toFixed(0)).join(', ')}]`);
-      enforce(reflink, p50, 1500, 1500, 500, 'create');
+      enforce(p50, 1500, 500, 'create');
     });
 
     const id = created[0];
@@ -1172,7 +1166,7 @@ async function timingAssertions() {
       }
       const p50 = median(samples);
       console.log(`      wake p50 ${p50.toFixed(0)}ms  [${samples.map((s) => s.toFixed(0)).join(', ')}]`);
-      enforce(reflink, p50, 1000, 1000, 200, 'wake');
+      enforce(p50, 1000, 200, 'wake');
     });
 
     await step('a machine still serves after being woken', async () => {
@@ -1202,7 +1196,60 @@ async function timingAssertions() {
       const p50 = median(gaps);
       console.log(`      checkpoint resume gap p50 ${p50.toFixed(0)}ms  [${gaps.join(', ')}]`);
       console.log(`      checkpoint round trip p50 ${median(trips).toFixed(0)}ms  [${trips.map((t) => t.toFixed(0)).join(', ')}]`);
-      enforce(reflink, p50, 500, 3000, 500, 'checkpoint resume gap');
+      // The engine target on EVERY host, with no ceiling for a filesystem
+      // that cannot share extents: the pause copies only the cow's dirty
+      // ranges, so it is O(writes) on ext4 as much as on btrfs. This is the
+      // assertion that goes red if that copy is ever reverted.
+      enforce(p50, 500, 500, 'checkpoint resume gap');
+    });
+
+    // ---- the published root RPO --------------------------------------------
+    //
+    // A write to the root that nobody checkpoints is made durable by the
+    // periodic flush within PILOT_ROOT_FLUSH_INTERVAL (60s by default). From
+    // the public API that is visible twice: on the row, whose rootfs_build_id
+    // moves to the flushed disk while its mem_build_id is cleared (the image
+    // taken at the last suspend describes a disk this one has moved past, so
+    // a rescue cold-boots the flushed disk rather than pairing stale memory
+    // with it); and on /metrics, where the realised window and the freeze
+    // that paid for it are histograms. The behavioural half -- a host
+    // killed, the machine rescued elsewhere with that uncheckpointed write
+    // intact -- needs a host to kill, and is gate.sh sections 7c and 10.
+    await step('a flushed write moves the row to the flushed disk without a checkpoint', async () => {
+      const { json: before } = await request(`/v1/machines/${id}`);
+      await exec(id, `echo flushed-${Date.now()} > /var/tmp/flushed-marker && sync`);
+      let last = before;
+      await waitFor(async () => {
+        const { json: now } = await request(`/v1/machines/${id}`);
+        last = now;
+        return now?.rootfs_build_id && now.rootfs_build_id !== before.rootfs_build_id
+          && !now.mem_build_id;
+      }, {
+        timeoutMs: 150_000, everyMs: 2000,
+        what: () => `the root flush to move the row (rootfs_build ${JSON.stringify(last?.rootfs_build_id ?? '')} `
+          + `mem_build ${JSON.stringify(last?.mem_build_id ?? '')}); is PILOT_ROOT_FLUSH_INTERVAL 0 on this host?`,
+      });
+      assert(last.state === 'running', `the machine is ${last.state} after a flush; it must keep running`);
+      const out = await exec(id, 'cat /var/tmp/flushed-marker');
+      assert(out.startsWith('flushed-'), `the guest lost its write across a flush: ${JSON.stringify(out)}`);
+    });
+
+    await step('the root flush publishes a bounded RPO', async () => {
+      // Skip-free: an absent family is a flush that never ran, and that is
+      // the failure, not a reason to return early.
+      const lagCount = await scrapeMetric('pilots_root_flush_lag_seconds_count');
+      const lagSum = await scrapeMetric('pilots_root_flush_lag_seconds_sum');
+      assert(lagCount > 0, 'pilots_root_flush_lag_seconds has no samples: no flush has run');
+      const mean = lagSum / lagCount;
+      console.log(`      root flush: ${lagCount} flushes, mean lag ${mean.toFixed(1)}s`);
+      assert(mean < 60, `the mean root-flush lag is ${mean.toFixed(1)}s; the published RPO is 60s`);
+
+      const pauseCount = await scrapeMetric('pilots_root_flush_pause_seconds_count');
+      const under25ms = await scrapeMetric('pilots_root_flush_pause_seconds_bucket{le="0.025"}');
+      assert(pauseCount > 0, 'pilots_root_flush_pause_seconds has no samples');
+      console.log(`      root flush pause: ${under25ms}/${pauseCount} under 25ms`);
+      assert(under25ms >= Math.ceil(0.99 * pauseCount),
+        `root flush pause p99 is over 25ms (${pauseCount - under25ms} of ${pauseCount} pauses were longer)`);
     });
 
     await step('the guest keeps serving through a checkpoint', async () => {
@@ -1606,6 +1653,33 @@ async function volumeAssertions() {
     await step('a volume attached to a machine cannot be deleted', async () => {
       const { status } = await request(`/v1/volumes/${volume.id}`, { method: 'DELETE' });
       assert(status === 409, `DELETE of an attached volume: expected 409, got ${status}`);
+    });
+
+    // The counterfactual for the prior-art REJECT that the machine root's
+    // bounded write-back must never leak into volumes (ARCHITECTURE.md, "Two
+    // durability tiers"). A volume is per-write durable: a write with no
+    // checkpoint, no suspend and no flush interval elapsed survives the
+    // machine being destroyed and another created against the same volume.
+    // If the root's model ever crept into the volume path, this is the step
+    // that goes red.
+    await step('a volume is still per-write durable', async () => {
+      const marker = `per-write-${Date.now()}`;
+      await exec(machine.id, `echo ${marker} > ${volume.mount_path}/durable && sync`);
+
+      const { status } = await request(`/v1/machines/${machine.id}`, { method: 'DELETE' });
+      assert(status === 204 || status === 200, `destroy: expected 204, got ${status}`);
+      machine = null;
+
+      const created = await request('/v1/machines', {
+        method: 'POST', body: { vcpus: 1, mem_mib: 512, volume: volume.id },
+      });
+      assert(created.status === 201,
+        `a second machine against the volume: expected 201, got ${created.status}: ${JSON.stringify(created.json)}`);
+      machine = created.json;
+
+      const back = await exec(machine.id, `cat ${volume.mount_path}/durable`);
+      assert(back === marker,
+        `the uncheckpointed volume write did not survive destroy-and-recreate: read back ${JSON.stringify(back)}`);
     });
   } finally {
     if (machine) {
@@ -2267,9 +2341,6 @@ async function edgeAssertions() {
 async function serviceAssertions() {
   const tag = Math.random().toString(36).slice(2, 8);
   const created = [];
-  // Taken once: the tier rule is shared with the timing battery, and asking
-  // the host twice in one run could only ever produce a disagreement.
-  const reflink = await hostSharesExtents();
 
   // A service nothing could ever wake is refused, and the message says why.
   // Silently redefining it as "stopped" is how it becomes a support ticket six
@@ -2399,7 +2470,7 @@ async function serviceAssertions() {
     }
     const p50 = median(samples);
     console.log(`      release restore p50 ${p50.toFixed(0)}ms  [${samples.map((s) => s.toFixed(0)).join(', ')}]`);
-    enforce(reflink, p50, 1500, 1500, 1000, 'release restore');
+    enforce(p50, 1500, 1000, 'release restore');
   });
 
   // Scale up and assert the new replica RESTORED. A machine created from a
@@ -2582,7 +2653,7 @@ async function serviceAssertions() {
     }
     const p50 = median(samples);
     console.log(`      promote p50 ${p50.toFixed(0)}ms  [${samples.map((s) => s.toFixed(0)).join(', ')}]`);
-    enforce(reflink, p50, 5000, 5000, 1500, 'promote');
+    enforce(p50, 5000, 1500, 'promote');
   });
 
   // -------------------------------------------------------------------------
@@ -5920,7 +5991,6 @@ async function execStreamAssertions() {
 // cause, reached the only way a test can reach it through the public API.
 async function exitAssertions() {
   const tag = Math.random().toString(36).slice(2, 8);
-  const reflink = await hostSharesExtents();
   let id = null;
   let url = null;
   let host = null;
@@ -6001,7 +6071,7 @@ async function exitAssertions() {
           `last_start=${last?.last_start} rootfs_build=${JSON.stringify(last?.rootfs_build_id ?? '')} ` +
           `mem_build=${JSON.stringify(last?.mem_build_id ?? '')})`,
       }));
-      enforce(reflink, ms, 30_000, 60_000, 30_000, 'exit recovery');
+      enforce(ms, 30_000, 30_000, 'exit recovery');
     });
 
     await step('the recovered machine keeps its URL, its disk and its logs', async () => {
@@ -6825,7 +6895,7 @@ async function replicaRuleAssertions() {
   }
 }
 
-async function agentDeployAssertions(REFLINK) {
+async function agentDeployAssertions() {
   const tag = Math.random().toString(36).slice(2, 8);
   const app = `gate-django-${tag}`;
   const webjsApp = `gate-webjs-${tag}`;
@@ -7001,6 +7071,12 @@ async function agentDeployAssertions(REFLINK) {
     // cannot place a repository. This is the loop when it can: one tool call,
     // no Dockerfile, no compose file, a URL at the end.
 
+    // Read before the deploy, for the assertion after it: a machine whose
+    // root is served over NBD moves the block cache counters, and one whose
+    // root was a file opened by Firecracker moves neither.
+    const nbdReadsBefore = (await scrapeMetric('pilots_nbd_cache_hits_total') ?? 0)
+      + (await scrapeMetric('pilots_nbd_cache_misses_total') ?? 0);
+
     await step('deploy takes a webjs directory to a URL in ONE call', async () => {
       assert(client, 'the MCP server did not start');
       const started = Date.now();
@@ -7041,7 +7117,23 @@ async function agentDeployAssertions(REFLINK) {
       // Bar 4 of AGENTS.md, as a number rather than a claim. npm's network
       // time is inside this, which is why the budget is generous relative to
       // a restore: what is being held is the whole one-call path.
-      enforce(REFLINK, oneCallMS, 300_000, 420_000, 180_000, 'webjs one-call deploy');
+      enforce(oneCallMS, 300_000, 180_000, 'webjs one-call deploy');
+    });
+
+    await step('a custom-image machine leaves no materialised rootfs behind', async () => {
+      // The machine that just answered was BOOTED from the build the deploy
+      // produced, and its root is a block device served from that build --
+      // not a full-size ext4 materialised on the host and copied per machine,
+      // which is what filled a rig host's disk. From the public API the
+      // difference is the block cache: a root served over NBD is read
+      // through it and moves its counters; a root that was a file opened by
+      // Firecracker moves neither. The host-shell half -- no images
+      // directory, every rootfs a device node -- is gate.sh section 45.
+      const after = (await scrapeMetric('pilots_nbd_cache_hits_total') ?? 0)
+        + (await scrapeMetric('pilots_nbd_cache_misses_total') ?? 0);
+      assert(after > nbdReadsBefore,
+        `the block cache counters did not move across the deploy (${nbdReadsBefore} -> ${after}); `
+        + 'the built machine\'s root was opened as a file rather than served from its build');
     });
 
     await step('a monorepo deploys as one service per workspace', async () => {
@@ -7373,9 +7465,6 @@ async function main() {
   await replicaRuleAssertions();
   await hostedMCPAssertions(FULL);
   if (FULL) {
-    // The engine target or the degraded ceiling: enforce() needs to know
-    // which, and the agent gate holds the one-call path to a budget.
-    const reflink = await hostSharesExtents();
     await lifecycleAssertions();
     await timingAssertions();
     await volumeAssertions();
@@ -7391,7 +7480,7 @@ async function main() {
     await scopedDeployAssertions();
     await volumeServiceAssertions();
     await multiServiceAssertions();
-    await agentDeployAssertions(reflink);
+    await agentDeployAssertions();
     await execStreamAssertions();
     await hostilityAssertions();
   } else {
