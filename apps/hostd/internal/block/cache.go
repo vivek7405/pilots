@@ -187,7 +187,8 @@ func (c *Cache) Close() error {
 // set that was written.
 //
 // Used at suspend: the result is chunkified into a build while the cache
-// itself is discarded.
+// itself is discarded. The copy is CopyDirtyRanges over this cache's own
+// file, so it costs what the machine wrote, not what its disk is sized.
 func (c *Cache) ExportToDiff(dstPath string) (*roaring.Bitmap, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -199,14 +200,42 @@ func (c *Cache) ExportToDiff(dstPath string) (*roaring.Bitmap, error) {
 	if c.file != nil {
 		_ = unix.SyncFileRange(int(c.file.Fd()), 0, 0, unix.SYNC_FILE_RANGE_WRITE)
 	}
+	if err := CopyDirtyRanges(c.path, dstPath, c.dirty, c.blockSize); err != nil {
+		return nil, err
+	}
+	return c.dirty.Clone(), nil
+}
+
+// CopyDirtyRanges copies the blocks in dirty from srcPath into a fresh sparse
+// file at dstPath of the same apparent size, at the same offsets.
+//
+// Only the dirty ranges are read, so the cost is proportional to what the
+// machine has written, not to the size of its disk, on every filesystem. That
+// is what lets a checkpoint stage its cow inside the pause without a
+// filesystem that can share extents: a reflink of the whole cow was free
+// where extents are shared and a full copy of the disk everywhere else, and
+// the pause must not depend on which of the two the host has.
+func CopyDirtyRanges(srcPath, dstPath string, dirty *roaring.Bitmap, blockSize int64) error {
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return fmt.Errorf("block: open %s: %w", srcPath, err)
+	}
+	defer src.Close()
+	st, err := src.Stat()
+	if err != nil {
+		return fmt.Errorf("block: stat %s: %w", srcPath, err)
+	}
+	size := st.Size()
 
 	dst, err := os.OpenFile(dstPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
-		return nil, fmt.Errorf("block: create diff %s: %w", dstPath, err)
+		return fmt.Errorf("block: create %s: %w", dstPath, err)
 	}
 	defer dst.Close()
-	if err := dst.Truncate(c.size); err != nil {
-		return nil, fmt.Errorf("block: truncate diff %s: %w", dstPath, err)
+	// Sparse: the same apparent size as the source, allocating nothing until
+	// a dirty range lands.
+	if err := dst.Truncate(size); err != nil {
+		return fmt.Errorf("block: truncate %s: %w", dstPath, err)
 	}
 
 	// CopyFileRange lets the kernel share extents where it can. Once it fails
@@ -214,30 +243,45 @@ func (c *Cache) ExportToDiff(dstPath string) (*roaring.Bitmap, error) {
 	// fail for every subsequent range too, so the fallback is sticky rather
 	// than retried per range.
 	useCopyFileRange := true
+	var buf []byte
 
-	for _, r := range BitsetRanges(c.dirty) {
-		off := r.Start * c.blockSize
-		length := (r.End - r.Start) * c.blockSize
-		if off+length > c.size {
-			length = c.size - off
+	for _, r := range BitsetRanges(dirty) {
+		off := r.Start * blockSize
+		length := (r.End - r.Start) * blockSize
+		if off+length > size {
+			length = size - off
 		}
 
 		if useCopyFileRange {
-			if err := copyFileRange(c.file, dst, off, length); err != nil {
+			if err := copyFileRange(src, dst, off, length); err != nil {
 				if !isUnsupported(err) {
-					return nil, err
+					return err
 				}
 				useCopyFileRange = false
 			} else {
 				continue
 			}
 		}
-		if _, err := dst.WriteAt(c.data[off:off+length], off); err != nil {
-			return nil, fmt.Errorf("block: copy diff range at %d: %w", off, err)
+		if buf == nil {
+			buf = make([]byte, copyBufSize)
+		}
+		for done := int64(0); done < length; {
+			n := min(int64(len(buf)), length-done)
+			if _, err := src.ReadAt(buf[:n], off+done); err != nil {
+				return fmt.Errorf("block: read range at %d: %w", off+done, err)
+			}
+			if _, err := dst.WriteAt(buf[:n], off+done); err != nil {
+				return fmt.Errorf("block: copy range at %d: %w", off+done, err)
+			}
+			done += n
 		}
 	}
-	return c.dirty.Clone(), nil
+	return nil
 }
+
+// copyBufSize bounds the fallback copy's buffer when the kernel cannot copy
+// a range for us: one dirty run can be most of a disk.
+const copyBufSize = 4 << 20
 
 // PopulateFromSlicer replays a build into this cache.
 //

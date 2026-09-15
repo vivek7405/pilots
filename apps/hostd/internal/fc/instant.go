@@ -645,10 +645,11 @@ func (m *Machine) SuspendInstant(ctx context.Context, up Uploader, chunks Upload
 // CheckpointInstant captures a restorable point and resumes immediately.
 //
 // The guest is frozen only long enough to write its vmstate, read the dirty
-// bitmap, and reflink-copy two files -- all metadata operations on a
-// reflink-capable filesystem, so the pause is roughly independent of how big
-// the machine is. Chunkifying and uploading happen afterwards, with the
-// machine already serving.
+// bitmap, reflink-copy the vmstate and copy the cow's dirty blocks. The first
+// is a metadata operation and the second costs what the machine has written
+// since its template, on any filesystem, so the pause is roughly independent
+// of how big the machine is. Chunkifying and uploading happen afterwards,
+// with the machine already serving.
 func (m *Machine) CheckpointInstant(ctx context.Context, up Uploader, chunks Uploader,
 	opts SnapshotOpts, localDir, snapKey string) (res InstantSnapshot, err error) {
 
@@ -752,8 +753,13 @@ func (m *Machine) CheckpointInstant(ctx context.Context, up Uploader, chunks Upl
 	// inside the pause. The copy protected nothing, either: a capture
 	// interrupted by a crash leaves the checkpoint unusable whether or not a
 	// staged copy survives, because nothing resumes one.
+	// Only the blocks the machine has written are copied, so this costs
+	// O(writes) on every filesystem. A reflink of the whole cow stood here
+	// once: a metadata operation where extents can be shared, and a copy of
+	// the entire disk -- inside the pause -- everywhere else.
 	if !dirty.IsEmpty() {
-		if err := reflinkCopy(CowPath(m.StateDir), localCow); err != nil {
+		if err := block.CopyDirtyRanges(CowPath(m.StateDir), localCow, dirty,
+			block.DefaultBlockSize); err != nil {
 			return res, err
 		}
 	}
