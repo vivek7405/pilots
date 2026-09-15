@@ -605,19 +605,26 @@ say "7c. A write nobody checkpointed is made durable by the root flush"
 # still there after the host that held it is destroyed and the machine is
 # rescued elsewhere from that flushed disk alone.
 FLUSH_MARKER="after-last-capture-$$"
-FLUSH_BEFORE=$(api "${IPS[0]}" GET "/v1/machines/${ID}" | jf rootfs_build_id)
+# The owner's counter, because a flush runs on the owning host only.
+FLUSH_OWNER=$(api "${IPS[0]}" GET "/v1/machines/${ID}" | jf host_id)
+FLUSH_OWNER_IP=""
+for ip in "${IPS[@]}"; do
+  HID=$($SSH "root@${ip}" "grep PILOT_HOST_ID /etc/pilots/config | cut -d= -f2" 2>/dev/null)
+  [ "$HID" = "$FLUSH_OWNER" ] && FLUSH_OWNER_IP="$ip"
+done
+flush_count() { curl -sf -m 5 "http://$1:8080/metrics" | awk '/^pilots_root_flush_lag_seconds_count/ {print $2}'; }
+FLUSH_BEFORE=$(flush_count "${FLUSH_OWNER_IP:-${IPS[0]}}"); FLUSH_BEFORE=${FLUSH_BEFORE:-0}
 api "${IPS[0]}" POST "/v1/machines/${ID}/exec" "{\"cmd\":\"echo ${FLUSH_MARKER} > /var/tmp/flushed-marker && sync\"}" >/dev/null
-START=$SECONDS; FLUSH_AFTER=""; FLUSH_MEM="x"
+START=$SECONDS; FLUSH_AFTER=$FLUSH_BEFORE
 while [ $((SECONDS - START)) -lt 150 ]; do
-  ROW=$(api "${IPS[0]}" GET "/v1/machines/${ID}")
-  FLUSH_AFTER=$(echo "$ROW" | jf rootfs_build_id); FLUSH_MEM=$(echo "$ROW" | jf mem_build_id)
-  [ -n "$FLUSH_AFTER" ] && [ "$FLUSH_AFTER" != "$FLUSH_BEFORE" ] && [ -z "$FLUSH_MEM" ] && break
+  FLUSH_AFTER=$(flush_count "${FLUSH_OWNER_IP:-${IPS[0]}}"); FLUSH_AFTER=${FLUSH_AFTER:-0}
+  [ "${FLUSH_AFTER%.*}" -gt "${FLUSH_BEFORE%.*}" ] && break
   sleep 5
 done
-if [ -n "$FLUSH_AFTER" ] && [ "$FLUSH_AFTER" != "$FLUSH_BEFORE" ] && [ -z "$FLUSH_MEM" ]; then
-  ok "the root flush moved the row to a new disk build $((SECONDS - START))s after the write, with no memory image"
+if [ "${FLUSH_AFTER%.*}" -gt "${FLUSH_BEFORE%.*}" ]; then
+  ok "the owner ${FLUSH_OWNER} completed a root flush $((SECONDS - START))s after the write (${FLUSH_BEFORE%.*} -> ${FLUSH_AFTER%.*})"
 else
-  bad "no root flush moved the row within 150s (rootfs_build '${FLUSH_AFTER}', mem_build '${FLUSH_MEM}'); is PILOT_ROOT_FLUSH_INTERVAL 0?"
+  bad "no root flush completed on ${FLUSH_OWNER} within 150s (count stayed ${FLUSH_BEFORE%.*}); is PILOT_ROOT_FLUSH_INTERVAL 0?"
 fi
 
 say "8. Hard-kill the host that owns it"

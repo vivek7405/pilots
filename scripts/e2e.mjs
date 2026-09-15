@@ -1206,30 +1206,28 @@ async function timingAssertions() {
     // ---- the published root RPO --------------------------------------------
     //
     // A write to the root that nobody checkpoints is made durable by the
-    // periodic flush within PILOT_ROOT_FLUSH_INTERVAL (60s by default). From
-    // the public API that is visible twice: on the row, whose rootfs_build_id
-    // moves to the flushed disk while its mem_build_id is cleared (the image
-    // taken at the last suspend describes a disk this one has moved past, so
-    // a rescue cold-boots the flushed disk rather than pairing stale memory
-    // with it); and on /metrics, where the realised window and the freeze
-    // that paid for it are histograms. The behavioural half -- a host
-    // killed, the machine rescued elsewhere with that uncheckpointed write
-    // intact -- needs a host to kill, and is gate.sh sections 7c and 10.
-    await step('a flushed write moves the row to the flushed disk without a checkpoint', async () => {
-      const { json: before } = await request(`/v1/machines/${id}`);
+    // periodic flush within PILOT_ROOT_FLUSH_INTERVAL (60s by default). The
+    // row's build ids are not part of the public machine shape, so from here
+    // the flush is visible on /metrics: every completed flush is a sample in
+    // pilots_root_flush_lag_seconds, and one landing AFTER the write is a
+    // flush that carried it. The guest keeps running through it. The
+    // behavioural half -- a host killed, the machine rescued elsewhere with
+    // that uncheckpointed write intact -- needs a host to kill, and is
+    // gate.sh sections 7c and 10.
+    await step('a root flush follows a write with no checkpoint, and the guest keeps serving', async () => {
+      const flushesBefore = (await scrapeMetric('pilots_root_flush_lag_seconds_count')) ?? 0;
       await exec(id, `echo flushed-${Date.now()} > /var/tmp/flushed-marker && sync`);
-      let last = before;
+      let flushes = flushesBefore;
       await waitFor(async () => {
-        const { json: now } = await request(`/v1/machines/${id}`);
-        last = now;
-        return now?.rootfs_build_id && now.rootfs_build_id !== before.rootfs_build_id
-          && !now.mem_build_id;
+        flushes = (await scrapeMetric('pilots_root_flush_lag_seconds_count')) ?? 0;
+        return flushes > flushesBefore;
       }, {
         timeoutMs: 150_000, everyMs: 2000,
-        what: () => `the root flush to move the row (rootfs_build ${JSON.stringify(last?.rootfs_build_id ?? '')} `
-          + `mem_build ${JSON.stringify(last?.mem_build_id ?? '')}); is PILOT_ROOT_FLUSH_INTERVAL 0 on this host?`,
+        what: () => `a root flush to complete after the write (flushes: ${flushesBefore} -> ${flushes}); `
+          + 'is PILOT_ROOT_FLUSH_INTERVAL 0 on this host?',
       });
-      assert(last.state === 'running', `the machine is ${last.state} after a flush; it must keep running`);
+      const { json: now } = await request(`/v1/machines/${id}`);
+      assert(now.state === 'running', `the machine is ${now.state} after a flush; it must keep running`);
       const out = await exec(id, 'cat /var/tmp/flushed-marker');
       assert(out.startsWith('flushed-'), `the guest lost its write across a flush: ${JSON.stringify(out)}`);
     });

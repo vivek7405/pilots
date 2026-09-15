@@ -129,6 +129,7 @@ func (m *Manager) flushRoot(ctx context.Context, id string) {
 		return
 	}
 
+	started := time.Now()
 	build, err := fcm.FlushRoot(ctx, m.opts.Chunks, m.snapshotOpts(t))
 	if err != nil {
 		slog.Warn("root flush failed; the machine's latest writes are not yet durable",
@@ -137,6 +138,21 @@ func (m *Manager) flushRoot(ctx context.Context, id string) {
 	}
 	if build == uuid.Nil {
 		m.dropStaleMemory(ctx, id)
+		return
+	}
+
+	// Re-read before writing. The flush above chunkified and uploaded with the
+	// lock held but the row unlocked to narrow writers -- Touch stamps
+	// last_activity without it -- and writing back the copy read before the
+	// upload would hand those columns their old values.
+	row, err = m.opts.Store.GetMachine(ctx, id)
+	if err != nil {
+		slog.Warn("root flush could not re-read the machine's row", "machine", id, "err", err)
+		m.discardBuilds(ctx, build.String())
+		return
+	}
+	if row.State != StateRunning || row.HostID != m.opts.HostID {
+		m.discardBuilds(ctx, build.String())
 		return
 	}
 
@@ -151,6 +167,8 @@ func (m *Manager) flushRoot(ctx context.Context, id string) {
 		m.discardBuilds(ctx, build.String())
 		return
 	}
+	slog.Info("root flushed", "machine", id, "build", build,
+		"ms", time.Since(started).Milliseconds())
 	// Only AFTER the row names the new build, for the reason suspend gives:
 	// deleting first would, on a failed write, leave the row pointing at an
 	// object that no longer exists.
