@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/google/uuid"
 	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"golang.org/x/sys/unix"
@@ -170,6 +171,62 @@ func TestExportToDiffCopiesOnlyWrittenBlocks(t *testing.T) {
 	// Untouched blocks stay zero.
 	if !bytes.Equal(raw[0:testBlock], make([]byte, testBlock)) {
 		t.Error("an untouched block was written by the export")
+	}
+}
+
+// A checkpoint stages the cow inside the pause, so the copy has to cost what
+// the machine wrote rather than what its disk is sized: blocks the bitmap does
+// not name must not be read, let alone land in the copy.
+func TestCopyDirtyRangesCopiesOnlyDirtyBlocks(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "cow")
+
+	// Every block of the source holds data, but the bitmap owns only two of
+	// them. The other two are allocated bytes the copy must leave behind.
+	f, err := os.Create(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := int64(0); i < 4; i++ {
+		if _, err := f.WriteAt(bytes.Repeat([]byte{byte(i + 1)}, int(testBlock)), i*testBlock); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dirty := roaring.New()
+	dirty.Add(1)
+	dirty.Add(3)
+
+	dst := filepath.Join(dir, "staged")
+	if err := CopyDirtyRanges(src, dst, dirty, testBlock); err != nil {
+		t.Fatalf("CopyDirtyRanges: %v", err)
+	}
+
+	raw, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(raw)) != 4*testBlock {
+		t.Fatalf("staged file is %d bytes, want the source's %d", len(raw), 4*testBlock)
+	}
+	if !bytes.Equal(raw[testBlock:2*testBlock], bytes.Repeat([]byte{2}, int(testBlock))) {
+		t.Error("block 1 did not survive the copy")
+	}
+	if !bytes.Equal(raw[3*testBlock:4*testBlock], bytes.Repeat([]byte{4}, int(testBlock))) {
+		t.Error("block 3 did not survive the copy")
+	}
+	// Blocks the bitmap does not own read back as holes...
+	for _, idx := range []int64{0, 2} {
+		if !bytes.Equal(raw[idx*testBlock:(idx+1)*testBlock], make([]byte, testBlock)) {
+			t.Errorf("block %d was copied although it is not dirty", idx)
+		}
+	}
+	// ...and never got allocated: the staged file occupies less than the
+	// source, which is the whole point of copying by bitmap.
+	if got, want := blocksAllocated(t, dst), blocksAllocated(t, src); got >= want {
+		t.Errorf("staged file occupies %d bytes, the source %d; the copy was not confined to the dirty blocks", got, want)
 	}
 }
 
