@@ -396,6 +396,10 @@ func Routes(d Deps) http.Handler {
 	// OFFER row authorises the move, so this only saves the target from
 	// waiting to notice one.
 	mux.HandleFunc("POST /v1/machines/{id}/take", d.handleTake)
+	// Internal: the host that owned a service's last replica asking the
+	// service's ARBITER to delete the rows only its store may write. Both
+	// of these answer a public caller as a missing route.
+	mux.HandleFunc("POST /v1/services/{id}/release", d.handleReleaseService)
 	// New machines from an existing one's exact state: the source's processes
 	// already running, its memory already warm. A suspended source is forked
 	// without waking it.

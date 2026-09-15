@@ -30,6 +30,9 @@ type Drainer interface {
 	Draining() bool
 	// Take accepts a machine another host has offered.
 	Take(ctx context.Context, machineID, handoffID string) error
+	// ReleaseServiceRows deletes the rows only this host, as a service's
+	// arbiter, may write, once the service's last replica is gone.
+	ReleaseServiceRows(ctx context.Context, serviceID string) error
 }
 
 // DrainReport is what a drain did.
@@ -131,6 +134,19 @@ func (d Deps) handleUndrain(w http.ResponseWriter, r *http.Request) {
 // machine, to whom, whether the offer is the newest, and whether the machine is
 // actually down. A forged call therefore moves nothing.
 func (d Deps) handleTake(w http.ResponseWriter, r *http.Request) {
+	// A peer's call over the mesh, never a public caller's. The drain that
+	// offers a machine marks its call the way every forward is marked and
+	// signs it with the peer token, which is what auth admits as an admin
+	// principal; a tenant key carries neither. Without this gate any
+	// machines-scoped key could name a machine on another host and have
+	// admit suspend this host's idle machines -- other tenants' included --
+	// before the offer was ever checked, and learn from 404-versus-409 which
+	// ids exist. Answered as a missing route, so a public caller cannot even
+	// tell it is here.
+	if r.Header.Get(forwardedHeader) == "" || !IsAdmin(r.Context()) {
+		WriteError(w, http.StatusNotFound, CodeNotFound, "no such route", NextNotFound, nil)
+		return
+	}
 	if d.Drain == nil {
 		WriteError(w, http.StatusNotImplemented, CodeNotImplemented,
 			"this host cannot take machines", "upgrade the host", nil)
@@ -143,6 +159,29 @@ func (d Deps) handleTake(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := d.Drain.Take(r.Context(), r.PathValue("id"), req.HandoffID); err != nil {
+		writeMapped(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// handleReleaseService is the internal route the host that owned a service's
+// last replica calls on the service's ARBITER, whose store is the only one
+// that may delete the rows keyed on the service id (the store's
+// service-writer guard names OwnerFor(serviceID, live), a hash over the live
+// hosts unrelated to which host held the replica). Gated exactly as
+// handleTake is: a peer's marked, token-signed call, never a public one.
+func (d Deps) handleReleaseService(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get(forwardedHeader) == "" || !IsAdmin(r.Context()) {
+		WriteError(w, http.StatusNotFound, CodeNotFound, "no such route", NextNotFound, nil)
+		return
+	}
+	if d.Drain == nil {
+		WriteError(w, http.StatusNotImplemented, CodeNotImplemented,
+			"this host cannot release services", "upgrade the host", nil)
+		return
+	}
+	if err := d.Drain.ReleaseServiceRows(r.Context(), r.PathValue("id")); err != nil {
 		writeMapped(w, err)
 		return
 	}

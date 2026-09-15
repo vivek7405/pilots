@@ -19,10 +19,33 @@ type fakeDrainer struct {
 	undrains int
 	draining bool
 	taken    []string
+	// released records the services this host was asked, as their arbiter,
+	// to release.
+	released []string
 	// picked is where the drainer was told each machine could go, so a test
 	// can assert the ranking reached it.
 	picked []string
 	err    error
+}
+
+func (f *fakeDrainer) ReleaseServiceRows(_ context.Context, serviceID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.released = append(f.released, serviceID)
+	return f.err
+}
+
+// postPeer is postJSON as a peer makes it: marked as forwarded, which with an
+// admin principal is what the internal routes admit.
+func postPeer(t *testing.T, h http.Handler, path, key, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("POST", path, strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(forwardedHeader, "host-peer")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
 }
 
 func (f *fakeDrainer) Drain(ctx context.Context, pick func(state.Machine) (string, bool)) (*DrainReport, error) {
@@ -144,19 +167,47 @@ func TestDrainingNeedsAnAdminKey(t *testing.T) {
 func TestTakeRequiresAHandoffID(t *testing.T) {
 	h, d, _ := drainServer(t)
 
-	if rec := postJSON(t, h, "/v1/machines/m_1/take", testKey, `{}`); rec.Code != http.StatusBadRequest {
+	if rec := postPeer(t, h, "/v1/machines/m_1/take", testKey, `{}`); rec.Code != http.StatusBadRequest {
 		t.Errorf("an empty take got %d, want 400", rec.Code)
 	}
 	if len(d.taken) != 0 {
 		t.Errorf("a take with no offer reached the manager: %v", d.taken)
 	}
 
-	rec := postJSON(t, h, "/v1/machines/m_1/take", testKey, `{"handoff_id":"ho-1"}`)
+	rec := postPeer(t, h, "/v1/machines/m_1/take", testKey, `{"handoff_id":"ho-1"}`)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("got %d: %s", rec.Code, rec.Body.String())
 	}
 	if len(d.taken) != 1 || d.taken[0] != "m_1/ho-1" {
 		t.Errorf("taken = %v, want the machine and its offer", d.taken)
+	}
+}
+
+// The take and release routes are for peers over the mesh, never for a
+// public caller. Take runs admit before the claim, and admit suspends this
+// host's idle machines to make room -- so a public call naming any machine
+// on another host could put other tenants' machines to sleep and only then
+// be refused, and could tell from 404-versus-409 which ids exist. Both routes
+// therefore answer an unmarked call as a missing route and never reach the
+// manager. A marked, admin call (what a peer sends) goes through.
+func TestTakeAndReleaseAreNotPublicRoutes(t *testing.T) {
+	h, d, _ := drainServer(t)
+
+	for _, path := range []string{"/v1/machines/m_1/take", "/v1/services/svc_1/release"} {
+		rec := postJSON(t, h, path, testKey, `{"handoff_id":"ho-1"}`)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("an unmarked public call to %s got %d, want 404", path, rec.Code)
+		}
+	}
+	if len(d.taken) != 0 || len(d.released) != 0 {
+		t.Fatalf("a public call reached the manager: taken=%v released=%v", d.taken, d.released)
+	}
+
+	if rec := postPeer(t, h, "/v1/services/svc_1/release", testKey, ``); rec.Code != http.StatusNoContent {
+		t.Fatalf("a peer's release got %d: %s", rec.Code, rec.Body.String())
+	}
+	if len(d.released) != 1 || d.released[0] != "svc_1" {
+		t.Errorf("released = %v, want the service the peer named", d.released)
 	}
 }
 

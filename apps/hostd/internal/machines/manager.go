@@ -696,36 +696,22 @@ func (m *Manager) releaseService(ctx context.Context, row *state.Machine) error 
 		}
 	}
 	// The side tables keyed on the service id go first, for the reason the
-	// machine's own do: a replicated store resolves this row's writer by
-	// reading the service row, and a row left behind is gossiped to every
-	// host forever for a service that no longer exists.
+	// machine's own do: a row left behind is gossiped to every host forever
+	// for a service that no longer exists -- the unbounded gossip rule 6
+	// exists to prevent.
 	//
-	// ALL of them. Only labels and url auth were deleted, so a removed
-	// service left its size, its broker grant, every release, and each
-	// release's vmstate and CPU-pool rows replicating fleet-wide for good --
-	// the unbounded gossip rule 6 exists to prevent. Releases before their
-	// rows' own side tables would orphan those, so each release's rows go
-	// first, then the releases, then the service's.
-	releases, err := m.opts.Store.ReleasesFor(ctx, row.ServiceID)
-	if err != nil {
-		return fmt.Errorf("list service %s releases: %w", row.ServiceID, err)
-	}
-	for _, rel := range releases {
-		if err := m.opts.Store.DeleteReleaseSnapshot(ctx, rel.ID); err != nil {
-			return fmt.Errorf("delete release %s vmstate: %w", rel.ID, err)
-		}
-		if err := m.opts.Store.DeleteMachineCPU(ctx, rel.ID); err != nil {
-			return fmt.Errorf("delete release %s cpu pool: %w", rel.ID, err)
-		}
-	}
-	if err := m.opts.Store.DeleteReleases(ctx, row.ServiceID); err != nil {
-		return fmt.Errorf("delete service %s releases: %w", row.ServiceID, err)
-	}
-	if err := m.opts.Store.DeleteServiceSize(ctx, row.ServiceID); err != nil {
-		return fmt.Errorf("delete service size %s: %w", row.ServiceID, err)
-	}
-	if err := m.opts.Store.DeleteBrokerGrant(ctx, row.ServiceID); err != nil {
-		return fmt.Errorf("delete service broker grant %s: %w", row.ServiceID, err)
+	// The rows the store guards with its service-writer check (each release's
+	// vmstate and CPU-pool rows, the releases, the size, the broker grant)
+	// belong to the service's ARBITER: OwnerFor(serviceID, live), a hash over
+	// the live hosts unrelated to which host held the replica. Deleting them
+	// from here refused on every host but that one, the early return then
+	// skipped the unguarded deletes below, and the service row, its labels,
+	// url auth, size and grant were left replicating fleet-wide while the
+	// client got a 409 for a machine that was gone. So that half goes to the
+	// arbiter, the way every service write already does, and only the rows
+	// no writer rule covers are removed here, service row last.
+	if err := m.releaseServiceRowsVia(ctx, row.ServiceID); err != nil {
+		return err
 	}
 	if err := m.opts.Store.DeleteLabels(ctx, row.ServiceID); err != nil {
 		return fmt.Errorf("delete service labels %s: %w", row.ServiceID, err)
@@ -742,6 +728,87 @@ func (m *Manager) releaseService(ctx context.Context, row *state.Machine) error 
 		return fmt.Errorf("delete service volumes %s: %w", row.ServiceID, err)
 	}
 	return nil
+}
+
+// releaseServiceRowsVia removes the arbiter-owned rows of a service: here
+// when this host is the arbiter, is alone, or cannot tell; otherwise on the
+// arbiter over the mesh.
+//
+// An arbiter that cannot be reached is a warning, not a failure. The machine
+// is already gone, and refusing its destroy would leave the client retrying
+// a teardown this host can never complete. The rows wait for the arbiter;
+// the service itself still disappears from the caller's side.
+func (m *Manager) releaseServiceRowsVia(ctx context.Context, serviceID string) error {
+	arbiter := m.serviceArbiter(ctx, serviceID)
+	if arbiter == "" || arbiter == m.opts.HostID || m.opts.Handoffs == nil {
+		return m.releaseServiceRows(ctx, serviceID)
+	}
+	if err := m.opts.Handoffs.ReleaseService(ctx, arbiter, serviceID); err != nil {
+		slog.Warn("could not have the arbiter release a service's rows; they wait for it",
+			"service", serviceID, "arbiter", arbiter, "err", err)
+	}
+	return nil
+}
+
+// ReleaseServiceRows is the arbiter's side of releaseServiceRowsVia, reached
+// over the internal route.
+func (m *Manager) ReleaseServiceRows(ctx context.Context, serviceID string) error {
+	return m.releaseServiceRows(ctx, serviceID)
+}
+
+// releaseServiceRows deletes the rows only the service's arbiter may write.
+// Each release's own side tables before the releases, then the service's,
+// so a run that stops part way orphans nothing.
+func (m *Manager) releaseServiceRows(ctx context.Context, serviceID string) error {
+	releases, err := m.opts.Store.ReleasesFor(ctx, serviceID)
+	if err != nil {
+		return fmt.Errorf("list service %s releases: %w", serviceID, err)
+	}
+	for _, rel := range releases {
+		if err := m.opts.Store.DeleteReleaseSnapshot(ctx, rel.ID); err != nil {
+			return fmt.Errorf("delete release %s vmstate: %w", rel.ID, err)
+		}
+		if err := m.opts.Store.DeleteMachineCPU(ctx, rel.ID); err != nil {
+			return fmt.Errorf("delete release %s cpu pool: %w", rel.ID, err)
+		}
+	}
+	if err := m.opts.Store.DeleteReleases(ctx, serviceID); err != nil {
+		return fmt.Errorf("delete service %s releases: %w", serviceID, err)
+	}
+	if err := m.opts.Store.DeleteServiceSize(ctx, serviceID); err != nil {
+		return fmt.Errorf("delete service size %s: %w", serviceID, err)
+	}
+	if err := m.opts.Store.DeleteBrokerGrant(ctx, serviceID); err != nil {
+		return fmt.Errorf("delete service broker grant %s: %w", serviceID, err)
+	}
+	return nil
+}
+
+// arbiterLiveWindow is the liveness cutoff the service arbiter is computed
+// from: the same 30s the corrosion store's own service-writer check uses. A
+// wider view here would route a release to a host whose store then refuses
+// it, because the two would disagree about who is alive.
+const arbiterLiveWindow = 30 * time.Second
+
+// serviceArbiter is the host that writes a service's rows, or "" when it
+// cannot be told (no hosts readable, none live), in which case the caller
+// acts here and lets the store say.
+func (m *Manager) serviceArbiter(ctx context.Context, serviceID string) string {
+	hosts, err := m.opts.Store.ListHosts(ctx)
+	if err != nil {
+		return ""
+	}
+	live := make([]state.Host, 0, len(hosts))
+	for _, h := range hosts {
+		if time.Since(time.Unix(h.LastSeen, 0)) < arbiterLiveWindow {
+			live = append(live, h)
+		}
+	}
+	owner, ok := state.OwnerFor(serviceID, live)
+	if !ok {
+		return ""
+	}
+	return owner
 }
 
 // deleteRemoteState removes a machine's objects.

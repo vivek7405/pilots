@@ -722,6 +722,10 @@ func (d drainAdapter) Take(ctx context.Context, machineID, handoffID string) err
 	return d.mgr.Take(ctx, machineID, handoffID)
 }
 
+func (d drainAdapter) ReleaseServiceRows(ctx context.Context, serviceID string) error {
+	return d.mgr.ReleaseServiceRows(ctx, serviceID)
+}
+
 // handoffCaller tells a target host to take a machine, over the mesh.
 //
 // Best effort by construction: the offer ROW authorises the move, so a failed
@@ -732,4 +736,11 @@ type handoffCaller struct{ peers peerAPI }
 func (h handoffCaller) Offer(ctx context.Context, hostID, machineID, handoffID string) error {
 	return h.peers.PostJSON(ctx, hostID, "/v1/machines/"+machineID+"/take",
 		api.TakeRequest{HandoffID: handoffID})
+}
+
+// ReleaseService asks a service's arbiter to delete the rows only it may
+// write, once the service's last replica is gone. Marked and signed like
+// every peer call, which is what the far side's gate admits.
+func (h handoffCaller) ReleaseService(ctx context.Context, hostID, serviceID string) error {
+	return h.peers.Post(ctx, hostID, "/v1/services/"+serviceID+"/release")
 }

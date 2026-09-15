@@ -44,8 +44,14 @@ func TestOnlyTheMachineRankingIsVendorFiltered(t *testing.T) {
 		"assertServiceWriter", // internal/state/corrosion: the service row guard
 		"mine",                // internal/api/forward.go: forward to the arbiter
 		"serviceArbiter",      // internal/github: one host acts on a delivery
-		"runDomainVerifier",   // cmd/hostd: the domain row writer
-		"scaleOnce",           // internal/services: the autoscaler's arbiter
+		// internal/machines: the host that held a service's last replica asks
+		// the arbiter to delete the rows only it may write (releaseService).
+		// Unnarrowed for exactly the reason assertServiceWriter is: a
+		// service's rows have ONE writer fleet-wide, and partitioning that
+		// choice by CPU vendor would give them two.
+		"serviceArbiter",
+		"runDomainVerifier", // cmd/hostd: the domain row writer
+		"scaleOnce",         // internal/services: the autoscaler's arbiter
 		// internal/state: the create-time ranking's TIE-BREAK, and only that.
 		//
 		// It belongs in the unnarrowed list rather than the vendor-filtered

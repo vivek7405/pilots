@@ -113,6 +113,10 @@ var lastHandoffSeq atomic.Int64
 // call, and the next real mistake would pass it.
 type HandoffNotifier interface {
 	Offer(ctx context.Context, hostID, machineID, handoffID string) error
+	// ReleaseService asks the host that ARBITRATES a service to delete the
+	// rows only it may write, once the service's last replica is gone. See
+	// releaseServiceRowsVia.
+	ReleaseService(ctx context.Context, hostID, serviceID string) error
 }
 
 // SetHandoffs installs the peer notifier after construction.
@@ -392,6 +396,22 @@ func (m *Manager) Take(ctx context.Context, id, handoffID string) error {
 	}
 	if row.HostID == m.opts.HostID {
 		return nil // already ours
+	}
+
+	// The OFFER is checked before anything else is touched. admit below
+	// suspends this host's idle machines to make room, so it must never run
+	// for a call that names a machine nobody offered here: a forged or stale
+	// take would otherwise put other tenants' machines to sleep and only then
+	// be refused by the claim. The same reads claimByHandoff makes, made
+	// first; the claim repeats them under the row's own write.
+	offer, err := m.opts.Store.NewestHandoff(ctx, id)
+	if err != nil {
+		return fmt.Errorf("machines: take %s: no offer for it: %w", id, err)
+	}
+	if offer.ID != handoffID || offer.MachineID != id ||
+		offer.ToHost != m.opts.HostID || offer.FromHost != row.HostID {
+		return fmt.Errorf("machines: take %s: handoff %s does not offer it from %s to this host: %w",
+			id, handoffID, row.HostID, state.ErrNotOwner)
 	}
 
 	// Room for it, checked BEFORE the claim. Take used to bring a machine up
