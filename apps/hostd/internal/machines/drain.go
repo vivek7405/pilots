@@ -335,6 +335,10 @@ func (m *Manager) offerTo(ctx context.Context, row state.Machine, target string,
 	if err := m.awaitHandoff(ctx, row.ID, target); err != nil {
 		return err
 	}
+	// This host stops metering the moment the target owns the row. The
+	// suspend above only TRANSITIONED the interval, and Take opens its own on
+	// the target, so without this both hosts bill the machine from here on.
+	m.opts.Usage.Close(row.ID)
 
 	// The offer has done its work, so it goes. Not tidiness: a handoff row is
 	// write-once and nothing was deleting them, so `machine_handoffs` grew

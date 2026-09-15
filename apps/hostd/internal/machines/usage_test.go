@@ -30,7 +30,7 @@ func TestEveryLifecycleWriteHasItsLedgerHook(t *testing.T) {
 	want := map[string][]string{
 		"Open":       {"Create", "Rescue", "RescueOnVolume", "Resize", "Take", "Take"},
 		"Transition": {"Redeploy", "Redeploy", "Redeploy", "Resize", "Resize", "RestoreCheckpoint", "RestoreCheckpoint", "Suspend", "Wake", "Wake", "settleExit"},
-		"Close":      {"Destroy", "StopLocal"},
+		"Close":      {"Destroy", "StopLocal", "offerTo"},
 	}
 	for method, wantCallers := range want {
 		if strings.Join(got[method], ",") != strings.Join(wantCallers, ",") {
@@ -50,9 +50,11 @@ func TestEveryLifecycleWriteHasItsLedgerHook(t *testing.T) {
 	// this host now, and it had none here.
 	//
 	// Take opens an interval for the same reason Rescue does: the machine is
-	// now this host's, and the host it came from closed its own interval when
-	// it suspended. The seam between the two is the handoff itself, so neither
-	// side double-bills and neither leaves a gap. It carries two: suspended,
+	// now this host's. The host it came from closes its own in offerTo once
+	// the target owns the row -- Suspend only transitions the interval, so
+	// without that Close both hosts would go on billing the machine. The seam
+	// between the two is the handoff itself, so neither side double-bills and
+	// neither leaves a gap. It carries two: suspended,
 	// for a machine that was asleep before the drain and stays asleep here
 	// (storage only), and running, for one brought back up.
 	//
