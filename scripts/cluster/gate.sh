@@ -277,9 +277,13 @@ fi
 
 WEB_ID=""; DB_ID=""; WEB_NAME=""; DB_NAME=""
 if [ -n "$A_IP" ]; then
-  # A create lands on the host that serves it, so aiming the two requests at
-  # different hosts is how they end up on different hosts -- no placement API
-  # and nothing to schedule.
+  # A create is RANKED and forwarded to the best host, not run on the host that
+  # received it (internal/api/place.go), and a tie among comparable hosts is
+  # broken by the machine name's hash -- so aiming the two creates at different
+  # hosts no longer makes them land on different ones. To assert cross-host
+  # discovery we need a pair that actually straddles two hosts, so create the db
+  # and recreate it until it lands off web's host: a fresh name rehashes each
+  # try, and a balanced fleet spreads within a couple of attempts.
   # auto_stop off, because this step asserts DISCOVERY and not lifecycle.
   #
   # The default is to idle-suspend after a minute, and a suspended machine
@@ -290,16 +294,23 @@ if [ -n "$A_IP" ]; then
   # were asking about went to sleep".
   KNOBS='"knobs":{"auto_stop":"off"}'
   WEB=$(api "$A_IP" POST /v1/machines "{\"app\":\"${APP}\",\"vcpus\":1,\"mem_mib\":512,${KNOBS}}")
-  DB=$(api "$B_IP" POST /v1/machines \
-    "{\"app\":\"${APP}\",\"vcpus\":1,\"mem_mib\":512,${KNOBS},\"cmd\":\"sleep 86400\",\"secret_env\":{\"DB_PASSWORD\":\"gate-secret-$$\"}}")
   WEB_ID=$(echo "$WEB" | jf id); WEB_NAME=$(echo "$WEB" | jf name)
-  DB_ID=$(echo "$DB" | jf id);  DB_NAME=$(echo "$DB" | jf name)
-  WEB_HOST=$(echo "$WEB" | jf host_id); DB_HOST=$(echo "$DB" | jf host_id)
+  WEB_HOST=$(echo "$WEB" | jf host_id)
+  DB_BODY="{\"app\":\"${APP}\",\"vcpus\":1,\"mem_mib\":512,${KNOBS},\"cmd\":\"sleep 86400\",\"secret_env\":{\"DB_PASSWORD\":\"gate-secret-$$\"}}"
+  DB_ID=""; DB_NAME=""; DB_HOST=""
+  for _ in 1 2 3 4 5 6; do
+    DB=$(api "$B_IP" POST /v1/machines "$DB_BODY")
+    DB_ID=$(echo "$DB" | jf id); DB_NAME=$(echo "$DB" | jf name); DB_HOST=$(echo "$DB" | jf host_id)
+    { [ -z "$DB_ID" ] || [ -z "$WEB_HOST" ] || [ "$DB_HOST" != "$WEB_HOST" ]; } && break
+    # Landed on web's host; drop it and let a new name hash elsewhere.
+    api "$B_IP" DELETE "/v1/machines/${DB_ID}" >/dev/null 2>&1
+    DB_ID=""; DB_HOST=""
+  done
 
   if [ -z "$WEB_ID" ] || [ -z "$DB_ID" ]; then
     bad "could not create the pair (web='${WEB}' db='${DB}')"
   elif [ "$WEB_HOST" = "$DB_HOST" ]; then
-    bad "both machines landed on ${WEB_HOST}; this asserts nothing about crossing hosts"
+    bad "could not place two machines of one app on different hosts after retries (both on ${WEB_HOST})"
   else
     ok "web on ${WEB_HOST}, db on ${DB_HOST}"
   fi
@@ -412,22 +423,36 @@ if [ -n "$WEB_ID" ] && [ -n "$DB_ID" ] && [ "${#LIVE_IPS[@]}" -ge 2 ]; then
   api "$B_IP" POST "/v1/machines/${DB_ID}/suspend" >/dev/null 2>&1
   api "$B_IP" POST "/v1/machines/${DB_ID}/wake" >/dev/null 2>&1
 
-  BEFORE=$(curl_until "$A_IP" "$WEB_ID" "http://${DB_NAME}.internal:3001/health")
+  # Kill the host that ACTUALLY runs the db, which placement may have put on any
+  # host, not the one its create was sent to. Map its host id to an IP the same
+  # way section 8 does, then to a domain. And run the BEFORE/AFTER lookups from a
+  # host that is NOT the one about to die, or the queries die with it.
+  DB_OWNER=$(api "$B_IP" GET "/v1/machines/${DB_ID}" | jf host_id)
+  DB_OWNER_IP=""
+  for ip in "${LIVE_IPS[@]}"; do
+    HID=$($SSH "root@${ip}" "grep PILOT_HOST_ID /etc/pilots/config | cut -d= -f2" 2>/dev/null)
+    [ "$HID" = "$DB_OWNER" ] && DB_OWNER_IP="$ip"
+  done
+  QUERY_IP=""
+  for ip in "${LIVE_IPS[@]}"; do [ "$ip" != "$DB_OWNER_IP" ] && QUERY_IP="$ip" && break; done
+  : "${QUERY_IP:=$A_IP}"
+
+  BEFORE=$(curl_until "$QUERY_IP" "$WEB_ID" "http://${DB_NAME}.internal:3001/health")
   BEFORE_ADDR=${BEFORE##* }
 
   DOM=$(sudo virsh list --name | while read -r d; do
-    [ -n "$d" ] && sudo virsh domifaddr "$d" --source lease 2>/dev/null | grep -q "$B_IP" && echo "$d"
+    [ -n "$d" ] && sudo virsh domifaddr "$d" --source lease 2>/dev/null | grep -q "$DB_OWNER_IP" && echo "$d"
   done | head -1)
-  [ -n "$DOM" ] && sudo virsh destroy "$DOM" >/dev/null 2>&1 \
-    && ok "destroyed ${DOM}, which was running ${DB_NAME}" \
-    || bad "could not destroy the db's host"
+  [ -n "$DOM" ] && [ -n "$DB_OWNER_IP" ] && sudo virsh destroy "$DOM" >/dev/null 2>&1 \
+    && ok "destroyed ${DOM}, which was running ${DB_NAME} (owner ${DB_OWNER})" \
+    || bad "could not destroy the db's host (owner ${DB_OWNER} at ${DB_OWNER_IP:-unknown})"
 
   # A rescued machine lands in a new slot on a new host, so its address
   # CHANGES. That is the whole reason answers carry a near-zero TTL, and the
   # assertion is that a client asking again gets the new one.
   START=$SECONDS; AFTER=""
   while [ $((SECONDS - START)) -lt 300 ]; do
-    AFTER=$(curl_from "$A_IP" "$WEB_ID" "http://${DB_NAME}.internal:3001/health")
+    AFTER=$(curl_from "$QUERY_IP" "$WEB_ID" "http://${DB_NAME}.internal:3001/health")
     [ "${AFTER%% *}" = "200" ] && [ "${AFTER##* }" != "$BEFORE_ADDR" ] && break
     sleep 10
   done
@@ -460,11 +485,12 @@ done
 # one fails for a reason that has nothing to do with what it asserts.
 if [ -n "${DOM:-}" ]; then
   sudo virsh start "$DOM" >/dev/null 2>&1
+  REVIVE_IP="${DB_OWNER_IP:-$B_IP}"
   for _ in $(seq 60); do
-    curl -sf -m 3 "http://${B_IP}:8080/v1/health" >/dev/null 2>&1 && break
+    curl -sf -m 3 "http://${REVIVE_IP}:8080/v1/health" >/dev/null 2>&1 && break
     sleep 2
   done
-  curl -sf -m 3 "http://${B_IP}:8080/v1/health" >/dev/null 2>&1 \
+  curl -sf -m 3 "http://${REVIVE_IP}:8080/v1/health" >/dev/null 2>&1 \
     && ok "brought ${DOM} back for the fleet steps" \
     || bad "${DOM} did not come back; the steps below have no fleet to work with"
 fi
