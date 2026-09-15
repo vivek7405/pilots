@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/google/uuid"
@@ -62,6 +63,50 @@ type RemoteBuild struct {
 // the next open serve those holes as zeros with no error anywhere. The marker
 // is the only thing that distinguishes "complete" from "the right length".
 const completeMarker = "data.complete"
+
+// BuildComplete reports whether a build directory holds every byte it claims.
+//
+// A stat of "header" and "data" is NOT that. OpenRemoteBuild truncates "data"
+// to its full packed size before fetching a single block, so a pull
+// interrupted by a SIGKILL or a reboot leaves a full-length file of holes that
+// passes any size check -- and LocalBuild's validateDataSize catches a
+// TRUNCATED file, not a holey one. Those holes then read back as zeros with no
+// error anywhere, and Chunkify with this directory as ParentDir encodes them
+// into a durable build as "unchanged, same as parent". The marker is the only
+// thing that distinguishes "complete" from "the right length", so it is the
+// only thing that licenses reading a build directory locally.
+func BuildComplete(dir string) bool {
+	if _, err := os.Stat(filepath.Join(dir, "header")); err != nil {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, completeMarker))
+	return err == nil
+}
+
+// AwaitBuildComplete waits until BuildComplete(dir) holds, polling, or until
+// the timeout or ctx ends.
+//
+// For a caller that would otherwise read a build still being hydrated -- a
+// checkpoint chunkifying against a template the block server is still pulling
+// from object storage. The server hydrates in the background from the moment
+// it attaches, so the wait is normally already over; it is bounded because a
+// hydration that failed would otherwise hold the caller forever.
+func AwaitBuildComplete(ctx context.Context, dir string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if BuildComplete(dir) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("block: build %s was not fully hydrated within %s", dir, timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
 
 // OpenRemoteBuild fetches a build's header and prepares its local cache.
 func OpenRemoteBuild(ctx context.Context, store ObjectStore, buildID uuid.UUID, cacheRoot string) (*RemoteBuild, error) {

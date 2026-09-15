@@ -371,10 +371,11 @@ func (m *Manager) adoptFleetTemplate(ctx context.Context, v variant) (*Template,
 // directories before this host can snapshot anything against them.
 func (m *Manager) materializeBuild(ctx context.Context, id uuid.UUID) error {
 	dir := filepath.Join(m.buildDir(), id.String())
-	if _, err := os.Stat(filepath.Join(dir, "header")); err == nil {
-		if _, err := os.Stat(filepath.Join(dir, "data")); err == nil {
-			return nil
-		}
+	// The marker, never a stat of the files: a pull interrupted by a SIGKILL
+	// or a reboot leaves a full-length data file of holes, and this used to
+	// call that "already there" and serve it. See block.BuildComplete.
+	if block.BuildComplete(dir) {
+		return nil
 	}
 	if m.opts.BlockStore == nil {
 		return fmt.Errorf("machines: cannot pull build %s without object storage", id)

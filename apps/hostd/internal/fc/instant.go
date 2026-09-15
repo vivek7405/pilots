@@ -531,6 +531,13 @@ func (m *Machine) DiscardCow() {
 // CowFile is the name a checkpoint's copy-on-write disk is staged under.
 const CowFile = "rootfs.cow"
 
+// hydrateWait bounds how long a background capture waits for the disk
+// template it diffs against to finish hydrating from object storage. The
+// block server pulls the whole template from the moment it attaches, so the
+// wait is normally over before a checkpoint is taken; the bound is for a pull
+// that failed.
+const hydrateWait = 5 * time.Minute
+
 // InstantArtifacts names the objects one instant snapshot produced.
 type InstantArtifacts struct {
 	InstantSnapshot
@@ -842,6 +849,15 @@ func (m *Machine) finishCheckpoint(up Uploader, chunks Uploader, opts SnapshotOp
 
 	var rootfsPacked int64
 	if ids.RootfsBuildID != uuid.Nil {
+		// The template may still be hydrating: the block server serves it
+		// from object storage from the moment it attaches and pulls the rest
+		// in the background, and a diff against a half-pulled parent would
+		// encode its holes as unchanged ranges. This runs with the guest
+		// already serving, so waiting costs the user nothing.
+		if err := block.AwaitBuildComplete(ctx, opts.RootfsTemplateDir, hydrateWait); err != nil {
+			fail(err)
+			return
+		}
 		_, rootfsStats, cerr := block.Chunkify(ctx, block.ChunkifyOpts{
 			In:      filepath.Join(localDir, CowFile),
 			OutDir:  filepath.Join(opts.BuildDir, ids.RootfsBuildID.String()),
