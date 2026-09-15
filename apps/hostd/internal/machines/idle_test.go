@@ -324,7 +324,7 @@ func TestAnErrorMachineIsNeverAnIdleCandidate(t *testing.T) {
 	}
 	rec.calls = nil
 
-	m.suspendIdleMachines(ctx)
+	m.suspendIdleMachines(ctx, func() {})
 
 	if w := writesOnly(rec.order()); len(w) != 0 {
 		t.Errorf("the idle monitor wrote %v for a machine in error", w)

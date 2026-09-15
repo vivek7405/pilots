@@ -75,7 +75,7 @@ const scheduledSnapshotTimeout = 20 * time.Second
 // already runs every few seconds over this host's machines, and a second timer
 // would be a second thing to keep alive and a second thing to notice when it
 // stops.
-func (m *Manager) snapshotDueVolumes(ctx context.Context) {
+func (m *Manager) snapshotDueVolumes(ctx context.Context, tick func()) {
 	if m.opts.Volumes == nil {
 		return
 	}
@@ -122,6 +122,10 @@ func (m *Manager) snapshotDueVolumes(ctx context.Context) {
 		snapCtx, cancel := context.WithTimeout(ctx, scheduledSnapshotTimeout)
 		_, err = m.SnapshotVolume(snapCtx, policy.VolumeID)
 		cancel()
+		// Each snapshot pauses a guest for up to scheduledSnapshotTimeout, and
+		// every @daily policy fires in the same minute: prove the loop is
+		// alive after each one rather than after all of them.
+		tick()
 		if err != nil {
 			slog.Error("a scheduled volume snapshot failed",
 				"volume", policy.VolumeID, "err", err)

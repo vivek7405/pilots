@@ -175,13 +175,23 @@ func (m *Manager) RunIdleMonitor(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			m.suspendIdleMachines(ctx)
+			// The tick is threaded INTO the pass. One pass suspends every idle
+			// machine one after another and pauses each due volume's guest for
+			// a snapshot, so its length is bounded by the work rather than by
+			// the interval. Ticking only at the end let a burst of sandboxes
+			// idling out together, or two slow volume snapshots at midnight,
+			// overrun the 30s budget and have the watchdog restart hostd in the
+			// middle of suspends it was doing correctly. A tick after each unit
+			// proves the loop is alive without bounding what it may do.
+			m.suspendIdleMachines(ctx, live.Tick)
 			live.Tick()
 		}
 	}
 }
 
-func (m *Manager) suspendIdleMachines(ctx context.Context) {
+// tick is called after each unit of work (a suspend, a snapshot) so the
+// liveness loop can tell a long pass from a wedged one.
+func (m *Manager) suspendIdleMachines(ctx context.Context, tick func()) {
 	rows, err := m.opts.Store.ListMachines(ctx)
 	if err != nil {
 		slog.Error("idle monitor could not list machines", "err", err)
@@ -210,7 +220,9 @@ func (m *Manager) suspendIdleMachines(ctx context.Context) {
 		if !m.shouldSuspend(ctx, row) {
 			continue
 		}
-		if err := m.Suspend(ctx, row.ID); err != nil {
+		err := m.Suspend(ctx, row.ID)
+		tick() // one unit of work done, whatever its outcome
+		if err != nil {
 			slog.Error("idle suspend failed", "machine", row.ID, "err", err)
 			continue
 		}
@@ -225,7 +237,7 @@ func (m *Manager) suspendIdleMachines(ctx context.Context) {
 	// own. It already runs every few seconds over this host's state, and a
 	// second timer would be a second thing to keep alive and a second thing to
 	// notice when it stops.
-	m.snapshotDueVolumes(ctx)
+	m.snapshotDueVolumes(ctx, tick)
 }
 
 // destroyStaleBuilders collects builders that have been suspended longer than
