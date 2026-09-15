@@ -72,6 +72,11 @@ func dialGuest(ctx context.Context, dial func(context.Context, string, string) (
 		}
 		actx, cancel := context.WithTimeout(ctx, timeout)
 		conn, err := dial(actx, network, addr)
+		// This attempt's own timeout, read BEFORE cancel: afterwards Err is
+		// always Canceled, every failure would look unanswered, a refusal
+		// would be retried in a tight loop with no backoff, and a permanent
+		// error would be retried for the whole window before the 502.
+		unanswered := errors.Is(actx.Err(), context.DeadlineExceeded)
 		cancel()
 		if err == nil {
 			return conn, nil
@@ -79,7 +84,6 @@ func dialGuest(ctx context.Context, dial func(context.Context, string, string) (
 		if ctx.Err() != nil {
 			return nil, err
 		}
-		unanswered := actx.Err() != nil // this attempt's own timeout, not the request's
 		if (!guestNotReady(err) && !unanswered) || time.Now().Add(backoff).After(deadline) {
 			return conn, err
 		}
