@@ -7069,12 +7069,6 @@ async function agentDeployAssertions() {
     // cannot place a repository. This is the loop when it can: one tool call,
     // no Dockerfile, no compose file, a URL at the end.
 
-    // Read before the deploy, for the assertion after it: a machine whose
-    // root is served over NBD moves the block cache counters, and one whose
-    // root was a file opened by Firecracker moves neither.
-    const nbdReadsBefore = (await scrapeMetric('pilots_nbd_cache_hits_total') ?? 0)
-      + (await scrapeMetric('pilots_nbd_cache_misses_total') ?? 0);
-
     await step('deploy takes a webjs directory to a URL in ONE call', async () => {
       assert(client, 'the MCP server did not start');
       const started = Date.now();
@@ -7118,21 +7112,19 @@ async function agentDeployAssertions() {
       enforce(oneCallMS, 300_000, 180_000, 'webjs one-call deploy');
     });
 
-    await step('a custom-image machine leaves no materialised rootfs behind', async () => {
-      // The machine that just answered was BOOTED from the build the deploy
-      // produced, and its root is a block device served from that build --
-      // not a full-size ext4 materialised on the host and copied per machine,
-      // which is what filled a rig host's disk. From the public API the
-      // difference is the block cache: a root served over NBD is read
-      // through it and moves its counters; a root that was a file opened by
-      // Firecracker moves neither. The host-shell half -- no images
-      // directory, every rootfs a device node -- is gate.sh section 45.
-      const after = (await scrapeMetric('pilots_nbd_cache_hits_total') ?? 0)
-        + (await scrapeMetric('pilots_nbd_cache_misses_total') ?? 0);
-      assert(after > nbdReadsBefore,
-        `the block cache counters did not move across the deploy (${nbdReadsBefore} -> ${after}); `
-        + 'the built machine\'s root was opened as a file rather than served from its build');
-    });
+    // "A custom-image machine leaves no materialised rootfs behind" is NOT
+    // asserted here, and the reason is the split table in AGENTS.md rather
+    // than an oversight. The machine that just answered was booted from the
+    // build the deploy produced, and its root is a block device served from
+    // that build -- not a full-size ext4 materialised on the host and copied
+    // per machine, which is what filled a rig host's disk. Nothing about that
+    // reaches the public API: the difference is a file versus a device node
+    // in a jail, and the block cache counters that would show it are
+    // incremented inside the handler PROCESS, which has its own registry and
+    // never appears in this host's scrape. So the assertion lives where it
+    // can actually be made, on a host shell, as gate.sh section 45: no image
+    // cache directory, every machine's rootfs.ext4 a block device node, and
+    // the jail sized by the number of machines rather than by an image.
 
     await step('a monorepo deploys as one service per workspace', async () => {
       assert(client, 'the MCP server did not start');
