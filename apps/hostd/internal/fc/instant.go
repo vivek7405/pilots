@@ -524,8 +524,10 @@ func (m *Machine) stopHandlers() []error {
 // Only on destroy. It holds every write since the last snapshot, so removing
 // it at any other point silently discards the machine's disk.
 func (m *Machine) DiscardCow() {
-	if err := os.Remove(CowPath(m.StateDir)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		slog.Warn("could not remove copy-on-write file", "machine", m.ID, "err", err)
+	for _, path := range []string{CowPath(m.StateDir), FlushCowPath(m.StateDir)} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("could not remove copy-on-write file", "machine", m.ID, "path", path, "err", err)
+		}
 	}
 }
 

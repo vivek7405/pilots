@@ -31,6 +31,14 @@ type Cache struct {
 	// dirty holds the indices of blocks this cache owns. A block not in here
 	// must be served by whatever sits underneath.
 	dirty *roaring.Bitmap
+	// unflushed holds the blocks written since the last acknowledged root
+	// flush -- a subset of dirty, cleared by MarkFlushed. It is what keeps a
+	// periodic flush's pause proportional to what was written since the
+	// previous one rather than to everything written since the wake.
+	unflushed *roaring.Bitmap
+	// pendingFlush is what the last Unflushed call handed out, so that
+	// MarkFlushed clears exactly that and nothing written afterwards.
+	pendingFlush *roaring.Bitmap
 }
 
 // NewCache opens or creates a cache file.
@@ -42,7 +50,7 @@ type Cache struct {
 func NewCache(size, blockSize int64, path string, dirtyFile bool) (*Cache, error) {
 	c := &Cache{
 		size: size, blockSize: blockSize, path: path,
-		dirty: roaring.New(),
+		dirty: roaring.New(), unflushed: roaring.New(),
 	}
 
 	// A zero-size cache is legal -- a machine with no disk of its own -- and
@@ -131,8 +139,9 @@ func (c *Cache) WriteAt(p []byte, off int64) (int, error) {
 	}
 
 	n := copy(c.data[off:], p)
-	c.dirty.AddRange(uint64(BlockIdx(off, c.blockSize)),
-		uint64(BlockCeilIdx(off+int64(n), c.blockSize)))
+	first, last := uint64(BlockIdx(off, c.blockSize)), uint64(BlockCeilIdx(off+int64(n), c.blockSize))
+	c.dirty.AddRange(first, last)
+	c.unflushed.AddRange(first, last)
 	return n, nil
 }
 
@@ -141,6 +150,32 @@ func (c *Cache) Dirty() *roaring.Bitmap {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.dirty.Clone()
+}
+
+// Unflushed returns a copy of the blocks written since the last MarkFlushed,
+// and remembers the set it handed out so MarkFlushed can clear exactly that.
+//
+// The caller is expected to hold the guest paused from this call through
+// MarkFlushed: then nothing is written in between, the remembered set is the
+// whole unflushed set, and a caller that copies what it was given and then
+// acknowledges has lost nothing.
+func (c *Cache) Unflushed() *roaring.Bitmap {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pendingFlush = c.unflushed.Clone()
+	return c.unflushed.Clone()
+}
+
+// MarkFlushed forgets the blocks the last Unflushed handed out. A block
+// written since then stays unflushed, which is why this clears the remembered
+// set rather than everything.
+func (c *Cache) MarkFlushed() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.pendingFlush != nil {
+		c.unflushed.AndNot(c.pendingFlush)
+		c.pendingFlush = nil
+	}
 }
 
 // Sync flushes the mapping to the backing file.
@@ -216,6 +251,20 @@ func (c *Cache) ExportToDiff(dstPath string) (*roaring.Bitmap, error) {
 // where extents are shared and a full copy of the disk everywhere else, and
 // the pause must not depend on which of the two the host has.
 func CopyDirtyRanges(srcPath, dstPath string, dirty *roaring.Bitmap, blockSize int64) error {
+	return copyDirtyRanges(srcPath, dstPath, dirty, blockSize, os.O_TRUNC)
+}
+
+// MergeDirtyRanges is CopyDirtyRanges into a file that is kept: the ranges
+// land over whatever dstPath already holds, and everything else in it stays.
+//
+// For a staged copy that persists between root flushes. Each flush merges
+// only the blocks written since the previous one, so the file is always the
+// whole cow as of the last pause while each pause costs only the delta.
+func MergeDirtyRanges(srcPath, dstPath string, dirty *roaring.Bitmap, blockSize int64) error {
+	return copyDirtyRanges(srcPath, dstPath, dirty, blockSize, 0)
+}
+
+func copyDirtyRanges(srcPath, dstPath string, dirty *roaring.Bitmap, blockSize int64, truncate int) error {
 	src, err := os.Open(srcPath)
 	if err != nil {
 		return fmt.Errorf("block: open %s: %w", srcPath, err)
@@ -227,7 +276,7 @@ func CopyDirtyRanges(srcPath, dstPath string, dirty *roaring.Bitmap, blockSize i
 	}
 	size := st.Size()
 
-	dst, err := os.OpenFile(dstPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+	dst, err := os.OpenFile(dstPath, os.O_RDWR|os.O_CREATE|truncate, 0o600)
 	if err != nil {
 		return fmt.Errorf("block: create %s: %w", dstPath, err)
 	}

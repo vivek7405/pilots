@@ -213,6 +213,32 @@ func (p *Process) Dirty() (*roaring.Bitmap, error) {
 	return parseDirty(payload)
 }
 
+// Unflushed asks the handler which blocks the machine has written since the
+// last flush hostd acknowledged. The same rules as Dirty: the VM must be
+// paused, and the device is flushed first so a write still in the host's page
+// cache reaches the handler before the bitmap is read.
+//
+// The handler remembers what it answered, and Flushed clears exactly that.
+// Both calls belong inside the same pause: then nothing is written between
+// them, and the acknowledgement forgets nothing that was not copied.
+func (p *Process) Unflushed() (*roaring.Bitmap, error) {
+	if err := flushDevice(p.Device); err != nil {
+		return nil, fmt.Errorf("nbd: flush %s before reading its unflushed set: %w", p.Device, err)
+	}
+	payload, err := ctlsock.Request(p.control, cmdUnflushed)
+	if err != nil {
+		return nil, err
+	}
+	return parseDirty(payload)
+}
+
+// Flushed tells the handler the blocks its last Unflushed answer named have
+// been copied out, so they are no longer unflushed.
+func (p *Process) Flushed() error {
+	_, err := ctlsock.Request(p.control, cmdFlushed)
+	return err
+}
+
 // Stop tears the handler down and returns its device to the pool.
 //
 // The disconnect comes FIRST and from here, not from the child. A handler

@@ -125,4 +125,20 @@ var (
 		"pilots_snapshot_resume_gap_seconds",
 		"Guest-visible freeze around a checkpoint.",
 		[]float64{0.05, 0.1, 0.2, 0.3, 0.5, 1, 2, 5})
+
+	// RootFlushPauseSeconds is the guest-visible freeze of a periodic root
+	// flush. It is the number the published root RPO is worth nothing
+	// without: a flush that keeps the window short by stopping the guest for
+	// a second is not a feature. The SLO is p99 under 25ms.
+	RootFlushPauseSeconds = NewHistogram(Default,
+		"pilots_root_flush_pause_seconds",
+		"Guest-visible freeze of a periodic root flush.",
+		[]float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 1})
+	// RootFlushLagSeconds is how long the machine's disk had been dirty when
+	// the flush ran -- the realised RPO, measured rather than claimed. The
+	// published bound is 60s.
+	RootFlushLagSeconds = NewHistogram(Default,
+		"pilots_root_flush_lag_seconds",
+		"Age of the oldest write a root flush made durable: the realised RPO.",
+		[]float64{5, 15, 30, 45, 60, 90, 120, 300})
 )

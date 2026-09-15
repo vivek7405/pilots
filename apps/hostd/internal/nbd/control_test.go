@@ -173,3 +173,51 @@ func TestDirtyRefusesWhenTheFlushFails(t *testing.T) {
 		t.Fatal("Dirty returned a bitmap although the device was never flushed")
 	}
 }
+
+// The root flush's half of the protocol. "unflushed" hands out what was
+// written since the last acknowledgement and "flushed" forgets exactly that,
+// so a flush that copies what it was handed and then acknowledges has lost
+// nothing -- and a write landing between the two stays unflushed.
+func TestControlHandsOutUnflushedBlocksAndForgetsThemOnFlushed(t *testing.T) {
+	sock, cache, _ := startControl(t)
+	block := bytes.Repeat([]byte{7}, 4096)
+
+	if _, err := cache.WriteAt(block, 0); err != nil {
+		t.Fatalf("WriteAt: %v", err)
+	}
+	payload, err := ctlsock.Request(sock, cmdUnflushed)
+	if err != nil {
+		t.Fatalf("unflushed: %v", err)
+	}
+	got, err := parseDirty(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.GetCardinality() != 1 || !got.Contains(0) {
+		t.Fatalf("unflushed is %v, want block 0", got.ToArray())
+	}
+
+	// Between the read and the acknowledgement.
+	if _, err := cache.WriteAt(block, 8192); err != nil {
+		t.Fatalf("WriteAt: %v", err)
+	}
+	if _, err := ctlsock.Request(sock, cmdFlushed); err != nil {
+		t.Fatalf("flushed: %v", err)
+	}
+
+	payload, err = ctlsock.Request(sock, cmdUnflushed)
+	if err != nil {
+		t.Fatalf("second unflushed: %v", err)
+	}
+	if got, _ = parseDirty(payload); got.GetCardinality() != 1 || !got.Contains(2) {
+		t.Fatalf("unflushed after the acknowledgement is %v, want only block 2", got.ToArray())
+	}
+	// The cumulative bitmap the checkpoint path reads is untouched.
+	payload, err = ctlsock.Request(sock, cmdDirty)
+	if err != nil {
+		t.Fatalf("dirty: %v", err)
+	}
+	if got, _ = parseDirty(payload); got.GetCardinality() != 2 {
+		t.Fatalf("dirty is %v after a flush, want blocks 0 and 2", got.ToArray())
+	}
+}

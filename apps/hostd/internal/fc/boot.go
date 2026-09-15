@@ -139,6 +139,17 @@ type Machine struct {
 	// metrics and for a test to assert the Full-to-Diff switch happened.
 	lastSnapshotType string
 
+	// The periodic root flush's state. rootStaged says the staged copy of
+	// the cow (FlushCowPath) holds everything written up to the last pause,
+	// so the next flush merges only the delta; it starts false on every
+	// attach and adoption, and the first flush copies the whole cow.
+	// rootFlushOwed says the last flush's background half failed, so the
+	// next one must chunkify even with nothing new written. lastRootFlush is
+	// the instant the disk was last made durable, for the lag metric.
+	rootStaged    bool
+	rootFlushOwed bool
+	lastRootFlush time.Time
+
 	// captureDone is closed when the background half of the previous snapshot
 	// finishes. See awaitCapture.
 	captureMu   sync.Mutex

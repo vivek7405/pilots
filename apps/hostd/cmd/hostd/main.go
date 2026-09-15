@@ -302,6 +302,9 @@ func run() error {
 		Chunks:        chunks,
 		BlockStore:    chunkReader(chunks),
 		NBDDevices:    devices,
+		// The published root RPO: how long a machine's writes may sit only on
+		// this host's disk before a flush puts them in object storage.
+		RootFlushInterval: cfg.RootFlushInterval,
 		// An ALLOWLIST, not this daemon's environment. The handlers read their
 		// builds through a per-machine socket now, so nothing they do needs a
 		// storage credential, and a process sitting next to a guest holding
@@ -434,6 +437,9 @@ func run() error {
 	// Sweeps up Firecrackers this host has no record of -- the residue of a
 	// hostd killed mid-create, or a destroy that failed partway.
 	go mgr.RunReaper(ctx)
+	// Makes every running machine's disk durable on a timer -- the root RPO
+	// the product publishes, measured by pilots_root_flush_lag_seconds.
+	go mgr.RunRootFlush(ctx)
 	// Every host publishes its own row, fleet or not, so that GET /v1/hosts on
 	// any host lists at least the one answering.
 	startHeartbeat(ctx, cfg, store, meshKeys, meshed, mgr)
