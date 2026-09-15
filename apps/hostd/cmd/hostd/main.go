@@ -441,6 +441,9 @@ func run() error {
 	// Makes every running machine's disk durable on a timer -- the root RPO
 	// the product publishes, measured by pilots_root_flush_lag_seconds.
 	go mgr.RunRootFlush(ctx)
+	// A host upgraded in place still carries the image cache an earlier hostd
+	// materialised; nothing writes it now, so it goes once, here.
+	mgr.RemoveLegacyImageCache()
 	// Every host publishes its own row, fleet or not, so that GET /v1/hosts on
 	// any host lists at least the one answering.
 	startHeartbeat(ctx, cfg, store, meshKeys, meshed, mgr)

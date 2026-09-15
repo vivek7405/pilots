@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"path/filepath"
 
 	"github.com/google/uuid"
@@ -22,6 +23,27 @@ import (
 // has to boot rather than restore: the golden template's memory image
 // describes the golden template's disk, and resuming it against somebody
 // else's root filesystem is a guest whose memory and disk have never met.
+
+// RemoveLegacyImageCache deletes the materialised image cache an earlier hostd
+// kept under the cache root: one full-size ext4 per build, which nothing ever
+// deleted and which filled a rig host's disk.
+//
+// Nothing writes it any more -- a booted machine's root is served from its
+// build -- so this is not a collector with a job, it is the one removal a
+// host upgraded in place needs to stop carrying those gigabytes forever. A
+// fresh host has nothing here and this is a no-op.
+func (m *Manager) RemoveLegacyImageCache() {
+	dir := filepath.Join(m.opts.CacheRoot, "images")
+	if _, err := os.Stat(dir); err != nil {
+		return
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		slog.Warn("could not remove the legacy image cache; nothing writes it, "+
+			"and it can be deleted by hand", "dir", dir, "err", err)
+		return
+	}
+	slog.Info("removed the legacy materialised image cache", "dir", dir)
+}
 
 // pinBootTemplate decides which build a booting machine's root is served from
 // and records that decision on the row.
