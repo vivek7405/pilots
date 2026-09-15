@@ -201,12 +201,19 @@ func checkChrootBaseUsable(base string) error {
 	return nil
 }
 
-// prepareJail builds the chroot the jailer will drop into: the per-machine
-// rootfs at the constant baked path, and the kernel.
+// prepareJail builds the chroot the jailer will drop into: a rootfs FILE at
+// the constant baked path, and the kernel.
 //
-// The rootfs is a reflink copy of the golden template where the filesystem
-// supports it, so a new machine costs no data copy and diverges lazily as it
-// writes.
+// This is the one place a whole rootfs is copied per machine, and it has
+// exactly one caller: machines.buildTemplate, booting the pinned golden image
+// to mint the first build on a host. That copy is legitimate and must not be
+// "fixed" into a served device -- there is no build to serve yet, so the file
+// is the only source there is -- and it runs once per host per template
+// rebuild, never per machine. Every other machine's root is a block device
+// served from its build (BootFromDisk), which is why a host's disk holds one
+// copy of a build however many machines use it. The copy is a reflink where
+// the filesystem shares extents and a plain copy elsewhere; either is fine at
+// this frequency.
 func prepareJail(cfg Config) (chrootDir string, err error) {
 	if err := checkChrootBaseUsable(cfg.ChrootBase); err != nil {
 		return "", err
