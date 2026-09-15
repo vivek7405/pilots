@@ -40,6 +40,23 @@ this, in order. It is loaded into context automatically (`CLAUDE.md` is
    a checkpoint's resume gap is independent of machine size. The numbers are
    the SLO table in #7 and the levers beyond it are #22; a change that makes
    any of them slower is a regression even if every test stays green.
+6. **A suspended machine costs the host nothing, and wakes from any host.**
+   Cost efficiency is why the platform exists: suspend leaves no process, no
+   veth, no reserved memory and no per-machine object behind (the wake sink
+   is ONE dummy interface per host for the whole address block), and the
+   wake it feeds is the extremely fast one in #5. Cross-host is the default
+   case, not an edge case: wake, restore, rescue and every volume must work
+   on a host other than the one that suspended the machine, within the
+   CPU-vendor pool of ARCHITECTURE.md rule 6. A design that keeps anything
+   warm per suspended machine, or that only works on the host the machine
+   last ran on, has failed this bar.
+7. **One storage model: S3 is the volume, the host disk is only a cache.**
+   The machine root and the volume are one S3-backed thing (#122), durable
+   in the bucket with local NVMe as a read-through cache that can be wiped
+   at any time. Not two models (a local rootfs copy plus a network volume),
+   and never a host-pinned disk: that is what cost Fly three years of
+   migration work (`docs/prior-art/fly-io.md`) and is what Sprites replaced
+   it with (`docs/prior-art/sprites-dev.md` §4).
 
 When a phase plan, an issue body, or a review comment conflicts with one of
 these, this section wins and the conflict is stated in the issue.
@@ -60,7 +77,10 @@ What makes it different:
   Adding a host is `scripts/host-bootstrap.sh <ip>`.
 - **One primitive, two faces.** A sandbox and a production service are the
   same `machine` with different lifecycle knobs. `promote` turns one into
-  the other without changing its URL.
+  the other without changing its URL. Fly and Sprites are the comparison:
+  two products built separately and combined after the fact, still shipping
+  two CLIs (`fly` and `sprite`, both installed locally). Pilots is one
+  product, one primitive, one CLI, designed as the 2-in-1 from the start.
 
 Tracking: [project board](https://github.com/users/vivek7405/projects/10).
 Master plan and phase breakdown: issues #1–#7.
