@@ -72,8 +72,11 @@ func statsManager(t *testing.T, id string, memMiB int) *Manager {
 	if err := st.PutMachine(t.Context(), row); err != nil {
 		t.Fatal(err)
 	}
+	// A real StateRoot, like cpuManager: without one stateDir(id) resolves to
+	// a relative path and writeCarried leaves m_abc/stats.json in the package
+	// directory on every run -- it was committed once that way.
 	return &Manager{opts: Options{
-		HostID: "host-a", Store: st,
+		HostID: "host-a", Store: st, StateRoot: t.TempDir(),
 		FCConfig: fc.Config{FirecrackerBin: "/usr/bin/firecracker"},
 	}}
 }
@@ -121,6 +124,11 @@ func TestASuspendedMachineReportsNoMemory(t *testing.T) {
 	fakeCgroup(t, "m_abc", "\n", 4820992, 640<<20)
 
 	m := statsManager(t, "m_abc", 512)
+	// The total a suspended machine reports is the one Suspend persisted, so
+	// write it. This test used to pass without doing so only because a
+	// sibling test leaked its stats.json into the package directory and the
+	// manager, having no state root, read that file back.
+	writeCarried(t, m, "m_abc", 2269379)
 	got, err := m.Stats(t.Context(), "m_abc")
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
