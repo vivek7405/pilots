@@ -1062,22 +1062,35 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 	return nil
 }
 
-// discardBuilds removes builds nothing references any more.
+// discardBuilds removes builds nothing references any more, from object
+// storage AND from this host's disk.
 //
 // Every suspend writes a fresh memory build, so without this each one leaks a
 // full memory diff into object storage forever -- the largest objects the
 // system produces, growing without bound for a machine that wakes and sleeps
 // on a schedule.
 //
-// Best effort: a failure here costs storage, while failing the suspend over it
-// would cost the machine.
+// The LOCAL half matters just as much and was missing: <CacheRoot>/builds/<id>
+// is a cache of the objects being deleted here, and nothing else ever removed
+// one. A suspend, a checkpoint and a root flush each mint a build, so a host
+// accumulated a directory per capture forever -- 99 GB across 1448 of them on
+// the box this was found on, which is the same disk fill this issue removed
+// from <CacheRoot>/images, arriving by another door. A build whose objects are
+// gone is not a cache of anything, and a directory left behind is worse than
+// useless: an incomplete one is exactly the holey build the marker exists to
+// refuse.
+//
+// Local removal is deliberately NOT gated on object storage being deletable.
+// A host that cannot delete remotely still must not keep the bytes: the build
+// is then still in the bucket, which makes the local copy a pure cache and its
+// removal free.
+//
+// Best effort throughout: a failure here costs storage, while failing the
+// suspend over it would cost the machine.
 func (m *Manager) discardBuilds(ctx context.Context, ids ...string) {
-	deleter, ok := m.opts.Chunks.(interface {
+	deleter, _ := m.opts.Chunks.(interface {
 		Delete(ctx context.Context, key string) error
 	})
-	if !ok {
-		return
-	}
 
 	for _, id := range ids {
 		if id == "" {
@@ -1096,11 +1109,17 @@ func (m *Manager) discardBuilds(ctx context.Context, ids ...string) {
 				"build", id)
 			continue
 		}
-		for _, name := range []string{id + "/header", id + "/data"} {
-			if err := deleter.Delete(ctx, name); err != nil {
-				slog.Warn("a superseded build was left in object storage",
-					"build", id, "key", name, "err", err)
+		if deleter != nil {
+			for _, name := range []string{id + "/header", id + "/data"} {
+				if err := deleter.Delete(ctx, name); err != nil {
+					slog.Warn("a superseded build was left in object storage",
+						"build", id, "key", name, "err", err)
+				}
 			}
+		}
+		if err := os.RemoveAll(filepath.Join(m.buildDir(), id)); err != nil {
+			slog.Warn("a superseded build was left on this host's disk",
+				"build", id, "err", err)
 		}
 	}
 }

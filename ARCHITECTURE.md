@@ -55,10 +55,34 @@ The root's window is a published, operator-tunable figure —
 one: `pilots_root_flush_pause_seconds` (the guest pause a flush costs, p99
 < 25ms) and `pilots_root_flush_lag_seconds` (how far the bucket trails the
 disk), both scraped and asserted by the e2e battery. **Data that cannot
-afford to lose its last 60 seconds belongs on a volume.** Sprites ships the
-same write-back model for its root and does not publish the window; pilots
-publishes it. (The prior-art REJECT is against an *unpublished* window and
-against letting write-back reach volumes; neither happens here.)
+afford to lose its last 60 seconds belongs on a volume.**
+
+**Measured against Sprites, which is the only comparable product, on both
+axes rather than the flattering one.** Sprites ships write-back for its root
+too, and *does not publish a window*: "The filesystem syncs to it
+continuously, not as a snapshot taken at hibernation" (lifecycle docs),
+"durability is a property of the disk rather than an event you trigger"
+(`fly.io/learn/fly-vs-e2b`), but "All storage on a Sprite shares this
+'eventual durability' property" and "Nothing written through the VFS is
+truly durable until that sync happens" (`fly.io/blog/litestream-writable-vfs`,
+where the only interval published anywhere — "every second or so" — is for
+the SQLite VFS write buffer, not the disk). So pilots is **ahead on the
+knowable window** and that is the REJECT this answers.
+
+Pilots is **behind on one axis and it is written here rather than left for
+a reader to find**: their flush never stops the guest — "the storage flush
+happens as a background write-back rather than as a stop-the-world copy of
+RAM, so putting a Sprite away is not a thing you wait for"
+(`fly.io/learn/fly-vs-e2b`), and a checkpoint "runs copy-on-write, so it's
+fast and doesn't interrupt the Sprite" (checkpoints docs). A pilots flush
+takes a real pause. It is bounded by construction (only the blocks written
+since the previous flush are copied) and measured at p99 < 25 ms, which is
+inside the noise of an HTTP request — but it is not zero, and zero is what
+a copy-on-write generation split inside `block.Cache` would buy. That split
+is deliberately NOT done here: it is a rewrite of `block.Cache` *and* of the
+NBD handler's control path, and `internal/nbd` is a **port, not a rewrite**
+(AGENTS.md). `pilots_root_flush_pause_seconds` is the number that decides
+whether that follow-on is ever worth its risk.
 
 Post-parity backlog (beyond every competitor): CoW memory fan-out (1→N
 fork), multi-region. (Tenant Postgres left this list: it is a shipped
