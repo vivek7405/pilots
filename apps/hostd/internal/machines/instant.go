@@ -175,6 +175,7 @@ func (m *Manager) restoreFromTemplate(ctx context.Context, row *state.Machine,
 	fcm, slot, err := m.restoreInstant(ctx, row, fc.Backends{
 		MemBuildID:        t.MemBuildID,
 		RootfsTemplateDir: m.rootfsTemplateDir(t),
+		RootfsTemplateID:  t.RootfsBuildID,
 		CacheRoot:         m.buildDir(),
 	}, t.SnapKey)
 	if err != nil {
@@ -205,6 +206,7 @@ func (m *Manager) wakeFromSuspend(ctx context.Context, row *state.Machine) (*fc.
 		// to be attached or every unchanged page resolves to nothing.
 		MemParentBuildID:  t.MemBuildID,
 		RootfsTemplateDir: m.rootfsTemplateDir(t),
+		RootfsTemplateID:  t.RootfsBuildID,
 		CacheRoot:         m.buildDir(),
 	}
 	// An absent rootfs build is normal: the machine wrote nothing to disk and

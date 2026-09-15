@@ -68,6 +68,7 @@ func (m *Manager) createFromRelease(ctx context.Context, row *state.Machine,
 		MemBuildID:        memBuild,
 		MemParentBuildID:  t.MemBuildID,
 		RootfsTemplateDir: m.rootfsTemplateDir(t),
+		RootfsTemplateID:  t.RootfsBuildID,
 		CacheRoot:         m.buildDir(),
 	}
 	if rootfsBuildID != "" {

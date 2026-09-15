@@ -43,12 +43,13 @@ type Backends struct {
 	MemBuildID       uuid.UUID
 	MemParentBuildID uuid.UUID
 
-	// RootfsTemplateDir is the golden template, on local disk. Every machine
-	// reads through the same one.
+	// RootfsTemplateDir is the disk template's local build directory, which
+	// every machine reads through, and RootfsTemplateID is the same build in
+	// object storage. Both are set: the block server reads the directory
+	// when it is complete and serves the bucket into it while it is not, so
+	// a host that does not have the template yet still attaches at once.
 	RootfsTemplateDir string
-	// RootfsTemplateID reads that template from object storage instead, for a
-	// host that does not have it yet.
-	RootfsTemplateID uuid.UUID
+	RootfsTemplateID  uuid.UUID
 	// RootfsDiffID replays a previous lifetime's disk writes before the guest
 	// reads anything.
 	RootfsDiffID uuid.UUID

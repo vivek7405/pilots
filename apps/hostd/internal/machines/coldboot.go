@@ -131,6 +131,7 @@ func (m *Manager) bootFromDisk(ctx context.Context, row *state.Machine,
 	}
 
 	backends.RootfsTemplateDir = m.rootfsTemplateDir(t)
+	backends.RootfsTemplateID = t.RootfsBuildID
 	backends.CacheRoot = m.buildDir()
 	// An absent rootfs build is normal and means the machine wrote nothing to
 	// disk and reads the template directly, exactly as on a wake.

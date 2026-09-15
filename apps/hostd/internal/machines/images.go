@@ -50,6 +50,7 @@ func (m *Manager) pinBootTemplate(ctx context.Context, row *state.Machine,
 			return backends, fmt.Errorf("machines: fetch build %s: %w", buildID, err)
 		}
 		backends.RootfsTemplateDir = filepath.Join(m.buildDir(), buildID.String())
+		backends.RootfsTemplateID = buildID
 		row.ImageRef = image
 		// The build IS this machine's disk template. Its later snapshots are
 		// diffs whose unchanged ranges resolve against it by offset, and the
@@ -63,6 +64,7 @@ func (m *Manager) pinBootTemplate(ctx context.Context, row *state.Machine,
 			return backends, err
 		}
 		backends.RootfsTemplateDir = m.rootfsTemplateDir(t)
+		backends.RootfsTemplateID = t.RootfsBuildID
 		row.TemplateRootfsBuildID = t.RootfsBuildID.String()
 	}
 

@@ -21,8 +21,11 @@ type Config struct {
 	Device string
 	Index  int
 
-	// TemplateDir reads the template from a local build directory.
-	// TemplateBuildID fetches it from object storage instead. Exactly one.
+	// TemplateDir is the template's local build directory and TemplateBuildID
+	// is the same build in object storage. Either or both: the directory is
+	// read directly when it is complete, and the bucket is served (and cached
+	// into that directory) while it is not. A directory that is incomplete
+	// with no build id to fall back to is refused, never served.
 	TemplateDir     string
 	TemplateBuildID uuid.UUID
 
@@ -133,12 +136,17 @@ func Run(ctx context.Context, cfg Config, store block.ObjectStore) error {
 }
 
 // openTemplate opens the read-only base the overlay falls through to.
+//
+// The truth is the build in object storage; the local directory is a cache
+// of it, and the marker is what says the cache is whole. So a complete
+// directory is read with no object storage in the path at all, and anything
+// less is served from the bucket -- which is what lets a create or a rescue
+// on a host that has never held the template answer before the template has
+// finished downloading. Reads do not block on hydration; the background
+// Prefault in Run pulls the rest into the same directory.
 func openTemplate(ctx context.Context, cfg Config, store block.ObjectStore) (block.Slicer, func(), error) {
 	switch {
-	case cfg.TemplateDir != "" && cfg.TemplateBuildID != uuid.Nil:
-		return nil, nil, fmt.Errorf("nbd: template-dir and template-build-id are exclusive")
-
-	case cfg.TemplateDir != "":
+	case cfg.TemplateDir != "" && block.BuildComplete(cfg.TemplateDir):
 		b, err := block.OpenLocalBuild(cfg.TemplateDir)
 		if err != nil {
 			return nil, nil, err
@@ -147,13 +155,20 @@ func openTemplate(ctx context.Context, cfg Config, store block.ObjectStore) (blo
 
 	case cfg.TemplateBuildID != uuid.Nil:
 		if store == nil {
-			return nil, nil, fmt.Errorf("nbd: template-build-id needs object storage")
+			return nil, nil, fmt.Errorf("nbd: template %s is not complete on disk and "+
+				"there is no object storage to serve it from", cfg.TemplateBuildID)
 		}
 		b, err := block.OpenRemoteBuild(ctx, store, cfg.TemplateBuildID, cfg.CacheRoot)
 		if err != nil {
 			return nil, nil, err
 		}
 		return b, func() { b.Close() }, nil
+
+	case cfg.TemplateDir != "":
+		// Named but incomplete, with no build id to fall back to. Refused: a
+		// holey data file reads back as zeros with no error anywhere.
+		return nil, nil, fmt.Errorf("nbd: template dir %s is incomplete and no "+
+			"template-build-id was given", cfg.TemplateDir)
 
 	default:
 		return nil, nil, fmt.Errorf("nbd: one of template-dir or template-build-id is required")
