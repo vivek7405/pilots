@@ -1087,7 +1087,17 @@ func (s *Store) ListVolumePolicies(ctx context.Context) ([]state.VolumePolicy, e
 	return out, rows.Err()
 }
 
+// DeleteVolumePolicy is guarded exactly as PutVolumePolicy is. A delete is a
+// write, and a Delete* left unguarded beside a guarded Put* is a cross-host
+// row write through a CRDT merge for any caller that assumes the two agree
+// (invariant 1). The same holds for every Delete* below that names a guard.
 func (s *Store) DeleteVolumePolicy(ctx context.Context, volumeID string) error {
+	// A policy whose volume is already gone has no owner left to protect, so
+	// its cleanup is allowed from anywhere -- as assertMachineOwner allows a
+	// gone machine's. Refusing it would strand the row for good.
+	if err := s.assertVolumeOwner(ctx, volumeID); err != nil && !errors.Is(err, state.ErrNotFound) {
+		return err
+	}
 	if _, err := s.client.Exec(ctx, `DELETE FROM volume_policies WHERE volume_id = ?`, volumeID); err != nil {
 		return fmt.Errorf("state: delete volume policy %q: %w", volumeID, err)
 	}
@@ -1160,7 +1170,11 @@ func (s *Store) ListLineage(ctx context.Context) ([]state.Lineage, error) {
 	return out, rows.Err()
 }
 
+// DeleteLineage is guarded as PutLineage is: the machine's owner writes it.
 func (s *Store) DeleteLineage(ctx context.Context, machineID string) error {
+	if err := s.assertMachineOwner(ctx, machineID, state.WriteAuth{}); err != nil {
+		return err
+	}
 	if _, err := s.client.Exec(ctx, `DELETE FROM machine_lineage WHERE id = ?`, machineID); err != nil {
 		return fmt.Errorf("state: delete lineage %q: %w", machineID, err)
 	}
@@ -2192,7 +2206,24 @@ func (s *Store) GetBrokerGrant(ctx context.Context, id string) (*state.BrokerGra
 	return &g, nil
 }
 
+// DeleteBrokerGrant is guarded as PutBrokerGrant is, by the row's own kind:
+// a service's grant is the arbiter's to remove, a machine's its owner's. A
+// grant that is already gone has nothing to delete and nothing to guard.
 func (s *Store) DeleteBrokerGrant(ctx context.Context, id string) error {
+	g, err := s.GetBrokerGrant(ctx, id)
+	if errors.Is(err, state.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if g.Kind == "service" {
+		if err := s.assertServiceWriter(ctx, id); err != nil {
+			return err
+		}
+	} else if err := s.assertMachineOwner(ctx, id, state.WriteAuth{}); err != nil {
+		return err
+	}
 	if _, err := s.client.Exec(ctx, `DELETE FROM broker_grants WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("state: delete broker grant %q: %w", id, err)
 	}
@@ -2306,14 +2337,23 @@ func (s *Store) GetHostEgress(ctx context.Context, hostID string) (*state.HostEg
 	return &e, nil
 }
 
+// DeleteHostEgress is guarded as PutHostEgress is: a host writes only its own.
 func (s *Store) DeleteHostEgress(ctx context.Context, hostID string) error {
+	if hostID != s.hostID {
+		return fmt.Errorf("state: host %s may not delete %s's egress: %w",
+			s.hostID, hostID, state.ErrNotOwner)
+	}
 	if _, err := s.client.Exec(ctx, `DELETE FROM host_egress WHERE host_id = ?`, hostID); err != nil {
 		return fmt.Errorf("state: delete host egress %q: %w", hostID, err)
 	}
 	return nil
 }
 
+// DeleteServiceSize is guarded as PutServiceSize is: the service's arbiter.
 func (s *Store) DeleteServiceSize(ctx context.Context, serviceID string) error {
+	if err := s.assertServiceWriter(ctx, serviceID); err != nil {
+		return err
+	}
 	if _, err := s.client.Exec(ctx, `DELETE FROM service_sizes WHERE service_id = ?`, serviceID); err != nil {
 		return fmt.Errorf("state: delete service size %q: %w", serviceID, err)
 	}
