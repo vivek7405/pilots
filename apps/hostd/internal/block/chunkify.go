@@ -147,7 +147,38 @@ func Chunkify(ctx context.Context, opts ChunkifyOpts) (*Header, ChunkifyStats, e
 	if err := os.WriteFile(filepath.Join(opts.OutDir, "header"), raw, 0o644); err != nil {
 		return nil, stats, fmt.Errorf("block: write header: %w", err)
 	}
+	if err := markComplete(opts.OutDir, dst); err != nil {
+		return nil, stats, err
+	}
 	return header, stats, nil
+}
+
+// markComplete records that a build this host just produced is whole on disk.
+//
+// OutDir is the same directory a restore opens as its cache (OpenRemoteBuild
+// with the build dir as cache root), and a restore trusts a cached data file
+// only when the marker is next to it. Chunkify never wrote one, so every wake
+// on the host that had just suspended the machine downloaded its own memory
+// image back out of object storage -- 308 MiB per wake for a 512 MiB webjs
+// replica, 0.5 to 7 seconds of a wake that Fly serves in 0.65 -- although
+// every byte was already in this file.
+//
+// The data is synced first, and that is not optional: the marker licenses
+// serving this file with no further check, so one that survives a crash its
+// data did not would hand a guest holes as memory.
+func markComplete(dir string, data *os.File) error {
+	if err := data.Sync(); err != nil {
+		return fmt.Errorf("block: sync build data: %w", err)
+	}
+	f, err := os.Create(filepath.Join(dir, completeMarker))
+	if err != nil {
+		return fmt.Errorf("block: mark build complete: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return fmt.Errorf("block: sync complete marker: %w", err)
+	}
+	return f.Close()
 }
 
 // writeSparse produces a self-contained build, eliding all-zero blocks.

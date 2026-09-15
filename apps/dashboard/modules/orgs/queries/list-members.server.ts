@@ -5,6 +5,7 @@ import { db } from '#db/connection.server.ts';
 import { memberships, users } from '#db/schema.server.ts';
 import { requireOrg, signedOut } from '#modules/auth/session.server.ts';
 import type { SignedOut } from '#modules/auth/session.server.ts';
+import { normalizeRole } from '#modules/orgs/roles.ts';
 import type { Role } from '#modules/auth/types.ts';
 
 export interface MemberRow {
@@ -30,7 +31,7 @@ export async function listMembers(): Promise<MemberRow[] | SignedOut> {
     login: r.users.login,
     name: r.users.name,
     avatarUrl: r.users.avatarUrl,
-    role: r.memberships.role === 'owner' ? 'owner' : 'member',
+    role: normalizeRole(r.memberships.role),
     since: r.memberships.createdAt,
   }));
 }

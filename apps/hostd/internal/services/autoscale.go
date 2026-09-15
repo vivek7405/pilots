@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -52,6 +53,7 @@ type Load interface {
 // can see whether its replica is busy. Every host runs the loop and each acts
 // on the half that is its own.
 func (m *Manager) RunAutoscaler(ctx context.Context, load Load) {
+	live := metrics.NewLoop("autoscaler", 3*ScaleInterval)
 	tick := time.NewTicker(ScaleInterval)
 	defer tick.Stop()
 
@@ -65,10 +67,17 @@ func (m *Manager) RunAutoscaler(ctx context.Context, load Load) {
 		if err := m.scaleOnce(ctx, load, idleSince); err != nil {
 			slog.Debug("autoscale pass failed", "err", err)
 		}
+		live.Tick()
 	}
 }
 
 func (m *Manager) scaleOnce(ctx context.Context, load Load, idleSince map[string]time.Time) error {
+	// Arbitration is a hash over the live hosts, so a replica that has not
+	// caught up picks a different arbiter than the fleet does and scales a
+	// service some other host is already scaling.
+	if m.opts.Ready != nil && !m.opts.Ready() {
+		return nil
+	}
 	svcs, err := m.opts.Store.ListServices(ctx)
 	if err != nil {
 		return err
@@ -272,13 +281,10 @@ func (m *Manager) scaleUp(ctx context.Context, svc *state.Service, machines []st
 		// and Wake restores the guest locally before any row write is refused,
 		// which means a second copy of a machine already running elsewhere.
 		// The waker enforces the same check for the same reason.
-		if mach.HostID != m.opts.HostID {
-			if err := m.remote(ctx, mach.HostID, mach.ID, "wake"); err != nil {
-				return fmt.Errorf("services: waking %s on %s: %w", mach.ID, mach.HostID, err)
-			}
-			return nil
+		if err := m.wakeOwned(ctx, mach); err != nil {
+			return fmt.Errorf("services: waking %s on %s: %w", mach.ID, mach.HostID, err)
 		}
-		return m.opts.Machines.Wake(ctx, mach.ID)
+		return nil
 	}
 	// A volume-backed service has one machine. If it exists and is not
 	// suspended it is running, or it belongs to a rollout or a rescue; a

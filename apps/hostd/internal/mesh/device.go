@@ -18,6 +18,24 @@ const (
 	// on any host sees the same name.
 	LinkName = "pilots0"
 
+	// WakeSinkName is a dummy interface that exists only to be the next hop for
+	// this host's OWN machine block.
+	//
+	// A suspended service replica keeps its slot address so peers can still
+	// resolve <name>.internal and reach it, and a packet that arrives for it is
+	// meant to trip the nftables `wake` chain (internal/netns/wake.go), which is
+	// a counted drop in the FORWARD hook. But a suspended machine has no veth, so
+	// its /128 route is gone, and without ANY route to the slot the kernel drops
+	// the packet as unreachable BEFORE the forward hook runs -- the counter never
+	// moves and the machine never wakes. A running machine's /128 veth route is
+	// more specific and still wins; this block route is only the fallback that
+	// carries a suspended slot's traffic into the forward hook so the wake rule
+	// can see it. The packet is dropped by the wake rule itself, so it never
+	// actually reaches this interface -- it exists only to be a valid next hop.
+	//
+	// One per host, not one per machine: a suspended replica costs nothing here.
+	WakeSinkName = "pilots-wake"
+
 	// ListenPort is the UDP port WireGuard itself uses, on the PUBLIC
 	// interface. Gossip and the internal proxy ride inside the tunnel; this is
 	// the only mesh port that has to be reachable from outside.
@@ -87,7 +105,57 @@ func Open(keys Keys) (*Device, error) {
 		ctrl.Close()
 		return nil, fmt.Errorf("mesh: bring %s up: %w", LinkName, err)
 	}
+
+	// The fallback route that lets a peer wake a suspended service replica of
+	// ours. See WakeSinkName. Not fatal: a host whose wake sink failed to set up
+	// still routes, serves and wakes on the URL path -- only a peer dialling a
+	// scaled-to-zero replica over .internal is affected, and the next restart
+	// retries it.
+	if err := ensureWakeSink(keys.Public); err != nil {
+		slog.Warn("could not set up the wake sink; a peer may not be able to wake a "+
+			"suspended service replica over .internal until this host restarts", "err", err)
+	}
 	return d, nil
+}
+
+// ensureWakeSink creates the dummy interface and the route for this host's own
+// machine block that together carry a suspended replica's traffic into the
+// forward hook. Idempotent, like everything else in Open.
+func ensureWakeSink(selfKey wgtypes.Key) error {
+	link, err := netlink.LinkByName(WakeSinkName)
+	if err != nil {
+		var notFound netlink.LinkNotFoundError
+		if !errors.As(err, &notFound) {
+			return fmt.Errorf("mesh: look up %s: %w", WakeSinkName, err)
+		}
+		attrs := netlink.NewLinkAttrs()
+		attrs.Name = WakeSinkName
+		if err := netlink.LinkAdd(&netlink.Dummy{LinkAttrs: attrs}); err != nil {
+			return fmt.Errorf("mesh: create %s: %w", WakeSinkName, err)
+		}
+		link, err = netlink.LinkByName(WakeSinkName)
+		if err != nil {
+			return fmt.Errorf("mesh: find %s after creating it: %w", WakeSinkName, err)
+		}
+	}
+	if err := netlink.LinkSetUp(link); err != nil {
+		return fmt.Errorf("mesh: bring %s up: %w", WakeSinkName, err)
+	}
+
+	// This host's own machine block, the same derivation every peer uses to
+	// route to it (peerRoutes). A running machine adds a more-specific /128 via
+	// its veth that wins; this /112 catches only the slots that have no veth,
+	// which is exactly the suspended ones.
+	block := MachinePrefixFor(selfKey)
+	dst := &net.IPNet{IP: block.Addr().AsSlice(), Mask: net.CIDRMask(block.Bits(), 128)}
+	if err := netlink.RouteReplace(&netlink.Route{
+		LinkIndex: link.Attrs().Index,
+		Dst:       dst,
+		Scope:     netlink.SCOPE_LINK,
+	}); err != nil {
+		return fmt.Errorf("mesh: route %s to %s: %w", dst, WakeSinkName, err)
+	}
+	return nil
 }
 
 // Address is this host's mesh address.

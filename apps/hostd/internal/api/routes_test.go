@@ -85,8 +85,10 @@ func TestHealthIsPublic(t *testing.T) {
 // rather than behind an admin key.
 func TestHealthReportsTheStoreVersion(t *testing.T) {
 	h := Routes(Deps{
-		HostID:       "host-test",
-		StoreVersion: func(context.Context) (int64, error) { return 42, nil },
+		HostID: "host-test",
+		Replication: func(context.Context) (int64, map[string]int64, bool, error) {
+			return 42, map[string]int64{"01": 42}, true, nil
+		},
 	})
 	rec := do(t, h, "GET", "/v1/health", "")
 	if rec.Code != http.StatusOK {
@@ -99,6 +101,25 @@ func TestHealthReportsTheStoreVersion(t *testing.T) {
 	if got.StoreVersion != 42 {
 		t.Errorf("store_version = %d, want 42", got.StoreVersion)
 	}
+	if got.StoreVersions["01"] != 42 || !got.ReplicationComplete {
+		t.Errorf("replication fields = %v / %v, want the vector and complete",
+			got.StoreVersions, got.ReplicationComplete)
+	}
+}
+
+// A host with no replica has nothing to catch up with, so it must not report
+// itself as forever joining: every peer reading this field would then wait on
+// it, and a single-host SQLite rig would never claim anything at all.
+func TestHealthReportsCompleteWithNoReplica(t *testing.T) {
+	h := Routes(Deps{HostID: "host-test"})
+	rec := do(t, h, "GET", "/v1/health", "")
+	var got HealthResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.ReplicationComplete {
+		t.Error("replication_complete = false with no replica; a SQLite host has nothing to join")
+	}
 }
 
 // A store that cannot be read is not a dead host. Failing liveness on a
@@ -107,8 +128,8 @@ func TestHealthReportsTheStoreVersion(t *testing.T) {
 func TestHealthStaysOKWhenTheStoreVersionCannotBeRead(t *testing.T) {
 	h := Routes(Deps{
 		HostID: "host-test",
-		StoreVersion: func(context.Context) (int64, error) {
-			return 0, errors.New("corrosion: connection refused")
+		Replication: func(context.Context) (int64, map[string]int64, bool, error) {
+			return 0, nil, false, errors.New("corrosion: connection refused")
 		},
 	})
 	rec := do(t, h, "GET", "/v1/health", "")
@@ -121,6 +142,9 @@ func TestHealthStaysOKWhenTheStoreVersionCannotBeRead(t *testing.T) {
 	}
 	if !got.OK || got.StoreVersion != 0 {
 		t.Errorf("health payload = %+v, want ok with store_version 0", got)
+	}
+	if got.ReplicationComplete {
+		t.Error("replication_complete = true on an unreadable replica; unreadable is not evidence of being caught up")
 	}
 }
 
@@ -138,12 +162,12 @@ func TestHealthDoesNotWaitOnAWedgedStore(t *testing.T) {
 
 	h := Routes(Deps{
 		HostID: "host-test",
-		StoreVersion: func(ctx context.Context) (int64, error) {
+		Replication: func(ctx context.Context) (int64, map[string]int64, bool, error) {
 			select {
 			case <-ctx.Done():
-				return 0, ctx.Err()
+				return 0, nil, false, ctx.Err()
 			case <-released:
-				return 99, nil
+				return 99, nil, true, nil
 			}
 		},
 	})
@@ -161,6 +185,9 @@ func TestHealthDoesNotWaitOnAWedgedStore(t *testing.T) {
 	}
 	if !got.OK || got.StoreVersion != 0 {
 		t.Errorf("health payload = %+v, want ok with store_version 0", got)
+	}
+	if got.ReplicationComplete {
+		t.Error("replication_complete = true on an unreadable replica; unreadable is not evidence of being caught up")
 	}
 	// Generous, so the test is not a stopwatch: what it rules out is the
 	// handler waiting on the store indefinitely.

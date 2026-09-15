@@ -223,8 +223,16 @@ sudo scripts/local-host.sh   # foreground, in a second shell
 It loads the `nbd` module if it is not loaded (a machine's disk is served over
 NBD, and a desktop kernel has the module built but not loaded — without it a
 create dies with "no network block devices exist" thirty seconds in), copies the
-golden image into `/var/lib/pilots/templates/` by reflink when its hash differs,
-writes `/etc/pilots/config` if there is none, and `exec`s hostd.
+golden and builder images into `/var/lib/pilots/templates/` by reflink when the
+source changed, writes `/etc/pilots/config` if there is none, and `exec`s hostd.
+
+"Changed" is decided by a `.stamp` beside each installed image, holding the
+source's inode, size and mtime plus its sha256 from the last copy. A restart
+with unchanged images reads the stamps and hashes nothing; a rebuilt image moves
+its mtime and is hashed and copied again. Delete the stamp to force a copy.
+Hashing on every start was the old check, and `sha256sum` reads a sparse file's
+apparent size, so the 32 GiB builder image alone kept the script silent for
+minutes before hostd was even started.
 
 It needs root for three things a user namespace cannot fake: the jailer, which
 is passed `--uid`, `--gid`, `--chroot-base-dir` and `--netns` and then
@@ -536,6 +544,16 @@ The **rig** below is a different thing: a test fixture for the properties that
 only exist across hosts -- rescue, gossip, arbitration -- and the only thing
 that runs `scripts/cluster/gate.sh`. It is N Ubuntu VMs on a libvirt NAT
 bridge, each running the identical stack.
+
+A freshly started rig host reports `replication_complete: false` on
+`/v1/health` for its first seconds, and that is correct rather than broken. It
+is the join gate: until the replica has caught up the host serves its own
+machines, routes, wakes and answers DNS as usual, and claims none of anybody
+else's, because a half-replicated replica cannot tell a dead host from one
+whose rows it has not applied yet. A single box with SQLite reports `true`
+immediately, having nothing to join. The field staying false for minutes on a
+rig host means gossip is not reaching it; check that its peers answer
+`http://<peer>:8080/v1/health` from that host.
 
 It is not cheap, and it cannot be. Firecracker runs **nested** inside those
 VMs, and a guest's memory is resident in its host, so the default rig asks for

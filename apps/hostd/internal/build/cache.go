@@ -119,13 +119,24 @@ func (b *Builder) pullCache(ctx context.Context, dir, orgID, cacheName string) {
 	if dir == "" || b.opts.CacheStore == nil {
 		return
 	}
+	// The epoch a reset advances. Read before the warm check, because a warm
+	// directory from before a reset is exactly what must NOT be used: that is
+	// the whole mechanism, and taking the early return first would make Reset
+	// a no-op on every host that already had a copy. See epoch.go.
+	epoch := b.readEpoch(ctx, orgID)
 	if _, err := os.Stat(filepath.Join(dir, "index.json")); err == nil {
-		// Already warm locally. Stamp it so the prune keeps what is in use.
-		_ = os.Chtimes(dir, time.Now(), time.Now())
-		return
+		if readLocalEpoch(dir) == epoch {
+			// Already warm locally. Stamp it so the prune keeps what is in use.
+			_ = os.Chtimes(dir, time.Now(), time.Now())
+			return
+		}
+		slog.Info("the build cache was reset; dropping this host's copy",
+			"org", orgID, "cache", cacheName,
+			"had", readLocalEpoch(dir), "want", epoch)
+		_ = os.RemoveAll(dir)
 	}
 
-	prefix := cacheKeyPrefix(orgID, cacheName)
+	prefix := cacheKeyPrefixAt(orgID, cacheName, epoch)
 	objects, err := b.opts.CacheStore.List(ctx, prefix)
 	if err != nil {
 		slog.Warn("could not list the layer cache; building cold",
@@ -155,8 +166,9 @@ func (b *Builder) pullCache(ctx context.Context, dir, orgID, cacheName string) {
 			return
 		}
 	}
+	writeLocalEpoch(dir, epoch)
 	slog.Info("pulled the layer cache", "org", orgID, "cache", cacheName,
-		"objects", len(objects), "seconds", int(time.Since(start).Seconds()))
+		"epoch", epoch, "objects", len(objects), "seconds", int(time.Since(start).Seconds()))
 }
 
 // pushCache mirrors a freshly exported cache directory to object storage, so
@@ -167,6 +179,24 @@ func (b *Builder) pushCache(ctx context.Context, dir, orgID, cacheName string) {
 	if dir == "" {
 		return
 	}
+	// The epoch is read BEFORE the swap, and that ordering is the whole of it.
+	//
+	// The stamp belongs to the directory this host PULLED. swapExported
+	// replaces that directory with the exporter's fresh output, which is a
+	// complete OCI layout and carries no stamp of its own -- so reading the
+	// epoch afterwards read a directory that had just been created, and
+	// answered 0 every time.
+	//
+	// Everything downstream then went wrong quietly. The cache was mirrored
+	// under epoch 0 while the fleet was at epoch N, so no other host ever
+	// found it; the local directory was left unstamped, so this host re-pulled
+	// on every build and threw the result away again on the next push; and a
+	// `pilot builder reset`, whose entire mechanism is bumping the epoch,
+	// therefore did not reset the cache but switched it off for good. The
+	// remedy for a cache making builds fail was a cache that never worked
+	// again, with nothing in any log saying so.
+	epoch := readLocalEpoch(dir)
+
 	// Swap the freshly exported generation over the one it was imported from.
 	// The exporter writes a complete OCI layout, so the new directory stands
 	// alone and the old one is dead the moment it is replaced.
@@ -175,10 +205,19 @@ func (b *Builder) pushCache(ctx context.Context, dir, orgID, cacheName string) {
 			"org", orgID, "cache", cacheName, "err", err)
 		return
 	}
+	// Re-stamp, so the generation that just replaced it carries the epoch it
+	// was built from. Without this the next pullCache compares 0 against the
+	// fleet's epoch, re-pulls a cache it already has, and the push after that
+	// unstamps it again.
+	writeLocalEpoch(dir, epoch)
+
 	if b.opts.CacheStore == nil {
 		return
 	}
-	prefix := cacheKeyPrefix(orgID, cacheName)
+	// Pushed under the epoch this host pulled at, so a build that started
+	// before a reset does not write its result into the new epoch and hand
+	// every other host the cache the reset was meant to discard.
+	prefix := cacheKeyPrefixAt(orgID, cacheName, epoch)
 	kept := map[string]bool{}
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
@@ -187,6 +226,12 @@ func (b *Builder) pushCache(ctx context.Context, dir, orgID, cacheName string) {
 		rel, rerr := filepath.Rel(dir, path)
 		if rerr != nil {
 			return rerr
+		}
+		if rel == epochFile {
+			// This host's own bookkeeping, not part of the OCI layout. Every
+			// host stamps its own after a pull, so mirroring one would put a
+			// value in the bucket that is true of nobody.
+			return nil
 		}
 		key := prefix + filepath.ToSlash(rel)
 		kept[key] = true

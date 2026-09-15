@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/machines"
@@ -36,6 +37,15 @@ type Target struct {
 }
 
 // Options configures the router.
+// hardLimitQueue is how long a request waits for room on a machine at its
+// hard limit before it is refused.
+//
+// Ten seconds because that is comfortably longer than a replica takes to
+// start: the autoscaler reacts to soft_limit, and a request that waits out one
+// scale-up succeeds instead of failing. Longer would turn a limit into a
+// timeout, which is the failure it exists to prevent.
+const hardLimitQueue = 10 * time.Second
+
 type Options struct {
 	Domain string // e.g. "pilotrun.app"
 	// HostID identifies this host. A machine owned by another host is not
@@ -63,6 +73,20 @@ type Options struct {
 	// that a host dying mid-request costs one slow request rather than an
 	// outage lasting until a background loop notices.
 	Rescue func(ctx context.Context, m state.Machine) error
+
+	// HandingOff reports the host a machine is being MOVED to, while a planned
+	// drain is in flight, and false otherwise.
+	//
+	// Read before anything else on the request path, because during that
+	// window the row still names the source host while the machine has already
+	// been suspended there and offered elsewhere. Without this the request
+	// would reach the source, be refused a wake, and the client would see a
+	// failure for an operation nobody asked them to notice. With it the
+	// request goes to the target and waits there, which is what makes a drain
+	// invisible.
+	//
+	// Nil on a single box, where there is nowhere to hand anything.
+	HandingOff func(machineID string) (hostID string, ok bool)
 
 	// Lookup resolves a machine by name from an in-memory replica, sparing
 	// the routing hot path a store query per request -- which in a fleet is
@@ -92,6 +116,8 @@ type Options struct {
 type Router struct {
 	opts  Options
 	wakes sync.Map // machine id -> *wakeOnce
+	// replayRR rotates which replica `elsewhere=true` picks. See otherReplica.
+	replayRR atomic.Uint32
 }
 
 func New(opts Options) *Router { return &Router{opts: opts} }
@@ -146,7 +172,15 @@ func (r *Router) resolve(ctx context.Context, host string) (*Target, error) {
 	// has not delivered yet -- or one reached by custom domain -- still
 	// resolves.
 	if r.opts.Lookup != nil {
-		if m, ok := r.opts.Lookup(name); ok {
+		// The builder check belongs HERE as well as in the store loop below,
+		// and this is the path that actually runs. The cache is the steady
+		// state -- a miss is a row the subscription has not delivered yet --
+		// so a guard only in the fallback was a guard that almost never fired:
+		// a builder's address resolved, woke a quota-exempt machine nobody
+		// asked for, and reset the activity clock the stale-builder collector
+		// reads. An org can read its own builder's name out of the machine
+		// list, so that was reachable by anyone holding a key.
+		if m, ok := r.opts.Lookup(name); ok && !machines.IsBuilder(m.Name) {
 			return &Target{Machine: m, Port: port}, nil
 		}
 	}
@@ -387,9 +421,21 @@ func (r *Router) ensureAwake(ctx context.Context, m state.Machine) error {
 		}()
 	}
 
+	// The SAME window a forwarded request gets, and that is the point: which
+	// host a machine happens to be on must not change how long a client waits
+	// for it. A same-host wake with no bound of its own could hold a request
+	// for ever on a wake that never finishes, while the identical request to
+	// the identical machine one host over would end at 120 seconds. A client
+	// that can tell those apart can tell where a machine is, which is the one
+	// thing the routing layer exists to hide.
+	timer := time.NewTimer(HeldWakeWindow)
+	defer timer.Stop()
+
 	select {
 	case <-w.done:
 		return w.err
+	case <-timer.C:
+		return fmt.Errorf("router: machine %s did not wake within %s", m.ID, HeldWakeWindow)
 	case <-ctx.Done():
 		return ctx.Err()
 	}
@@ -417,7 +463,153 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if !r.allowed(w, req, target) {
 		return
 	}
+
+	// The body is buffered before the first attempt, because a replay has to
+	// send it again and a body can be read once. A request that carries none,
+	// which is most of them, costs nothing here.
+	// Buffered only when the body is BOUNDED. An unbounded one streams and
+	// gives up the replay; see bufferBody.
+	body, bodyErr := bufferBody(req)
+	if bodyErr == nil {
+		rewind(req, body)
+	}
+
+	st := &replayState{}
+	req = req.WithContext(withReplayState(req.Context(), st))
 	r.serveOrForward(w, req, target)
+
+	if st.want == "" || st.done {
+		return
+	}
+	// The machine asked for this request to be served somewhere else. Nothing
+	// of its own response reached the client: captureReplay closed it.
+	st.done = true
+	if bodyErr != nil {
+		// The machine asked for a replay of a request this edge cannot send
+		// again. Said in full rather than as one message for both reasons: a
+		// body over the cap is a limit somebody can raise, and a body with no
+		// declared length is a shape no cap would help with.
+		slog.Warn("a machine asked for a replay of a request that cannot be replayed",
+			"machine", st.answeredBy.Machine.ID, "err", bodyErr)
+		http.Error(w, "cannot replay this request: "+bodyErr.Error(), http.StatusBadGateway)
+		return
+	}
+	r.replay(w, req, st, body)
+}
+
+// replay sends a request a second time, to the machine the first one named.
+func (r *Router) replay(w http.ResponseWriter, req *http.Request, st *replayState, body []byte) {
+	want, err := parseReplay(st.want)
+	if err != nil {
+		// A routing instruction from a customer's process, so a spelling
+		// nobody understands is refused rather than guessed at.
+		slog.Warn("a machine asked for a replay this router could not read",
+			"machine", st.answeredBy.Machine.ID, "err", err)
+		http.Error(w, "replay refused: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	next, err := r.replayTarget(req.Context(), want, st.answeredBy)
+	if err != nil {
+		slog.Warn("a machine asked for a replay that was refused",
+			"machine", st.answeredBy.Machine.ID, "err", err)
+		http.Error(w, "replay refused: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	// What the second machine is told: which machine sent it here, on which
+	// host, when, and whatever state the first one wanted carried across.
+	req.Header.Set(ReplaySrcHeader, srcHeader(st.answeredBy, r.opts.HostID, want.State))
+	rewind(req, body)
+	r.serveOrForward(w, req, next)
+}
+
+// replayTarget resolves what a replay named, and refuses what it may not
+// reach.
+//
+// The check is the whole security model, and it is made HERE rather than
+// trusted from the header: the header was written by a customer's process, so
+// treating it as authority over routing would let one tenant's application aim
+// traffic at another tenant's machine.
+func (r *Router) replayTarget(ctx context.Context, want replayRequest, from *Target) (*Target, error) {
+	if want.Elsewhere {
+		if from.Machine.ServiceID == "" {
+			return nil, errors.New("elsewhere needs a service, and this machine is not part of one")
+		}
+		next, ok := r.otherReplica(from)
+		if !ok {
+			return nil, errors.New("no other replica of this service is available")
+		}
+		return next, nil
+	}
+
+	if r.opts.Lookup == nil {
+		return nil, errors.New("this host cannot resolve a machine by name")
+	}
+	m, ok := r.opts.Lookup(want.Machine)
+	if !ok {
+		return nil, fmt.Errorf("no machine named %q", want.Machine)
+	}
+	// The ORG first, because nothing below it is a tenant boundary.
+	//
+	// `app` is a free-text string the client chooses at create; there is no
+	// apps table and nothing qualifies it by org, so two tenants that both call
+	// something "api" -- which is the name everybody reaches for -- shared an
+	// app by accident. `sameApp` alone therefore let one tenant's process aim a
+	// request at the other's machine, which is exactly what this function's own
+	// comment says it exists to prevent. Names are allocated fleet-wide, so the
+	// attacker needs no collision of its own: it names the victim's machine.
+	//
+	// OrgOf reads the local tenancy replica (rule 2), so this costs no network.
+	// A machine whose org cannot be resolved is refused rather than allowed:
+	// an unanswered question is not a match.
+	if r.opts.OrgOf == nil {
+		return nil, errors.New("this host cannot tell which org a machine belongs to")
+	}
+	mine, ok := r.opts.OrgOf(ctx, from.Machine.ID)
+	theirs, ok2 := r.opts.OrgOf(ctx, m.ID)
+	if !ok || !ok2 || mine == "" || mine != theirs {
+		// Deliberately the SAME message the app/service refusal gives, so the
+		// refusal is not an oracle telling one tenant that a name it guessed
+		// belongs to somebody else.
+		return nil, fmt.Errorf("%q is not in the same app or service", want.Machine)
+	}
+	// Same app, or same service. Both are the tenant's own namespace, and a
+	// machine that shares neither is somebody else's by construction.
+	sameApp := from.Machine.App != "" && m.App == from.Machine.App
+	sameService := from.Machine.ServiceID != "" && m.ServiceID == from.Machine.ServiceID
+	if !sameApp && !sameService {
+		return nil, fmt.Errorf("%q is not in the same app or service", want.Machine)
+	}
+	return &Target{Machine: m, Port: from.Port}, nil
+}
+
+// otherReplica picks any running replica of this machine's service except this
+// one.
+func (r *Router) otherReplica(from *Target) (*Target, bool) {
+	if r.opts.Service == nil {
+		return nil, false
+	}
+	_, replicas, ok := r.opts.Service(from.Machine.ServiceID)
+	if !ok {
+		return nil, false
+	}
+	// Started from a rotating offset rather than from index 0.
+	//
+	// `elsewhere` means "any other replica", and answering it with the first
+	// one in the list made every replayed request in the fleet land on the same
+	// machine: an app that replays writes to a primary is fine, but one that
+	// replays to shed load was concentrating it instead. One counter per
+	// router, so the choice costs nothing and does not need per-service state.
+	n := len(replicas)
+	start := int(r.replayRR.Add(1))
+	for i := 0; i < n; i++ {
+		m := replicas[((start+i)%n+n)%n]
+		if m.ID != from.Machine.ID && m.State == "running" {
+			return &Target{Machine: m, Port: from.Port}, true
+		}
+	}
+	return nil, false
 }
 
 // setEdgeHeaders makes the forwarded headers say what THIS edge knows.
@@ -464,10 +656,12 @@ var agentAddr = (*netns.Slot).AgentAddr
 // Requests go to the guest agent, which forwards to the requested port inside
 // the machine. That keeps one ingress path into the guest instead of exposing
 // every application port on the host.
-func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, slot *netns.Slot, port int) {
+func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, slot *netns.Slot,
+	port int, machine *Target) {
 	target := &url.URL{Scheme: "http", Host: agentAddr(slot)}
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Transport = guestTransport
 	proxy.Director = func(out *http.Request) {
 		out.URL.Scheme = target.Scheme
 		out.URL.Host = target.Host
@@ -476,7 +670,16 @@ func (r *Router) proxyTo(w http.ResponseWriter, req *http.Request, slot *netns.S
 		// Host is preserved: applications build absolute URLs and set cookies
 		// from it, so they must see what the user typed.
 	}
+	// The replay hook. It always strips the header, so a client never sees an
+	// internal routing instruction, and aborts the response when the machine
+	// asked for the request to be served somewhere else.
+	proxy.ModifyResponse = captureReplay(req.Context(), machine)
 	proxy.ErrorHandler = func(w http.ResponseWriter, _ *http.Request, err error) {
+		if errors.Is(err, errReplay) {
+			// Not a failure: nothing has been written, and ServeHTTP is about
+			// to send the request to the machine the response named.
+			return
+		}
 		slog.Error("proxy to guest failed", "addr", target.Host, "err", err)
 		http.Error(w, "machine unreachable", http.StatusBadGateway)
 	}

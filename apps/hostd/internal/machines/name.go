@@ -39,8 +39,8 @@ func (m *Manager) ensureNotReserved(name string, internal bool) error {
 		apiHost = "api." + m.opts.Domain
 	}
 	if strings.EqualFold(name+"."+m.opts.Domain, apiHost) {
-		return fmt.Errorf("machines: the name %q is reserved for the control API hostname %q",
-			name, apiHost)
+		return fmt.Errorf("%w: the name %q is reserved for the control API hostname %q",
+			api.ErrBadRequest, name, apiHost)
 	}
 	// The builder prefix is hostd's, not a tenant's. It is not cosmetic: the
 	// idle monitor decides what to destroy after a day by reading this prefix,
@@ -48,7 +48,8 @@ func (m *Manager) ensureNotReserved(name string, internal bool) error {
 	// hand itself a machine that never counts and is reaped behind its back.
 	// Only the create hostd makes for itself may use it.
 	if !internal && strings.HasPrefix(name, builderNamePrefix) {
-		return fmt.Errorf("machines: names beginning %q are reserved for build machines", builderNamePrefix)
+		return fmt.Errorf("%w: names beginning %q are reserved for build machines",
+			api.ErrBadRequest, builderNamePrefix)
 	}
 	return nil
 }

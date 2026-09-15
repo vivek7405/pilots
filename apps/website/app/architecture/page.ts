@@ -256,7 +256,7 @@ export default function Architecture() {
       body: html`
         <div class="grid gap-px bg-rule border border-rule rounded overflow-hidden mid:grid-cols-2">
           ${[
-            ['One CPU vendor, fleet-wide', 'Memory snapshots carry raw CPUID and will not cross the Intel/AMD line. The fleet commits to one vendor and a machine cannot leave it.'],
+            ['CPU vendor pools, not one fleet', 'Memory snapshots carry raw CPUID and will not cross the Intel/AMD line, so a snapshot is portable within a vendor pool and never across one. A machine whose pool has no live host does not fail: it cold-boots from its own disk, keeping its id, its name, its URL and every byte it had written.'],
             ['No cross-host transactions', 'The state layer cannot express one. Anything needing uniqueness has to be reachable by a hash instead, and anything that cannot be is a design problem rather than a query problem.'],
             ['Silent corruption is the failure mode', 'A single-writer violation produces no error at all. It merges. Review is therefore where this gets caught.'],
             ['Every host is a security boundary', 'Since every host serves the full API, every host authenticates. Key hashes are replicated so authentication survives losing any host, including the one running the dashboard.'],

@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -18,16 +20,20 @@ import (
 // rollout's job is ordering and gating, and both are testable without a
 // Firecracker anywhere near them.
 type fakeMachines struct {
-	mu       sync.Mutex
-	store    state.Store
-	next     int
-	healthy  map[string]bool // machine -> passes its probe
-	events   []string        // ordered log of what happened, for assertions
-	failNth  int             // fail the Nth create (1-based), 0 = never
-	creates  int
-	noSnap   bool // Checkpoint produces no memory build
-	suspends []string
-	touches  []string
+	mu      sync.Mutex
+	store   state.Store
+	next    int
+	healthy map[string]bool // machine -> passes its probe
+	events  []string        // ordered log of what happened, for assertions
+	failNth int             // fail the Nth create (1-based), 0 = never
+	// distinctCaptures gives every checkpoint its own ids, for a test that has
+	// to tell a second photograph of a release from the first.
+	distinctCaptures bool
+	captures         int
+	creates          int
+	noSnap           bool // Checkpoint produces no memory build
+	suspends         []string
+	touches          []string
 	// healthyAfterRedeploy is what a redeployed machine's probe answers. False
 	// is how a test drives a failed gate onto the recovery path.
 	healthyAfterRedeploy bool
@@ -161,6 +167,8 @@ func (f *fakeMachines) Exec(ctx context.Context, id string, req api.ExecRequest)
 	return &api.ExecResponse{ExitCode: 1, Stderr: "not ready"}, nil
 }
 
+func (f *fakeMachines) AwaitCheckpointDurable(context.Context, string, string) error { return nil }
+
 func (f *fakeMachines) Checkpoint(ctx context.Context, id, comment string) (*state.Checkpoint, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -168,16 +176,194 @@ func (f *fakeMachines) Checkpoint(ctx context.Context, id, comment string) (*sta
 	if f.noSnap {
 		return &state.Checkpoint{ID: "ck-1", MachineID: id}, nil
 	}
+	if f.distinctCaptures {
+		f.captures++
+		n := strconv.Itoa(f.captures)
+		return &state.Checkpoint{ID: "ck-" + n, MachineID: id, MemBuildID: "mem-" + n, RootfsBuildID: "rootfs-" + n}, nil
+	}
 	return &state.Checkpoint{ID: "ck-1", MachineID: id, MemBuildID: "mem-1", RootfsBuildID: "rootfs-1"}, nil
 }
 
 func (f *fakeMachines) AppAddr(id string) (string, bool) { return "", false }
+
+// The real one is a pure function of the two ids, so the fake spells the same
+// layout rather than returning a sentinel: a test that asserts a replica
+// restores from the right vmstate is asserting this string.
+func (f *fakeMachines) CheckpointSnapKey(machineID, checkpointID string) string {
+	return "machines/" + machineID + "/checkpoints/" + checkpointID + "/snap.bin"
+}
 
 func (f *fakeMachines) ResetAgentToken(ctx context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.log("reset-token:%s", id)
 	return nil
+}
+
+// cpuAuthStore records the WriteOptions each machine_cpu write carried.
+//
+// The sqlite store enforces no writer rule, so the only way to test that the
+// caller SAYS which service a release belongs to is to watch what it passes.
+// On corrosion that option is the whole difference between the write landing
+// and failing.
+type cpuAuthStore struct {
+	state.Store
+	mu    sync.Mutex
+	auths map[string]state.WriteAuth
+}
+
+func (s *cpuAuthStore) PutMachineCPU(ctx context.Context, c *state.MachineCPU,
+	opts ...state.WriteOption) error {
+
+	s.mu.Lock()
+	if s.auths == nil {
+		s.auths = map[string]state.WriteAuth{}
+	}
+	s.auths[c.ID] = state.ResolveAuth(opts)
+	s.mu.Unlock()
+	return s.Store.PutMachineCPU(ctx, c, opts...)
+}
+
+func (s *cpuAuthStore) authFor(id string) (state.WriteAuth, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	a, ok := s.auths[id]
+	return a, ok
+}
+
+// A release's CPU-pool row names its service, because nothing can look it up.
+//
+// # The bug
+//
+// The driver's writer check read the release back to find its service. That
+// read cannot succeed: the row is written from inside snapshotRelease, while
+// the release is still being assembled, and the release row is written
+// afterwards. So the check failed on every release the fleet ever cut.
+//
+// A promote surfaced it as a flat HTTP 404 with nothing in the journal -- the
+// checkpoint had succeeded, and a missing local row became "not found; check
+// the id". A deploy swallowed it as a warning saying the release had no memory
+// image, which was false, and carried on with the CPU-vendor guard silently
+// unarmed: every later replica read no pool row, took that as "in no pool",
+// and restored a memory image that may have been photographed on the other
+// vendor.
+func TestAReleasesCPURowNamesItsService(t *testing.T) {
+	ctx := context.Background()
+	m, _, store, svc := fixture(t, 1)
+	spy := &cpuAuthStore{Store: store}
+	m.opts.Store = spy
+
+	rel, err := m.Deploy(ctx, "svc-1", "rootfs-build", nil)
+	if err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	auth, ok := spy.authFor(rel.ID)
+	if !ok {
+		t.Fatal("no CPU-pool row was written for the release, so nothing records " +
+			"which vendor photographed its memory image and the cross-vendor " +
+			"guard has nothing to read")
+	}
+	if auth.ForService != svc.ID {
+		t.Errorf("the write named service %q, want %q. Without it the driver "+
+			"falls back to reading the release, which does not exist yet",
+			auth.ForService, svc.ID)
+	}
+}
+
+// A lifecycle verb goes to the host that holds the machine.
+//
+// # The bug
+//
+// The manager refuses a machine this host does not hold, which is right: waking
+// one locally restores the guest before any row write is refused, so a second
+// copy runs untracked. But the rollout and rollback paths called the local
+// manager directly.
+//
+// A service's arbiter is hash(id) mod live_hosts and moves as hosts come and
+// go, while a drain or a self-heal moves replicas independently, so the host
+// running a rollback is routinely not the host holding its replicas. Rollback
+// hard-failed there: one replica elsewhere and the release never flipped, with
+// a 409 and a service left on the version it was rolling away from.
+//
+// autoscale.go had this right and said why. The other three call sites did not,
+// and all four share one helper now.
+func TestALifecycleVerbGoesToTheHostThatHoldsTheMachine(t *testing.T) {
+	m, _, _, _ := fixture(t, 1)
+	m.opts.HostID = "host-a"
+	peers := &recordingPeers{}
+	m.opts.Peers = peers
+
+	elsewhere := state.Machine{ID: "m-remote", HostID: "host-b"}
+	if err := m.wakeOwned(t.Context(), elsewhere); err != nil {
+		t.Fatalf("waking a machine on another host: %v", err)
+	}
+	if err := m.suspendOwned(t.Context(), elsewhere); err != nil {
+		t.Fatalf("suspending a machine on another host: %v", err)
+	}
+	want := []string{"host-b /v1/machines/m-remote/wake", "host-b /v1/machines/m-remote/suspend"}
+	if got := peers.posts; len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("posted %v, want %v. A verb aimed at the local manager for a "+
+			"machine another host holds is refused, and the whole operation fails",
+			got, want)
+	}
+}
+
+// And a machine this host DOES hold never leaves the process, or every rollout
+// would pay a round trip it does not need.
+func TestALifecycleVerbOnAnOwnedMachineStaysLocal(t *testing.T) {
+	m, fm, _, _ := fixture(t, 1)
+	m.opts.HostID = "host-a"
+	peers := &recordingPeers{}
+	m.opts.Peers = peers
+
+	mine := state.Machine{ID: "m-local", HostID: "host-a"}
+	if err := m.wakeOwned(t.Context(), mine); err != nil {
+		t.Fatalf("waking an owned machine: %v", err)
+	}
+	if len(peers.posts) != 0 {
+		t.Errorf("an owned machine was woken over the network: %v", peers.posts)
+	}
+	if !slices.Contains(fm.events, "wake:m-local") {
+		t.Errorf("the local manager was not asked to wake it: %v", fm.events)
+	}
+}
+
+// A row with no host at all is this host's problem, not a reason to post into
+// the void. Rows predating the host_id column look like this.
+func TestAMachineWithNoHostIsHandledLocally(t *testing.T) {
+	m, _, _, _ := fixture(t, 1)
+	m.opts.HostID = "host-a"
+	peers := &recordingPeers{}
+	m.opts.Peers = peers
+
+	if err := m.wakeOwned(t.Context(), state.Machine{ID: "m-old"}); err != nil {
+		t.Fatalf("waking a machine with no host: %v", err)
+	}
+	if len(peers.posts) != 0 {
+		t.Errorf("a hostless machine was posted to a peer: %v", peers.posts)
+	}
+}
+
+// recordingPeers notes where a verb was sent.
+type recordingPeers struct {
+	mu    sync.Mutex
+	posts []string
+}
+
+func (p *recordingPeers) Post(_ context.Context, hostID, path string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.posts = append(p.posts, hostID+" "+path)
+	return nil
+}
+
+func (p *recordingPeers) PostJSON(ctx context.Context, hostID, path string, _ any) error {
+	return p.Post(ctx, hostID, path)
+}
+
+func (p *recordingPeers) PostJSONReply(ctx context.Context, hostID, path string, _, _ any) error {
+	return p.Post(ctx, hostID, path)
 }
 
 func fixture(t *testing.T, replicas int) (*Manager, *fakeMachines, state.Store, *state.Service) {
@@ -313,6 +499,45 @@ func TestAReleaseWithNoSnapshotStillDeploys(t *testing.T) {
 		if e == "create:m-2:restore" {
 			t.Error("replica 2 restored from a release that has no memory image")
 		}
+	}
+}
+
+// A deploy records where its release keeps its vmstate, carrying the service.
+//
+// # Why the service id is on the row
+//
+// The writer guard on this table asks whether this host is the one that writes
+// that service, and the obvious way to answer is to read the release row and
+// take its service_id. That does not work here: this row is written from
+// inside snapshotRelease, which runs BEFORE the release row is written -- the
+// checkpoint has to succeed before there is a release worth writing at all.
+// A guard that looked the release up would refuse every write it exists to
+// allow, and a promote would come back 404 with nothing naming the cause.
+//
+// So the service travels on the row, and this test is what says so.
+func TestADeployRecordsWhereItsVMStateIsWithItsService(t *testing.T) {
+	ctx := context.Background()
+	m, _, store, svc := fixture(t, 2)
+
+	rel, err := m.Deploy(ctx, "svc-1", "rootfs-build", nil)
+	if err != nil {
+		t.Fatalf("deploy: %v", err)
+	}
+
+	snap, err := store.GetReleaseSnapshot(ctx, rel.ID)
+	if err != nil {
+		t.Fatalf("a deployed release records no vmstate, so every replica of it "+
+			"will boot rather than restore: %v", err)
+	}
+	if snap.ServiceID != svc.ID {
+		t.Errorf("the snapshot row names service %q, want %q. Without it the "+
+			"writer guard has nothing to check against, because the release row "+
+			"does not exist yet when this is written", snap.ServiceID, svc.ID)
+	}
+	if snap.CheckpointID == "" || snap.MachineID == "" {
+		t.Errorf("the snapshot row names machine %q checkpoint %q; the vmstate "+
+			"key is built from both, so an empty one is an empty key",
+			snap.MachineID, snap.CheckpointID)
 	}
 }
 
@@ -655,6 +880,7 @@ type fakePeers struct {
 	postJSONs []string
 	bodies    []any
 	err       error
+	replies   int
 }
 
 func (p *fakePeers) Post(_ context.Context, hostID, path string) error {
@@ -666,6 +892,42 @@ func (p *fakePeers) PostJSON(_ context.Context, hostID, path string, body any) e
 	p.postJSONs = append(p.postJSONs, hostID+" "+path)
 	p.bodies = append(p.bodies, body)
 	return p.err
+}
+
+// PostJSONReply records the call the way PostJSON does and fills `out` with
+// whatever reply was queued, so a placed create can be driven without a peer.
+func (p *fakePeers) PostJSONReply(_ context.Context, hostID, path string, body, out any) error {
+	p.postJSONs = append(p.postJSONs, hostID+" "+path)
+	p.bodies = append(p.bodies, body)
+	if p.err != nil {
+		return p.err
+	}
+	p.fill(path, out)
+	return nil
+}
+
+// fill is what the far side would have answered. Ids are derived from the
+// call count so two creates never collide.
+func (p *fakePeers) fill(path string, out any) {
+	p.replies++
+	switch dst := out.(type) {
+	case *state.Machine:
+		dst.ID = fmt.Sprintf("m_remote_%d", p.replies)
+		dst.HostID = p.lastHost(path)
+	case *state.Volume:
+		dst.ID = fmt.Sprintf("v_remote_%d", p.replies)
+	}
+}
+
+func (p *fakePeers) lastHost(string) string {
+	if len(p.postJSONs) == 0 {
+		return ""
+	}
+	last := p.postJSONs[len(p.postJSONs)-1]
+	if i := strings.IndexByte(last, ' '); i > 0 {
+		return last[:i]
+	}
+	return last
 }
 
 // volumeFixture is one service that mounts one volume.
@@ -992,6 +1254,10 @@ func TestAReplicaOnTheReleasesVendorRestores(t *testing.T) {
 		ID: rel.ID, Kind: state.KindRelease, Vendor: "AuthenticAMD"}); err != nil {
 		t.Fatal(err)
 	}
+	if err := store.PutReleaseSnapshot(ctx, &state.ReleaseSnapshot{
+		ID: rel.ID, MachineID: "m-photographed", CheckpointID: "ck-1"}); err != nil {
+		t.Fatal(err)
+	}
 
 	if _, err := m.createReplica(ctx, svc, rel, nil, ""); err != nil {
 		t.Fatalf("createReplica: %v", err)
@@ -1043,6 +1309,10 @@ func TestAnUnrecordedReleaseStillRestores(t *testing.T) {
 		RootfsBuildID: "rootfs-build", MemBuildID: "mem-build",
 	}
 	if err := store.PutRelease(ctx, rel); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PutReleaseSnapshot(ctx, &state.ReleaseSnapshot{
+		ID: rel.ID, MachineID: "m-photographed", CheckpointID: "ck-1"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1193,5 +1463,58 @@ func TestAnErrorReplicaIsPrunedByTheSecondDeployAfterIt(t *testing.T) {
 	}
 	if got := eventsWithPrefix(fm, "destroy:m-1"); len(got) == 0 {
 		t.Errorf("the error replica survived the second deploy after it: %v", fm.events)
+	}
+}
+
+// CreateVolume records the volume and stores it, so an ordinal rollout can be
+// driven without a filesystem. The events log carries it, because WHEN a volume
+// is created relative to its binding is a property worth asserting: the binding
+// is write-once and naming a volume that does not exist could never be undone.
+func (f *fakeMachines) DeleteVolume(ctx context.Context, id string) error {
+	f.mu.Lock()
+	f.events = append(f.events, "delete-volume "+id)
+	f.mu.Unlock()
+	return nil
+}
+
+func (f *fakeMachines) CreateVolume(ctx context.Context, req api.CreateVolumeRequest) (*state.Volume, error) {
+	f.mu.Lock()
+	f.next++
+	id := fmt.Sprintf("vol_%d", f.next)
+	f.events = append(f.events, "create-volume "+req.Name)
+	f.mu.Unlock()
+
+	v := &state.Volume{
+		ID: id, Name: req.Name, SizeMiB: req.SizeGiB * 1024,
+		MountPath: req.MountPath, CreatedAt: 1,
+	}
+	if err := f.store.PutVolume(ctx, v); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+// A resize and a rollback photograph a release that was photographed before.
+// The vmstate row must move with the memory image, or every later replica
+// restores one capture's memory into another's device state.
+func TestReleaseRePhotographedKeepsItsVmstateInStep(t *testing.T) {
+	m, fm, store, svc := fixture(t, 1)
+	fm.distinctCaptures = true
+	ctx := t.Context()
+	rel := &state.Release{ID: "rel-1", ServiceID: svc.ID, RootfsBuildID: "img"}
+
+	for want := 1; want <= 2; want++ {
+		if err := m.snapshotRelease(ctx, "m-1", rel); err != nil {
+			t.Fatalf("photograph %d: %v", want, err)
+		}
+		snap, err := store.GetReleaseSnapshot(ctx, rel.ID)
+		if err != nil {
+			t.Fatalf("photograph %d: %v", want, err)
+		}
+		n := strconv.Itoa(want)
+		if rel.MemBuildID != "mem-"+n || snap.CheckpointID != "ck-"+n {
+			t.Errorf("photograph %d: release names %s with vmstate from %s; want mem-%s with ck-%s",
+				want, rel.MemBuildID, snap.CheckpointID, n, n)
+		}
 	}
 }

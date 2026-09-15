@@ -181,6 +181,18 @@ func (m *Manager) captureDiskAfterExit(ctx context.Context, row *state.Machine,
 		// working durable image for nothing -- clearing RootfsBuildID and
 		// dropping the memory image leaves a row with no image at all, and
 		// every later Wake fails on "no usable memory build" forever.
+		//
+		// SAID OUT LOUD, because this was the one path out of this function
+		// that logged nothing. A machine created from the template and never
+		// snapshotted has no builds either, so an empty bitmap here is the
+		// difference between it coming back and staying in error forever --
+		// and three rig runs produced that outcome with no line anywhere
+		// explaining it. The Unsafe rootfs cache was why the bitmap was empty;
+		// this is why nobody could tell.
+		slog.Info("an exited machine had written nothing to its disk, so there is "+
+			"no newer image than the row already names",
+			"machine", row.ID, "rootfs_build", row.RootfsBuildID,
+			"mem_build", row.MemBuildID)
 		return false, discard
 	}
 	if err := m.uploadBuild(ctx, rootfs); err != nil {

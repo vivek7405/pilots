@@ -50,7 +50,13 @@ function usage(hostId: string, since: number, until: number, orgs: Record<string
     orgs: Object.fromEntries(
       Object.entries(orgs).map(([org, seconds]) => [
         org,
-        { machine_seconds: seconds, vcpu_seconds: seconds * 2, mib_seconds: seconds * 512, volume_gib_seconds: seconds },
+        {
+          machine_seconds: seconds,
+          vcpu_seconds: seconds * 2,
+          mib_seconds: seconds * 512,
+          volume_gib_seconds: seconds,
+          snapshot_gib_seconds: seconds,
+        },
       ]),
     ),
   };

@@ -100,13 +100,23 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
 
 1. **Single-writer.** A host writes ONLY rows describing its own machines.
    The sanctioned exceptions are deterministic-owner operations (name
-   allocation and self-heal claims of a *provably dead* host's machines) and
+   allocation and self-heal claims of a *provably dead* host's machines),
+   a **planned handoff** (a LIVE host offering its own machine to another, on
+   a drain — the offer row is write-once, written by the machine's current
+   owner, and the claim is checked against it: right target, right current
+   owner, newest offer, machine not running), and
    the write-once rows in `tenancy`, `api_key_revocations` and
    `repo_links`, plus
-   `api_keys` and `org_quotas` on an admin-scoped request. Violating this
+   `api_keys` and `org_quotas` on an admin-scoped request, plus the object-row
+   side tables (`url_auth`, `broker_grants`), each written by the host that
+   writes the object row it describes. Violating this
    does not error — it corrupts state silently through CRDT merges. A row is
    only safe for "any host" to write when it is written once, or has one
-   logical writer: then the merge has nothing to corrupt.
+   logical writer: then the merge has nothing to corrupt. And never a claim
+   before the join gate opens: a replica that has not caught up cannot tell a
+   dead host from one it has applied nothing from, so it may act on its own
+   rows and on the PRESENCE of a foreign row, never on the absence of one
+   (`internal/state/corrosion/joingate.go`, ARCHITECTURE.md rule 3).
 2. **The data plane never depends on the control plane.** Routing and wake
    read local state only. If that is not true of a change, the change is
    wrong.
@@ -151,6 +161,13 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
   comment that meant an empty SQL string. Also run `bash -n` on every shell
   script you edited and `node --check scripts/e2e.mjs` — a syntax error in
   either is only found at the moment it is needed, on a host, mid-bootstrap.
+- **A new background loop registers a liveness budget.** One line at the top
+  of the loop (`metrics.NewLoop(name, budget)`) and one `Tick()` at the END of
+  each pass, budget normally three times the interval. `Restart=always` only
+  catches a loop that dies; the failure that actually happens is a loop that
+  wedges while the process stays healthy, and the watchdog withholds its pet
+  on an overdue budget so systemd restarts the host. A loop with no budget is
+  invisible to that, which is the whole of the bug.
 - Every phase issue (#2–#7) carries a **gate checklist**. An issue closes
   when its gate is green, not when the code is written.
 
@@ -176,6 +193,18 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
   is bar 4 as a test rather than a claim.
 - `scripts/cluster/gate.sh` is the fleet battery, a numbered `say` section per
   property, run against the local multi-node rig. It grows monotonically too.
+  Section 43 covers Postgres high availability: the nodes on distinct hosts,
+  a leader killed with -9 the way a host death kills one, and the seconds from
+  that kill to a successful WRITE through the unchanged address -- not "a node
+  was promoted" but "an application can write again".
+  Section 42 covers per-machine numbers and log rotation: the reported memory
+  against what the kernel itself says, a scrape on a host that does NOT own the
+  machine, and a console log that stays bounded with its writer still appending
+  at the new end after a rotation.
+  Section 41 covers the credential broker: a socket bound inside one machine's
+  namespace and in no other, nothing holding a token in the clear on the host,
+  and a token minted on one host accepted by another with no lookup -- none of
+  which is observable from the public API alone.
   Section 22 covers the push path against `scripts/cluster/fake-github.py`,
   because a delivery has no client on the other end and nothing about it is
   observable from the public API alone. Section 23 kills a build's client
@@ -184,6 +213,11 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
   Section 25 asserts no host runs a build daemon at all, and kills a builder
   machine mid-build: a build runs inside a microVM, so the wreckage of one
   belongs to that guest and nothing of it may survive on the host.
+  Sections 28 and 29 are the join gate and its negative control: a host whose
+  peers it cannot reach reports itself as still joining, keeps serving its own
+  machines, and claims none; with the gate skipped behind two fault flags, the
+  same host declares itself caught up, which is the judgement section 28
+  refuses to make.
 
 **Where a new test belongs** — the split is what can *observe* the assertion:
 

@@ -2,9 +2,11 @@ package machines
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/quota"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
@@ -190,6 +192,13 @@ func TestTheBuilderPrefixIsReservedForHostd(t *testing.T) {
 
 	if err := m.ensureNotReserved("builder-acme-01", false); err == nil {
 		t.Fatal("a tenant was allowed to take a builder- name")
+	} else if !errors.Is(err, api.ErrBadRequest) {
+		// The refusal was right and its STATUS was a 500, which told the
+		// caller the fleet was broken and invited a retry of a request that
+		// can never work. The reason sat in `details` where nothing reads it.
+		t.Errorf("a reserved name came back as %v, which the error mapper turns "+
+			"into a 500; it is the caller's to fix, so it must carry "+
+			"api.ErrBadRequest and surface as a 400", err)
 	}
 	if err := m.ensureNotReserved("builder-acme-01", true); err != nil {
 		t.Fatalf("hostd's own builder create was refused: %v", err)

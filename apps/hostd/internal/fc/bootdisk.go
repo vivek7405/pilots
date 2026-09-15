@@ -86,7 +86,7 @@ func BootFromDisk(ctx context.Context, cfg InstantConfig, store block.ObjectStor
 					ControlSock:      nbd.ControlSockFor(cfg.StateDir),
 					CacheRoot:        cfg.Backends.CacheRoot,
 				},
-				Env: cfg.Env, LogFile: logFile,
+				Env: cfg.Env, ChunksSock: cfg.ChunksSock, LogFile: logFile,
 			})
 			return perr
 		},

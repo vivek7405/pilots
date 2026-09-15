@@ -59,12 +59,36 @@ compose fragment on the ordinary primitives, not a product tier. See
    no uniqueness constraints and no cross-host transactions, therefore:
    - **Single-writer invariant:** a host writes ONLY rows about its own
      machines. Enforced in review; violations corrupt silently.
+   - **The planned handoff** is the one exception where a LIVE host's machine
+     changes owner, and it is the narrowest shape that can work. The source --
+     the machine's current owner -- suspends it, then writes a WRITE-ONCE
+     offer row naming the target. The target's claim is checked against that
+     row rather than against anything it says itself: the offer must name it,
+     must come from the machine's current owner, must be the machine's newest
+     offer, and the machine must not be running. The last two are the ones
+     easy to omit and expensive to omit: without "newest", a target the source
+     gave up on can arrive late and take a machine offered elsewhere; without
+     "not running", two Firecrackers end up serving one id. See `pilot hosts
+     drain`.
    - **Deterministic ownership** for anything needing uniqueness or an
      actor: `hash(key) mod live_hosts` (name allocation, self-heal slices).
      What machine names and service addresses actually do today is the
      cheaper half of that shape: a local read of both namespaces before the
      single-writer row is written, plus a deterministic lowest-id tie-break
      at read time for the cross-host race a local read cannot prevent.
+   - **Join gate.** Until a host's replica has caught up, it may act on its
+     own rows and on the PRESENCE of a foreign row, never on the ABSENCE of
+     one. A half-replicated replica cannot tell a dead host from one whose
+     rows it has not applied yet: both are an empty result, and the claim
+     that follows merges silently into a row a live host is still writing.
+     So a joining host serves its own machines, routes, wakes, meters and
+     answers DNS immediately, and holds back exactly three callers until it
+     has caught up: self-heal claims, the router's held-request rescue, and
+     autoscaler arbitration. Complete means no gaps in
+     `__corro_bookkeeping_gaps`, no SWIM member missing from the version
+     vector, and no live peer ahead of us on any actor. It latches once and
+     never re-closes, because a gate that could re-close would make liveness
+     depend on gossip. See `internal/state/corrosion/joingate.go`.
 4. **S3 is the only truth for machine state.** Hetzner Object Storage
    (S3-compatible, path-style; internal eu-central traffic is free — compute
    must live in FSN1/NBG1). Local NVMe is strictly a cache; the design test
@@ -193,7 +217,8 @@ CREATE TABLE hosts    (id TEXT PRIMARY KEY, wg_addr TEXT, public_ip TEXT,
                        last_seen INTEGER);           -- writer: the host itself
 CREATE TABLE machines (id TEXT PRIMARY KEY, name TEXT, host_id TEXT,
                        state TEXT,   -- creating|running|suspended|stopped|error
-                       kind_knobs TEXT,  -- json: auto_stop/auto_start/min_machines_running/soft_limit
+                       kind_knobs TEXT,  -- json: auto_stop/auto_start/min_machines_running/
+                                         -- soft_limit/hard_limit/idle_timeout/schedules
                        image_ref TEXT, vcpus INTEGER, mem_mib INTEGER,
                        domain TEXT, custom_domain TEXT,
                        app_port INTEGER, agent_port INTEGER,
@@ -328,12 +353,72 @@ CREATE TABLE org_quotas (org_id TEXT PRIMARY KEY, max_machines INTEGER,
 
 #### Side tables that are never columns (rule 6)
 
-Two facts about a machine or a service were added after those tables held
-rows, so each is a keyed side table, written once at create by the host that
-writes the object row, under the same owner check `machine_cpu` uses, and
-deleted before the object row: `machine_labels` (`labels` on the API,
-`?label=k=v` on the lists, copied by promote) and `url_auth` (`url_auth` on
-the API; absent means public). A third fact would be a third table.
+Facts about a machine, a service or a host that were added after those tables
+held rows live in keyed side tables rather than new columns, written by the
+host that writes the object row, under the same owner check `machine_cpu`
+uses, and deleted before the object row:
+
+- `machine_labels` -- `labels` on the API, `?label=k=v` on the lists, copied
+  by promote. Written once at create.
+- `url_auth` -- `url_auth` on the API; absent means public. Written once at
+  create.
+- `service_sizes` -- how big a service's replicas are, plus the size the
+  release's memory image was photographed at. Absent reads as 1 vCPU / 512
+  MiB, which is what every service ran at before the table, so nothing is
+  backfilled. Written by the service's ARBITER, the host that already writes
+  the `services` row.
+- `host_egress` -- the routed IPv6 prefix a host hands per-org outbound
+  addresses out of. Written by the host it names. Replicated because the host
+  ANSWERING a request about a machine is usually not the host the machine runs
+  on, and it cannot derive the address without the prefix.
+- `machine_lineage` -- where a FORKED machine came from: its parent, the
+  checkpoint it was restored from, and the build ids it shares. Write-once, by
+  the fork's own host. The build ids are load-bearing rather than informational:
+  a fork faults pages out of its parent's memory image until its own first
+  suspend, so `discardBuilds` reads this before deleting anything. Without it
+  the parent's next suspend removes an object a live machine is reading, and
+  the failure appears as an unrelated guest hanging on a page fault.
+- `machine_handoffs` -- one host offering a machine to another on a drain. See
+  the planned handoff above.
+
+The next such fact is the next table. A column add is never the answer.
+
+#### Concurrency limits, and the header that moves one request
+
+`soft_limit` says "start another replica"; `hard_limit` says "this one has had
+enough". Without the second, a burst that outruns the autoscaler piles every
+request onto one guest, which serves all of them slowly rather than most of
+them well -- and a machine with a slow dependency degrades into timeouts nobody
+can attribute to it. Above the hard limit a request waits briefly for room and
+is then refused with 503 and `Retry-After`. Zero is unlimited, which is what
+every knobs blob written before the field decodes to, so nothing changes until
+it is set.
+
+`Pilot-Replay` on a RESPONSE tells the router to serve this request again
+somewhere else and return that answer instead. Two forms, plus an optional
+opaque `state=` the app reads back on the second pass so it need not look
+the same thing up twice:
+
+```
+Pilot-Replay: machine=<name>      send it to this machine
+Pilot-Replay: elsewhere=true      send it to any other replica of this service
+Pilot-Replay: machine=db-2; state=<opaque>
+```
+
+The named machine must be in the caller's OWN org and its own app or service.
+That is the entire security model and it is checked at the edge rather than
+trusted: the header is written by a customer's process, so treating it as
+authority over routing would let one tenant aim traffic at another tenant's
+machine. Every refusal is a 502: a spelling the router does not understand, a
+machine in another org or app, and a body too large to send twice are all
+answered rather than guessed at, because a typo that silently routed traffic
+somewhere is worse than one that fails.
+
+Honoured ONCE: the replayed request has the header stripped, so two machines
+cannot bounce a request between them for ever. The machine it lands on sees
+`Pilot-Replay-Src` naming where it came from, and the client sees neither
+header. The body is buffered up to 1 MiB so it can be sent twice; a larger one
+is a 502 rather than a silently truncated retry.
 
 ### hostd HTTP API (public; every host serves it; bearer auth)
 
@@ -353,12 +438,52 @@ GET    /v1/machines/:id/logs?follow  stream; a follow ends on disconnect, destro
                                      or a read that keeps failing (it says so on
                                      the stream), never on suspend
 POST   /v1/machines/:id/suspend|wake|stop|start
+POST   /v1/machines/:id/resize       {vcpus?, mem_mib?} boot the same machine at a
+                                     new size, in place: same id, URL, disk and
+                                     volume. A BOOT, not a resume -- a memory image
+                                     cannot load into a differently-sized VM -- so
+                                     what was in memory is lost. Refuses a service
+                                     replica (409, naming `pilot services scale`)
+                                     and a machine that has checkpoints
 POST   /v1/machines/:id/redeploy     {image, release?}  boot the same machine
                                      from another image, in place (the rollout's;
                                      a peer call carries the fleet's peer token)
 POST   /v1/machines/:id/checkpoints  {comment?} → {id, seq}
 GET    /v1/machines/:id/checkpoints  list
 POST   /v1/checkpoints/:id/restore   in-place restore
+POST   /v1/machines/:id/fork         {count?, name?, volume?} → {forks:[{machine|error}]}
+POST   /v1/checkpoints/:id/fork      NEW machines from a machine's or checkpoint's
+                                     exact state: the source's processes already
+                                     running, its memory already warm. A running
+                                     source is checkpointed in place first and keeps
+                                     its id and URL; a SUSPENDED source is forked
+                                     without being woken. One result per fork, because
+                                     forks are independent. Capped at 100; a source
+                                     with a volume needs volume: true
+POST   /v1/volumes/:id/snapshots     point-in-time copy; a clone inside the volume's
+                                     own filesystem, so no blocks move. A running
+                                     guest is PAUSED for the clone
+GET    /v1/volumes/:id/snapshots     newest first
+POST   /v1/volumes/:id/snapshots/:ts/restore
+                                     the snapshot becomes the live disk. 409 while a
+                                     machine is RUNNING on it; a SUSPENDED machine
+                                     loses its memory image and cold-boots, because
+                                     that image cached the OLD filesystem
+POST   /v1/hosts/:id/drain           move every machine off a host, so it can be
+                                     rebooted or retired without taking them down.
+                                     Each is suspended there and restored elsewhere,
+                                     keeping its id, name and URL; a request arriving
+                                     mid-move is HELD and served late, never refused.
+                                     The host keeps refusing new machines afterwards.
+                                     Admin-scoped; any host serves it and forwards to
+                                     the one named
+GET    /v1/hosts/:id/drain           whether it is draining, and what is still on it
+DELETE /v1/hosts/:id/drain           let it take machines again; nothing moves back
+GET    /v1/egress                    {org_id, addresses:[{host_id, ipv6, interface}]}
+                                     every address this org's OUTBOUND traffic can
+                                     leave from, one per host that manages egress.
+                                     Empty unless a host is given PILOT_EGRESS_INTERFACE
+                                     and a routed /64 in PILOT_EGRESS_PREFIX6
 POST   /v1/builds                    {dockerfile-context tar} → streamed structured log → {rootfs_build_id}
        ?deploy=<service>             …and cut that service a release from the image,
                                      on this host, once (the last line carries `release`)
@@ -370,8 +495,19 @@ POST   /v1/services                  {name, release|build, replicas, health, dom
                                      mints none
 GET    /v1/services                  list
 GET    /v1/services/:id              info
-PATCH  /v1/services/:id              {replicas?, health?, env?, secret_env?, repo?,
-                                     branch?, autodeploy?, domain?}; domain is
+PATCH  /v1/services/:id              {replicas?, size?, health?, env?, secret_env?, repo?,
+                                     branch?, autodeploy?, domain?}; size is
+                                     {vcpus?, mem_mib?} and its application is a
+                                     ROLLOUT of the release the service is already
+                                     on: a replica comes up at the new size, passes
+                                     the same health gate, and only then is an old
+                                     one retired, so a stateless service drops no
+                                     request. A volume-backed one has a held window
+                                     instead, because a volume has one writer.
+                                     Quota is charged on the INCREASE alone, and the
+                                     shape is checked before the quota so an
+                                     impossible size is a 400 rather than a 429;
+                                     domain is
                                      accepted once, on a service that has none
                                      (409 on one that has, 400 on an empty
                                      string); env and secret_env
@@ -381,7 +517,10 @@ PATCH  /v1/services/:id              {replicas?, health?, env?, secret_env?, rep
                                      (they travel on the deploy); forwarded to the
                                      service's arbiter
 GET    /v1/services/:id/releases     newest first, [] for none
-POST   /v1/services/:id/deploy       health-gated cutover
+POST   /v1/services/:id/deploy       health-gated cutover; {size?} rides here rather
+                                     than as a patch beforehand, so a compose file
+                                     that changed both its image and its size costs
+                                     ONE rollout instead of two
 POST   /v1/services/:id/rollback
 POST   /v1/machines/:id/promote      {domain?} → service
 POST   /v1/volumes                   create JuiceFS volume
@@ -420,7 +559,12 @@ POST   /v1/plan?app=                 {a tar of a directory, 2 GiB cap} ->
                                      the workspaces and the two Dockerfile rules
 GET    /v1/health                    liveness (unauthenticated); carries
                                      store_version, the sum of this replica's
-                                     version vector (0 on SQLite)
+                                     version vector (0 on SQLite), plus
+                                     store_versions (that vector per actor)
+                                     and replication_complete (the join gate;
+                                     always true on SQLite). A joining peer
+                                     reads the vector from here, which is why
+                                     it is on the one route that needs no key
 GET    /metrics                      Prometheus (unauthenticated)
                                      engine: pilots_uffd_*, pilots_snapshot_*
                                      host: pilots_machines{state},
@@ -431,7 +575,11 @@ GET    /metrics                      Prometheus (unauthenticated)
                                      pilots_nbd_cache_hits_total,
                                      pilots_nbd_cache_misses_total,
                                      pilots_router_inflight, pilots_slots_free,
-                                     pilots_quota_refusals_total{quota}
+                                     pilots_quota_refusals_total{quota},
+                                     pilots_replication_complete,
+                                     pilots_replication_gaps,
+                                     pilots_loop_last_tick_seconds{loop},
+                                     pilots_cert_expiry_seconds
 ```
 
 **Every non-2xx body is `{error, code, next, details}`.** `error` is a sentence
@@ -595,9 +743,9 @@ Landmines:
   and root-namespace state, rebuilt at restore. The guest knows `169.254.0.22`,
   its own `fdee::21`, and whatever DNS returned.
 - **Key rotation is a readdressing event.** Machine addresses derive from the
-  host's key, so rotating it moves every machine that host runs: drain first,
-  or accept a connection-reset event for all of them plus an AllowedIPs and
-  NAT rebuild.
+  host's key, so rotating it moves every machine that host runs:
+  `pilot hosts drain <host>` first, or accept a connection-reset event for all
+  of them plus an AllowedIPs and NAT rebuild.
 
 ### Environment and secrets
 
@@ -630,6 +778,83 @@ operator-held, supplied out of band to `host-bootstrap.sh`, and lives only in
 with object storage fully intact — so it is the one piece of state whose
 durability is the operator's job, in the same trust class as the SSH key that
 runs the bootstrap. Rotation requires a re-seal sweep over the affected rows.
+
+### Machine observability
+
+Two endpoints, and neither touches the host's own `/metrics`, which stays
+unauthenticated and label-free because a label per machine multiplies every
+series by the machine count.
+
+- `GET /v1/machines/{id}/metrics` — one machine's CPU seconds and memory,
+  read from its cgroup by the host that owns it. A host asked about another's
+  machine forwards rather than answering with zeroes.
+- `GET /v1/metrics` — every machine a key can see, as Prometheus text. The
+  local replica says which machines those are and where they run, which never
+  leaves the host; the owners are then asked in parallel, once each, carrying
+  the caller's own bearer so each narrows by the same rule.
+
+**The CPU total is monotonic across suspend and wake.** A cgroup dies with a
+suspend and its counter restarts, so the total is persisted beside the machine
+and added back. A counter that goes down makes every rate over it negative and
+fires every alert built on it whenever a machine suspends.
+
+**An unreachable host is a named series, not a failed scrape.** A scrape that
+went blank because one host was slow would go blank exactly when somebody is
+looking at why a host is slow.
+
+**Console logs are host-local and bounded, and they are NOT machine state.**
+The live log rotates at 8 MiB and one rotation is kept, so no machine holds
+more than 16 MiB, on the machine's state directory. Rule 3 is unchanged by
+this: wipe a host and the logs are gone while every machine restores from
+object storage exactly as before. The rotation is copytruncate, and the serial
+log is opened `O_APPEND` for that reason — a plain descriptor keeps its own
+offset and would leave a multi-megabyte hole of zero bytes in front of every
+later line.
+
+A follow is resumable: `X-Pilot-Log-Offset` says where a body starts, `?offset=`
+says where to start it, `?tail=N` takes only the end, and `Accept:
+text/event-stream` carries the offset as each event's id so `Last-Event-ID` is
+an exact resume. The plain-text default is byte for byte what it was, because
+the CLI, three SDKs, the MCP tool and the dashboard all read it.
+
+### Brokered credentials
+
+A machine holds no API key, and that is the point. A key baked into a guest is
+a key in every snapshot of it, in every fork of it, and in whatever the guest
+writes to object storage — and re-issuing one on restore, rescue or promote
+would be a fleet-wide re-issue path that has to be correct forever.
+
+Instead a machine ASKS. hostd binds a broker on the constant gateway address
+inside each machine's own network namespace (`169.254.0.22:3002`), so the only
+party that can reach a machine's broker socket is that machine. **The request
+path is the identity**: no credential is presented, because there is nothing a
+guest could present that a copy of that guest could not. A namespace is not a
+secret that can leak.
+
+- `GET /identity` — who this machine is, and where the API is.
+- `GET /token?scope=…` — a signed claim, valid 15 minutes, stored nowhere.
+- `GET /secrets` — the values granted to this machine, opened with the fleet
+  key. These are the secrets that never enter `/etc/pilot/env`, so they are in
+  no snapshot and on no disk.
+
+**Deny by default.** With no grant, both answer 403. A grant is written by an
+operator through `PUT /v1/machines/{id}/secrets` or the service equivalent, and
+a caller may only grant scopes it already holds. `admin` is never mintable.
+
+A token is a claim rather than a row: `pbt1.<claims>.<hmac>`, signed with a
+third label of the fleet's agent-token secret, so **every host verifies one
+without holding anything new and without a lookup**. Three things stop one, all
+from local state: its own expiry, the write-once revocation tombstone the
+`api_keys` revoke route already writes, and the machine row being `destroyed`.
+
+The grant lives in `broker_grants`, an object-row side table on the same terms
+as `url_auth`: one logical writer, the host that owns the row it describes.
+
+Two limits, stated rather than implied. A **compromised host** mints any token,
+which is the same trust class as the fleet key itself. And a **fork taken
+within a token's life** inherits that token for the rest of its life, in the
+same org — bounded by the 15 minutes and by the fact that a fork is already a
+copy of everything else the source had.
 
 ### Guest-agent protocol (inside every VM, port 3001)
 
@@ -705,6 +930,36 @@ iptables SNAT/DNAT, which is rebuilt at restore — never inside the snapshot.
 Slot pool of 1024/host. In-netns nft table drops guest egress to
 RFC1918/loopback/link-local/ULA. All netns/tap/nft setup implemented in Go
 (netlink), not shelled bash.
+
+**Per-org egress addresses** (`inet pilots-egress`, ROOT namespace, off unless
+configured): a guest's packets reach the root namespace wearing the slot's
+`10.11` address and its own mesh `/128`, neither of which is routable off the
+host. Two rules answer that, in this order and only this order:
+
+1. Per-ORG source rewrite, IPv6. A machine's mesh address is rewritten to
+   `OrgAddr6(host prefix, org)` -- a pure hash of the host's routed `/64` and
+   the org id, so there is no allocator, no assignment row, and every host
+   computes the same answer without talking. The `/128` is also put ON the
+   uplink, or the rewrite would send every reply to an address this host never
+   claimed.
+2. IPv4 masquerade for `10.11.0.0/16`, scoped to the uplink. There is no
+   per-org IPv4 and there will not be one: a v4 address is purchased and
+   scarce, and a bare-metal host has one.
+
+The order is load-bearing. Masquerade rewrites to whatever the interface
+carries, so a masquerade placed first makes every per-org rule under it dead
+code that still reads as correct; `gate.sh` section 32 asserts the ordering
+rather than trusting it.
+
+Nothing happens unless a host is given both `PILOT_EGRESS_INTERFACE` and a
+globally routed `/64` in `PILOT_EGRESS_PREFIX6` -- half of that pair is a
+refused start, not a half-working host. A machine whose org is unknown gets no
+rule at all and keeps the shared address: inventing an org for it would put one
+tenant's traffic behind another tenant's allowlisted address.
+
+Per ORG rather than per machine because the allowlist entry has to outlive the
+machine. The set an operator allowlists is `GET /v1/egress` -- one address per
+host, changing only when a host joins or leaves the fleet.
 
 **The rootfs bind-mount trick** (a shared rootfs causes post-resume workqueue
 lockups; the snapshot bakes an absolute drive path): FC runs under
@@ -1026,9 +1281,43 @@ election. The survivor set is filtered by `host_cpu` **inside that same
 hash**: the hosts of the memory image's own vendor pool are ranked first
 (tier 2), and only when none of them is live is the whole live set ranked
 (tier 3), where the winner cold-boots the machine from its disk instead of
-restoring it (rule 6). There is no second ranking and no placer. Placement double-booking is prevented by hosts being final
-authority on their own capacity (a create/rescue targeting a full host is
-refused and re-hashed).
+restoring it (rule 6).
+
+**Placement (create time) is a different question from self-heal**, and it has
+a different answer. Self-heal keeps the hash: it runs with no host to ask,
+because the host that knew is gone, and a deterministic slice is the only way
+survivors agree without electing anyone. A CREATE has the whole live fleet
+available, so it ranks.
+
+The ranking is a pure function of rows the receiving host already has in its
+local replica -- the live set, each host's `host_capacity`, and which builds
+each host has cached -- and it runs on whichever host took the request. No
+coordinator, because there is nothing to coordinate: two hosts ranking two
+creates differently is FINE, since the ranker only proposes. The target
+disposes. It admits the machine against its own free memory or refuses with
+507, and the ranker tries the next candidate (at most three, then it serves
+locally and lets its own admission answer).
+
+Highest headroom after placement wins, never tightest fit. Bin-packing a
+fleet of microVMs is how a platform ends up with every host at 95% and no room
+to absorb the next burst; spreading is what keeps a create from failing.
+A host that already holds every build the create needs gets a bounded bonus,
+because a cached build is the difference between a restore and a download,
+but the bonus can only break a near-tie -- never move a machine onto a host
+that cannot hold it. Exact ties fall back to `OwnerFor`, so the answer is
+deterministic and does not depend on the order rows arrived in.
+
+**Reclaimable memory is part of capacity.** A host counts, beside its free
+memory, the memory held by RUNNING machines that are idle enough for the idle
+monitor to suspend anyway. A create that fits within free plus reclaimable is
+admitted, suspending the idlest machines until it fits, rather than refused
+while the host holds gigabytes nobody is using. (Suspended machines are not
+counted: suspend kills the Firecracker process, so a suspended machine already
+holds no memory at all.)
+
+Placement double-booking is prevented by hosts being final authority on their
+own capacity, which is now enforced rather than assumed: before this, nothing
+on the create path read free memory.
 
 **Operations:** a host whose local replica is corrupt or hopelessly behind is
 re-seeded with `scripts/corrosion-reseed.sh <ip> --from <survivor>`, which
@@ -1092,12 +1381,23 @@ the agent runs as a unit with `systemd-networkd-wait-online` masked.
 The `tar` exporter carries the filesystem and **no image metadata** — no CMD,
 ENTRYPOINT, WORKDIR or ENV. That is the price of taking the flattened
 filesystem instead of a layered image, and it leaves the agent nothing to
-exec once env has been delivered. So the build reads the start spec out of
-the **Dockerfile's final stage** and writes it into the image at
-`/etc/pilot-agent/start.json`, recording `from_dockerfile_only: true`. Read
-that field: a Dockerfile that inherits its command from its base image yields
-an empty spec, and a consumer must be able to tell that from "this
-application declares no start command" and fall back to the service spec.
+exec once env has been delivered. So the build writes a start spec into the
+image at `/etc/pilot-agent/start.json`, assembled from two sources: the
+**Dockerfile's final stage**, parsed here, and the **base image's own config**,
+which the frontend has already resolved and publishes through `buildctl
+--metadata-file` under `containerimage.config`. Without that second half
+`image: postgres:17` built a filesystem with nothing to run, which is the
+whole reason a stock image used to build and never start.
+
+The merge is Docker's own rule, per field: the Dockerfile wins what it names,
+the image fills the blanks, `ENV` merges key by key, and a Dockerfile
+`ENTRYPOINT` with no `CMD` **discards** the image's `CMD`, because those
+arguments were written for a different program. `PATH` is filled last. The
+spec records `from_dockerfile_only`, now meaningful rather than always true:
+false says the image's config was merged in, true says the build saw only the
+Dockerfile, which happens when the daemon published no config. A spec that
+still names nothing to start fails the build, where it is cheap to read,
+rather than the boot, where it is not.
 
 **A machine with its own image, or with a volume, BOOTS rather than
 restoring.** Both are forced. The golden template's memory describes the
@@ -1305,7 +1605,38 @@ replica takes the ordinary floor of zero; only a destroy or a self-heal claim
 moves a volume. A promoted volume-backed sandbox's release is the image it was
 created from. Availability across a deploy or a host death needs a volume per
 replica and application-level replication, Fly's answer too (at least two
-volumes per app), and is not built here.
+volumes per app), and for one case it IS built here: see below.
+
+**A volume per ordinal, for engines only.** A volume-backed service runs one
+replica, because two machines mounting one volume is two processes writing one
+filesystem. The exception is a service whose write-once `pilot.engine` label
+is `postgres` or `etcd`: it may run N replicas with N `service_volumes` rows,
+one per ordinal, which is the shape that table was always written for. The
+label is set by the recipe at create and can never be added later, so a
+hand-written service cannot reach this by editing a number: it is refused, and
+the refusal names the recipe.
+
+Postgres caps at 7 ordinals and etcd must be an odd number at most 9, which
+are not arbitrary — an even etcd has no majority it did not already have at
+one fewer, and a Postgres beyond 7 is a replication fan-out nobody should
+reach for without saying why.
+
+**High availability, and whose it is.** Patroni runs inside the machines, with
+its own etcd in the same app, and pilots does not participate in a single one
+of its decisions. What pilots operates is the machines, the volumes, the
+snapshots, the process supervisor and the placement of ordinals across
+distinct hosts. What it does not operate is Patroni's choice of leader, the
+tuning, or the three in the morning. That division is stated in `docs/honesty.md`
+and printed by the command that turns this on, because a platform that lets
+somebody believe otherwise has made the most expensive mistake available to it.
+
+**The leader address is not in Corrosion, deliberately.** `<name>.internal`
+keeps resolving to every data replica, and each replica runs HAProxy on the
+published port forwarding to whichever node answers 200 on Patroni's
+`/primary`. A leader recorded in a row would be a row written by whichever host
+noticed a promotion, which is a single-writer violation with a CRDT merge
+underneath it, and it would be stale exactly when it mattered. Following a
+health check costs one more process and is correct by construction.
 
 **Databases are the documented exception, and it is a default rather than a
 prohibition.** Per-write durability means an S3 round trip per fsync, which a
@@ -1321,6 +1652,19 @@ because it trades RPO for commit latency.
 One consequence to carry into operations: **a rescued database has a different
 RTO from every other machine.** Everything else restores instantly from its
 snapshot; a database restores and then replays WAL.
+
+**The honesty layer is part of the feature, not documentation added afterwards.**
+The decision not to build a managed-database tier is the right one -- fly built
+that company and wrote about what it cost -- but a platform that runs databases
+while leaving people to assume they are managed has made the most expensive
+mistake available to it. So the numbers above are surfaced where a USER meets
+them rather than only here: `pilot add` prints which durability mode was chosen
+and what it costs, every time and not behind a flag, and says in one line who
+operates what. `docs/honesty.md` is the long form -- what is automatic, what is
+not, exactly how much data each mode can lose, and how long each kind of
+recovery takes. It ends by saying that an application here talking to a managed
+database elsewhere is an ordinary configuration rather than a workaround,
+because the honest answer to "should we operate your database" is usually no.
 
 ---
 
@@ -1377,7 +1721,7 @@ snapshot; a database restores and then replays WAL.
   the guest. `?token=` is deliberately not accepted: it lands in logs and in
   shell history.
 - Per-machine **agent tokens** (guest exec auth) are minted at create,
-  hashed into the machine row, never reused across machines.
+  hashed into the machine row (and a broker token, minted on request, is written nowhere), never reused across machines.
 
 ---
 

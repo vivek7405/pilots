@@ -114,6 +114,32 @@ func waitForWrites(t *testing.T, rec *recordingStore, n int) []string {
 	}
 }
 
+// waitForDeletes waits until every expected object has been discarded.
+//
+// The counterpart to waitForWrites, and needed for the same reason: the exit
+// path is a goroutine, so an assertion made the instant the row lands is
+// asserting on work that has not run yet. It returns what was deleted rather
+// than failing here, so the caller still reports WHICH object is missing.
+func waitForDeletes(t *testing.T, up interface{ keys() []string }, want map[string]bool) []string {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		got := up.keys()
+		missing := false
+		for key := range want {
+			if !contains(got, key) {
+				missing = true
+				break
+			}
+		}
+		if !missing || time.Now().After(deadline) {
+			return got
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func countWrites(order []string) int {
 	n := 0
 	for _, call := range order {
@@ -395,7 +421,14 @@ func TestACapturedDiskDropsTheMemoryImage(t *testing.T) {
 		suspendSnapKey("m-capture"): true,
 		prefetchKey("m-capture"):    true,
 	}
-	deleted := up.keys()
+	// Waited for, not sampled. waitForWrites returns the moment the ROW write
+	// lands, and the deletes come after it -- with two store reads in between
+	// now that discardBuilds asks whether a fork still holds the build. Reading
+	// up.keys() straight after the write therefore raced the deletes it is
+	// asserting on: under -race this failed two runs in three, and the log said
+	// "sql: database is closed" because the exit goroutine was still using the
+	// store after t.Cleanup had closed it.
+	deleted := waitForDeletes(t, up, want)
 	for key := range want {
 		if !contains(deleted, key) {
 			t.Errorf("%q was not discarded; it is superseded and nothing references it", key)

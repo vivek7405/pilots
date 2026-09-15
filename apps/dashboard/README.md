@@ -220,7 +220,9 @@ flow, and the engine's installation tokens and webhook. Create it once:
 - **Callback URL** `https://pilots.run/api/auth/callback/github`
 - **Enable Device Flow** on, which is what `pilot login` uses
 - **Webhook URL** `https://<api host>/v1/github/webhook`, with a generated secret
-- **Permissions** `contents: read`, `pull_requests: write`, `metadata: read`
+- **Permissions** `contents: read`, `pull_requests: write`, `metadata: read`,
+  `statuses: write` (the commit status a push deploy reports itself with; an
+  installation without it still deploys and simply reports nothing)
 - **Events** `push` and `pull_request`
 
 Its client id and secret become this app's `AUTH_GITHUB_ID` and

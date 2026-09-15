@@ -3,8 +3,11 @@ package machines
 import (
 	"context"
 	"net"
+	"reflect"
 	"testing"
 	"time"
+
+	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
 // A running machine is not the same as a daemon accepting connections. Without
@@ -47,6 +50,51 @@ func TestWaitForBuildkitGivesUp(t *testing.T) {
 	}
 }
 
+// A failed create leaves a builder row in the error state with no image to
+// start from. Reusing it failed every later build on "no usable memory build";
+// it has to be reported for replacement instead, while a healthy builder is
+// still reused and other hosts' rows are never touched.
+func TestFindBuilderReplacesAFailedCreate(t *testing.T) {
+	m, st := storeManager(t)
+	ctx := t.Context()
+	const name = "builder-org-host-a"
+	for _, row := range []state.Machine{
+		{ID: "m_failed", Name: name, HostID: "host-a", State: StateError},
+		{ID: "m_elsewhere", Name: name, HostID: "host-b", State: StateError},
+		{ID: "m_other_org", Name: "builder-other-host-a", HostID: "host-a", State: StateError},
+	} {
+		if err := st.PutMachine(ctx, &row); err != nil {
+			t.Fatalf("PutMachine %s: %v", row.ID, err)
+		}
+	}
+
+	id, stale, err := m.findBuilder(ctx, name, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "" {
+		t.Errorf("reused %q, a builder that can never start", id)
+	}
+	if !reflect.DeepEqual(stale, []string{"m_failed"}) {
+		t.Errorf("stale = %v, want only this host's failed row for this name", stale)
+	}
+
+	healthy := state.Machine{ID: "m_ok", Name: name, HostID: "host-a", State: StateSuspended}
+	if err := st.PutMachine(ctx, &healthy); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.DeleteMachine(ctx, "m_failed"); err != nil {
+		t.Fatal(err)
+	}
+	id, stale, err = m.findBuilder(ctx, name, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "m_ok" || len(stale) != 0 {
+		t.Errorf("findBuilder = %q, %v; want the suspended builder and nothing to clear", id, stale)
+	}
+}
+
 // A cancelled context stops the wait at once: a client that hung up should not
 // leave hostd polling a guest for a minute and a half.
 func TestWaitForBuildkitHonoursCancellation(t *testing.T) {
@@ -54,5 +102,34 @@ func TestWaitForBuildkitHonoursCancellation(t *testing.T) {
 	cancel()
 	if err := waitForBuildkitAddr(ctx, "127.0.0.1:1", time.Minute); err == nil {
 		t.Fatal("a cancelled wait reported success")
+	}
+}
+
+// A builder minted from an older builder template is replaced, so a rebuilt
+// builder image reaches it; a current one is reused.
+func TestFindBuilderReplacesOneFromAnOlderTemplate(t *testing.T) {
+	m, st := storeManager(t)
+	ctx := t.Context()
+	const name = "builder-org-host-a"
+	old := state.Machine{ID: "m_old", Name: name, HostID: "host-a",
+		State: StateSuspended, TemplateMemBuildID: "tmpl-v1"}
+	if err := st.PutMachine(ctx, &old); err != nil {
+		t.Fatal(err)
+	}
+
+	id, stale, err := m.findBuilder(ctx, name, "tmpl-v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "" || !reflect.DeepEqual(stale, []string{"m_old"}) {
+		t.Errorf("findBuilder = %q, %v; want the older-template builder replaced", id, stale)
+	}
+
+	id, stale, err = m.findBuilder(ctx, name, "tmpl-v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "m_old" || len(stale) != 0 {
+		t.Errorf("findBuilder = %q, %v; want a current builder reused", id, stale)
 	}
 }

@@ -4,13 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/hmac"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"math/big"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -20,6 +18,7 @@ import (
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/fc"
+	"github.com/vivek7405/pilots/hostd/internal/naming"
 	"github.com/vivek7405/pilots/hostd/internal/netns"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
@@ -252,43 +251,10 @@ func marshalKnobs(k api.Knobs) (string, error) { return api.MarshalKnobs(k) }
 // one import.
 func ParseKnobs(raw string) api.Knobs { return api.ParseKnobs(raw) }
 
-// Name generation. Two words plus a short suffix: readable enough to say out
-// loud, and distinct enough that a collision within an account is unlikely.
-var (
-	adjectives = []string{
-		"amber", "brisk", "calm", "dawn", "eager", "frost", "gentle", "hazel",
-		"ivory", "jade", "keen", "lunar", "misty", "noble", "olive", "prism",
-		"quiet", "rapid", "solar", "tidal", "umber", "vivid", "warm", "zephyr",
-	}
-	nouns = []string{
-		"anchor", "beacon", "cedar", "delta", "ember", "fjord", "grove", "harbor",
-		"island", "jetty", "kernel", "lagoon", "meadow", "nebula", "orbit", "pillar",
-		"quarry", "ridge", "summit", "thicket", "vertex", "willow",
-	}
-)
-
-func generateName() string {
-	return pick(adjectives) + "-" + pick(nouns) + "-" + randSuffix(4)
-}
-
-func pick(list []string) string {
-	n, err := rand.Int(rand.Reader, big.NewInt(int64(len(list))))
-	if err != nil {
-		return list[0]
-	}
-	return list[n.Int64()]
-}
-
-func randSuffix(n int) string {
-	const alphabet = "abcdefghijklmnopqrstuvwxyz0123456789"
-	var sb strings.Builder
-	for i := 0; i < n; i++ {
-		idx, err := rand.Int(rand.Reader, big.NewInt(int64(len(alphabet))))
-		if err != nil {
-			sb.WriteByte('0')
-			continue
-		}
-		sb.WriteByte(alphabet[idx.Int64()])
-	}
-	return sb.String()
-}
+// generateName is one machine name, from the shared alphabet.
+//
+// The alphabet and the shuffling moved to internal/naming because the api
+// package's placement needs them too and cannot import this one: machines
+// imports api, so the shared half lives below both rather than in a second
+// copy that drifts.
+func generateName() string { return naming.Machine() }

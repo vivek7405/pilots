@@ -26,7 +26,7 @@ func (m *Machines) TCP(ctx context.Context, id string, port int) (net.Conn, erro
 		u += "?org=" + url.QueryEscape(m.c.org)
 	}
 	conn, _, err := websocket.Dial(ctx, u, &websocket.DialOptions{
-		HTTPHeader: http.Header{"Authorization": {"Bearer " + m.c.apiKey}},
+		HTTPHeader: http.Header{"Authorization": {"Bearer " + m.c.credential()}},
 	})
 	if err != nil {
 		return nil, err

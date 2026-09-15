@@ -59,6 +59,7 @@ type scheduleExecer interface {
 // host, "http" otherwise), stamped on each GET as X-Forwarded-Proto.
 func runSchedules(ctx context.Context, hostID, domain, proto string, view fleetView, handler http.Handler, exec scheduleExecer) {
 	s := newScheduler(hostID, domain, proto, view, handler, exec)
+	live := metrics.NewLoop("schedules", 3*scheduleInterval)
 	tick := time.NewTicker(scheduleInterval)
 	defer tick.Stop()
 	for {
@@ -67,6 +68,7 @@ func runSchedules(ctx context.Context, hostID, domain, proto string, view fleetV
 			return
 		case <-tick.C:
 			s.tick(ctx)
+			live.Tick()
 		}
 	}
 }

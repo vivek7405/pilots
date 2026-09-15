@@ -19,6 +19,8 @@ import { db } from '#db/connection.server.ts';
 import { memberships, orgs, users } from '#db/schema.server.ts';
 import type { Membership, Org, User } from '#db/schema.server.ts';
 import { auth } from './auth.server.ts';
+import { normalizeRole } from '#modules/orgs/roles.ts';
+import { slugify } from '#modules/orgs/slug.ts';
 import type { Role } from './types.ts';
 
 export const ORG_COOKIE = 'pilots_org';
@@ -129,16 +131,22 @@ export async function upsertGithubUser(identity: GithubIdentity): Promise<User> 
 }
 
 /**
- * The first free slug for a login: the login itself, else `login-2`,
- * `login-3` and so on. Lower-cased, because GitHub logins are
+ * The first free slug for a name: the name's own slug, else `slug-2`,
+ * `slug-3` and so on. Lower-cased through `slugify`, because GitHub logins are
  * case-insensitive and the unique constraint is not, so `Alice` and `alice`
  * would otherwise be two different slugs for one login. Runs inside the
- * sign-in transaction, so two first sign-ins cannot both see a slug as free.
+ * calling transaction, so two creates cannot both see a slug as free.
+ *
+ * Exported because creating a second team derives its address exactly this
+ * way. A team name is arbitrary text where a login is not, which is why the
+ * slugify step is shared rather than re-typed: a name of `Acme Corp.` and the
+ * login `acme` must not be able to produce the same slug by two different
+ * routes.
  */
-type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+export type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
 
-function freeSlug(tx: Tx, login: string): string {
-  const base = login.toLowerCase();
+export function freeSlug(tx: Tx, name: string): string {
+  const base = slugify(name) || 'team';
   for (let n = 1; ; n++) {
     const slug = n === 1 ? base : `${base}-${n}`;
     const taken = tx.select().from(orgs).where(eq(orgs.slug, slug)).get();
@@ -170,7 +178,7 @@ export async function currentOrg(req: Request | undefined, user: User): Promise<
 
   const asPairs: { org: Org; role: Role }[] = rows.map((r: { memberships: Membership; orgs: Org }) => ({
     org: r.orgs,
-    role: r.memberships.role === 'owner' ? 'owner' : 'member',
+    role: normalizeRole(r.memberships.role),
   }));
 
   const wanted = readOrgCookie(req);
@@ -198,7 +206,7 @@ export async function roleOn(userId: number, orgId: string): Promise<Role | null
     .where(and(eq(memberships.userId, userId), eq(memberships.orgId, orgId)))
     .get();
   if (!row) return null;
-  return row.role === 'owner' ? 'owner' : 'member';
+  return normalizeRole(row.role);
 }
 
 /** The `Set-Cookie` value that switches the acting org. */

@@ -32,6 +32,7 @@ from .types import (
     CreateVolumeRequest,
     DeployRequest,
     DomainResponse,
+    EgressResponse,
     ExecRequest,
     ExecResponse,
     HealthResponse,
@@ -44,8 +45,10 @@ from .types import (
     RepoLinkListResponse,
     RepoLinkResponse,
     RepoRef,
+    ResizeMachineRequest,
     RevokeResponse,
     Service,
+    Size,
     UpdateMachineRequest,
     UpdateServiceRequest,
     UsageResponse,
@@ -229,6 +232,16 @@ class Machines:
     def start(self, id: str) -> None:
         self._http.none("POST", f"/v1/machines/{_seg(id)}/start")
 
+    def resize(self, id: str, vcpus: int = 0, mem_mib: int = 0) -> Machine:
+        """Boots a machine again at a new size, in place: same id, same URL, same disk, same volume.
+
+        A boot rather than a resume, because a memory image cannot be loaded into a
+        differently-sized VM, so the machine loses what was in memory. Leave a
+        dimension at zero to keep it as it is.
+        """
+        body = to_json(ResizeMachineRequest(vcpus=vcpus, mem_mib=mem_mib))
+        return from_json(Machine, self._http.json("POST", f"/v1/machines/{_seg(id)}/resize", json_body=body))
+
     def checkpoint(self, id: str, comment: str | None = None) -> Checkpoint:
         body = to_json(CheckpointRequest(comment=comment))
         return from_json(Checkpoint, self._http.json("POST", f"/v1/machines/{_seg(id)}/checkpoints", json_body=body))
@@ -325,6 +338,26 @@ class Services:
         travel on ``deploy``."""
         return from_json(Service, self._http.json("PATCH", f"/v1/services/{_seg(id)}", json_body=to_json(req)))
 
+    def scale(self, id: str, replicas: int = 0, vcpus: int = 0, mem_mib: int = 0) -> Service:
+        """Changes how big every replica is, and how many there are.
+
+        Leave anything at zero to leave it alone. A size change replaces the
+        replicas one at a time, at the same release, and drops no request: a
+        replica comes up at the new size, passes the same health gate a deploy's
+        does, and only then is an old one retired.
+
+        A volume-backed service has a held window instead of no window at all,
+        because a volume is mounted by one machine at a time and the
+        replacement cannot mount it until the old one has let go. Requests
+        arriving then are served late rather than refused.
+        """
+        req = UpdateServiceRequest()
+        if replicas > 0:
+            req.replicas = replicas
+        if vcpus > 0 or mem_mib > 0:
+            req.size = Size(vcpus=vcpus, mem_mib=mem_mib)
+        return self.patch(id, req)
+
     def releases(self, id: str) -> builtins.list[Release]:
         """Newest first."""
         return [from_json(Release, r) for r in self._http.json("GET", f"/v1/services/{_seg(id)}/releases") or []]
@@ -362,6 +395,19 @@ class Hosts:
     def list(self) -> builtins.list[Host]:
         """The fleet as this host sees it, read from its local replica."""
         return [from_json(Host, h) for h in self._http.json("GET", "/v1/hosts") or []]
+
+    def egress(self) -> EgressResponse:
+        """Every address this org's outbound traffic can leave from.
+
+        What to hand anything that allowlists by source address. One entry per
+        host that manages egress, because the address is derived from the
+        host's own prefix; empty on a fleet where no host has been given one,
+        in which case traffic leaves from each host's shared address.
+
+        The set changes only when a host joins or leaves the fleet, never when
+        this org's machines are created, destroyed, resized, rolled or moved.
+        """
+        return from_json(EgressResponse, self._http.json("GET", "/v1/egress"))
 
 
 class APIKeys:

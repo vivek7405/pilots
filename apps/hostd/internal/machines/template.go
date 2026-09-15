@@ -1,10 +1,15 @@
 package machines
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -13,6 +18,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/sys/unix"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/block"
@@ -53,6 +59,39 @@ type Template struct {
 	// manifest written before page size was recorded, which is treated the
 	// same way.
 	PageSizeKiB int `json:"page_size_kib"`
+	// RootfsID identifies the ext4 artifact this template was derived from.
+	//
+	// The golden rootfs carries the whole guest userspace, the guest agent
+	// included, baked in when the artifact is built. A template is a snapshot
+	// of a machine booted from it, so every machine restored from that
+	// template runs that userspace for as long as the template lives.
+	//
+	// Nothing connected the two. Shipping a host a NEW rootfs left the cached
+	// template in place -- its manifest names build ids and a page size, none
+	// of which change when the artifact underneath does -- so the host went on
+	// minting machines from the old userspace indefinitely. The failure is
+	// silent by construction: the machines work, they just answer the way the
+	// previous release did.
+	//
+	// The rig showed it. Its template was two days older than its rootfs, and
+	// a session's `busy` field, which the current agent emits and the old one
+	// does not, was absent from every response -- so an assertion failed
+	// against a fleet whose code was right.
+	//
+	// Empty means this template was not derived here -- it was adopted from
+	// the fleet, or written before this field existed -- and is then not
+	// judged against the local artifact at all. A host that adopted a
+	// template never read its own ext4 to build it, so discarding the
+	// template because that ext4 moved would be answering a question nobody
+	// asked.
+	//
+	// What that leaves unsolved, stated rather than hidden: shipping a new
+	// artifact fleet-wide re-derives it on the hosts that built their own and
+	// does NOT dislodge it on the hosts that adopted one. Those hosts follow
+	// when the pool's published template is replaced. Making adopters chase an
+	// artifact they never read is a fleet-propagation design, and this is the
+	// single-host correctness half of it.
+	RootfsID string `json:"rootfs_id"`
 }
 
 // rejected reports whether this template is the one a restore just proved
@@ -79,12 +118,27 @@ func (m *Manager) templateRoot(v variant) string {
 	return filepath.Join(m.opts.CacheRoot, "template-"+string(v))
 }
 
-// templateRowID is the fleet row a variant publishes to, one per vendor pool.
+// templateRowID is the fleet row a variant publishes to: one per vendor pool
+// AND per rootfs artifact.
+//
+// Per artifact because the row has no column saying which image a template
+// was derived from, and adoption believed whatever row it found. Once a fleet
+// had a template, a rebuilt golden image never produced another: every host
+// adopted the old row, stamped nothing, and loadTemplate's artifact check had
+// nothing to compare. The new guest agent, and the fix for a template whose
+// memory and disk disagreed, never reached a machine. A column cannot be
+// added to a table that has rows (hard rule 6), and it does not need to be:
+// the artifact goes in the id, so a new image looks up a row that does not
+// exist yet and builds one, while hosts still on the old image keep theirs.
 func (m *Manager) templateRowID(v variant) string {
+	base := state.BuilderTemplateFor(m.opts.Vendor)
 	if v == variantGolden {
-		return state.GoldenTemplateFor(m.opts.Vendor)
+		base = state.GoldenTemplateFor(m.opts.Vendor)
 	}
-	return state.BuilderTemplateFor(m.opts.Vendor)
+	if id := m.rootfsID(v); len(id) >= 16 {
+		return base + "-" + id[:16]
+	}
+	return base
 }
 
 // variantRootfs is the ext4 a variant's disk half is chunkified from.
@@ -280,6 +334,9 @@ func (m *Manager) adoptFleetTemplate(ctx context.Context, v variant) (*Template,
 		SnapKey:     row.SnapKey,
 		CreatedAt:   row.CreatedAt,
 		PageSizeKiB: m.pageSizeKiB(),
+		// The row id is keyed by this host's artifact (templateRowID), so
+		// finding it at all says the template was derived from that artifact.
+		RootfsID: m.rootfsID(v),
 	}
 	if t.MemBuildID, err = uuid.Parse(row.MemBuildID); err != nil {
 		return nil, fmt.Errorf("machines: fleet template has an unusable memory build %q: %w",
@@ -339,6 +396,39 @@ func (m *Manager) materializeBuild(ctx context.Context, id uuid.UUID) error {
 // loadTemplate reads a previously built template, checking that the builds it
 // names are actually still on disk.
 func (m *Manager) loadTemplate(v variant) (*Template, error) {
+	t, err := m.loadTemplateManifest(v)
+	if err != nil {
+		return nil, err
+	}
+	// A template derived from an artifact this host no longer ships is
+	// reported as no template, which rebuilds -- the same answer a page-size
+	// mismatch gets, for a weaker but more insidious reason. A wrong page size
+	// fails loudly at restore. A stale userspace WORKS: it boots, it serves,
+	// it execs, and it answers every request the way it did before whatever
+	// the new artifact added. Nothing is red and the change simply never
+	// reached a guest.
+	//
+	// A rebuild costs minutes, once, when the artifact actually changes.
+	// An unstamped manifest counts as a mismatch once this host knows its own
+	// artifact: it is either from before stamping or adopted from a row that
+	// named no image, and in both cases nothing says it matches. Replacing it
+	// costs one adopt or one build.
+	if want := m.rootfsID(v); want != "" && t.RootfsID != want {
+		return nil, fmt.Errorf("machines: template was derived from rootfs %s, "+
+			"this host ships %s: %w", shortID(t.RootfsID), shortID(want), errTemplateRootfs)
+	}
+	return t, nil
+}
+
+// loadTemplateManifest is loadTemplate without the artifact check: the
+// manifest, its builds on disk, and its page size.
+//
+// For a caller that already knows which builds it needs and only asks whether
+// this host's manifest names them -- a wake, whose machine is pinned to its
+// template. Judging the artifact there answered nothing the pin had not, and
+// it hashed both rootfs images on the first wake of every hostd process while
+// the request waited.
+func (m *Manager) loadTemplateManifest(v variant) (*Template, error) {
 	raw, err := os.ReadFile(filepath.Join(m.templateRoot(v), templateFile))
 	if err != nil {
 		return nil, err
@@ -367,7 +457,161 @@ func (m *Manager) loadTemplate(v variant) (*Template, error) {
 		return nil, fmt.Errorf("machines: template is %d KiB pages, this host "+
 			"runs %d KiB: %w", t.PageSizeKiB, want, errTemplatePageSize)
 	}
+
 	return &t, nil
+}
+
+// errTemplateRootfs marks a template derived from an artifact this host has
+// since replaced.
+var errTemplateRootfs = errors.New("machines: template rootfs mismatch")
+
+// shortID trims a hash for a log line.
+func shortID(id string) string {
+	switch {
+	case id == "":
+		return "none"
+	case len(id) > 12:
+		return id[:12]
+	}
+	return id
+}
+
+// rootfsID identifies the ext4 a variant's template is derived from.
+//
+// The CONTENT, not the path or the timestamp. A host bootstrap rewrites the
+// file and moves its mtime whether or not a byte changed, and rebuilding every
+// template on every bootstrap would cost minutes for nothing. Hashing is
+// memoised on size and mtime, so it runs once per artifact version per hostd
+// lifetime rather than once per create.
+//
+// An unreadable artifact returns the empty string, which is deliberately
+// treated as "do not judge". A host that cannot stat its own rootfs has a
+// problem, and throwing away a working template is not a way to report it --
+// especially since a template already adopted from the fleet is usable on a
+// host whose local artifact was never written at all.
+func (m *Manager) rootfsID(v variant) string {
+	path := m.variantRootfs(v)
+	if path == "" {
+		return ""
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	key := fmt.Sprintf("%s|%d|%d", path, info.Size(), info.ModTime().UnixNano())
+
+	m.rootfsIDMu.Lock()
+	if id, ok := m.rootfsIDs[key]; ok {
+		m.rootfsIDMu.Unlock()
+		return id
+	}
+	m.rootfsIDMu.Unlock()
+
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	sum, err := contentID(f, info.Size())
+	if err != nil {
+		return ""
+	}
+
+	m.rootfsIDMu.Lock()
+	if m.rootfsIDs == nil {
+		m.rootfsIDs = map[string]string{}
+	}
+	m.rootfsIDs[key] = sum
+	m.rootfsIDMu.Unlock()
+	return sum
+}
+
+// contentID hashes an image by its non-zero blocks.
+//
+// A plain sha256 reads the APPARENT size, and a rootfs is sparse: the builder
+// image is 32 GiB of which 260 MiB is data. rootfsID runs on the first
+// template lookup of every hostd process, and the create or wake that made it
+// waited -- 3 s on a laptop with the image in the page cache, and a restart's
+// first wake of a webjs replica measured at 18 to 32 s without it. Holes read
+// as zeros, so seeking past them loses nothing, and all-zero blocks inside
+// data extents are skipped too: that makes the id depend only on content, not
+// on which zero ranges a filesystem happened to allocate, so two hosts with
+// the same bytes still agree.
+func contentID(f *os.File, size int64) (string, error) {
+	const blk = 4096
+	h := sha256.New()
+	buf := make([]byte, 1<<20)
+	var idx [8]byte
+	zero := make([]byte, blk)
+
+	hashRange := func(start, end int64) error {
+		for off := start &^ (blk - 1); off < end; {
+			n := min(int64(len(buf)), (end-off+blk-1)&^(blk-1))
+			got, err := f.ReadAt(buf[:n], off)
+			if err != nil && !errors.Is(err, io.EOF) {
+				return err
+			}
+			if got == 0 {
+				return nil
+			}
+			// A short read is the end of the file: pad its last block with
+			// the zeros a reader past EOF would see.
+			full := (got + blk - 1) &^ (blk - 1)
+			clear(buf[got:full])
+			for i := 0; i < full; i += blk {
+				b := buf[i : i+blk]
+				if bytes.Equal(b, zero) {
+					continue
+				}
+				binary.LittleEndian.PutUint64(idx[:], uint64((off+int64(i))/blk))
+				h.Write(idx[:])
+				h.Write(b)
+			}
+			if int64(got) < n {
+				return nil
+			}
+			off += n
+		}
+		return nil
+	}
+
+	fd := int(f.Fd())
+	for off := int64(0); off < size; {
+		data, err := unix.Seek(fd, off, unix.SEEK_DATA)
+		if err != nil {
+			if errors.Is(err, unix.ENXIO) {
+				break // no data past off: the rest is a hole
+			}
+			// No SEEK_DATA on this filesystem: read everything.
+			if err := hashRange(off, size); err != nil {
+				return "", err
+			}
+			break
+		}
+		hole, err := unix.Seek(fd, data, unix.SEEK_HOLE)
+		if err != nil {
+			hole = size
+		}
+		if err := hashRange(data, min(hole, size)); err != nil {
+			return "", err
+		}
+		off = hole
+	}
+	binary.LittleEndian.PutUint64(idx[:], uint64(size))
+	h.Write(idx[:])
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// WarmTemplateIDs computes each variant's artifact id ahead of the first
+// create or wake, which would otherwise wait for it. Called once, in the
+// background, as hostd starts.
+func (m *Manager) WarmTemplateIDs() {
+	for _, v := range []variant{variantGolden, variantBuilder} {
+		start := time.Now()
+		id := m.rootfsID(v)
+		slog.Info("rootfs artifact id ready", "variant", v, "id", shortID(id),
+			"ms", time.Since(start).Milliseconds())
+	}
 }
 
 // errTemplatePageSize marks a template this host cannot restore because it was
@@ -417,32 +661,41 @@ func (m *Manager) buildTemplate(ctx context.Context, v variant) (*Template, erro
 		SnapKey:     filepath.Join("template", uuid.NewString(), fc.SnapFile),
 		CreatedAt:   time.Now().Unix(),
 		PageSizeKiB: m.pageSizeKiB(),
+		// Stamped HERE and not on the adopt path: this is the one place a
+		// template is built out of a local artifact, so it is the one place
+		// that can honestly say which artifact that was.
+		RootfsID: m.rootfsID(v),
 	}
 
-	// The disk template needs no VM at all: it is the variant's rootfs, chunked.
-	rootfsBuild := uuid.New()
-	if _, _, err := block.Chunkify(ctx, block.ChunkifyOpts{
-		In:      m.variantRootfs(v),
-		OutDir:  filepath.Join(m.buildDir(), rootfsBuild.String()),
-		BuildID: rootfsBuild,
-	}); err != nil {
-		return nil, fmt.Errorf("machines: chunkify the %s rootfs: %w", v, err)
+	// Checked before a slot, a namespace and a boot are spent on it: a host
+	// with no image for this variant fails here, saying which file.
+	if _, err := os.Stat(m.variantRootfs(v)); err != nil {
+		return nil, fmt.Errorf("machines: the %s rootfs: %w", v, err)
 	}
-	if err := m.uploadBuild(ctx, rootfsBuild); err != nil {
-		return nil, err
-	}
-	t.RootfsBuildID = rootfsBuild
-
-	memBuild, err := m.captureTemplateMemory(ctx, v, t.SnapKey)
+	memBuild, rootfsBuild, err := m.captureTemplate(ctx, v, t.SnapKey)
 	if err != nil {
 		return nil, err
 	}
 	t.MemBuildID = memBuild
+	t.RootfsBuildID = rootfsBuild
 	return t, nil
 }
 
-// captureTemplateMemory boots a throwaway machine and chunkifies its memory.
-func (m *Manager) captureTemplateMemory(ctx context.Context, v variant, snapKey string) (uuid.UUID, error) {
+// captureTemplate boots a throwaway machine and chunkifies its memory AND the
+// disk it booted on, both from the same pause.
+//
+// The disk used to be the variant's rootfs chunked before the machine ever
+// booted, on the reasoning that a guest which has only just booted has written
+// nothing worth keeping. It had written plenty: systemd-journald creates
+// /var/log/journal and its files during boot, and the memory image holds the
+// inodes and directory blocks for them. Paired with the pristine disk, every
+// machine created from the template carried caches naming blocks its disk did
+// not have. Nothing showed until the guest evicted those caches and read the
+// blocks back -- `ls /var/log/journal` answering "Structure needs cleaning" in
+// a brand-new sandbox after a drop_caches, and a 4 GiB builder under build
+// pressure logging "Directory block failed checksum" and failing BuildKit
+// reads with EBADMSG.
+func (m *Manager) captureTemplate(ctx context.Context, v variant, snapKey string) (uuid.UUID, uuid.UUID, error) {
 	row := &state.Machine{
 		// The prefix matters: it is how Manager.token knows this guest still
 		// carries the golden rootfs's placeholder credential.
@@ -454,16 +707,16 @@ func (m *Manager) captureTemplateMemory(ctx context.Context, v variant, snapKey 
 
 	slot, err := m.pool.Take(row.ID)
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, uuid.Nil, err
 	}
 	defer m.pool.Return(slot.Idx)
 
 	mac, err := fc.GenerateMAC()
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, uuid.Nil, err
 	}
 	if err := netns.Setup(slot, mac, m.opts.FCConfig.JailUID); err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, uuid.Nil, err
 	}
 
 	// The variant's own rootfs, not the host's default. Without this the
@@ -475,12 +728,12 @@ func (m *Manager) captureTemplateMemory(ctx context.Context, v variant, snapKey 
 	fcm, err := fc.Boot(ctx, fcCfg)
 	if err != nil {
 		_ = netns.Teardown(slot)
-		return uuid.Nil, fmt.Errorf("machines: boot the template machine: %w", err)
+		return uuid.Nil, uuid.Nil, fmt.Errorf("machines: boot the template machine: %w", err)
 	}
 	defer func() { _ = fcm.Kill() }()
 
 	if err := waitForAgent(ctx, slot.AgentAddr(), 60*time.Second); err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, uuid.Nil, err
 	}
 	// Let systemd finish converging. Snapshotting a guest mid-transition
 	// produces a template that restores into a machine which never finishes
@@ -488,7 +741,7 @@ func (m *Manager) captureTemplateMemory(ctx context.Context, v variant, snapKey 
 	select {
 	case <-time.After(settleTime):
 	case <-ctx.Done():
-		return uuid.Nil, ctx.Err()
+		return uuid.Nil, uuid.Nil, ctx.Err()
 	}
 
 	// Flush before the capture, or the memory image holds writes the disk
@@ -498,15 +751,31 @@ func (m *Manager) captureTemplateMemory(ctx context.Context, v variant, snapKey 
 
 	snapshot, err := fcm.CaptureTemplate(ctx, fc.SnapshotOpts{BuildDir: m.buildDir()})
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, uuid.Nil, err
+	}
+
+	// The disk the guest booted on, read while it is still paused, so it is
+	// the disk the memory image just described. Self-contained, with no
+	// parent: it IS the base every machine's disk is diffed against.
+	rootfsBuild := uuid.New()
+	if _, _, err := block.Chunkify(ctx, block.ChunkifyOpts{
+		In:      filepath.Join(fcm.ChrootDir, fc.BakedRootfsPath),
+		OutDir:  filepath.Join(m.buildDir(), rootfsBuild.String()),
+		BuildID: rootfsBuild,
+	}); err != nil {
+		return uuid.Nil, uuid.Nil, fmt.Errorf("machines: chunkify the %s template's booted disk: %w", v, err)
+	}
+
+	if err := m.uploadBuild(ctx, rootfsBuild); err != nil {
+		return uuid.Nil, uuid.Nil, err
 	}
 	if err := m.uploadBuild(ctx, snapshot.MemBuildID); err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, uuid.Nil, err
 	}
 	if err := m.opts.Uploader.PutFile(ctx, snapKey, snapshot.SnapPath); err != nil {
-		return uuid.Nil, fmt.Errorf("machines: upload the template vmstate: %w", err)
+		return uuid.Nil, uuid.Nil, fmt.Errorf("machines: upload the template vmstate: %w", err)
 	}
-	return snapshot.MemBuildID, nil
+	return snapshot.MemBuildID, rootfsBuild, nil
 }
 
 // execSync flushes the guest's page cache. Best effort, like the suspend path:
@@ -562,7 +831,7 @@ func (m *Manager) templateFor(ctx context.Context, row *state.Machine) (*Templat
 	// The host's own template, when it happens to be the same one. Saves
 	// materialising what is already on disk, which is the common case.
 	for _, v := range []variant{variantGolden, variantBuilder} {
-		if t, err := m.loadTemplate(v); err == nil &&
+		if t, err := m.loadTemplateManifest(v); err == nil &&
 			t.MemBuildID == memID && t.RootfsBuildID == rootfsID {
 			return t, nil
 		}

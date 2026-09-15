@@ -27,6 +27,22 @@ EnvironmentFile=-/etc/pilots/hostd.env
 Restart=always
 RestartSec=1
 
+# Restart=always catches a process that DIES. The failure it does not catch is
+# the one where nothing dies: a background loop blocks on a query with no
+# timeout or a socket that accepts and never answers, the process stays up,
+# /v1/health answers 200, and the metering, the self-healing or the certificate
+# renewal silently stops. Fly lost five hours of billing and renewal to exactly
+# that on 2026-09-02 with every process healthy throughout.
+#
+# So hostd pets this watchdog only while every one of its loops is inside its
+# budget, and withholds the pet when one is not, naming it in the journal
+# first. See cmd/hostd/watchdog.go and internal/metrics/liveness.go.
+#
+# Safe here and nowhere else: KillMode=process below means a restart leaves the
+# machines running to be re-adopted, so the cost is a few seconds of API rather
+# than an outage. corrosion.service has carried the same line since 2024.
+WatchdogSec=30
+
 # Type=notify plus that 120s schema wait needs a start timeout above it, or
 # systemd SIGKILLs a perfectly healthy hostd at the 90s default -- during
 # exactly the fleet-wide restart where the wait is longest.

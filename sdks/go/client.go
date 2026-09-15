@@ -48,8 +48,12 @@ type Client struct {
 	httpClient *http.Client
 	// org narrows every request to one org. See WithOrg.
 	org string
+	// broker is the token file the guest agent keeps fresh, for a client
+	// constructed inside a machine with no key. nil everywhere else.
+	broker *brokerCredential
 
 	Machines    *Machines
+	Builders    *Builders
 	Checkpoints *Checkpoints
 	Builds      *Builds
 	Services    *Services
@@ -60,6 +64,7 @@ type Client struct {
 	Quotas      *Quotas
 	Usage       *Usage
 	Compose     *Compose
+	Recipes     *Recipes
 }
 
 // Option customises a Client.
@@ -98,6 +103,10 @@ func New(apiKey string, opts ...Option) *Client {
 	c := &Client{
 		apiKey:  apiKey,
 		baseURL: strings.TrimRight(base, "/"),
+		// With no key, a client inside a machine uses the token the guest
+		// agent keeps on disk. Only with no key: an explicit one is an
+		// explicit choice and must never be quietly replaced.
+		broker: brokerFor(apiKey),
 		// No client-level deadline on purpose. A build streams for minutes, an
 		// exec carries its own timeout_ms, and a checkpoint pauses a guest --
 		// any fixed ceiling here would truncate one of them into a network
@@ -109,6 +118,7 @@ func New(apiKey string, opts ...Option) *Client {
 		opt(c)
 	}
 	c.Machines = &Machines{c: c}
+	c.Builders = &Builders{c: c}
 	c.Checkpoints = &Checkpoints{c: c}
 	c.Builds = &Builds{c: c}
 	c.Services = &Services{c: c}
@@ -119,6 +129,7 @@ func New(apiKey string, opts ...Option) *Client {
 	c.Quotas = &Quotas{c: c}
 	c.Usage = &Usage{c: c}
 	c.Compose = &Compose{c: c}
+	c.Recipes = &Recipes{c: c}
 	return c
 }
 
@@ -126,7 +137,39 @@ func New(apiKey string, opts ...Option) *Client {
 func (c *Client) BaseURL() string { return c.baseURL }
 
 // APIKey is the key this client authenticates with.
-func (c *Client) APIKey() string { return c.apiKey }
+// Orgs is which orgs this key can act as, and which it is acting as now.
+//
+// For a client offering a switch. A tenant key answers with exactly its own,
+// because listing the fleet's other orgs to it would be a tenant oracle.
+func (c *Client) Orgs(ctx context.Context) (*OrgsResponse, error) {
+	var out OrgsResponse
+	return &out, c.do(ctx, http.MethodGet, "/v1/orgs", nil, &out)
+}
+
+func (c *Client) APIKey() string { return c.credential() }
+
+// credential is the bearer to send: the explicit key, or the machine's own
+// token when there is none.
+//
+// One function, so the four places that set an Authorization header cannot
+// disagree about which credential a request carries -- three of them are
+// WebSocket dials, which is exactly where a divergence would show up as an
+// upgrade that fails with nothing in the body to explain it.
+func (c *Client) credential() string {
+	if c.apiKey != "" {
+		return c.apiKey
+	}
+	return c.broker.Token()
+}
+
+// brokerFor returns the machine's own credential source, or nil when a key was
+// given or there is no token file.
+func brokerFor(apiKey string) *brokerCredential {
+	if apiKey != "" {
+		return nil
+	}
+	return newBrokerCredential()
+}
 
 // Health is the one route that needs no key.
 func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
@@ -240,7 +283,7 @@ func (c *Client) request(ctx context.Context, method, path string, body io.Reade
 	if err != nil {
 		return nil, fmt.Errorf("pilots: building the request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+c.apiKey)
+	req.Header.Set("Authorization", "Bearer "+c.credential())
 	return req, nil
 }
 

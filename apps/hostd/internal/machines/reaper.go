@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/netns"
 	"strconv"
 	"strings"
@@ -36,6 +37,7 @@ const (
 // memory, their cgroup and their network slot indefinitely, and the only
 // remedy is a human with a terminal.
 func (m *Manager) RunReaper(ctx context.Context) {
+	live := metrics.NewLoop("reaper", 3*reaperInterval)
 	ticker := time.NewTicker(reaperInterval)
 	defer ticker.Stop()
 
@@ -45,6 +47,11 @@ func (m *Manager) RunReaper(ctx context.Context) {
 			return
 		case <-ticker.C:
 			m.reapOrphans(ctx)
+			// The same loop, for the same reason: this is where "clean up what
+			// nothing is using" already lives, and a second timer for
+			// checkpoints would be a second thing to reason about.
+			m.ExpireCheckpoints(ctx)
+			live.Tick()
 		}
 	}
 }
@@ -95,6 +102,11 @@ func (m *Manager) reapOrphanResources(machineID string) {
 	if err := os.RemoveAll(m.stateDir(machineID)); err != nil {
 		slog.Warn("could not remove an orphan's state dir", "machine", machineID, "err", err)
 	}
+	// An empty cgroup still costs a kernel structure, so a host that made one
+	// per machine and removed none would accumulate them for as long as it
+	// stays up.
+	m.killCgroup(machineID)
+	m.removeCgroup(machineID)
 }
 
 type fcProcess struct {

@@ -189,6 +189,34 @@ export default function Sandboxes() {
       `,
     })}
 
+    ${section({
+      id: 'restore-contract',
+      layout: 'split',
+      heading: 'What a restore promises, and what it does not',
+      lede: html`Worth saying plainly, because the interesting case is the one where the fast path
+        is unavailable and most platforms would simply fail.`,
+      body: html`
+        <p class="${PROSE}">
+          A restore never fails because a memory image is gone. Memory snapshots carry raw CPUID,
+          so one is portable within a CPU vendor pool and never across it. When no host of the
+          image's pool is live, the machine <strong>cold-boots from its own disk</strong> instead.
+        </p>
+        <p class="${PROSE} mt-4">
+          What survives that: the id, the name, the URL, the volume, the agent token, and every byte
+          the machine had written. What does not: the processes that were running and the memory
+          they held. The machine reports
+          <span class="font-mono">last_start: cold_boot</span>, so a client can tell the difference
+          rather than discovering it from behaviour.
+        </p>
+        <p class="${PROSE} mt-4">
+          A request that arrives while a machine is asleep is <strong>held, not bounced</strong>,
+          for up to ${inlineFact('heldWake')}. That window is one number for a machine on the host you
+          reached and for a machine one host over, so nothing a client can measure tells it where
+          its sandbox lives.
+        </p>
+      `,
+    })}
+
     <!-- No bordered panel here. The home page closes with one, and repeating
          the same box on every page is the closing-CTA template that makes a
          site read as generated. A hairline and a wide statement end this page

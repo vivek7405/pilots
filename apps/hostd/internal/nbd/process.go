@@ -41,9 +41,15 @@ type Process struct {
 // StartOptions describes a handler to launch.
 type StartOptions struct {
 	Config
-	// Env is passed through to the child, which needs the PILOT_S3_*
-	// credentials to open a remote build.
+	// Env is passed through to the child. It is an ALLOWLIST, not hostd's own
+	// environment: a handler reads its builds through ChunksSock and holds no
+	// storage credential at all. See internal/chunkserve.
 	Env []string
+	// ChunksSock is the host socket this handler reads build chunks through.
+	// Empty falls back to reading object storage directly, which needs the
+	// PILOT_S3_* credentials in Env and is how a handler adopted from before
+	// this existed keeps working.
+	ChunksSock string
 	// LogFile receives the handler's stderr. Without it a handler's failures
 	// are invisible: it is not attached to a terminal and hostd's own log is a
 	// different process's stream.
@@ -163,7 +169,19 @@ func argv(opts StartOptions) []string {
 	if opts.ReadOnly {
 		args = append(args, "--read-only")
 	}
+	if opts.ChunksSock != "" {
+		args = append(args, "--chunks-sock", opts.ChunksSock)
+	}
 	return args
+}
+
+// PID is the handler process's id, for putting it in the machine's cgroup.
+// Zero when the handler is not running.
+func (p *Process) PID() int {
+	if p == nil {
+		return 0
+	}
+	return p.pid
 }
 
 // Dirty asks the handler which blocks the machine has written.
@@ -171,7 +189,23 @@ func argv(opts StartOptions) []string {
 // The VM must be paused first. A bitmap taken while the guest is writing
 // describes a disk state that never existed at any instant, and chunkifying
 // against it produces a snapshot with a torn filesystem.
+//
+// And the device is flushed before the bitmap is read, which a pause does not
+// do. Firecracker writes the guest's disk through the host's page cache for
+// /dev/nbdN, so a write the guest has completed can still be sitting in that
+// cache, not yet sent to this handler and so neither in the cow file nor in
+// the bitmap. The guest's memory image, taken at the same pause, believes the
+// write happened. Capturing without the flush pairs that memory with an older
+// disk, and ext4 comes back on restore with "Directory block failed
+// checksum". Reproduced by writing 150 MiB in a sandbox and checkpointing at
+// once; measured on the host, 57 MiB of such a write was still unwritten to
+// the handler right after the guest's write returned.
 func (p *Process) Dirty() (*roaring.Bitmap, error) {
+	if err := flushDevice(p.Device); err != nil {
+		// Refused rather than captured: a disk that may be missing writes its
+		// memory image depends on is worse than no snapshot.
+		return nil, fmt.Errorf("nbd: flush %s before reading its dirty set: %w", p.Device, err)
+	}
 	payload, err := ctlsock.Request(p.control, cmdDirty)
 	if err != nil {
 		return nil, err
@@ -272,4 +306,20 @@ func AdoptedProcess(pool *DevicePool, pid, index int, control string) *Process {
 	pool.Reserve(index)
 	return &Process{pid: pid, pool: pool, control: control,
 		Device: fmt.Sprintf("/dev/nbd%d", index), Index: index}
+}
+
+// flushDevice pushes everything in the host's page cache for a block device
+// through to its driver -- for an NBD device, to the handler -- and waits.
+// fsync on a block device is sync_blockdev plus a flush request, which is
+// exactly that. A variable so a test can observe the ordering in Dirty.
+var flushDevice = func(path string) error {
+	if path == "" {
+		return nil
+	}
+	f, err := os.OpenFile(path, os.O_RDONLY, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return f.Sync()
 }

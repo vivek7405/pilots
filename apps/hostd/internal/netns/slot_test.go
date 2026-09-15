@@ -120,6 +120,26 @@ func TestTheGuestsNetworkConfigNamesOnlyConstants(t *testing.T) {
 		}
 	}
 
+	// The IPv4 address must be GLOBALLY scoped, and that is not cosmetic.
+	//
+	// 169.254.0.0/16 is link-local, so networkd scopes it link by default --
+	// and the kernel will not select a link-scoped address as the source for
+	// a route to a global destination. Without this the guest has nothing to
+	// source from, builds its SYNs with source 0.0.0.0, and the kernel drops
+	// them as martians inside the namespace. Every guest's outbound internet
+	// access was broken exactly that way, with nothing logged anywhere and
+	// every rule downstream reading as correct.
+	//
+	// The address itself stays link-local on purpose: every guest shares it
+	// and the host translates it per machine, which is what keeps a snapshot
+	// host-agnostic. The scope is about how the kernel may use it, not about
+	// what the range means.
+	if !strings.Contains(config, "Scope=global") {
+		t.Errorf("the guest's IPv4 address is not globally scoped, so the guest "+
+			"cannot source outbound traffic and every connection to a public "+
+			"address leaves as 0.0.0.0:\n%s", config)
+	}
+
 	// hostd listens under fdcc::. A guest that had a route there would be
 	// addressing the platform, and the split between the two spaces is the
 	// tenant boundary itself.

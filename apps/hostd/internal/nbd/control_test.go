@@ -2,6 +2,7 @@ package nbd
 
 import (
 	"bytes"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -126,5 +127,49 @@ func TestControlServesRepeatedRequests(t *testing.T) {
 		if int(got.GetCardinality()) != i+1 {
 			t.Errorf("request %d: %d dirty blocks, want %d", i, got.GetCardinality(), i+1)
 		}
+	}
+}
+
+// A write the guest completed can still be in the host's page cache for the
+// device when the VM is paused; it reaches the handler only when the device
+// is flushed. Dirty must flush first, or the bitmap -- and the disk captured
+// against it -- misses writes the memory image already believes happened.
+func TestDirtyFlushesTheDeviceBeforeReadingTheBitmap(t *testing.T) {
+	sock, cache, _ := startControl(t)
+
+	orig := flushDevice
+	t.Cleanup(func() { flushDevice = orig })
+	flushed := ""
+	flushDevice = func(path string) error {
+		flushed = path
+		// What the flush delivers: a write that was only in the page cache.
+		_, err := cache.WriteAt(bytes.Repeat([]byte{9}, 4096), 12288)
+		return err
+	}
+
+	p := &Process{control: sock, Device: "/dev/nbd7"}
+	got, err := p.Dirty()
+	if err != nil {
+		t.Fatalf("Dirty: %v", err)
+	}
+	if flushed != "/dev/nbd7" {
+		t.Errorf("flushed %q, want the machine's device", flushed)
+	}
+	if !got.Contains(3) { // 12288 / 4096
+		t.Errorf("dirty = %v; the write the flush delivered is missing", got.ToArray())
+	}
+}
+
+// A device that cannot be flushed is a capture refused, not a capture of a
+// disk that may be missing writes.
+func TestDirtyRefusesWhenTheFlushFails(t *testing.T) {
+	sock, _, _ := startControl(t)
+
+	orig := flushDevice
+	t.Cleanup(func() { flushDevice = orig })
+	flushDevice = func(string) error { return errors.New("injected") }
+
+	if _, err := (&Process{control: sock, Device: "/dev/nbd7"}).Dirty(); err == nil {
+		t.Fatal("Dirty returned a bitmap although the device was never flushed")
 	}
 }

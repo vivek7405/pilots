@@ -34,6 +34,9 @@ type fakeBuilder struct {
 	// org's builder machine, so passing the wrong one would run one tenant's
 	// Dockerfile in another tenant's guest.
 	gotOrg string
+	// The cache generation a reset advances, and whose org it advanced.
+	epoch     int
+	bumpedOrg string
 
 	// recordEmitted mirrors the real builder, which appends a line to its log
 	// store before it emits. Opt-in, so the tests that hand BuildLog a fixed
@@ -64,6 +67,14 @@ func (f *fakeBuilder) BuildLog(_ context.Context, id string, follow bool) (
 		return nil, nil, false
 	}
 	return f.log, nil, true
+}
+
+// BumpEpoch records the reset, so a test can assert the cache generation
+// moved without a bucket behind it.
+func (f *fakeBuilder) BumpEpoch(_ context.Context, orgID string) (int, error) {
+	f.bumpedOrg = orgID
+	f.epoch++
+	return f.epoch, nil
 }
 
 func (f *fakeBuilder) RecordRefusal(_ string, line BuildLogLine) {
@@ -303,7 +314,8 @@ func (c *cancelProbeBuilder) BuildLog(context.Context, string, bool) (
 	return nil, nil, false
 }
 
-func (c *cancelProbeBuilder) RecordRefusal(string, BuildLogLine) {}
+func (c *cancelProbeBuilder) RecordRefusal(string, BuildLogLine)             {}
+func (c *cancelProbeBuilder) BumpEpoch(context.Context, string) (int, error) { return 1, nil }
 
 // The build must be able to read its context after the stream has started.
 //
@@ -529,8 +541,8 @@ func TestAScopedKeyDeploysTheImageItBuilt(t *testing.T) {
 		t.Fatalf("deploying the image it just built: got %d, want 200 (%s)",
 			dep.Code, dep.Body.String())
 	}
-	if roll.deploys != 1 {
-		t.Fatalf("the deploy did not reach the rollout (%d deploys)", roll.deploys)
+	if roll.Deploys() != 1 {
+		t.Fatalf("the deploy did not reach the rollout (%d deploys)", roll.Deploys())
 	}
 	if mac := postJSON(t, h, "/v1/machines", "pilot_org1_deploy",
 		`{"vcpus":1,"mem_mib":512,"image":"`+image+`"}`); mac.Code != http.StatusCreated {
@@ -547,8 +559,8 @@ func TestAScopedKeyDeploysTheImageItBuilt(t *testing.T) {
 		t.Errorf("deploying another org's image: got %d (%s), want 404 build not found",
 			foreign.Code, foreign.Body.String())
 	}
-	if roll.deploys != 1 {
-		t.Errorf("a foreign image reached the rollout (%d deploys)", roll.deploys)
+	if roll.Deploys() != 1 {
+		t.Errorf("a foreign image reached the rollout (%d deploys)", roll.Deploys())
 	}
 	if boot := postJSON(t, h, "/v1/machines", "pilot_org2_deploy",
 		`{"vcpus":1,"mem_mib":512,"image":"`+image+`"}`); boot.Code != http.StatusNotFound {
@@ -764,9 +776,11 @@ func TestASecondOwnerWriteNeverFailsABuildThatSucceeded(t *testing.T) {
 	}
 }
 
-func (x *readingBuilder) RecordRefusal(string, BuildLogLine) {}
+func (x *readingBuilder) RecordRefusal(string, BuildLogLine)             {}
+func (x *readingBuilder) BumpEpoch(context.Context, string) (int, error) { return 1, nil }
 
-func (x *blockingBuilder) RecordRefusal(string, BuildLogLine) {}
+func (x *blockingBuilder) RecordRefusal(string, BuildLogLine)             {}
+func (x *blockingBuilder) BumpEpoch(context.Context, string) (int, error) { return 1, nil }
 
 // fakeStager stands in for the fetch and plan internal/github does, so the
 // route's branch can be tested with no App, no network and no repository.

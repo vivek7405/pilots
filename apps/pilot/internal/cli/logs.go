@@ -11,7 +11,10 @@ import (
 )
 
 func newLogsCmd(env *Env) *cobra.Command {
-	var follow bool
+	var (
+		follow bool
+		tail   int
+	)
 	c := &cobra.Command{
 		Use:   "logs <service>",
 		Short: "every replica's logs, each line prefixed with the replica name",
@@ -57,7 +60,7 @@ func newLogsCmd(env *Env) *cobra.Command {
 
 			if !follow {
 				for _, r := range replicas {
-					text, err := client.Machines.Logs(c.Context(), r.ID)
+					text, err := client.Machines.LogsTail(c.Context(), r.ID, tail)
 					if err != nil {
 						return err
 					}
@@ -99,6 +102,9 @@ func newLogsCmd(env *Env) *cobra.Command {
 		},
 	}
 	c.Flags().BoolVarP(&follow, "follow", "f", false, "keep streaming until interrupted")
+	// The last N lines. What somebody wants nine times out of ten on a machine
+	// that has been up for a week: the end, not the boot.
+	c.Flags().IntVarP(&tail, "tail", "n", 0, "only the last N lines")
 	Describe(c, Doc{
 		When: "When a deploy's replica failed its health gate, or a service is\n" +
 			"answering 5xx: the replicas' consoles say why. For one machine on its\n" +

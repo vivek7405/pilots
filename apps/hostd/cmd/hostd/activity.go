@@ -98,6 +98,7 @@ type machineToucher interface {
 func runActivity(ctx context.Context, view fleetView, loc *mesh.Locator,
 	toucher machineToucher, guest *guestLoad) {
 
+	live := metrics.NewLoop("activity", 3*wakeInterval)
 	tick := time.NewTicker(wakeInterval)
 	defer tick.Stop()
 
@@ -131,6 +132,9 @@ func runActivity(ctx context.Context, view fleetView, loc *mesh.Locator,
 			sessions.failed("could not list open guest-to-guest sessions; "+
 				"treating every local replica as busy until this recovers", err)
 			guest.unreadable()
+			// A deliberate, complete pass: the signal is missing and the
+			// autoscaler has been told so. The loop is alive, so it ticks.
+			live.Tick()
 			continue
 		}
 		sessions.recovered()
@@ -144,6 +148,7 @@ func runActivity(ctx context.Context, view fleetView, loc *mesh.Locator,
 			}
 		}
 		guest.set(netns.HeldBy(flows, running))
+		live.Tick()
 	}
 }
 

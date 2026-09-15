@@ -51,11 +51,18 @@ func TestEnvIsDeliveredFromTheCreatePathAndNowhereElse(t *testing.T) {
 		},
 		{
 			callee: "bootMachine",
-			want:   []string{"Redeploy", "startNewMachine"},
+			want:   []string{"Redeploy", "RescueOnVolume", "startNewMachine"},
 			why: "the same back door, by the other create path -- and from a " +
 				"redeploy, which is a create of the process: the old one was " +
 				"killed, the new one starts from another image and has to be " +
-				"handed its environment exactly as a first boot is",
+				"handed its environment exactly as a first boot is. NOT a " +
+				"resize: bootMachine boots a fresh copy of the image, and a " +
+				"resize that took it discarded every write the machine had made. " +
+				"A resize boots its own disk through bootFromDisk instead. A " +
+				"RESCUE onto a volume is the same shape again, and the most " +
+				"clearly so: the old process went with its host, there is no " +
+				"memory image because a volume machine never has one, and the " +
+				"new process is a first boot in every sense that matters here",
 		},
 		{
 			// The dispatcher is the choke point both paths go through, so the
@@ -126,12 +133,12 @@ func callersOf(t *testing.T, name string) []string {
 // is a path that burns a slot per wake -- #64 arriving again, with the name of
 // whoever added it.
 //
-// captureTemplateMemory is the sanctioned exception: the throwaway machine a
+// captureTemplate is the sanctioned exception: the throwaway machine a
 // golden template is photographed from has no row, so it has no reservation to
 // reuse, and it returns its index on the way out.
 func TestEveryBringUpGetsItsSlotThroughTakeSlot(t *testing.T) {
 	got := callersOf(t, "Take")
-	want := []string{"captureTemplateMemory", "takeSlot"}
+	want := []string{"captureTemplate", "takeSlot"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Errorf("pool.Take is called from %v, want exactly %v: a bring-up that "+
 			"takes its own index cannot consume the reservation a suspended "+
@@ -244,18 +251,23 @@ func TestNoRestoreSkipsTheVendorCheck(t *testing.T) {
 		},
 		{
 			callee: "bringUp",
-			want:   []string{"Rescue", "Wake"},
-			why: "these are the two paths that bring a suspended machine back " +
+			want:   []string{"Rescue", "Take", "Wake"},
+			why: "these are the paths that bring a suspended machine back " +
 				"locally; anything else reaching them is a bring-up outside the " +
-				"lock and the ledger hooks both of these own",
+				"lock and the ledger hooks these own. TAKE is the planned twin " +
+				"of Rescue: the same restore, authorised by an offer from a LIVE " +
+				"host rather than by the old owner being dead, and it holds the " +
+				"same lock and opens the same ledger interval",
 		},
 		{
 			callee: "bootFromDisk",
-			want:   []string{"bringUp", "bringUp", "restoreFromCheckpoint"},
+			want:   []string{"Resize", "bringUp", "bringUp", "restoreFromCheckpoint"},
 			why: "the cold-boot path is entered from the vendor decision, from " +
-				"a row that has a disk and no memory image at all, and from a " +
-				"rollback whose CHECKPOINT is foreign, and from nowhere else -- " +
-				"a caller that reached it directly would discard a resumable " +
+				"a row that has a disk and no memory image at all, from a " +
+				"rollback whose CHECKPOINT is foreign, and from a RESIZE, whose " +
+				"memory image describes a machine of another size and can never " +
+				"be loaded -- and from nowhere else. " +
+				"A caller that reached it otherwise would discard a resumable " +
 				"memory image for no reason. Both bringUp entries are the same " +
 				"decision: bringUp is the ONE place a memory image is weighed " +
 				"against the disk beside it",

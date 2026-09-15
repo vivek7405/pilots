@@ -175,11 +175,18 @@ func (m *Manager) bootFromDisk(ctx context.Context, row *state.Machine,
 		cfg.InitPath = build.AgentPathInImage
 	}
 
-	fcm, err := fc.BootFromDisk(ctx, fc.InstantConfig{
+	boot := fc.InstantConfig{
 		Config:   cfg,
 		Backends: backends,
 		Env:      m.opts.HandlerEnv,
-	}, m.opts.BlockStore, m.opts.NBDDevices)
+	}
+	boot.ChunksSock = m.chunks.start(row.ID, boot.StateDir,
+		m.opts.BlockStore, allowedBuilds(boot))
+
+	fcm, err := fc.BootFromDisk(ctx, boot, m.opts.BlockStore, m.opts.NBDDevices)
+	if fcm != nil {
+		m.joinHandlersToCgroup(fcm)
+	}
 	if err != nil {
 		_ = netns.Teardown(slot)
 		m.pool.Return(slot.Idx)

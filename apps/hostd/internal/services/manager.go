@@ -38,10 +38,24 @@ type MachineManager interface {
 	// fleet-wide.
 	Touch(ctx context.Context, id string)
 	Exec(ctx context.Context, machineID string, req api.ExecRequest) (*api.ExecResponse, error)
+	// CreateVolume makes one, for a service whose engine replicates between
+	// its own ordinals and therefore needs a volume per ordinal.
+	CreateVolume(ctx context.Context, req api.CreateVolumeRequest) (*state.Volume, error)
+	DeleteVolume(ctx context.Context, id string) error
 	Checkpoint(ctx context.Context, machineID, comment string) (*state.Checkpoint, error)
+	// AwaitCheckpointDurable waits for a checkpoint's upload, which Checkpoint
+	// does not: it returns once the artifacts are staged.
+	AwaitCheckpointDurable(ctx context.Context, machineID, checkpointID string) error
 	// AppAddr is where this host can reach the machine's application port,
 	// empty if it holds no slot for it.
 	AppAddr(machineID string) (string, bool)
+	// CheckpointSnapKey is where a checkpoint's Firecracker vmstate lives.
+	//
+	// A pure function of the two ids, exposed rather than duplicated: the
+	// layout belongs to the machines package, and a second spelling of an
+	// object key is a second thing to keep in step with the first. Reached
+	// through the interface because services does not import machines.
+	CheckpointSnapKey(machineID, checkpointID string) string
 	// ResetAgentToken puts the guest's credential back to the placeholder the
 	// golden template ships, so a machine restored from this one's snapshot
 	// can install its own the same way a template restore does.
@@ -60,6 +74,13 @@ type Options struct {
 	// image only when the pools match, and boots from the rootfs when they do
 	// not -- the documented slow path, not an error.
 	Vendor string
+	// Ready reports whether this host's replica has caught up with the fleet.
+	// Nil means always ready. The autoscaler is arbitrated by a hash over the
+	// live host list, so a host with a partial view computes a different
+	// arbiter than the fleet does and acts on services that are not its to act
+	// on. Rollouts are not gated: they are driven by a request, which carries
+	// its own authority.
+	Ready func() bool
 }
 
 // PeerCaller performs a lifecycle call against a machine held by another host.
@@ -73,6 +94,12 @@ type PeerCaller interface {
 	Post(ctx context.Context, hostID, path string) error
 	// PostJSON is Post with a body, for a call that names an image.
 	PostJSON(ctx context.Context, hostID, path string, body any) error
+	// PostJSONReply is PostJSON that decodes the far side's answer.
+	//
+	// Needed because an ordinal is PLACED: the rollout creates its volume and
+	// its replica on the host the placement names, and it cannot wait on, gate
+	// or redeploy either of them without the id the far side assigned.
+	PostJSONReply(ctx context.Context, hostID, path string, body, out any) error
 }
 
 type Manager struct {
@@ -163,7 +190,15 @@ func (m *Manager) Deploy(ctx context.Context, serviceID, rootfsBuildID string,
 		return nil, err
 	}
 	if vol != "" {
-		if err := m.rollOutOnVolume(ctx, svc, rel, health, knobs, vol); err != nil {
+		// An engine that replicates between its OWN ordinals takes the
+		// per-ordinal path: one volume each, ordinal 1 gated before the rest
+		// so followers find a leader to copy from. Every other volume-backed
+		// service takes the single path below, unchanged.
+		if engine := m.engineOf(ctx, svc.ID); replicatesItsOwnOrdinals(engine) && svc.Replicas > 1 {
+			if err := m.rollOutOnVolumes(ctx, svc, rel, health, knobs, svc.Replicas); err != nil {
+				return nil, err
+			}
+		} else if err := m.rollOutOnVolume(ctx, svc, rel, health, knobs, vol); err != nil {
 			return nil, err
 		}
 		if err := m.opts.Store.CASServiceRelease(ctx, svc.ID, svc.ReleaseID, rel.ID); err != nil {
@@ -199,7 +234,7 @@ func (m *Manager) Deploy(ctx context.Context, serviceID, rootfsBuildID string,
 	// turn a five-second rollback into a rebuild. They are pruned on the NEXT
 	// successful deploy, which is also what bounds how many accumulate.
 	for _, mach := range previous {
-		if err := m.opts.Machines.Suspend(ctx, mach.ID); err != nil {
+		if err := m.suspendOwned(ctx, mach); err != nil {
 			slog.Warn("could not suspend a superseded replica",
 				"machine", mach.ID, "service", svc.ID, "err", err)
 		}
@@ -251,8 +286,15 @@ func (m *Manager) rollOut(ctx context.Context, svc *state.Service, rel *state.Re
 	// budgeted. Best effort by design: a release that cannot be snapshotted
 	// still deploys, it just deploys the slow way.
 	if err := m.snapshotRelease(ctx, first.ID, rel); err != nil {
-		slog.Warn("release has no memory image; its replicas will boot rather than restore",
-			"service", svc.ID, "release", rel.ID, "err", err)
+		// Deliberately not "this release has no memory image". It might have
+		// one: snapshotRelease also records the CPU pool and the vmstate, and
+		// a failure in either of those leaves a perfectly good build pair
+		// behind. Saying the image is missing when the bookkeeping failed sent
+		// everyone looking at the checkpoint, which was fine, and hid a writer
+		// check that was refusing every release the fleet cut.
+		slog.Warn("a release was not fully photographed; some of its replicas may "+
+			"boot rather than restore, and its CPU pool may be unrecorded",
+			"service", svc.ID, "release", rel.ID, "mem_build", rel.MemBuildID, "err", err)
 	}
 
 	rel.Healthy = true
@@ -397,6 +439,16 @@ func (m *Manager) redeploy(ctx context.Context, mach *state.Machine, rel *state.
 // slow path.
 func (m *Manager) createReplica(ctx context.Context, svc *state.Service,
 	rel *state.Release, knobs json.RawMessage, volumeID string) (*state.Machine, error) {
+	return m.createReplicaOn(ctx, svc, rel, knobs, volumeID, "")
+}
+
+// createReplicaOn is createReplica with a placement.
+//
+// hostID empty, or this host, creates here exactly as before. Anything else is
+// the ordinal path: the replica has to exist on the host the placement named,
+// because the volume it mounts is there and a volume has one writer.
+func (m *Manager) createReplicaOn(ctx context.Context, svc *state.Service,
+	rel *state.Release, knobs json.RawMessage, volumeID, hostID string) (*state.Machine, error) {
 
 	// Whether this replica restores the release's memory image or boots its
 	// rootfs is decided HERE, not by the caller, because two of the three
@@ -407,6 +459,32 @@ func (m *Manager) createReplica(ctx context.Context, svc *state.Service,
 	// added to a snapshot being restored, and Create restores whenever it sees
 	// a mem build regardless of the volume.
 	restore := rel.MemBuildID != "" && volumeID == ""
+
+	// How big this replica is comes from the service, so every replica of one
+	// service is the same size and a replica created later -- by the
+	// autoscaler, by self-heal, by a rollout -- is the size the service was
+	// last scaled to rather than the size it was first created at.
+	size, err := m.sizeOf(ctx, svc.ID)
+	if err != nil {
+		return nil, err
+	}
+	vcpus, memMiB := size.Size()
+
+	// A memory image is photographed at one size and Firecracker will not load
+	// it into a machine of another. So a release snapshotted BEFORE the last
+	// resize cannot be restored at the new size, however willing this host is.
+	// Booting from the rootfs is the documented slow path, and it is the only
+	// correct answer: restoring anyway fails deep inside Firecracker as a
+	// corrupt snapshot, naming nothing about the size.
+	if restore && !size.ImageMatchesSize() {
+		slog.Info("this release's memory image was photographed at another size; "+
+			"this replica boots from its rootfs",
+			"service", svc.ID, "release", rel.ID,
+			"image_vcpus", size.ImageVCPUs, "image_mem_mib", size.ImageMemMiB,
+			"vcpus", vcpus, "mem_mib", memMiB)
+		restore = false
+	}
+
 	if restore {
 		cpu, err := m.opts.Store.GetMachineCPU(ctx, rel.ID)
 		switch {
@@ -434,6 +512,36 @@ func (m *Manager) createReplica(ctx context.Context, svc *state.Service,
 			restore = false
 		}
 	}
+
+	// The vmstate key, the third artifact a restore needs and the one the
+	// release's build ids cannot name.
+	var snapKey string
+	if restore {
+		snap, err := m.opts.Store.GetReleaseSnapshot(ctx, rel.ID)
+		switch {
+		case errors.Is(err, state.ErrNotFound):
+			// A release photographed before this row existed. Its vmstate
+			// object is still in the bucket, but nothing records the machine
+			// and checkpoint its key is built from, so it cannot be named --
+			// and a restore that cannot name its vmstate does not half-work,
+			// it fails on an empty object key. Boot from the rootfs, the same
+			// documented slow path a foreign vendor or a changed size takes.
+			slog.Info("a release does not record where its vmstate is; "+
+				"this replica boots from its rootfs",
+				"service", svc.ID, "release", rel.ID)
+			restore = false
+		case err != nil:
+			// Refused rather than guessed, for the reason the vendor read
+			// above gives: booting instead would silently turn every replica's
+			// sub-second restore into a cold boot for as long as the store is
+			// unwell, and nothing would say why.
+			return nil, fmt.Errorf("services: could not read where release %s keeps its "+
+				"vmstate, so whether it can be restored is unknown: %w", rel.ID, err)
+		default:
+			snapKey = m.opts.Machines.CheckpointSnapKey(snap.MachineID, snap.CheckpointID)
+		}
+	}
+
 	req := api.CreateMachineRequest{
 		App:    svc.App,
 		Image:  rel.RootfsBuildID,
@@ -445,18 +553,49 @@ func (m *Manager) createReplica(ctx context.Context, svc *state.Service,
 		Knobs:   knobs,
 		Service: svc.ID,
 		Release: rel.ID,
+		VCPUs:   vcpus,
+		MemMiB:  memMiB,
 	}
 	if restore {
 		// The build pair from the release, not the rootfs alone.
 		req.Image = ""
 		req.MemBuildID = rel.MemBuildID
 		req.RootfsBuildID = rel.RootfsBuildID
+		req.MemSnapKey = snapKey
 	}
-	return m.opts.Machines.Create(ctx, req)
+	if hostID == "" || hostID == m.opts.HostID {
+		return m.opts.Machines.Create(ctx, req)
+	}
+	// A restore does not travel. MemSnapKey and ImageToken are `json:"-"`, so
+	// a placed restore would reach the far side with no vmstate key and be
+	// refused by createFromRelease as a 500 nobody can act on. Only a boot is
+	// placed today (the per-ordinal path, which always carries a volume); say
+	// so here rather than let the next caller find it.
+	if restore {
+		return nil, fmt.Errorf("services: a replica that restores %s cannot be placed on %s: "+
+			"the vmstate key does not travel; only a boot may be placed", rel.ID, hostID)
+	}
+	// Placed elsewhere. The far side runs the same handler a client's create
+	// reaches, so nothing about the machine differs except which host holds
+	// it -- and it answers with the row, which is the id every later step of
+	// this rollout needs.
+	if m.opts.Peers == nil {
+		return nil, fmt.Errorf("services: %s belongs on %s and this host cannot reach it",
+			svc.ID, hostID)
+	}
+	var out state.Machine
+	if err := m.opts.Peers.PostJSONReply(ctx, hostID, "/v1/machines", req, &out); err != nil {
+		return nil, fmt.Errorf("services: creating a replica of %s on %s: %w", svc.ID, hostID, err)
+	}
+	if out.ID == "" {
+		return nil, fmt.Errorf("services: %s created a replica of %s but named no machine",
+			hostID, svc.ID)
+	}
+	return &out, nil
 }
 
 // snapshotRelease freezes a proved replica into the release's build pair.
-func (m *Manager) snapshotRelease(ctx context.Context, machineID string, rel *state.Release) error {
+func (m *Manager) snapshotRelease(ctx context.Context, machineID string, rel *state.Release) (err error) {
 	// Put the guest's credential back to the placeholder FIRST. Every replica
 	// restored from this image installs its own token by authenticating as the
 	// placeholder -- exactly how a golden-template restore does it -- and a
@@ -472,18 +611,72 @@ func (m *Manager) snapshotRelease(ctx context.Context, machineID string, rel *st
 	if ck.MemBuildID == "" {
 		return errors.New("checkpoint produced no memory build")
 	}
-	rel.MemBuildID = ck.MemBuildID
-	if ck.RootfsBuildID != "" {
-		rel.RootfsBuildID = ck.RootfsBuildID
+	// Uploaded before anything can name it. Every later replica of this release
+	// restores from object storage, on this host or another, and Checkpoint
+	// returns while the upload is still running: replica two of a deploy
+	// failed on the release checkpoint's snap.bin not being there yet.
+	if err := m.opts.Machines.AwaitCheckpointDurable(ctx, machineID, ck.ID); err != nil {
+		return err
+	}
+	// The vmstate, which the two build ids below cannot name.
+	//
+	// A restore needs the memory image, the disk AND the device state plus
+	// vcpu registers. That third artifact is keyed by the machine and
+	// checkpoint it came from, so a replica holding only the build ids has no
+	// way to ask for it -- which is why every restore from a release used to
+	// fetch an empty key and fail inside the AWS SDK.
+	//
+	// Before the caller writes the release row: a release row naming a memory
+	// image whose vmstate is unrecorded is a release every replica tries to
+	// restore from and cannot. Failing here leaves no release at all, and the
+	// deploy says why.
+	//
+	// REPLACED when the release already has one. A resize and a rollback both
+	// roll out a release that was photographed before, and photograph it
+	// again. The row is write-once so nothing can quietly point a release at
+	// another capture's registers -- but this IS the release's single writer
+	// replacing its own capture, and refusing it was worse than what the rule
+	// guards against: the insert failed, the caller only warned, and the
+	// release row went on to name the NEW memory image while this row still
+	// named the OLD checkpoint's vmstate, so every later replica restored one
+	// capture's memory into another's device state.
+	if _, err := m.opts.Store.GetReleaseSnapshot(ctx, rel.ID); err == nil {
+		if err := m.opts.Store.DeleteReleaseSnapshot(ctx, rel.ID); err != nil {
+			return fmt.Errorf("replace the release's previous vmstate: %w", err)
+		}
+		// From here the release's old memory image has no vmstate either, so
+		// a failure below must not leave rel naming it: its replicas boot
+		// rather than restore, which is slow and correct.
+		defer func() {
+			if err != nil {
+				rel.MemBuildID = ""
+			}
+		}()
+	} else if !errors.Is(err, state.ErrNotFound) {
+		return fmt.Errorf("read the release's previous vmstate: %w", err)
+	}
+	if err = m.opts.Store.PutReleaseSnapshot(ctx, &state.ReleaseSnapshot{
+		ID: rel.ID, ServiceID: rel.ServiceID, MachineID: machineID,
+		CheckpointID: ck.ID, CreatedAt: time.Now().Unix(),
+	}); err != nil {
+		return fmt.Errorf("record the release's vmstate: %w", err)
 	}
 	// Record which pool photographed it, before the caller writes the release
 	// row that names the build. A replica created on the other vendor reads
 	// this and boots from the rootfs rather than failing at snapshot load.
-	if err := m.opts.Store.PutMachineCPU(ctx, &state.MachineCPU{
+	if err = m.opts.Store.PutMachineCPU(ctx, &state.MachineCPU{
 		ID: rel.ID, Kind: state.KindRelease, Vendor: m.opts.Vendor,
 		UpdatedAt: time.Now().Unix(),
-	}); err != nil {
+	}, state.WithService(rel.ServiceID)); err != nil {
 		return fmt.Errorf("record the release's cpu vendor: %w", err)
+	}
+	// The build ids LAST, once everything that describes them is recorded. The
+	// caller writes rel whether or not this returned an error, so assigning
+	// them first let a failed recording publish a memory image with no vmstate
+	// to go with it.
+	rel.MemBuildID = ck.MemBuildID
+	if ck.RootfsBuildID != "" {
+		rel.RootfsBuildID = ck.RootfsBuildID
 	}
 	return nil
 }
@@ -561,7 +754,7 @@ func (m *Manager) Rollback(ctx context.Context, serviceID string) (*state.Releas
 		}
 	} else {
 		for _, mach := range machines {
-			if err := m.opts.Machines.Wake(ctx, mach.ID); err != nil {
+			if err := m.wakeOwned(ctx, mach); err != nil {
 				return nil, fmt.Errorf("services: waking %s: %w", mach.ID, err)
 			}
 		}
@@ -585,7 +778,7 @@ func (m *Manager) Rollback(ctx context.Context, serviceID string) (*state.Releas
 			"superseded replicas to stop them: %w", target.ID, err)
 	}
 	for _, mach := range superseded {
-		if err := m.opts.Machines.Suspend(ctx, mach.ID); err != nil {
+		if err := m.suspendOwned(ctx, mach); err != nil {
 			slog.Warn("could not suspend a superseded replica after rollback",
 				"machine", mach.ID, "service", serviceID, "err", err)
 		}
@@ -716,6 +909,33 @@ func (m *Manager) replicaKnobs(ctx context.Context, svc *state.Service,
 }
 
 // remote asks another host to suspend or wake one of its machines.
+// wakeOwned and suspendOwned run a lifecycle verb on whichever host holds the
+// machine.
+//
+// Only the OWNER may run one. The manager refuses a machine this host does not
+// hold, and the service arbiter is hash(id) mod live_hosts, which moves as
+// hosts come and go -- while a drain or a self-heal moves replicas
+// independently. So the host running a rollout is routinely not the host
+// holding its replicas, and calling the local manager there fails the whole
+// operation with a 409.
+//
+// autoscale.go had this right and said why; the rollout and rollback paths
+// called the local manager directly. Rollback in particular hard-failed: one
+// replica on another host and the release never flipped.
+func (m *Manager) wakeOwned(ctx context.Context, mach state.Machine) error {
+	if mach.HostID != "" && mach.HostID != m.opts.HostID {
+		return m.remote(ctx, mach.HostID, mach.ID, "wake")
+	}
+	return m.opts.Machines.Wake(ctx, mach.ID)
+}
+
+func (m *Manager) suspendOwned(ctx context.Context, mach state.Machine) error {
+	if mach.HostID != "" && mach.HostID != m.opts.HostID {
+		return m.remote(ctx, mach.HostID, mach.ID, "suspend")
+	}
+	return m.opts.Machines.Suspend(ctx, mach.ID)
+}
+
 func (m *Manager) remote(ctx context.Context, hostID, machineID, action string) error {
 	if m.opts.Peers == nil {
 		return fmt.Errorf("services: %s is held by %s and this host cannot reach it",

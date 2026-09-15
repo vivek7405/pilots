@@ -1,0 +1,541 @@
+/**
+ * Running one query against one database, through a tunnel.
+ *
+ * # Read-only by default, and what that actually means
+ *
+ * A data browser that can drop a table by accident is worse than no data
+ * browser, so every engine here is put into the strongest read-only mode it
+ * offers before the query runs, and lifting it is a separate deliberate act
+ * with its own confirmation in the UI.
+ *
+ * The enforcement is the ENGINE's, never a regular expression over the query
+ * text. A statement filter is the wrong shape: it is a denylist, it has to
+ * understand comments, dollar quoting and multi-statement bodies, and the first
+ * thing it misses is the one that drops the table. Postgres and MySQL both have
+ * a real read-only transaction; Redis and Mongo have no such mode, so those two
+ * are an allowlist of read COMMANDS, which is a closed set rather than an open
+ * grammar.
+ *
+ * # Why the drivers and not the engine's own client over exec
+ *
+ * Typed values and paging. `psql --csv` through exec would work and would have
+ * added no dependency, but everything comes back as text: a NULL and the string
+ * "NULL" are the same four characters, a bigint loses precision on the way
+ * through, and paging becomes string surgery. A data browser that cannot tell
+ * those apart is one that shows the wrong thing confidently.
+ */
+
+import type { Tunnel } from '#modules/data/tunnel.server.ts';
+
+/** The engines a recipe exists for, which is exactly what this supports. */
+export const ENGINES = ['postgres', 'mysql', 'redis', 'mongo'] as const;
+export type Engine = (typeof ENGINES)[number];
+
+export function isEngine(value: unknown): value is Engine {
+  return (ENGINES as readonly string[]).includes(String(value));
+}
+
+/** Where each engine listens inside its machine. */
+export const ENGINE_PORT: Record<Engine, number> = {
+  postgres: 5432,
+  mysql: 3306,
+  redis: 6379,
+  mongo: 27017,
+};
+
+export interface QueryRequest {
+  engine: Engine;
+  tunnel: Tunnel;
+  /** The connection string `pilot add` generated, with the host rewritten. */
+  url: string;
+  query: string;
+  /** The collection or key space a Mongo query runs in. */
+  target?: string;
+  /** Lifts the read-only mode. The caller has already confirmed. */
+  write?: boolean;
+  limit?: number;
+}
+
+export interface QueryResult {
+  columns: string[];
+  rows: unknown[][];
+  /** How many rows a write touched, when the engine reports it. */
+  affected?: number;
+  /** True when the engine refused to go further than `limit`. */
+  truncated?: boolean;
+  /** Set when the query ran with the read-only mode lifted. */
+  wrote?: boolean;
+}
+
+const DEFAULT_LIMIT = 200;
+
+/**
+ * Rewrites a stored connection string to point at the tunnel.
+ *
+ * The credentials, database name and options are the ones `pilot add`
+ * generated. Only the authority moves, because everything else in that string
+ * is part of what makes the connection work and rebuilding it here would be a
+ * second place the format is written down.
+ */
+export function throughTunnel(url: string, tunnel: Tunnel): string {
+  const parsed = new URL(url);
+  parsed.hostname = tunnel.host;
+  parsed.port = String(tunnel.port);
+  return parsed.toString();
+}
+
+export async function runQuery(req: QueryRequest): Promise<QueryResult> {
+  const limit = req.limit && req.limit > 0 ? Math.min(req.limit, 1000) : DEFAULT_LIMIT;
+  switch (req.engine) {
+    case 'postgres':
+      return runPostgres(req, limit);
+    case 'mysql':
+      return runMySQL(req, limit);
+    case 'redis':
+      return runRedis(req, limit);
+    case 'mongo':
+      return runMongo(req, limit);
+  }
+}
+
+/** The login a read-only query runs as when the stored credential is privileged. */
+export const PG_READONLY_ROLE = 'pilots_console_ro';
+
+/**
+ * The read-only role's password, derived from the stored connection string.
+ *
+ * Derived rather than stored, so there is no second secret to keep: anyone who
+ * can compute it already holds the superuser credential it is derived from.
+ * Hex, so it is safe to place in ALTER ROLE, which takes no bind parameters.
+ */
+export async function readOnlyRolePassword(url: string): Promise<string> {
+  const { createHash } = await import('node:crypto');
+  return createHash('sha256').update('pilots-console-readonly\0').update(url).digest('hex');
+}
+
+/** The stored connection string with its identity swapped for the read-only role. */
+export function asReadOnlyRole(url: string, password: string): string {
+  const parsed = new URL(url);
+  parsed.username = PG_READONLY_ROLE;
+  parsed.password = password;
+  return parsed.toString();
+}
+
+/**
+ * Whether a session may reach outside the database: a superuser, or a member
+ * of the roles that run server programs or read and write server files.
+ *
+ * A read-only transaction does not stop any of that. `COPY (SELECT 1) TO
+ * PROGRAM '...'` writes nothing to a table, so Postgres runs it inside a READ
+ * ONLY transaction, as the server's OS user -- and `pilot add` generates the
+ * `postgres` superuser, so a `member` denied writes could run a shell command
+ * on the database machine, or delete its data directory.
+ */
+export const PG_PRIVILEGED_SQL = `
+  SELECT r.rolsuper
+      OR (current_setting('server_version_num')::int >= 110000 AND (
+            pg_has_role(current_user, 'pg_execute_server_program', 'MEMBER')
+         OR pg_has_role(current_user, 'pg_read_server_files', 'MEMBER')
+         OR pg_has_role(current_user, 'pg_write_server_files', 'MEMBER'))) AS privileged,
+         current_setting('server_version_num')::int AS version
+    FROM pg_roles r WHERE r.rolname = current_user`;
+
+/**
+ * The connection string a read-only query must use.
+ *
+ * An unprivileged credential is used as it is: the engine's read-only
+ * transaction is then the whole guarantee. A privileged one is NOT, and
+ * switching role inside its session is not enough either -- the session user
+ * stays a superuser, and one statement can `set_config('role', ...)` back
+ * before a function that checks privilege at run time. So the query logs in
+ * as a separate role that is not a superuser and holds only pg_read_all_data,
+ * which no statement can raise. The role is created or corrected here, with
+ * the privileged credential, every time: that also takes back anything
+ * granted to it since.
+ */
+async function readOnlyConnection(url: string): Promise<string> {
+  const { Client } = await import('pg');
+  const admin = new Client({ connectionString: url });
+  await admin.connect();
+  try {
+    const res = await admin.query(PG_PRIVILEGED_SQL);
+    const { privileged, version } = res.rows[0] ?? { privileged: false, version: 0 };
+    if (!privileged) return url;
+    if (version < 140000) {
+      throw new Error(
+        'this database is reached with a superuser, and a read-only query ' +
+          'cannot be kept inside the database before Postgres 14 (no ' +
+          'pg_read_all_data role). Turn on writes to run it, or store a ' +
+          'credential that is not a superuser.',
+      );
+    }
+    const password = await readOnlyRolePassword(url);
+    const role = PG_READONLY_ROLE;
+    await admin.query(`DO $$ BEGIN
+      IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${role}') THEN
+        CREATE ROLE ${role} LOGIN;
+      END IF; END $$`);
+    await admin.query(
+      `ALTER ROLE ${role} WITH LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE ` +
+        `NOREPLICATION NOBYPASSRLS PASSWORD '${password}'`,
+    );
+    await admin.query(`GRANT pg_read_all_data TO ${role}`);
+    await admin.query(
+      `REVOKE pg_execute_server_program, pg_read_server_files, ` +
+        `pg_write_server_files, pg_write_all_data FROM ${role}`,
+    );
+    return asReadOnlyRole(url, password);
+  } finally {
+    await admin.end();
+  }
+}
+
+async function runPostgres(req: QueryRequest, limit: number): Promise<QueryResult> {
+  const { Client } = await import('pg');
+  const direct = throughTunnel(req.url, req.tunnel);
+  const client = new Client({
+    connectionString: req.write ? direct : await readOnlyConnection(direct),
+    // SESSION level, not transaction level, and this is the whole of the
+    // read-only guarantee.
+    //
+    // BEGIN READ ONLY on its own was escapable from the query box. The query
+    // carries no parameters, so node-postgres sends it over the SIMPLE query
+    // protocol, which permits several statements in one string -- and a query
+    // beginning `COMMIT;` ends the transaction the guard opened, leaving
+    // everything after it to run in a fresh read-write one. `COMMIT; DROP
+    // TABLE users;` with writes OFF dropped the table, and because a
+    // multi-statement simple query returns an ARRAY of results, the console
+    // reported "No rows." under a banner still reading "Read only. The
+    // database itself refuses a write."
+    //
+    // default_transaction_read_only is set for the connection, so every
+    // transaction on it starts read only however many the caller opens or
+    // closes. A COMMIT cannot clear it; only SET can, and SET is itself a
+    // write the engine refuses under it. MySQL below already used its
+    // session-level form and was never exposed.
+    options: req.write ? undefined : '-c default_transaction_read_only=on',
+  });
+  await client.connect();
+  try {
+    // A transaction either way, so a read is a consistent snapshot and a write
+    // is one unit that either lands or does not. READ ONLY is the engine's own
+    // enforcement: it refuses INSERT, UPDATE, DELETE, every DDL and every
+    // function that writes, which no filter over the query text could match.
+    await client.query(req.write ? 'BEGIN' : 'BEGIN READ ONLY');
+    try {
+      // One statement per query, enforced by the SERVER, which is what closes
+      // the multi-statement hole rather than narrowing it.
+      //
+      // The session GUC above stops `COMMIT; DROP TABLE users;`, because a
+      // COMMIT cannot clear a GUC. It does not stop the same trick with one
+      // more statement in front of it: `SET` is not a write, so it is allowed
+      // inside a read-only transaction, it is session-scoped, and it survives
+      // the COMMIT that follows it. `SET default_transaction_read_only=off;
+      // COMMIT; DROP TABLE users;` therefore walked through the ceiling the
+      // connection was opened with -- and, like the original, through
+      // canWriteData, so a `member` could still drop a production table.
+      //
+      // The root cause is under both of them: with no `values`, node-pg's
+      // requiresPreparation() returns false (node_modules/pg/lib/query.js:54)
+      // and the text goes out on the SIMPLE protocol, which runs every
+      // `;`-separated statement in it. `queryMode: 'extended'` is the one
+      // switch that turns that off: Postgres then refuses the text outright
+      // with "cannot insert multiple commands into a prepared statement".
+      //
+      // Both stay. The GUC is the ceiling a single statement runs under; this
+      // is what stops a second statement existing. Neither is redundant, and
+      // this file's rule holds for both -- the enforcement is the engine's,
+      // never a regular expression over the query text.
+      //
+      // Bound to a name rather than passed as a literal because @types/pg has
+      // not caught up with pg 8.23's `queryMode`; an excess property on a
+      // fresh literal would pick the wrong overload, while the same object
+      // behind a name is simply assignable.
+      const ask = {
+        text: req.query,
+        rowMode: 'array' as const,
+        queryMode: 'extended' as const,
+      };
+      const res = await client.query(ask);
+      await client.query('COMMIT');
+      const fields = res.fields ?? [];
+      const rows = (res.rows as unknown[][]) ?? [];
+      return {
+        columns: fields.map((f: { name: string }) => f.name),
+        rows: rows.slice(0, limit),
+        affected: typeof res.rowCount === 'number' ? res.rowCount : undefined,
+        truncated: rows.length > limit,
+        wrote: req.write === true,
+      };
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {});
+      throw err;
+    }
+  } finally {
+    await client.end();
+  }
+}
+
+async function runMySQL(req: QueryRequest, limit: number): Promise<QueryResult> {
+  const mysql = await import('mysql2/promise');
+  const conn = await mysql.createConnection(throughTunnel(req.url, req.tunnel));
+  try {
+    if (!req.write) {
+      // MySQL's session-level equivalent. The next transaction is read only,
+      // and the engine refuses a write inside it.
+      await conn.query('SET SESSION TRANSACTION READ ONLY');
+    }
+    await conn.beginTransaction();
+    try {
+      const [rows, fields] = await conn.query({ sql: req.query, rowsAsArray: true });
+      await conn.commit();
+      if (Array.isArray(rows)) {
+        const all = rows as unknown[][];
+        return {
+          columns: (fields ?? []).map((f: { name: string }) => f.name),
+          rows: all.slice(0, limit),
+          truncated: all.length > limit,
+          wrote: req.write === true,
+        };
+      }
+      // A write answers with a result header rather than rows.
+      const header = rows as { affectedRows?: number };
+      return {
+        columns: [],
+        rows: [],
+        affected: header.affectedRows,
+        wrote: req.write === true,
+      };
+    } catch (err) {
+      await conn.rollback().catch(() => {});
+      throw err;
+    }
+  } finally {
+    await conn.end();
+  }
+}
+
+/**
+ * Redis commands that only read.
+ *
+ * An ALLOWLIST rather than a denylist of writes, because the set of commands
+ * that can destroy data is open -- it grows with every Redis release and with
+ * every module somebody loads -- while the set worth browsing with is small and
+ * closed. A command not on this list is refused by name, which is a better
+ * error than one that ran.
+ */
+const REDIS_READS = new Set([
+  'get', 'mget', 'strlen', 'exists', 'ttl', 'pttl', 'type', 'randomkey',
+  'keys', 'scan', 'dbsize',
+  'hget', 'hmget', 'hgetall', 'hkeys', 'hvals', 'hlen', 'hexists', 'hscan',
+  'lrange', 'llen', 'lindex',
+  'smembers', 'scard', 'sismember', 'sscan', 'srandmember',
+  'zrange', 'zrevrange', 'zrangebyscore', 'zcard', 'zscore', 'zscan', 'zcount',
+  'getrange', 'bitcount', 'object', 'memory', 'info', 'ping', 'time', 'lastsave',
+]);
+
+async function runRedis(req: QueryRequest, limit: number): Promise<QueryResult> {
+  const parts = splitCommand(req.query);
+  if (parts.length === 0) throw new Error('no command');
+  const name = parts[0]!.toLowerCase();
+  if (!req.write && !REDIS_READS.has(name)) {
+    throw new Error(
+      `${parts[0]} is not a read command. Redis has no read-only mode, so this is an ` +
+        'allowlist; turn on Write to run it.',
+    );
+  }
+
+  const { Redis } = await import('ioredis');
+  const url = new URL(throughTunnel(req.url, req.tunnel));
+  const redis = new Redis({
+    host: url.hostname,
+    port: Number(url.port),
+    password: decodeURIComponent(url.password),
+    // One attempt. A browser query that silently retried against a database
+    // somebody is watching would run twice with nothing saying so.
+    maxRetriesPerRequest: 0,
+    retryStrategy: () => null,
+  });
+  try {
+    const reply = await redis.call(name, ...parts.slice(1));
+    const rows = Array.isArray(reply)
+      ? reply.map((value, i) => [i, stringify(value)])
+      : [[0, stringify(reply)]];
+    return {
+      columns: Array.isArray(reply) ? ['#', 'value'] : ['', 'value'],
+      rows: rows.slice(0, limit),
+      truncated: rows.length > limit,
+      wrote: req.write === true,
+    };
+  } finally {
+    redis.disconnect();
+  }
+}
+
+/**
+ * Mongo operations that only read.
+ *
+ * Same reasoning as Redis: no read-only session mode, so a closed set of
+ * operations rather than an open grammar. `find` and `aggregate` are what a
+ * browser needs; an aggregate carrying a `$out` or `$merge` stage writes, so
+ * those two stages are refused by name.
+ */
+const MONGO_READS = new Set(['find', 'aggregate', 'count', 'distinct', 'listCollections']);
+const MONGO_WRITING_STAGES = new Set(['$out', '$merge']);
+
+/**
+ * The operations this driver can actually perform.
+ *
+ * A SECOND set, and the difference from `MONGO_READS` is the whole point. The
+ * allowlist said what was safe to run; it did not say what the code below
+ * knows how to run, and the two had drifted. `count`, `distinct` and
+ * `listCollections` passed the allowlist and then fell through to the `find`
+ * branch, so a count returned documents and the header said nothing was wrong.
+ * With Write on it was worse: the allowlist was skipped entirely, so an
+ * `insertOne` also ran as a find, answered 200, reported `wrote: true`, and
+ * changed nothing.
+ *
+ * An operation that reaches here and is in neither set is refused by name.
+ */
+const MONGO_IMPLEMENTED = new Set(['find', 'aggregate', 'count', 'distinct', 'listCollections']);
+
+async function runMongo(req: QueryRequest, limit: number): Promise<QueryResult> {
+  const parsed: {
+    op?: string;
+    filter?: unknown;
+    pipeline?: Record<string, unknown>[];
+    field?: string;
+  } = req.query.trim() ? JSON.parse(req.query) : { op: 'find', filter: {} };
+  const op = parsed.op ?? 'find';
+  if (!req.write && !MONGO_READS.has(op)) {
+    throw new Error(
+      `${op} is not a read operation. Mongo has no read-only session, so this is an ` +
+        'allowlist; turn on Write to run it.',
+    );
+  }
+  if (!MONGO_IMPLEMENTED.has(op)) {
+    throw new Error(
+      `${op} is not something this console can run. It understands ` +
+        `${[...MONGO_IMPLEMENTED].join(', ')}; use a Mongo client for anything else.`,
+    );
+  }
+  if (op === 'aggregate') {
+    for (const stage of parsed.pipeline ?? []) {
+      for (const key of Object.keys(stage)) {
+        if (MONGO_WRITING_STAGES.has(key)) {
+          throw new Error(`${key} writes a collection; it is not a read stage`);
+        }
+      }
+    }
+  }
+  // listCollections asks about the database, not about one collection, so it
+  // is the one operation that needs no target.
+  if (!req.target && op !== 'listCollections') throw new Error('name a collection');
+  if (op === 'distinct' && !parsed.field) {
+    throw new Error('distinct needs a field: {"op":"distinct","field":"status"}');
+  }
+
+  const { MongoClient } = await import('mongodb');
+  const client = new MongoClient(throughTunnel(req.url, req.tunnel), {
+    directConnection: true,
+    serverSelectionTimeoutMS: 5000,
+  });
+  try {
+    await client.connect();
+    const db = client.db();
+
+    // The operations whose answer is not a list of documents are rendered
+    // here, each as the one column it actually produces. Folding them into the
+    // document path is what made a count look like a find.
+    if (op === 'count') {
+      const n = await db.collection(req.target as string).countDocuments((parsed.filter ?? {}) as object);
+      return { columns: ['count'], rows: [[String(n)]], truncated: false, wrote: false };
+    }
+    if (op === 'distinct') {
+      const values = await db
+        .collection(req.target as string)
+        .distinct(parsed.field as string, (parsed.filter ?? {}) as object);
+      return {
+        columns: [parsed.field as string],
+        rows: values.slice(0, limit).map((v) => [stringify(v)]),
+        truncated: values.length > limit,
+        wrote: false,
+      };
+    }
+    if (op === 'listCollections') {
+      const names = await db.listCollections().toArray();
+      return {
+        columns: ['name'],
+        rows: names.slice(0, limit).map((c) => [stringify(c.name)]),
+        truncated: names.length > limit,
+        wrote: false,
+      };
+    }
+
+    const collection = db.collection(req.target as string);
+    const docs =
+      op === 'aggregate'
+        ? await collection.aggregate(parsed.pipeline ?? []).limit(limit + 1).toArray()
+        : await collection.find((parsed.filter ?? {}) as object).limit(limit + 1).toArray();
+    // Columns are the union of every key seen, in first-seen order, because a
+    // document store has no schema and taking the first document's keys as the
+    // header silently hides every field the rest of them have.
+    const columns: string[] = [];
+    for (const doc of docs) {
+      for (const key of Object.keys(doc)) if (!columns.includes(key)) columns.push(key);
+    }
+    return {
+      columns,
+      rows: docs.slice(0, limit).map((doc) => columns.map((key) => stringify((doc as Record<string, unknown>)[key]))),
+      truncated: docs.length > limit,
+      wrote: req.write === true,
+    };
+  } finally {
+    await client.close();
+  }
+}
+
+/**
+ * Splits a Redis command line, honouring quotes.
+ *
+ * Needed because a value can contain spaces, and splitting on whitespace alone
+ * turns `SET k "a b"` into a command with three arguments.
+ */
+export function splitCommand(line: string): string[] {
+  const out: string[] = [];
+  let current = '';
+  let quote: string | null = null;
+  let started = false;
+  for (const ch of line.trim()) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      else current += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      started = true;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (current || started) out.push(current);
+      current = '';
+      started = false;
+      continue;
+    }
+    current += ch;
+    started = true;
+  }
+  if (current || started) out.push(current);
+  return out;
+}
+
+/** Renders one cell without losing the difference between null and "null". */
+function stringify(value: unknown): string {
+  if (value === null) return '∅';
+  if (value === undefined) return '';
+  if (typeof value === 'string') return value;
+  if (value instanceof Date) return value.toISOString();
+  if (Buffer.isBuffer(value)) return value.toString('base64');
+  return JSON.stringify(value);
+}

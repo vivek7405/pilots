@@ -9,7 +9,10 @@ package pilots
 // hostd's Go source on every run and fails naming the struct and the tag when
 // the two sides disagree, in either direction.
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"strings"
+)
 
 // Knobs is the per-machine lifecycle policy. A sandbox and a production
 // service are the same machine with different knobs.
@@ -18,7 +21,12 @@ type Knobs struct {
 	AutoStart          bool   `json:"auto_start"`           // wake on an inbound request
 	MinMachinesRunning int    `json:"min_machines_running"` // 0 = scale to zero
 	SoftLimit          int    `json:"soft_limit"`
-	IdleTimeout        int    `json:"idle_timeout"` // seconds of quiet before suspend, 1..3600
+	// HardLimit is the concurrency the machine queues at and then refuses.
+	// soft_limit starts another replica; this one refuses. A request above it
+	// waits briefly for room and is then answered 503 with Retry-After. Zero
+	// is unlimited.
+	HardLimit   int `json:"hard_limit"`
+	IdleTimeout int `json:"idle_timeout"` // seconds of quiet before suspend, 1..3600
 	// Schedules are the machine's cron jobs; null (nil here) means none. On a
 	// deploy an absent key inherits the previous release's and an explicit
 	// empty list clears them, which is why KnobsPatch carries a pointer to a
@@ -66,6 +74,7 @@ type KnobsPatch struct {
 	AutoStart          *bool   `json:"auto_start,omitempty"`           // wake on an inbound request
 	MinMachinesRunning *int    `json:"min_machines_running,omitempty"` // 0 = scale to zero
 	SoftLimit          *int    `json:"soft_limit,omitempty"`
+	HardLimit          *int    `json:"hard_limit,omitempty"`
 	IdleTimeout        *int    `json:"idle_timeout,omitempty"` // seconds of quiet before suspend, 1..3600
 	// A pointer to a slice, not a slice: omitempty drops an empty slice, and
 	// an empty list is the one way to clear inherited schedules on a deploy.
@@ -110,21 +119,72 @@ type Machine struct {
 	Labels map[string]string `json:"labels,omitempty"`
 	// URLAuth is who may reach the URL: "public" (the default) or "org".
 	URLAuth string `json:"url_auth,omitempty"`
+	// Parent is the machine this one was FORKED from, and Checkpoint the
+	// checkpoint it was restored from. Empty on a machine that was created
+	// rather than forked.
+	Parent     string `json:"parent,omitempty"`
+	Checkpoint string `json:"checkpoint,omitempty"`
+	// Egress is the address this machine's OUTBOUND traffic leaves from, when
+	// its host manages egress. Shared with the org's other machines on the
+	// same host, and outliving every one of them.
+	//
+	// Empty means the machine leaves from the host's shared address, which is
+	// what every machine did before egress addresses existed.
+	Egress string `json:"egress,omitempty"`
 }
 
-// CreateMachineRequest creates a machine from exactly one source: a built
-// image, a template, or a checkpoint.
+// EgressResponse is every address an org's outbound traffic can leave from,
+// one per host that manages egress. GET /v1/egress.
+//
+// A set rather than one address, because the address is derived from the
+// HOST's prefix: an org running machines on three hosts leaves from three
+// addresses. It changes when a host joins or leaves the fleet and at no other
+// time -- not when the org's machines are created, destroyed, resized, rolled
+// or moved -- which is what makes it safe to put in somebody else's firewall.
+type EgressResponse struct {
+	OrgID     string          `json:"org_id"`
+	Addresses []EgressAddress `json:"addresses"`
+}
+
+// EgressAddress is one host's answer. There is no IPv4 counterpart and there
+// will not be one: a v4 address is purchased and scarce, and a bare-metal host
+// has one, so v4 stays a shared masquerade.
+type EgressAddress struct {
+	HostID    string `json:"host_id"`
+	IPv6      string `json:"ipv6"`
+	Interface string `json:"interface,omitempty"`
+}
+
 // URL auth modes.
 const (
 	URLAuthPublic = "public"
 	URLAuthOrg    = "org"
 )
 
+// Size is how big a machine is: the two dimensions that are priced, named
+// together wherever a service carries a size rather than a single machine.
+//
+// Zero on a dimension means "leave it as it is" on a request, and means the
+// default on a reply -- never a machine with no memory.
+type Size struct {
+	VCPUs  int `json:"vcpus"`
+	MemMiB int `json:"mem_mib"`
+}
+
+// ResizeMachineRequest is POST /v1/machines/{id}/resize. Either field may be
+// omitted to leave that dimension alone.
+type ResizeMachineRequest struct {
+	VCPUs  int `json:"vcpus,omitempty"`
+	MemMiB int `json:"mem_mib,omitempty"`
+}
+
 // UpdateMachineRequest is PATCH /v1/machines/{id}: who may reach the URL.
 type UpdateMachineRequest struct {
 	URLAuth *string `json:"url_auth,omitempty"`
 }
 
+// CreateMachineRequest creates a machine from exactly one source: a built
+// image, a template, or a checkpoint.
 type CreateMachineRequest struct {
 	Name       string `json:"name,omitempty"` // generated when empty
 	Image      string `json:"image,omitempty"`
@@ -151,6 +211,28 @@ type CreateMachineRequest struct {
 	SecretEnv map[string]string `json:"secret_env,omitempty"`
 	Labels    map[string]string `json:"labels,omitempty"`
 	URLAuth   string            `json:"url_auth,omitempty"` // public|org; default public
+}
+
+// Process is one of the named processes a machine runs.
+//
+// A machine runs a SET of them: an image's own command is the process "app",
+// and a compose file or a runtime registration can add more. The names are
+// what make it possible to restart a dev server without taking down the
+// database beside it.
+type Process struct {
+	Name string `json:"name"`
+	Cmd  string `json:"cmd"`
+	// State is "running" or "stopped".
+	State string `json:"state"`
+	// PID inside the guest. Zero when the process is stopped.
+	PID int `json:"pid,omitempty"`
+	// Restarts counts how often the supervisor brought it back after an exit
+	// nobody asked for. Climbing steadily is a crash loop.
+	Restarts int `json:"restarts"`
+	// Needs names processes that must start before this one.
+	Needs []string `json:"needs,omitempty"`
+	// Port reports the one process that owns the machine's app port.
+	Port bool `json:"port,omitempty"`
 }
 
 // ExecRequest runs a command inside a machine, buffered.
@@ -244,8 +326,12 @@ type Service struct {
 	// address this service's environment references. Derived by hostd on
 	// every read from both halves of the environment and stored nowhere, so
 	// it reflects what the service is configured to dial right now.
-	DependsOn    []string     `json:"depends_on,omitempty"`
-	Replicas     int          `json:"replicas"`
+	DependsOn []string `json:"depends_on,omitempty"`
+	Replicas  int      `json:"replicas"`
+	// Size is how big each replica is. Always spelled out, even for a service
+	// that has never been scaled, so a reader never has to know what the
+	// defaults were on the day the service was made.
+	Size         Size         `json:"size"`
 	Knobs        Knobs        `json:"knobs"`
 	Health       *HealthCheck `json:"health,omitempty"`
 	URL          string       `json:"url,omitempty"`
@@ -275,6 +361,9 @@ type CreateServiceRequest struct {
 	// belongs. A patch for the same reason every other request's is.
 	Knobs  *KnobsPatch  `json:"knobs,omitempty"`
 	Health *HealthCheck `json:"health,omitempty"`
+	// Size is how big each replica will be. Omitted means the defaults, which
+	// is what every service was before a service had a size.
+	Size *Size `json:"size,omitempty"`
 	// Domain is the subdomain label under the fleet's domain. Empty means one
 	// is minted from the name: the name itself when it is free, else the name
 	// and a four-character suffix. Set it to ask for an exact label, which is
@@ -308,6 +397,13 @@ type DeployRequest struct {
 	// A patch, so raising one field does not zero the three the caller never
 	// mentioned. See KnobsPatch.
 	Knobs *KnobsPatch `json:"knobs,omitempty"`
+	// Size sets how big the replicas this deploy creates are.
+	//
+	// It rides on the deploy rather than being sent as a separate patch
+	// beforehand: a patch carrying a size runs a rollout of its own, so a
+	// compose file that changed both its image and its size would roll the
+	// service twice to arrive where one rollout could have put it.
+	Size *Size `json:"size,omitempty"`
 }
 
 // PromoteRequest turns a sandbox into a durable service. The machine's URL is
@@ -382,6 +478,276 @@ type Host struct {
 	// CPUVendor is which pool this host restores memory images from, the raw
 	// /proc/cpuinfo vendor_id. Empty until the host publishes it.
 	CPUVendor string `json:"cpu_vendor,omitempty"`
+	// MemReclaimableMiB is memory held by RUNNING machines this host would
+	// suspend if it needed the room. Placement counts it as available, so a
+	// host whose free memory looks small can still take a create. Suspended
+	// machines are not counted: their memory is already in mem_free_mib.
+	MemReclaimableMiB int `json:"mem_reclaimable_mib"`
+	// VCPUsRunning is the vCPUs this host's machines are configured with.
+	// Oversubscription is normal, because vCPUs are timeshared, so this is a
+	// load signal rather than a limit.
+	VCPUsRunning int `json:"vcpus_running"`
+	// Draining says an operator is moving this host's machines off it. Every
+	// ranker skips a draining host.
+	Draining bool `json:"draining,omitempty"`
+	// BuildsCached is how many builds this host holds on local disk.
+	BuildsCached int `json:"builds_cached,omitempty"`
+}
+
+// ForkRequest asks for N new machines from one machine's or checkpoint's exact
+// state: the source's processes already running, its memory already warm.
+type ForkRequest struct {
+	// Name is the first fork's name; the rest take a suffix. Empty mints one.
+	Name string `json:"name,omitempty"`
+	// Count is how many, default 1, capped at 100.
+	Count int `json:"count,omitempty"`
+	// Volume forks the source's volume too. A source WITH a volume and this
+	// unset is refused rather than forked without it.
+	Volume bool `json:"volume,omitempty"`
+}
+
+// ForkResponse is one entry per requested fork, in order.
+//
+// Per-fork rather than one status for the request, because forks are
+// independent: nine that came up are worth having when the tenth did not.
+type ForkResponse struct {
+	Forks []ForkEntry `json:"forks"`
+}
+
+// ForkEntry is one fork: the machine, or why it did not happen.
+type ForkEntry struct {
+	Machine *Machine `json:"machine,omitempty"`
+	Error   string   `json:"error,omitempty"`
+}
+
+// SnapshotResponse is one point-in-time copy of a volume.
+//
+// Snapshot is the stamp that names it, `20260912T101500Z`. It sorts lexically
+// in time order, so a list needs no separate ordering field.
+type SnapshotResponse struct {
+	VolumeID string `json:"volume_id"`
+	Snapshot string `json:"snapshot"`
+}
+
+// ComposeRecipe is the compose fragment for one database, with the durability
+// decision made and explained.
+//
+// Fetched rather than built by the client: two copies of a recipe is two places
+// for it to drift from what the planner will accept. The PASSWORD is generated
+// on the client and never crosses the wire -- SecretNames says what to make,
+// and URLTemplate carries PASSWORD where it goes.
+type ComposeRecipe struct {
+	Engine string `json:"engine"`
+	// Mode is "wal-archive" or "durable-volume" for Postgres, and
+	// "durable-volume" for every other engine.
+	Mode string `json:"mode"`
+	// Service is the compose service block, ready to splice into a file.
+	Service map[string]any `json:"service"`
+	// Companions are further compose services the recipe declares, by name.
+	// Splice each one in beside Service. They build from the same context, so
+	// the planner folds them into the database's own machine as extra
+	// processes rather than standing up a second one.
+	Companions map[string]map[string]any `json:"companions,omitempty"`
+	// Volumes are the named volumes it declares.
+	Volumes map[string]struct{} `json:"volumes"`
+	// Files are extra files the fragment needs, by path relative to the
+	// project root. Anything ending .sh is written executable.
+	Files map[string]string `json:"files,omitempty"`
+	// SecretNames are the secrets to generate and store locally.
+	SecretNames []string `json:"secret_names"`
+	// ConnVar is the environment variable an application reads, and
+	// URLTemplate its value with PASSWORD standing in for the secret.
+	ConnVar     string `json:"conn_var"`
+	URLTemplate string `json:"url_template"`
+	// DirectVar and DirectTemplate are the second connection string, past the
+	// pooler, present only when there is a pooler. Transaction pooling is not a
+	// superset of a direct connection -- it costs LISTEN/NOTIFY, session
+	// advisory locks, temporary tables and any SET that outlives a transaction
+	// -- so the address a migration must use is named rather than guessed.
+	DirectVar      string `json:"direct_var,omitempty"`
+	DirectTemplate string `json:"direct_template,omitempty"`
+	// Statement is what this mode costs and guarantees, in one line. Print it:
+	// a durability decision the operator did not read is one they did not make.
+	Statement string `json:"statement"`
+}
+
+// URLFor is the connection string with the generated password in it.
+//
+// The template travels with PASSWORD where the secret goes, so the value is
+// made on the caller's machine and the fleet never sees it.
+func (r *ComposeRecipe) URLFor(password string) string {
+	return strings.Replace(r.URLTemplate, "PASSWORD", password, 1)
+}
+
+// DirectURLFor is the connection string that goes PAST the pooler. Empty when
+// the recipe has no pooler.
+func (r *ComposeRecipe) DirectURLFor(password string) string {
+	if r.DirectTemplate == "" {
+		return ""
+	}
+	return strings.Replace(r.DirectTemplate, "PASSWORD", password, 1)
+}
+
+// VolumePolicy is how often a volume is snapshotted and how much is kept.
+//
+// Two retention numbers rather than one, because they answer different
+// questions: how far back at a day's resolution, and how far back at all.
+//
+// An empty Cron means no schedule. Retention of zero and zero keeps
+// EVERYTHING, never nothing: an unset policy read as "keep none" would delete
+// a volume's whole history the first time the loop ran.
+type VolumePolicy struct {
+	Cron       string `json:"cron,omitempty"`
+	KeepDaily  int    `json:"keep_daily,omitempty"`
+	KeepWeekly int    `json:"keep_weekly,omitempty"`
+}
+
+// ComposeHAFragment is the compose text that turns one Postgres into a Patroni
+// cluster.
+//
+// Returned as data rather than applied, because the thing that edits somebody's
+// compose file is the CLI, on their machine, where they can read the diff before
+// any of it is deployed.
+type ComposeHAFragment struct {
+	// Service replaces the database block's changing half: the replica count,
+	// the role it starts in, and what it now depends on.
+	Service map[string]any `json:"service"`
+	// Etcd is the new service. Its own, because the smallest sensible cluster
+	// is two data nodes and three etcd members, which cannot co-locate -- and
+	// a lost data node must not also shrink the quorum that decides whether to
+	// replace it.
+	EtcdName   string         `json:"etcd_name"`
+	Etcd       map[string]any `json:"etcd"`
+	EtcdVolume string         `json:"etcd_volume"`
+	// SecretNames are the secrets the caller must generate locally. Named
+	// rather than carried, like every other recipe: the value is made on the
+	// caller's machine and never travels.
+	SecretNames []string `json:"secret_names"`
+	// Statement is what the operator is told before any of it happens.
+	Statement string `json:"statement"`
+}
+
+// MachineMetrics is one machine's CPU and memory.
+//
+// Read from the cgroup on the host that owns the machine, so the numbers are
+// the kernel's rather than an estimate. Distinct from the host's own /metrics,
+// which stays unauthenticated and label-free because a label per machine
+// multiplies every series by the machine count.
+type MachineMetrics struct {
+	MachineID string `json:"machine_id"`
+	Name      string `json:"name,omitempty"`
+	ServiceID string `json:"service_id,omitempty"`
+	State     string `json:"state"`
+	VCPUs     int    `json:"vcpus"`
+	MemMiB    int    `json:"mem_mib"`
+	// CPUSeconds is monotonic across suspend and wake. A counter that went down
+	// would make every rate over it negative or enormous, and would fire every
+	// alert built on it whenever a machine was suspended.
+	CPUSeconds float64 `json:"cpu_seconds"`
+	// MemoryBytes is what it holds now. Zero while suspended, which is the
+	// truth rather than a gap.
+	MemoryBytes      int64 `json:"memory_bytes"`
+	MemoryLimitBytes int64 `json:"memory_limit_bytes"`
+	SampledAt        int64 `json:"sampled_at"`
+}
+
+// GrantRequest is what a machine, or every replica of a service, may ask its
+// host's credential broker for. Both fields REPLACE.
+//
+// Replace rather than merge, because merging two partial grants produces a
+// permission nobody wrote: one caller adds a scope, another adds a secret, and
+// the machine ends up holding a union neither reviewed.
+type GrantRequest struct {
+	// Scopes a minted token may carry. Empty means no token at all. A caller
+	// may grant only scopes it already holds, and never admin.
+	Scopes []string `json:"scopes,omitempty"`
+	// Secrets the machine may fetch from its broker. These never enter the
+	// machine's environment, so they are in no snapshot and on no disk in the
+	// guest. Empty means none.
+	Secrets map[string]string `json:"secrets,omitempty"`
+}
+
+// GrantResponse is what is granted, without the values. Reading a grant answers
+// with NAMES: a route that returned granted secrets would be a second reveal
+// route with none of the deliberation the first one has.
+type GrantResponse struct {
+	ID          string   `json:"id"`
+	Kind        string   `json:"kind"`
+	OrgID       string   `json:"org_id,omitempty"`
+	Scopes      []string `json:"scopes"`
+	SecretNames []string `json:"secret_names"`
+	UpdatedAt   int64    `json:"updated_at,omitempty"`
+}
+
+// BrokerClaims is what a machine's own token says about itself.
+//
+// Decodable by a client that wants to know when its token dies or what it is
+// allowed to do, which is the only reason this is here: it is never sent as a
+// request body. The signature is not carried, so nothing in a client can be
+// mistaken for a verifier -- verifying is hostd's, from a secret no client has.
+type BrokerClaims struct {
+	V        int      `json:"v"`
+	Org      string   `json:"org"`
+	Machine  string   `json:"machine"`
+	Service  string   `json:"service,omitempty"`
+	Scopes   []string `json:"scopes"`
+	IssuedAt int64    `json:"iat"`
+	Expires  int64    `json:"exp"`
+}
+
+// ServiceEnvResponse is a service's environment WITH the values in it.
+//
+// Every other surface returns variable names only. This one exists so a
+// password that was written can be recovered rather than kept in a second place
+// that is worse, and calling it is a deliberate act.
+//
+// Env and SecretEnv stay separate because the difference survives the round
+// trip: one was written in the clear and the other was sealed, and a client
+// that merged them could no longer write them back the way they came.
+//
+// Sealed false on a service that has a sealed half means the host could not
+// open it -- no fleet key, or a key that disagrees -- which is a configuration
+// problem, not an empty environment.
+type ServiceEnvResponse struct {
+	ServiceID string            `json:"service_id"`
+	Env       map[string]string `json:"env,omitempty"`
+	SecretEnv map[string]string `json:"secret_env,omitempty"`
+	Sealed    bool              `json:"sealed"`
+}
+
+// ForkVolumeRequest names the new volume a fork creates. Empty mints one from
+// the source's name and the snapshot's stamp.
+type ForkVolumeRequest struct {
+	Name string `json:"name,omitempty"`
+}
+
+// SnapshotListResponse is every snapshot of a volume, newest first.
+type SnapshotListResponse struct {
+	VolumeID  string   `json:"volume_id"`
+	Snapshots []string `json:"snapshots"`
+}
+
+// DrainReport is what draining a host did. POST /v1/hosts/{id}/drain.
+//
+// The machines in Moved are on other hosts now, with the same ids, names and
+// URLs they had: that is what makes a drain invisible to the people using them.
+// Left are the ones no host would take, each with its reason -- a fleet-capacity
+// problem, reported rather than retried for ever.
+type DrainReport struct {
+	Moved  []string          `json:"moved"`
+	Left   []string          `json:"left,omitempty"`
+	Errors map[string]string `json:"errors,omitempty"`
+	// Draining stays true after a drain that left something behind, so the
+	// host goes on refusing new machines until an operator says otherwise.
+	Draining bool  `json:"draining"`
+	Started  int64 `json:"started"`
+}
+
+// TakeRequest is one host telling another to take a machine it has offered.
+// Internal: it travels over the mesh, and the offer row is what authorises the
+// move. No client sends this.
+type TakeRequest struct {
+	HandoffID string `json:"handoff_id"`
 }
 
 type HealthResponse struct {
@@ -408,11 +774,33 @@ type HealthResponse struct {
 	// CPUVendorForced is true only when a fault flag is making this host lie
 	// about its CPU, which is how the fleet gate reaches the cold-boot tier.
 	CPUVendorForced bool `json:"cpu_vendor_forced,omitempty"`
+	// StoreVersions is the same number broken out per actor: how far this
+	// replica has applied each host's changes, keyed by site id in hex. The
+	// sum answers "are we far apart"; this answers "on whose rows". Empty on
+	// a single-box SQLite host.
+	StoreVersions map[string]int64 `json:"store_versions,omitempty"`
+	// ReplicationComplete is false while this host is still catching up with
+	// the fleet. Such a host serves its own machines normally and claims none
+	// of anybody else's, so it is healthy, not broken. Stuck false for more
+	// than a few seconds is a replication problem.
+	ReplicationComplete bool `json:"replication_complete"`
 }
 
 // WhoamiResponse is what the caller's key resolves to on the host that
 // answered. OrgID is empty for a key that belongs to no org, which is the
 // bootstrap admin key's case.
+// OrgsResponse is which orgs a key can act as, and which it is acting as now.
+//
+// NOT a list of teams, and it cannot become one: the fleet knows an org only as
+// a string on a row, and who the people are lives elsewhere. A tenant key gets
+// exactly its own; an admin key gets the orgs that own something, plus Admin
+// true to say it may act as one not listed.
+type OrgsResponse struct {
+	Current string   `json:"current"`
+	Orgs    []string `json:"orgs"`
+	Admin   bool     `json:"admin"`
+}
+
 type WhoamiResponse struct {
 	OrgID  string   `json:"org_id"`
 	Scopes []string `json:"scopes"`
@@ -475,7 +863,15 @@ type DomainResponse struct {
 // stored and take effect at the next deploy. Knobs are refused here and travel
 // on the deploy.
 type UpdateServiceRequest struct {
-	Replicas   *int              `json:"replicas,omitempty"`
+	Replicas *int `json:"replicas,omitempty"`
+	// Size changes how big every replica is. Zero on a dimension leaves that
+	// dimension alone.
+	//
+	// Applying it replaces the replicas one at a time, at the same release,
+	// and drops no request. A volume-backed service has a held window instead,
+	// because a volume has one writer and the replacement cannot mount it
+	// until the old machine has let go.
+	Size       *Size             `json:"size,omitempty"`
 	Health     *HealthCheck      `json:"health,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 	SecretEnv  map[string]string `json:"secret_env,omitempty"`
@@ -557,7 +953,23 @@ type QuotaResponse struct {
 	MaxMemMiB    int    `json:"max_mem_mib"`
 	MaxVolumeGiB int    `json:"max_volume_gib"`
 	MaxBuilds    int    `json:"max_builds"`
-	UpdatedAt    int64  `json:"updated_at"`
+	// MaxSnapshotGiB is how much object storage this org's checkpoints may
+	// hold. Zero on a PUT means the default rather than none, so a client
+	// written against the older body shape does not freeze an org's
+	// checkpoints by omitting it.
+	MaxSnapshotGiB int   `json:"max_snapshot_gib"`
+	UpdatedAt      int64 `json:"updated_at"`
+
+	// UsedMachines and the fields beside it are what the org is holding right
+	// now, against those limits. Answered on GET and absent on PUT, because
+	// they are not settable. A caller that counted machines itself to get this
+	// number could not know that builders do not count against the quota, and
+	// was wrong by however many the org had.
+	UsedMachines    int `json:"used_machines,omitempty"`
+	UsedVCPUs       int `json:"used_vcpus,omitempty"`
+	UsedMemMiB      int `json:"used_mem_mib,omitempty"`
+	UsedVolumeGiB   int `json:"used_volume_gib,omitempty"`
+	UsedSnapshotGiB int `json:"used_snapshot_gib,omitempty"`
 }
 
 // QuotaExceededResponse is a 429 body. Scope is "host" when the ceiling is the
@@ -577,6 +989,10 @@ type UsageTotals struct {
 	VCPUSeconds      int64 `json:"vcpu_seconds"`
 	MiBSeconds       int64 `json:"mib_seconds"`
 	VolumeGiBSeconds int64 `json:"volume_gib_seconds"`
+	// SnapshotGiBSeconds is what this org's checkpoints held in object
+	// storage, accrued in EVERY machine state: the bytes are there whatever
+	// the guest is doing, which is why a stopped machine is not free.
+	SnapshotGiBSeconds int64 `json:"snapshot_gib_seconds"`
 }
 
 type UsageResponse struct {
@@ -584,6 +1000,11 @@ type UsageResponse struct {
 	Since  int64                  `json:"since"`
 	Until  int64                  `json:"until"`
 	Orgs   map[string]UsageTotals `json:"orgs"`
+	// Machines is the same accrual per machine, keyed by org and then by
+	// machine id. Present only for a ByMachine call, because it is the larger
+	// answer and most callers want the invoice line rather than its
+	// derivation.
+	Machines map[string]map[string]UsageTotals `json:"machines,omitempty"`
 }
 
 // --- internal/compose, mirrored under a Compose prefix --------------------
@@ -606,6 +1027,15 @@ type ComposeVolume struct {
 	SizeGiB   int    `json:"size_gib"`
 	MountPath string `json:"mount_path"`
 }
+
+// What a compose step gets when its file says nothing about size. Mirrored
+// from internal/compose so a caller can tell "the file asked for this" from
+// "the planner filled in the default", which is the difference between
+// changing a service's size and leaving it alone.
+const (
+	DefaultVCPUs  = 1
+	DefaultMemMiB = 512
+)
 
 type ComposeStep struct {
 	Name       string        `json:"name"`
@@ -632,9 +1062,31 @@ type ComposeStep struct {
 	Domain string      `json:"domain,omitempty"`
 	// Private asks for no address at all. A service without it is given one
 	// from its name, so this is how a database says it has nothing to serve.
-	Private      bool   `json:"private,omitempty"`
-	CustomDomain string `json:"custom_domain,omitempty"`
-	PreDeploy    string `json:"pre_deploy,omitempty"`
+	Private bool `json:"private,omitempty"`
+	// Labels are attached to the service at create, write-once. The database
+	// recipes set `pilot.engine`, which is how `pilot metrics` and the
+	// dashboard know a service is a database and which one.
+	Labels map[string]string `json:"labels,omitempty"`
+	// SnapshotPolicy is the volume's schedule and retention. Nil leaves
+	// whatever is set, so a redeploy does not reset a schedule somebody tuned.
+	SnapshotPolicy *VolumePolicy `json:"snapshot_policy,omitempty"`
+	CustomDomain   string        `json:"custom_domain,omitempty"`
+	PreDeploy      string        `json:"pre_deploy,omitempty"`
+	// Processes is filled when SEVERAL compose services share one build
+	// context and therefore run as one machine with one process each. Empty is
+	// the ordinary case: one service, one machine, one process named app.
+	Processes []ComposeProcess `json:"processes,omitempty"`
+}
+
+// ComposeProcess is one named command inside a machine that runs several.
+type ComposeProcess struct {
+	Name string `json:"name"`
+	Cmd  string `json:"cmd,omitempty"`
+	// Needs orders the start within the machine: everything named here starts
+	// before this process does.
+	Needs []string `json:"needs,omitempty"`
+	// Port marks the one process that owns the machine's published port.
+	Port bool `json:"port,omitempty"`
 }
 
 type ComposePlan struct {
@@ -698,6 +1150,27 @@ type RepoRef struct {
 // Knobs by TestKnobsPatchCoversEveryKnob instead.
 var wireTypes = []any{
 	UpdateMachineRequest{},
+	ResizeMachineRequest{},
+	Size{},
+	EgressResponse{},
+	EgressAddress{},
+	ForkRequest{},
+	ForkResponse{},
+	ForkEntry{},
+	SnapshotResponse{},
+	VolumePolicy{},
+	ComposeRecipe{},
+	OrgsResponse{},
+	ComposeHAFragment{},
+	MachineMetrics{},
+	GrantRequest{},
+	GrantResponse{},
+	BrokerClaims{},
+	ServiceEnvResponse{},
+	ForkVolumeRequest{},
+	SnapshotListResponse{},
+	DrainReport{},
+	TakeRequest{},
 	Knobs{},
 	Schedule{},
 	Machine{},
@@ -741,6 +1214,7 @@ var wireTypes = []any{
 	ComposeBuild{},
 	ComposeVolume{},
 	ComposeStep{},
+	ComposeProcess{},
 	ComposePlan{},
 	ComposeUnsupported{},
 	ComposePlanError{},

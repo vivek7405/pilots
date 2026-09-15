@@ -31,6 +31,11 @@ const OK: Record<string, string> = {
   invited: 'Invitation sent.',
   removed: 'Member removed.',
   switched: 'Team switched.',
+  left: 'You left the team.',
+  deleted: 'Team deleted.',
+  transferred: 'The team has a new owner.',
+  'plan-changed': 'Plan changed. New limits are in effect.',
+  'builder-reset': 'Builder reset. The next build starts from a clean cache.',
 };
 
 const ERR: Record<string, string> = {

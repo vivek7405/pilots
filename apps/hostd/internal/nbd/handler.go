@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -301,12 +302,51 @@ func (h *Handler) reply(handle uint64, errno unix.Errno, data []byte) error {
 	return nil
 }
 
+// disconnectTimeout bounds the parent-side teardown.
+//
+// Opening /dev/nbdN can block in the kernel indefinitely: another process
+// already inside nbd_disconnect on that device holds the block device's mutex,
+// and this open waits on it with no deadline of its own. Ten seconds is far
+// longer than the ioctls take when the device is healthy, and the only thing
+// past it is a wait that does not end.
+const disconnectTimeout = 10 * time.Second
+
 // DisconnectDevice detaches a device by index, without owning a handler.
 //
 // This is the parent-side teardown, and it must run BEFORE signalling the
 // handler. A handler blocked in NBD_DO_IT never reaches its own cleanup, so
 // relying on the child alone leaves the device attached forever.
+//
+// BOUNDED, because the remedy could become the outage. Stop's own comment
+// warns that a missed disconnect leaves a handler in D-state and the device
+// unusable until a reboot; what it did not anticipate is that the disconnect
+// ITSELF can hang, on the open, waiting for a mutex the wedged handler holds.
+//
+// Measured: after a battery run left one handler stuck in nbd_disconnect,
+// hostd's next start blocked in this function on goroutine 1 -- the startup
+// path -- for twenty-four minutes and never listened. One leaked device took
+// the whole host down, and nothing said why. Both callers already collect the
+// error and carry on, so returning one is all it takes to turn a host that
+// never starts into a host that starts with one device short and says so.
+//
+// The goroutine is deliberately left behind on a timeout. It is blocked in the
+// kernel and cannot be cancelled; one leaked goroutine and one file descriptor
+// is the cheaper half of that trade.
 func DisconnectDevice(index int) error {
+	done := make(chan error, 1)
+	go func() { done <- disconnectDeviceBlocking(index) }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(disconnectTimeout):
+		return fmt.Errorf("nbd: /dev/nbd%d did not disconnect within %s; another "+
+			"process is wedged inside the kernel's nbd teardown and this device is "+
+			"leaked until a reboot", index, disconnectTimeout)
+	}
+}
+
+// disconnectDeviceBlocking is the ioctl sequence itself, unchanged.
+func disconnectDeviceBlocking(index int) error {
 	f, err := os.OpenFile(fmt.Sprintf("/dev/nbd%d", index), os.O_RDWR, 0)
 	if err != nil {
 		return fmt.Errorf("nbd: open device for disconnect: %w", err)

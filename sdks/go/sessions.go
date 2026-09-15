@@ -64,7 +64,7 @@ func (m *Machines) Attach(ctx context.Context, id, session string, rows, cols ui
 	target += "?" + q.Encode()
 	streamCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	conn, _, err := websocket.Dial(ctx, target, &websocket.DialOptions{
-		HTTPHeader: http.Header{"Authorization": {"Bearer " + m.c.apiKey}},
+		HTTPHeader: http.Header{"Authorization": {"Bearer " + m.c.credential()}},
 	})
 	if err != nil {
 		cancel()

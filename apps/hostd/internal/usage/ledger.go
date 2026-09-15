@@ -45,6 +45,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 )
 
 // dayLayout names a ledger file. It is also parsed back, so the file name is
@@ -67,14 +69,24 @@ type line struct {
 	VCPUs     int    `json:"vcpus"`
 	MemMiB    int    `json:"mem_mib"`
 	VolumeGiB int    `json:"volume_gib"`
+	// SnapshotMiB is what this machine's checkpoints hold in object storage,
+	// as of the moment this interval opened. MiB rather than GiB because a
+	// diff checkpoint is routinely tens of megabytes, and a GiB column would
+	// meter most of them as zero.
+	//
+	// A future key is added, never renamed, and encoding/json ignores what it
+	// does not know, so a day file written before this column reads back with
+	// it at zero.
+	SnapshotMiB int `json:"snapshot_mib,omitempty"`
 }
 
 // Totals is one org's accrual over a range, in the four units the API bills in.
 type Totals struct {
-	MachineSeconds   int64
-	VCPUSeconds      int64
-	MiBSeconds       int64
-	VolumeGiBSeconds int64
+	MachineSeconds     int64
+	VCPUSeconds        int64
+	MiBSeconds         int64
+	VolumeGiBSeconds   int64
+	SnapshotMiBSeconds int64
 }
 
 // Uploader is the one object-storage operation the ledger needs; *s3.Client
@@ -93,16 +105,21 @@ type Entry struct {
 	VCPUs     int
 	MemMiB    int
 	VolumeGiB int
+	// SnapshotMiB is what this machine's checkpoints hold in object storage.
+	// Filled by the caller from the checkpoint rows, so a restart resumes
+	// metering the storage rather than starting it again at zero.
+	SnapshotMiB int
 }
 
 // interval is an accrual in progress: everything a line needs except its end.
 type interval struct {
-	orgID     string
-	state     string
-	from      int64
-	vcpus     int
-	memMiB    int
-	volumeGiB int
+	orgID       string
+	state       string
+	from        int64
+	vcpus       int
+	memMiB      int
+	volumeGiB   int
+	snapshotMiB int
 }
 
 // Ledger meters this host's machines. Every method is nil-safe, so a manager
@@ -171,6 +188,34 @@ func (l *Ledger) Transition(machineID, state string) {
 	l.open[machineID] = iv
 }
 
+// SetSnapshotMiB records how much this machine's checkpoints now hold in
+// object storage, closing the current interval and reopening it with the new
+// figure.
+//
+// Closing and reopening rather than editing in place, exactly as Transition
+// does, because an interval is a CLOSED fact: the seconds already accrued were
+// accrued against the old number, and rewriting them would bill history for
+// bytes that did not exist yet. A checkpoint taken now accrues from now.
+//
+// A no-op when the figure has not moved, so the common path -- a re-meter
+// after a checkpoint that changed nothing -- does not split an interval per
+// call.
+func (l *Ledger) SetSnapshotMiB(machineID string, mib int) {
+	if l == nil {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	iv, ok := l.open[machineID]
+	if !ok || iv.snapshotMiB == mib {
+		return
+	}
+	now := l.now().Unix()
+	l.closeLocked(machineID, now)
+	iv.snapshotMiB, iv.from = mib, now
+	l.open[machineID] = iv
+}
+
 // Close ends a machine's accrual: it was destroyed, or it left this host.
 func (l *Ledger) Close(machineID string) {
 	if l == nil {
@@ -205,6 +250,7 @@ func (l *Ledger) Recover(entries []Entry) {
 	}
 	for _, e := range entries {
 		l.Open(e.MachineID, e.OrgID, e.State, e.VCPUs, e.MemMiB, e.VolumeGiB)
+		l.SetSnapshotMiB(e.MachineID, e.SnapshotMiB)
 	}
 }
 
@@ -234,6 +280,7 @@ func (l *Ledger) appendLocked(machineID string, iv interval, to int64) {
 			MachineID: machineID, OrgID: iv.orgID, State: iv.state,
 			From: from, To: end,
 			VCPUs: iv.vcpus, MemMiB: iv.memMiB, VolumeGiB: iv.volumeGiB,
+			SnapshotMiB: iv.snapshotMiB,
 		})
 		from = end
 	}
@@ -318,7 +365,7 @@ func (l *Ledger) Sum(since, until int64) (map[string]Totals, error) {
 		if now < end {
 			end = now
 		}
-		add(out, iv.orgID, iv.state, iv.vcpus, iv.memMiB, iv.volumeGiB,
+		add(out, iv.orgID, iv.state, iv.vcpus, iv.memMiB, iv.volumeGiB, iv.snapshotMiB,
 			overlap(iv.from, end, since, until))
 	}
 	return out, nil
@@ -334,18 +381,28 @@ func sumFile(path string, since, until int64, out map[string]Totals) error {
 		if strings.TrimSpace(text) == "" {
 			continue
 		}
-		var rec line
-		if err := json.Unmarshal([]byte(text), &rec); err != nil {
-			// A torn last line is what a host killed mid-write leaves. It is
-			// worth a line in the log and is not worth failing the whole
-			// answer, which would take every other org's usage with it.
-			slog.Warn("skipping an unparseable usage line", "path", path, "err", err)
+		rec, ok := decodeLine(text, path)
+		if !ok {
 			continue
 		}
 		add(out, rec.OrgID, rec.State, rec.VCPUs, rec.MemMiB, rec.VolumeGiB,
-			overlap(rec.From, rec.To, since, until))
+			rec.SnapshotMiB, overlap(rec.From, rec.To, since, until))
 	}
 	return nil
+}
+
+// decodeLine parses one ledger line, or reports that it could not.
+//
+// A torn last line is what a host killed mid-write leaves. It is worth a line
+// in the log and is not worth failing the whole answer, which would take every
+// other org's usage with it.
+func decodeLine(text, path string) (line, bool) {
+	var rec line
+	if err := json.Unmarshal([]byte(text), &rec); err != nil {
+		slog.Warn("skipping an unparseable usage line", "path", path, "err", err)
+		return line{}, false
+	}
+	return rec, true
 }
 
 // overlap is how many seconds of [from, to) fall inside [since, until).
@@ -363,7 +420,7 @@ func overlap(from, to, since, until int64) int64 {
 }
 
 // add applies the accrual rule for one interval of secs seconds.
-func add(out map[string]Totals, orgID, state string, vcpus, memMiB, volumeGiB int, secs int64) {
+func add(out map[string]Totals, orgID, state string, vcpus, memMiB, volumeGiB, snapshotMiB int, secs int64) {
 	if secs <= 0 {
 		return
 	}
@@ -378,6 +435,14 @@ func add(out map[string]Totals, orgID, state string, vcpus, memMiB, volumeGiB in
 	}
 	if volumeGiB > 0 {
 		t.VolumeGiBSeconds += int64(volumeGiB) * secs
+	}
+	// Snapshots accrue in EVERY state, including suspended and error: the
+	// bytes are in object storage whatever the guest is doing, which is the
+	// whole reason a stopped machine is not free. Fly priced this twice
+	// (stopped rootfs from Apr 2024, volume snapshots from Jan 2026) and
+	// pilots metered neither.
+	if snapshotMiB > 0 {
+		t.SnapshotMiBSeconds += int64(snapshotMiB) * secs
 	}
 	out[orgID] = t
 }
@@ -396,6 +461,8 @@ func (l *Ledger) Run(ctx context.Context, up Uploader, hostID string) {
 		slog.Info("usage ledger: no object storage; intervals stay on local disk",
 			"dir", l.dir)
 	}
+	// Three times the interval, so one slow upload is not a restart.
+	live := metrics.NewLoop("usage_ledger", 3*l.interval)
 	t := time.NewTicker(l.interval)
 	defer t.Stop()
 	for {
@@ -407,6 +474,10 @@ func (l *Ledger) Run(ctx context.Context, up Uploader, hostID string) {
 			if up != nil {
 				l.upload(ctx, up, hostID)
 			}
+			// At the END of the pass: a loop that began one and blocked inside
+			// it has not ticked, and metering that silently stops is exactly
+			// what this catches (fly, 2026-09-02, five hours of billing).
+			live.Tick()
 		}
 	}
 }

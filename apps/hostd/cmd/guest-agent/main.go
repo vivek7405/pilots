@@ -95,6 +95,11 @@ func main() {
 	mux.HandleFunc("GET /sessions", requireAuth(handleSessions))
 	mux.HandleFunc("GET /attach", requireAuth(handleAttach))
 	mux.HandleFunc("POST /sessions/{id}/kill", requireAuth(handleKillSession))
+	mux.HandleFunc("GET /processes", requireAuth(handleProcesses))
+	mux.HandleFunc("POST /processes", requireAuth(handleRegisterProcess))
+	mux.HandleFunc("DELETE /processes/{name}", requireAuth(handleDeleteProcess))
+	mux.HandleFunc("POST /processes/{name}/{action}", requireAuth(handleProcessAction))
+	mux.HandleFunc("GET /processes/{name}/logs", requireAuth(handleProcessLogs))
 
 	srv := &http.Server{
 		Addr:              ":" + port,

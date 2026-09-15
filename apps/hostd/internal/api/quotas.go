@@ -2,6 +2,7 @@ package api
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -14,7 +15,8 @@ func quotaToAPI(q state.Quota) QuotaResponse {
 	return QuotaResponse{
 		OrgID: q.OrgID, MaxMachines: q.MaxMachines, MaxVCPUs: q.MaxVCPUs,
 		MaxMemMiB: q.MaxMemMiB, MaxVolumeGiB: q.MaxVolumeGiB,
-		MaxBuilds: q.MaxBuilds, UpdatedAt: q.UpdatedAt,
+		MaxBuilds: q.MaxBuilds, MaxSnapshotGiB: q.MaxSnapshotGiB,
+		UpdatedAt: q.UpdatedAt,
 	}
 }
 
@@ -29,7 +31,26 @@ func (d Deps) handleGetQuota(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, "org is required", "pass org", nil)
 		return
 	}
-	writeJSON(w, http.StatusOK, quotaToAPI(quota.For(r.Context(), d.Store, org)))
+	out := quotaToAPI(quota.For(r.Context(), d.Store, org))
+
+	// Usage from the one function that decides what counts, rather than from a
+	// second count here that would drift from the refusal's.
+	//
+	// A failure is not fatal to the answer: the limits are what the caller
+	// asked for and they are correct, so the usage half is omitted and logged
+	// rather than turning a readable quota into a 500.
+	used, err := quota.Used(r.Context(), d.Store, org, true)
+	if err != nil {
+		slog.Warn("could not count an org's quota usage; answering with limits alone",
+			"org", org, "err", err)
+	} else {
+		out.UsedMachines = used.Machines
+		out.UsedVCPUs = used.VCPUs
+		out.UsedMemMiB = used.MemMiB
+		out.UsedVolumeGiB = used.VolumeGiB
+		out.UsedSnapshotGiB = used.SnapshotGiB
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (d Deps) handlePutQuota(w http.ResponseWriter, r *http.Request) {
@@ -47,7 +68,7 @@ func (d Deps) handlePutQuota(w http.ResponseWriter, r *http.Request) {
 	// frozen. Negative is not: it would read as an unreachable limit and
 	// silently admit everything.
 	for _, v := range []int{req.MaxMachines, req.MaxVCPUs, req.MaxMemMiB,
-		req.MaxVolumeGiB, req.MaxBuilds} {
+		req.MaxVolumeGiB, req.MaxBuilds, req.MaxSnapshotGiB} {
 		if v < 0 {
 			WriteError(w, http.StatusBadRequest, CodeBadRequest, "a quota cannot be negative",
 				"every limit is zero or more", nil)
@@ -58,7 +79,15 @@ func (d Deps) handlePutQuota(w http.ResponseWriter, r *http.Request) {
 	row := &state.Quota{
 		OrgID: org, MaxMachines: req.MaxMachines, MaxVCPUs: req.MaxVCPUs,
 		MaxMemMiB: req.MaxMemMiB, MaxVolumeGiB: req.MaxVolumeGiB,
-		MaxBuilds: req.MaxBuilds, UpdatedAt: time.Now().Unix(),
+		MaxBuilds: req.MaxBuilds, MaxSnapshotGiB: req.MaxSnapshotGiB,
+		UpdatedAt: time.Now().Unix(),
+	}
+	// Zero means the default here, not zero, unlike every other limit on this
+	// body. A client written against the previous shape sends no
+	// max_snapshot_gib at all, and reading that as "hold no checkpoints" would
+	// freeze an org's checkpoints the first time anybody touched its quota.
+	if row.MaxSnapshotGiB == 0 {
+		row.MaxSnapshotGiB = quota.Defaults.MaxSnapshotGiB
 	}
 	if err := d.Store.PutQuota(r.Context(), row); err != nil {
 		writeMapped(w, err)

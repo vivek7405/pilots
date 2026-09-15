@@ -84,7 +84,7 @@ export async function subscribe(orgId: string, ws: LiveSocket): Promise<void> {
   set.add(ws);
   s.orgs.set(orgId, set);
 
-  const machines = await listMachines(orgId);
+  const machines = await listMachines(orgId, { builders: true });
   if (!s.last.has(orgId)) s.last.set(orgId, new Map(machines.map((m) => [m.id, fingerprint(m)])));
   ws.send(JSON.stringify({ type: 'snapshot', machines } satisfies Snapshot));
 
@@ -123,7 +123,7 @@ export async function tick(): Promise<void> {
     if (sockets.size === 0) continue;
     let machines: Machine[];
     try {
-      machines = await listMachines(orgId);
+      machines = await listMachines(orgId, { builders: true });
     } catch (err) {
       // A fleet blip must not tear down every viewer's socket; the next tick
       // re-asks and the client keeps the rows it already has.

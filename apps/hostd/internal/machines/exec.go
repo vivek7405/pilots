@@ -179,6 +179,16 @@ func (m *Manager) Logs(ctx context.Context, machineID string) ([]byte, error) {
 // Whether the machine still exists is a separate, far rarer question, asked by
 // the follow itself -- a missing file alone cannot answer it, being
 // indistinguishable from a machine that has not written anything yet.
+//
+// A rotation is reported as api.ErrLogRotated. It has to be reported HERE
+// because this is the only place that can see it: rotateLog keeps the inode and
+// TRUNCATES (logrotate.go says why -- Firecracker holds the descriptor open),
+// so a follower's offset simply lands past the end of a file that is now empty.
+// A read there returns nothing and no error, which every follower was reading as
+// "no new output" -- so a follow went permanently silent at the moment a log
+// rotated, and then resumed mid-line once the file grew back past the stale
+// offset. That is the exact failure the callers' `reset` branch was written for,
+// and it was keyed on an error that a rotation never produced.
 func (m *Manager) LogTail(machineID string, offset int64) ([]byte, error) {
 	f, err := os.Open(filepath.Join(m.stateDir(machineID), "lifecycle.log"))
 	if err != nil {
@@ -188,6 +198,14 @@ func (m *Manager) LogTail(machineID string, offset int64) ([]byte, error) {
 		return nil, fmt.Errorf("machines: read logs for %s: %w", machineID, err)
 	}
 	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("machines: read logs for %s: %w", machineID, err)
+	}
+	if info.Size() < offset {
+		return nil, fmt.Errorf("machines: %s: %w", machineID, api.ErrLogRotated)
+	}
 
 	// Bounded: a guest that prints a gigabyte between two ticks must not be
 	// able to make one read allocate a gigabyte. The rest arrives next tick.

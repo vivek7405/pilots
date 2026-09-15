@@ -6,10 +6,13 @@ package config
 
 import (
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"github.com/vivek7405/pilots/hostd/internal/netns"
 )
 
 // Config is the full runtime configuration for a hostd process.
@@ -156,6 +159,16 @@ type Config struct {
 	// wildcard so it needs no record and no certificate of its own. Checked
 	// before the workload suffix in dispatch, and reserved as a machine name.
 	APIHostname string // PILOT_API_HOSTNAME
+
+	// Egress is the per-org outbound address configuration, from
+	// PILOT_EGRESS_INTERFACE and PILOT_EGRESS_PREFIX6.
+	//
+	// Both unset is the default and means this host manages no egress at all:
+	// no table, no addresses, and exactly the behaviour it had before the
+	// feature existed. Guest outbound traffic is the one path where a wrong
+	// rule is invisible until a tenant's application stops reaching the
+	// internet, so nothing happens until a host is told to make it happen.
+	Egress netns.EgressConfig
 }
 
 // Fleet reports whether this host is part of a cluster.
@@ -258,6 +271,21 @@ func Load() (*Config, error) {
 		DNSUpstream:      env("PILOT_DNS_UPSTREAM", "1.1.1.1:53,8.8.8.8:53"),
 		AgentTokenSecret: os.Getenv("PILOT_AGENT_TOKEN_SECRET"),
 		APIHostname:      os.Getenv("PILOT_API_HOSTNAME"),
+
+		Egress: netns.EgressConfig{Interface: os.Getenv("PILOT_EGRESS_INTERFACE")},
+	}
+
+	// Parsed rather than stored as a string, so a typo is a refused start
+	// instead of a host that quietly hands out addresses nobody routes.
+	if raw := os.Getenv("PILOT_EGRESS_PREFIX6"); raw != "" {
+		prefix, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return nil, fmt.Errorf("config: PILOT_EGRESS_PREFIX6 %q is not an address block: %w", raw, err)
+		}
+		c.Egress.Prefix6 = prefix
+	}
+	if err := c.Egress.Validate(); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
 	}
 
 	if c.APIHostname == "" {

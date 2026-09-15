@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -13,6 +16,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync/atomic"
+	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -203,8 +209,15 @@ func applyInit(req initRequest) (initResponse, error) {
 		}
 	}
 
+	// Every poke is a moment this machine began running: a create, a wake, a
+	// cold boot. Starting the refresh here rather than at process start means a
+	// restored machine fetches its OWN token from the socket bound in its own
+	// namespace, which is why a fork does not inherit the source's.
+	startBrokerRefresh()
+
 	resp := initResponse{OK: true}
 	if req.StartApp {
+		markAppStarting()
 		resp.AppStarted, resp.AppReason = startApp()
 	}
 	return resp, nil
@@ -307,8 +320,43 @@ func writeAppCmd(cmd string) error {
 var (
 	startApp = func() (bool, string) {
 		cmdline, env, err := readAppCmd()
-		if err != nil || cmdline == "" {
+		// What a compose file with two services on one build context asked
+		// for, delivered in the environment the host hands this machine at
+		// every init. Read here rather than from the image, because it is
+		// configuration rather than content: the same image serves a machine
+		// with one process and a machine with three.
+		declared, derr := declaredProcesses(env)
+		if derr != "" {
+			return false, derr
+		}
+		saved := savedProcesses()
+		if (err != nil || cmdline == "") && len(saved) == 0 && len(declared) == 0 {
 			return false, "this image carries no application command"
+		}
+
+		// Several processes, whether declared by the deploy or registered at
+		// runtime on a previous boot. Supervised here rather than handed to
+		// systemd even on an image that has it: the unit knows one command,
+		// and splitting the set across two mechanisms would mean two answers
+		// to "what is running".
+		if len(saved) > 0 || len(declared) > 0 {
+			specs := append([]processSpec{}, declared...)
+			// The image's own command is the process `app` ONLY when the
+			// deploy declared no set of its own. A grouped deploy's processes
+			// already include everything the machine runs, and adding the
+			// image's CMD beside them would start one of them twice.
+			if cmdline != "" && len(declared) == 0 {
+				specs = append([]processSpec{{
+					Name: DefaultProcess, Cmd: cmdline, Env: env, Port: true,
+				}}, specs...)
+			}
+			specs = append(specs, withoutNamesIn(saved, specs)...)
+			for i := range specs {
+				// Every process inherits the machine's environment; a process
+				// that named its own keeps them on top.
+				specs[i].Env = mergeEnv(env, specs[i].Env)
+			}
+			return appSupervisor.startAll(specs)
 		}
 
 		// Which mechanism, decided by looking rather than by assuming. The
@@ -346,6 +394,7 @@ func proxyToLocalPort(w http.ResponseWriter, r *http.Request, port string) {
 	target := &url.URL{Scheme: "http", Host: "127.0.0.1:" + port}
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Transport = appTransport
 	proxy.Director = func(req *http.Request) {
 		req.URL.Scheme = target.Scheme
 		req.URL.Host = target.Host
@@ -362,4 +411,83 @@ func proxyToLocalPort(w http.ResponseWriter, r *http.Request, port string) {
 		})
 	}
 	proxy.ServeHTTP(w, r)
+}
+
+// withoutNamesIn drops saved processes whose names the boot's own set already
+// uses, saying which.
+//
+// A runtime registration that reused a declared process's name, or `app`, was
+// saved and replayed beside it, and orderByNeeds refuses two processes with
+// one name by starting NOTHING: one registration stopped the whole machine
+// coming up. The deploy's declaration and the image's command are the ones
+// that stand; the registration is the one that loses.
+func withoutNamesIn(saved, taken []processSpec) []processSpec {
+	used := make(map[string]bool, len(taken))
+	for _, s := range taken {
+		used[s.Name] = true
+	}
+	out := make([]processSpec, 0, len(saved))
+	for _, s := range saved {
+		if used[s.Name] {
+			log.Printf("guest-agent: not starting the registered process %q: the "+
+				"deploy or the image already runs a process by that name", s.Name)
+			continue
+		}
+		used[s.Name] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+// appStartedAt is when the application was last started on purpose: at
+// create, at a cold boot, at a redeploy, or by a process start. Zero before
+// the first.
+var appStartedAt atomic.Int64
+
+func markAppStarting() { appStartedAt.Store(time.Now().UnixNano()) }
+
+// How long after a start a refused connection is read as "not listening YET",
+// and how long one request waits for it.
+const (
+	appStartGrace  = 60 * time.Second
+	appListenWait  = 30 * time.Second
+	appListenRetry = 50 * time.Millisecond
+)
+
+// appTransport reaches the application, waiting for it to listen when it was
+// started a moment ago.
+//
+// A request held across a redeploy or a cold boot is sent the moment the
+// machine answers, and the machine answers before its application does. It was
+// answered 502 "no application listening" -- a request the router had held for
+// exactly this, turned into an error a few hundred milliseconds early. That
+// window was hidden while the router's first connect sat in a one-second SYN
+// retransmit, and opened when that was fixed. Retrying the local connect is
+// safe for any request: nothing of it has reached the application. An
+// application that was NOT just started is answered at once, so a crashed one
+// is still a prompt 502 rather than a request held for nothing.
+var appTransport = func() *http.Transport {
+	t := http.DefaultTransport.(*http.Transport).Clone()
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	t.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		deadline := time.Now().Add(appListenWait)
+		for {
+			conn, err := dialer.DialContext(ctx, network, addr)
+			if err == nil || !errors.Is(err, syscall.ECONNREFUSED) || !appJustStarted() ||
+				time.Now().After(deadline) {
+				return conn, err
+			}
+			select {
+			case <-ctx.Done():
+				return nil, err
+			case <-time.After(appListenRetry):
+			}
+		}
+	}
+	return t
+}()
+
+func appJustStarted() bool {
+	at := appStartedAt.Load()
+	return at != 0 && time.Since(time.Unix(0, at)) < appStartGrace
 }

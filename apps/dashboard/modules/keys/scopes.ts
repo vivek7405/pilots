@@ -6,6 +6,9 @@
  * applies when it authorises a request.
  */
 
+import { canAdministerOrg } from '#modules/orgs/roles.ts';
+import type { Role } from '#modules/orgs/roles.ts';
+
 export const SCOPES = ['machines', 'deploy', 'admin'] as const;
 export type Scope = (typeof SCOPES)[number];
 
@@ -16,15 +19,22 @@ export function isScope(value: unknown): value is Scope {
 /**
  * Validates a requested scope set.
  *
- * A `member` may not mint an `admin` key. An admin key can create and revoke
- * keys for any org on the fleet, so handing one to a non-owner would make org
- * membership meaningless in one step.
+ * Only an OWNER may mint an `admin` key -- not the team's own admin role, and
+ * not a member. An `admin`-scoped key can create and revoke keys for any org
+ * on the fleet, so it is power over teams this one has nothing to do with:
+ * handing it to anyone but the owner would make team membership meaningless in
+ * one step, and handing it to the `admin` role would make that role a rename
+ * of owner rather than a narrower one.
+ *
+ * Every other scope is open to every member. That is deliberate: a token is
+ * how the CLI and the SDKs authenticate, and a team whose members cannot mint
+ * one has members who cannot work.
  */
-export function validateScopes(raw: unknown, role: 'owner' | 'member'): { scopes: Scope[] } | { error: string } {
+export function validateScopes(raw: unknown, role: Role): { scopes: Scope[] } | { error: string } {
   if (!Array.isArray(raw) || raw.length === 0) return { error: 'Choose at least one scope' };
   if (!raw.every(isScope)) return { error: `Scopes must be drawn from ${SCOPES.join(', ')}` };
   const scopes = [...new Set(raw as Scope[])];
-  if (role !== 'owner' && scopes.includes('admin')) {
+  if (!canAdministerOrg(role) && scopes.includes('admin')) {
     return { error: 'Only an org owner can mint an admin key' };
   }
   return { scopes };

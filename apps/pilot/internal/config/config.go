@@ -178,11 +178,19 @@ func Resolve(env Env, flagURL, flagKey, flagOrg string) (url, key, org Resolved,
 		key = Resolved{creds.APIKey, Source(path)}
 	}
 
+	// The same ladder the key takes, and it was missing its last rung.
+	//
+	// `pilot login` has always written org_id into this file, and nothing ever
+	// read it back: the stored org was dead weight, and the only way to persist
+	// one was exporting PILOT_ORG. Somebody who logged into a team and then ran
+	// a command silently acted as whatever org the fleet defaulted them to.
 	switch {
 	case flagOrg != "":
 		org = Resolved{flagOrg, "--org"}
 	case env("PILOT_ORG") != "":
 		org = Resolved{env("PILOT_ORG"), "PILOT_ORG"}
+	case creds != nil && creds.OrgID != "":
+		org = Resolved{creds.OrgID, Source(path)}
 	}
 
 	return url, key, org, nil

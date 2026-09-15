@@ -229,6 +229,17 @@ export const FACTS = {
 
   /* Budgets. Not results. The source says so in words, because a reader
      skimming a table of numbers will not infer it from a field name. */
+  /* How long a request to a SLEEPING machine is held before it is given up on.
+     A design constant rather than a measurement: it is the ceiling, and the
+     thing worth publishing about it is that there is only one of it. Wherever
+     the machine is, the wait is bounded the same way, so nobody can tell which
+     host holds their sandbox from how long a cold request takes. */
+  heldWake: {
+    value: '120s',
+    label: 'how long a request to a sleeping machine is held',
+    source: 'router.HeldWakeWindow, one constant for the same-host wake and the cross-host forward; apps/hostd/internal/router/heldwake_test.go asserts they cannot diverge',
+    kind: 'design',
+  },
   metalCreate: {
     value: '<500ms',
     label: 'create',

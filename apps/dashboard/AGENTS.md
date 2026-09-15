@@ -341,6 +341,53 @@ listeners are on `document`, which is the case the skill sanctions: a global
 shortcut has no element to dispatch from, and neither handler reads markup
 another component rendered.
 
+**A builder is hidden, not absent.** hostd creates a builder machine per host
+per team to build images on. Nobody asked for it, it has no URL and there is
+nothing to open on it, so it is out of `<machine-list>`'s default rows and out
+of every chip's count but its own -- and the `builders` chip still carries that
+count, so a reader wondering why a build is slow can find it without knowing
+the word first. The signal is the NAME PREFIX (`modules/machines/utils/
+builder.ts`, mirroring `BuilderNamePrefix` in `apps/hostd/internal/quota/`),
+because there is no `kind` field on the wire and a second signal invented here
+could disagree with the four places in the engine that read that one. The team
+page lists them with a Reset, which destroys the builder and bumps the team's
+build-cache epoch so every host re-pulls: the cure for a cache that is making
+builds fail in a way no log on this side explains.
+
+**The team is this app's, and the fleet's org is an opaque id.** hostd knows
+an org only as a string on a row, a quota and a tenancy claim. Who the people
+are, what role each holds, what the team is called and what it is paying for
+live HERE and nowhere else, which is why `orgs`, `memberships` and
+`billing_accounts` are in `db/schema.server.ts` and none of them has a
+counterpart in Corrosion. Three roles, defined once in `modules/orgs/roles.ts`
+and read by both the page and the action, because a hidden button is a courtesy
+and the action is the control:
+
+- `owner` renames the team, hands it over, deletes it, changes the plan, and
+  mints an `admin`-scoped token. Nobody else does any of those five.
+- `admin` adds and removes people and mints every other scope. It stops short
+  of the five above on purpose: each of them either ends the team or grants
+  power over teams this one has nothing to do with, and an admin who could
+  remove the owner would be an owner with one more step.
+- `member` uses what the team owns. Every member may mint a non-`admin` token,
+  because a token is how the CLI authenticates and a team whose members cannot
+  mint one has members who cannot work.
+
+A PERSONAL team is the account's own home: created on first sign-in, found
+again by its `owner_id`, and never leavable, transferable, deletable or on any
+plan but free. Every one of those four refusals exists because the alternative
+strands an account that can then see nothing and has no path back.
+
+**A plan is a quota bundle, and activating one writes it to the fleet.**
+`modules/billing/plans.ts` declares the five numbers; `activate-plan.server.ts`
+sends them with `PUT /v1/quotas/{org}` FIRST and only then writes the local row,
+so a fleet that refuses leaves the team on the plan it is actually being held
+to. `PaymentProvider` in `provider.server.ts` has exactly ONE implementation,
+`NoneProvider`, which makes no network call and needs no configuration: pilots
+is meant to be self-hosted by someone who is not running a billing integration.
+The interface is the whole of the integration; adding a real provider is one new
+file and one line in `paymentProvider()`.
+
 **No control for something the engine does not enforce.** One absence in this
 app is deliberate and recorded where it would otherwise be questioned. The
 create on `/services/new` exists because it creates a service with a build in

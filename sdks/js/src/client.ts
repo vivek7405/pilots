@@ -10,6 +10,10 @@ import { BuildStream } from './build.ts'
 import { Http, textLines } from './http.ts'
 import type { HttpOptions } from './http.ts'
 import { buildExecURL, ExecStream } from './stream.ts'
+import { tcpStream } from './tcp.ts'
+import type { TCPOptions } from './tcp.ts'
+import type { Duplex } from 'node:stream'
+
 import type { ExecStreamOptions, WebSocketCtor } from './stream.ts'
 import type {
   AddDomainRequest,
@@ -26,6 +30,7 @@ import type {
   CreateVolumeRequest,
   DeployRequest,
   DomainResponse,
+  EgressResponse,
   ExecRequest,
   ExecResponse,
   HealthResponse,
@@ -37,7 +42,10 @@ import type {
   Release,
   RepoLinkListResponse,
   RepoLinkResponse,
+  MachineMetrics,
   RepoRef,
+  ServiceEnvResponse,
+  ResizeMachineRequest,
   RevokeResponse,
   Service,
   UpdateServiceRequest,
@@ -87,7 +95,7 @@ export class PilotsClient {
   }
 
   get apiKey(): string {
-    return this.http.apiKey
+    return this.http.credential()
   }
 
   /** Liveness. The one route that needs no key. */
@@ -205,13 +213,40 @@ export class Machines {
       opts,
       this.http.org,
     )
-    return new ExecStream(url, this.http.apiKey, {
+    return new ExecStream(url, this.http.credential(), {
       // A tty implies stdin, so the pair is settled here rather than left to
       // each caller: hostd refuses tty=true with stdin=false outright.
       stdin: opts.tty ? true : (opts.stdin ?? false),
       tty: opts.tty ?? false,
       ...(opts.WebSocket ?? this.WebSocket ? { WebSocket: opts.WebSocket ?? this.WebSocket! } : {}),
     })
+  }
+
+  /**
+   * One TCP connection to a port inside the machine, as a Duplex.
+   *
+   * What a database driver needs: `pg`, `mysql2`, `ioredis` and `mongodb` all
+   * speak to something shaped like a `net.Socket`, so handing them this makes
+   * every one of them work unmodified against a machine on the fleet.
+   *
+   * Resolves once the socket is OPEN. A driver handed a stream that is not yet
+   * connected writes its handshake into a queue and waits for a reply that
+   * cannot arrive until the queue drains.
+   */
+  tcp(id: string, port: number, opts: TCPOptions = {}): Promise<Duplex> {
+    return tcpStream(this.http.baseURL, this.http.credential(), id, port, this.http.org, {
+      ...(opts.WebSocket ?? this.WebSocket ? { WebSocket: opts.WebSocket ?? this.WebSocket! } : {}),
+    })
+  }
+
+  /**
+   * What one machine is using, from the host that owns it.
+   *
+   * A host asked about somebody else's machine forwards rather than answering
+   * with zeroes, so this is correct wherever it is called.
+   */
+  metrics(id: string): Promise<MachineMetrics> {
+    return this.http.json<MachineMetrics>('GET', `/v1/machines/${encodeURIComponent(id)}/metrics`)
   }
 
   /** Follows the console log line by line. Never given a client deadline. */
@@ -237,6 +272,17 @@ export class Machines {
 
   start(id: string): Promise<void> {
     return this.http.none('POST', `/v1/machines/${encodeURIComponent(id)}/start`)
+  }
+
+  /**
+   * Boots a machine again at a new size, in place: same id, same URL, same
+   * disk, same volume. Omit a dimension to leave it alone.
+   *
+   * A boot rather than a resume, because a memory image cannot be loaded into
+   * a differently-sized VM, so the machine loses what was in memory.
+   */
+  resize(id: string, req: ResizeMachineRequest): Promise<Machine> {
+    return this.http.json<Machine>('POST', `/v1/machines/${encodeURIComponent(id)}/resize`, { body: req })
   }
 
   checkpoint(id: string, req: CheckpointRequest = {}): Promise<Checkpoint> {
@@ -363,6 +409,17 @@ export class Services {
   }
 
   /**
+   * The service's environment WITH the values in it.
+   *
+   * The one call that answers with values; every other surface returns names.
+   * Needs a deploy-scoped key, which is the level that already sets them.
+   * Nothing caches the result: it exists for as long as the caller holds it.
+   */
+  env(id: string): Promise<ServiceEnvResponse> {
+    return this.http.json<ServiceEnvResponse>('GET', `/v1/services/${encodeURIComponent(id)}/env`)
+  }
+
+  /**
    * NO client deadline, for the reason a build stream has none: a rollout
    * takes as long as the release takes to prove itself. It boots a replica,
    * gates it for up to the health check's grace period -- which a compose
@@ -403,6 +460,29 @@ export class Services {
    */
   patch(id: string, req: UpdateServiceRequest): Promise<Service> {
     return this.http.json<Service>('PATCH', `/v1/services/${encodeURIComponent(id)}`, { body: req })
+  }
+
+  /**
+   * Changes how big every replica is, and how many there are. Omit anything to
+   * leave it alone.
+   *
+   * A size change replaces the replicas one at a time, at the same release, and
+   * drops no request: a replica comes up at the new size, passes the same
+   * health gate a deploy's does, and only then is an old one retired.
+   *
+   * A volume-backed service has a held window instead of no window at all,
+   * because a volume is mounted by one machine at a time and the replacement
+   * cannot mount it until the old one has let go. Requests arriving then are
+   * held the way a request during a wake is held, so they are served late
+   * rather than refused.
+   */
+  scale(id: string, opts: { replicas?: number; vcpus?: number; mem_mib?: number }): Promise<Service> {
+    const req: UpdateServiceRequest = {}
+    if (opts.replicas !== undefined) req.replicas = opts.replicas
+    if (opts.vcpus !== undefined || opts.mem_mib !== undefined) {
+      req.size = { vcpus: opts.vcpus ?? 0, mem_mib: opts.mem_mib ?? 0 }
+    }
+    return this.patch(id, req)
   }
 
   /** Newest first. */
@@ -461,6 +541,21 @@ export class Hosts {
   /** The fleet as this host sees it, read from its local replica. */
   list(): Promise<Host[]> {
     return this.http.json<Host[]>('GET', '/v1/hosts')
+  }
+
+  /**
+   * Every address this org's outbound traffic can leave from: what to hand
+   * anything that allowlists by source address.
+   *
+   * One entry per host that manages egress, because the address is derived
+   * from the host's own prefix. Empty on a fleet where no host has been given
+   * one, in which case traffic leaves from each host's shared address.
+   *
+   * The set changes only when a host joins or leaves the fleet, never when
+   * this org's machines are created, destroyed, resized, rolled or moved.
+   */
+  egress(): Promise<EgressResponse> {
+    return this.http.json<EgressResponse>('GET', '/v1/egress')
   }
 }
 

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/mesh"
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/netns"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
@@ -74,6 +75,11 @@ func (v storeView) Hosts() []state.Host {
 
 // runTenantFilter keeps the root namespace's rules matching the fleet.
 func runTenantFilter(ctx context.Context, hostID string, view fleetView, loc *mesh.Locator) {
+	// A wedge here freezes guest-to-guest filtering on whatever rules were
+	// last applied, which get more wrong with every machine that moves -- and
+	// does it with the process healthy, which is precisely what the budget is
+	// for.
+	live := metrics.NewLoop("tenant_filter", 3*tenantInterval)
 	tick := time.NewTicker(tenantInterval)
 	defer tick.Stop()
 
@@ -94,6 +100,8 @@ func runTenantFilter(ctx context.Context, hostID string, view fleetView, loc *me
 					"local_machines", len(rules.Local), "apps", len(rules.Apps))
 			}
 		}
+
+		live.Tick()
 
 		select {
 		case <-ctx.Done():

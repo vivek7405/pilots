@@ -12,6 +12,7 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/fc"
 	"github.com/vivek7405/pilots/hostd/internal/netns"
+	"github.com/vivek7405/pilots/hostd/internal/s3"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 	"github.com/vivek7405/pilots/hostd/internal/volumes"
 )
@@ -24,6 +25,25 @@ type VolumeManager interface {
 	Attach(ctx context.Context, v *state.Volume) error
 	Detach(ctx context.Context, id string) error
 	ImagePath(id string) string
+	// Check runs a filesystem check on a volume's image, before a guest is
+	// given it. A host that died mid-write leaves an image that still SAYS it
+	// is clean, so this is forced rather than conditional.
+	Check(ctx context.Context, id string) error
+	// Snapshot, ListSnapshots, RestoreSnapshot and CopySnapshotTo are the
+	// point-in-time surface. A snapshot is a clone inside the volume's own
+	// filesystem, so it is metadata and costs milliseconds; a copy crosses two
+	// filesystems and costs bytes.
+	Snapshot(ctx context.Context, id, stamp string) error
+	ListSnapshots(id string) ([]string, error)
+	RestoreSnapshot(ctx context.Context, id, stamp string) error
+	// DeleteSnapshot removes one, for retention. A snapshot holds blocks the
+	// live volume has overwritten, so deleting one is what actually frees
+	// storage rather than merely tidying a listing.
+	DeleteSnapshot(ctx context.Context, id, stamp string) error
+	CopySnapshotTo(ctx context.Context, id, stamp, destImage string) error
+	// Delete removes a volume's mount, replication and local files. Its
+	// objects are removed by the caller; see DeleteVolume.
+	Delete(ctx context.Context, id string) error
 }
 
 // ErrNoVolumes reports a host that cannot serve volumes at all.
@@ -108,7 +128,85 @@ func (m *Manager) claimVolume(ctx context.Context, volumeID, machineID string) (
 	if err := m.opts.Volumes.Attach(ctx, v); err != nil {
 		return nil, err
 	}
+
+	// And a filesystem check BEFORE the guest sees it.
+	//
+	// This is the one moment it can be done at all: the image is mounted and
+	// nothing is writing to it. A host that died mid-write leaves an ext4 that
+	// still reports itself clean, so the check is forced; handing that image to
+	// a guest lets it write on top of the damage and turns a filesystem a
+	// snapshot could have restored into one nothing can.
+	//
+	// Not run on a local wake, where the mount was never released, so the wake
+	// path's latency is untouched.
+	if err := m.opts.Volumes.Check(ctx, volumeID); err != nil {
+		return nil, err
+	}
 	return v, nil
+}
+
+// DeleteVolume removes a volume for good: its mount and local files on this
+// host, every object under its prefix, its snapshot policy and its row.
+//
+// Nothing deleted a volume before, so a scaled-down database ordinal left its
+// volume -- the data and its snapshots -- in object storage with no row
+// anything could reach it by. Refused while a machine still has it attached,
+// and on any host but the one mounting it, which is the only one that can stop
+// what is still writing to it.
+func (m *Manager) DeleteVolume(ctx context.Context, id string) error {
+	if m.opts.Volumes == nil {
+		return ErrNoVolumes
+	}
+	v, err := m.opts.Store.GetVolume(ctx, id)
+	if err != nil {
+		return err
+	}
+	if v.MachineID != "" {
+		if row, err := m.opts.Store.GetMachine(ctx, v.MachineID); err == nil && row.State != state.StateDestroyed {
+			return fmt.Errorf("%w: volume %s is attached to %s; destroy the machine first",
+				api.ErrConflict, id, v.MachineID)
+		}
+	}
+	if v.HostID != "" && v.HostID != m.opts.HostID {
+		return fmt.Errorf("machines: volume %s is mounted on %s, not here: %w",
+			id, v.HostID, state.ErrNotOwner)
+	}
+	if err := m.opts.Volumes.Delete(ctx, id); err != nil {
+		return fmt.Errorf("machines: release volume %s on this host: %w", id, err)
+	}
+	if err := m.deleteVolumeObjects(ctx, v); err != nil {
+		return err
+	}
+	if err := m.opts.Store.DeleteVolumePolicy(ctx, id); err != nil && !errors.Is(err, state.ErrNotFound) {
+		return fmt.Errorf("machines: delete volume %s policy: %w", id, err)
+	}
+	return m.opts.Store.DeleteVolume(ctx, id)
+}
+
+// deleteVolumeObjects removes every object under a volume's prefix: JuiceFS's
+// chunks, its periodic metadata dumps and Litestream's replica all live there.
+func (m *Manager) deleteVolumeObjects(ctx context.Context, v *state.Volume) error {
+	if v.S3Prefix == "" {
+		return nil
+	}
+	store, ok := m.opts.Uploader.(interface {
+		List(ctx context.Context, prefix string) ([]s3.ObjectInfo, error)
+		Delete(ctx context.Context, key string) error
+	})
+	if !ok {
+		return nil // no object storage configured, so there is nothing there
+	}
+	objects, err := store.List(ctx, v.S3Prefix)
+	if err != nil {
+		return fmt.Errorf("machines: list volume %s objects: %w", v.ID, err)
+	}
+	var errs []error
+	for _, o := range objects {
+		if err := store.Delete(ctx, o.Key); err != nil {
+			errs = append(errs, fmt.Errorf("delete %s: %w", o.Key, err))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // releaseVolume gives a volume up when its machine is destroyed.

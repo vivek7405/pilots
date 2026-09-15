@@ -29,7 +29,12 @@ func (m *Model) View() tea.View {
 		default:
 			content = m.viewDashboard()
 		}
+		if m.workspaces != nil {
+			content = m.overlay(content, m.viewWorkspaces())
+		}
 		if m.confirm != nil {
+			// LAST, so a confirmation is never drawn under another overlay: it
+			// is the one that is asking for a decision.
 			content = m.overlay(content, m.viewConfirm())
 		}
 	}
@@ -43,6 +48,13 @@ func (m *Model) View() tea.View {
 // titleBar is the top line: where you are, and when the fleet was last read.
 func (m *Model) titleBar(where string) string {
 	left := m.st.Title.Render("pilot") + "  " + m.st.Muted.Render(where)
+	// The workspace, whenever there is one to name. On a screen full of
+	// machines, whose they are is the one thing a multi-tenant view must never
+	// leave ambiguous, and somebody with two teams cannot tell by looking at
+	// the rows.
+	if m.org != "" {
+		left += "  " + m.st.Muted.Render("·") + "  " + m.st.Key.Render(m.org)
+	}
 	// An action in flight is the most important thing on the line: a
 	// checkpoint takes seconds, and without this the keypress looks dead.
 	if m.busy != "" {
@@ -111,7 +123,7 @@ func (m *Model) viewDashboard() string {
 	title := m.titleBar("dashboard")
 	hosts := m.viewHosts()
 	tabs := m.viewTabs()
-	help := m.helpLine("↑↓", "move", "tab", "switch", "enter", "open", "c", "console", "L", "logs", "?", "keys", "q", "quit")
+	help := m.helpLine("↑↓", "move", "tab", "switch", "enter", "open", "c", "console", "L", "logs", "w", "workspace", "?", "keys", "q", "quit")
 
 	// Whatever is left after the fixed chrome is the list's, and the list
 	// scrolls inside exactly that many lines.
@@ -466,6 +478,7 @@ func (m *Model) viewHelp() string {
 		{"tab ← →", "machines ↔ services"},
 		{"enter", "open the selected row"},
 		{"c", "console (returns here on exit)"},
+		{"w", "which workspace this is showing, and change it"},
 		{"L", "logs"},
 		{"s / w", "suspend / wake"},
 		{"S / T", "stop / start"},
@@ -524,4 +537,48 @@ func mib(n int) string {
 		return fmt.Sprintf("%.1f GiB", float64(n)/1024)
 	}
 	return fmt.Sprintf("%d MiB", n)
+}
+
+// viewWorkspaces is the picker: which workspace this session is showing.
+//
+// The current one is marked rather than merely highlighted, because the cursor
+// starts on it and a highlight alone would not say which of those two facts the
+// reader is looking at.
+func (m *Model) viewWorkspaces() string {
+	if m.workspaces.Err != nil {
+		// The reason, not an empty list. An empty picker with nothing saying
+		// why reads as a program that failed silently.
+		return m.st.Focus.Width(min(m.width-4, 70)).Render(
+			fitBlock("could not read the workspaces: "+m.workspaces.Err.Error(),
+				min(m.width-6, 66)) + "\n\n" + m.helpLine("esc", "close"))
+	}
+	if len(m.workspaces.Orgs) == 0 {
+		return m.st.Focus.Width(min(m.width-4, 70)).Render(
+			fitBlock("this key acts as no workspace yet", min(m.width-6, 66)) + "\n\n" +
+				m.helpLine("esc", "close"))
+	}
+
+	var b strings.Builder
+	for i, org := range m.workspaces.Orgs {
+		line := "  " + org
+		if org == m.workspaces.Current {
+			line += "  " + m.st.Muted.Render("(showing)")
+		}
+		if i == m.workspaces.Cursor {
+			line = m.st.Selected.Render("> " + org)
+			if org == m.workspaces.Current {
+				line += "  " + m.st.Muted.Render("(showing)")
+			}
+		}
+		b.WriteString(line + "\n")
+	}
+	if m.workspaces.Admin {
+		// Said, because an admin key's list is "what exists" rather than "what
+		// you may use", and somebody whose workspace is missing would
+		// otherwise conclude they had lost access to it.
+		b.WriteString("\n" + m.st.Muted.Render(
+			"this key may act as any workspace, including one not listed") + "\n")
+	}
+	b.WriteString("\n" + m.helpLine("↑↓", "move", "enter", "show", "esc", "close"))
+	return m.st.Focus.Width(min(m.width-4, 70)).Render(b.String())
 }

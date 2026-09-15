@@ -44,6 +44,11 @@ type BuildRunner interface {
 	// failed build does. On this interface rather than only on the GitHub
 	// one, because the route that serves those logs is here.
 	RecordRefusal(id string, line BuildLogLine)
+	// BumpEpoch advances an org's layer-cache generation and returns the new
+	// value. It is how a reset reaches every host without a message to any of
+	// them: the epoch is part of the cache's object key, so each host finds
+	// out at its own next build. See internal/build/epoch.go.
+	BumpEpoch(ctx context.Context, orgID string) (int, error)
 }
 
 // BuildLogHolder is the extra a build that ends in a RELEASE needs: its log

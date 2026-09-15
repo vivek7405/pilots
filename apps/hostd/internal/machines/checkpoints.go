@@ -63,6 +63,12 @@ func (m *Manager) Checkpoint(ctx context.Context, machineID, comment string) (*s
 	// copy is reused instead of re-downloaded.
 	localDir := m.checkpointDir(machineID, ckpt.ID)
 
+	// Recorded BEFORE the first side effect. A checkpoint interrupted between
+	// the freeze and the upload leaves a staging directory and a row that says
+	// nothing about it; this is what the next start reads to finish or abandon
+	// it. See opjournal.go, including why it cannot grow.
+	m.beginOp(machineID, opCheckpoint, ckpt.ID)
+
 	// Same reason as suspend: the disk image must agree with the memory image
 	// about what was written.
 	m.reclaimGuestMemory(ctx, machineID)
@@ -111,6 +117,41 @@ func (m *Manager) Checkpoint(ctx context.Context, machineID, comment string) (*s
 	return ckpt, nil
 }
 
+// AwaitCheckpointDurable blocks until a checkpoint's upload has completed, and
+// reports a failed or unfinished one as an error.
+//
+// For a caller that is about to restore the checkpoint somewhere: Checkpoint
+// returns as soon as the artifacts are staged, and a restore that starts before
+// the upload ends fails on "artifact missing". A release's later replicas are
+// exactly that caller -- replica two of a deploy failed with the release
+// checkpoint's snap.bin not yet in object storage.
+func (m *Manager) AwaitCheckpointDurable(ctx context.Context, machineID, checkpointID string) error {
+	localDir := m.checkpointDir(machineID, checkpointID)
+	deadline := time.Now().Add(checkpointDurableWait)
+	for {
+		st := fc.StatusOf(localDir)
+		switch {
+		case st.Durable:
+			return nil
+		case st.Failed:
+			return fmt.Errorf("machines: checkpoint %s could not be uploaded: %s", checkpointID, st.Error)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("machines: checkpoint %s was not uploaded within %s", checkpointID, checkpointDurableWait)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(250 * time.Millisecond):
+		}
+	}
+}
+
+// checkpointDurableWait bounds AwaitCheckpointDurable. Generous: the upload is
+// a memory image and a disk diff, and a deploy waiting on it is still faster
+// than the replicas it saves from booting.
+const checkpointDurableWait = 5 * time.Minute
+
 // awaitDurable records a checkpoint as durable once its upload completes.
 //
 // Detached from the request that created the checkpoint: the caller already
@@ -123,6 +164,7 @@ func (m *Manager) awaitDurable(checkpointID, machineID, localDir string) {
 		st := fc.StatusOf(localDir)
 		switch {
 		case st.Durable:
+			m.endOp(machineID)
 			ck, err := m.findCheckpoint(ctx, checkpointID)
 			if err != nil {
 				return
@@ -134,6 +176,10 @@ func (m *Manager) awaitDurable(checkpointID, machineID, localDir string) {
 			}
 			return
 		case st.Failed:
+			// Cleared on failure too: the outcome is decided and recorded, so
+			// a resume on the next start would retry something that already
+			// has an answer.
+			m.endOp(machineID)
 			slog.Error("checkpoint upload failed; it cannot be restored from "+
 				"another host", "checkpoint", checkpointID, "machine", machineID,
 				"err", st.Error)
@@ -182,6 +228,13 @@ func (m *Manager) RestoreCheckpoint(ctx context.Context, checkpointID string) (*
 	if err != nil {
 		return nil, err
 	}
+
+	// Recorded before the teardown, which is the first irreversible step. A
+	// restore killed between the old instance's death and the new row's write
+	// leaves a machine that is neither running nor recorded as stopped, and
+	// nothing else would ever notice. See opjournal.go.
+	m.beginOp(row.ID, opRestore, ckpt.ID)
+	defer m.endOp(row.ID)
 
 	// Tear the current instance down first. Its disk and memory are being
 	// replaced wholesale.

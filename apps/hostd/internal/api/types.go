@@ -25,6 +25,19 @@ type Knobs struct {
 	AutoStart          bool   `json:"auto_start"`           // wake on an inbound request
 	MinMachinesRunning int    `json:"min_machines_running"` // 0 = scale to zero
 	SoftLimit          int    `json:"soft_limit"`           // concurrency before starting another replica
+	// HardLimit is the concurrency a machine will QUEUE at and then refuse.
+	//
+	// soft_limit says "start another replica"; hard_limit says "this one has
+	// had enough". Without it a burst that outruns the autoscaler piles every
+	// request onto one guest, which serves all of them slowly rather than
+	// most of them well, and a machine with a slow dependency degrades into
+	// timeouts nobody can attribute.
+	//
+	// Above the limit a request waits briefly for room, and is refused with
+	// 503 and Retry-After when none comes. Zero is unlimited, which is what
+	// every existing machine's knobs decode to, so nothing changes until it
+	// is set.
+	HardLimit int `json:"hard_limit"`
 	// IdleTimeout is how many seconds of quiet the idle monitor waits before
 	// it suspends the machine. The machine's own activity -- a request, an
 	// exec, a session running a command -- restarts the wait, so this is the
@@ -148,6 +161,17 @@ func (k Knobs) Validate() error {
 	if k.SoftLimit < 0 {
 		return errors.New("soft_limit cannot be negative")
 	}
+	if k.HardLimit < 0 {
+		return errors.New("hard_limit cannot be negative")
+	}
+	// A hard limit under the soft one would refuse requests at a concurrency
+	// the autoscaler has not even reacted to yet, which reads as the platform
+	// dropping traffic rather than as a limit doing its job.
+	if k.HardLimit > 0 && k.SoftLimit > 0 && k.HardLimit < k.SoftLimit {
+		return fmt.Errorf("hard_limit is %d and soft_limit is %d; a machine cannot "+
+			"refuse below the concurrency that starts another replica",
+			k.HardLimit, k.SoftLimit)
+	}
 	if k.IdleTimeout < 1 || k.IdleTimeout > MaxIdleTimeoutSeconds {
 		return fmt.Errorf("idle_timeout is %d, want 1..%d seconds", k.IdleTimeout, MaxIdleTimeoutSeconds)
 	}
@@ -231,6 +255,24 @@ type Machine struct {
 	// URLAuth is who may reach the URL: "public" (the default) or "org", which
 	// makes the router ask for an API key of the owning org.
 	URLAuth string `json:"url_auth,omitempty"`
+	// Parent is the machine this one was FORKED from, and Checkpoint the
+	// checkpoint it was restored from. Absent on a machine that was created
+	// rather than forked, which is most of them.
+	//
+	// Worth reporting rather than leaving internal: a fork shares artifacts
+	// with its parent until its own first suspend, so "which machine did this
+	// come from" is the question behind every surprising thing a fork does.
+	Parent     string `json:"parent,omitempty"`
+	Checkpoint string `json:"checkpoint,omitempty"`
+	// Egress is the address this machine's OUTBOUND traffic leaves from, when
+	// its host manages egress. Derived from the host's prefix and the owning
+	// org, so it is shared with the org's other machines on the same host and
+	// survives every one of them being destroyed.
+	//
+	// Absent means the machine leaves from the host's shared address, which is
+	// what every machine did before egress addresses existed. GET /v1/egress
+	// lists the whole set, which is what a tenant allowlists.
+	Egress string `json:"egress,omitempty"`
 }
 
 // CreateMachineRequest creates a machine from exactly one source: a built
@@ -241,6 +283,66 @@ const (
 	URLAuthPublic = "public"
 	URLAuthOrg    = "org"
 )
+
+// ResizeMachineRequest is POST /v1/machines/{id}/resize.
+//
+// Either field may be omitted to leave that dimension alone, which is how
+// "give it more memory" is said without restating the vCPU count.
+type ResizeMachineRequest struct {
+	VCPUs  int `json:"vcpus,omitempty"`
+	MemMiB int `json:"mem_mib,omitempty"`
+}
+
+// The bounds one machine is held to, wherever a size is named: on a machine
+// resize, on a service's size, and on a create.
+//
+// They exist so a typo is refused at the edge rather than somewhere deep in a
+// boot, where it has already cost the machine whatever was in its memory. They
+// are deliberately generous -- larger than any host this runs on today -- so
+// the check catches mistakes rather than capacity, which is the quota's job.
+const (
+	MaxVCPUs  = 64
+	MaxMemMiB = 262144
+	// MinMemMiB is roughly what a Linux guest needs before the kernel gives up
+	// during boot rather than after.
+	MinMemMiB = 128
+)
+
+// EgressResponse is every address an org's outbound traffic can leave from,
+// one per host that manages egress.
+//
+// A set rather than a single address, because the address is derived from the
+// HOST's prefix: an org running machines on three hosts leaves from three
+// addresses. The set changes when a host joins or leaves the fleet and at no
+// other time -- not when the org's machines are created, destroyed, resized,
+// rolled or moved, which is what makes it safe to put in a firewall.
+//
+// Empty on a fleet where no host has been given an egress prefix, which is
+// every fleet until an operator configures one.
+type EgressResponse struct {
+	OrgID     string          `json:"org_id"`
+	Addresses []EgressAddress `json:"addresses"`
+}
+
+// EgressAddress is one host's answer.
+type EgressAddress struct {
+	HostID string `json:"host_id"`
+	// IPv6 is the address, a /128 out of the host's prefix. There is no IPv4
+	// counterpart and there will not be one: a v4 address is purchased and
+	// scarce, and a bare-metal host has one, so v4 stays a shared masquerade.
+	IPv6      string `json:"ipv6"`
+	Interface string `json:"interface,omitempty"`
+}
+
+// Size is how big a machine is: the two dimensions that are priced, named
+// together wherever a service carries a size rather than a single machine.
+//
+// Zero on a dimension means "leave it as it is" on a request, and means the
+// default on a reply -- never a machine with no memory.
+type Size struct {
+	VCPUs  int `json:"vcpus"`
+	MemMiB int `json:"mem_mib"`
+}
 
 // UpdateMachineRequest is the one thing a machine changes after create.
 type UpdateMachineRequest struct {
@@ -280,6 +382,37 @@ type CreateMachineRequest struct {
 	// never has an owner row, so the pair is admin-only on the API.
 	MemBuildID    string `json:"mem_build_id,omitempty"`
 	RootfsBuildID string `json:"rootfs_build_id,omitempty"`
+
+	// MemSnapKey is where the vmstate for that pair lives: device state and
+	// vcpu registers, kilobytes beside the gigabytes of memory the pair
+	// carries. A restore needs all three, and this is the one the build ids
+	// cannot name, because it is keyed by the machine and checkpoint it was
+	// captured from rather than by a build.
+	//
+	// NOT on the wire, deliberately. It is an object-storage key, and a
+	// client that could name one could point a restore at any object in the
+	// bucket. The rollout resolves it from the release's own row and the fork
+	// path from the checkpoint it just took; neither comes from a request
+	// body. A `json:"-"` field also stays out of the SDKs, which mirror this
+	// struct, so it cannot arrive from one by accident either.
+	MemSnapKey string `json:"-"`
+
+	// ImageToken is the agent credential the restored image ALREADY carries,
+	// used to authenticate the install of this machine's own.
+	//
+	// A release image carries the placeholder, because the rollout puts it
+	// back before photographing the replica. A FORK's image does not: it is a
+	// picture of a live machine, taken with that machine's own token inside
+	// it, and nothing reset it. Installing the fork's credential while
+	// authenticating as the placeholder is a 401, and the fork dies at
+	// "install agent token: status 401" having booted perfectly.
+	//
+	// Empty means the placeholder, which is every path but a fork.
+	//
+	// NOT on the wire, for the obvious reason: it is a credential, and a
+	// client that could name one could authenticate as any machine in the
+	// fleet. `json:"-"` also keeps it out of the SDKs that mirror this struct.
+	ImageToken string `json:"-"`
 
 	// Service and Release record which service's rollout this machine belongs
 	// to, so a deploy can find its own replicas and a rollback can find the
@@ -463,8 +596,12 @@ type Service struct {
 	// A NAME, never a value. "web dials db" is what the app grouping and a
 	// connection attempt already say out loud, so nothing here is a secret
 	// the caller could not have learned by reading its own compose file.
-	DependsOn    []string     `json:"depends_on,omitempty"`
-	Replicas     int          `json:"replicas"`
+	DependsOn []string `json:"depends_on,omitempty"`
+	Replicas  int      `json:"replicas"`
+	// Size is how big each replica is. Always spelled out, even for a service
+	// that has never been scaled, so a reader never has to know what the
+	// defaults were on the day the service was made.
+	Size         Size         `json:"size"`
 	Knobs        Knobs        `json:"knobs"`
 	Health       *HealthCheck `json:"health,omitempty"`
 	URL          string       `json:"url,omitempty"`
@@ -494,6 +631,9 @@ type CreateServiceRequest struct {
 	// DeployRequest.
 	Knobs  *Knobs       `json:"knobs,omitempty"`
 	Health *HealthCheck `json:"health,omitempty"`
+	// Size is how big each replica will be. Omitted means the defaults, which
+	// is what every service was before a service had a size.
+	Size *Size `json:"size,omitempty"`
 	// Domain is the subdomain label under the fleet's domain. Empty means one
 	// is minted from the name: the name itself when it is free, else the name
 	// and a four-character suffix. Set it to ask for an exact label, which is
@@ -553,6 +693,13 @@ type DeployRequest struct {
 	// the deploy is where they travel: {"min_machines_running":1} is how a
 	// replica is kept warm, and a redeploy with different knobs changes them.
 	Knobs json.RawMessage `json:"knobs,omitempty"`
+	// Size sets how big the replicas this deploy creates are.
+	//
+	// It rides on the deploy rather than being sent as a separate patch
+	// beforehand on purpose: a patch carrying a size runs a rollout of its
+	// own, so a compose file that changed both its image and its size would
+	// roll the service twice to arrive where one rollout could have put it.
+	Size *Size `json:"size,omitempty"`
 }
 
 // PromoteRequest turns a sandbox into a durable service. The machine's URL is
@@ -585,7 +732,16 @@ type RedeployRequest struct {
 // them if it had them. They travel on the deploy, and a body carrying one is a
 // 400 naming the field.
 type UpdateServiceRequest struct {
-	Replicas   *int              `json:"replicas,omitempty"`
+	Replicas *int `json:"replicas,omitempty"`
+	// Size changes how big every replica is. Zero on a dimension leaves that
+	// dimension alone, which is how "give it more memory" is said without
+	// restating the vCPU count.
+	//
+	// Applying it replaces the replicas one at a time, at the same release,
+	// and drops no request. A volume-backed service has a held window instead,
+	// because a volume has one writer and the replacement cannot mount it
+	// until the old machine has let go.
+	Size       *Size             `json:"size,omitempty"`
 	Health     *HealthCheck      `json:"health,omitempty"`
 	Env        map[string]string `json:"env,omitempty"`
 	SecretEnv  map[string]string `json:"secret_env,omitempty"`
@@ -660,6 +816,25 @@ type Host struct {
 	// /proc/cpuinfo vendor_id. Empty on a host that has not published its row
 	// yet, which ranks as "in no pool".
 	CPUVendor string `json:"cpu_vendor,omitempty"`
+	// MemReclaimableMiB is memory held by RUNNING machines this host would
+	// suspend if it needed the room. Placement counts it as available, so a
+	// host whose free memory looks small can still take a create.
+	//
+	// Not suspended machines: suspend kills the Firecracker process, so a
+	// suspended machine's memory is already in mem_free_mib.
+	MemReclaimableMiB int `json:"mem_reclaimable_mib"`
+	// VCPUsRunning is the vCPUs this host's machines are configured with.
+	// Oversubscription is normal and expected -- vCPUs are timeshared -- so
+	// this is a load signal rather than a limit.
+	VCPUsRunning int `json:"vcpus_running"`
+	// Draining says an operator is moving this host's machines off it. Every
+	// ranker skips a draining host, which is what lets a drain converge
+	// instead of racing the placer.
+	Draining bool `json:"draining,omitempty"`
+	// BuildsCached is how many builds this host holds on local disk. A create
+	// whose builds are all here starts from a restore rather than a download,
+	// which is worth a tie-break in placement and nothing more.
+	BuildsCached int `json:"builds_cached,omitempty"`
 }
 
 // CreateAPIKeyRequest mints a key for an org. Admin-scoped: the org is named
@@ -738,7 +913,29 @@ type QuotaResponse struct {
 	MaxMemMiB    int    `json:"max_mem_mib"`
 	MaxVolumeGiB int    `json:"max_volume_gib"`
 	MaxBuilds    int    `json:"max_builds"`
-	UpdatedAt    int64  `json:"updated_at,omitempty"`
+	// MaxSnapshotGiB is how much object storage this org's checkpoints may
+	// hold. Zero on a PUT means the default rather than none, because a client
+	// that sent the old body shape would otherwise freeze the org's
+	// checkpoints without meaning to.
+	MaxSnapshotGiB int   `json:"max_snapshot_gib"`
+	UpdatedAt      int64 `json:"updated_at,omitempty"`
+
+	// What the org is holding right now, against those limits.
+	//
+	// A quota API that reports the ceiling and not the floor is half an API:
+	// the only way to learn the other half was to hit it and read the 429. So
+	// anyone who wanted to show a usage bar, or decide whether to ask for one
+	// more machine, had to count it themselves -- and a count derived from
+	// GET /v1/machines cannot know that builders do not count, so it is wrong
+	// by however many builders the org has.
+	//
+	// Answered on GET, absent on PUT: these are not settable, and omitempty
+	// keeps them out of the body a client echoes back when it changes a limit.
+	UsedMachines    int `json:"used_machines,omitempty"`
+	UsedVCPUs       int `json:"used_vcpus,omitempty"`
+	UsedMemMiB      int `json:"used_mem_mib,omitempty"`
+	UsedVolumeGiB   int `json:"used_volume_gib,omitempty"`
+	UsedSnapshotGiB int `json:"used_snapshot_gib,omitempty"`
 }
 
 // QuotaExceededResponse names the limit that refused a request, so a client is
@@ -767,6 +964,10 @@ type UsageTotals struct {
 	VCPUSeconds      int64 `json:"vcpu_seconds"`
 	MiBSeconds       int64 `json:"mib_seconds"`
 	VolumeGiBSeconds int64 `json:"volume_gib_seconds"`
+	// SnapshotGiBSeconds is what this org's checkpoints held in object
+	// storage, accrued in EVERY machine state: the bytes are there whatever
+	// the guest is doing, which is why a stopped machine is not free.
+	SnapshotGiBSeconds int64 `json:"snapshot_gib_seconds"`
 }
 
 // UsageResponse is what THIS host metered, never the fleet's total: there is
@@ -778,6 +979,11 @@ type UsageResponse struct {
 	Since  int64                  `json:"since"`
 	Until  int64                  `json:"until"`
 	Orgs   map[string]UsageTotals `json:"orgs"`
+	// Machines is the same accrual per machine, keyed by org and then by
+	// machine id. Present only for ?by=machine, because it is the larger
+	// answer and most callers want the invoice line rather than its
+	// derivation.
+	Machines map[string]map[string]UsageTotals `json:"machines,omitempty"`
 }
 
 type HealthResponse struct {
@@ -810,6 +1016,18 @@ type HealthResponse struct {
 	// lie about its CPU. It exists so the fleet gate can prove it armed the
 	// fault rather than assume it; a real host never sets it.
 	CPUVendorForced bool `json:"cpu_vendor_forced,omitempty"`
+	// StoreVersions is the same number broken out per actor: how far this
+	// replica has applied each host's changes, keyed by site id in hex. The
+	// sum above answers "are we far apart"; this answers "on whose rows",
+	// which is what a joining host has to know before it may act on a row it
+	// cannot see. Empty on SQLite.
+	StoreVersions map[string]int64 `json:"store_versions,omitempty"`
+	// ReplicationComplete is the join gate: false while this host is still
+	// catching up, during which it serves its own machines normally and
+	// claims none of anybody else's. See
+	// internal/state/corrosion/joingate.go. Always true on SQLite, which has
+	// no replica to wait for.
+	ReplicationComplete bool `json:"replication_complete"`
 }
 
 // WhoamiResponse is what the caller's key resolves to on the host that

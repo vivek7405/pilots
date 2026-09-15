@@ -47,6 +47,14 @@ const (
 	// default route from an RA loses it. scripts/host-bootstrap.sh sets
 	// accept_ra=2 for that reason.
 	v6ForwardingKnob = "/proc/sys/net/ipv6/conf/all/forwarding"
+
+	// v4ForwardingKnob is the same thing for IPv4, and it is what carries a
+	// guest's outbound traffic from its veth to the host's uplink.
+	//
+	// Written by ApplyEgress rather than here, beside the masquerade that
+	// needs it: the two are useless apart. It has no accept_ra side effect to
+	// warn about, because IPv4 has no router advertisements.
+	v4ForwardingKnob = "/proc/sys/net/ipv4/ip_forward"
 )
 
 // TenantMachine is one machine as the filter sees it.

@@ -56,9 +56,26 @@ var builderKnobs = json.RawMessage(
 func (m *Manager) EnsureBuilder(ctx context.Context, orgID string) (string, func(), error) {
 	name := BuilderName(orgID, m.opts.HostID)
 
-	id, err := m.findBuilder(ctx, name)
+	// The current builder template, so a builder minted from an older one is
+	// recognised below. createBuilder needs it anyway; asking first costs a
+	// manifest read.
+	tmpl, err := m.EnsureBuilderTemplate(ctx)
 	if err != nil {
 		return "", nil, err
+	}
+	id, stale, err := m.findBuilder(ctx, name, tmpl.MemBuildID.String())
+	if err != nil {
+		return "", nil, err
+	}
+	for _, s := range stale {
+		// The name is held by the stale row, so a create cannot proceed until
+		// it is gone. Failing here says so, rather than failing the create on
+		// a name conflict that reads as a second builder already existing.
+		slog.Warn("replacing a builder that failed or was made from an older builder template",
+			"machine", s, "name", name, "template", tmpl.MemBuildID)
+		if err := m.Destroy(ctx, s); err != nil {
+			return "", nil, fmt.Errorf("machines: clear the failed builder %s: %w", s, err)
+		}
 	}
 	if id == "" {
 		if id, err = m.createBuilder(ctx, orgID, name); err != nil {
@@ -119,23 +136,54 @@ func (m *Manager) EnsureBuilder(ctx context.Context, orgID string) (string, func
 }
 
 // findBuilder returns this host's builder row for a name, or "" if there is
-// none to reuse.
+// none to reuse, plus the ids of rows under that name that must be destroyed
+// before one can be created.
 //
 // Matched on name AND host: the name already carries a host suffix, so a row
 // from another host cannot match, but the explicit check is what makes that a
 // property of this function rather than of the naming scheme. A destroyed row
 // is a tombstone and is not reused.
-func (m *Manager) findBuilder(ctx context.Context, name string) (string, error) {
+//
+// A row in the error state is never reused. It is what a create that failed
+// before the guest came up leaves behind: no memory image and no disk, so a
+// wake can only answer "no usable memory build", and it holds the name, so no
+// fresh builder can be created either. Reusing it turned one transient create
+// failure (object storage down for a minute) into every build for that org
+// failing on this host until someone destroyed the machine by hand. A builder
+// holds nothing worth keeping -- the layer cache lives on the host -- so the
+// row is replaced rather than repaired.
+//
+// So is one pinned to a builder template other than the current one, unless it
+// is running. A builder carries its template's disk and userspace for life, so
+// a rebuilt builder image -- a new BuildKit, a new agent, or the fix for a
+// template whose memory and disk disagreed -- never reached a builder that
+// already existed. The last case is how this was found: a builder minted from
+// the broken template kept failing BuildKit reads with EBADMSG after the
+// template was fixed. A running one is left for its current build and
+// replaced the next time a build finds it asleep.
+func (m *Manager) findBuilder(ctx context.Context, name, templateMem string) (string, []string, error) {
 	rows, err := m.opts.Store.ListMachines(ctx)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
+	var id string
+	var stale []string
 	for _, row := range rows {
-		if row.Name == name && row.HostID == m.opts.HostID && row.State != state.StateDestroyed {
-			return row.ID, nil
+		if row.Name != name || row.HostID != m.opts.HostID || row.State == state.StateDestroyed {
+			continue
 		}
+		if row.State == StateError {
+			stale = append(stale, row.ID)
+			continue
+		}
+		if _, running := m.get(row.ID); !running && templateMem != "" &&
+			row.TemplateMemBuildID != "" && row.TemplateMemBuildID != templateMem {
+			stale = append(stale, row.ID)
+			continue
+		}
+		id = row.ID
 	}
-	return "", nil
+	return id, stale, nil
 }
 
 // createBuilder makes this host's builder for an org.
@@ -165,6 +213,16 @@ func (m *Manager) createBuilder(ctx context.Context, orgID, name string) (string
 		Knobs:  builderKnobs,
 	})
 	if err != nil {
+		// Create keeps the row of a guest that never started, in the error
+		// state, as the record of a failed create. For a builder that record
+		// is a name nobody can use, so it goes now rather than at the next
+		// build. Best effort: findBuilder clears one this could not.
+		if row != nil {
+			if derr := m.Destroy(context.WithoutCancel(ctx), row.ID); derr != nil {
+				slog.Warn("could not clear a builder whose create failed",
+					"machine", row.ID, "err", derr)
+			}
+		}
 		return "", fmt.Errorf("machines: create the builder for org %q: %w", orgID, err)
 	}
 	slog.Info("created a builder machine", "id", row.ID, "name", name,

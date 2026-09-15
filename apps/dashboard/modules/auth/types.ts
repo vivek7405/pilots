@@ -3,8 +3,15 @@
  * shipping component may import from here.
  */
 
-/** A role on one org. `owner` may mint admin keys and manage membership. */
-export type Role = 'owner' | 'member';
+/**
+ * A role on one team.
+ *
+ * Re-exported from `#modules/orgs/roles.ts`, which owns the ladder and the
+ * predicates that read it. It stays exported from here because every existing
+ * import of `Role` in this app points at this file, and one type with two
+ * definitions is exactly how a permission check drifts.
+ */
+export type { Role } from '#modules/orgs/roles.ts';
 
 /** The org the current request acts as, as a page or component sees it. */
 export interface OrgSummary {

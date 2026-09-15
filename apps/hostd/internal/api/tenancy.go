@@ -99,6 +99,15 @@ func (d Deps) ownedMachine(w http.ResponseWriter, r *http.Request, id string) (*
 		notFound(w, "machine")
 		return nil, false
 	}
+	// A broker token acts on its own machine and nothing else. Checked HERE,
+	// where every machine-scoped handler already passes, rather than in each of
+	// them: a list of call sites goes out of date, and the handler somebody
+	// writes next year would silently let a machine act on its siblings.
+	if !selfAllows(r, row.ID, row.ServiceID) {
+		self, _ := Self(r.Context())
+		selfRefused(w, self)
+		return nil, false
+	}
 	return row, true
 }
 
@@ -113,6 +122,13 @@ func (d Deps) ownedService(w http.ResponseWriter, r *http.Request, id string) (*
 		notFound(w, "service")
 		return nil, false
 	}
+	// A replica may act on its OWN service and no other. selfAllows takes the
+	// service id in both positions because a service IS the object here.
+	if !selfAllows(r, svc.ID, svc.ID) {
+		self, _ := Self(r.Context())
+		selfRefused(w, self)
+		return nil, false
+	}
 	return svc, true
 }
 
@@ -125,6 +141,22 @@ func (d Deps) ownedVolume(w http.ResponseWriter, r *http.Request, id string) (*s
 	}
 	if !d.mayAccess(r, id) {
 		notFound(w, "volume")
+		return nil, false
+	}
+	// The same self-token narrowing ownedMachine and ownedService apply.
+	//
+	// self.go argues that the check belongs in the chokepoints so no handler
+	// can be forgotten, and then this one was: there are THREE ownership
+	// resolvers, not two, and the volume-snapshot handlers all arrive here. A
+	// broker token could restore a sibling service's database to an old
+	// snapshot, delete every snapshot of it, or overwrite its backup schedule.
+	//
+	// A volume names no machine, so the object is compared against itself: a
+	// machine's token reaches a volume only through a route that already
+	// resolved the machine, never by naming the volume directly.
+	if !selfAllows(r, id, "") {
+		self, _ := Self(r.Context())
+		selfRefused(w, self)
 		return nil, false
 	}
 	return v, true

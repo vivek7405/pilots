@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -56,6 +57,18 @@ type Options struct {
 	Fleet  Fleet
 	Store  state.Store
 
+	// Ready reports whether this host's replica has caught up with the fleet.
+	// Nil means always ready, which is the single box and every test that is
+	// not about the gate.
+	//
+	// This loop is the reason the join gate exists. Its whole job is to act on
+	// machines whose owner it cannot see, and on a half-replicated replica an
+	// owner that is merely unseen is indistinguishable from one that is dead:
+	// both are an empty result. The claim that follows merges cleanly into a
+	// row a live host is still writing, so nothing errors and two hosts end up
+	// believing they own the same machine.
+	Ready func() bool
+
 	// Capacity reports whether this host can take another machine of this
 	// size. Refusing is normal and costs nothing: the next tick recomputes the
 	// live set and re-hashes, so a full host does not wedge a machine.
@@ -64,6 +77,17 @@ type Options struct {
 	// Restore brings a rescued machine up here. It receives the row and
 	// nothing else -- everything host-local is minted fresh.
 	Restore func(ctx context.Context, m *state.Machine) error
+	// BootOnVolume rescues a volume-backed machine, which has no memory image
+	// and never will: it takes a release by booting its rootfs, because a
+	// memory image carries the volume drive in its device state.
+	//
+	// It owns its claim for the same reason Restore does: the claim and the
+	// start must happen under one per-machine lock, or something else decides
+	// the machine is free in between.
+	//
+	// nil on a host that cannot boot one; such a host leaves the machine for
+	// the next tick, which re-hashes over the live set.
+	BootOnVolume func(ctx context.Context, m *state.Machine) error
 
 	// RunningLocally lists the machines this host currently has processes for.
 	RunningLocally func() []string
@@ -72,6 +96,26 @@ type Options struct {
 
 	// Heartbeat reports this host's identity and free capacity.
 	Heartbeat func() state.Host
+
+	// Capacities reports what this host can still hold, written beside the
+	// heartbeat so placement reads a figure as fresh as liveness itself. Nil
+	// on a host that publishes none, which is every host in a test that is not
+	// about placement.
+	//
+	// Separate from Heartbeat because the two rows have different jobs: the
+	// hosts row is the liveness signal every survivor reads to decide who is
+	// dead, and capacity is advisory. Folding capacity into the hosts row
+	// would also mean a column add on a table that has rows (rule 6).
+	Capacities func() *state.HostCapacity
+
+	// CachedBuilds reports the build ids this host holds on local disk, or nil
+	// when nothing has changed since the last tick.
+	//
+	// Nil is the common answer, and that is the point: this row is gossiped in
+	// FULL on every write, and a build cache changes far more often than
+	// placement needs to hear about it. Writing it every five seconds would
+	// starve the apply loop for every other row on the fleet.
+	CachedBuilds func() []string
 
 	// Now is overridable for tests.
 	Now func() time.Time
@@ -90,6 +134,7 @@ func (o Options) now() time.Time {
 // reads, so a host that stops writing it is, by definition, gone -- and its
 // machines become someone else's to rescue.
 func RunHeartbeat(ctx context.Context, opts Options) {
+	live := metrics.NewLoop("heartbeat", 3*HeartbeatInterval)
 	tick := time.NewTicker(HeartbeatInterval)
 	defer tick.Stop()
 
@@ -104,6 +149,41 @@ func RunHeartbeat(ctx context.Context, opts Options) {
 			slog.Error("could not write this host's heartbeat; the fleet will "+
 				"shortly treat this host as dead", "err", err)
 		}
+		// Capacity and the cached-build set ride the same tick, AFTER the
+		// hosts row: a capacity row for a host the fleet does not yet believe
+		// in is a row no ranker will read, and writing it first would only
+		// widen that window.
+		//
+		// Neither failure is fatal here. A host that cannot publish its
+		// capacity is simply not preferred by placement, which is the safe
+		// direction; a host that cannot heartbeat at all is the serious case,
+		// and it is shouted about above.
+		if opts.Capacities != nil {
+			if c := opts.Capacities(); c != nil {
+				c.HostID = opts.HostID
+				c.UpdatedAt = opts.now().Unix()
+				if err := opts.Store.PutHostCapacity(ctx, c); err != nil && ctx.Err() == nil {
+					slog.Warn("could not publish this host's capacity; placement will "+
+						"not prefer it until this clears", "err", err)
+				}
+			}
+		}
+		if opts.CachedBuilds != nil {
+			if ids := opts.CachedBuilds(); ids != nil {
+				if err := opts.Store.PutHostBuilds(ctx, &state.HostBuilds{
+					HostID: opts.HostID, Builds: ids, UpdatedAt: opts.now().Unix(),
+				}); err != nil && ctx.Err() == nil {
+					slog.Warn("could not publish this host's cached builds; placement "+
+						"loses only the affinity bonus", "err", err)
+				}
+			}
+		}
+
+		// Ticked even when the write failed: what this watches is whether the
+		// LOOP is running. A store that refuses is loud already, in the line
+		// above and in every peer's view of this host. A loop that stopped
+		// spinning says nothing at all, which is the case the watchdog is for.
+		live.Tick()
 
 		select {
 		case <-ctx.Done():
@@ -115,11 +195,13 @@ func RunHeartbeat(ctx context.Context, opts Options) {
 
 // RunRescue reclaims orphaned machines until ctx is done.
 func RunRescue(ctx context.Context, opts Options) {
+	live := metrics.NewLoop("self_heal", 3*RescueInterval)
 	tick := time.NewTicker(RescueInterval)
 	defer tick.Stop()
 
 	for {
 		Tick(ctx, opts)
+		live.Tick()
 		select {
 		case <-ctx.Done():
 			return
@@ -135,6 +217,15 @@ func Tick(ctx context.Context, opts Options) {
 	// else now owns, and every moment it keeps serving is a moment two
 	// Firecrackers are writing the same machine's disk.
 	releaseLost(ctx, opts)
+
+	// Releasing what we lost is a read of PRESENCE: another host's id is in
+	// the row, which a partial replica can only under-report, never invent. So
+	// it runs before the gate. Everything below this line reads an ABSENCE and
+	// waits.
+	if opts.Ready != nil && !opts.Ready() {
+		slog.Warn("replication not complete; claiming nothing this tick")
+		return
+	}
 
 	now := opts.now()
 
@@ -223,6 +314,37 @@ func releaseLost(ctx context.Context, opts Options) {
 
 // rescue claims one machine and brings it up here.
 func rescue(ctx context.Context, opts Options, m state.Machine) {
+	// A VOLUME machine is rescued by BOOTING it, not by restoring it.
+	//
+	// It has no memory image and never will: a volume-backed machine takes a
+	// release by booting its rootfs, because a memory image carries the volume
+	// drive in its device state and could only be restored onto the same drive
+	// on the same host. So the branch below, which gives up on a machine with
+	// no snapshot, was giving up on exactly the machines whose data DID survive
+	// their host -- it is on a volume in object storage, which is the whole
+	// point of a volume.
+	//
+	// Everything that makes this safe is unchanged: the claim is still a
+	// dead-owner claim on a provably dead host, still made under the same lock,
+	// and the volume is still claimed before it is mounted. What differs is
+	// only what happens after the claim: a boot from the image the machine
+	// already names, rather than a restore of a snapshot that does not exist.
+	if m.MemBuildID == "" && m.VolumeID != "" && m.ImageRef != "" {
+		if opts.BootOnVolume == nil {
+			// A host that cannot boot one leaves it for a host that can; the
+			// next tick re-hashes over the live set.
+			return
+		}
+		slog.Info("rescuing a volume-backed machine by booting it on its volume",
+			"machine", m.ID, "dead_host", m.HostID, "volume", m.VolumeID)
+		if err := opts.BootOnVolume(ctx, &m); err != nil {
+			slog.Info("did not rescue a volume-backed machine", "machine", m.ID, "err", err)
+			return
+		}
+		slog.Info("machine rescued onto its volume", "machine", m.ID, "url", m.Domain)
+		return
+	}
+
 	// A machine with no memory image cannot be restored anywhere: it was never
 	// suspended or checkpointed, so there is nothing in object storage to
 	// bring back. Looping on it every tick forever helps nobody.

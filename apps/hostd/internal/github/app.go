@@ -277,6 +277,56 @@ func (a *App) Comment(ctx context.Context, token, repo string, number int, marke
 	return nil
 }
 
+// StatusContext is the name pilots' commit status appears under. One context,
+// so a repository with branch protection can require exactly this check.
+const StatusContext = "pilots/deploy"
+
+// maxStatusDescription is GitHub's limit for the one-line description.
+const maxStatusDescription = 140
+
+// Status posts a commit status: the dot beside a commit that says whether this
+// push deployed.
+//
+// A push deploy had no feedback of any kind. The build ran, it succeeded or it
+// did not, and the only way to find out was to notice the app had not changed
+// and then go looking for a log that was not linked from anywhere. A status is
+// how every other deploy service answers that, it is one API call, and it puts
+// a link to the log in the place a person is already looking.
+//
+// A commit status rather than a check run, deliberately. A status needs the
+// `statuses` permission and one POST per state; a check run needs its own
+// permission, an app installation token scoped to checks, a check-run id to
+// carry between calls, and an annotations model this has no use for. The
+// visible result in the pull request is the same line either way.
+func (a *App) Status(ctx context.Context, token, repo, sha, state, description, targetURL string) error {
+	if sha == "" {
+		return fmt.Errorf("github: a commit status needs a sha")
+	}
+	if len(description) > maxStatusDescription {
+		description = description[:maxStatusDescription-1] + "…"
+	}
+	payload, _ := json.Marshal(map[string]string{
+		"state": state, "context": StatusContext,
+		"description": description, "target_url": targetURL,
+	})
+	url := fmt.Sprintf("%s/repos/%s/statuses/%s", a.base(), repo, sha)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, strings.NewReader(string(payload)))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+	resp, err := a.HTTP.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return fmt.Errorf("github: status on %s@%s: %s", repo, sha, resp.Status)
+	}
+	return nil
+}
+
 func (a *App) findComment(ctx context.Context, token, repo string, number int, marker string) (int64, error) {
 	url := fmt.Sprintf("%s/repos/%s/issues/%d/comments?per_page=100", a.base(), repo, number)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
