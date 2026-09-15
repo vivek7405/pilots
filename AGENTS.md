@@ -231,10 +231,10 @@ e2e half asserts what a client would see, the gate half asserts that the host
 kept none of the wreckage. Neither half may retire an assertion, and neither
 may *skip* one — a block that cannot set itself up fails loudly, because a
 quiet early return retires every assertion below it at runtime.
-- The **metal tier** runs only under `PILOTS_E2E_METAL=1` on a host whose
-  `/v1/health` reports `reflink: true`. It replaces the laptop budgets with
-  the SLOs the product is sold on; the flag on a host that cannot share
-  extents fails the run rather than downgrading it.
+- The **metal tier** runs only under `PILOTS_E2E_METAL=1`, which is the
+  operator asserting dedicated hardware. It replaces the laptop budgets with
+  the SLOs the product is sold on; nothing the host reports stands in for
+  that assertion, and there is no degraded tier beneath the laptop budgets.
 
 ---
 

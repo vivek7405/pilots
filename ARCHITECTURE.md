@@ -36,8 +36,29 @@ deploy sets it on its replicas, and a promoted sandbox keeps the knobs it had).
 | Promote | sandbox checkpoint → production service, identity preserved |
 | N-replica | router LB, concurrency-driven autostop/autostart |
 | Volumes | persistent, per-write durable, survive host death |
+| Root durability | RPO <= 60s, published and measured |
 | Surface | CLI, JS/Go SDKs, MCP server, webjs dashboard |
 | Multi-tenant | jailer + cgroups v2 + egress firewall + quotas |
+
+### Two durability tiers
+
+Not every byte a machine writes is promised the same thing, and the promise
+is stated rather than implied:
+
+| Tier | Guarantee | Mechanism |
+|---|---|---|
+| **Volume** | **per-write durable** | JuiceFS chunk upload per write; `--writeback` deliberately absent; the drive is `cache_type Writeback` |
+| **Machine root** | **RPO <= 60 s** — the disk is durable in S3 as of the last checkpoint, suspend, **or root flush, whichever is most recent** | a periodic disk-only checkpoint: pause → read the dirty bitmap → copy the dirty ranges → resume → chunkify and upload |
+
+The root's window is a published, operator-tunable figure —
+`PILOT_ROOT_FLUSH_INTERVAL`, default `60s`, `0` disables — and a measured
+one: `pilots_root_flush_pause_seconds` (the guest pause a flush costs, p99
+< 25ms) and `pilots_root_flush_lag_seconds` (how far the bucket trails the
+disk), both scraped and asserted by the e2e battery. **Data that cannot
+afford to lose its last 60 seconds belongs on a volume.** Sprites ships the
+same write-back model for its root and does not publish the window; pilots
+publishes it. (The prior-art REJECT is against an *unpublished* window and
+against letting write-back reach volumes; neither happens here.)
 
 Post-parity backlog (beyond every competitor): CoW memory fan-out (1→N
 fork), multi-region. (Tenant Postgres left this list: it is a shipped
@@ -192,6 +213,15 @@ compose fragment on the ordinary primitives, not a product tier. See
    dispose"). Storage is content-addressed and host-agnostic (better than
    Fly's host-pinned volumes) -- and the disk half is vendor-free; only memory
    images are pool-local (rule 6).
+
+   The machine root is S3-backed all the way down. The truth of a root is
+   its chunked build chain in object storage; the host's build directory
+   and each machine's cow file are caches of it, disposable and rebuilt on
+   demand, and no per-machine copy of a rootfs exists on any path. A host
+   with a cold cache serves a root from the bucket while it hydrates rather
+   than waiting for a copy. What the root promises about durability is the
+   published RPO under **Two durability tiers** above; the volume's stronger
+   per-write promise is a separate tier, not a degraded copy of it.
 
 8. **Guest page size is fleet-wide.** Guest memory is backed by 2MiB
    hugepages when the host is configured for it (`PILOT_HUGEPAGES`, with the
@@ -963,10 +993,11 @@ host, changing only when a host joins or leaves the fleet.
 
 **The rootfs bind-mount trick** (a shared rootfs causes post-resume workqueue
 lockups; the snapshot bakes an absolute drive path): FC runs under
-`unshare -m`; a per-machine rootfs (reflink copy of the template, on NVMe —
-not tmpfs) is bind-mounted onto the constant path
-`/srv/pilots/rootfs.ext4` inside that private mount ns. Every snapshot
-therefore restores against the same path on any host.
+`unshare -m`; the machine's rootfs — its own NBD device node for every
+machine, and a plain file only for the template build itself — is
+bind-mounted onto the constant path `/srv/pilots/rootfs.ext4` inside that
+private mount ns. Every snapshot therefore restores against the same path on
+any host: the path is the invariant, not what sits behind it.
 
 **A machine is pinned to the template it was built from.** Its memory and disk
 images are diffs, and a diff's unchanged ranges name a logical offset rather
@@ -981,46 +1012,49 @@ because builds are content-addressed. `block.SetParent` verifies the pairing
 and refuses a mismatch, turning what would be a silently stitched guest into a
 failed restore.
 
-**Put the machine store on a filesystem that can share extents** (btrfs, or
-XFS made with `-m reflink=1`). Create copies the golden template, and
-checkpoint copies the snapshot and the cow *inside the pause window*; all
-three are budgeted as metadata operations, and a reflink is what makes them
-metadata operations.
+**Extent sharing is a nice-to-have, not a dependency.** A create does not
+copy the golden template: it restores through NBD over a build every machine
+on the host shares, and only the machine's own writes land in its cow file.
+A checkpoint copies the *dirty ranges* of that cow inside the pause window,
+so the pause is O(writes) rather than O(disk) on every filesystem. Nothing on
+the machine path asks the filesystem to share extents. btrfs, or XFS made
+with `-m reflink=1`, still makes the one whole-file copy that remains — the
+template build, once per host per template — cheaper, and that is all it
+buys.
 
-Measured on ext4 with the 2GiB golden rootfs, the engine's actual copy
-(`cp --reflink=auto --sparse=always`, which skips zero blocks) costs **134ms
-warm and 465ms cold** — not free, but not fatal either: create measures
-**~1020ms** there, inside its 1.5s budget. What does break is the **checkpoint
-pause**, which stops being independent of machine size and measures **409ms to
-2172ms p50 across hosts against a 500ms budget**, with single samples past 4s.
-That size-independence is the property that makes checkpoints usable at all,
-so it is the reason to care.
+That was not always so, and the numbers that drove the change are kept here
+as history. Before the root was served over NBD, create reflink-copied the
+golden template and checkpoint reflink-copied the *whole* cow inside the
+pause. On ext4, where `cp --reflink=auto --sparse=always` falls back to a
+real copy, the create copy cost **134ms warm and 465ms cold** (create
+measured **~1020ms**, inside its 1.5s budget) — and the **checkpoint pause
+stopped being independent of machine size**: **409ms to 2172ms p50 across
+hosts against a 500ms budget**, with single samples past 4s. That
+size-independence is the property that makes checkpoints usable at all,
+which is why a copy of the whole cow could not stay in the pause window.
 
-Nothing errors when extents cannot be shared. So hostd probes at startup,
-warns, and reports it on `/v1/health`; `host-bootstrap.sh` prints it and
-refuses to finish under `PILOT_REQUIRE_REFLINK=1`. The e2e battery holds
-create and wake to the engine targets on every host, and gives the checkpoint
-gap a *degraded ceiling* where extents cannot be shared rather than dropping
-the assertion — an assertion that stops asserting is how a real slowdown
-hides.
+hostd still probes extent sharing at startup and reports it on `/v1/health`
+as `reflink`, because the figure is useful to an operator sizing a host; it
+is no longer a precondition for anything. The e2e battery holds create, wake
+and the checkpoint gap to the same targets on every host. There is no
+degraded tier: a budget that relaxes where extents cannot be shared is an
+assertion that has stopped asserting, and that is how a real slowdown hides.
 
-Above those two tiers sits a third. `PILOTS_E2E_METAL=1` holds the host to the
-**metal SLOs** — create < 500ms, wake < 200ms, checkpoint resume gap < 500ms,
-release restore < 1s, promote < 1.5s, cold boot from own disk < 5s — which is
-the latency the product is
-sold on and is only achievable on dedicated hardware. The switch is explicit
-rather than inferred, because extent sharing is necessary for those numbers
-and nowhere near sufficient: a nested-virtualisation laptop node on btrfs
-reports `reflink: true` and cannot create a machine in 500ms. Setting the
-flag on a host whose `/v1/health` does not report `reflink: true` is a FAILED
-step, never a quiet downgrade to the laptop ceilings.
+Above the engine targets sits one more tier. `PILOTS_E2E_METAL=1` holds the
+host to the **metal SLOs** — create < 500ms, wake < 200ms, checkpoint resume
+gap < 500ms, release restore < 1s, promote < 1.5s, cold boot from own disk
+< 5s — which is the latency the product is sold on and is only achievable on
+dedicated hardware. The switch is the operator asserting dedicated hardware:
+explicit, and inferred from nothing the host reports, because nothing a host
+reports can stand in for it — a nested-virtualisation laptop node cannot
+create a machine in 500ms whatever its filesystem says.
 
 The cold boot is the one number in that list that is a *kernel* boot rather
 than a restore, so it has its own budget rather than sharing wake's: < 5s on
-dedicated hardware, and a degraded ceiling of 30s where extents cannot be
-shared, against 25s for the engine's own nested-KVM kernel-boot figure. It
-is asserted separately (`PILOTS_E2E_COLD_BOOT=1`) precisely so a regression in
-the resume path cannot hide behind it.
+dedicated hardware, and 30s on a nested-virtualisation laptop node, against
+25s for the engine's own nested-KVM kernel-boot figure. It is asserted
+separately (`PILOTS_E2E_COLD_BOOT=1`) precisely so a regression in the resume
+path cannot hide behind it.
 
 (An earlier note here put the ext4 penalty at 2.2s per create. That measured
 `cp --reflink=auto` without `--sparse=always`, which is not what the engine
@@ -1074,12 +1108,15 @@ and every one of them was arrived at by measuring a resume gap:
 5. Read the NBD handler's dirty bitmap over its control socket, while the
    guest is still paused — a bitmap read mid-write describes a disk state
    that never existed.
-6. *Checkpoint*: reflink the cow, **resume immediately**, then chunkify and
-   upload in the background (semaphore, default 1 — unbounded chunkify OOMs
-   hosts). The memory image is chunkified IN PLACE: step 1 guarantees
-   Firecracker cannot overwrite it first, and reflinking half a gigabyte
-   pins extents whose allocation cost resurfaces as a multi-second pause a
-   checkpoint or two later.
+6. *Checkpoint*: copy the cow's dirty ranges — the ones the bitmap from
+   step 5 names, so the copy is O(writes) on every filesystem — **resume
+   immediately**, then chunkify and upload in the background (semaphore,
+   default 1 — unbounded chunkify OOMs hosts). The memory image is
+   chunkified IN PLACE: step 1 guarantees Firecracker cannot overwrite it
+   first. (A reflink of the whole cow stood here once. It was the
+   size-dependent half of the pause, and reflinking half a gigabyte pinned
+   extents whose allocation cost resurfaced as a multi-second pause a
+   checkpoint or two later.)
    *Suspend*: chunkify both synchronously, upload, kill the VM, then upload
    the fault order — the handler writes it as it runs, so it is only
    complete once that process is gone.
