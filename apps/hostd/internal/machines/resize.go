@@ -181,7 +181,18 @@ func (m *Manager) Resize(ctx context.Context, id string, vcpus, memMiB int) (*st
 	// agent token is already on that disk, written at create and flushed by
 	// the sync above, so there is nothing to install.
 	token := m.token(id)
-	fcm, err := m.bootFromDisk(ctx, row, fc.Backends{}, row.RootfsBuildID)
+	// Room for the NEW size, checked before anything is brought up. A resize
+	// used to boot straight into memory this host may not have -- the failure
+	// deep inside Firecracker that admit exists to replace on the create path.
+	// The old process is dead by here, so its memory is free to count. A
+	// refusal lands in the same error branch as a failed boot: the machine is
+	// down either way.
+	var fcm *fc.Machine
+	release, err := m.admit(ctx, vcpus, memMiB)
+	if err == nil {
+		defer release()
+		fcm, err = m.bootFromDisk(ctx, row, fc.Backends{}, row.RootfsBuildID)
+	}
 	if err != nil {
 		row.State = StateError
 		stampSlot(row, nil)
