@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -24,23 +25,23 @@ func hugePageManager(t *testing.T, huge bool) *Manager {
 	}}
 }
 
-// writeTemplate lays down a manifest plus the build headers loadTemplate
-// insists on, so the only thing a test varies is the page size.
+// writeTemplate lays down a manifest plus the least loadTemplate insists on
+// for each build -- a COMPLETE memory build, a disk build with only its
+// header -- so the only thing a test varies is the page size.
 func writeTemplate(t *testing.T, m *Manager, tpl *Template) {
 	t.Helper()
 	if err := os.MkdirAll(m.templateRoot(variantGolden), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, dir := range []string{m.memParentDir(tpl), m.rootfsTemplateDir(tpl)} {
-		if dir == "" {
-			continue
-		}
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(dir, "header"), []byte("x"), 0o644); err != nil {
-			t.Fatal(err)
-		}
+	if dir := m.memParentDir(tpl); dir != "" {
+		writeLocalBuild(t, dir)
+	}
+	dir := m.rootfsTemplateDir(tpl)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "header"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
 	}
 	raw, err := json.Marshal(tpl)
 	if err != nil {
@@ -127,6 +128,34 @@ func TestLoadTemplateAcceptsAMatchingPageSize(t *testing.T) {
 	}
 	if got.PageSizeKiB != 2048 || got.MemBuildID != want.MemBuildID {
 		t.Errorf("loaded %+v, want %+v", got, want)
+	}
+}
+
+// "On disk" means two different things for a template's two builds. The
+// memory build is read locally by the fault handler, so a memory build without
+// its marker -- an interrupted pull, the right length and unknown holes -- is
+// reported gone, which re-pulls it rather than handing a guest zeros as
+// memory. The disk build only needs its header: the block server serves it
+// from object storage while it hydrates, so a template whose disk is still
+// arriving is a template a machine can be created from right now.
+func TestLoadTemplateNeedsACompleteMemoryBuildButOnlyTheDiskHeader(t *testing.T) {
+	m := hugePageManager(t, false)
+	tpl := &Template{MemBuildID: uuid.New(), RootfsBuildID: uuid.New(), PageSizeKiB: 4}
+	writeTemplate(t, m, tpl)
+
+	if _, err := m.loadTemplate(variantGolden); err != nil {
+		t.Fatalf("a template whose disk build has only its header was refused: %v", err)
+	}
+
+	if err := os.Remove(filepath.Join(m.memParentDir(tpl), "data.complete")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := m.loadTemplate(variantGolden)
+	if err == nil {
+		t.Fatal("a template whose memory build is not complete was served")
+	}
+	if !strings.Contains(err.Error(), "memory build") {
+		t.Fatalf("got %v, want the memory build named as the reason", err)
 	}
 }
 

@@ -43,12 +43,13 @@ type Backends struct {
 	MemBuildID       uuid.UUID
 	MemParentBuildID uuid.UUID
 
-	// RootfsTemplateDir is the golden template, on local disk. Every machine
-	// reads through the same one.
+	// RootfsTemplateDir is the disk template's local build directory, which
+	// every machine reads through, and RootfsTemplateID is the same build in
+	// object storage. Both are set: the block server reads the directory
+	// when it is complete and serves the bucket into it while it is not, so
+	// a host that does not have the template yet still attaches at once.
 	RootfsTemplateDir string
-	// RootfsTemplateID reads that template from object storage instead, for a
-	// host that does not have it yet.
-	RootfsTemplateID uuid.UUID
+	RootfsTemplateID  uuid.UUID
 	// RootfsDiffID replays a previous lifetime's disk writes before the guest
 	// reads anything.
 	RootfsDiffID uuid.UUID
@@ -408,23 +409,20 @@ func (m *Machine) Chunkify(ctx context.Context, opts SnapshotOpts) (InstantSnaps
 // machine has.
 func (m *Machine) ChunkifyDisk(ctx context.Context, opts SnapshotOpts) (uuid.UUID, error) {
 	if m.NBD == nil {
-		// No block server means this machine was BOOTED rather than restored,
-		// and its disk is a plain file in the jail. That happens for exactly
-		// two machines: the throwaway one a golden template is photographed
-		// from, which has no disk worth keeping and says so by leaving
-		// RootfsTemplateDir empty, and a machine created with a volume, which
-		// has to be booted because a drive cannot be added to a snapshot being
-		// restored.
+		// No block server means this machine was booted by Boot rather than
+		// BootFromDisk, and its disk is a plain file in the jail. Exactly one
+		// machine is: the throwaway one a template is photographed from, which
+		// has no disk worth keeping here and says so by leaving
+		// RootfsTemplateDir empty. Every created machine -- image, volume or
+		// template -- has a block server, and its disk is captured below.
 		//
-		// The second one's disk very much matters. Skipping it here is silent:
-		// the machine suspends, wakes from the template alone, and every write
-		// it made to its root filesystem is gone with nothing reporting it.
-		//
-		// Diffing the file wholesale is correct here in a way it would not be
-		// for a copy-on-write cache. This file is a full copy of the template,
-		// not a sparse overlay, so every block holds real data and a block
-		// that matches the parent genuinely is unchanged -- which is exactly
-		// the ambiguity the dirty bitmap exists to resolve for a cow.
+		// The file branch is kept rather than made an error because skipping a
+		// disk is silent: the machine suspends, wakes from the template alone,
+		// and every write it made is gone with nothing reporting it. Diffing a
+		// file wholesale is correct here in a way it would not be for a
+		// copy-on-write cache: every block holds real data, so a block that
+		// matches the parent genuinely is unchanged -- which is exactly the
+		// ambiguity the dirty bitmap exists to resolve for a cow.
 		if opts.RootfsTemplateDir == "" {
 			return uuid.Nil, nil
 		}
@@ -526,13 +524,22 @@ func (m *Machine) stopHandlers() []error {
 // Only on destroy. It holds every write since the last snapshot, so removing
 // it at any other point silently discards the machine's disk.
 func (m *Machine) DiscardCow() {
-	if err := os.Remove(CowPath(m.StateDir)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		slog.Warn("could not remove copy-on-write file", "machine", m.ID, "err", err)
+	for _, path := range []string{CowPath(m.StateDir), FlushCowPath(m.StateDir)} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("could not remove copy-on-write file", "machine", m.ID, "path", path, "err", err)
+		}
 	}
 }
 
 // CowFile is the name a checkpoint's copy-on-write disk is staged under.
 const CowFile = "rootfs.cow"
+
+// hydrateWait bounds how long a background capture waits for the disk
+// template it diffs against to finish hydrating from object storage. The
+// block server pulls the whole template from the moment it attaches, so the
+// wait is normally over before a checkpoint is taken; the bound is for a pull
+// that failed.
+const hydrateWait = 5 * time.Minute
 
 // InstantArtifacts names the objects one instant snapshot produced.
 type InstantArtifacts struct {
@@ -645,10 +652,11 @@ func (m *Machine) SuspendInstant(ctx context.Context, up Uploader, chunks Upload
 // CheckpointInstant captures a restorable point and resumes immediately.
 //
 // The guest is frozen only long enough to write its vmstate, read the dirty
-// bitmap, and reflink-copy two files -- all metadata operations on a
-// reflink-capable filesystem, so the pause is roughly independent of how big
-// the machine is. Chunkifying and uploading happen afterwards, with the
-// machine already serving.
+// bitmap, reflink-copy the vmstate and copy the cow's dirty blocks. The first
+// is a metadata operation and the second costs what the machine has written
+// since its template, on any filesystem, so the pause is roughly independent
+// of how big the machine is. Chunkifying and uploading happen afterwards,
+// with the machine already serving.
 func (m *Machine) CheckpointInstant(ctx context.Context, up Uploader, chunks Uploader,
 	opts SnapshotOpts, localDir, snapKey string) (res InstantSnapshot, err error) {
 
@@ -752,8 +760,13 @@ func (m *Machine) CheckpointInstant(ctx context.Context, up Uploader, chunks Upl
 	// inside the pause. The copy protected nothing, either: a capture
 	// interrupted by a crash leaves the checkpoint unusable whether or not a
 	// staged copy survives, because nothing resumes one.
+	// Only the blocks the machine has written are copied, so this costs
+	// O(writes) on every filesystem. A reflink of the whole cow stood here
+	// once: a metadata operation where extents can be shared, and a copy of
+	// the entire disk -- inside the pause -- everywhere else.
 	if !dirty.IsEmpty() {
-		if err := reflinkCopy(CowPath(m.StateDir), localCow); err != nil {
+		if err := block.CopyDirtyRanges(CowPath(m.StateDir), localCow, dirty,
+			block.DefaultBlockSize); err != nil {
 			return res, err
 		}
 	}
@@ -839,6 +852,15 @@ func (m *Machine) finishCheckpoint(up Uploader, chunks Uploader, opts SnapshotOp
 
 	var rootfsPacked int64
 	if ids.RootfsBuildID != uuid.Nil {
+		// The template may still be hydrating: the block server serves it
+		// from object storage from the moment it attaches and pulls the rest
+		// in the background, and a diff against a half-pulled parent would
+		// encode its holes as unchanged ranges. This runs with the guest
+		// already serving, so waiting costs the user nothing.
+		if err := block.AwaitBuildComplete(ctx, opts.RootfsTemplateDir, hydrateWait); err != nil {
+			fail(err)
+			return
+		}
 		_, rootfsStats, cerr := block.Chunkify(ctx, block.ChunkifyOpts{
 			In:      filepath.Join(localDir, CowFile),
 			OutDir:  filepath.Join(opts.BuildDir, ids.RootfsBuildID.String()),

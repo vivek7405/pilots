@@ -594,6 +594,32 @@ if [ "${#LIVE_IPS[@]}" -ge 2 ]; then
   done
 fi
 
+say "7c. A write nobody checkpointed is made durable by the root flush"
+# The published root RPO, as a behaviour rather than a number: everything
+# above this line was captured by a checkpoint or a suspend, and what follows
+# is a plain write to a running machine's root with no capture of any kind.
+# The flush loop makes it durable within PILOT_ROOT_FLUSH_INTERVAL (60s), and
+# the row says so -- rootfs_build_id moves to the flushed disk and
+# mem_build_id is cleared, because the memory image taken at the last suspend
+# describes a disk this one has moved past. Step 10 then proves the write is
+# still there after the host that held it is destroyed and the machine is
+# rescued elsewhere from that flushed disk alone.
+FLUSH_MARKER="after-last-capture-$$"
+FLUSH_BEFORE=$(api "${IPS[0]}" GET "/v1/machines/${ID}" | jf rootfs_build_id)
+api "${IPS[0]}" POST "/v1/machines/${ID}/exec" "{\"cmd\":\"echo ${FLUSH_MARKER} > /var/tmp/flushed-marker && sync\"}" >/dev/null
+START=$SECONDS; FLUSH_AFTER=""; FLUSH_MEM="x"
+while [ $((SECONDS - START)) -lt 150 ]; do
+  ROW=$(api "${IPS[0]}" GET "/v1/machines/${ID}")
+  FLUSH_AFTER=$(echo "$ROW" | jf rootfs_build_id); FLUSH_MEM=$(echo "$ROW" | jf mem_build_id)
+  [ -n "$FLUSH_AFTER" ] && [ "$FLUSH_AFTER" != "$FLUSH_BEFORE" ] && [ -z "$FLUSH_MEM" ] && break
+  sleep 5
+done
+if [ -n "$FLUSH_AFTER" ] && [ "$FLUSH_AFTER" != "$FLUSH_BEFORE" ] && [ -z "$FLUSH_MEM" ]; then
+  ok "the root flush moved the row to a new disk build $((SECONDS - START))s after the write, with no memory image"
+else
+  bad "no root flush moved the row within 150s (rootfs_build '${FLUSH_AFTER}', mem_build '${FLUSH_MEM}'); is PILOT_ROOT_FLUSH_INTERVAL 0?"
+fi
+
 say "8. Hard-kill the host that owns it"
 OWNER=$(api "${IPS[0]}" GET "/v1/machines/${ID}" | jf host_id)
 OWNER_IP=""
@@ -605,6 +631,24 @@ done
 
 SURVIVOR=""
 for ip in "${IPS[@]}"; do [ "$ip" != "$OWNER_IP" ] && SURVIVOR="$ip" && break; done
+
+# Make every survivor a COLD host for the rescue: drop the marker that says
+# its copy of the golden disk template is whole. The bytes stay, so machines
+# already running on it are untouched; what changes is that the rescued
+# machine's block server finds no complete local template, serves it from
+# object storage, and hydrates the directory behind the running guest. Step
+# 10 asserts both halves: the machine answers, and the marker comes back.
+TEMPLATE_ROOTFS=""
+for ip in "${IPS[@]}"; do
+  [ "$ip" = "$OWNER_IP" ] && continue
+  T=$($SSH "root@${ip}" 'python3 -c "import json;print(json.load(open(\"/var/cache/pilots/template/template.json\"))[\"rootfs_build_id\"])"' 2>/dev/null)
+  [ -n "$T" ] || continue
+  TEMPLATE_ROOTFS="$T"
+  $SSH "root@${ip}" "rm -f /var/cache/pilots/builds/${T}/data.complete" 2>/dev/null \
+    && ok "${ip} no longer holds a complete template ${T:0:8}; the rescue must serve it from the bucket" \
+    || bad "${ip}: could not drop the template's completion marker"
+done
+[ -n "$TEMPLATE_ROOTFS" ] || bad "no survivor names a golden template, so the cold-host rescue cannot be set up"
 
 DOMAIN=$(sudo virsh list --name | while read -r d; do
   [ -n "$d" ] && sudo virsh domifaddr "$d" --source lease 2>/dev/null | grep -q "$OWNER_IP" && echo "$d"
@@ -674,6 +718,36 @@ done
 [ "$(echo "$OUT" | tr -d '[:space:]')" = "before-failover" ] \
   && ok "the machine came back with what it had written" \
   || bad "exec after rescue returned '${OUT}'"
+
+# The write from step 7c: captured by nothing but the root flush, and the
+# host that held it is gone. Its survival here is the published RPO.
+OUT=$(api "$SURVIVOR" POST "/v1/machines/${ID}/exec" '{"cmd":"cat /var/tmp/flushed-marker"}' 2>/dev/null | jf stdout)
+[ "$(echo "$OUT" | tr -d '[:space:]')" = "$FLUSH_MARKER" ] \
+  && ok "the uncheckpointed write survived the host's death via the root flush" \
+  || bad "the flushed write did not survive the rescue (got '${OUT}', want '${FLUSH_MARKER}')"
+
+# And it was served from the bucket while the survivor's copy of the template
+# hydrated behind it: the marker step 8 removed comes back on its own, after
+# the machine already answered above.
+if [ -n "$TEMPLATE_ROOTFS" ]; then
+  HYDRATED=""
+  for ip in "${IPS[@]}"; do
+    [ "$ip" = "$OWNER_IP" ] && continue
+    HID=$($SSH "root@${ip}" "grep PILOT_HOST_ID /etc/pilots/config | cut -d= -f2" 2>/dev/null)
+    [ "$HID" = "$NEWOWNER" ] || continue
+    START=$SECONDS
+    while [ $((SECONDS - START)) -lt 180 ]; do
+      $SSH "root@${ip}" "test -e /var/cache/pilots/builds/${TEMPLATE_ROOTFS}/data.complete" 2>/dev/null && HYDRATED="${ip}" && break
+      sleep 5
+    done
+    if [ -n "$HYDRATED" ]; then
+      ok "the rescuing host served the template from the bucket and finished hydrating it $((SECONDS - START))s later"
+    else
+      bad "the rescuing host ${ip} never completed its copy of template ${TEMPLATE_ROOTFS:0:8}; it served, but nothing hydrated behind it"
+    fi
+  done
+  [ -n "$HYDRATED" ] || [ -z "$NEWOWNER" ] || true
+fi
 
 say "11. One command turns a new IP into a serving host"
 # "Add a host = give an IP" is the claim. On real hardware the machine is
@@ -4079,6 +4153,41 @@ else
     fi
   fi
 fi
+
+say "45. No host holds a per-machine copy of a root filesystem"
+# The host-shell half of the e2e step "a custom-image machine leaves no
+# materialised rootfs behind", and what would have caught the 40 GB disk fill:
+# a deploy-heavy host once held one full-size ext4 per build under the image
+# cache plus one per booted machine in its jail. Now every machine's root is a
+# block device served from a build the host holds once, and the only rootfs
+# FILE anywhere belongs to the throwaway machine a template is photographed
+# from. So: no images directory; every rootfs under the jailer base a device
+# node, tmpl- machines excepted; and the jail's footprint scaling with the
+# number of machines (a kernel and a vmstate each) rather than with the size
+# of an image.
+for ip in "${LIVE_IPS[@]}"; do
+  wait_serving "$ip" 30 || continue
+  IMAGES=$($SSH "root@${ip}" 'test -e /var/cache/pilots/images && echo present || echo absent' 2>/dev/null)
+  [ "$IMAGES" = "absent" ] \
+    && ok "${ip}: no materialised image cache" \
+    || bad "${ip}: /var/cache/pilots/images exists; something materialised a rootfs"
+
+  FILES=$($SSH "root@${ip}" 'find /var/lib/pilots/jailer -path "*/srv/pilots/rootfs.ext4" -type f 2>/dev/null | grep -v "/tmpl-" | wc -l' 2>/dev/null)
+  NODES=$($SSH "root@${ip}" 'find /var/lib/pilots/jailer -path "*/srv/pilots/rootfs.ext4" -type b 2>/dev/null | wc -l' 2>/dev/null)
+  [ "${FILES:-1}" = 0 ] \
+    && ok "${ip}: every machine's rootfs is a block device node (${NODES:-0} of them), none a file" \
+    || bad "${ip}: ${FILES} machine(s) have a rootfs FILE in their jail; their root was copied, not served"
+
+  # Per running machine the jail holds a kernel (hardlinked where it can be)
+  # and a few MiB of vmstate; a copied image is gigabytes. 128 MiB per
+  # machine plus 256 MiB of slack is a bound no image fits under.
+  RUNNING=$(live_machines_on "$ip")
+  USED=$($SSH "root@${ip}" 'du -sm /var/lib/pilots/jailer 2>/dev/null | cut -f1' 2>/dev/null)
+  BOUND=$(( 256 + 128 * ${RUNNING:-0} ))
+  [ "${USED:-0}" -le "$BOUND" ] \
+    && ok "${ip}: the jail base holds ${USED:-0} MiB for ${RUNNING:-0} running machine(s), under ${BOUND} MiB" \
+    || bad "${ip}: the jail base holds ${USED} MiB for ${RUNNING} machine(s); an image-sized copy is in there"
+done
 
 say "Result"
 echo "  ${PASS} passed, ${FAIL} failed"

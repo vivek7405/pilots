@@ -1040,10 +1040,11 @@ REFLINK=$(curl -sf http://127.0.0.1:8080/v1/health |
 if [ "$REFLINK" = True ]; then
   echo "  reflink: yes"
 else
-  echo "  reflink: NO -- $(findmnt -no FSTYPE -T /var/lib/pilots) cannot share extents." >&2
-  echo "    Every machine image copy will be a real copy: create and checkpoint" >&2
-  echo "    will run several times slower than the engine is designed for." >&2
-  echo "    Put /var/lib/pilots on btrfs, or on XFS made with -m reflink=1." >&2
+  echo "  reflink: no -- $(findmnt -no FSTYPE -T /var/lib/pilots) does not share extents." >&2
+  echo "    Nothing per machine depends on it: create, wake and checkpoint meet their" >&2
+  echo "    targets on any filesystem. Only the once-per-host template build copies" >&2
+  echo "    an image in full here. btrfs, or XFS made with -m reflink=1, makes that" >&2
+  echo "    one copy cheaper; PILOT_REQUIRE_REFLINK=1 still refuses without it." >&2
   # An `&&` chain here would be the last command in the script, so a false
   # test would exit non-zero under `set -e` and fail the bootstrap of a host
   # that is merely slow.

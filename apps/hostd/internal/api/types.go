@@ -990,11 +990,12 @@ type HealthResponse struct {
 	OK     bool   `json:"ok"`
 	HostID string `json:"host_id"`
 	// Reflink reports whether this host's machine store can share extents.
-	// Without it the engine still works and still passes every correctness
-	// assertion, but create and checkpoint are several times slower, because
-	// image copies that should be metadata operations become real ones. It is
-	// on the health response so that a degraded host is visible from the
-	// outside rather than only in a latency graph nobody is watching.
+	// A true fact about the host's filesystem that an operator sizing one
+	// wants, and no longer a dependency of any latency the product sells: a
+	// create restores over a shared build, a booted machine's root is served
+	// from its build, and a checkpoint copies only the cow's dirty ranges, so
+	// nothing on the machine path asks the filesystem to share extents. The
+	// one whole-file copy left is the template build, once per host.
 	Reflink bool `json:"reflink"`
 	// HugePages reports whether guest memory on this host is backed by 2MiB
 	// pages. Unlike Reflink this is not only a speed signal: the page size is

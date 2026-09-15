@@ -111,6 +111,12 @@ type Options struct {
 	// served on. One pool per host, because the devices are a host resource.
 	NBDDevices *nbd.DevicePool
 
+	// RootFlushInterval is how often a running machine's disk is made
+	// durable in object storage without a checkpoint: the published root RPO
+	// (ARCHITECTURE.md, "Two durability tiers"). Zero switches the flush
+	// off, which leaves the root at checkpoint granularity.
+	RootFlushInterval time.Duration
+
 	// HandlerEnv is passed to the block and fault servers. It is an ALLOWLIST
 	// built by HandlerEnv(), not this daemon's environment: those processes
 	// read their builds through a per-machine chunk socket and hold no storage
@@ -198,8 +204,13 @@ type Manager struct {
 	// unix socket, so no handler holds a storage credential. See chunks.go.
 	chunks *chunkServers
 
-	locks  sync.Map // machine id -> *sync.Mutex
-	flight *inFlight
+	locks sync.Map // machine id -> *sync.Mutex
+	// The periodic root flush's bookkeeping: which machines have a flush in
+	// flight, and the memory image a flush unpinned from a row but could not
+	// yet delete. See rootflush.go.
+	flushing sync.Map // machine id -> true
+	staleMem sync.Map // machine id -> memory build id
+	flight   *inFlight
 
 	// retired keeps the engine counters monotonic across a machine going
 	// away. See retiredUffd.
@@ -1011,8 +1022,13 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 
 	// The builds this suspend replaces. Nothing else can be reading them: a
 	// checkpoint mints its own ids, so a machine's suspend builds are named by
-	// its row and nowhere else.
+	// its row and nowhere else. And the image a root flush unpinned but left
+	// in storage while the fault handler could still need it: this suspend's
+	// image replaces it for good.
 	superseded := []string{row.MemBuildID, row.RootfsBuildID}
+	if stale, ok := m.staleMem.LoadAndDelete(id); ok {
+		superseded = append(superseded, stale.(string))
+	}
 
 	row.State = StateSuspended
 	// The slot is gone for an ordinary machine: it holds no index and is
@@ -1335,6 +1351,9 @@ func (m *Manager) Redeploy(ctx context.Context, id string, req api.RedeployReque
 	// discarded after it -- never before, or a failed write would leave the
 	// row naming objects that no longer exist.
 	superseded := []string{row.MemBuildID, row.RootfsBuildID}
+	if stale, ok := m.staleMem.LoadAndDelete(id); ok {
+		superseded = append(superseded, stale.(string))
+	}
 	row.MemBuildID, row.RootfsBuildID = "", ""
 	if err := os.RemoveAll(filepath.Join(m.opts.CacheRoot, "machines", id)); err != nil {
 		slog.Warn("redeploy could not clear the machine cache",
