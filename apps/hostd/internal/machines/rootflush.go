@@ -5,9 +5,8 @@ import (
 	"log/slog"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
-
-	"github.com/google/uuid"
 
 	"github.com/vivek7405/pilots/hostd/internal/block"
 	"github.com/vivek7405/pilots/hostd/internal/metrics"
@@ -98,9 +97,18 @@ func (m *Manager) selectFlushable(rows []state.Machine) []string {
 // cold-boots the flushed disk, which is the published window as a behaviour:
 // what the machine wrote in the last interval is what comes back.
 func (m *Manager) flushRoot(ctx context.Context, id string) {
+	// TryLock, never Lock. A machine somebody else is holding is a machine
+	// whose disk that operation is already making durable -- a suspend, a
+	// checkpoint, a resize, a rollout's own capture -- so a flush has nothing
+	// to add to it and every reason not to queue behind it. The next tick
+	// picks the machine up, which is what a bounded window can afford and a
+	// blocked deploy cannot.
 	lock := m.lockFor(id)
-	lock.Lock()
-	defer lock.Unlock()
+	if !lock.TryLock() {
+		return
+	}
+	unlock := sync.OnceFunc(lock.Unlock)
+	defer unlock()
 
 	fcm, ok := m.get(id)
 	if !ok {
@@ -130,21 +138,37 @@ func (m *Manager) flushRoot(ctx context.Context, id string) {
 	}
 
 	started := time.Now()
-	build, err := fcm.FlushRoot(ctx, m.opts.Chunks, m.snapshotOpts(t))
+	opts := m.snapshotOpts(t)
+	finish, err := fcm.StageRootFlush(ctx)
 	if err != nil {
 		slog.Warn("root flush failed; the machine's latest writes are not yet durable",
 			"machine", id, "err", err)
 		return
 	}
-	if build == uuid.Nil {
+	if finish == nil {
 		m.dropStaleMemory(ctx, id)
 		return
 	}
 
-	// Re-read before writing. The flush above chunkified and uploaded with the
-	// lock held but the row unlocked to narrow writers -- Touch stamps
-	// last_activity without it -- and writing back the copy read before the
-	// upload would hand those columns their old values.
+	// Unlocked for the chunkify and the upload. They run with the guest
+	// serving, and a suspend or a checkpoint arriving now takes this machine
+	// at once and waits only at the capture gate -- which is the difference
+	// between a background loop nobody notices and one that holds a deploy
+	// for the length of an upload.
+	unlock()
+
+	build, err := finish(ctx, m.opts.Chunks, opts)
+	if err != nil {
+		slog.Warn("root flush failed; the machine's latest writes are not yet durable",
+			"machine", id, "err", err)
+		return
+	}
+
+	// Re-taken, and the row re-read: everything above ran unlocked, so the
+	// copy read before the upload would hand last_activity and the state
+	// columns back their old values.
+	lock.Lock()
+	defer lock.Unlock()
 	row, err = m.opts.Store.GetMachine(ctx, id)
 	if err != nil {
 		slog.Warn("root flush could not re-read the machine's row", "machine", id, "err", err)
@@ -152,6 +176,9 @@ func (m *Manager) flushRoot(ctx context.Context, id string) {
 		return
 	}
 	if row.State != StateRunning || row.HostID != m.opts.HostID {
+		// Suspended, destroyed or handed over while this flushed. Whatever
+		// did that captured the disk itself, so this build is superseded
+		// before it was ever named.
 		m.discardBuilds(ctx, build.String())
 		return
 	}

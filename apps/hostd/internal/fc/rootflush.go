@@ -19,36 +19,47 @@ import (
 // flushes so each one adds only what was written since.
 func FlushCowPath(stateDir string) string { return filepath.Join(stateDir, "flush.cow") }
 
-// FlushRoot makes the machine's disk durable in object storage without
-// capturing its memory, and returns the build it produced -- uuid.Nil when
-// there was nothing new to make durable.
+// StageRootFlush freezes the guest just long enough to copy the blocks written
+// since the previous flush into the staged cow, and returns the finisher that
+// makes them durable in object storage. A nil finisher means there was nothing
+// to make durable.
 //
-// It is the disk half of CheckpointInstant and nothing else: pause, copy the
-// blocks written since the previous flush, resume, then chunkify and upload
-// with the guest already serving. No vmstate, no memory image, no
-// makeMemoryResident -- which is what makes it cheap enough to run on a
-// timer. The pause is proportional to the bytes written since the previous
-// flush, not to the disk and not to everything written since the wake: the
-// block server keeps a bitmap of exactly those blocks, and they are merged
-// into a staged copy of the cow that persists between flushes, so the staged
-// copy is always the whole cow as of the last pause while each pause copies
-// only the delta. The first flush after an attach copies the whole cow.
+// It is the disk half of CheckpointInstant and nothing else: pause, copy,
+// resume, then chunkify and upload with the guest already serving. No vmstate,
+// no memory image, no makeMemoryResident -- which is what makes it cheap
+// enough to run on a timer. The pause is proportional to the bytes written
+// since the previous flush, not to the disk and not to everything written
+// since the wake: the block server keeps a bitmap of exactly those blocks, and
+// they are merged into a staged copy of the cow that persists between flushes,
+// so the staged copy is always the whole cow as of the last pause while each
+// pause copies only the delta. The first flush after an attach copies the
+// whole cow.
 //
-// The build is a diff against the template, exactly like a suspend's, never
-// against the previous flush: a chain of flushes would be a chain of parents,
-// and the block layer refuses grandparent chains for the reason chunkify.go
-// gives. Each build is complete on its own, so the previous flush's is
-// superseded the moment the row names this one.
+// It is SPLIT IN TWO on purpose. The pause belongs under whatever lock the
+// caller holds over this machine; the chunkify and the upload that follow
+// belong under no lock at all. Held together, a background timer would own a
+// machine for the length of an upload -- and a deploy's checkpoint, a suspend
+// or a destroy arriving meanwhile would queue behind a loop that exists to be
+// invisible. What serialises the finisher against another capture is the
+// capture gate, held from here until it returns, exactly as CheckpointInstant
+// holds it across its own background half.
 //
-// It returns only once the build is uploaded: what the caller does with the
-// id is name it on the row, and a row naming a build that is not in object
-// storage is a rescue that fails on another host.
-func (m *Machine) FlushRoot(ctx context.Context, chunks Uploader, opts SnapshotOpts) (uuid.UUID, error) {
+// The build the finisher produces is a diff against the template, exactly like
+// a suspend's, never against the previous flush: a chain of flushes would be a
+// chain of parents, and the block layer refuses grandparent chains for the
+// reason chunkify.go gives. Each build is complete on its own, so the previous
+// flush's is superseded the moment the row names this one. The finisher
+// returns only once the build is uploaded: what the caller does with the id is
+// name it on the row, and a row naming a build that is not in object storage
+// is a rescue that fails on another host.
+func (m *Machine) StageRootFlush(ctx context.Context) (
+	func(context.Context, Uploader, SnapshotOpts) (uuid.UUID, error), error) {
+
 	if m.NBD == nil {
 		// A file-backed disk has no block server and no bitmap. Only the
 		// throwaway template machine is in that state now, and its disk is
 		// captured by the template build, not by a flush.
-		return uuid.Nil, nil
+		return nil, nil
 	}
 	// Never overlapping a checkpoint or a suspend, in either direction: they
 	// read the same bitmap and stage from the same cow, and the capture gate
@@ -104,39 +115,42 @@ func (m *Machine) FlushRoot(ctx context.Context, chunks Uploader, opts SnapshotO
 	})
 	pause := time.Since(pausedAt)
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("fc: root flush of %s: %w", m.ID, err)
+		return nil, fmt.Errorf("fc: root flush of %s: %w", m.ID, err)
 	}
 	if dirty == nil {
-		return uuid.Nil, nil
+		return nil, nil
 	}
 	metrics.RootFlushPauseSeconds.Observe(pause.Seconds())
 
 	// Everything from here runs with the guest serving. A suspend or a
-	// checkpoint that arrives meanwhile waits at awaitCapture.
+	// checkpoint that arrives meanwhile takes the machine's lock at once and
+	// waits at awaitCapture, which is where waiting belongs.
 	m.beginCapture()
-	defer m.endCapture()
+	return func(ctx context.Context, chunks Uploader, opts SnapshotOpts) (uuid.UUID, error) {
+		defer m.endCapture()
 
-	build := uuid.New()
-	if _, _, err := block.Chunkify(ctx, block.ChunkifyOpts{
-		In:        staged,
-		OutDir:    filepath.Join(opts.BuildDir, build.String()),
-		BuildID:   build,
-		ParentDir: opts.RootfsTemplateDir,
-		Dirty:     dirty,
-	}); err != nil {
-		m.rootFlushOwed = true
-		return uuid.Nil, fmt.Errorf("fc: chunkify flushed disk of %s: %w", m.ID, err)
-	}
-	if err := uploadBuild(ctx, chunks, opts.BuildDir, build); err != nil {
-		m.rootFlushOwed = true
-		return uuid.Nil, fmt.Errorf("fc: upload flushed disk of %s: %w", m.ID, err)
-	}
-	m.rootFlushOwed = false
+		build := uuid.New()
+		if _, _, err := block.Chunkify(ctx, block.ChunkifyOpts{
+			In:        staged,
+			OutDir:    filepath.Join(opts.BuildDir, build.String()),
+			BuildID:   build,
+			ParentDir: opts.RootfsTemplateDir,
+			Dirty:     dirty,
+		}); err != nil {
+			m.rootFlushOwed = true
+			return uuid.Nil, fmt.Errorf("fc: chunkify flushed disk of %s: %w", m.ID, err)
+		}
+		if err := uploadBuild(ctx, chunks, opts.BuildDir, build); err != nil {
+			m.rootFlushOwed = true
+			return uuid.Nil, fmt.Errorf("fc: upload flushed disk of %s: %w", m.ID, err)
+		}
+		m.rootFlushOwed = false
 
-	// The realised window: how long the oldest write this flush made durable
-	// had been at risk. Measured from the previous durable instant to this
-	// pause, which is the number the published RPO is a bound on.
-	metrics.RootFlushLagSeconds.Observe(pausedAt.Sub(m.lastRootFlush).Seconds())
-	m.lastRootFlush = pausedAt
-	return build, nil
+		// The realised window: how long the oldest write this flush made
+		// durable had been at risk. Measured from the previous durable instant
+		// to the pause above, which is the number the published RPO bounds.
+		metrics.RootFlushLagSeconds.Observe(pausedAt.Sub(m.lastRootFlush).Seconds())
+		m.lastRootFlush = pausedAt
+		return build, nil
+	}, nil
 }
