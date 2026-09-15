@@ -52,10 +52,15 @@ is stated rather than implied:
 
 The root's window is a published, operator-tunable figure —
 `PILOT_ROOT_FLUSH_INTERVAL`, default `60s`, `0` disables — and a measured
-one: `pilots_root_flush_pause_seconds` (the guest pause a flush costs, p99
-< 25ms) and `pilots_root_flush_lag_seconds` (how far the bucket trails the
-disk), both scraped and asserted by the e2e battery. **Data that cannot
-afford to lose its last 60 seconds belongs on a volume.**
+one: `pilots_root_flush_pause_seconds` (the guest pause a flush costs, SLO
+p99 < 25ms across a fleet) and `pilots_root_flush_lag_seconds` (how far the
+bucket trails the disk), both scraped by the e2e battery. The battery
+asserts the realised lag against the 60 s window, that the BULK of pauses
+are under 25 ms, and that none approaches a whole-disk copy — not the p99
+itself, which a dozen flushes over short-lived machines cannot measure,
+because the first flush of each machine copies the whole cow and is an
+outsized share of that sample. **Data that cannot afford to lose its last
+60 seconds belongs on a volume.**
 
 **Measured against Sprites, which is the only comparable product, on both
 axes rather than the flattering one.** Sprites ships write-back for its root
