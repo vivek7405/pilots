@@ -47,6 +47,39 @@ func TestRootFlushSelectsOnlyThisHostsRunningMachines(t *testing.T) {
 	}
 }
 
+// The flush never queues behind another operation. A machine somebody else
+// holds is one whose disk that operation is already making durable -- a
+// suspend, a checkpoint, a rollout's own capture -- so the flush takes it with
+// TryLock and leaves it for the next tick. Blocking here is what let a
+// background timer hold a deploy for the length of an upload.
+func TestRootFlushSkipsAMachineAnotherOperationHolds(t *testing.T) {
+	m, _, _ := newColdBootManager(t)
+	ctx := context.Background()
+
+	row := &state.Machine{ID: "m-1", HostID: "host-a", State: StateRunning,
+		VCPUs: 1, MemMiB: 512}
+	if err := m.opts.Store.PutMachine(ctx, row); err != nil {
+		t.Fatal(err)
+	}
+
+	// Held by "another operation" for longer than this test will wait.
+	lock := m.lockFor("m-1")
+	lock.Lock()
+	defer lock.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		m.flushRoot(ctx, "m-1")
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a flush queued behind the operation holding the machine; " +
+			"a deploy's checkpoint would wait for it")
+	}
+}
+
 // A machine that is not running here -- nothing in the registry -- is not a
 // machine this host can pause, and the flush must not touch its row on the
 // strength of a listing alone.
