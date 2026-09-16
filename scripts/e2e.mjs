@@ -1976,7 +1976,7 @@ async function buildAssertions() {
   // list and lets you destroy it, and so do we. It must also not be counted
   // against the org's machine quota, since nobody asked for it.
   await step('the builder machine is visible to the org and destroyable', async () => {
-    const { status, json } = await request('/v1/machines');
+    const { status, json } = await request('/v1/machines?include=builders');
     assert(status === 200, `list machines: ${status}`);
     const builders = (json ?? [])
       .filter((m) => typeof m.name === 'string' && m.name.startsWith('builder-'));
@@ -2476,6 +2476,7 @@ async function serviceAssertions() {
           method: 'POST',
           body: {
             app: svc.app,
+            service: svc.id, release: release.id,
             mem_build_id: release.mem_build_id,
             rootfs_build_id: release.rootfs_build_id,
             vcpus: 1, mem_mib: 512,
@@ -2690,8 +2691,9 @@ async function serviceAssertions() {
     const res = await postTar('/v1/builds', tarball({
       'Dockerfile': [
         'FROM alpine:3.20',
+        'RUN apk add --no-cache busybox-extras',
         'RUN mkdir /www && echo ok > /www/index.html',
-        'CMD ["httpd","-f","-p","8080","-h","/www"]',
+        'CMD ["busybox-extras","httpd","-f","-p","8080","-h","/www"]',
         '',
       ].join('\n'),
     }));
@@ -3352,11 +3354,12 @@ async function volumeServiceAssertions() {
       const res = await postTar('/v1/builds', tarball({
         'Dockerfile': [
           'FROM alpine:3.20',
+          'RUN apk add --no-cache busybox-extras',
           'RUN echo one > /etc/pilots-release-marker',
           // A real listener, so the held request during a redeploy has
           // something to be answered by rather than something to time out on.
           'RUN mkdir /www && echo ok > /www/index.html',
-          'CMD ["httpd","-f","-p","8080","-h","/www"]',
+          'CMD ["busybox-extras","httpd","-f","-p","8080","-h","/www"]',
           '',
         ].join('\n'),
       }));
@@ -3404,9 +3407,10 @@ async function volumeServiceAssertions() {
       const res = await postTar('/v1/builds', tarball({
         'Dockerfile': [
           'FROM alpine:3.20',
+          'RUN apk add --no-cache busybox-extras',
           'RUN echo two > /etc/pilots-release-marker',
           'RUN mkdir /www && echo ok > /www/index.html',
-          'CMD ["httpd","-f","-p","8080","-h","/www"]',
+          'CMD ["busybox-extras","httpd","-f","-p","8080","-h","/www"]',
           '',
         ].join('\n'),
       }));
