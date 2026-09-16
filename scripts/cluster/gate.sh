@@ -560,15 +560,29 @@ if [ "${#LIVE_IPS[@]}" -ge 2 ]; then
 
     # 3. A silent, open session holds it up. This is the half that keeps a
     # database alive mid-transaction, and no packet counter can see it.
-    api "$B_IP" POST "/v1/machines/${CLIENT_ID}/exec" \
-      "{\"cmd\":\"nohup bash -c 'exec 3<>/dev/tcp/${SZ_NAME}.internal/3001; sleep 300' >/dev/null 2>&1 & echo held\",\"user\":\"root\"}" \
-      >/dev/null 2>&1
-    sleep 75
-    STATE=$(api "$A_IP" GET "/v1/machines/${SZ_ID}" | jf state)
-    if [ "$STATE" = "running" ] && [ -n "$(fc_pid "$SZ_HOST_IP" "$SZ_ID")" ]; then
-      ok "a held session kept it running past the scale-down window"
+    #
+    # The session's establishment is VERIFIED before anything is asserted about
+    # what it should cause. It used to be fired off into nohup with its output
+    # discarded and the exec's result thrown away, so if the connect never
+    # happened -- and it often did not, because step 2 has just woken a machine
+    # whose idle timeout is shorter than this step takes -- the assertion below
+    # was checking that a machine with NO session open on it stayed awake. That
+    # tests nothing and fails honestly-looking. A setup that cannot set itself
+    # up has to say so (AGENTS.md).
+    HELD=$(api "$B_IP" POST "/v1/machines/${CLIENT_ID}/exec" \
+      "{\"cmd\":\"rm -f /tmp/held-ok; nohup bash -c 'exec 3<>/dev/tcp/${SZ_NAME}.internal/3001 && touch /tmp/held-ok && sleep 300' >/dev/null 2>&1 & sleep 5; test -e /tmp/held-ok && echo held || echo not-held\",\"user\":\"root\"}" \
+      | jf stdout | tr -d '[:space:]')
+    if [ "$HELD" != "held" ]; then
+      bad "the peer could not open a session to hold it (got '${HELD}'); what follows would assert nothing"
     else
-      bad "it was given back with a session open on it (state '${STATE}'): a transaction died mid-flight"
+      ok "a peer holds a silent session open on it"
+      sleep 75
+      STATE=$(api "$A_IP" GET "/v1/machines/${SZ_ID}" | jf state)
+      if [ "$STATE" = "running" ] && [ -n "$(fc_pid "$SZ_HOST_IP" "$SZ_ID")" ]; then
+        ok "a held session kept it running past the scale-down window"
+      else
+        bad "it was given back with a session open on it (state '${STATE}'): a transaction died mid-flight"
+      fi
     fi
 
     # 4. And it sleeps again once the client lets go.
@@ -998,13 +1012,26 @@ else
     [ -n "$SVOLID" ] && ok "created the service's volume ${SVOLID} on ${VHOST}" \
       || bad "service volume create failed: $SVOL"
 
-    SVCVOL=$(api "$VHOST" POST /v1/services \
-      "{\"name\":\"gate-vol-$$\",\"app\":\"gate-vol-$$\",\"replicas\":1,\"volume\":\"${SVOLID}\",\"health\":{\"type\":\"cmd\",\"test\":[\"CMD-SHELL\",\"true\"],\"grace\":90,\"interval\":2,\"healthy_threshold\":1}}")
+    # Deliberately NOT api(): it uses `curl -sf`, which prints NOTHING on a
+    # non-2xx. A create that FAILED therefore reached the assertion below as an
+    # empty volume_id and was reported as "did not record its volume" -- a
+    # misdiagnosis that hid the real error across two gate runs and sent the
+    # investigation at the volume-binding code, which was fine all along. The
+    # status and the body are what separate the two, so they are captured.
+    SVCVOL_RAW=$(curl -s -m 180 -w '\n%{http_code}' -X POST "http://${VHOST}:8080/v1/services" \
+      -H "$AUTH" -H 'Content-Type: application/json' \
+      -d "{\"name\":\"gate-vol-$$\",\"app\":\"gate-vol-$$\",\"replicas\":1,\"volume\":\"${SVOLID}\",\"health\":{\"type\":\"cmd\",\"test\":[\"CMD-SHELL\",\"true\"],\"grace\":90,\"interval\":2,\"healthy_threshold\":1}}")
+    SVCVOL_CODE=$(printf '%s' "$SVCVOL_RAW" | tail -n1)
+    SVCVOL=$(printf '%s' "$SVCVOL_RAW" | sed '$d')
     SVCVOLID=$(echo "$SVCVOL" | jf id)
     SVCVOLBOUND=$(echo "$SVCVOL" | jf volume_id)
-    [ "$SVCVOLBOUND" = "$SVOLID" ] \
-      && ok "service ${SVCVOLID} mounts ${SVOLID}" \
-      || bad "the service create did not record its volume (got '${SVCVOLBOUND}'): $SVCVOL"
+    if [ "$SVCVOL_CODE" != 201 ] && [ "$SVCVOL_CODE" != 200 ]; then
+      bad "the volume-backed service create FAILED with HTTP ${SVCVOL_CODE:-000}: $(printf '%s' "$SVCVOL" | head -c 300)"
+    elif [ "$SVCVOLBOUND" = "$SVOLID" ]; then
+      ok "service ${SVCVOLID} mounts ${SVOLID}"
+    else
+      bad "the service create returned ${SVCVOL_CODE} but recorded volume '${SVCVOLBOUND}', want ${SVOLID}: $(printf '%s' "$SVCVOL" | head -c 300)"
+    fi
 
     SVCBUILD=$(build_image "$VHOST" 'FROM alpine:3.20
 RUN mkdir /www && echo ok > /www/index.html
@@ -1383,15 +1410,39 @@ if [ -n "$H1_ID" ]; then
   fi
 
   # A device that was freed but not reusable is the same outage one create
-  # later, so the assertion runs until the device is back in service.
+  # later -- so what has to be true is that the freed device is back in
+  # SERVICE and a later create succeeds.
+  #
+  # NOT that the later create takes that same index. DevicePool.Acquire
+  # round-robins from where it left off rather than reusing the lowest free
+  # index, deliberately and for correctness: the kernel clears a device's size
+  # asynchronously after a detach, so handing an index straight back lets the
+  # old teardown zero the size the new handler just set, and the device then
+  # never becomes usable (internal/nbd/pool.go). Demanding immediate reuse
+  # asserted the one behaviour the allocator documents as wrong; it passed only
+  # when the cursor happened to wrap, and this branch -- where every machine
+  # takes a device -- made it fail every time. Section 15's hundred cycles are
+  # what prove the pool does not leak.
+  #
+  # So the assertion is the pool's OWN two criteria for handing a device out
+  # again: no pid file, and a size the kernel has cleared. Either the device is
+  # idle and meets them, or it was handed straight back out and is in use --
+  # both mean it returned to the pool. The failure is the limbo in between.
   H1B=$(api "$H_IP" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
   H1B_ID=$(echo "$H1B" | jf id)
   if [ -z "$H1B_ID" ]; then
     bad "a create after the destroy failed: $H1B"
   else
-    REUSED=$(nbd_attached "$H_IP" | comm -12 - <(echo "$FREED"))
-    [ -n "$REUSED" ] && ok "the later create reused $(echo "$REUSED" | tr '\n' ' ')" \
-      || bad "the freed device was not reused; it is out of the pool"
+    FREED_DEV=$(echo "$FREED" | head -1)
+    AVAIL=$($SSH "root@${H_IP}" "
+      if [ -s /sys/block/${FREED_DEV}/pid ]; then echo inuse
+      elif [ \"\$(cat /sys/block/${FREED_DEV}/size 2>/dev/null)\" = 0 ]; then echo available
+      else echo limbo; fi" 2>/dev/null | tr -d '[:space:]')
+    case "$AVAIL" in
+      available) ok "${FREED_DEV} is back in the pool: no owner, and the kernel cleared its size" ;;
+      inuse)     ok "${FREED_DEV} was handed straight back out and is serving again" ;;
+      *)         bad "${FREED_DEV} is neither free nor reused (size not cleared); the kernel left it mid-teardown, which is the state that wedges the next handler" ;;
+    esac
     OUT=$(api "$H_IP" POST "/v1/machines/${H1B_ID}/exec" '{"cmd":"echo nbd-alive","user":"root"}' 2>/dev/null | jf stdout)
     [ "$(echo "$OUT" | tr -d '[:space:]')" = "nbd-alive" ] \
       && ok "and the machine on it serves" || bad "the machine on the reused device does not serve (got '${OUT}')"
