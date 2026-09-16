@@ -21,10 +21,16 @@ When two designs are equally good, the one with fewer moving parts wins.
 
 **The worked example is e2b-infra**: a central API that is the only lifecycle
 entry point — "the orchestrator cannot create a sandbox on its own initiative;
-it does not even know the team" — placement decided centrally, node discovery
-through Nomad with a documented 0–20 s gap, Redis as the routing catalog, and
-60+ runtime feature flags gating engine behaviour per sandbox. Every one of
-those is a thing that can be down while the hosts are fine.
+it does not even know the team" — placement decided centrally, **Nomad and
+Consul as the orchestration tier** (Nomad schedules the per-node orchestrator
+as a system job and is also how the API discovers nodes, with a documented
+0–20 s discovery gap; Consul supplies service DNS), Redis as the routing
+catalog, and 60+ runtime feature flags gating engine behaviour per sandbox.
+
+That is four separate tiers — API, Nomad, Consul, Redis — each of which can be
+down while every host is perfectly healthy and every sandbox is running. Here
+there is one binary per host and a gossiped replica, and a host serves the full
+API whether or not any other host is reachable.
 
 ## 2. Extremely cost efficient, with extremely fast wake.
 
