@@ -25,11 +25,18 @@ say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 
 api() { # api <ip> <method> <path> [body]
   local ip=$1 method=$2 path=$3 body=${4:-}
+  # --fail-with-body, NOT -f. Both exit non-zero on a refusal, which every
+  # `api ... && ok || bad` here depends on, but -f also DISCARDS the response
+  # body -- so a refusal printed nothing and the assertion reported an empty
+  # string. Three separate investigations were sent at the wrong subsystem by
+  # that: a 429 "quota exceeded" read as a broken create path, a 503 from a
+  # dead arbiter read as a 401, and a 400 "repo and ref are both required"
+  # read as a broken database planner. The body names the cause every time.
   if [ -n "$body" ]; then
-    curl -sf -m 180 -X "$method" "http://${ip}:8080${path}" -H "$AUTH" \
+    curl -s --fail-with-body -m 180 -X "$method" "http://${ip}:8080${path}" -H "$AUTH" \
       -H 'Content-Type: application/json' -d "$body"
   else
-    curl -sf -m 180 -X "$method" "http://${ip}:8080${path}" -H "$AUTH"
+    curl -s --fail-with-body -m 180 -X "$method" "http://${ip}:8080${path}" -H "$AUTH"
   fi
 }
 
@@ -4356,7 +4363,7 @@ DB_COMPOSE=$(echo "$DB_RECIPE" | jq -r '
     ([.value | to_entries[] | "    \(.key): \(.value|tojson)"] | join("\n"))] | join("\n")) +
   "\nvolumes:\n" + ([.volumes | keys[] | "  \(.): {}"] | join("\n"))' 2>/dev/null)
 
-DB_PLAN=$(api "$DB_IP" POST /v1/plan "$(jq -n --arg c "$DB_COMPOSE" '{compose:$c}')")
+DB_PLAN=$(api "$DB_IP" POST /v1/compose/plan "$(jq -n --arg c "$DB_COMPOSE" '{compose:$c}')")
 DB_STEPS=$(echo "$DB_PLAN" | jq '.steps | length' 2>/dev/null)
 DB_PROCS=$(echo "$DB_PLAN" | jq '.steps[0].processes | length' 2>/dev/null)
 if [ "${DB_STEPS:-0}" = "1" ] && [ "${DB_PROCS:-0}" = "2" ]; then
@@ -4390,7 +4397,7 @@ for engine in postgres mysql redis mongo; do
       ([.companions | to_entries[] | "  \(.key):\n" +
         ([.value | to_entries[] | "    \(.key): \(.value|tojson)"] | join("\n"))] | join("\n")) + "\n" end) +
     "volumes:\n" + ([.volumes | keys[] | "  \(.): {}"] | join("\n"))' 2>/dev/null)
-  ENG_PLAN=$(api "$DB_IP" POST /v1/plan "$(jq -n --arg c "$ENG_COMPOSE" '{compose:$c}')")
+  ENG_PLAN=$(api "$DB_IP" POST /v1/compose/plan "$(jq -n --arg c "$ENG_COMPOSE" '{compose:$c}')")
   if [ "$(echo "$ENG_PLAN" | jq '.steps | length' 2>/dev/null)" != "1" ]; then
     DB_BAD="${DB_BAD} ${engine}"
   fi
