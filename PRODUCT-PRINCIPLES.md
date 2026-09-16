@@ -107,11 +107,12 @@ The comparison is fly + sprites: two products built separately and combined
 after the fact, still shipping two CLIs (`fly` and `sprite`). e2b is the other
 half of the gap — a sandbox product with no PaaS face at all: no services, no
 volumes, no permanent URLs (its routing entries carry a TTL and its catalog is
-bounded in hours). Pilots is one product, one primitive, one CLI, designed as
-the 2-in-1 from the start. Any
-change that starts to split the two faces apart — a second command surface, a
-second lifecycle, a capability only one of them can reach — is moving toward
-the shape this product exists to avoid.
+bounded in hours, where a permanent URL is an architecture rule here).
+
+Pilots is one product, one primitive, one CLI, designed as the 2-in-1 from the
+start. Any change that starts to split the two faces apart — a second command
+surface, a second lifecycle, a capability only one of them can reach — is
+moving toward the shape this product exists to avoid.
 
 ---
 
