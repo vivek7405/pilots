@@ -2575,13 +2575,29 @@ say "21. A Firecracker killed on the host is reaped and its machine comes back"
 # child's wait, as an adopted process's pidfd after a hostd restart, and as a
 # dead pid found by reconcile when the process died while hostd was down.
 if [ -n "$H_IP" ]; then
+  # Every live host's counts BEFORE the create, so the one the machine lands
+  # on can be compared against its own empty state.
+  #
+  # Taking the baseline after the create instead put the machine under test
+  # INSIDE the baseline, so the counts at the end were one lower than the
+  # start rather than equal, and the section reported "the exit path leaked"
+  # about a teardown that had worked perfectly. The host is not known until
+  # the create returns, so all of them are recorded and one is chosen.
+  EX_BASE_ALL=""
+  for ip in "${HOSTILE_IPS[@]}"; do
+    EX_BASE_ALL="${EX_BASE_ALL}${ip}=$(host_counts "$ip" | tr ' ' '_') "
+  done
+
   EX_ROW=$(api "$H_IP" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
   EX_ID=$(echo "$EX_ROW" | jf id); EX_URL=$(echo "$EX_ROW" | jf url)
   # The kill, the reap, the handler pids and the journal are all on the host
-  # that RUNS this machine. The baseline is taken there too, and therefore
-  # after the create rather than before it.
+  # that RUNS this machine, not the one the create was addressed to.
   EX_IP=$(owner_ip "$EX_ID" "$H_IP")
-  EX_BASE=$(host_counts "$EX_IP")
+  EX_BASE=""
+  for pair in $EX_BASE_ALL; do
+    [ "${pair%%=*}" = "$EX_IP" ] && EX_BASE="$(echo "${pair#*=}" | tr '_' ' ')"
+  done
+  [ -n "$EX_BASE" ] || EX_BASE=$(host_counts "$EX_IP")
   api "$H_IP" POST "/v1/machines/${EX_ID}/exec" \
     '{"cmd":"echo exit-marker > /var/tmp/marker-exit && sync","user":"root"}' >/dev/null 2>&1
 
