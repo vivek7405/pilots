@@ -352,6 +352,13 @@ func TestCreateImageProducesAMountableExt4(t *testing.T) {
 	if !strings.Contains(string(out), "Block size:               4096") {
 		t.Errorf("expected 4096-byte blocks:\n%s", out)
 	}
+	// Empty, the way a Docker volume is: initdb refuses a data directory
+	// that holds mke2fs's lost+found.
+	if ls, err := exec.Command("debugfs", "-R", "ls -l /", m.ImagePath(id)).CombinedOutput(); err != nil {
+		t.Fatalf("debugfs could not list the image: %v: %s", err, ls)
+	} else if strings.Contains(string(ls), "lost+found") {
+		t.Errorf("a fresh volume still carries lost+found:\n%s", ls)
+	}
 
 	// Idempotent, and that is not politeness: a retried create must never
 	// reformat a volume that already holds a machine's data.

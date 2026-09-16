@@ -173,6 +173,15 @@ func (m *Manager) createImage(ctx context.Context, id string, sizeMiB int) error
 		path, strconv.Itoa(sizeMiB)+"M"); err != nil {
 		return fmt.Errorf("volumes: format the image for %s: %w", id, err)
 	}
+	// Empty, the way a Docker volume is. mke2fs leaves a lost+found directory,
+	// and a database that owns its data directory checks that it is empty
+	// before initialising it: postgres's initdb refused the mount as "not
+	// empty -- it contains a lost+found directory", exited 1 and was restarted
+	// forever. debugfs removes it without a mount; fsck recreates it whenever
+	// it has something to put there.
+	if _, err := m.run(ctx, "debugfs", "-w", "-R", "rmdir lost+found", path); err != nil {
+		return fmt.Errorf("volumes: clear lost+found in the image for %s: %w", id, err)
+	}
 	return nil
 }
 
