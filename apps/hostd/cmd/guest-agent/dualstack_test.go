@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -64,5 +65,26 @@ func TestListenerTableParsing(t *testing.T) {
 	}
 	if tableHasListener(strings.NewReader(table), 3001) {
 		t.Fatal("an ESTABLISHED socket on 3001 was taken for a listener")
+	}
+}
+
+// The links every init makes under /dev: a shell's process substitution opens
+// /dev/fd, which devtmpfs does not provide, and the postgres image's
+// entrypoint died on it. An existing entry is left alone.
+func TestInitLinksTheStandardDevEntries(t *testing.T) {
+	dir := t.TempDir()
+	links := map[string]string{
+		dir + "/fd":     "/proc/self/fd",
+		dir + "/stdout": "/proc/self/fd/1",
+	}
+	if err := os.WriteFile(dir+"/stdout", []byte("kept"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	linkDevices(links)
+	if got, err := os.Readlink(dir + "/fd"); err != nil || got != "/proc/self/fd" {
+		t.Fatalf("fd -> %q, %v; want /proc/self/fd", got, err)
+	}
+	if b, _ := os.ReadFile(dir + "/stdout"); string(b) != "kept" {
+		t.Fatal("an existing /dev entry was replaced")
 	}
 }
