@@ -8,6 +8,13 @@ still misses the point can be caught.
 Every one of these has already been argued for once. None of them is up for
 quiet renegotiation in a pull request.
 
+**On the evidence below.** Each principle names the prior art that motivated
+it and points at `docs/prior-art/` for the sourced version. The pointer is
+deliberate: those notes carry a URL or a `path:line` on every claim and are
+kept current, and a second copy of a comparison rots exactly the way a second
+copy of a contract does. Facts about other products belong there. What belongs
+here is what pilots does about them.
+
 ---
 
 ## 1. Simple on purpose. No central control plane.
@@ -19,18 +26,21 @@ replica. There is no scheduler tier, no managed database, no coordinator, no
 A design that needs something in the middle has failed, however fast it is.
 When two designs are equally good, the one with fewer moving parts wins.
 
-**The worked example is e2b-infra**: a central API that is the only lifecycle
-entry point — "the orchestrator cannot create a sandbox on its own initiative;
-it does not even know the team" — placement decided centrally, **Nomad and
-Consul as the orchestration tier** (Nomad schedules the per-node orchestrator
-as a system job and is also how the API discovers nodes, with a documented
-0–20 s discovery gap; Consul supplies service DNS), Redis as the routing
-catalog, and 60+ runtime feature flags gating engine behaviour per sandbox.
+The same rule decides what it takes to **run** pilots. Adding a host is
+`scripts/host-bootstrap.sh <ip>` against a bare-metal box and an S3 endpoint.
+Every dependency on a cloud-managed appliance — a load balancer, a managed
+filer, a hosted queue — is a machine somebody cannot self-host on, and is
+rejected for that reason alone.
 
-That is four separate tiers — API, Nomad, Consul, Redis — each of which can be
-down while every host is perfectly healthy and every sandbox is running. Here
-there is one binary per host and a gossiped replica, and a host serves the full
-API whether or not any other host is reachable.
+**The worked example is e2b-infra**: a central API that is the only lifecycle
+entry point, with placement decided centrally, Nomad and Consul as the
+orchestration tier, Redis as the routing catalog, and feature flags gating
+engine behaviour per sandbox. That is four tiers that can each be down while
+every host is healthy and every sandbox is running. Its self-hosting floor is
+a cloud account: `iac/` ships an AWS provider and a GCP provider and nothing
+else. Here there is one binary per host and a gossiped replica, and a host
+serves the full API whether or not any other host is reachable.
+(`docs/prior-art/e2b-infra.md`, "Central control plane" and the REJECT list.)
 
 ## 2. Extremely cost efficient, with extremely fast wake.
 
@@ -43,11 +53,11 @@ because it is slow has failed; a wake that is fast because the machine was
 never really asleep has failed.
 
 The wake is **L3** — a packet for a sleeping machine is what wakes it, counted
-on the host that owns it. e2b resumes at L7 through its central API
-(client-proxy to `ResumeSandbox`), and Fly cannot wake a private `.internal`
-address at all without routing through its proxy. Waking from the packet
-itself, with no proxy and nothing in the middle, is the deliberate
-differentiator and it is downstream of principle 1.
+on the host that owns it. Waking from the packet itself, with no proxy and
+nothing in the middle, is the deliberate differentiator, and it is downstream
+of principle 1: the alternatives wake at L7 through a central tier because
+they have one. (`docs/prior-art/e2b-infra.md` REJECT "L7-only, API-mediated
+wake-on-request"; `docs/prior-art/fly-io.md` §on fly-proxy.)
 
 ## 3. A suspended machine occupies next to nothing on its host.
 
@@ -66,17 +76,20 @@ than the one the machine last ran on, within the CPU-vendor pool that
 `ARCHITECTURE.md` rule 6 defines.
 
 A feature that works only where the machine happens to be is not finished.
-Fly spent three years adding migration to host-pinned volumes; the cost of
-getting this wrong is measured in years, and it is avoided by never pinning
-anything to a host in the first place.
+Fly's own account of retrofitting this is the warning: "It took 3 years to get
+workload migration right with attached storage, and it's still not 'easy'."
+Three years, for a team that is very good at this, because the pinning came
+first. The cost of getting it wrong is measured in years and it is avoided by
+never pinning anything to a host in the first place.
 
-The harder half is a host that dies **while machines are running on it**. A
-paused e2b sandbox can be resumed elsewhere, but a running one dies with its
-node: there is no dead-host recovery, and an orchestrator restart kills what
-it was running rather than re-adopting it. Pilots recovers a machine whose
-host is gone, from object storage, onto a survivor that chose itself with
-nobody coordinating — and its own daemon restarts without stopping a single
-running machine. That is the property this principle is really about.
+The harder half is a host that dies **while machines are running on it**.
+Resuming a *paused* workload elsewhere is the easy direction and several
+platforms do it; recovering a *running* one whose host is gone is the property
+this principle is really about. Pilots rebuilds it from object storage onto a
+survivor that chose itself with nobody coordinating, and its own daemon
+restarts without stopping a single running machine.
+(`docs/prior-art/INDEX.md` scorecard rows "Cross-host recreate from object
+storage" and "Self-heal on host death".)
 
 ## 5. One storage model: S3 is the volume, the host disk is only a cache.
 
@@ -85,17 +98,22 @@ bucket; local NVMe is a read-through cache that can be wiped at any moment
 without losing anything. Wipe any host's disk and nothing is lost.
 
 Not two models. Not a local rootfs copy beside a network volume. Not a
-host-pinned disk. The test is the one Fly's own team stated after replacing
-their host-pinned tier: the durable state of a machine should be a URL.
+host-pinned disk. The test is the one Fly's team stated for Sprites, their
+object-storage-backed sandbox product: the durable state of a Sprite is
+simply a URL.
 
 Durability is **stated, not implied**: a volume is per-write durable, and the
 machine root has a published, measured RPO. A window nobody publishes is not
 a guarantee, it is a hope.
 
-One model also means one place truth lives. e2b splits it across Postgres for
-durable rows, Redis for the running set and routing, and object storage for
-the artifacts — three stores that can disagree. Here the bucket is the truth
-and everything on a host is derived from it.
+The counter-example is sharp because it is so nearly right. e2b already keeps
+build artifacts in object storage, and still ends up running **three** storage
+models: object storage for templates and snapshots, a managed cloud NFS filer
+for user volumes, and a local NVMe overlay for the root whose durable form is
+the last snapshot it managed to upload. Three places truth can live, two of
+which can disagree. Splitting truth is the easy mistake, and one model is the
+whole of the fix. (`docs/prior-art/e2b-infra.md` §9 and the REJECT list;
+`docs/prior-art/sprites-dev.md` §4.)
 
 ## 6. A 2-in-1 sandbox and PaaS, on one primitive.
 
@@ -104,10 +122,12 @@ A sandbox for an agent and a durable production service are the same
 without changing its URL.
 
 The comparison is fly + sprites: two products built separately and combined
-after the fact, still shipping two CLIs (`fly` and `sprite`). e2b is the other
-half of the gap — a sandbox product with no PaaS face at all: no services, no
-volumes, no permanent URLs (its routing entries carry a TTL and its catalog is
-bounded in hours, where a permanent URL is an architecture rule here).
+after the fact, still shipping two CLIs (`fly` and `sprite`). Sprites run on
+top of Fly Machines rather than replacing them, which is what a second product
+looks like from the inside. e2b is the other half of the gap, a sandbox
+product with no PaaS face: no services, no health-gated rollout, no custom
+domains, and a routing entry that expires with the sandbox's own lifetime,
+where a permanent URL is an architecture rule here.
 
 Pilots is one product, one primitive, one CLI, designed as the 2-in-1 from the
 start. Any change that starts to split the two faces apart — a second command
@@ -135,8 +155,7 @@ of e2b at once, and neither cancels the other.
 Same rule for fly and sprites, which have the advantage of being further along
 and the disadvantage of being closed: their published writing is evidence about
 mechanics and about what the tradeoffs cost in production, not a template for
-how pilots should be shaped. `docs/prior-art/` carries the sourced notes, each
-ending in what to copy and what to reject.
+how pilots should be shaped.
 
 ## How to use this
 
@@ -147,6 +166,7 @@ implementing it. Reject anything that:
 - pins durable state to a particular host,
 - introduces a coordinator any request path depends on,
 - keeps two storage models where one would do,
+- needs a cloud-managed appliance to stand a host up,
 - or splits the sandbox and the PaaS into two products.
 
 `AGENTS.md` bar items 6 and 7 are the enforceable form of principles 2–5, and

@@ -58,9 +58,12 @@ of them. Read it once; argue with the bar here.
    The machine root and the volume are one S3-backed thing (#122), durable
    in the bucket with local NVMe as a read-through cache that can be wiped
    at any time. Not two models (a local rootfs copy plus a network volume),
-   and never a host-pinned disk: that is what cost Fly three years of
-   migration work (`docs/prior-art/fly-io.md`) and is what Sprites replaced
-   it with (`docs/prior-art/sprites-dev.md` §4).
+   and never a host-pinned disk: Fly's own account is that it "took 3 years
+   to get workload migration right with attached storage, and it's still not
+   'easy'" (`docs/prior-art/fly-io.md` §7). Sprites is the shape to match —
+   the whole root is a read-through cache over object storage
+   (`docs/prior-art/sprites-dev.md` §4) — and e2b the shape to avoid, at
+   three storage models (`docs/prior-art/e2b-infra.md` §9).
 
 When a phase plan, an issue body, or a review comment conflicts with one of
 these, this section wins and the conflict is stated in the issue.
