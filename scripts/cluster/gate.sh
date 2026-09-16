@@ -693,16 +693,56 @@ if [ "${#LIVE_IPS[@]}" -ge 2 ]; then
     # was checking that a machine with NO session open on it stayed awake. That
     # tests nothing and fails honestly-looking. A setup that cannot set itself
     # up has to say so (AGENTS.md).
-    HELD=$(api "$B_IP" POST "/v1/machines/${CLIENT_ID}/exec" \
-      "{\"cmd\":\"rm -f /tmp/held-ok; nohup bash -c 'exec 3<>/dev/tcp/${SZ_NAME}.internal/3001 && touch /tmp/held-ok && sleep 300' >/dev/null 2>&1 & sleep 5; test -e /tmp/held-ok && echo held || echo not-held\",\"user\":\"root\"}" \
+    # NOT against the agent's port 3001. The guest agent is an http.Server with
+    # ReadHeaderTimeout 10s and no IdleTimeout, so it hangs up on a connection
+    # that never sends a request line -- correct slowloris defence, and fatal
+    # to this assertion: the hold was verified at t+5, the agent closed it at
+    # t+10, conntrack left ESTABLISHED, and the replica was legitimately idle
+    # long before the state was read at t+80. The section then blamed the
+    # platform for dropping a session that the test had already lost.
+    #
+    # A real peer mid-transaction is connected to the WORKLOAD, so the replica
+    # runs a listener of its own that does not hang up. Written through base64
+    # because the JSON, the shell and python would otherwise be three layers of
+    # quoting over one line.
+    SZ_HOLD_PORT=5000
+    SZ_LISTENER=$(printf '%s\n' \
+      'import socket, itertools' \
+      's = socket.socket(socket.AF_INET6)' \
+      's.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)' \
+      "s.bind((\"::\", ${SZ_HOLD_PORT}))" \
+      's.listen(16)' \
+      '# every accepted connection stays referenced, or it is closed at once' \
+      'keep = [s.accept() for _ in itertools.count()]' | base64 -w0)
+    LISTENING=$(api "$A_IP" POST "/v1/machines/${SZ_ID}/exec" \
+      "{\"cmd\":\"echo ${SZ_LISTENER} | base64 -d > /tmp/hold.py; nohup setsid python3 /tmp/hold.py >/dev/null 2>&1 & sleep 3; timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/${SZ_HOLD_PORT}' && echo listening || echo no-listener\",\"user\":\"root\"}" \
       | jf stdout | tr -d '[:space:]')
-    if [ "$HELD" != "held" ]; then
+    if [ "$LISTENING" != "listening" ]; then
+      bad "could not start a listener in the replica to hold a session against (got '${LISTENING}'); what follows would assert nothing"
+    else
+      ok "the replica listens on ${SZ_HOLD_PORT} for a peer to hold open"
+    fi
+
+    HELD=$(api "$B_IP" POST "/v1/machines/${CLIENT_ID}/exec" \
+      "{\"cmd\":\"rm -f /tmp/held-ok; nohup bash -c 'exec 3<>/dev/tcp/${SZ_NAME}.internal/${SZ_HOLD_PORT} && touch /tmp/held-ok && sleep 300' >/dev/null 2>&1 & sleep 5; test -e /tmp/held-ok && echo held || echo not-held\",\"user\":\"root\"}" \
+      | jf stdout | tr -d '[:space:]')
+    if [ "$LISTENING" != "listening" ] || [ "$HELD" != "held" ]; then
       bad "the peer could not open a session to hold it (got '${HELD}'); what follows would assert nothing"
     else
       ok "a peer holds a silent session open on it"
       sleep 75
+      # Re-verified, not assumed. The setup proving itself at t+5 and being
+      # false by t+10 is precisely the hole this section fell through, so the
+      # holder is checked to be alive and still holding its fd BEFORE the
+      # state is read. A hold that died is a broken test, not a failed
+      # assertion, and has to say which.
+      STILL=$(api "$B_IP" POST "/v1/machines/${CLIENT_ID}/exec" \
+        "{\"cmd\":\"p=\$(pgrep -f 'sleep 300' | head -1); test -n \\\"\$p\\\" && test -e /proc/\$p/fd/3 && echo holding || echo gone\",\"user\":\"root\"}" \
+        | jf stdout | tr -d '[:space:]')
       STATE=$(api "$A_IP" GET "/v1/machines/${SZ_ID}" | jf state)
-      if [ "$STATE" = "running" ] && [ -n "$(fc_pid "$SZ_HOST_IP" "$SZ_ID")" ]; then
+      if [ "$STILL" != "holding" ]; then
+        bad "the peer's session did not survive the 75s window (got '${STILL}'); this step asserted nothing about the platform"
+      elif [ "$STATE" = "running" ] && [ -n "$(fc_pid "$SZ_HOST_IP" "$SZ_ID")" ]; then
         ok "a held session kept it running past the scale-down window"
       else
         bad "it was given back with a session open on it (state '${STATE}'): a transaction died mid-flight"
@@ -1324,9 +1364,23 @@ print(mine[0]['id'] if len(mine) == 1 else '')
         printf '    (deploying through %s, which is NOT the replica owner %s)\n' "$DEPLOY_VIA" "$SOWNER"
       fi
 
-      api "$DEPLOY_VIA" POST "/v1/services/${SVCVOLID}/deploy" "{\"build\":\"${SVCBUILD}\"}" >/dev/null \
-        && ok "redeployed the rescued volume-backed service through ${DEPLOY_VIA}" \
-        || bad "the deploy after the rescue failed; a peer call that cannot authenticate answers 401"
+      # The status and body are CAPTURED rather than guessed at. This used to
+      # assert a cause -- "a peer call that cannot authenticate answers 401" --
+      # that it had never observed, and api() uses curl -sf, so every non-2xx
+      # landed on that one sentence. It was in fact a 503: the deploy was
+      # forwarded to the host this section had just powered off, because
+      # arbitration counted a host live for 90s while the claim guard buried
+      # it at 30s. Naming a cause the test did not see cost an investigation
+      # aimed at the wrong subsystem, which is the reason this reads the real
+      # answer now. The service-create block above does the same.
+      DPL_BODY=$(curl -s -m 180 -o /tmp/gate-deploy-body -w '%{http_code}' \
+        -X POST "http://${DEPLOY_VIA}:8080/v1/services/${SVCVOLID}/deploy" \
+        -H "$AUTH" -H 'Content-Type: application/json' \
+        -d "{\"build\":\"${SVCBUILD}\"}" 2>/dev/null)
+      case "$DPL_BODY" in
+        2*) ok "redeployed the rescued volume-backed service through ${DEPLOY_VIA}" ;;
+        *)  bad "the deploy after the rescue failed with HTTP ${DPL_BODY}: $(head -c 200 /tmp/gate-deploy-body 2>/dev/null)" ;;
+      esac
 
       SREPS=$(api "$VSURVIVOR" GET /v1/machines | python3 -c "
 import sys, json
