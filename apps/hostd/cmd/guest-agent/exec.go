@@ -12,7 +12,9 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -196,7 +198,51 @@ func prepareCommand(cmd *exec.Cmd, username, cwd string, env map[string]string) 
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
+
+	// Resolve a bare command name against the PATH the command will RUN
+	// with, not the one the agent was started with. exec.Command looks the
+	// name up at construction, in the agent's own environment -- and the
+	// agent is the guest's init, started by the kernel with no PATH at all,
+	// so every relative name failed with "executable file not found" and
+	// `pilot exec <machine> -- echo hi` exited 127 while `/bin/echo hi`
+	// worked. The shell path (/exec with a cmd string) never noticed, since
+	// the shell is named by its absolute path and does its own lookup.
+	if cmd.Err != nil || !strings.ContainsRune(cmd.Path, os.PathSeparator) {
+		if p, err := lookPathIn(envValue(cmd.Env, "PATH"), cmd.Args[0]); err == nil {
+			cmd.Path, cmd.Err = p, nil
+		}
+	}
 	return nil
+}
+
+// lookPathIn is exec.LookPath against an explicit PATH rather than the
+// process's own.
+func lookPathIn(pathEnv, file string) (string, error) {
+	if strings.ContainsRune(file, os.PathSeparator) {
+		return file, nil
+	}
+	for _, dir := range filepath.SplitList(pathEnv) {
+		if dir == "" {
+			dir = "."
+		}
+		candidate := filepath.Join(dir, file)
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return candidate, nil
+		}
+	}
+	return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
+}
+
+// envValue is the LAST value of key in a KEY=value list, which is the one
+// the kernel hands the process when a key is duplicated.
+func envValue(env []string, key string) string {
+	val := ""
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
+			val = v
+		}
+	}
+	return val
 }
 
 // imageDefaultUser is the USER the image's Dockerfile declared, from the start

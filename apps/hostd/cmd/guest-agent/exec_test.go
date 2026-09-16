@@ -427,3 +427,33 @@ func TestAnExecWithNoMachineEnvStillRuns(t *testing.T) {
 		t.Fatalf("prepareCommand with no env file: %v", err)
 	}
 }
+
+// A bare command name resolves against the PATH the command will run with.
+// The agent is the guest's init and starts with no PATH of its own, so the
+// lookup exec.Command does at construction found nothing, and every
+// `pilot exec <machine> -- <name>` exited 127 unless the name was absolute.
+func TestABareCommandNameResolvesAgainstTheCommandsOwnPath(t *testing.T) {
+	dir := t.TempDir()
+	tool := filepath.Join(dir, "greet")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "")
+
+	cmd := exec.Command("greet")
+	if cmd.Err == nil {
+		t.Fatal("the fixture is wrong: exec.Command found greet with no PATH")
+	}
+	cmd.Env = []string{"PATH=" + dir}
+	if p, err := lookPathIn(envValue(cmd.Env, "PATH"), cmd.Args[0]); err != nil {
+		t.Fatalf("greet not found on the command's own PATH: %v", err)
+	} else if p != tool {
+		t.Fatalf("resolved %s, want %s", p, tool)
+	}
+	if _, err := lookPathIn(dir, "absent"); err == nil {
+		t.Fatal("a name that is on no PATH entry resolved")
+	}
+	if envValue([]string{"PATH=a", "PATH=b"}, "PATH") != "b" {
+		t.Fatal("a duplicated key must yield its last value, as the kernel does")
+	}
+}
