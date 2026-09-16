@@ -149,3 +149,74 @@ func TestHealthSaysWhenTheVendorIsForced(t *testing.T) {
 		t.Errorf("health = %+v, want a forced GenuineIntel", got)
 	}
 }
+
+// staleCPUView is a subscription cache that has not yet been delivered the
+// write its own host just made -- the normal steady state for the moment
+// after a wake, not an exotic one.
+type staleCPUView struct{ row state.MachineCPU }
+
+func (v staleCPUView) MachineCPU(context.Context, string) (state.MachineCPU, bool) {
+	return v.row, true
+}
+
+// The API must not report the start BEFORE the one that just happened.
+//
+// Falling back to the store only on a cache MISS fixed the create and left
+// this behind: every start after the first finds a non-empty LastStart in the
+// cache, so the fallback never ran and the answer was always one start stale.
+// A machine that had just cold-booted reported "restore", and its next
+// ordinary restore reported "cold_boot" -- indistinguishable from a machine
+// that reboots forever, which is how the fleet gate found it.
+func TestAFreshStartIsNotMaskedByTheCachedPreviousOne(t *testing.T) {
+	ctx := context.Background()
+	st, err := state.Open(":memory:")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	const id = "m-stale"
+	// The store has the cold boot that just happened...
+	if err := st.PutMachineCPU(ctx, &state.MachineCPU{
+		ID: id, Kind: state.KindMachine, Vendor: "AuthenticAMD",
+		LastStart: state.StartColdBoot, LastStartAt: 1700000100,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// ...while the cache still holds the restore before it.
+	d := Deps{Store: st, MachineCPU: staleCPUView{state.MachineCPU{
+		ID: id, Kind: state.KindMachine, Vendor: "AuthenticAMD",
+		LastStart: state.StartRestore, LastStartAt: 1700000000,
+	}}}
+
+	got := d.startOf(ctx, id)
+	if got.LastStart != state.StartColdBoot || got.LastStartAt != 1700000100 {
+		t.Errorf("startOf reported %q/%d, want cold_boot/1700000100: the API is "+
+			"serving the start before the one that just happened",
+			got.LastStart, got.LastStartAt)
+	}
+}
+
+// The mirror image: for a machine this host does not own, the cache is the
+// only place the row is, and a store that has not applied it yet must not
+// blank it out.
+func TestACachedStartWinsWhenTheStoreHasNotSeenItYet(t *testing.T) {
+	ctx := context.Background()
+	st, err := state.Open(":memory:")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	d := Deps{Store: st, MachineCPU: staleCPUView{state.MachineCPU{
+		ID: "m-peer", Kind: state.KindMachine, Vendor: "AuthenticAMD",
+		LastStart: state.StartColdBoot, LastStartAt: 1700000200,
+	}}}
+
+	got := d.startOf(ctx, "m-peer")
+	if got.LastStart != state.StartColdBoot || got.LastStartAt != 1700000200 {
+		t.Errorf("startOf reported %q/%d, want the cached cold_boot: a peer's "+
+			"machine has no row in this host's store yet",
+			got.LastStart, got.LastStartAt)
+	}
+}
