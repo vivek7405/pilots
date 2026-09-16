@@ -133,7 +133,7 @@ func newDeployCmd(env *Env, getenv config.Env) *cobra.Command {
 			env.W.Notef("plan: %d services in app %s", len(plan.Steps), plan.App)
 
 			creds, _ := config.Load(getenv)
-			secrets := secretsFor(creds, plan.App)
+			secrets := withEnvSecrets(secretsFor(creds, plan.App), plan, getenv)
 
 			results, err := executePlan(ctx, env, client, plan, composeDir, secrets, wait, verbose)
 			if err != nil {
@@ -203,6 +203,46 @@ func secretsFor(creds *config.Credentials, app string) map[string]string {
 		return nil
 	}
 	return all[app]
+}
+
+// withEnvSecrets overlays the environment on the credentials file: a secret
+// the plan references is taken from PILOT_SECRET_<NAME> when that is set,
+// with NAME upper-cased and every character outside [A-Z0-9] as `_`, so
+// `database_url` reads PILOT_SECRET_DATABASE_URL. This is the store a CI
+// runner has -- it has no credentials file and never ran `pilot secrets set`
+// -- and it is the convention the previous CLI and the battery already use.
+// The environment wins over the file, the way an override should.
+func withEnvSecrets(secrets map[string]string, plan pilots.ComposePlan, getenv config.Env) map[string]string {
+	if getenv == nil {
+		return secrets
+	}
+	for _, step := range plan.Steps {
+		for _, name := range step.SecretRefs {
+			v := getenv(secretEnvVar(name))
+			if v == "" {
+				continue
+			}
+			if secrets == nil {
+				secrets = map[string]string{}
+			}
+			secrets[name] = v
+		}
+	}
+	return secrets
+}
+
+// secretEnvVar is the environment variable a secret name is read from.
+func secretEnvVar(name string) string {
+	var b strings.Builder
+	b.WriteString("PILOT_SECRET_")
+	for _, r := range strings.ToUpper(name) {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }
 
 // resolveSecrets turns a step's secret_refs (env name -> secret name) into
