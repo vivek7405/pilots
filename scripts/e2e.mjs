@@ -1969,7 +1969,12 @@ async function buildAssertions() {
     }));
     assert(res.status === 200, `expected 200, got ${res.status}`);
     const lines = await readNDJSON(res);
-    assert(!/REACHED-PRIVATE/.test(JSON.stringify(lines)),
+    // Only what the build PRINTED. Every line also carries its step name,
+    // which is the Dockerfile command itself -- marker included -- so a
+    // match over the whole record found the command echo, never the
+    // output, and reported a reach that had not happened.
+    const printed = lines.filter((l) => l.stream !== 'status').map((l) => l.line ?? '');
+    assert(!printed.some((l) => /REACHED-PRIVATE/.test(l)),
       'a build reached a private network address');
     assert(lines[lines.length - 1]?.result,
       `the build failed: ${JSON.stringify(lines.slice(-3))}`);
