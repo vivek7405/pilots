@@ -498,7 +498,14 @@ CREATE_FILLERS=""
 create_on_host() {
   local api_ip="$1" want_ip="$2" body="$3" m mid mip code f
   CREATE_FILLERS=""
-  for _ in 1 2 3 4 5 6; do
+  # Sixteen attempts, not six. The ranker prefers the host with the most free
+  # memory, and on this rig that is emphatically ONE host: three creates sent
+  # to three different hosts all landed on the same one. So the target does not
+  # come up by chance -- it comes up only once the hosts ahead of it have been
+  # filled, which takes roughly one attempt per 512 MiB of their free memory.
+  # Six was a coin toss that usually lost, and reported it as the section's
+  # failure rather than the helper's.
+  for _ in $(seq 16); do
     code=$(curl -s -m 180 -o /tmp/gate-create.json -w '%{http_code}' \
       -X POST "http://${api_ip}:8080/v1/machines" -H "$AUTH" \
       -H 'Content-Type: application/json' -d "$body" 2>/dev/null)
@@ -517,7 +524,7 @@ create_on_host() {
       return 0
     fi
     CREATE_FILLERS="${CREATE_FILLERS} ${mid}"
-    sleep 6 # let the reservation reach the gossip before ranking again
+    sleep 4 # let the reservation reach the gossip before ranking again
   done
   # Every attempt landed elsewhere. Release them before giving up, or the next
   # section inherits six machines it did not make.
@@ -2344,10 +2351,6 @@ else
       # carry the forced one and resume normally -- which is the design, and is
       # what step 6 below asserts.
       api "$FAULT_IP" POST "/v1/machines/${CB_ID}/suspend" '{}' >/dev/null 2>&1
-      CB_BEFORE=$(curl -sf -m 5 "http://${CB_IP}:8080/metrics" 2>/dev/null \
-        | awk '$1=="pilots_machine_starts_total{kind=\"cold_boot\"}"{print $2}')
-      CB_BEFORE="${CB_BEFORE:-0}"
-      CB_NBD_BEFORE=$(nbd_attached "$CB_IP" | wc -l)
 
       # Armed on EVERY live host, not just the one driving the API.
       #
@@ -2375,6 +2378,21 @@ else
         wait_serving "$ip" 120 && CB_ARMED="${CB_ARMED}${ip} "
       done
       ok "forced ${CB_OTHER} on every live host (${CB_ARMED}), so the machine's own pool has none left"
+
+      # The baselines are taken HERE, after the arming, not before it.
+      #
+      # Arming restarts hostd on every host, and pilots_machine_starts_total
+      # is an in-process counter: a restart puts it back to zero. Reading it
+      # first meant comparing a pre-restart number against a post-restart one,
+      # so the section reported the cold-boot counter going 1 -> 0 and called
+      # a correct cold boot a failure. The NBD count is read here for the same
+      # reason: a restart re-attaches the devices of the machines it adopts,
+      # so the figure before it is not the figure this step is diffing.
+      CB_BEFORE=$(curl -sf -m 5 "http://${CB_IP}:8080/metrics" 2>/dev/null \
+        | awk '$1=="pilots_machine_starts_total{kind=\"cold_boot\"}"{print $2}')
+      CB_BEFORE="${CB_BEFORE:-0}"
+      CB_NBD_BEFORE=$(nbd_attached "$CB_IP" | wc -l)
+
       if wait_serving "$FAULT_IP" 120; then
         CB_HEALTH=$(curl -sf -m 5 "http://${FAULT_IP}:8080/v1/health" 2>/dev/null)
         if [ "$(echo "$CB_HEALTH" | jf cpu_vendor)" = "$CB_OTHER" ] \
@@ -3339,7 +3357,13 @@ BM_IP="${LIVE_IPS[0]:-${IPS[0]}}"
 # This is the whole change stated as one assertion. If buildkitd is running
 # here, a customer RUN step is executing on this kernel beside other tenants'
 # machines, which is exactly what a builder machine exists to stop.
-BM_DAEMON=$($SSH "root@${BM_IP}" "pgrep -c buildkitd 2>/dev/null || echo 0" 2>/dev/null | tr -d '[:space:]')
+# `pgrep -c` PRINTS 0 and EXITS 1 when nothing matches, so `|| echo 0` ran as
+# well and the reading was the string "00" -- which is not "0", so the section
+# reported a daemon on a host that had none. It only surfaced once the host
+# daemon was actually removed: while one was running, pgrep exited 0 and the
+# fallback never fired. `|| true` swallows the exit status without adding a
+# second line.
+BM_DAEMON=$($SSH "root@${BM_IP}" "pgrep -c buildkitd 2>/dev/null || true" 2>/dev/null | tr -d '[:space:]')
 if [ "${BM_DAEMON:-0}" = 0 ]; then
   ok "no buildkitd process on the host"
 else
