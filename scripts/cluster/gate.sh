@@ -553,6 +553,14 @@ create_on_host() {
 
   # The target is the emptiest host now, so the caller's create lands there.
   # Verified rather than assumed: something else on the fleet may have moved.
+  #
+  # A miss is DELETED before the next attempt, which the ballast probes above
+  # deliberately do not do. The reason is the caller's body may NAME the
+  # machine, and a name is held by the row that has it: retrying with the same
+  # body then answers 500 "the name is already taken", the helper bails, and
+  # the caller sees a blank failure about its own second attempt. Deleting the
+  # miss frees the name, and the fillers that sank the other hosts stay put, so
+  # the target is still the emptiest.
   for _ in 1 2 3; do
     code=$(curl -s -m 180 -o /tmp/gate-create.json -w '%{http_code}' \
       -X POST "http://${api_ip}:8080/v1/machines" -H "$AUTH" \
@@ -569,7 +577,7 @@ create_on_host() {
       echo "$m"
       return 0
     fi
-    CREATE_FILLERS="${CREATE_FILLERS} ${mid}"
+    delete_machine "$mid" # frees the name for the next attempt
     sleep 4
   done
 
@@ -3366,10 +3374,14 @@ PYEOF" >/dev/null 2>&1
       # On TT_IP specifically: the manifest was broken on TT_IP, so a machine
       # the ranker placed elsewhere restores against a HEALTHY template and
       # proves nothing about re-derivation.
-      TT_M=$(create_on_host "$TT_IP" "$TT_IP" "{\"name\":\"tmpl-heal-$$\"}" | jf id)
+      # Captured, THEN read. Piping straight into jf discards the helper's
+      # own failure message, which is how "the create failed outright" was
+      # reported with nothing after it.
+      TT_OUT=$(create_on_host "$TT_IP" "$TT_IP" "{\"name\":\"tmpl-heal-$$\"}")
+      TT_M=$(echo "$TT_OUT" | jf id)
       for f in $CREATE_FILLERS; do api "$TT_IP" DELETE "/v1/machines/${f}" >/dev/null 2>&1; done
       if [ -z "$TT_M" ]; then
-        bad "the create failed outright; a host with an unusable template must re-derive one, not refuse"
+        bad "the create failed outright; a host with an unusable template must re-derive one, not refuse: ${TT_OUT}"
       else
         ok "the create succeeded (${TT_M}) despite the template naming a missing snapshot"
 
@@ -3397,11 +3409,12 @@ PYEOF" >/dev/null 2>&1
 
       # A second create must be ordinary: the fix re-derives once, it does not
       # rebuild on every create forever.
-      TT_M2=$(create_on_host "$TT_IP" "$TT_IP" "{\"name\":\"tmpl-heal2-$$\"}" | jf id)
+      TT_OUT2=$(create_on_host "$TT_IP" "$TT_IP" "{\"name\":\"tmpl-heal2-$$\"}")
+      TT_M2=$(echo "$TT_OUT2" | jf id)
       for f in $CREATE_FILLERS; do api "$TT_IP" DELETE "/v1/machines/${f}" >/dev/null 2>&1; done
       [ -n "$TT_M2" ] \
         && ok "the next create is ordinary again" \
-        || bad "the host did not settle; a second create still fails"
+        || bad "the host did not settle; a second create still fails: ${TT_OUT2}"
       [ -n "$TT_M2" ] && api "$TT_IP" DELETE "/v1/machines/${TT_M2}" >/dev/null 2>&1
     fi
   fi
