@@ -515,6 +515,13 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 		fcm, err = m.startNewMachine(ctx, row, token, req.Volume, req.Image, env.Cmd)
 	}
 	if err != nil {
+		// Said here as well as returned. The caller is often nobody: a
+		// rollout started by a build whose client has gone reads this into a
+		// build log nobody fetches, and the row then sits in `error` with no
+		// process, no directory and no line in the journal to say why.
+		slog.Warn("machine failed to start; its row is marked error",
+			"machine", id, "service", req.Service, "release", req.Release,
+			"start", startKind, "err", err)
 		row.State = StateError
 		stampSlot(row, nil)
 		row.UpdatedAt = time.Now().Unix()
