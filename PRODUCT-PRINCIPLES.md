@@ -19,6 +19,16 @@ replica. There is no scheduler tier, no managed database, no coordinator, no
 A design that needs something in the middle has failed, however fast it is.
 When two designs are equally good, the one with fewer moving parts wins.
 
+**The worked example is e2b-infra** (open source, cloned locally; notes in
+`docs/prior-art/e2b-infra.md`). Its engine below the gRPC boundary is good and
+worth reading. Above it sits exactly what this principle rejects: a central API
+that is the only lifecycle entry point — "the orchestrator cannot create a
+sandbox on its own initiative; it does not even know the team" — placement
+decided centrally, node discovery through Nomad with a documented 0–20 s gap,
+Redis as the routing catalog, and 60+ runtime feature flags gating engine
+behaviour per sandbox. Every one of those is a thing that can be down while
+the hosts are fine.
+
 ## 2. Extremely cost efficient, with extremely fast wake.
 
 Cost efficiency is why the platform exists. The lever is that a machine
@@ -28,6 +38,13 @@ keeping it running was never worth it.
 Those two pull against each other and both must hold. A wake that is cheap
 because it is slow has failed; a wake that is fast because the machine was
 never really asleep has failed.
+
+The wake is **L3** — a packet for a sleeping machine is what wakes it, counted
+on the host that owns it. e2b resumes at L7 through its central API
+(client-proxy to `ResumeSandbox`), and Fly cannot wake a private `.internal`
+address at all without routing through its proxy. Waking from the packet
+itself, with no proxy and nothing in the middle, is the deliberate
+differentiator and it is downstream of principle 1.
 
 ## 3. A suspended machine occupies next to nothing on its host.
 
@@ -50,6 +67,14 @@ Fly spent three years adding migration to host-pinned volumes; the cost of
 getting this wrong is measured in years, and it is avoided by never pinning
 anything to a host in the first place.
 
+The harder half is a host that dies **while machines are running on it**. A
+paused e2b sandbox can be resumed elsewhere, but a running one dies with its
+node: there is no dead-host recovery, and an orchestrator restart kills what
+it was running rather than re-adopting it. Pilots recovers a machine whose
+host is gone, from object storage, onto a survivor that chose itself with
+nobody coordinating — and its own daemon restarts without stopping a single
+running machine. That is the property this principle is really about.
+
 ## 5. One storage model: S3 is the volume, the host disk is only a cache.
 
 The machine root and the volume are one S3-backed thing. Truth lives in the
@@ -64,6 +89,11 @@ Durability is **stated, not implied**: a volume is per-write durable, and the
 machine root has a published, measured RPO. A window nobody publishes is not
 a guarantee, it is a hope.
 
+One model also means one place truth lives. e2b splits it across Postgres for
+durable rows, Redis for the running set and routing, and object storage for
+the artifacts — three stores that can disagree. Here the bucket is the truth
+and everything on a host is derived from it.
+
 ## 6. A 2-in-1 sandbox and PaaS, on one primitive.
 
 A sandbox for an agent and a durable production service are the same
@@ -71,8 +101,11 @@ A sandbox for an agent and a durable production service are the same
 without changing its URL.
 
 The comparison is fly + sprites: two products built separately and combined
-after the fact, still shipping two CLIs (`fly` and `sprite`). Pilots is one
-product, one primitive, one CLI, designed as the 2-in-1 from the start. Any
+after the fact, still shipping two CLIs (`fly` and `sprite`). e2b is the other
+half of the gap — a sandbox product with no PaaS face at all: no services, no
+volumes, no permanent URLs (its routing entries carry a TTL and its catalog is
+bounded in hours). Pilots is one product, one primitive, one CLI, designed as
+the 2-in-1 from the start. Any
 change that starts to split the two faces apart — a second command surface, a
 second lifecycle, a capability only one of them can reach — is moving toward
 the shape this product exists to avoid.
