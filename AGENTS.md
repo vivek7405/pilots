@@ -15,6 +15,10 @@ Every plan written into an issue and every line of code is measured against
 this, in order. It is loaded into context automatically (`CLAUDE.md` is
 `@AGENTS.md`), so it applies while planning AND while implementing.
 
+**`PRODUCT-PRINCIPLES.md` is why these bars exist** — the six non-negotiables
+about what pilots is for. Bars 6 and 7 below are the enforceable form of four
+of them. Read it once; argue with the bar here.
+
 1. **At par with the best microVM platforms in production, or better.** Never
    below any of them on a capability they have. The prior-art repo carries the
    scorecard; a design that lands a "~" or "✗" where an established platform
