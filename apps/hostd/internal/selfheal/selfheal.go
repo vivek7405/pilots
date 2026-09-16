@@ -345,10 +345,22 @@ func rescue(ctx context.Context, opts Options, m state.Machine) {
 		return
 	}
 
-	// A machine with no memory image cannot be restored anywhere: it was never
-	// suspended or checkpointed, so there is nothing in object storage to
-	// bring back. Looping on it every tick forever helps nobody.
-	if m.MemBuildID == "" {
+	// A machine with NEITHER a memory image nor a disk cannot be restored
+	// anywhere: it was never suspended, checkpointed or flushed, so there is
+	// nothing in object storage to bring back. Looping on it every tick
+	// forever helps nobody.
+	//
+	// A machine with a DISK and no memory image is a different thing entirely
+	// and must not be given up on: machines.bringUp cold-boots it from that
+	// disk, which is tier 3 in place. Testing the memory image alone abandoned
+	// exactly the machines whose disk DID survive their host -- the state a
+	// periodic root flush leaves on every pass (it points the row at the
+	// flushed disk and drops the memory image, because that image describes a
+	// disk the machine has moved past), and the state an exit leaves behind
+	// when it captured the disk on the way out. Both are machines whose last
+	// writes are in object storage and whose host is now gone, which is the
+	// case this loop exists for.
+	if m.MemBuildID == "" && m.RootfsBuildID == "" {
 		// Nothing is written to the row. Claiming a machine this host cannot
 		// restore would be destruction, not rescue: the owner may only be
 		// partitioned, still running the machine -- a claim here makes the
