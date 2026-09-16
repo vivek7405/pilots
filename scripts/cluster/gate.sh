@@ -369,6 +369,46 @@ curl_until() {
   echo "$out"
 }
 
+# revive_host brings a deliberately killed host back, and waits for it to be
+# USEFUL rather than merely reachable.
+#
+# Every destructive section asserts what it came to assert while the host is
+# down. What follows needs the fleet whole again: a battery that accumulates
+# damage stops testing its own properties and starts testing how much damage
+# has accumulated, which is how a run reached section 25 with one host alive
+# and forty cascading failures that named things no code had broken.
+#
+# Two waits, not one. Serving is when the API answers; CAUGHT UP is when the
+# host's replica has applied what it missed, and only then can it rescue,
+# resolve a peer or take a handoff. A section starting in the gap between them
+# fails "for a reason that has nothing to do with what it asserts" -- section
+# 7's own words about this exact hazard, which it then only half-guarded by
+# waiting on health alone. That gap is what made the peer-wake step below fail
+# one run and pass the next.
+revive_host() { # revive_host <domain> <ip> <what it is coming back from>
+  local dom=$1 ip=$2 why=$3
+  [ -n "$dom" ] || return 0
+  sudo virsh start "$dom" >/dev/null 2>&1
+  local i
+  for i in $(seq 90); do
+    curl -sf -m 3 "http://${ip}:8080/v1/health" >/dev/null 2>&1 && break
+    sleep 2
+  done
+  if ! curl -sf -m 3 "http://${ip}:8080/v1/health" >/dev/null 2>&1; then
+    bad "${dom} did not come back after ${why}; the sections below have no fleet to work with"
+    return 0
+  fi
+  for i in $(seq 90); do
+    curl -sf -m 4 "http://${ip}:8080/v1/health" 2>/dev/null \
+      | grep -q '"replication_complete":true' && break
+    sleep 2
+  done
+  curl -sf -m 4 "http://${ip}:8080/v1/health" 2>/dev/null \
+    | grep -q '"replication_complete":true' \
+    && ok "brought ${dom} back after ${why}, caught up and able to claim" \
+    || bad "${dom} is serving after ${why} but its replica has not caught up; it can rescue nothing"
+}
+
 if [ -n "$WEB_ID" ] && [ -n "$DB_ID" ]; then
   # The listener is the peer's own guest agent: /health needs no credential,
   # so every machine already has one and reaching it proves the whole path --
@@ -493,15 +533,7 @@ done
 # not rejoined gossip cannot rescue anything, and a step that starts against
 # one fails for a reason that has nothing to do with what it asserts.
 if [ -n "${DOM:-}" ]; then
-  sudo virsh start "$DOM" >/dev/null 2>&1
-  REVIVE_IP="${DB_OWNER_IP:-$B_IP}"
-  for _ in $(seq 60); do
-    curl -sf -m 3 "http://${REVIVE_IP}:8080/v1/health" >/dev/null 2>&1 && break
-    sleep 2
-  done
-  curl -sf -m 3 "http://${REVIVE_IP}:8080/v1/health" >/dev/null 2>&1 \
-    && ok "brought ${DOM} back for the fleet steps" \
-    || bad "${DOM} did not come back; the steps below have no fleet to work with"
+  revive_host "$DOM" "${DB_OWNER_IP:-$B_IP}" "the rescue in step 7"
 fi
 
 say "7b. A promoted service at floor zero frees its Firecracker when idle, and not while a peer holds a session"
@@ -770,6 +802,12 @@ if [ -n "$TEMPLATE_ROOTFS" ]; then
   [ -n "$HYDRATED" ] || [ -z "$NEWOWNER" ] || true
 fi
 
+# Steps 8 to 10 have had everything they came for: the owner died, a survivor
+# claimed the machine, the URL held, the disk came back and the template was
+# served from the bucket while it hydrated. The fleet goes back to whole before
+# step 11, which needs hosts to add one to.
+revive_host "${DOMAIN:-}" "$OWNER_IP" "the hard kill in step 8"
+
 say "11. One command turns a new IP into a serving host"
 # "Add a host = give an IP" is the claim. On real hardware the machine is
 # already racked and already has an address, so provisioning one more VM is
@@ -940,6 +978,10 @@ else
   [ "$(echo "$OUT" | tr -d '[:space:]')" = "before-failover" ] \
     && ok "the retry was served by ${NEXT} after $((SECONDS - START))s, same machine, same disk" \
     || bad "the retry never succeeded (got '${OUT}')"
+
+  # Asserted; the fleet goes back to whole. Section 13 needs somewhere for a
+  # volume to move TO.
+  revive_host "${DOM:-}" "$CUR_IP" "the mid-request kill in step 12"
 fi
 
 say "13. A volume survives the death of the host that had it mounted"
@@ -1208,6 +1250,12 @@ print(' '.join(m['id'] for m in rows if m.get('service_id') == '${SVCVOLID}' and
         || bad "the redeploy lost the volume's data (got '${SAFTER}')"
     fi
   fi
+
+  # The volume has been through everything this section exists to put it
+  # through. Its host comes back, and it is the LAST of the three kills, so
+  # from here the fleet is whole for every section below -- which is what the
+  # thirty sections after this one have never once had.
+  revive_host "${VDOM:-}" "$VHOST" "the volume host's death in step 13"
 fi
 
 say "13b. A key minted on a dead host still authenticates on every survivor"
@@ -4251,7 +4299,10 @@ say "Result"
 echo "  ${PASS} passed, ${FAIL} failed"
 echo
 echo "This run left the rig changed on purpose:"
-echo "  - three hosts are powered off (steps 8, 12 and 13); sudo virsh start <domain>"
+echo "  - the three hosts killed on purpose (steps 8, 12 and 13) were brought"
+echo "    back and waited for, each once its own section had asserted what it"
+echo "    came for, so every section runs against a whole fleet rather than"
+echo "    against whatever the sections above it left standing."
 echo "  - the fleet is one host bigger (step 11), and cluster.env records it,"
 echo "    so the next run adds another. cluster-down.sh resets it."
 echo "  - one host was hard reset (step 19) after the NBD wedge was reproduced"
