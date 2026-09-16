@@ -2746,6 +2746,19 @@ GH_PORT=9418
 GH_PID=""
 GH_TMP=$(mktemp -d)
 GH_KEY="${GH_TMP}/gate-app.pem"
+
+# LIVE_IPS is RECOMPUTED here, not inherited.
+#
+# Section 13 narrowed it to the hosts it had not just powered off, and every
+# section after that inherited the narrower list. By the time a push lands the
+# fleet is whole again, so this section armed and counted two hosts while the
+# delivery's owner election ran over all four live ones -- and an election that
+# picks a host the section is not watching looks exactly like no host acting at
+# all.
+LIVE_IPS=()
+for ip in "${IPS[@]}" ${NEW_IP:-}; do
+  curl -sf -m 5 "http://${ip}:8080/v1/health" >/dev/null 2>&1 && LIVE_IPS+=("$ip")
+done
 GH_OPIP=$(ip route get "${LIVE_IPS[0]}" 2>/dev/null | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)
 
 if [ "${#LIVE_IPS[@]}" -lt 1 ]; then
@@ -2834,7 +2847,11 @@ systemctl restart hostd" >/dev/null 2>&1
   journal_grep_build() {
     local ip=$1 needle=$2 line
     line=$($SSH "root@$ip" "journalctl -u hostd --since '${GH_SINCE}' --no-pager 2>/dev/null | grep '${needle}' | tail -1" 2>/dev/null)
-    printf '%s' "$line" | grep -o 'build=[^ ]*' | tail -1 | cut -d= -f2
+    # hostd logs JSON (slog.NewJSONHandler), so the field reads "build":"bld-…"
+    # and never build=bld-…. The logfmt pattern could not match a single line,
+    # so this returned empty on every run and the assertions built on it read
+    # as a build that carried no id.
+    printf '%s' "$line" | grep -o '"build":"[^"]*"' | tail -1 | cut -d'"' -f4
   }
 
   # The service a push deploys into. No health of its own, so the plan's is
@@ -2900,7 +2917,7 @@ print(h.get('path', ''))
 
   # The record a person reads. The build id is in the journal line, and the
   # log route answers for it exactly as it answers for a failed build.
-  GH_BUILD=$(printf '%s' "$GH_CODE" | grep -o 'build=[^ ]*' | head -1 | cut -d= -f2)
+  GH_BUILD=$(printf '%s' "$GH_CODE" | grep -o '"build":"[^"]*"' | head -1 | cut -d'"' -f4)
   if [ -n "$GH_BUILD" ]; then
     GH_LOG=$(curl -sf -m 30 "http://${LIVE_IPS[0]}:8080/v1/builds/${GH_BUILD}/logs" -H "$AUTH" 2>/dev/null | tail -1)
     case "$GH_LOG" in

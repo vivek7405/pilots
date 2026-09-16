@@ -150,12 +150,33 @@ func (d Deps) onPush(ctx context.Context, ev Event) error {
 	if d.App != nil {
 		if t, terr := d.App.InstallationToken(ctx, ev.Installation.ID); terr == nil {
 			token = t
+		} else {
+			// SAID, not swallowed. status() returns early on an empty token,
+			// so a push whose first GitHub call fails posts no status, logs
+			// no plan line and cuts no release: from outside it is
+			// indistinguishable from a delivery that never arrived, and there
+			// is nothing anywhere to say which it was. A whole fleet-gate
+			// section read as a broken deploy path when the real answer was
+			// one refused connection to the token endpoint.
+			slog.Warn("could not mint an installation token; this push will "+
+				"deploy but report nothing to github",
+				"installation", ev.Installation.ID, "repo", ev.Repository.FullName,
+				"err", terr)
 		}
 	}
 	repo := ev.Repository.FullName
 
 	build, step, err := d.buildRef(ctx, ev, ev.After, svc.App, org)
 	if err != nil {
+		// A REFUSAL carries its own build id while buildRef returns none, so
+		// the failure status used to link to /builds/ with nothing after it.
+		// The id is the only way back to the log that says why, which is the
+		// entire point of putting a link on the status.
+		if id := build; id == "" {
+			if r := refusalOf(err); r != nil {
+				build = r.BuildID
+			}
+		}
 		d.status(ctx, token, repo, ev.After, "failure", "build failed: "+err.Error(), d.buildURL(build))
 		return err
 	}
@@ -542,11 +563,28 @@ func refusalComment(sha string, r *Refusal) string {
 
 // serviceFor finds the service connected to a repository, and to a branch when
 // one is given.
+//
+// The NEWEST match wins, and ties break on the id.
+//
+// It used to take whichever row ListServices happened to return first. With
+// two services connected to one repository -- which nothing forbids, and which
+// happens the moment somebody reconnects a repo, since there is no way to
+// delete a service -- a push then deployed an arbitrary one of them and said
+// nothing about the other. On the fleet gate that meant every run's push
+// deployed the FIRST run's service while the run polled the one it had just
+// made, so the release, the health path and the commit status all landed on a
+// row nobody was looking at.
+//
+// Newest is the answer a person would expect: the most recently connected
+// service is the one they connected last. The id tiebreak is not decoration --
+// every host runs this election independently and they must agree, so two rows
+// sharing a timestamp must not resolve differently on different hosts.
 func (d Deps) serviceFor(ctx context.Context, repo, branch string) (*state.Service, error) {
 	svcs, err := d.Store.ListServices(ctx)
 	if err != nil {
 		return nil, err
 	}
+	var best *state.Service
 	for i := range svcs {
 		if svcs[i].Repo != repo {
 			continue
@@ -554,9 +592,13 @@ func (d Deps) serviceFor(ctx context.Context, repo, branch string) (*state.Servi
 		if branch != "" && svcs[i].Branch != "" && svcs[i].Branch != branch {
 			continue
 		}
-		return &svcs[i], nil
+		if best == nil ||
+			svcs[i].CreatedAt > best.CreatedAt ||
+			(svcs[i].CreatedAt == best.CreatedAt && svcs[i].ID > best.ID) {
+			best = &svcs[i]
+		}
 	}
-	return nil, nil
+	return best, nil
 }
 
 func min(a, b int) int {
