@@ -335,9 +335,16 @@ slice_of() {
     2>/dev/null | tr -d '[:space:]'
 }
 
-# fc_pid reads the Firecracker pid out of the machine's own slice. pgrep will
-# not do it: the jailer execve()s Firecracker over itself, so the --id that
-# named the machine is gone from the command line by the time it matters.
+# fc_pid reads the Firecracker pid out of the machine's own slice.
+#
+# NOT `pgrep -f 'firecracker.*--id <id>'`, for a reason that is worth stating
+# accurately because an earlier version of this comment stated it wrongly. The
+# --id IS still on the command line: the jailer execve()s Firecracker over
+# itself and the resulting cmdline carries it, which is exactly how
+# internal/machines/reaper.go finds a process. What breaks pgrep -f is that
+# the REMOTE SHELL running the pgrep has the pattern in its own command line
+# and matches itself, so the count is never zero and the pid is often that
+# shell. The cgroup is the machine's own, and nothing else is in it.
 fc_pid() {
   local slice; slice=$(slice_of "$1" "$2")
   [ -z "$slice" ] && return
@@ -2296,7 +2303,10 @@ else
         CB_START=$(date +%s%N)
         api "$FAULT_IP" POST "/v1/machines/${CB_ID}/wake" '{}' >/dev/null 2>&1
         CB_MS=$(( ($(date +%s%N) - CB_START) / 1000000 ))
-        CB_ROW=$(api "$FAULT_IP" GET "/v1/machines/${CB_ID}")
+        # Read from the OWNER. Any host serves this route, but only the owner
+        # has certainly applied its own write; a peer's copy arrives by gossip
+        # and can still be showing the start before this one.
+        CB_ROW=$(api "$CB_IP" GET "/v1/machines/${CB_ID}")
 
         # 60s is the RIG ceiling, not the product budget. The tiered budget --
         # 5s on metal, 25s under nested KVM -- is asserted by scripts/e2e.mjs;
@@ -2335,12 +2345,11 @@ else
         # would mean the machine restored something and this section proved
         # nothing.
         # Counted from the machine's own cgroup, NOT with `pgrep -f
-        # 'firecracker.*--id <id>'`. Two independent reasons that pattern
-        # cannot work: the jailer execve()s Firecracker over itself so the
-        # --id is gone from the command line (the same reason fc_pid exists),
-        # and pgrep -f matches the remote shell running the pgrep, whose own
-        # command line contains the pattern -- which is how this read reported
-        # "2 Firecracker processes" on a host running one.
+        # 'firecracker.*--id <id>'`: pgrep -f matches the remote shell running
+        # the pgrep, whose own command line contains the pattern. That is how
+        # this read reported "2 Firecracker processes" on a host running one
+        # (1 firecracker + 1 shell) and "1 uffd handler" for a machine that
+        # had none.
         CB_SLICE=$(slice_of "$CB_IP" "$CB_ID")
         CB_FC=$($SSH "root@$CB_IP" "n=0; for p in \$(cat ${CB_SLICE}/cgroup.procs 2>/dev/null); do [ \"\$(cat /proc/\$p/comm 2>/dev/null)\" = firecracker ] && n=\$((n+1)); done; echo \$n" 2>/dev/null | tr -d '[:space:]')
         CB_PID=$(fc_pid "$CB_IP" "$CB_ID")
@@ -2362,9 +2371,14 @@ else
         # And the machine is normal again. Its suspend image now belongs to the
         # pool it landed in, so the next wake is an ordinary restore -- if it is
         # not, the cold boot produced a machine that reboots forever.
-        api "$FAULT_IP" POST "/v1/machines/${CB_ID}/suspend" '{}' >/dev/null 2>&1
-        api "$FAULT_IP" POST "/v1/machines/${CB_ID}/wake" '{}' >/dev/null 2>&1
-        CB_ROW2=$(api "$FAULT_IP" GET "/v1/machines/${CB_ID}")
+        # The status is checked. A suspend that failed makes the wake below a
+        # no-op, which leaves last_start reading 'cold_boot' from the previous
+        # start -- indistinguishable from the bug this step looks for.
+        api "$CB_IP" POST "/v1/machines/${CB_ID}/suspend" '{}' >/dev/null 2>&1 \
+          || bad "the suspend after the cold boot failed; the wake below asserts nothing"
+        api "$CB_IP" POST "/v1/machines/${CB_ID}/wake" '{}' >/dev/null 2>&1 \
+          || bad "the wake after the cold boot failed"
+        CB_ROW2=$(api "$CB_IP" GET "/v1/machines/${CB_ID}")
         [ "$(echo "$CB_ROW2" | jf last_start)" = "restore" ] \
           && ok "the next wake is an ordinary restore" \
           || bad "the second wake reports '$(echo "$CB_ROW2" | jf last_start)'; the machine cold-boots forever"
@@ -3187,7 +3201,11 @@ PYEOF" >/dev/null 2>&1
 
       # A create is the only thing that reaches for the snapshot, so it is
       # the only thing that can discover the manifest is unusable.
-      TT_M=$(api "$TT_IP" POST /v1/machines "{\"name\":\"tmpl-heal-$$\"}" | jf id)
+      # On TT_IP specifically: the manifest was broken on TT_IP, so a machine
+      # the ranker placed elsewhere restores against a HEALTHY template and
+      # proves nothing about re-derivation.
+      TT_M=$(create_on_host "$TT_IP" "$TT_IP" "{\"name\":\"tmpl-heal-$$\"}" | jf id)
+      for f in $CREATE_FILLERS; do api "$TT_IP" DELETE "/v1/machines/${f}" >/dev/null 2>&1; done
       if [ -z "$TT_M" ]; then
         bad "the create failed outright; a host with an unusable template must re-derive one, not refuse"
       else
@@ -3217,7 +3235,8 @@ PYEOF" >/dev/null 2>&1
 
       # A second create must be ordinary: the fix re-derives once, it does not
       # rebuild on every create forever.
-      TT_M2=$(api "$TT_IP" POST /v1/machines "{\"name\":\"tmpl-heal2-$$\"}" | jf id)
+      TT_M2=$(create_on_host "$TT_IP" "$TT_IP" "{\"name\":\"tmpl-heal2-$$\"}" | jf id)
+      for f in $CREATE_FILLERS; do api "$TT_IP" DELETE "/v1/machines/${f}" >/dev/null 2>&1; done
       [ -n "$TT_M2" ] \
         && ok "the next create is ordinary again" \
         || bad "the host did not settle; a second create still fails"
@@ -3263,6 +3282,9 @@ else
 fi
 
 BM_NAMES=$($SSH "root@${BM_IP}" "sqlite3 /var/lib/pilots/corrosion/store.db \"SELECT name FROM machines WHERE name LIKE 'builder-%' AND state != 'destroyed';\"" 2>/dev/null)
+# The ID as well as the name: a Firecracker's command line carries --id, never
+# the machine's NAME, so the kill below has to ask for it by id.
+BM_MID=$($SSH "root@${BM_IP}" "sqlite3 /var/lib/pilots/corrosion/store.db \"SELECT id FROM machines WHERE name LIKE 'builder-%' AND state != 'destroyed' LIMIT 1;\"" 2>/dev/null | tr -d '[:space:]')
 if [ -n "$BM_NAMES" ]; then
   ok "the build left a builder machine behind to reuse"
 else
@@ -3299,7 +3321,14 @@ printf 'FROM alpine\nRUN sleep 120\n' > "${BM_TMP}/Dockerfile"
 ( tar -cf - -C "$BM_TMP" Dockerfile | curl -s -m 300 -X POST "http://${BM_IP}:8080/v1/builds" -H "$AUTH" -H 'Content-Type: application/x-tar' --data-binary @- > "${BM_TMP}/ndjson" 2>/dev/null ) &
 BM_PID=$!
 sleep 25
-BM_FC=$($SSH "root@${BM_IP}" "pgrep -f 'firecracker.*builder-' | head -1" 2>/dev/null | tr -d '[:space:]')
+# From the machine's own cgroup, by id. The old read was
+# `pgrep -f 'firecracker.*builder-'`, which could never match a real
+# Firecracker -- its command line carries --id <machine-id>, not the name --
+# so the ONLY thing it ever matched was the remote shell carrying the pattern.
+# The kill below then killed that dead shell, and the step reported "killed
+# the builder's Firecracker mid-build" as a pass while the build failed for an
+# entirely unrelated reason.
+BM_FC=$(fc_pid "${BM_IP}" "${BM_MID}")
 if [ -n "$BM_FC" ]; then
   $SSH "root@${BM_IP}" "kill -9 ${BM_FC}" >/dev/null 2>&1
   ok "killed the builder's Firecracker mid-build (pid ${BM_FC})"
@@ -3361,6 +3390,9 @@ HD_ID=$(echo "$HD" | jf id)
 if [ -z "$HD_ID" ]; then
   bad "could not create a machine to inspect its handlers: $HD"
 else
+  # Its handlers, its cgroup and its state dir are on the host the ranker put
+  # it on, not the host the create was addressed to.
+  HD_IP=$(owner_ip "$HD_ID" "$HD_IP")
   ok "machine ${HD_ID} is up on ${HD_IP}"
 
   # 26a. No PILOT_ variable in any handler's environ. /proc/<pid>/environ is
@@ -3436,6 +3468,9 @@ CS_ID=$(echo "$CS" | jf id)
 if [ -z "$CS_ID" ]; then
   bad "could not create a machine to inspect its chunk socket: $CS"
 else
+  # The socket lives beside the machine, on the machine's own host: reading a
+  # non-owner finds nothing and reports that the handlers bypassed it.
+  CS_IP=$(owner_ip "$CS_ID" "$CS_IP")
   CS_SOCK="/var/lib/pilots/machines/${CS_ID}/chunks.sock"
   if $SSH "root@$CS_IP" "test -S ${CS_SOCK}" 2>/dev/null; then
     ok "the machine has a chunk socket at ${CS_SOCK}"
@@ -3731,8 +3766,14 @@ else
 
   # A guest actually leaves from it. This is the only assertion that proves the
   # whole path rather than its pieces, so it runs against a real machine.
-  EG_M=$(api "$EG_IP" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
+  # On EG_IP, because EG_IP is the only host this section checked for an
+  # egress prefix. A machine the ranker placed on a host with no prefix
+  # configured has no egress address to report, and the assertion below would
+  # fail on a correct fleet. Dormant while no host is configured; a false
+  # failure the day one is.
+  EG_M=$(create_on_host "$EG_IP" "$EG_IP" '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
   EG_MID=$(echo "$EG_M" | jf id)
+  for f in $CREATE_FILLERS; do api "$EG_IP" DELETE "/v1/machines/${f}" >/dev/null 2>&1; done
   if [ -z "$EG_MID" ]; then
     bad "could not create a machine to check what address it leaves from: $EG_M"
   else
@@ -3815,7 +3856,12 @@ else
   # A machine created ON the host about to be drained, with something written
   # inside it: the point of a drain is that the machine survives, not merely
   # that a row moves.
-  DR_M=$(api "$DR_FROM" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
+  # ON the host about to be drained, not merely addressed to it. A create the
+  # ranker sent elsewhere leaves the drain with nothing to move, and then
+  # "the machine moved from A to B" fails on a fleet where nothing is wrong.
+  DR_FILLERS=""
+  DR_M=$(create_on_host "$DR_ENTRY" "$DR_FROM" '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
+  DR_FILLERS="$CREATE_FILLERS"
   DR_ID=$(echo "$DR_M" | jf id)
   if [ -z "$DR_ID" ]; then
     bad "could not create a machine to drain: $DR_M"
@@ -3827,9 +3873,15 @@ else
     # And one ALREADY asleep when the drain starts. A drain must move it, not
     # wake it: taking every suspended machine back up on the target turned a
     # drain into a mass wake of every scale-to-zero sandbox on the host.
-    DR_S=$(api "$DR_FROM" POST /v1/machines '{"vcpus":1,"mem_mib":512}')
+    DR_S=$(create_on_host "$DR_ENTRY" "$DR_FROM" '{"vcpus":1,"mem_mib":512}')
+    DR_FILLERS="${DR_FILLERS} ${CREATE_FILLERS}"
     DR_SID=$(echo "$DR_S" | jf id)
     [ -n "$DR_SID" ] && api "$DR_FROM" POST "/v1/machines/${DR_SID}/suspend" >/dev/null 2>&1
+
+    # Fillers go BEFORE the drain. One left on the draining host is another
+    # machine the drain has to move; one left on the target changes the "a new
+    # machine went elsewhere" assertion at the end.
+    for f in $DR_FILLERS; do api "$DR_ENTRY" DELETE "/v1/machines/${f}" >/dev/null 2>&1; done
 
     # Drained through the OTHER host, which is the shape an operator uses: any
     # host serves the route and forwards it to the one named.
@@ -3872,7 +3924,10 @@ else
 
     # Nothing of the machine may be left on the source. A leftover jailer root
     # is a disk leak; a leftover Firecracker is two processes for one id.
-    DR_LEFT=$($SSH "root@$DR_FROM" "pgrep -fc \"firecracker.*${DR_ID}\"" 2>/dev/null | tr -d '[:space:]')
+    # Bracketed, and `|| true`. The unbracketed pattern matched the remote
+    # shell carrying it, so the count was never 0 and this could not pass; and
+    # pgrep -c exits 1 on no matches, which here is the PASSING case.
+    DR_LEFT=$($SSH "root@$DR_FROM" "pgrep -fc '[f]irecracker.*${DR_ID}' || true" 2>/dev/null | tr -d '[:space:]')
     [ "${DR_LEFT:-0}" = "0" ] \
       && ok "no Firecracker for it is left on the source host" \
       || bad "${DR_LEFT} Firecracker process(es) for ${DR_ID} still run on ${DR_FROM}"
@@ -3915,6 +3970,10 @@ else
   if [ -z "$SN_MID" ]; then
     bad "could not create a machine on the volume: $SN_M"
   else
+    # A volume-backed create is ranked like any other -- there is no volume
+    # exception in place.go -- and the volume is mounted on the machine's own
+    # host, so the snapshot files are there and nowhere else.
+    SN_IP=$(owner_ip "$SN_MID" "$SN_IP")
     # A marker, a snapshot, then a SECOND marker. The snapshot must hold the
     # first and not the second: that is the whole of what point-in-time means.
     api "$SN_IP" POST "/v1/machines/${SN_MID}/exec" '{"cmd":"echo one > /data/marker && sync"}' >/dev/null 2>&1
@@ -3927,7 +3986,7 @@ else
     # shares no blocks with the image it came from, which makes it a full copy
     # wearing the name of a snapshot.
     if [ -n "$SN_TS" ]; then
-      if $SSH "root@$SN_IP" "test -f /var/lib/pilots/volumes-mnt/${SN_VOLID}/snapshots/${SN_TS}/disk.img" 2>/dev/null; then
+      if $SSH "root@$SN_IP" "test -f /mnt/pilot-volumes/${SN_VOLID}/snapshots/${SN_TS}/disk.img" 2>/dev/null; then
         ok "the snapshot is a clone inside the volume's filesystem"
       else
         bad "no clone at snapshots/${SN_TS}/disk.img inside the volume"
@@ -3935,7 +3994,7 @@ else
 
       # A clone costs no blocks. Compared against the live image, which is a
       # whole gibibyte: a full copy would show as one.
-      SN_USED=$($SSH "root@$SN_IP" "du -sm --apparent-size /var/lib/pilots/volumes-mnt/${SN_VOLID}/snapshots 2>/dev/null | cut -f1" | tr -d '[:space:]')
+      SN_USED=$($SSH "root@$SN_IP" "du -sm --apparent-size /mnt/pilot-volumes/${SN_VOLID}/snapshots 2>/dev/null | cut -f1" | tr -d '[:space:]')
       echo "  MEASURED snapshot_apparent_mib=${SN_USED:-unknown}"
     fi
 
@@ -4208,6 +4267,9 @@ BK_ID=$(echo "$BK_M" | jf id)
 if [ -z "$BK_ID" ]; then
   bad "could not create a machine to broker for: $BK_M"
 else
+  # The namespace, the socket, the on-disk databases and the hostd this
+  # section restarts all belong to the machine's own host.
+  BK_IP=$(owner_ip "$BK_ID" "$BK_IP")
   # The namespace name is the machine id, the way every other section finds it.
   BK_NS=$($SSH "root@$BK_IP" "ip netns list 2>/dev/null | grep -o '[^ ]*${BK_ID}[^ ]*' | head -1" 2>/dev/null | tr -d '[:space:]')
   if [ -z "$BK_NS" ]; then
@@ -4241,8 +4303,14 @@ else
 
   # A token minted on THIS host is accepted by another, with no forward header
   # and no row anywhere. That is the whole reason it is a signed claim.
-  if [ -n "$BK_TOKEN" ] && [ "${#LIVE_IPS[@]}" -gt 1 ]; then
-    BK_OTHER="${LIVE_IPS[1]}"
+  # Picked by EXCLUSION, not by index: now that BK_IP follows the machine it
+  # can itself be LIVE_IPS[1], and "another host" would then be the minting
+  # host testing itself.
+  BK_OTHER=""
+  for ip in "${LIVE_IPS[@]}"; do
+    [ "$ip" != "$BK_IP" ] && { BK_OTHER="$ip"; break; }
+  done
+  if [ -n "$BK_TOKEN" ] && [ -n "$BK_OTHER" ]; then
     BK_CODE=$(curl -sk -o /dev/null -w '%{http_code}' \
       -H "Authorization: Bearer ${BK_TOKEN}" "http://${BK_OTHER}:8080/v1/whoami" 2>/dev/null)
     [ "$BK_CODE" = "200" ] \
@@ -4298,6 +4366,7 @@ MX_ID=$(echo "$MX_M" | jf id)
 if [ -z "$MX_ID" ]; then
   bad "could not create a machine to measure: $MX_M"
 else
+  MX_IP=$(owner_ip "$MX_ID" "$MX_IP")
   # The API's number against the cgroup's own file. A reading that agreed with
   # itself but not with the kernel would be a confident wrong answer, which is
   # the only kind worth testing for here.
@@ -4324,8 +4393,13 @@ else
   # A scrape on a host that does NOT own the machine still carries it. That is
   # the whole promise of a fleet-wide scrape, and it is the half that cannot be
   # tested on one host.
-  if [ "${#LIVE_IPS[@]}" -gt 1 ]; then
-    MX_OTHER="${LIVE_IPS[1]}"
+  # By exclusion, for the same reason BK_OTHER is: a "non-owner" that turns
+  # out to be the owner asserts nothing.
+  MX_OTHER=""
+  for ip in "${LIVE_IPS[@]}"; do
+    [ "$ip" != "$MX_IP" ] && { MX_OTHER="$ip"; break; }
+  done
+  if [ -n "$MX_OTHER" ]; then
     MX_SCRAPE=$(curl -s -H "Authorization: Bearer ${KEY}" "http://${MX_OTHER}:8080/v1/metrics" 2>/dev/null | grep -c "machine=\"${MX_ID}\"")
     [ "${MX_SCRAPE:-0}" -ge 1 ] \
       && ok "a scrape on a non-owner host carries a machine owned elsewhere" \
@@ -4472,7 +4546,10 @@ else
         bad "could not find the address of ${HA_LEADER_HOST}"
       else
         HA_START=$(date +%s)
-        $SSH "root@$HA_HOST_IP" "pkill -9 -f 'firecracker.*${HA_LEADER}'" >/dev/null 2>&1 || true
+        # Bracketed so the pattern cannot match the shell carrying it, which
+        # would SIGKILL that shell alongside the guest and make the exit
+        # status meaningless.
+        $SSH "root@$HA_HOST_IP" "pkill -9 -f '[f]irecracker.*${HA_LEADER}'" >/dev/null 2>&1 || true
 
         # Time to a WRITE through the unchanged address, which is the number
         # anybody actually cares about: not "a node was promoted" but "my
