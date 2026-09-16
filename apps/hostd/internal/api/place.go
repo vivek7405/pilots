@@ -366,8 +366,9 @@ func (d Deps) observePlacement(outcome string) {
 
 // liveWindow is how long a host may be silent and still be ranked. The same
 // window serviceArbiter uses, so placement and arbitration agree about who is
-// in the fleet.
-const liveWindow = 90 * time.Second
+// in the fleet -- which is now true by construction rather than by two
+// constants being kept equal by hand.
+const liveWindow = state.DeadAfter
 
 func orInt(v, def int) int {
 	if v == 0 {

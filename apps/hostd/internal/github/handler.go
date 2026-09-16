@@ -116,13 +116,7 @@ func (d Deps) mine(ctx context.Context, repo string) bool {
 		// missed push is silent, and a duplicate build is merely wasteful.
 		return true
 	}
-	live := make([]state.Host, 0, len(hosts))
-	for _, h := range hosts {
-		if time.Since(time.Unix(h.LastSeen, 0)) < 90*time.Second {
-			live = append(live, h)
-		}
-	}
-	owner, ok := state.OwnerFor(repo, live)
+	owner, ok := state.OwnerFor(repo, state.LiveHosts(hosts))
 	return !ok || owner == d.HostID
 }
 

@@ -2660,11 +2660,33 @@ func NewOwnedID(prefix, hostID string, live []Host) string {
 	return prefix + uuid.NewString()
 }
 
+// DeadAfter is how long a host may go without heartbeating before the fleet
+// treats it as gone. It is ONE fact for the whole system, and it lives here
+// because every deterministic-owner decision depends on it: who arbitrates a
+// service write, who is ranked for a create, who mints the next service id or
+// ordinal, who answers a push, and who may claim a dead host's machines.
+//
+// It was five separate copies, and two different answers. The store's claim
+// guard and the self-heal loop said 30s -- each with a comment insisting the
+// other had to match it -- while arbitration, placement, LiveHosts, the
+// autoscaler and the push handler each spelled their own 90s. A host silent
+// for between 30 and 90 seconds was therefore dead enough for self-heal to
+// claim its machines and alive enough to be handed a service write, so a
+// deploy issued in that window was forwarded to a host that was already gone
+// and answered 503 from the dial. Section 13 of the fleet gate is exactly
+// that window, which is how it was found.
+//
+// 30s is the authoritative answer because it is the one that gates WRITES: a
+// claim is re-checked against it at the moment it lands, so a longer window
+// anywhere else does not grant a host any real authority, it only routes
+// requests at a corpse.
+const DeadAfter = 30 * time.Second
+
 // LiveHosts filters a host list to those still heartbeating.
 func LiveHosts(hosts []Host) []Host {
 	out := make([]Host, 0, len(hosts))
 	for _, h := range hosts {
-		if time.Since(time.Unix(h.LastSeen, 0)) < 90*time.Second {
+		if time.Since(time.Unix(h.LastSeen, 0)) < DeadAfter {
 			out = append(out, h)
 		}
 	}

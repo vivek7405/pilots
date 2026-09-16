@@ -32,7 +32,7 @@ const (
 	// moment of the claim. A rescuer using a shorter window than the store
 	// would have its claims refused; a longer one and the store would accept
 	// claims this loop should never have made.
-	DeadAfter = 30 * time.Second
+	DeadAfter = state.DeadAfter
 
 	// RescueInterval is how often the fleet is checked for orphans.
 	RescueInterval = 10 * time.Second
