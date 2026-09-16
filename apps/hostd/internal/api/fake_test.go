@@ -215,6 +215,10 @@ func (f *fakeManager) MachineVolume(context.Context, string) (*MachineVolume, er
 	}, f.err
 }
 
+func (f *fakeManager) CheckpointSnapKey(machineID, checkpointID string) string {
+	return "machines/" + machineID + "/checkpoints/" + checkpointID + "/snap.bin"
+}
+
 func (f *fakeManager) CollectMetrics() { f.collected++ }
 
 func (f *fakeManager) TCPStream(http.ResponseWriter, *http.Request, string, int) error { return nil }

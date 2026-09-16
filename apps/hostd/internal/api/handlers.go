@@ -41,6 +41,10 @@ type Manager interface {
 	ListCheckpoints(ctx context.Context, machineID string) ([]state.Checkpoint, error)
 	RestoreCheckpoint(ctx context.Context, checkpointID string) (*state.Machine, error)
 	GetCheckpoint(ctx context.Context, checkpointID string) (*state.Checkpoint, error)
+	// CheckpointSnapKey is where a checkpoint's vmstate lives in object
+	// storage: the third artifact a restore needs, which its build ids
+	// cannot name.
+	CheckpointSnapKey(machineID, checkpointID string) string
 	Exec(ctx context.Context, machineID string, req ExecRequest) (*ExecResponse, error)
 	Logs(ctx context.Context, machineID string) ([]byte, error)
 	// Processes answers what a machine is running, as the agent's own JSON.
@@ -454,6 +458,25 @@ func (d Deps) handleCreateMachine(w http.ResponseWriter, r *http.Request) {
 			// two apart would be a release-id oracle across tenants.
 			notFound(w, "release")
 			return
+		}
+		// A machine created from a release RESTORES the release's pair, and
+		// a restore needs the vmstate the pair's two build ids cannot name.
+		// Filled here the way a rollout fills it, so a create that names a
+		// release is the same restore a deploy performs. A release with no
+		// vmstate row was photographed before that row existed; it is left
+		// to the engine to refuse by name rather than guessed at here.
+		if req.MemBuildID == "" && rel.MemBuildID != "" {
+			req.MemBuildID, req.RootfsBuildID = rel.MemBuildID, rel.RootfsBuildID
+		}
+		if req.MemBuildID != "" && req.MemSnapKey == "" {
+			snap, err := d.Store.GetReleaseSnapshot(r.Context(), rel.ID)
+			switch {
+			case err == nil:
+				req.MemSnapKey = d.Machines.CheckpointSnapKey(snap.MachineID, snap.CheckpointID)
+			case !errors.Is(err, state.ErrNotFound):
+				writeMapped(w, err)
+				return
+			}
 		}
 	}
 

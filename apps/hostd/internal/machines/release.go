@@ -3,9 +3,12 @@ package machines
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/google/uuid"
 
+	"github.com/vivek7405/pilots/hostd/internal/block"
 	"github.com/vivek7405/pilots/hostd/internal/fc"
 	"github.com/vivek7405/pilots/hostd/internal/netns"
 	"github.com/vivek7405/pilots/hostd/internal/state"
@@ -19,8 +22,10 @@ import (
 // serves, and is checkpointed; every replica after it lands here instead, on
 // the same restore path that makes an ordinary create sub-second.
 //
-// The pair is a diff against the golden template exactly as a checkpoint's is,
-// so it is parented the same way. The guest in that image carries the
+// The pair is parented on whatever its headers say it was encoded against --
+// the golden template for a release photographed from a template-restored
+// replica, nothing at all for one photographed from an image-booted replica
+// -- exactly as a checkpoint restore is. The guest in that image carries the
 // template's PLACEHOLDER credential, because the rollout resets it before
 // snapshotting -- so this installs the machine's own token the same way a
 // template restore does.
@@ -49,32 +54,69 @@ func (m *Manager) createFromRelease(ctx context.Context, row *state.Machine,
 			"only be booted", row.ID, memBuildID)
 	}
 
-	t, err := m.EnsureTemplate(ctx)
-	if err != nil {
-		return nil, err
-	}
 	memBuild, err := uuid.Parse(memBuildID)
 	if err != nil {
 		return nil, fmt.Errorf("machines: release memory build %q: %w", memBuildID, err)
 	}
 
+	// What the pair was actually encoded against, read from the builds' own
+	// headers rather than assumed to be the golden template.
+	//
+	// A release photographed from a template-restored replica carries a
+	// memory diff and a disk diff on that template. A release photographed
+	// from an IMAGE-booted replica does not: bootMachine gives such a machine
+	// no memory parent and makes the image build its own disk template, so
+	// its checkpoint is a self-contained memory image (header base == build)
+	// and its disk is the image itself. Attaching the golden template to
+	// either is precisely the mismatch block.SetParent refuses -- both
+	// handlers exited before the device came online, and replica 2 of every
+	// image deploy failed to come up. So the row is pinned to what the
+	// headers name, and the template is then resolved the way a checkpoint
+	// restore resolves it, which already knows a nil memory parent.
+	memParent, err := m.buildBase(ctx, memBuild)
+	if err != nil {
+		return nil, fmt.Errorf("machines: release memory build %s: %w", memBuild, err)
+	}
+	if memParent == memBuild {
+		memParent = uuid.Nil
+	}
+	var rootfsTemplate, rootfsDiff uuid.UUID
+	if rootfsBuildID != "" {
+		rootfsBuild, err := uuid.Parse(rootfsBuildID)
+		if err != nil {
+			return nil, fmt.Errorf("machines: release disk build %q: %w", rootfsBuildID, err)
+		}
+		if rootfsTemplate, err = m.buildBase(ctx, rootfsBuild); err != nil {
+			return nil, fmt.Errorf("machines: release disk build %s: %w", rootfsBuild, err)
+		}
+		if rootfsTemplate != rootfsBuild {
+			rootfsDiff = rootfsBuild
+		}
+	} else {
+		t, err := m.EnsureTemplate(ctx)
+		if err != nil {
+			return nil, err
+		}
+		rootfsTemplate = t.RootfsBuildID
+	}
+
 	// Pin the template this pair is a diff against, for the same reason
 	// createFromTemplate does: restoring against a different template returns
 	// a guest stitched together from two machines.
-	row.TemplateMemBuildID = t.MemBuildID.String()
-	row.TemplateRootfsBuildID = t.RootfsBuildID.String()
+	row.TemplateMemBuildID = memParent.String()
+	row.TemplateRootfsBuildID = rootfsTemplate.String()
+	t, err := m.templateFor(ctx, row)
+	if err != nil {
+		return nil, err
+	}
 
 	backends := fc.Backends{
 		MemBuildID:        memBuild,
 		MemParentBuildID:  t.MemBuildID,
 		RootfsTemplateDir: m.rootfsTemplateDir(t),
 		RootfsTemplateID:  t.RootfsBuildID,
+		RootfsDiffID:      rootfsDiff,
 		CacheRoot:         m.buildDir(),
-	}
-	if rootfsBuildID != "" {
-		if backends.RootfsDiffID, err = uuid.Parse(rootfsBuildID); err != nil {
-			return nil, fmt.Errorf("machines: release disk build %q: %w", rootfsBuildID, err)
-		}
 	}
 
 	fcm, slot, err := m.restoreInstant(ctx, row, backends, snapKey)
@@ -95,6 +137,30 @@ func (m *Manager) createFromRelease(ctx context.Context, row *state.Machine,
 		return nil, fmt.Errorf("install agent token: %w", err)
 	}
 	return fcm, nil
+}
+
+// buildBase is the build at the root of a build's chain: the build itself when
+// it is self-contained (a template, an image, a booted machine's memory
+// image), else the template it was diffed against. Every chain here is one
+// diff deep, so the base IS the parent to attach.
+//
+// Read from the header this host already holds when it has one, else fetched
+// -- which leaves the header cached for the handler about to open the same
+// build. A local header that does not parse is refetched rather than trusted.
+func (m *Manager) buildBase(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+	if f, err := os.Open(filepath.Join(m.buildDir(), id.String(), "header")); err == nil {
+		h, err := block.Deserialize(f)
+		f.Close()
+		if err == nil {
+			return h.Metadata.BaseBuildId, nil
+		}
+	}
+	b, err := block.OpenRemoteBuild(ctx, m.opts.BlockStore, id, m.buildDir())
+	if err != nil {
+		return uuid.Nil, err
+	}
+	defer b.Close()
+	return b.Header().Metadata.BaseBuildId, nil
 }
 
 // ResetAgentToken puts a guest's credential back to the placeholder the golden

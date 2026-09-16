@@ -675,50 +675,22 @@ func (m *Manager) snapshotRelease(ctx context.Context, machineID string, rel *st
 	// them first let a failed recording publish a memory image with no vmstate
 	// to go with it.
 	rel.MemBuildID = ck.MemBuildID
-	// The checkpoint's DISK is adopted only when a replica restoring this
-	// release would attach the same parent it was diffed against.
-	//
-	// A checkpoint's rootfs build is a diff against the machine's own template
-	// (machines.templateFor reads row.template_rootfs_build_id), while
-	// createFromRelease attaches the HOST'S GOLDEN template to every release
-	// restore. For a release rolled out from a build those are not the same
-	// thing: the replica was booted from the image, so its template IS the
-	// image, and adopting that diff points the release at a build whose parent
-	// no restore will ever attach. block.SetParent catches it and the block
-	// server exits -- "handler exited before the device came online" -- so
-	// replica two of the deploy never comes up.
-	//
-	// Nothing was lost by not adopting it, and this is the behaviour that
-	// shipped before a booted machine had a block server at all: a machine
-	// booted from an image had an empty dirty bitmap, so the checkpoint minted
-	// no disk build and the release kept its image. The replica restores that
-	// image plus the memory image captured over it, which is the same pair it
-	// always restored. Carrying the boot's disk writes as well would need the
-	// release to name a parent as well as a build, and a release row holds one
-	// -- a shape change this issue explicitly does not make.
-	if ck.RootfsBuildID != "" && !m.checkpointSharesTheReleaseImage(ctx, machineID, rel) {
+	// The checkpoint's DISK, with it. The memory image was captured over THIS
+	// disk -- its page cache, its inode tables, the block the agent's token
+	// was rewritten into -- so a replica that restores that memory onto any
+	// other disk, the pristine image included, reads blocks that are not
+	// there. A version of this adopted the diff only when its parent was the
+	// golden template, on the belief that the image plus the memory image was
+	// "the same pair it always restored"; every replica after the first then
+	// answered 401 to its own token install, because the token file the
+	// restored kernel believed in lived in blocks only the checkpoint's disk
+	// held. createFromRelease now attaches whatever parent a build's header
+	// names, so the diff restores wherever it was diffed from -- the golden
+	// template for a restored replica, the image for a booted one.
+	if ck.RootfsBuildID != "" {
 		rel.RootfsBuildID = ck.RootfsBuildID
 	}
 	return nil
-}
-
-// checkpointSharesTheReleaseImage reports whether the machine just
-// checkpointed was booted from this release's own image, which is what makes
-// the checkpoint's disk diff unusable as the release's rootfs build.
-//
-// Errs towards TRUE -- "do not adopt" -- when the row cannot be read. Keeping
-// the release on its image costs the boot's disk writes, which the memory
-// image still carries; adopting a diff whose parent no replica attaches costs
-// every replica after the first.
-func (m *Manager) checkpointSharesTheReleaseImage(ctx context.Context, machineID string, rel *state.Release) bool {
-	row, err := m.opts.Store.GetMachine(ctx, machineID)
-	if err != nil {
-		slog.Warn("could not read which template a release's checkpoint was diffed "+
-			"against; keeping the release on its image",
-			"release", rel.ID, "machine", machineID, "err", err)
-		return true
-	}
-	return row.TemplateRootfsBuildID == rel.RootfsBuildID
 }
 
 // Rollback returns a service to its previous healthy release.

@@ -1,77 +1,45 @@
 package services
 
 import (
-	"context"
 	"testing"
 
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
-// A release must never adopt a checkpoint's disk that was diffed against the
-// release's OWN image.
+// A release adopts the checkpoint's disk whatever the replica was booted from.
 //
-// A checkpoint's rootfs build is a diff against the machine's template, and
-// createFromRelease attaches the host's golden template to every release
-// restore. For a release rolled out from a build those differ: the replica was
-// booted from the image, so its template IS the image. Adopting that diff
-// points the release at a build whose parent no restore attaches,
-// block.SetParent catches the mismatch, and the block server exits with
-// "handler exited before the device came online" -- so replica two of the
-// deploy never comes up, which is how this was found.
-func TestAReleaseKeepsItsImageWhenTheCheckpointWasDiffedAgainstIt(t *testing.T) {
-	ctx := context.Background()
-	store, host, _ := autoscaleFixture(t)
-	m := New(Options{HostID: host, Store: store})
+// The memory image is captured over that disk -- its page cache, its inode
+// tables, the block the agent's token was rewritten into -- so a replica that
+// restores the memory onto the pristine image instead reads blocks that are
+// not there, and answers 401 to its own token install. A version of this kept
+// the release on its image when the replica had been booted from it, because
+// createFromRelease attached the golden template to every restore and the
+// diff's parent was the image; createFromRelease now attaches the parent the
+// build's header names, so the diff is restorable and must be taken.
+func TestAReleaseAdoptsTheCheckpointDiskOfABootedReplica(t *testing.T) {
+	m, _, store, svc := fixture(t, 1)
+	ctx := t.Context()
 
 	const image = "image-build-1"
 	if err := store.PutMachine(ctx, &state.Machine{
-		ID: "m-1", Name: "m-1", HostID: host, State: "running",
-		// Booted FROM the image, so the image is this machine's template and
-		// every checkpoint of it is a diff against the image.
+		ID: "m-1", Name: "m-1", HostID: m.opts.HostID, State: "running",
+		// Booted FROM the image: the image is this machine's template and
+		// its checkpoint's disk is a diff against the image, not the golden
+		// template.
 		TemplateRootfsBuildID: image,
 	}); err != nil {
 		t.Fatal(err)
 	}
 
-	rel := &state.Release{ID: "rel-1", ServiceID: "svc-1", RootfsBuildID: image}
-	if !m.checkpointSharesTheReleaseImage(ctx, "m-1", rel) {
-		t.Fatal("a checkpoint diffed against the release's own image was treated " +
-			"as adoptable; replica two would fail to attach its disk")
-	}
-}
-
-// The other half: a replica that was RESTORED carries the golden template, so
-// its checkpoint's diff has the same parent a release restore attaches, and
-// the release takes it. This is what a rollback and a resize rely on.
-func TestAReleaseAdoptsACheckpointDiffedAgainstTheSharedTemplate(t *testing.T) {
-	ctx := context.Background()
-	store, host, _ := autoscaleFixture(t)
-	m := New(Options{HostID: host, Store: store})
-
-	if err := store.PutMachine(ctx, &state.Machine{
-		ID: "m-1", Name: "m-1", HostID: host, State: "running",
-		TemplateRootfsBuildID: "golden-build",
-	}); err != nil {
+	rel := &state.Release{ID: "rel-1", ServiceID: svc.ID, RootfsBuildID: image}
+	if err := m.snapshotRelease(ctx, "m-1", rel); err != nil {
 		t.Fatal(err)
 	}
-
-	rel := &state.Release{ID: "rel-1", ServiceID: "svc-1", RootfsBuildID: "image-build-1"}
-	if m.checkpointSharesTheReleaseImage(ctx, "m-1", rel) {
-		t.Fatal("a checkpoint diffed against the shared template was refused; " +
-			"a rollback would lose the disk it just captured")
+	if rel.RootfsBuildID != "rootfs-1" {
+		t.Fatalf("the release stayed on %s; want the checkpoint's disk rootfs-1, "+
+			"which the memory image was captured over", rel.RootfsBuildID)
 	}
-}
-
-// A row that cannot be read errs towards keeping the image: the boot's disk
-// writes are still in the memory image, while adopting a diff whose parent
-// nothing attaches costs every replica after the first.
-func TestAnUnreadableRowKeepsTheReleaseOnItsImage(t *testing.T) {
-	ctx := context.Background()
-	store, host, _ := autoscaleFixture(t)
-	m := New(Options{HostID: host, Store: store})
-
-	rel := &state.Release{ID: "rel-1", ServiceID: "svc-1", RootfsBuildID: "image-build-1"}
-	if !m.checkpointSharesTheReleaseImage(ctx, "no-such-machine", rel) {
-		t.Fatal("an unreadable machine row was treated as adoptable")
+	if rel.MemBuildID != "mem-1" {
+		t.Fatalf("the release names memory %s, want mem-1", rel.MemBuildID)
 	}
 }
