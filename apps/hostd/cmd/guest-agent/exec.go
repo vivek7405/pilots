@@ -166,6 +166,33 @@ func prepareCommand(cmd *exec.Cmd, username, cwd string, env map[string]string) 
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
+
+	// The MACHINE's own environment, before the caller's.
+	//
+	// applyUserCredential builds cmd.Env from scratch -- HOME, USER, PATH and
+	// little else -- so an exec'd command did not inherit the agent's
+	// environment and nothing ever added the machine's. Every PILOT_ variable
+	// was therefore empty inside `pilot exec`, which is not a cosmetic gap:
+	// `$PILOT_BROKER_URL/token` expanded to "/token", and the SDK's
+	// InsideMachine() is `os.Getenv("PILOT_BROKER_URL") != ""`, so an agent
+	// running through exec could not tell it was inside a machine at all.
+	//
+	// This is the one chokepoint: exec, the terminal, the stream and sessions
+	// all prepare their command through here.
+	//
+	// Read fresh rather than cached. A deploy rewrites this file, and a
+	// long-lived agent that cached it at boot would hand out the previous
+	// release's environment. A missing or unreadable file is not an error:
+	// that is simply a machine with nothing declared, which is every machine
+	// built from a plain image.
+	if raw, err := os.ReadFile(envPath); err == nil {
+		for k, v := range parseEnvFile(string(raw)) {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+	}
+
+	// LAST, so an explicitly requested variable still wins: Go takes the final
+	// occurrence of a duplicated key.
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}

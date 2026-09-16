@@ -373,3 +373,57 @@ func TestTheImageDefaultUserComesFromTheStartSpec(t *testing.T) {
 		t.Errorf("no start spec at all: got %q, want empty", got)
 	}
 }
+
+// An exec'd command must see the machine's own environment.
+//
+// applyUserCredential rebuilds cmd.Env from scratch, so nothing inherited the
+// agent's environment and nothing added the machine's: every PILOT_ variable
+// was empty inside `pilot exec`. That is not cosmetic. The credential broker's
+// URL lives there, so `$PILOT_BROKER_URL/token` expanded to "/token", and the
+// Go SDK decides it is running inside a machine by testing that same variable
+// for emptiness -- so an agent invoked through exec could not tell.
+func TestAnExecSeesTheMachinesOwnEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	saved := envPath
+	envPath = filepath.Join(dir, "env")
+	t.Cleanup(func() { envPath = saved })
+
+	if err := os.WriteFile(envPath, []byte(
+		"PILOT_BROKER_URL=\"http://169.254.0.22:3002\"\nAPP_MODE=production\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("true")
+	if err := prepareCommand(cmd, "", "", map[string]string{"APP_MODE": "override"}); err != nil {
+		t.Fatalf("prepareCommand: %v", err)
+	}
+
+	got := map[string]string{}
+	for _, kv := range cmd.Env {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			got[k] = v // later wins, which is what exec itself does
+		}
+	}
+	if got["PILOT_BROKER_URL"] != "http://169.254.0.22:3002" {
+		t.Errorf("PILOT_BROKER_URL = %q; the broker URL is invisible to an exec, so "+
+			"$PILOT_BROKER_URL/token expands to /token", got["PILOT_BROKER_URL"])
+	}
+	// The caller's explicit value wins over the machine's.
+	if got["APP_MODE"] != "override" {
+		t.Errorf("APP_MODE = %q, want the caller's \"override\"", got["APP_MODE"])
+	}
+}
+
+// A machine with no env file is every machine built from a plain image. It
+// must not fail, and it must still get its account defaults.
+func TestAnExecWithNoMachineEnvStillRuns(t *testing.T) {
+	dir := t.TempDir()
+	saved := envPath
+	envPath = filepath.Join(dir, "absent")
+	t.Cleanup(func() { envPath = saved })
+
+	cmd := exec.Command("true")
+	if err := prepareCommand(cmd, "", "", nil); err != nil {
+		t.Fatalf("prepareCommand with no env file: %v", err)
+	}
+}
