@@ -88,3 +88,17 @@ func TestInitLinksTheStandardDevEntries(t *testing.T) {
 		t.Fatal("an existing /dev entry was replaced")
 	}
 }
+
+// A filesystem the agent has just formatted mounts empty: mke2fs's lost+found
+// is removed, because initdb refuses a data directory that contains it.
+func TestAFreshVolumeMountsWithoutLostAndFound(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(dir+"/lost+found", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	clearFreshLostAndFound(dir)
+	if _, err := os.Stat(dir + "/lost+found"); !os.IsNotExist(err) {
+		t.Fatal("lost+found survived on a freshly formatted volume")
+	}
+	clearFreshLostAndFound(dir) // absent is fine
+}

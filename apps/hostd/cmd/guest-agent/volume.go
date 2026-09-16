@@ -97,6 +97,9 @@ func mountVolume(device, mountPath string) error {
 	if err := unix.Mount(device, mountPath, "ext4", 0, ""); err != nil {
 		return fmt.Errorf("mount %s at %s: %w", device, mountPath, err)
 	}
+	if !formatted {
+		clearFreshLostAndFound(mountPath)
+	}
 	return nil
 }
 
@@ -146,4 +149,21 @@ func unescapeMounts(s string) string {
 		s = strings.ReplaceAll(s, sub[0], sub[1])
 	}
 	return s
+}
+
+// clearFreshLostAndFound removes the lost+found directory mke2fs leaves in a
+// filesystem this agent has just created, so the volume mounts EMPTY.
+//
+// A database that owns its data directory checks that it is empty before
+// initialising it: postgres's initdb refused "/var/lib/postgresql/data exists
+// but is not empty -- it contains a lost+found directory", exited 1 and was
+// restarted forever. Docker volumes never carry one, so every image assumes
+// an empty mount. Only a filesystem formatted here is touched: an existing
+// one is the user's, lost+found and all, and fsck recreates the directory
+// whenever it has something to put there.
+func clearFreshLostAndFound(mountPath string) {
+	lf := filepath.Join(mountPath, "lost+found")
+	if err := os.Remove(lf); err != nil && !os.IsNotExist(err) {
+		log.Printf("guest-agent: could not clear %s on a fresh volume: %v", lf, err)
+	}
 }
