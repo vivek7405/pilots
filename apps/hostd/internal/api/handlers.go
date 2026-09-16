@@ -326,6 +326,15 @@ func decodeBody(r *http.Request, v any) error {
 // machines imports this package, not the other way round.
 var ErrConflict = errors.New("conflict")
 
+// NoRollbackTargetError is a rollback asked of a service that has no earlier
+// healthy release. It is the caller's situation, not the host's, so it is a
+// 409 that says so rather than the "internal error" it used to become.
+type NoRollbackTargetError struct{ Service string }
+
+func (e *NoRollbackTargetError) Error() string {
+	return "service " + e.Service + " has no earlier healthy release to roll back to"
+}
+
 // ErrNoCapacity marks a create this host cannot hold, even after suspending
 // every idle machine it could.
 //

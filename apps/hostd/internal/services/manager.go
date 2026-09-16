@@ -722,7 +722,7 @@ func (m *Manager) Rollback(ctx context.Context, serviceID string) (*state.Releas
 		}
 	}
 	if target == nil {
-		return nil, fmt.Errorf("services: %s has no earlier healthy release to roll back to", serviceID)
+		return nil, &api.NoRollbackTargetError{Service: serviceID}
 	}
 
 	health, err := ParseHealth(svc.Health)

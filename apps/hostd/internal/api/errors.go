@@ -121,6 +121,7 @@ func writeMapped(w http.ResponseWriter, err error) {
 // two mappings would be two vocabularies for the same failure.
 func mapError(err error) (int, ErrorResponse) {
 	var gate *HealthGateDetails
+	var noRollback *NoRollbackTargetError
 	switch {
 	case errors.As(err, &gate):
 		return http.StatusUnprocessableEntity, ErrorResponse{
@@ -128,6 +129,12 @@ func mapError(err error) (int, ErrorResponse) {
 			Next: "read the replica's console: pilot machines logs " + gate.Replica +
 				"; fix the app and deploy again, or pilot services rollback " + gate.Service,
 			Details: gate,
+		}
+	case errors.As(err, &noRollback):
+		return http.StatusConflict, ErrorResponse{
+			Error: noRollback.Error(), Code: CodeConflict,
+			Next: "deploy a build that passes its health gate first; a rollback " +
+				"returns to the newest earlier release that did",
 		}
 	case errors.Is(err, state.ErrNotFound):
 		// The body stays opaque. TestWriteMappedLeaksNoInternals is a paid-for
