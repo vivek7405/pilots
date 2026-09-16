@@ -615,12 +615,24 @@ CONF
 systemctl daemon-reload
 runuser -u pilot -- env XDG_RUNTIME_DIR="/run/user/$PILOT_UID" \
   systemctl --user daemon-reload >/dev/null 2>&1 || true
-if runuser -u pilot -- env XDG_RUNTIME_DIR="/run/user/$PILOT_UID" \
-     systemctl --user enable --now buildkitd >/dev/null 2>&1; then
-  echo "  buildkitd running"
-else
-  echo "  WARNING: buildkitd did not start; builds will fail on this host" >&2
-fi
+
+# The daemon is NOT started, and the unit is NOT enabled.
+#
+# Builds run inside a per-org builder microVM now, and the build path only
+# ever dials that guest over TCP (netns.Slot.BuildkitAddr). Nothing on any
+# host dials a local buildkit socket. A host daemon left enabled with
+# lingering therefore ran from boot to shutdown serving nobody: it held
+# memory that placement counts against the host, kept a rootless runtime
+# nothing used, and made the fleet gate's "no host daemon, builds are
+# isolated" assertion false on every host.
+#
+# The unit file and the binaries stay on disk. buildctl is the CLIENT the
+# host uses to drive the builder machine, and leaving the unit costs nothing
+# while making it obvious how to start a daemon by hand if one is ever wanted
+# for debugging.
+runuser -u pilot -- env XDG_RUNTIME_DIR="/run/user/$PILOT_UID" \
+  systemctl --user disable --now buildkitd >/dev/null 2>&1 || true
+echo "  buildkit client installed; no host daemon (builds run in a microVM)"
 REMOTE
 
 # ---------------------------------------------------------------------------
