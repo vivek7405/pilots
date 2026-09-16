@@ -498,14 +498,55 @@ CREATE_FILLERS=""
 create_on_host() {
   local api_ip="$1" want_ip="$2" body="$3" m mid mip code f
   CREATE_FILLERS=""
-  # Sixteen attempts, not six. The ranker prefers the host with the most free
-  # memory, and on this rig that is emphatically ONE host: three creates sent
-  # to three different hosts all landed on the same one. So the target does not
-  # come up by chance -- it comes up only once the hosts ahead of it have been
-  # filled, which takes roughly one attempt per 512 MiB of their free memory.
-  # Six was a coin toss that usually lost, and reported it as the section's
-  # failure rather than the helper's.
-  for _ in $(seq 16); do
+  # BALLAST first, then the real machine.
+  #
+  # The ranker prefers the host with the most free memory, and on this rig that
+  # is emphatically ONE host: three creates addressed to three different hosts
+  # all landed on the same one. So the target does not come up by chance. It
+  # comes up once every host ahead of it is full, and the cheapest way to get
+  # there is to sink those hosts with LARGE throwaway machines rather than with
+  # copies of the caller's, which may be 512 MiB and would need a dozen.
+  #
+  # Each probe creates one 2 GiB ballast machine and asks where it went. Landing
+  # on the target means the target is now the emptiest host, so the ballast is
+  # released and the caller's machine is created in its place. Landing anywhere
+  # else means that host was emptier, so the ballast STAYS -- releasing it would
+  # free the host again and the next probe would pick it right back, which is
+  # the loop section 7 documents.
+  local ballast='{"vcpus":1,"mem_mib":2048,"knobs":{"auto_stop":"off"}}'
+  local probe pid_ ok_=""
+  for _ in $(seq 10); do
+    code=$(curl -s -m 180 -o /tmp/gate-create.json -w '%{http_code}' \
+      -X POST "http://${api_ip}:8080/v1/machines" -H "$AUTH" \
+      -H 'Content-Type: application/json' -d "$ballast" 2>/dev/null)
+    probe=$(cat /tmp/gate-create.json 2>/dev/null)
+    pid_=$(echo "$probe" | jf id)
+    if [ -z "$pid_" ]; then
+      for f in $CREATE_FILLERS; do delete_machine "$f"; done
+      CREATE_FILLERS=""
+      echo "HTTP ${code}: $(echo "$probe" | head -c 200)"
+      return 1
+    fi
+    if [ "$(owner_ip "$pid_" "")" = "$want_ip" ]; then
+      delete_machine "$pid_"   # make room for the machine that is actually wanted
+      sleep 3
+      ok_=yes
+      break
+    fi
+    CREATE_FILLERS="${CREATE_FILLERS} ${pid_}"
+    sleep 4 # let the reservation reach the gossip before ranking again
+  done
+
+  if [ -z "$ok_" ]; then
+    for f in $CREATE_FILLERS; do delete_machine "$f"; done
+    CREATE_FILLERS=""
+    echo "no ballast ever landed on ${want_ip}; it is not the emptiest host and cannot be made so"
+    return 1
+  fi
+
+  # The target is the emptiest host now, so the caller's create lands there.
+  # Verified rather than assumed: something else on the fleet may have moved.
+  for _ in 1 2 3; do
     code=$(curl -s -m 180 -o /tmp/gate-create.json -w '%{http_code}' \
       -X POST "http://${api_ip}:8080/v1/machines" -H "$AUTH" \
       -H 'Content-Type: application/json' -d "$body" 2>/dev/null)
@@ -518,19 +559,16 @@ create_on_host() {
       return 1
     fi
     if [ "$(owner_ip "$mid" "")" = "$want_ip" ]; then
-      for f in $CREATE_FILLERS; do delete_machine "$f"; done
-      CREATE_FILLERS=""
       echo "$m"
       return 0
     fi
     CREATE_FILLERS="${CREATE_FILLERS} ${mid}"
-    sleep 4 # let the reservation reach the gossip before ranking again
+    sleep 4
   done
-  # Every attempt landed elsewhere. Release them before giving up, or the next
-  # section inherits six machines it did not make.
+
   for f in $CREATE_FILLERS; do delete_machine "$f"; done
   CREATE_FILLERS=""
-  echo "no attempt landed on ${want_ip}"
+  echo "ballast reached ${want_ip} but the create did not follow it there"
   return 1
 }
 
@@ -2224,7 +2262,7 @@ FAULT_IP=""
 if [ -z "$FAULT_IP" ]; then
   bad "no host is alive to reproduce the wedge on"
 else
-  $SSH "root@$FAULT_IP" "mkdir -p /etc/pilots && printf 'PILOT_FAULTS=1\nPILOT_FAULT_NBD_SKIP_DISCONNECT=1\n' >> /etc/pilots/hostd.env && systemctl restart hostd" >/dev/null 2>&1
+  $SSH "root@$FAULT_IP" "mkdir -p /etc/pilots && touch /etc/pilots/hostd.env && sed -i -e '\$a\\' /etc/pilots/hostd.env && printf 'PILOT_FAULTS=1\nPILOT_FAULT_NBD_SKIP_DISCONNECT=1\n' >> /etc/pilots/hostd.env && systemctl restart hostd" >/dev/null 2>&1
   if wait_serving "$FAULT_IP" 120; then
     ok "armed the NBD fault on ${FAULT_IP} and hostd came back"
   else
@@ -2275,7 +2313,7 @@ else
   fi
 
   # Disarm before the reboot, so a host that comes back is a normal host.
-  $SSH "root@$FAULT_IP" "sed -i '/^PILOT_FAULTS=/d;/^PILOT_FAULT_NBD_SKIP_DISCONNECT=/d' /etc/pilots/hostd.env" >/dev/null 2>&1
+  $SSH "root@$FAULT_IP" "sed -i '/PILOT_FAULTS=/d;/PILOT_FAULT_NBD_SKIP_DISCONNECT=/d' /etc/pilots/hostd.env" >/dev/null 2>&1
   LEFT=$($SSH "root@$FAULT_IP" "grep -c PILOT_FAULT /etc/pilots/hostd.env" 2>/dev/null | tr -d '[:space:]')
   [ "${LEFT:-1}" = "0" ] && ok "the fault flags are out of hostd.env" \
     || bad "a PILOT_FAULT line is still in /etc/pilots/hostd.env on ${FAULT_IP}"
@@ -2374,7 +2412,7 @@ else
       done
       CB_ARMED=""
       for ip in "${CB_HOSTS[@]}"; do
-        $SSH "root@$ip" "mkdir -p /etc/pilots && printf 'PILOT_FAULTS=1\nPILOT_FAULT_CPU_VENDOR=%s\n' '$CB_OTHER' >> /etc/pilots/hostd.env && systemctl restart hostd" >/dev/null 2>&1
+        $SSH "root@$ip" "mkdir -p /etc/pilots && touch /etc/pilots/hostd.env && sed -i -e '\$a\\' /etc/pilots/hostd.env && printf 'PILOT_FAULTS=1\nPILOT_FAULT_CPU_VENDOR=%s\n' '$CB_OTHER' >> /etc/pilots/hostd.env && systemctl restart hostd" >/dev/null 2>&1
         wait_serving "$ip" 120 && CB_ARMED="${CB_ARMED}${ip} "
       done
       ok "forced ${CB_OTHER} on every live host (${CB_ARMED}), so the machine's own pool has none left"
@@ -2503,7 +2541,7 @@ else
     # rather than trusted.
     CB_DIRTY=""
     for ip in "${CB_HOSTS[@]:-${LIVE_IPS[@]}}"; do
-      $SSH "root@$ip" "sed -i '/^PILOT_FAULTS=/d;/^PILOT_FAULT_CPU_VENDOR=/d' /etc/pilots/hostd.env && systemctl restart hostd" >/dev/null 2>&1
+      $SSH "root@$ip" "sed -i '/PILOT_FAULTS=/d;/PILOT_FAULT_CPU_VENDOR=/d' /etc/pilots/hostd.env && systemctl restart hostd" >/dev/null 2>&1
       if wait_serving "$ip" 120; then
         CB_LEFT=$($SSH "root@$ip" "grep -c PILOT_FAULT /etc/pilots/hostd.env" 2>/dev/null | tr -d '[:space:]')
         CB_NOW=$(curl -sf -m 5 "http://${ip}:8080/v1/health" 2>/dev/null | jf cpu_vendor)
@@ -2713,7 +2751,7 @@ else
     $SSH "root@$ip" "mkdir -p /etc/pilots" >/dev/null 2>&1
     scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$SSH_KEY" \
       "$GH_KEY" "root@${ip}:/etc/pilots/gate-app.pem" >/dev/null 2>&1
-    $SSH "root@$ip" "sed -i '/^PILOT_GITHUB_/d' /etc/pilots/hostd.env; cat >> /etc/pilots/hostd.env <<EOF
+    $SSH "root@$ip" "sed -i '/PILOT_GITHUB_/d' /etc/pilots/hostd.env; sed -i -e '\$a\\' /etc/pilots/hostd.env; cat >> /etc/pilots/hostd.env <<EOF
 PILOT_GITHUB_APP_ID=1
 PILOT_GITHUB_APP_KEY=/etc/pilots/gate-app.pem
 PILOT_GITHUB_WEBHOOK_SECRET=gate
@@ -3072,7 +3110,7 @@ print(det[0].get('framework', ''))
   # Disarm. The rig goes back to having no GitHub App, so nothing below and
   # no later run inherits a fleet pointed at a stand-in that is gone.
   for ip in "${LIVE_IPS[@]}"; do
-    $SSH "root@$ip" "sed -i '/^PILOT_GITHUB_/d' /etc/pilots/hostd.env; rm -f /etc/pilots/gate-app.pem; systemctl restart hostd" >/dev/null 2>&1
+    $SSH "root@$ip" "sed -i '/PILOT_GITHUB_/d' /etc/pilots/hostd.env; rm -f /etc/pilots/gate-app.pem; systemctl restart hostd" >/dev/null 2>&1
     wait_serving "$ip" 120 || bad "${ip} did not come back after the github env was removed"
   done
   GH_LEFT=$($SSH "root@${LIVE_IPS[0]}" "grep -c PILOT_GITHUB_ /etc/pilots/hostd.env" 2>/dev/null | tr -d '[:space:]')
