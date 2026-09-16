@@ -879,19 +879,26 @@ if [ -n "$NEW_IP" ]; then
     bad "the one command failed"
   fi
 
-  # Live hosts only: the one killed in step 5 is still down on purpose, so the
-  # fleet the new host should see is the survivors plus itself.
-  LIVE=$(( ${#IPS[@]} - 1 + 1 ))
+  # Every host killed on purpose above has been brought back and waited for
+  # (revive_host), so the fleet the new host should see is ALL of them plus
+  # itself. This used to subtract the one step 8 left dead; once that host
+  # comes back the arithmetic was one short, and the poll below then spun for
+  # its full two minutes and reported whatever it last read.
+  LIVE=$(( ${#IPS[@]} + 1 ))
 
   # Poll rather than assert once. The checklist asks for schedulable and
   # serving "within minutes", not instantly: a host that has just joined still
   # has to exchange gossip and heartbeat once before anyone counts it alive.
   # Asserting the moment the bootstrap returns measures convergence latency
   # and calls it a failure.
+  # A call that FAILED answers empty, never 0. Reporting a failed read as a
+  # legitimate "sees zero hosts" is how the assertion below once accused a
+  # host of seeing no fleet at the same moment the next step proved it was
+  # routing for one.
   live_seen() { # live_seen <ip>
     api "$1" GET /v1/hosts 2>/dev/null | python3 -c "
 import sys, json
-print(sum(1 for h in json.load(sys.stdin) if h.get('alive')))" 2>/dev/null || echo 0
+print(sum(1 for h in json.load(sys.stdin) if h.get('alive')))" 2>/dev/null
   }
 
   START=$SECONDS; N=0
@@ -900,7 +907,7 @@ print(sum(1 for h in json.load(sys.stdin) if h.get('alive')))" 2>/dev/null || ec
     sleep 5
   done
   [ "$N" = "$LIVE" ] && ok "the new host sees ${N} live hosts after $((SECONDS - START))s" \
-    || bad "the new host sees ${N} live hosts, want ${LIVE}"
+    || bad "the new host sees ${N:-<no readable answer from /v1/hosts>} live hosts, want ${LIVE}"
 
   START=$SECONDS; N=0
   while [ $((SECONDS - START)) -lt 120 ]; do
@@ -908,7 +915,7 @@ print(sum(1 for h in json.load(sys.stdin) if h.get('alive')))" 2>/dev/null || ec
     sleep 5
   done
   [ "$N" = "$LIVE" ] && ok "the existing hosts see it too" \
-    || bad "an existing host sees ${N} live hosts, want ${LIVE}"
+    || bad "an existing host sees ${N:-<no readable answer from /v1/hosts>} live hosts, want ${LIVE}"
 
   # Serving, not merely present. A host that joined gossip but cannot route is
   # in the fleet's tables and useless to a client.
@@ -1822,7 +1829,27 @@ if [ -n "$H_IP" ]; then
     H5_FCPID_AFTER=$(fc_pid "$H_IP" "$H5_ID")
     [ -n "$H5_FCPID_AFTER" ] || bad "no Firecracker is running for ${H5_ID} after the loop"
     FD_AFTER=$($SSH "root@$H_IP" "ls /proc/${H5_FCPID_AFTER}/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
-    HOSTD_FD_AFTER=$($SSH "root@$H_IP" "ls /proc/\$(pgrep -x hostd | head -1)/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
+
+    # hostd's count is taken as the LOWEST of several samples, not the first.
+    #
+    # A leak never settles; a busy fleet does. hostd holds a chunk-socket
+    # listener per running machine and a connection per in-flight operation,
+    # so sampling the instant a thousand-operation loop ends measures how busy
+    # the host was, not what it is holding on to -- and it read exactly the
+    # threshold on a run where the fleet was whole, while measurement on an
+    # idle rig showed the same counts falling back (47 -> 16) and staying
+    # there. Taking the floor over half a minute keeps a real leak caught,
+    # because a real one has no floor to fall to.
+    HOSTD_FD_AFTER=""
+    for _ in $(seq 6); do
+      HOSTD_FD_SAMPLE=$($SSH "root@$H_IP" "ls /proc/\$(pgrep -x hostd | head -1)/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
+      case "$HOSTD_FD_SAMPLE" in
+        ''|*[!0-9]*) ;;
+        *) [ -z "$HOSTD_FD_AFTER" ] && HOSTD_FD_AFTER=$HOSTD_FD_SAMPLE
+           [ "$HOSTD_FD_SAMPLE" -lt "$HOSTD_FD_AFTER" ] && HOSTD_FD_AFTER=$HOSTD_FD_SAMPLE ;;
+      esac
+      sleep 5
+    done
     # hostd is the side that would hold a leaked keepalive connection open, so
     # it is asserted as well as Firecracker's own count.
     [ $(( FD_AFTER - FD_BEFORE )) -lt 20 ] 2>/dev/null \
