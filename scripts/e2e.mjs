@@ -144,11 +144,14 @@ async function viaRouter(hostname, path = '/', timeoutMs = 120_000, headers = {}
       (res) => {
         let body = '';
         res.on('data', (c) => { body += c; });
-        res.on('end', () => resolve({ status: res.statusCode, body, headers: res.headers }));
+        // Both names, because half the callers read .body and half read
+        // .text, and a missing field turned four address assertions into a
+        // TypeError that said nothing about the address.
+        res.on('end', () => resolve({ status: res.statusCode, body, text: body, headers: res.headers }));
       },
     );
-    req.on('timeout', () => { req.destroy(); resolve({ status: 0, body: 'timeout' }); });
-    req.on('error', (err) => resolve({ status: 0, body: String(err.message) }));
+    req.on('timeout', () => { req.destroy(); resolve({ status: 0, body: 'timeout', text: 'timeout' }); });
+    req.on('error', (err) => resolve({ status: 0, body: String(err.message), text: String(err.message) }));
     req.end();
   });
 }
