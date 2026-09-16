@@ -110,3 +110,26 @@ func TestARunningReplicaGetsACounterAndASuspendedOneAWakeRule(t *testing.T) {
 		t.Error("the running replica's counter has no address to match on")
 	}
 }
+
+// A suspended replica whose slot a running machine now holds gets no wake
+// trap. The trap is a counted DROP on the address, so arming it in front of a
+// live machine swallows every packet for that machine; this is what a host
+// that restarted without re-reserving its sleeping machines' slots did to
+// every create that landed on one of them.
+func TestASuspendedReplicaOnARunningMachinesSlotGetsNoWakeTrap(t *testing.T) {
+	const self = "host-a"
+	rows := []state.Machine{
+		{ID: "m-live", HostID: self, Slot: 3, App: "shop", State: "running"},
+		{ID: "m-susp", HostID: self, Slot: 3, App: "shop", State: "suspended", ReleaseID: "rel-1"},
+		{ID: "m-asleep", HostID: self, Slot: 4, App: "shop", State: "suspended", ReleaseID: "rel-1"},
+	}
+
+	rules := tenantRules(self, fakeView{machines: rows}, testLocator(t, self))
+
+	if len(rules.Wake) != 1 || rules.Wake[0].MachineID != "m-asleep" {
+		t.Fatalf("wake rules = %v, want only the replica whose slot nothing running holds", rules.Wake)
+	}
+	if len(rules.Local) != 1 || rules.Local[0].SlotIdx != 3 {
+		t.Fatalf("local rules = %v, want the running machine's slot", rules.Local)
+	}
+}

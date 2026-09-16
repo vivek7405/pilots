@@ -273,6 +273,43 @@ func (m *Manager) restoreInstantImmutable(ctx context.Context, row *state.Machin
 // it gets here; and a reservation the pool will not honour, which is logged
 // and then treated as absent, because a wake that fails over bookkeeping is
 // worse than a wake onto a different index.
+// ReserveHeldSlots speaks for the machines that cannot speak for themselves
+// after a restart: every suspended machine on this host that still holds a
+// slot, and with it a mesh address.
+//
+// The pool is rebuilt from the machines hostd ADOPTS, and adoption finds
+// processes. A suspended machine has no process, so nothing re-reserved its
+// slot, and the next create was handed it: two machines on one address, the
+// sleeping one's wake trap -- a counted drop in the root namespace -- taking
+// every packet meant for the running one. Nothing logged it; the symptom was
+// a name that resolved to an address that swallowed traffic, on every host,
+// after every hostd upgrade.
+//
+// Rows that already collide -- two claiming one index, which a host that
+// restarted before this existed can hold -- are left as they are: the first
+// keeps the index, and the other takes a fresh one when it wakes, which is
+// the documented outcome of a kept slot that cannot be reused (takeSlot).
+func (m *Manager) ReserveHeldSlots(ctx context.Context) (int, error) {
+	rows, err := m.opts.Store.ListMachines(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("machines: list rows to re-reserve their slots: %w", err)
+	}
+	n := 0
+	for _, row := range rows {
+		if row.HostID != m.opts.HostID || row.State != "suspended" || row.Slot <= 0 {
+			continue
+		}
+		if _, err := m.pool.Reserve(row.Slot, row.ID); err != nil {
+			slog.Warn("a suspended machine's slot is held by another machine; it "+
+				"comes up in a fresh one and its mesh address moves",
+				"machine", row.ID, "slot", row.Slot, "err", err)
+			continue
+		}
+		n++
+	}
+	return n, nil
+}
+
 func (m *Manager) takeSlot(row *state.Machine) (*netns.Slot, error) {
 	if row.Slot > 0 && row.HostID == m.opts.HostID {
 		slot, err := m.pool.Reserve(row.Slot, row.ID)

@@ -954,6 +954,18 @@ func settleReconciled(found []fc.Reconciled, root string, mgr *machines.Manager,
 		_ = fc.ClearBreadcrumbs(filepath.Join(root, st.MachineID))
 	}
 
+	// After the machines with a process, the ones without: a suspended
+	// machine keeps its slot and its address across a restart only if
+	// something re-reserves it, and adoption cannot, having no process to
+	// find. Without this the next create lands on a sleeping machine's
+	// address behind its wake trap.
+	if n, err := mgr.ReserveHeldSlots(context.Background()); err != nil {
+		slog.Error("could not re-reserve suspended machines' slots; a create may "+
+			"be handed a sleeping machine's address", "err", err)
+	} else if n > 0 {
+		slog.Info("re-reserved the slots of suspended machines", "count", n)
+	}
+
 	// After both loops, so every machine's liveness is already decided: an
 	// operation interrupted by the restart is settled against what adoption
 	// just found rather than against a guess. Adoption has never covered this

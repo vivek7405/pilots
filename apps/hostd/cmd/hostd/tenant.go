@@ -116,6 +116,20 @@ func tenantRules(hostID string, view fleetView, loc *mesh.Locator) netns.TenantR
 	rules := netns.TenantRules{Apps: map[string][]netip.Addr{}}
 	local := map[int][]state.Machine{}
 
+	// The slots a RUNNING machine on this host holds. A suspended replica
+	// whose slot one of these holds has lost the address it slept on -- a
+	// restart that did not re-reserve it, or a row that outlived its machine
+	// -- and arming its wake trap would put a counted drop in front of the
+	// running machine: every packet for the live one swallowed so that a
+	// sleeping one might wake. The running machine keeps the address; the
+	// replica takes a fresh slot when it wakes.
+	occupied := map[int]bool{}
+	for _, m := range view.Machines() {
+		if m.HostID == hostID && m.State == "running" && m.Slot > 0 {
+			occupied[m.Slot] = true
+		}
+	}
+
 	for _, m := range view.Machines() {
 		addr, ok := loc.MachineAddress(m)
 		if !ok {
@@ -134,7 +148,9 @@ func tenantRules(hostID string, view fleetView, loc *mesh.Locator) netns.TenantR
 		// counted drop rather than a forwarding rule: the count is what brings
 		// it back.
 		if m.State == "suspended" && m.ReleaseID != "" {
-			rules.Wake = append(rules.Wake, netns.WakeTarget{MachineID: m.ID, Addr: addr})
+			if !occupied[m.Slot] {
+				rules.Wake = append(rules.Wake, netns.WakeTarget{MachineID: m.ID, Addr: addr})
+			}
 			continue
 		}
 		local[m.Slot] = append(local[m.Slot], m)
