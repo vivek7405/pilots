@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"github.com/vivek7405/pilots/hostd/internal/netns"
 	"log"
 	"os"
 	"os/exec"
@@ -100,6 +101,9 @@ func runAsInit() {
 	// being passed, a systemd-carrying base would boot systemd instead and lose
 	// .internal with nothing else failing.
 	configureNetwork()
+	// Beside the network, for the app port: peers arrive over IPv6 and most
+	// apps bind IPv4 only.
+	go dualStackShim(netns.GuestAppPort)
 
 	go reapChildren()
 }
