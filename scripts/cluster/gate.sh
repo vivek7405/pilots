@@ -88,6 +88,41 @@ case "$KEY" in
 esac
 sleep 3
 
+# ---------------------------------------------------------------------------
+# Headroom, before anything creates a machine.
+#
+# This battery creates dozens of machines across its sections. The default org
+# quota is 20, so a full run exhausts it partway through and EVERY create from
+# that point answers 429 -- and because api() uses `curl -sf`, the body that
+# says "quota exceeded" is discarded and each assertion reports an empty
+# string. A run once failed 28 assertions across a dozen sections that way,
+# all of them reading "could not create ...: " with nothing after the colon,
+# none of them about the thing the section was testing.
+#
+# So the quota is raised first, and the raise is CHECKED. The e2e battery
+# already lifts quotas for the same reason. A gate that cannot get headroom
+# must say so here rather than discover it fifteen sections later.
+GATE_ORG="${PILOT_ORG:-ops}"
+Q_CODE=$(curl -s -m 15 -o /tmp/gate-quota.json -w '%{http_code}' \
+  -X PUT "http://${IPS[0]}:8080/v1/quotas/${GATE_ORG}" -H "$AUTH" \
+  -H 'Content-Type: application/json' \
+  -d '{"max_machines":400,"max_vcpus":800,"max_mem_mib":8388608,"max_volume_gib":500,"max_builds":400,"max_snapshot_gib":500}' 2>/dev/null)
+case "$Q_CODE" in
+  2*) ok "raised the ${GATE_ORG} org's quota so a full run cannot exhaust it" ;;
+  *)  bad "could not raise the ${GATE_ORG} quota (HTTP ${Q_CODE}): $(head -c 200 /tmp/gate-quota.json 2>/dev/null); later sections will fail on 429, not on what they test" ;;
+esac
+
+# Battery debris from earlier runs counts against that quota too, and a rig
+# left full is the same outage one run later. Anything in `error` is wreckage
+# by definition; it is reported rather than silently swept, so a run that
+# starts dirty says so.
+DEBRIS=$(api "${IPS[0]}" GET /v1/machines 2>/dev/null | python3 -c "
+import sys, json
+try: rows = json.load(sys.stdin)
+except Exception: rows = []
+print(sum(1 for m in rows if m.get('state') not in ('destroyed', None)))" 2>/dev/null || echo 0)
+echo "  ${DEBRIS} machine(s) already exist on this fleet before the run"
+
 say "1. Every host sees the whole fleet"
 for ip in "${IPS[@]}"; do
   # Live hosts, not rows. A host that was retired -- or destroyed by an
@@ -351,6 +386,15 @@ fc_pid() {
   $SSH "root@$1" "head -1 ${slice}/cgroup.procs" 2>/dev/null | tr -d '[:space:]'
 }
 
+# fc_pid_of is the comm-checked variant: it finds a Firecracker by the --id
+# on its command line, the way internal/machines/reaper.go does, after
+# confirming /proc/<pid>/comm is firecracker. That comm check is what keeps
+# it from matching the shell that carries the pattern, which is the trap
+# pgrep -f falls into. Top level, NOT inside a section: it was defined inside
+# section 21's conditional, so a run that skipped that branch left every
+# later caller silently calling a command that did not exist.
+fc_pid_of() { $SSH "root@$1" "for p in /proc/[0-9]*; do [ \"\$(cat \$p/comm 2>/dev/null)\" = firecracker ] || continue; tr '\\0' ' ' < \$p/cmdline | grep -q -- '--id $2 ' && basename \$p; done" 2>/dev/null | head -1 | tr -d '[:space:]'; }
+
 # ---------------------------------------------------------------------------
 # Finding the host a machine actually runs on.
 #
@@ -416,6 +460,21 @@ owner_ip() {
   echo "${oip:-${2:-}}"
 }
 
+# delete_machine <id> -- destroy it through whichever host will take the call.
+#
+# Not through a caller-chosen address: the sections that need this are the ones
+# that have just killed or faulted a host, and a DELETE aimed at a host that is
+# down leaves the machine alive and counting against the org's quota. That is
+# how a run exhausts its quota mid-way and turns every later create into a 429.
+delete_machine() {
+  local ip
+  for ip in "${IPS[@]}" ${NEW_IP:-}; do
+    curl -sf -m 60 -X DELETE -H "$AUTH" \
+      "http://${ip}:8080/v1/machines/$1" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
 # create_on_host <api-ip> <target-ip> <body> -> the create JSON of a machine
 # the ranker placed on <target-ip>.
 #
@@ -424,22 +483,47 @@ owner_ip() {
 # purpose, so the only honest way to co-locate is to create until one lands
 # where it is wanted and keep the misses as filler -- a miss lowers its own
 # host's free memory, so the next attempt ranks elsewhere. Deleting a miss
-# instead would free that host again and loop forever on it, which is the trap
-# section 7 documents. Echoes the JSON; the caller deletes $CREATE_FILLERS.
+# immediately would free that host again and loop forever on it, which is the
+# trap section 7 documents.
+#
+# It cleans up after ITSELF, through delete_machine, rather than leaving
+# $CREATE_FILLERS to a caller who may be holding a dead host's address. The
+# variable is still set, so the existing caller-side loops are harmless.
+#
+# On failure it echoes the HTTP status and body rather than an empty string.
+# Twenty-eight assertions once failed reading "could not create ...: " with
+# nothing after the colon, because api() uses `curl -sf` and the "quota
+# exceeded" body went in the bin.
 CREATE_FILLERS=""
 create_on_host() {
-  local api_ip="$1" want_ip="$2" body="$3" m mid mip
+  local api_ip="$1" want_ip="$2" body="$3" m mid mip code f
   CREATE_FILLERS=""
   for _ in 1 2 3 4 5 6; do
-    m=$(api "$api_ip" POST /v1/machines "$body")
+    code=$(curl -s -m 180 -o /tmp/gate-create.json -w '%{http_code}' \
+      -X POST "http://${api_ip}:8080/v1/machines" -H "$AUTH" \
+      -H 'Content-Type: application/json' -d "$body" 2>/dev/null)
+    m=$(cat /tmp/gate-create.json 2>/dev/null)
     mid=$(echo "$m" | jf id)
-    [ -z "$mid" ] && { echo "$m"; return 1; }
-    mip=$(owner_ip "$mid" "")
-    if [ "$mip" = "$want_ip" ]; then echo "$m"; return 0; fi
+    if [ -z "$mid" ]; then
+      for f in $CREATE_FILLERS; do delete_machine "$f"; done
+      CREATE_FILLERS=""
+      echo "HTTP ${code}: $(echo "$m" | head -c 200)"
+      return 1
+    fi
+    if [ "$(owner_ip "$mid" "")" = "$want_ip" ]; then
+      for f in $CREATE_FILLERS; do delete_machine "$f"; done
+      CREATE_FILLERS=""
+      echo "$m"
+      return 0
+    fi
     CREATE_FILLERS="${CREATE_FILLERS} ${mid}"
     sleep 6 # let the reservation reach the gossip before ranking again
   done
-  echo ""
+  # Every attempt landed elsewhere. Release them before giving up, or the next
+  # section inherits six machines it did not make.
+  for f in $CREATE_FILLERS; do delete_machine "$f"; done
+  CREATE_FILLERS=""
+  echo "no attempt landed on ${want_ip}"
   return 1
 }
 
@@ -2440,7 +2524,6 @@ if [ -n "$H_IP" ]; then
 
   # The pid by --id in cmdline and comm, the way reaper.go's
   # firecrackerProcesses finds one: the pid file alone can name a recycled pid.
-  fc_pid_of() { $SSH "root@$1" "for p in /proc/[0-9]*; do [ \"\$(cat \$p/comm 2>/dev/null)\" = firecracker ] || continue; tr '\\0' ' ' < \$p/cmdline | grep -q -- '--id $2 ' && basename \$p; done" 2>/dev/null | head -1 | tr -d '[:space:]'; }
   state_field() { $SSH "root@$1" "python3 -c \"import json;print(json.load(open('/var/lib/pilots/machines/$2/state.json')).get('$3',0))\"" 2>/dev/null | tr -d '[:space:]'; }
 
   EX_PID=$(fc_pid_of "$EX_IP" "$EX_ID")
