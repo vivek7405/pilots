@@ -288,3 +288,61 @@ func TestBuilderNamesDoNotCollideOnSimilarIDs(t *testing.T) {
 		t.Fatalf("a builder name from long ids is not a usable label: %v", err)
 	}
 }
+
+// A destroyed builder must not brick its org's builds on that host.
+//
+// The builder's name is derived from the org and the host, so there is exactly
+// one possible name per pair. Holding it against the tombstone meant the FIRST
+// destroy was permanent: findBuilder skips the destroyed row and asks for a
+// new builder, and ensureNameFree then refused to mint one, quoting the very
+// row findBuilder had stepped over. Two rig hosts were bricked for building
+// that way, and every build on them failed with "the name ... is already
+// taken" with nothing to say why.
+//
+// A destroyed USER machine still holds its name, and the second half of this
+// test pins that: its URL was permanent, so the name must not be handed to
+// something else.
+func TestADestroyedBuilderReleasesItsNameAndAUserMachineDoesNot(t *testing.T) {
+	store, err := state.Open(":memory:")
+	if err != nil {
+		t.Fatalf("state.Open: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	m := &Manager{opts: Options{Store: store, HostID: "host-test"}}
+
+	builder := BuilderName("ops", "host-test")
+	if !strings.HasPrefix(builder, builderNamePrefix) {
+		t.Fatalf("BuilderName produced %q, which is not a builder name", builder)
+	}
+	for _, row := range []*state.Machine{
+		{ID: "m-builder", Name: builder, HostID: "host-test", State: state.StateDestroyed},
+		{ID: "m-user", Name: "shop", HostID: "host-test", State: state.StateDestroyed},
+	} {
+		if err := store.PutMachine(ctx, row); err != nil {
+			t.Fatalf("PutMachine %s: %v", row.ID, err)
+		}
+	}
+
+	if err := m.ensureNameFree(ctx, builder); err != nil {
+		t.Errorf("a destroyed builder still holds %q, so this org can never "+
+			"build on this host again: %v", builder, err)
+	}
+
+	if err := m.ensureNameFree(ctx, "shop"); err == nil {
+		t.Error("a destroyed user machine released its name; a new machine can " +
+			"now take a URL that was promised to be permanent")
+	}
+
+	// And a LIVE builder still holds its name: the exception is for tombstones
+	// only, or two builders would race for one host's build path.
+	if err := store.PutMachine(ctx, &state.Machine{
+		ID: "m-builder2", Name: builder, HostID: "host-test", State: state.StateRunning,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.ensureNameFree(ctx, builder); err == nil {
+		t.Error("a running builder's name was handed out a second time")
+	}
+}
