@@ -490,3 +490,19 @@ func TestAdoptRefusesAHandlerPidRecycledInsideOneBoot(t *testing.T) {
 		t.Error("the machine was not adopted at all; a dead handler must not cost it its handle")
 	}
 }
+
+// An adopted machine's flush clock starts at adoption, not at the machine's
+// start: the previous daemon flushed it until the restart, and what it last
+// flushed is at most one interval old. Measured from StartedAt, the first
+// flush after a restart reported hours of lag that never existed.
+func TestAnAdoptedMachinesFlushClockStartsAtAdoption(t *testing.T) {
+	started := time.Now().Add(-3 * time.Hour)
+	m := Adopted(State{MachineID: "m-1", Pid: os.Getpid(), StartedAtNs: started.UnixNano()},
+		t.TempDir(), nil)
+	if m == nil {
+		t.Fatal("the test's own pid could not be adopted")
+	}
+	if m.lastRootFlush.IsZero() || m.lastRootFlush.Before(time.Now().Add(-time.Minute)) {
+		t.Fatalf("flush clock %v; want the moment of adoption, not the start %v", m.lastRootFlush, started)
+	}
+}
