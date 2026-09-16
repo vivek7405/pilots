@@ -19,15 +19,12 @@ replica. There is no scheduler tier, no managed database, no coordinator, no
 A design that needs something in the middle has failed, however fast it is.
 When two designs are equally good, the one with fewer moving parts wins.
 
-**The worked example is e2b-infra** (open source, cloned locally; notes in
-`docs/prior-art/e2b-infra.md`). Its engine below the gRPC boundary is good and
-worth reading. Above it sits exactly what this principle rejects: a central API
-that is the only lifecycle entry point — "the orchestrator cannot create a
-sandbox on its own initiative; it does not even know the team" — placement
-decided centrally, node discovery through Nomad with a documented 0–20 s gap,
-Redis as the routing catalog, and 60+ runtime feature flags gating engine
-behaviour per sandbox. Every one of those is a thing that can be down while
-the hosts are fine.
+**The worked example is e2b-infra**: a central API that is the only lifecycle
+entry point — "the orchestrator cannot create a sandbox on its own initiative;
+it does not even know the team" — placement decided centrally, node discovery
+through Nomad with a documented 0–20 s gap, Redis as the routing catalog, and
+60+ runtime feature flags gating engine behaviour per sandbox. Every one of
+those is a thing that can be down while the hosts are fine.
 
 ## 2. Extremely cost efficient, with extremely fast wake.
 
@@ -111,6 +108,28 @@ second lifecycle, a capability only one of them can reach — is moving toward
 the shape this product exists to avoid.
 
 ---
+
+## A note on e2b-infra, which these principles keep citing
+
+e2b-infra is cited above as the counter-example four times, and that is only
+half of what it is. It is **open source and cloned locally**, which makes it
+the one place the hard half of this product already exists as readable code:
+the userfaultfd handler, the chained memfile/diff block layout, the in-process
+NBD server, netns and slot addressing, guest provisioning, pre-pause hygiene.
+When the question is *how does this mechanism work*, read it before guessing —
+that is a rule in `AGENTS.md`, and the alternative has already cost time here.
+
+The line is clean and worth holding: **take mechanics, never architecture.**
+Below their gRPC boundary is an engine worth learning from. Above it is the
+control plane these principles exist to replace. Something can be excellent
+code and still be a shape this product refuses; both halves of that are true
+of e2b at once, and neither cancels the other.
+
+Same rule for fly and sprites, which have the advantage of being further along
+and the disadvantage of being closed: their published writing is evidence about
+mechanics and about what the tradeoffs cost in production, not a template for
+how pilots should be shaped. `docs/prior-art/` carries the sourced notes, each
+ending in what to copy and what to reject.
 
 ## How to use this
 
