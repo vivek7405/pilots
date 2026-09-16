@@ -2067,7 +2067,32 @@ else
       CB_BEFORE="${CB_BEFORE:-0}"
       CB_NBD_BEFORE=$(nbd_attached "$FAULT_IP" | wc -l)
 
-      $SSH "root@$FAULT_IP" "mkdir -p /etc/pilots && printf 'PILOT_FAULTS=1\nPILOT_FAULT_CPU_VENDOR=%s\n' '$CB_OTHER' >> /etc/pilots/hostd.env && systemctl restart hostd" >/dev/null 2>&1
+      # Armed on EVERY live host, not just the one driving the API.
+      #
+      # The machine's pool has to be empty for a cold boot to be the only way
+      # back, and "empty" is a property of the whole fleet: forcing one host to
+      # report the other vendor removes it from the pool and leaves every other
+      # live host still in it, so the machine simply restores on one of those.
+      # That is exactly what happened once the sections above stopped leaving
+      # the fleet dead -- the section had been relying on being run against a
+      # rig that earlier sections had already destroyed, and it read "the last
+      # live host" because by then there usually was only one. A section that
+      # needs a degraded fleet degrades it itself.
+      # The live set is computed HERE rather than reused. LIVE_IPS was built
+      # further up with the hosts of steps 8 and 12 deliberately excluded,
+      # because they were dead at the time; they are revived now, and arming a
+      # subset would leave the machine's pool populated by exactly the hosts
+      # the list forgot.
+      CB_HOSTS=()
+      for ip in "${IPS[@]}" ${NEW_IP:-}; do
+        curl -sf -m 5 "http://${ip}:8080/v1/health" >/dev/null 2>&1 && CB_HOSTS+=("$ip")
+      done
+      CB_ARMED=""
+      for ip in "${CB_HOSTS[@]}"; do
+        $SSH "root@$ip" "mkdir -p /etc/pilots && printf 'PILOT_FAULTS=1\nPILOT_FAULT_CPU_VENDOR=%s\n' '$CB_OTHER' >> /etc/pilots/hostd.env && systemctl restart hostd" >/dev/null 2>&1
+        wait_serving "$ip" 120 && CB_ARMED="${CB_ARMED}${ip} "
+      done
+      ok "forced ${CB_OTHER} on every live host (${CB_ARMED}), so the machine's own pool has none left"
       if wait_serving "$FAULT_IP" 120; then
         CB_HEALTH=$(curl -sf -m 5 "http://${FAULT_IP}:8080/v1/health" 2>/dev/null)
         if [ "$(echo "$CB_HEALTH" | jf cpu_vendor)" = "$CB_OTHER" ] \
@@ -2156,17 +2181,25 @@ else
       api "$FAULT_IP" DELETE "/v1/machines/${CB_ID}" >/dev/null 2>&1
     fi
 
-    # Disarm, always, so this section leaves the rig as it found it.
-    $SSH "root@$FAULT_IP" "sed -i '/^PILOT_FAULTS=/d;/^PILOT_FAULT_CPU_VENDOR=/d' /etc/pilots/hostd.env && systemctl restart hostd" >/dev/null 2>&1
-    if wait_serving "$FAULT_IP" 120; then
-      CB_LEFT=$($SSH "root@$FAULT_IP" "grep -c PILOT_FAULT /etc/pilots/hostd.env" 2>/dev/null | tr -d '[:space:]')
-      CB_NOW=$(curl -sf -m 5 "http://${FAULT_IP}:8080/v1/health" 2>/dev/null | jf cpu_vendor)
-      [ "${CB_LEFT:-1}" = "0" ] && [ "$CB_NOW" = "$CB_REAL" ] \
-        && ok "the fault is disarmed and ${FAULT_IP} reports ${CB_REAL} again" \
-        || bad "${FAULT_IP} still carries a PILOT_FAULT line or reports '${CB_NOW}'"
-    else
-      bad "${FAULT_IP} did not come back after disarming the CPU vendor fault"
-    fi
+    # Disarm every host it was armed on, always, so this section leaves the rig
+    # as it found it. A stray PILOT_FAULT_CPU_VENDOR left on ANY host turns
+    # every wake in the fleet into a reboot, so the cleanup is checked per host
+    # rather than trusted.
+    CB_DIRTY=""
+    for ip in "${CB_HOSTS[@]:-${LIVE_IPS[@]}}"; do
+      $SSH "root@$ip" "sed -i '/^PILOT_FAULTS=/d;/^PILOT_FAULT_CPU_VENDOR=/d' /etc/pilots/hostd.env && systemctl restart hostd" >/dev/null 2>&1
+      if wait_serving "$ip" 120; then
+        CB_LEFT=$($SSH "root@$ip" "grep -c PILOT_FAULT /etc/pilots/hostd.env" 2>/dev/null | tr -d '[:space:]')
+        CB_NOW=$(curl -sf -m 5 "http://${ip}:8080/v1/health" 2>/dev/null | jf cpu_vendor)
+        [ "${CB_LEFT:-1}" = "0" ] && [ -n "$CB_NOW" ] && [ "$CB_NOW" != "$CB_OTHER" ] \
+          || CB_DIRTY="${CB_DIRTY}${ip}(left=${CB_LEFT:-?},vendor=${CB_NOW:-?}) "
+      else
+        CB_DIRTY="${CB_DIRTY}${ip}(did not come back) "
+      fi
+    done
+    [ -z "$CB_DIRTY" ] \
+      && ok "the fault is disarmed on every host and each reports its real vendor again" \
+      || bad "the vendor fault was left behind on: ${CB_DIRTY}"
   fi
 fi
 
