@@ -335,8 +335,24 @@ func TestADestroyedBuilderReleasesItsNameAndAUserMachineDoesNot(t *testing.T) {
 			"now take a URL that was promised to be permanent")
 	}
 
-	// And a LIVE builder still holds its name: the exception is for tombstones
-	// only, or two builders would race for one host's build path.
+	// A builder STRANDED on another host does not hold this host's name.
+	// A rescue used to move one there, keeping the name of the host it was
+	// minted for, and findBuilder requires the host to match -- so the row
+	// was useless to its new host and fatal to its old one.
+	if err := store.PutMachine(ctx, &state.Machine{
+		ID: "m-stranded", Name: BuilderName("ops", "host-other"),
+		HostID: "host-test", State: StateSuspended,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m2 := &Manager{opts: Options{Store: store, HostID: "host-other"}}
+	if err := m2.ensureNameFree(ctx, BuilderName("ops", "host-other")); err != nil {
+		t.Errorf("a builder stranded on another host still holds host-other's "+
+			"name, so host-other can never build again: %v", err)
+	}
+
+	// And a LIVE builder ON THIS HOST still holds its name: the exception is
+	// for tombstones and strays, or two builders would race for one host.
 	if err := store.PutMachine(ctx, &state.Machine{
 		ID: "m-builder2", Name: builder, HostID: "host-test", State: state.StateRunning,
 	}); err != nil {

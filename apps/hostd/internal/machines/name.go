@@ -170,7 +170,14 @@ func (m *Manager) ensureNameFree(ctx context.Context, name string) error {
 		if row.Name != name {
 			continue
 		}
-		if reusable && row.State == state.StateDestroyed {
+		// Destroyed, or stranded on a host this name does not belong to.
+		//
+		// The second case is what a rescue used to leave behind: a builder
+		// named for host A restored onto host B keeps A's name, and findBuilder
+		// requires the row's host to match, so B ignores it and A can never
+		// mint its own again. Self-heal no longer rescues builders, but rows
+		// stranded before that fix must not keep a host bricked forever.
+		if reusable && (row.State == state.StateDestroyed || row.HostID != m.opts.HostID) {
 			continue
 		}
 		return fmt.Errorf("machines: the name %q is already taken", name)

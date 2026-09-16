@@ -13,10 +13,12 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/metrics"
+	"github.com/vivek7405/pilots/hostd/internal/quota"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -254,6 +256,26 @@ func Tick(ctx context.Context, opts Options) {
 
 	for _, m := range opts.Fleet.Machines() {
 		if liveIDs[m.HostID] || m.State == state.StateDestroyed {
+			continue
+		}
+		// A builder dies with its host, on purpose.
+		//
+		// Its name encodes the host it belongs to (machines.BuilderName),
+		// because the name check scans the whole fleet and two hosts must be
+		// able to hold a builder for the same org at once. Rescuing one moves
+		// a row named for host A onto host B, where nothing can use it:
+		// findBuilder requires the row's host to match, so B ignores it and
+		// mints its own, and A -- once it is back -- can never mint its own
+		// again, because the name it must use is held by that stranded row.
+		// Two of three rig hosts were bricked for building that way, every
+		// build on them failing with "the name ... is already taken".
+		//
+		// Nothing is lost by letting it go. A builder holds no durable state;
+		// it is a cache of layers that also live in object storage, and the
+		// next build on A makes a fresh one in seconds.
+		if strings.HasPrefix(m.Name, quota.BuilderNamePrefix) {
+			slog.Info("not rescuing a builder; its host is gone and its name belongs to that host",
+				"machine", m.ID, "name", m.Name)
 			continue
 		}
 		if rescuer, ok := RescuerFor(m.ID, opts.Fleet.MachineVendor(m.ID), live); !ok || rescuer != opts.HostID {
