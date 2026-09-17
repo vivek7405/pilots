@@ -338,3 +338,15 @@ func mustWrite(t *testing.T, path, body string) {
 		t.Fatal(err)
 	}
 }
+
+// The OCI layout is exported for its config blob alone and deleted at once,
+// so its layers are not compressed on the way out: the default would gzip
+// every layer of every build for one JSON document.
+func TestTheOCILayoutIsExportedUncompressed(t *testing.T) {
+	b := &Builder{opts: Options{}}
+	args := b.solveArgs(testBuilderAddr, "/work/context", "/work/rootfs.tar", "", "", "/work/metadata.json")
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "type=oci,tar=false,compression=uncompressed,dest=") {
+		t.Errorf("the OCI layout export compresses its layers: %v", args)
+	}
+}

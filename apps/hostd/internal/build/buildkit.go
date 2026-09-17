@@ -59,7 +59,10 @@ func (b *Builder) solveArgs(addr, contextDir, out, cacheDir, seedDir, metadata s
 	if metadata != "" {
 		args = append(args,
 			"--metadata-file", metadata,
-			"--output", "type=oci,tar=false,dest="+ociLayoutDir(metadata))
+			// compression=uncompressed: the layout exists to be read for one
+			// config blob and is deleted at once, and the default re-gzips
+			// every layer of every build to produce it.
+			"--output", "type=oci,tar=false,compression=uncompressed,dest="+ociLayoutDir(metadata))
 	}
 
 	// The cache is what makes a redeploy cheap. Both directories are on the
