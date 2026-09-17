@@ -805,7 +805,12 @@ Landmines:
   "no human action" covers the platform, not the application's connections.
 - **Nothing here may enter a snapshot.** Routes, NAT66 and the filter are netns
   and root-namespace state, rebuilt at restore. The guest knows `169.254.0.22`,
-  its own `fdee::21`, and whatever DNS returned.
+  its own `fdee::21`, and whatever DNS returned -- and its gateway's MAC, which
+  is why every namespace's tap carries the one constant `netns.TapMAC`. A tap
+  that came back from a rebuild with a fresh MAC left the restored guest's
+  neighbour tables pointing at a MAC nothing had: its IPv6 replies went nowhere
+  for the ~15 s unreachability detection takes to give up on unicast probes,
+  which read as a `.internal` name that resolved and did not answer.
 - **Key rotation is a readdressing event.** Machine addresses derive from the
   host's key, so rotating it moves every machine that host runs:
   `pilot hosts drain <host>` first, or accept a connection-reset event for all

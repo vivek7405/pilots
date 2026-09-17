@@ -73,7 +73,7 @@ func BootFromDisk(ctx context.Context, cfg InstantConfig, store block.ObjectStor
 	err = inParallel(
 		func() error {
 			// Teardown-first, so re-creating an existing namespace is safe.
-			if err := netns.Setup(cfg.Slot, cfg.MAC, cfg.JailUID); err != nil {
+			if err := netns.Setup(cfg.Slot, cfg.JailUID); err != nil {
 				return fmt.Errorf("fc: netns for a cold boot: %w", err)
 			}
 			return nil

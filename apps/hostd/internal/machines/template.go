@@ -774,7 +774,7 @@ func (m *Manager) captureTemplate(ctx context.Context, v variant, snapKey string
 	if err != nil {
 		return uuid.Nil, uuid.Nil, err
 	}
-	if err := netns.Setup(slot, mac, m.opts.FCConfig.JailUID); err != nil {
+	if err := netns.Setup(slot, m.opts.FCConfig.JailUID); err != nil {
 		return uuid.Nil, uuid.Nil, err
 	}
 

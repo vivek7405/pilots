@@ -155,7 +155,7 @@ func RestoreInstant(ctx context.Context, cfg InstantConfig, dl Uploader,
 			// Restore owns this rather than assuming it survived: a suspend
 			// releases the namespace, and a restore on another host never had
 			// one.
-			if err := netns.Setup(cfg.Slot, cfg.MAC, cfg.JailUID); err != nil {
+			if err := netns.Setup(cfg.Slot, cfg.JailUID); err != nil {
 				return fmt.Errorf("fc: netns for restore: %w", err)
 			}
 			return nil

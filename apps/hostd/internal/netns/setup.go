@@ -15,17 +15,17 @@ import (
 // forwarding, NAT, and the egress firewall.
 //
 // tapOwnerUID must be the uid the jailer drops Firecracker to, or FC cannot
-// open the tap. macAddr is the guest's virtio-net MAC.
+// open the tap. The tap carries TapMAC, never a per-machine one: see TapMAC.
 //
 // Create is teardown-first and therefore idempotent: a create that failed
 // partway leaves resources behind, and the next attempt must not trip over
 // them.
-func Setup(s *Slot, macAddr string, tapOwnerUID int) (err error) {
+func Setup(s *Slot, tapOwnerUID int) (err error) {
 	_ = Teardown(s) // best effort; a stale namespace must not block a create
 
-	mac, err := net.ParseMAC(macAddr)
+	mac, err := net.ParseMAC(TapMAC)
 	if err != nil {
-		return fmt.Errorf("netns: bad mac %q: %w", macAddr, err)
+		return fmt.Errorf("netns: bad tap mac %q: %w", TapMAC, err)
 	}
 
 	// Undo everything if any step fails, so a partial namespace never

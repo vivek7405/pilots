@@ -51,6 +51,20 @@ const (
 	// TapName is the tap device inside the namespace, referenced by
 	// Firecracker's network-interface config as host_dev_name.
 	TapName = "vmnet"
+	// TapMAC is the MAC of every namespace's tap, the guest's gateway. One
+	// constant for the fleet, like the gateway addresses beside it: a guest
+	// caches its gateway's MAC in its neighbour tables, and those tables are
+	// in the memory image a suspend captures. A tap that came back with a
+	// fresh random MAC on every wake left the restored guest sending its
+	// replies to a MAC nothing had any more -- for IPv6, until unreachability
+	// detection gave up on three unicast probes and multicast-resolved it,
+	// about fifteen seconds after the first packet. IPv4 was spared only
+	// because a kernel refreshes an ARP entry from the request the namespace
+	// sends when it resolves the guest; neighbour discovery refreshes the
+	// link-local entry that solicitation was sourced from, not the gateway's.
+	// Proven with a capture on the tap: the guest's SYN-ACKs leaving for the
+	// previous tap's MAC while the client retransmitted into the void.
+	TapMAC = "02:70:69:6c:6f:74"
 
 	// GuestAppPort and GuestAgentPort are what the router dials through the
 	// slot's host-facing IP.
