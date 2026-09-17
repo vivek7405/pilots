@@ -50,6 +50,19 @@ is stated rather than implied:
 | **Volume** | **per-write durable** | JuiceFS chunk upload per write; `--writeback` deliberately absent; the drive is `cache_type Writeback` |
 | **Machine root** | **RPO <= 60 s** — the disk is durable in S3 as of the last checkpoint, suspend, **or root flush, whichever is most recent** | a periodic disk-only checkpoint: pause → read the dirty bitmap → copy the dirty ranges → resume → chunkify and upload |
 
+The flush widens what self-heal will claim, and that is deliberate. Before it,
+a machine whose row named no disk build was left alone when its host went
+silent, because a claim on it could only be destruction: nothing in S3 to
+bring back, and an owner that may only be partitioned still running the
+guest. With the flush on, every running machine names a durable disk within a
+window, so self-heal claims **every** machine of a host that has been silent
+for `state.DeadAfter`, sleeping or running, and cold-boots it from that disk.
+The blast radius of a gossip stall that long is therefore the whole host, not
+its sleeping machines; the claim guard bounds a running machine the same way
+it bounds a suspended one, and a returning owner finds its rows claimed and
+kills its own copies. A shorter `DeadAfter` is a faster rescue and a wider
+window for that stall; it is one number for exactly this reason.
+
 The root's window is a published, operator-tunable figure —
 `PILOT_ROOT_FLUSH_INTERVAL`, default `60s`, `0` disables — and a measured
 one: `pilots_root_flush_pause_seconds` (the guest pause a flush costs, SLO
