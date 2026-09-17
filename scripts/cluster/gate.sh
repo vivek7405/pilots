@@ -1184,13 +1184,20 @@ import sys, json
 print(sum(1 for h in json.load(sys.stdin) if h.get('alive')))" 2>/dev/null
   }
 
+  # Five minutes, not two. A brand-new host serves the API only once its
+  # replica has caught up (the join gate), and catching up means pulling the
+  # fleet's whole history: on a rig that has run batteries for days that is
+  # half a million versions, and the API answered nothing readable for the
+  # whole of a two-minute window while the bootstrap itself had succeeded.
+  # The checklist asks for "within minutes"; the time is printed so a slower
+  # join is seen as one rather than hidden inside a wider budget.
   START=$SECONDS; N=0
-  while [ $((SECONDS - START)) -lt 120 ]; do
+  while [ $((SECONDS - START)) -lt 300 ]; do
     N=$(live_seen "$NEW_IP"); [ "$N" = "$LIVE" ] && break
     sleep 5
   done
   [ "$N" = "$LIVE" ] && ok "the new host sees ${N} live hosts after $((SECONDS - START))s" \
-    || bad "the new host sees ${N:-<no readable answer from /v1/hosts>} live hosts, want ${LIVE}"
+    || bad "the new host sees ${N:-<no readable answer from /v1/hosts>} live hosts after $((SECONDS - START))s, want ${LIVE}"
 
   START=$SECONDS; N=0
   while [ $((SECONDS - START)) -lt 120 ]; do
@@ -2206,6 +2213,15 @@ say "18. hostd killed at ten random points converges to the running set"
 # The kill lands at a random point in the create on purpose: the interesting
 # window is between spawning a Firecracker and recording it.
 if [ -n "$H_IP" ]; then
+  # Something for a restart to re-adopt. By this point in the run the host
+  # may hold no machines at all -- its earlier ones were rescued elsewhere or
+  # destroyed by the sections above -- and then no kill can adopt anything
+  # and the journal assertion below fails for want of a subject, which is
+  # what it did on a run where every earlier assertion here was green.
+  KILL_ANCHOR=$(create_on_host "$H_IP" "$H_IP" '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}' | jf id)
+  for f in $CREATE_FILLERS; do api "$H_IP" DELETE "/v1/machines/${f}" >/dev/null 2>&1; done
+  [ -n "$KILL_ANCHOR" ] && ok "anchored ${KILL_ANCHOR} on ${H_IP} for the restarts to re-adopt" \
+    || bad "could not place an anchor machine on ${H_IP}; the re-adoption assertion below has no subject"
   KILL_BASE=$(host_counts "$H_IP")
   KILL_IDS_BEFORE=$(machine_ids_on "$H_IP")
   KILL_SINCE=$($SSH "root@$H_IP" "date '+%Y-%m-%d %H:%M:%S'" 2>/dev/null | tr -d '\n')
@@ -2237,6 +2253,7 @@ if [ -n "$H_IP" ]; then
   $SSH "root@$H_IP" "journalctl -u hostd --since '${KILL_SINCE}' --no-pager 2>/dev/null | grep -q 're-adopted machines from a previous run'" >/dev/null 2>&1 \
     && ok "the journal shows machines re-adopted by comm across a restart" \
     || bad "no restart re-adopted anything; the running machines were abandoned"
+  [ -n "$KILL_ANCHOR" ] && api "$H_IP" DELETE "/v1/machines/${KILL_ANCHOR}" >/dev/null 2>&1
 
   # Past the reaper's 5-minute interval, so an orphan has actually been swept
   # rather than merely not looked at yet.
@@ -3225,14 +3242,19 @@ try:
     rows = json.load(sys.stdin)
 except Exception:
     rows = []
-print(rows[0]['id'] if rows else '')" 2>/dev/null)
+print(rows[0]['id'] if rows and rows[0].get('healthy') else '')" 2>/dev/null)
       [ -n "$DV_REL" ] && break
       sleep 4
     done
+    # A HEALTHY release, not the first row: the rollout records the release
+    # before it gates the replica, and the verdict line in the build log and
+    # the service's release_id are both written when the gate passes. Read
+    # in that window, the log ended at "deploying" and every host reported
+    # release_id empty, for a deploy that went through seconds later.
     if [ -z "$DV_REL" ]; then
-      bad "no release was cut for ${DV_SVC}: a build nobody watched deployed nothing"
+      bad "no healthy release was cut for ${DV_SVC}: a build nobody watched deployed nothing"
     else
-      ok "${DV_READER} sees release ${DV_REL}, cut with no client attached"
+      ok "${DV_READER} sees release ${DV_REL}, cut and gated with no client attached"
 
       DV_N=$(api "$DV_READER" GET "/v1/services/${DV_SVC}/releases" 2>/dev/null \
         | python3 -c "import sys, json; print(len(json.load(sys.stdin)))" 2>/dev/null)
