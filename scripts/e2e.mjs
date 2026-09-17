@@ -3238,8 +3238,18 @@ async function deployOnVerdictAssertions() {
       const last = lines[lines.length - 1];
       assert(last.release === release.id,
         `the log's last line does not carry the release: ${JSON.stringify(last)}`);
-      assert(last.result === release.rootfs_build_id,
-        `the log's image id and the release's disagree: ${JSON.stringify(last)} vs ${release.rootfs_build_id}`);
+      // The release's own rootfs is the checkpoint disk its first replica was
+      // photographed with, whose parent is the image; the machine rows are
+      // where the image id itself is visible. So the verdict's image is held
+      // against what the release's replicas were built from, which is the
+      // claim the old rootfs-id equality made before a release adopted its
+      // checkpoint's disk.
+      const replicas = await replicasOf(svc.id);
+      assert(replicas.length > 0, 'the release has no replica to check the image of');
+      for (const m of replicas) {
+        assert(m.image_ref === last.result,
+          `replica ${m.id} runs image ${m.image_ref}, but the verdict named ${last.result}`);
+      }
       assert(!last.error, `the terminal line reports an error: ${JSON.stringify(last)}`);
     });
     if (!release) return;
@@ -6125,7 +6135,13 @@ async function exitAssertions() {
       // travels the same namespace and slot address the router uses to reach
       // the guest agent. A machine whose namespace or slot was lost on the way
       // out cannot answer that at all.
-      const { status: served } = await viaRouter(host, '/', 30_000);
+      // Within sixty seconds of an app start the guest agent holds a refused
+      // connection for up to thirty, on the reading that the app is still
+      // coming up -- and a machine that just cold-booted is inside that
+      // window. The budget here is that hold plus a margin, so a 502 that
+      // arrives at thirty-one seconds is the honest answer it is and not a
+      // router that never answered.
+      const { status: served } = await viaRouter(host, '/', 45_000);
       assert(served !== 0,
         'the router did not answer at all for a machine it just brought back');
 
