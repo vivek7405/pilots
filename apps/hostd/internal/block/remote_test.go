@@ -534,3 +534,47 @@ func TestBuildCompleteRejectsAHoleyCache(t *testing.T) {
 		t.Error("a directory that does not exist was reported complete")
 	}
 }
+
+// A build directory has one hydrator at a time, across processes: a second
+// Prefault against a directory whose lock another holder has yields at once,
+// leaving the file to the one already pulling, and pulls once the lock is
+// free.
+func TestPrefaultYieldsToTheHydratorAlreadyPulling(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store := newFakeStore()
+	src := filepath.Join(dir, "src.bin")
+	if err := os.WriteFile(src, bytes.Repeat([]byte{7}, int(4*testBlock)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	id := uuid.New()
+	publish(t, store, filepath.Join(dir, "pub"), src, id, "")
+
+	cacheRoot := filepath.Join(dir, "cache")
+	b, err := OpenRemoteBuild(ctx, store, id, cacheRoot)
+	if err != nil {
+		t.Fatalf("OpenRemoteBuild: %v", err)
+	}
+	defer b.Close()
+
+	// Another process holds the lock: modelled by a second descriptor with
+	// the lock taken, which is what flock sees from another process too.
+	release, held := takeHydrateLock(b.dir)
+	if !held {
+		t.Fatal("the lock could not be taken on an empty directory")
+	}
+	before := store.ranges
+	if err := b.Prefault(ctx); err != nil {
+		t.Fatalf("Prefault with the lock held elsewhere: %v", err)
+	}
+	if store.ranges != before {
+		t.Fatalf("Prefault pulled %d ranges while another hydrator held the lock", store.ranges-before)
+	}
+	release()
+	if err := b.Prefault(ctx); err != nil {
+		t.Fatalf("Prefault after the lock was released: %v", err)
+	}
+	if store.ranges == before {
+		t.Fatal("Prefault pulled nothing once the lock was free")
+	}
+}

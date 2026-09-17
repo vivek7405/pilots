@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/RoaringBitmap/roaring/v2"
@@ -373,5 +374,41 @@ func (b *RemoteBuild) Prefault(ctx context.Context) error {
 		return nil
 	}
 
+	// One hydrator per build directory, across processes. The manager pulls
+	// a template it adopts, and every block server on a machine restored
+	// from it pulls the same template for the same reason; a three-replica
+	// deploy on a cold host was four full downloads of one object into one
+	// file. The lock is advisory and per directory, so the first to take it
+	// pulls and the rest keep serving lazily and let the marker say when the
+	// bytes have landed. Released with the process, so a hydrator that dies
+	// hands the file to the next one that asks.
+	release, held := takeHydrateLock(b.dir)
+	if !held {
+		return nil
+	}
+	defer release()
+
 	return b.fetchRange(ctx, 0, total)
+}
+
+// hydrateLock is the advisory lock file a hydrating process holds.
+const hydrateLock = "data.hydrating"
+
+// takeHydrateLock takes the build directory's hydrate lock without waiting.
+// It reports false when another process holds it. A directory that cannot
+// hold a lock file at all is treated as unlocked: a pull that cannot be
+// deduplicated is still a pull.
+func takeHydrateLock(dir string) (release func(), held bool) {
+	f, err := os.OpenFile(filepath.Join(dir, hydrateLock), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return func() {}, true
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		return nil, false
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, true
 }
