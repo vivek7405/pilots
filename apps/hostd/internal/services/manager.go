@@ -223,6 +223,17 @@ func (m *Manager) Deploy(ctx context.Context, serviceID, rootfsBuildID string,
 	fresh, err := m.rollOut(ctx, svc, rel, health, replicas, knobs)
 	if err != nil {
 		// Nothing has been flipped, so the old release is still serving.
+		var gate *api.HealthGateDetails
+		if errors.As(err, &gate) {
+			// A replica that came up and failed its gate is the evidence: the
+			// refusal tells the caller to read its console, and diagnose
+			// reads it back. Destroying it here made both a lie -- by the
+			// time anyone looked, the machine named in the 422 was gone.
+			// Suspended, so it stops billing, and pruned by the next deploy
+			// that succeeds, like any superseded release's replicas.
+			m.park(ctx, svc.ID, fresh)
+			return nil, err
+		}
 		// Clear up what was half-built rather than leaving it to bill.
 		m.cleanUp(ctx, svc.ID, fresh, "deploy")
 		return nil, err
@@ -826,6 +837,21 @@ func (m *Manager) cleanUp(ctx context.Context, serviceID string, machines []stri
 	for _, id := range machines {
 		if err := m.opts.Machines.Destroy(ctx, id); err != nil {
 			slog.Error("could not clean up a failed "+what+"'s machine",
+				"machine", id, "service", serviceID, "err", err)
+		}
+	}
+}
+
+// park suspends the machines of a rollout that failed its health gate, on the
+// same detached context and for the same reason cleanUp uses one.
+func (m *Manager) park(ctx context.Context, serviceID string, machines []string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+	defer cancel()
+
+	for _, id := range machines {
+		if err := m.opts.Machines.Suspend(ctx, id); err != nil {
+			slog.Warn("could not park a replica that failed its health gate; "+
+				"it stays up until the idle monitor reaches it",
 				"machine", id, "service", serviceID, "err", err)
 		}
 	}

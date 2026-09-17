@@ -121,3 +121,51 @@ func TestTheProcessCheckReadsTheAgentsOwnEnvelope(t *testing.T) {
 		t.Fatalf("the agent's own answer was refused: %v", err)
 	}
 }
+
+// A replica that failed its gate is kept, suspended, not destroyed: the 422
+// tells the caller to read its console and diagnose reads it back, and both
+// were lies while the rollout destroyed the machine they named. The next
+// deploy that succeeds prunes it like any superseded release's replica.
+func TestAGateFailedReplicaIsParkedForDiagnosisThenPruned(t *testing.T) {
+	ctx := context.Background()
+	m, fm, _, _ := fixture(t, 1)
+	if _, err := m.Deploy(ctx, "svc-1", "rootfs-1", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	fm.events = nil
+	fm.createUnhealthy = true
+	_, err := m.Deploy(ctx, "svc-1", "rootfs-2", nil)
+	var gate *api.HealthGateDetails
+	if !errors.As(err, &gate) {
+		t.Fatalf("the second deploy did not fail its gate: %v", err)
+	}
+	var suspended, destroyed bool
+	for _, e := range fm.events {
+		if e == "suspend:"+gate.Replica {
+			suspended = true
+		}
+		if e == "destroy:"+gate.Replica {
+			destroyed = true
+		}
+	}
+	if !suspended || destroyed {
+		t.Fatalf("the failed replica %s was not parked (suspended=%v destroyed=%v): %v",
+			gate.Replica, suspended, destroyed, fm.events)
+	}
+
+	fm.events = nil
+	fm.createUnhealthy = false
+	if _, err := m.Deploy(ctx, "svc-1", "rootfs-3", nil); err != nil {
+		t.Fatalf("the third deploy failed: %v", err)
+	}
+	pruned := false
+	for _, e := range fm.events {
+		if e == "destroy:"+gate.Replica {
+			pruned = true
+		}
+	}
+	if !pruned {
+		t.Errorf("the parked replica %s survived the next successful deploy: %v", gate.Replica, fm.events)
+	}
+}

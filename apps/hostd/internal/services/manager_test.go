@@ -33,7 +33,9 @@ type fakeMachines struct {
 	creates          int
 	noSnap           bool // Checkpoint produces no memory build
 	suspends         []string
-	touches          []string
+	// createUnhealthy makes every machine created from now on fail its probe.
+	createUnhealthy bool
+	touches         []string
 	// healthyAfterRedeploy is what a redeployed machine's probe answers. False
 	// is how a test drives a failed gate onto the recovery path.
 	healthyAfterRedeploy bool
@@ -96,7 +98,7 @@ func (f *fakeMachines) Create(ctx context.Context, req api.CreateMachineRequest)
 	if err := f.store.PutMachine(ctx, row); err != nil {
 		return nil, err
 	}
-	f.healthy[id] = true
+	f.healthy[id] = !f.createUnhealthy
 	if f.onCreate != nil {
 		f.onCreate()
 	}
