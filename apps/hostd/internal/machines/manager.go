@@ -210,7 +210,11 @@ type Manager struct {
 	// yet delete. See rootflush.go.
 	flushing sync.Map // machine id -> true
 	staleMem sync.Map // machine id -> memory build id
-	flight   *inFlight
+	// pulling is every template build a background hydration is running
+	// for, so a burst of creates on a cold host starts one pull, not one
+	// per create.
+	pulling sync.Map // build id -> true
+	flight  *inFlight
 
 	// retired keeps the engine counters monotonic across a machine going
 	// away. See retiredUffd.
@@ -851,6 +855,13 @@ func (m *Manager) deleteRemoteState(ctx context.Context, id string) error {
 	var builds []string
 	if row, err := m.opts.Store.GetMachine(ctx, id); err == nil {
 		builds = append(builds, row.MemBuildID, row.RootfsBuildID)
+	}
+	// The memory image a root flush unpinned from the row and was holding
+	// until the fault handler no longer needed it. Suspend and Redeploy drain
+	// it on their way; a machine destroyed between a flush and its next
+	// suspend would otherwise leave its last image in the bucket for good.
+	if stale, ok := m.staleMem.LoadAndDelete(id); ok {
+		builds = append(builds, stale.(string))
 	}
 	if cks, err := m.opts.Store.ListCheckpoints(ctx, id); err == nil {
 		for _, c := range cks {
