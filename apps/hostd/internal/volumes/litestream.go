@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -83,20 +84,17 @@ func (m *Manager) startReplication(ctx context.Context, id string) error {
 // Attach their machines' next wake or cold boot goes through. The units are
 // left running now: stopping one for a volume this host is serving would open
 // a replication gap for nothing.
+//
+// Found through the symlinks `systemctl enable` writes, not through
+// `list-unit-files --state=enabled`, which does not list the instances of a
+// template: on a host with ten enabled instances it answered none.
 func (m *Manager) DisableLegacyReplicationUnits(ctx context.Context) {
-	out, err := m.run(ctx, "systemctl", "list-unit-files", "--state=enabled",
-		"--no-legend", "--plain", "litestream@*.service")
-	if err != nil {
-		return
-	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		fields := strings.Fields(line)
-		if len(fields) == 0 || !strings.HasPrefix(fields[0], "litestream@") {
-			continue
-		}
-		if _, err := m.run(ctx, "systemctl", "disable", fields[0]); err != nil {
+	links, _ := filepath.Glob(filepath.Join(m.cfg.SystemdRoot, "*.wants", "litestream@*.service"))
+	for _, link := range links {
+		unit := filepath.Base(link)
+		if _, err := m.run(ctx, "systemctl", "disable", unit); err != nil {
 			slog.Warn("could not un-enable a legacy replication unit; it will start "+
-				"ahead of hostd at the next boot", "unit", fields[0], "err", err)
+				"ahead of hostd at the next boot", "unit", unit, "err", err)
 		}
 	}
 }

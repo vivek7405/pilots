@@ -2,6 +2,7 @@ package volumes
 
 import (
 	"context"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -62,10 +63,11 @@ func newTestManager(t *testing.T) (*Manager, *recorder) {
 		Bucket:    "pilots",
 		AccessKey: "AK", SecretKey: "SK",
 		JuiceFSBin: "/opt/pilots/bin/juicefs", LitestreamBin: "/opt/pilots/bin/litestream",
-		MetaRoot:   filepath.Join(root, "meta"),
-		MountRoot:  filepath.Join(root, "mnt"),
-		CacheRoot:  filepath.Join(root, "cache"),
-		ConfigRoot: filepath.Join(root, "etc"),
+		MetaRoot:    filepath.Join(root, "meta"),
+		MountRoot:   filepath.Join(root, "mnt"),
+		CacheRoot:   filepath.Join(root, "cache"),
+		ConfigRoot:  filepath.Join(root, "etc"),
+		SystemdRoot: filepath.Join(root, "systemd"),
 	})
 	rec := &recorder{}
 	m.run = rec.run
@@ -445,5 +447,35 @@ func TestAttachKeepsCompactedSlicesOnAnOlderVolume(t *testing.T) {
 				t.Fatalf("juicefs config set trash-days to %q, want 1: %v", v, c.args)
 			}
 		}
+	}
+}
+
+// The units an earlier hostd enabled are found through the symlinks enable
+// wrote, because list-unit-files does not list a template's instances, and
+// each is disabled -- not stopped, since one may be replicating a volume this
+// host is serving.
+func TestLegacyReplicationUnitsAreFoundThroughTheirSymlinks(t *testing.T) {
+	m, rec := newTestManager(t)
+	wants := filepath.Join(m.cfg.SystemdRoot, "multi-user.target.wants")
+	if err := os.MkdirAll(wants, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"litestream@vol-1.service", "litestream@vol-2.service", "hostd.service"} {
+		if err := os.WriteFile(filepath.Join(wants, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.DisableLegacyReplicationUnits(context.Background())
+	var disabled []string
+	for _, c := range rec.calls {
+		if filepath.Base(c.name) == "systemctl" && len(c.args) == 2 && c.args[0] == "disable" {
+			disabled = append(disabled, c.args[1])
+		}
+		if strings.Contains(strings.Join(c.args, " "), "stop") {
+			t.Fatalf("a legacy unit was stopped, not just un-enabled: %v", c.args)
+		}
+	}
+	if strings.Join(disabled, ",") != "litestream@vol-1.service,litestream@vol-2.service" {
+		t.Fatalf("disabled %v, want exactly the two litestream instances", disabled)
 	}
 }
