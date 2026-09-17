@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -127,10 +128,25 @@ func forwardUntilGone(ln net.Listener, port int) {
 	}
 }
 
-// pipe copies both ways and returns when either side is done.
+// pipe copies both ways and returns when both sides are done.
+//
+// Each direction's end is passed on as a half-close rather than ending the
+// whole pipe: a client that shuts its write side after sending its request
+// and then waits for the answer -- which is what a request-then-EOF protocol
+// does -- would otherwise lose the answer the moment its EOF arrived.
 func pipe(a, b net.Conn) {
-	errc := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(a, b); errc <- struct{}{} }()
-	go func() { _, _ = io.Copy(b, a); errc <- struct{}{} }()
-	<-errc
+	var wg sync.WaitGroup
+	wg.Add(2)
+	copyThenHalfClose := func(dst, src net.Conn) {
+		defer wg.Done()
+		_, _ = io.Copy(dst, src)
+		if cw, ok := dst.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+			return
+		}
+		_ = dst.Close()
+	}
+	go copyThenHalfClose(a, b)
+	go copyThenHalfClose(b, a)
+	wg.Wait()
 }

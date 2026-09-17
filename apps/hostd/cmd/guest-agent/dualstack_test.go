@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"strings"
@@ -124,5 +125,59 @@ func TestAVolumeMountsWithoutAnEmptyLostAndFound(t *testing.T) {
 	clearEmptyLostAndFound(dir)
 	if _, err := os.Stat(dir + "/lost+found/#12"); err != nil {
 		t.Fatalf("a lost+found holding recovered files was removed: %v", err)
+	}
+}
+
+// A client that half-closes after its request still gets the answer: the
+// shim passes the EOF on as a half-close and keeps the other direction open.
+func TestTheShimCarriesAHalfClose(t *testing.T) {
+	app, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Close()
+	go func() {
+		c, err := app.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		req, _ := io.ReadAll(c) // reads until the client's EOF
+		_, _ = c.Write([]byte("answer to " + string(req)))
+	}()
+
+	front, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer front.Close()
+	go func() {
+		c, err := front.Accept()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		up, err := net.Dial("tcp", app.Addr().String())
+		if err != nil {
+			return
+		}
+		defer up.Close()
+		pipe(c, up)
+	}()
+
+	client, err := net.Dial("tcp", front.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	_, _ = client.Write([]byte("ping"))
+	_ = client.(*net.TCPConn).CloseWrite()
+	_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+	got, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatalf("reading the answer: %v", err)
+	}
+	if string(got) != "answer to ping" {
+		t.Fatalf("got %q, want the answer written after the client's half-close", got)
 	}
 }
