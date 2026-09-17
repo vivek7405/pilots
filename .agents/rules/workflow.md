@@ -57,6 +57,17 @@ it, and the table is in `AGENTS.md`.
 A block that cannot set itself up must fail loudly. A quiet early return
 retires every assertion below it at runtime, which is worse than a red test.
 
+**Budget the batteries.** The e2e takes ~35 minutes in full and the gate two
+to three hours; neither may be overlapped with the other. Say the ETA before
+starting one and run it in the background. Confirm a single fix with
+`PILOTS_E2E_ONLY=<sections>` (minutes; the summary names every section not
+run and exits 2), and run the full battery once per wave of fixes, never once
+per fix. A battery failure is diagnosed by reproducing its calls by hand,
+not by re-running the battery. Before a timing run: disk under 85%, no
+leftover battery machines, and A/B the previous binary on the same host
+before reading code. The full rules are in `AGENTS.md` under "Budget the
+batteries before starting them".
+
 ## Working on the engine
 
 The uffd handler and the NBD handler are **ports, not rewrites**: they encode
