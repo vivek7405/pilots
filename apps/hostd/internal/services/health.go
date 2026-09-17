@@ -139,11 +139,17 @@ func (m *Manager) probeProcess(ctx context.Context, machineID string) error {
 	if err != nil {
 		return &probeFailure{api.HealthLast{Error: "the replica's agent could not list its processes: " + err.Error()}}
 	}
-	var procs []agentProcess
-	if err := json.Unmarshal(raw, &procs); err != nil {
+	// The agent answers {"processes":[...]} -- see handleProcesses in
+	// cmd/guest-agent. Decoded through that envelope, not as a bare list: the
+	// first cut of this decoded a list, its fake agreed with it, and the real
+	// agent's answer was "unreadable" on every probe.
+	var listing struct {
+		Processes []agentProcess `json:"processes"`
+	}
+	if err := json.Unmarshal(raw, &listing); err != nil {
 		return &probeFailure{api.HealthLast{Error: "the replica's process list was unreadable: " + err.Error()}}
 	}
-	app, ok := appProcess(procs)
+	app, ok := appProcess(listing.Processes)
 	if !ok {
 		return &probeFailure{api.HealthLast{Error: "the replica supervises no app process"}}
 	}

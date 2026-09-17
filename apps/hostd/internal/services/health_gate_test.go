@@ -110,3 +110,14 @@ func TestTheProcessCheckJudgesTheAppProcess(t *testing.T) {
 		t.Errorf("a lone process was not taken as the app: %+v", got)
 	}
 }
+
+// The gate reads the agent's answer as the agent writes it. This document is
+// a real GET /processes answer from a postgres replica, verbatim, so a change
+// to either side's shape fails here rather than as "unreadable" on a host.
+func TestTheProcessCheckReadsTheAgentsOwnEnvelope(t *testing.T) {
+	m, fm, _, _ := fixture(t, 1)
+	fm.processes = []byte(`{"processes":[{"name":"app","cmd":"docker-entrypoint.sh postgres","state":"running","pid":251,"restarts":0,"port":true}]}`)
+	if err := m.probeProcess(context.Background(), "m-1"); err != nil {
+		t.Fatalf("the agent's own answer was refused: %v", err)
+	}
+}

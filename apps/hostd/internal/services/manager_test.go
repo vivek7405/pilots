@@ -42,6 +42,8 @@ type fakeMachines struct {
 	// its gate not yet passed.
 	onCreate     func()
 	restartsByID map[string]int
+	// processes, when set, is what Processes answers for every machine.
+	processes []byte
 }
 
 func newFakeMachines(store state.Store) *fakeMachines {
@@ -189,17 +191,23 @@ func (f *fakeMachines) AppAddr(id string) (string, bool) { return "", false }
 
 // Processes answers the way the agent does for a machine whose app is up
 // (healthy) or crash-looping (not): the restart count climbs on every read.
+// The envelope is the agent's own, {"processes":[...]}, copied from a real
+// answer; a fake that returned a bare list once passed a gate the real agent
+// failed on every probe.
 func (f *fakeMachines) Processes(ctx context.Context, id string) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if f.processes != nil {
+		return f.processes, nil
+	}
 	if f.healthy[id] {
-		return []byte(`[{"name":"app","cmd":"serve","state":"running","pid":42,"restarts":0,"port":true}]`), nil
+		return []byte(`{"processes":[{"name":"app","cmd":"serve","state":"running","pid":42,"restarts":0,"port":true}]}`), nil
 	}
 	f.restartsByID[id]++
-	return []byte(fmt.Sprintf(`[{"name":"app","cmd":"serve","state":"running","pid":42,"restarts":%d,"port":true}]`, f.restartsByID[id])), nil
+	return []byte(fmt.Sprintf(`{"processes":[{"name":"app","cmd":"serve","state":"running","pid":42,"restarts":%d,"port":true}]}`, f.restartsByID[id])), nil
 }
 
 // The real one is a pure function of the two ids, so the fake spells the same
