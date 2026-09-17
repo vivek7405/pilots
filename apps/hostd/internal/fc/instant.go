@@ -1130,6 +1130,14 @@ func (m *Machine) beginCapture() {
 	m.captureDone = make(chan struct{})
 }
 
+// CaptureInFlight reports whether a background capture is still running,
+// without waiting for it.
+func (m *Machine) CaptureInFlight() bool {
+	m.captureMu.Lock()
+	defer m.captureMu.Unlock()
+	return m.captureDone != nil
+}
+
 // endCapture releases whoever is waiting on the capture.
 func (m *Machine) endCapture() {
 	m.captureMu.Lock()

@@ -63,8 +63,16 @@ func (m *Machine) StageRootFlush(ctx context.Context) (
 	}
 	// Never overlapping a checkpoint or a suspend, in either direction: they
 	// read the same bitmap and stage from the same cow, and the capture gate
-	// is what serialises them.
-	m.awaitCapture()
+	// is what serialises them. Never WAITED for, either: this runs under the
+	// machine's lock, and a checkpoint's upload runs with that lock free, so
+	// a tick landing inside the upload would have held the lock for its
+	// whole length and queued a suspend, a destroy or a rollout behind a
+	// background loop -- exactly what the lock's TryLock exists to prevent,
+	// through a door the TryLock could not see. A capture in flight is a
+	// disk already being made durable; the next tick has nothing to add.
+	if m.CaptureInFlight() {
+		return nil, nil
+	}
 	if m.lastRootFlush.IsZero() {
 		m.lastRootFlush = m.StartedAt
 	}

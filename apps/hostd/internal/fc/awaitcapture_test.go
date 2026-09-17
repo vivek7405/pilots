@@ -100,3 +100,28 @@ func TestABoundOfZeroWaitsAsLongAsItTakes(t *testing.T) {
 		t.Fatal("an unbounded wait did not return after the capture ended")
 	}
 }
+
+// The flush asks rather than waits: a capture in flight is reported as such
+// and the caller steps aside, because it holds the machine's lock and the
+// capture's upload can run for the length of an upload.
+func TestCaptureInFlightReportsWithoutWaiting(t *testing.T) {
+	m := &Machine{}
+	if m.CaptureInFlight() {
+		t.Fatal("nothing in flight was reported as a capture")
+	}
+	m.beginCapture()
+	done := make(chan bool, 1)
+	go func() { done <- m.CaptureInFlight() }()
+	select {
+	case got := <-done:
+		if !got {
+			t.Fatal("a capture in flight was not reported")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("CaptureInFlight waited on the capture instead of reporting it")
+	}
+	m.endCapture()
+	if m.CaptureInFlight() {
+		t.Fatal("a finished capture was still reported in flight")
+	}
+}
