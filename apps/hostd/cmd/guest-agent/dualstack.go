@@ -28,7 +28,7 @@ import (
 // IPv4-only listener exists, and lets go when that listener does.
 func dualStackShim(port int) {
 	for {
-		if hasListener(procNetTCP4, port) && !hasListener(procNetTCP6, port) {
+		if hasWildcardListener(procNetTCP4, port) && !hasListener(procNetTCP6, port) {
 			ln, err := net.Listen("tcp6", fmt.Sprintf("[::]:%d", port))
 			if err == nil {
 				log.Printf("guest-agent: the app listens on IPv4 only; answering [::]:%d for peers", port)
@@ -56,6 +56,25 @@ func hasListener(table string, port int) bool {
 }
 
 func tableHasListener(r io.Reader, port int) bool {
+	return tableHas(r, port, false)
+}
+
+// hasWildcardListener is hasListener for a socket bound to every address.
+//
+// The shim exists for an app on 0.0.0.0 that a peer cannot reach over IPv6.
+// An app on 127.0.0.1 chose to be reachable from nowhere else, and a shim on
+// [::] forwarding to loopback would hand every peer a listener that was
+// never meant to leave the guest. Only the wildcard bind is fronted.
+func hasWildcardListener(table string, port int) bool {
+	f, err := os.Open(table)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	return tableHas(f, port, true)
+}
+
+func tableHas(r io.Reader, port int, wildcardOnly bool) bool {
 	want := fmt.Sprintf(":%04X", port)
 	sc := bufio.NewScanner(r)
 	sc.Scan() // header
@@ -64,9 +83,13 @@ func tableHasListener(r io.Reader, port int) bool {
 		if len(fields) < 4 {
 			continue
 		}
-		if strings.HasSuffix(fields[1], want) && fields[3] == "0A" {
-			return true
+		if !strings.HasSuffix(fields[1], want) || fields[3] != "0A" {
+			continue
 		}
+		if wildcardOnly && !strings.HasPrefix(fields[1], "00000000:") {
+			continue
+		}
+		return true
 	}
 	return false
 }

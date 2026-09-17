@@ -66,6 +66,20 @@ func TestListenerTableParsing(t *testing.T) {
 	if tableHasListener(strings.NewReader(table), 3001) {
 		t.Fatal("an ESTABLISHED socket on 3001 was taken for a listener")
 	}
+
+	// A loopback-only listener is not fronted: the shim would otherwise hand
+	// every peer an app that chose to be reachable from nowhere else.
+	loopback := "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n" +
+		"   0: 0100007F:1F90 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 1 1 0000000000000000 100 0 0 10 0\n"
+	if !tableHas(strings.NewReader(loopback), 8080, false) {
+		t.Fatal("the loopback LISTEN socket was not seen at all")
+	}
+	if tableHas(strings.NewReader(loopback), 8080, true) {
+		t.Fatal("a 127.0.0.1-only listener would be exposed to peers by the shim")
+	}
+	if !tableHas(strings.NewReader(table), 8080, true) {
+		t.Fatal("the wildcard listener was not accepted as one")
+	}
 }
 
 // The links every init makes under /dev: a shell's process substitution opens
