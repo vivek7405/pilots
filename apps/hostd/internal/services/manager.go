@@ -38,6 +38,9 @@ type MachineManager interface {
 	// fleet-wide.
 	Touch(ctx context.Context, id string)
 	Exec(ctx context.Context, machineID string, req api.ExecRequest) (*api.ExecResponse, error)
+	// Processes is what the guest agent supervises in a machine, as the
+	// agent's own JSON: a list of {name, state, restarts, port}.
+	Processes(ctx context.Context, machineID string) ([]byte, error)
 	// CreateVolume makes one, for a service whose engine replicates between
 	// its own ordinals and therefore needs a volume per ordinal.
 	CreateVolume(ctx context.Context, req api.CreateVolumeRequest) (*state.Volume, error)
@@ -112,6 +115,9 @@ type Manager struct {
 	// tombstone to collect.
 	mu      sync.Mutex
 	rolling map[string]struct{}
+	// restartsSeen is the app process restart count the process health check
+	// last saw per machine, so a restart between two probes is visible.
+	restartsSeen sync.Map
 }
 
 func New(opts Options) *Manager {

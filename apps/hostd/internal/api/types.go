@@ -566,7 +566,7 @@ type BuildLogLine struct {
 //	{"type":"http","path":"/__webjs/ready","grace":40,"healthy_threshold":2}
 //	{"type":"cmd","test":["CMD-SHELL","pg_isready -U postgres"],"retries":5}
 type HealthCheck struct {
-	Type string `json:"type,omitempty"` // "http" (default) | "cmd" | "none"
+	Type string `json:"type,omitempty"` // "http" (default) | "cmd" | "process" | "none"
 	Path string `json:"path,omitempty"`
 	// Test is Docker's form: ["CMD-SHELL", "..."], ["CMD", argv...], ["NONE"].
 	Test []string `json:"test,omitempty"`

@@ -403,7 +403,12 @@ CREATE TABLE org_quotas (org_id TEXT PRIMARY KEY, max_machines INTEGER,
 --    "healthy_threshold":…}
 --   {"type":"cmd","test":["CMD-SHELL","pg_isready -U postgres"],
 --    "interval":…,"timeout":…,"grace":…,"retries":…}
+--   {"type":"process","interval":…,"timeout":…,"grace":…,"healthy_threshold":…}
 -- Docker semantics, so every stock image's own HEALTHCHECK maps straight in.
+-- "process" is Docker's semantics for an image with no HEALTHCHECK -- the
+-- supervised process is up and has not restarted between two checks -- and is
+-- the default for a private service that declares none, since private means
+-- there is nothing on the app port for the HTTP default to reach.
 -- A service with no domain still health-gates and still rolls back, but it has
 -- no concurrency signal -- so minMachinesRunning: 0 has no wake-on-request to
 -- fall back on and is REJECTED at validation rather than silently redefined.

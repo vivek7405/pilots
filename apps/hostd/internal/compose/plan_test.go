@@ -1065,3 +1065,42 @@ services:
 		t.Errorf("the 400 does not name the contradiction: %+v", perr.Unsupported)
 	}
 }
+
+// A private service has nothing to answer on the app port, so the default HTTP
+// probe can only refuse it. With no healthcheck of its own it is gated on its
+// process instead; one it declares still wins, and a public service keeps the
+// platform default.
+func TestAPrivateServiceWithNoHealthcheckIsGatedOnItsProcess(t *testing.T) {
+	plan, perr, err := Compile(context.Background(), Request{Compose: `
+name: shop
+services:
+  web:
+    image: nginx
+  db:
+    image: postgres
+    x-pilots:
+      private: true
+  cache:
+    image: redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+    x-pilots:
+      private: true
+`})
+	if err != nil || perr != nil {
+		t.Fatalf("compile: err=%v planErr=%+v", err, perr)
+	}
+	byName := map[string]Step{}
+	for _, s := range plan.Steps {
+		byName[s.Name] = s
+	}
+	if h := byName["db"].Health; h == nil || h.Type != "process" {
+		t.Errorf("a private service with no healthcheck got %+v, want the process check", h)
+	}
+	if h := byName["cache"].Health; h == nil || h.Type != "cmd" {
+		t.Errorf("a private service's own healthcheck was replaced: %+v", h)
+	}
+	if h := byName["web"].Health; h != nil {
+		t.Errorf("a public service with no healthcheck was given %+v, want the platform default", h)
+	}
+}

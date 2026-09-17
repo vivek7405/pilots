@@ -40,11 +40,12 @@ type fakeMachines struct {
 	// onCreate runs after each successful create. A test uses it to hang up
 	// the caller at the one moment that matters -- with a machine built and
 	// its gate not yet passed.
-	onCreate func()
+	onCreate     func()
+	restartsByID map[string]int
 }
 
 func newFakeMachines(store state.Store) *fakeMachines {
-	return &fakeMachines{store: store, healthy: map[string]bool{}, healthyAfterRedeploy: true}
+	return &fakeMachines{store: store, healthy: map[string]bool{}, restartsByID: map[string]int{}, healthyAfterRedeploy: true}
 }
 
 func (f *fakeMachines) log(format string, a ...any) {
@@ -185,6 +186,21 @@ func (f *fakeMachines) Checkpoint(ctx context.Context, id, comment string) (*sta
 }
 
 func (f *fakeMachines) AppAddr(id string) (string, bool) { return "", false }
+
+// Processes answers the way the agent does for a machine whose app is up
+// (healthy) or crash-looping (not): the restart count climbs on every read.
+func (f *fakeMachines) Processes(ctx context.Context, id string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if f.healthy[id] {
+		return []byte(`[{"name":"app","cmd":"serve","state":"running","pid":42,"restarts":0,"port":true}]`), nil
+	}
+	f.restartsByID[id]++
+	return []byte(fmt.Sprintf(`[{"name":"app","cmd":"serve","state":"running","pid":42,"restarts":%d,"port":true}]`, f.restartsByID[id])), nil
+}
 
 // The real one is a pure function of the two ids, so the fake spells the same
 // layout rather than returning a sentinel: a test that asserts a replica

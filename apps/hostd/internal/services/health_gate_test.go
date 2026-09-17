@@ -67,3 +67,46 @@ func TestDescribeDialNamesTheCauseWithoutTheAddress(t *testing.T) {
 		t.Errorf("the address survived a failure with no named cause: %s", got)
 	}
 }
+
+// A private service with no check of its own is gated on its process: up, and
+// staying up. The fake's unhealthy machine is a crash loop -- every read shows
+// one more restart -- which is exactly what an entrypoint that keeps dying and
+// being restarted looks like from the host, and it must not pass as deployed.
+func TestTheProcessCheckPassesAStableProcessAndFailsACrashLoop(t *testing.T) {
+	m, fm, _, _ := fixture(t, 1)
+	spec := HealthSpec{Type: "process", GraceSec: 2, IntervalSec: 1, TimeoutSec: 1, HealthyThreshold: 2}
+
+	fm.healthy["m-1"] = true
+	if err := m.waitHealthy(context.Background(), "m-1", spec); err != nil {
+		t.Fatalf("a process that stayed up was refused: %v", err)
+	}
+
+	fm.healthy["m-1"] = false
+	err := m.waitHealthy(context.Background(), "m-1", spec)
+	var gate *api.HealthGateDetails
+	if !errors.As(err, &gate) {
+		t.Fatalf("a crash-looping process passed the gate: %v", err)
+	}
+	if !strings.Contains(gate.Last.Error, "restarted") {
+		t.Errorf("the failure does not say the process restarted: %s", gate.Last.Error)
+	}
+}
+
+// The gate judges the process that holds the app port, or the image's own
+// command, never a sidecar somebody registered beside it.
+func TestTheProcessCheckJudgesTheAppProcess(t *testing.T) {
+	procs := []agentProcess{
+		{Name: "worker", State: "running"},
+		{Name: "app", State: "stopped", Restarts: 3, Port: true},
+	}
+	got, ok := appProcess(procs)
+	if !ok || got.Name != "app" {
+		t.Errorf("picked %+v, want the port holder", got)
+	}
+	if _, ok := appProcess([]agentProcess{{Name: "a"}, {Name: "b"}}); ok {
+		t.Error("two processes and no app: something was picked anyway")
+	}
+	if got, ok := appProcess([]agentProcess{{Name: "only", State: "running"}}); !ok || got.Name != "only" {
+		t.Errorf("a lone process was not taken as the app: %+v", got)
+	}
+}
