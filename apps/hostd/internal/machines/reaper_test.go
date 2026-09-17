@@ -1,9 +1,12 @@
 package machines
 
 import (
+	"context"
+	"github.com/vivek7405/pilots/hostd/internal/state"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestMachineIDFromCmdline(t *testing.T) {
@@ -65,6 +68,43 @@ func TestFirecrackerProcessesIgnoresOtherProcesses(t *testing.T) {
 	for _, p := range firecrackerProcesses() {
 		if p.pid == self {
 			t.Fatal("the reaper identified the test binary as a firecracker")
+		}
+	}
+}
+
+// The sweep removes only what no row names and what has been on disk long
+// enough that nothing can still be about to name it.
+func TestOrphanBuildSweepKeepsReferencedAndYoungDirectories(t *testing.T) {
+	dirs := []buildDirInfo{
+		{id: "old-orphan", age: 3 * time.Hour},
+		{id: "young-orphan", age: 10 * time.Minute},
+		{id: "old-referenced", age: 3 * time.Hour},
+	}
+	got := selectOrphanBuilds(dirs, map[string]bool{"old-referenced": true})
+	if len(got) != 1 || got[0] != "old-orphan" {
+		t.Fatalf("selectOrphanBuilds = %v, want only the old orphan", got)
+	}
+}
+
+// Every id a row can name is protected: the machine's disk and memory, its
+// template pair, the image it booted and its checkpoints.
+func TestReferencedBuildsNamesEverythingARowCan(t *testing.T) {
+	ctx := context.Background()
+	m, st := storeManager(t)
+	if err := st.PutMachine(ctx, &state.Machine{ID: "m-1", HostID: "host-a", State: StateRunning,
+		RootfsBuildID: "disk", MemBuildID: "mem", TemplateMemBuildID: "tmem", TemplateRootfsBuildID: "tdisk", ImageRef: "image"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.PutCheckpoint(ctx, &state.Checkpoint{ID: "ck-1", MachineID: "m-1", RootfsBuildID: "ckdisk", MemBuildID: "ckmem"}); err != nil {
+		t.Fatal(err)
+	}
+	ref, ok := m.referencedBuilds(ctx)
+	if !ok {
+		t.Fatal("referencedBuilds could not read a store it just wrote")
+	}
+	for _, want := range []string{"disk", "mem", "tmem", "tdisk", "image", "ckdisk", "ckmem"} {
+		if !ref[want] {
+			t.Errorf("%q is not protected: %v", want, ref)
 		}
 	}
 }
