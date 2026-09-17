@@ -177,9 +177,19 @@ func (m *Manager) createImage(ctx context.Context, id string, sizeMiB int) error
 	// and a database that owns its data directory checks that it is empty
 	// before initialising it: postgres's initdb refused the mount as "not
 	// empty -- it contains a lost+found directory", exited 1 and was restarted
-	// forever. debugfs removes it without a mount; fsck recreates it whenever
-	// it has something to put there.
-	if _, err := m.run(ctx, "debugfs", "-w", "-R", "rmdir lost+found", path); err != nil {
+	// forever. Check clears it again after every fsck, which recreates it.
+	return m.clearLostAndFound(ctx, id)
+}
+
+// clearLostAndFound removes an EMPTY lost+found from a volume's image, without
+// a mount.
+//
+// debugfs's rmdir refuses a directory with entries in it, so a lost+found that
+// fsck has put recovered files into survives; only the empty one every mke2fs
+// and every forced e2fsck leaves behind goes. The guest agent does the same
+// after its mount, for a volume attached by an older hostd.
+func (m *Manager) clearLostAndFound(ctx context.Context, id string) error {
+	if _, err := m.run(ctx, "debugfs", "-w", "-R", "rmdir lost+found", m.ImagePath(id)); err != nil {
 		return fmt.Errorf("volumes: clear lost+found in the image for %s: %w", id, err)
 	}
 	return nil

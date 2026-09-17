@@ -89,16 +89,26 @@ func TestInitLinksTheStandardDevEntries(t *testing.T) {
 	}
 }
 
-// A filesystem the agent has just formatted mounts empty: mke2fs's lost+found
-// is removed, because initdb refuses a data directory that contains it.
-func TestAFreshVolumeMountsWithoutLostAndFound(t *testing.T) {
+// A volume mounts empty: the lost+found that mke2fs leaves, and that the
+// host's forced fsck puts back before every attach, is removed -- because
+// initdb refuses a data directory that contains it. One that fsck has put
+// recovered files into is the user's data, and stays.
+func TestAVolumeMountsWithoutAnEmptyLostAndFound(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.Mkdir(dir+"/lost+found", 0o700); err != nil {
 		t.Fatal(err)
 	}
-	clearFreshLostAndFound(dir)
+	clearEmptyLostAndFound(dir)
 	if _, err := os.Stat(dir + "/lost+found"); !os.IsNotExist(err) {
-		t.Fatal("lost+found survived on a freshly formatted volume")
+		t.Fatal("an empty lost+found survived the mount")
 	}
-	clearFreshLostAndFound(dir) // absent is fine
+	clearEmptyLostAndFound(dir) // absent is fine
+
+	if err := os.MkdirAll(dir+"/lost+found/#12", 0o700); err != nil {
+		t.Fatal(err)
+	}
+	clearEmptyLostAndFound(dir)
+	if _, err := os.Stat(dir + "/lost+found/#12"); err != nil {
+		t.Fatalf("a lost+found holding recovered files was removed: %v", err)
+	}
 }
