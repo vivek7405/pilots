@@ -109,6 +109,9 @@ func newDeployCmd(env *Env, getenv config.Env) *cobra.Command {
 				}
 				plan = *p
 				env.W.Notef("%s: compose file", filepath.Base(composeFile))
+				if err := recogniseBuildContexts(ctx, client, &plan, composeDir, env.W.Notef); err != nil {
+					return err
+				}
 			} else {
 				tarBytes, err := tarDirectory(dir)
 				if err != nil {
@@ -443,6 +446,62 @@ func refuseVolumeChange(ctx context.Context, client *pilots.Client, app string, 
 	}
 	return out.Failf("a service's volume is set when it is created",
 		"%s: mounts %s and the compose file names %s", step.Name, mountedName, wantName)
+}
+
+// recogniseBuildContexts asks the host what each build: context with no
+// Dockerfile is, and carries its answer into the step.
+//
+// A compose file plans from its text, so the host never sees what a build:
+// context contains; a plain directory plans from a tar of itself, and that is
+// where the host recognises a framework and writes its Dockerfile. A context
+// with no Dockerfile is such a directory, so it gets the same call: the
+// host's Dockerfile becomes the step's generated one, uploaded over the
+// context exactly as an image: step's is, and its readiness check fills a
+// health the service did not declare. Without this the step reached the
+// builder, which refused it after every other service had already been built
+// and rolled out. Nothing here reads the source: the host still decides.
+func recogniseBuildContexts(ctx context.Context, client *pilots.Client, plan *pilots.ComposePlan, dir string,
+	note func(string, ...any)) error {
+	for i := range plan.Steps {
+		step := &plan.Steps[i]
+		if step.Build == nil || step.Dockerfile != "" {
+			continue
+		}
+		contextDir := dir
+		if step.Build.Context != "" {
+			contextDir = filepath.Join(dir, step.Build.Context)
+		}
+		named := step.Build.Dockerfile
+		if named == "" {
+			named = "Dockerfile"
+		}
+		if _, err := os.Stat(filepath.Join(contextDir, named)); err == nil {
+			continue
+		}
+		tarBytes, err := tarDirectory(contextDir)
+		if err != nil {
+			return err
+		}
+		res, err := client.Plan(ctx, bytes.NewReader(tarBytes), step.Name)
+		if err != nil {
+			return explainUnknown(err)
+		}
+		if len(res.Plan.Steps) == 0 || res.Plan.Steps[0].Dockerfile == "" {
+			// A context the host planned as something with a Dockerfile of
+			// its own that the stat above did not see, or a nested compose
+			// project; the builder answers for those.
+			continue
+		}
+		step.Dockerfile = res.Plan.Steps[0].Dockerfile
+		if step.Health == nil {
+			step.Health = res.Plan.Steps[0].Health
+		}
+		if len(res.Detected) > 0 && note != nil {
+			d := res.Detected[0]
+			note("%s: %s (%s) in %s", step.Name, d.Source, d.Framework, filepath.Join(".", step.Build.Context))
+		}
+	}
+	return nil
 }
 
 // buildStep packs the step's context and streams the build. The plan's
