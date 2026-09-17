@@ -188,6 +188,8 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
   comment that meant an empty SQL string. Also run `bash -n` on every shell
   script you edited and `node --check scripts/e2e.mjs` — a syntax error in
   either is only found at the moment it is needed, on a host, mid-bootstrap.
+  `node --check` proves syntax and nothing more: a changed battery section is
+  also RUN, through `PILOTS_E2E_ONLY=<section>`, before it is committed.
 - **A new background loop registers a liveness budget.** One line at the top
   of the loop (`metrics.NewLoop(name, budget)`) and one `Tick()` at the END of
   each pass, budget normally three times the interval. `Restart=always` only
@@ -248,7 +250,7 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
 
 **Budget the batteries before starting them.** `scripts/e2e.mjs` takes about
 35 minutes on the laptop host and `gate.sh` two to three hours on the rig,
-neither has a section filter, and they share one bucket so they cannot
+`gate.sh` has no section filter, and they share one bucket so they cannot
 overlap. One day of work lost four and a half hours to this, so the rules are:
 
 - **Say the duration and the ETA before launching a run**, and launch it in
@@ -258,6 +260,10 @@ overlap. One day of work lost four and a half hours to this, so the rules are:
   `PILOTS_E2E_LIST=1`). A narrowed run prints every section it did not run
   and exits 2, so it can never pass for a full run; the full battery is still
   owed once per wave of fixes, not once per fix.
+- **A change to a battery section is run through that section before it is
+  committed.** `node --check` proves syntax, nothing more: a timeout passed in
+  the wrong argument position went to main syntax-clean and turned twelve
+  steps red on the next full run. With the filter that check is two minutes.
 - **Batch fixes, then run once.** Never re-run the full battery to confirm
   one fix. Reproduce the fix by hand in its own minute (a create, an exec, a
   curl), commit it, keep going, and run the battery once for the whole wave.

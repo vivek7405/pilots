@@ -6965,6 +6965,11 @@ async function replicaRuleAssertions() {
 // monorepo deploy to that default on a loaded laptop, for builds that
 // completed. The engine's own budget for a build is the bound here.
 const BUILD_CALL = { timeout: 600_000 };
+// The SDK's second parameter is the result schema; the options go third. A
+// timeout passed in the schema slot went to main syntax-clean and turned twelve
+// steps red, so the slot is not exposed: every build-length call goes through
+// here.
+const buildCall = (client, params) => client.callTool(params, undefined, BUILD_CALL);
 
 async function agentDeployAssertions() {
   const tag = Math.random().toString(36).slice(2, 8);
@@ -7056,10 +7061,10 @@ async function agentDeployAssertions() {
       const broken = dockerfile.replace('FROM python:3.12-slim', 'FROM python:3.12-slim-does-not-exist');
       assert(broken !== dockerfile, 'the injection did not change the Dockerfile');
 
-      const result = await client.callTool({
+      const result = await buildCall(client, {
         name: 'build',
         arguments: { dir: DJANGO_FIXTURE, dockerfile: broken },
-      }, BUILD_CALL);
+      });
       assert(result.isError, `the broken build did not fail: ${toolText(result).slice(0, 400)}`);
 
       const lines = toolText(result).split('\n').filter((l) => l.trim());
@@ -7080,10 +7085,10 @@ async function agentDeployAssertions() {
 
     await step('the corrected Dockerfile builds a rootfs', async () => {
       assert(dockerfile, 'there is no recipe to build');
-      const result = await client.callTool({
+      const result = await buildCall(client, {
         name: 'build',
         arguments: { dir: DJANGO_FIXTURE, dockerfile },
-      }, BUILD_CALL);
+      });
       assert(!result.isError, `the corrected build failed: ${toolText(result).slice(-600)}`);
       const parsed = JSON.parse(toolText(result));
       assert(parsed.rootfs_build_id, `no rootfs build id: ${toolText(result)}`);
@@ -7092,7 +7097,7 @@ async function agentDeployAssertions() {
 
     await step('deploy puts the app behind a URL', async () => {
       assert(build, 'there is no rootfs to deploy');
-      const result = await client.callTool({
+      const result = await buildCall(client, {
         name: 'deploy',
         arguments: {
           name: `web-${tag}`,
@@ -7101,7 +7106,7 @@ async function agentDeployAssertions() {
           port: 8080,
           health: { type: 'http', path: '/', grace: 60 },
         },
-      }, BUILD_CALL);
+      });
       assert(!result.isError, `deploy failed: ${toolText(result)}`);
       service = JSON.parse(toolText(result));
       assert(service.service_id, `no service id: ${toolText(result)}`);
@@ -7145,10 +7150,10 @@ async function agentDeployAssertions() {
     await step('deploy takes a webjs directory to a URL in ONE call', async () => {
       assert(client, 'the MCP server did not start');
       const started = Date.now();
-      const result = await client.callTool({
+      const result = await buildCall(client, {
         name: 'deploy',
         arguments: { dir: WEBJS_FIXTURE, app: webjsApp },
-      }, BUILD_CALL);
+      });
       assert(!result.isError, `the one-call deploy failed: ${toolText(result).slice(-800)}`);
       const body = JSON.parse(toolText(result));
       assert(body.services?.length === 1, `services = ${JSON.stringify(body.services)}`);
@@ -7209,10 +7214,10 @@ async function agentDeployAssertions() {
       const plan = JSON.parse(toolText(planned)).plan;
       assert(plan.steps.length === 2, `${plan.steps.length} steps, want 2`);
 
-      const deployed = await client.callTool({
+      const deployed = await buildCall(client, {
         name: 'deploy',
         arguments: { dir: WORKSPACE_FIXTURE, app: workspaceApp },
-      }, BUILD_CALL);
+      });
       assert(!deployed.isError, `the monorepo deploy failed: ${toolText(deployed).slice(-800)}`);
       const body = JSON.parse(toolText(deployed));
       assert(body.services.length === 2, `services = ${JSON.stringify(body.services)}`);
@@ -7228,7 +7233,7 @@ async function agentDeployAssertions() {
       unknownDir = dir;
       writeFileSync(join(dir, 'README.md'), '# nothing deployable here\n');
 
-      const result = await client.callTool({ name: 'deploy', arguments: { dir } }, BUILD_CALL);
+      const result = await buildCall(client, { name: 'deploy', arguments: { dir } });
       assert(result.isError, `an empty directory deployed: ${toolText(result)}`);
       const body = JSON.parse(toolText(result));
       assert(body.code === 'unknown_framework', `code = ${body.code}`);
@@ -7258,10 +7263,10 @@ async function agentDeployAssertions() {
         + 'COPY . .\n'
         + 'CMD ["sh","-c","python3 -m http.server ${PORT:-8080} --bind 0.0.0.0"]\n');
 
-      const result = await client.callTool({
+      const result = await buildCall(client, {
         name: 'deploy',
         arguments: { dir: unknownDir, app: recoveredApp },
-      }, BUILD_CALL);
+      });
       assert(!result.isError, `the recovered deploy failed: ${toolText(result).slice(-800)}`);
       const deployed = JSON.parse(toolText(result));
       assertOpenableURL(deployed.services[0].url, 'the recovered service');
@@ -7295,14 +7300,14 @@ async function agentDeployAssertions() {
       writeFileSync(join(dir, 'Dockerfile'),
         'FROM alpine:3.20\nENV PORT=8080\nEXPOSE 8080\nCMD ["sh","-c","sleep 3600"]\n');
 
-      const result = await client.callTool({
+      const result = await buildCall(client, {
         name: 'deploy',
         arguments: {
           dir,
           app: brokenApp,
           health: { type: 'http', path: '/', grace: 20 },
         },
-      }, BUILD_CALL);
+      });
       assert(result.isError, `an app that never listens deployed: ${toolText(result).slice(0, 400)}`);
       const raw = toolText(result);
       const body = JSON.parse(raw.split('\n').filter((l) => l.trim()).pop());
