@@ -7507,44 +7507,82 @@ async function hostedMCPAssertions(full) {
   }
 }
 
-async function main() {
-  console.log(`e2e: ${API}${FULL ? ' (full lifecycle)' : ' (process only)'}`);
+// The battery's sections, in the order they run. Named so a run can be
+// narrowed to the ones a fix touches -- PILOTS_E2E_ONLY=timing,services --
+// which turns a thirty-five-minute confirmation into a few minutes' one.
+//
+// A narrowed run is NEVER a green run: every section it did not run is
+// printed in the summary and the exit status is 2, so a skip cannot pass for
+// a pass and no assertion retires without anyone noticing. The full run,
+// with nothing skipped, is still the only thing that proves the battery.
+const SECTIONS = [
+  ['process', () => processAssertions(), false],
+  ['tenancy', () => tenancyAssertions(), false],
+  // Before the FULL gate: the compose plan, the service patch and the shape
+  // of the usage answer need no Firecracker, and the half that does says so.
+  ['data-routes', () => dataRouteAssertions(), false],
+  ['egress', () => egressAddressAssertions(), false],
+  ['placement', () => placementAssertions(), false],
+  ['recipes', () => recipeAssertions(), false],
+  ['replica-rules', () => replicaRuleAssertions(), false],
+  ['hosted-mcp', () => hostedMCPAssertions(FULL), false],
+  ['lifecycle', () => lifecycleAssertions(), true],
+  ['timing', () => timingAssertions(), true],
+  ['volumes', () => volumeAssertions(), true],
+  ['fork', () => forkAssertions(), true],
+  ['broker', () => brokerAssertions(), true],
+  ['observability', () => observabilityAssertions(), true],
+  ['builds', () => buildAssertions(), true],
+  ['internal', () => internalAssertions(), true],
+  ['edge', () => edgeAssertions(), true],
+  ['env', () => envAssertions(), true],
+  ['services', () => serviceAssertions(), true],
+  ['deploy-on-verdict', () => deployOnVerdictAssertions(), true],
+  ['scoped-deploy', () => scopedDeployAssertions(), true],
+  ['volume-services', () => volumeServiceAssertions(), true],
+  ['multi-service', () => multiServiceAssertions(), true],
+  ['agent-deploy', () => agentDeployAssertions(), true],
+  ['exec-stream', () => execStreamAssertions(), true],
+  ['hostility', () => hostilityAssertions(), true],
+];
 
-  await processAssertions();
-  await tenancyAssertions();
-  // Before the FULL gate: the compose plan, the service patch and the shape of
-  // the usage answer need no Firecracker, and the half that does says so.
-  await dataRouteAssertions();
-  await egressAddressAssertions();
-  await placementAssertions();
-  await recipeAssertions();
-  await replicaRuleAssertions();
-  await hostedMCPAssertions(FULL);
-  if (FULL) {
-    await lifecycleAssertions();
-    await timingAssertions();
-    await volumeAssertions();
-    await forkAssertions();
-    await brokerAssertions();
-    await observabilityAssertions();
-    await buildAssertions();
-    await internalAssertions();
-    await edgeAssertions();
-    await envAssertions();
-    await serviceAssertions();
-    await deployOnVerdictAssertions();
-    await scopedDeployAssertions();
-    await volumeServiceAssertions();
-    await multiServiceAssertions();
-    await agentDeployAssertions();
-    await execStreamAssertions();
-    await hostilityAssertions();
-  } else {
+async function main() {
+  if (process.env.PILOTS_E2E_LIST === '1') {
+    for (const [name, , full] of SECTIONS) console.log(`${name}${full ? ' (full)' : ''}`);
+    return;
+  }
+  const only = (process.env.PILOTS_E2E_ONLY ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+  for (const name of only) {
+    if (!SECTIONS.some(([n]) => n === name)) {
+      console.error(`e2e: no section named ${JSON.stringify(name)}; PILOTS_E2E_LIST=1 lists them`);
+      process.exit(1);
+    }
+  }
+  console.log(`e2e: ${API}${FULL ? ' (full lifecycle)' : ' (process only)'}${only.length ? ` (only: ${only.join(', ')})` : ''}`);
+
+  const notRun = [];
+  for (const [name, run, needsFull] of SECTIONS) {
+    if (only.length && !only.includes(name)) {
+      notRun.push(name);
+      continue;
+    }
+    if (needsFull && !FULL) {
+      notRun.push(name);
+      continue;
+    }
+    await run();
+  }
+  if (!FULL && !only.length) {
     console.log('  - machine lifecycle skipped (set PILOTS_E2E_FULL=1 on a Firecracker host)');
   }
 
   console.log(`\n${passed} passed, ${failures.length} failed`);
+  if (only.length && notRun.length) {
+    console.log(`NOT RUN (${notRun.length} sections, PILOTS_E2E_ONLY): ${notRun.join(', ')}`);
+    console.log('a narrowed run proves only what it ran; the full battery is still owed');
+  }
   if (failures.length) process.exit(1);
+  if (only.length && notRun.length) process.exit(2);
 }
 
 main().catch((err) => {

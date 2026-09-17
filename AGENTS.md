@@ -253,6 +253,11 @@ overlap. One day of work lost four and a half hours to this, so the rules are:
 
 - **Say the duration and the ETA before launching a run**, and launch it in
   the background. The user reads silence as a loop.
+- **Narrow a confirmation to the sections a fix touches:**
+  `PILOTS_E2E_ONLY=timing,services node scripts/e2e.mjs` (names from
+  `PILOTS_E2E_LIST=1`). A narrowed run prints every section it did not run
+  and exits 2, so it can never pass for a full run; the full battery is still
+  owed once per wave of fixes, not once per fix.
 - **Batch fixes, then run once.** Never re-run the full battery to confirm
   one fix. Reproduce the fix by hand in its own minute (a create, an exec, a
   curl), commit it, keep going, and run the battery once for the whole wave.
