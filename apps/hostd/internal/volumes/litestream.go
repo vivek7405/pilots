@@ -3,6 +3,7 @@ package volumes
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 )
@@ -13,9 +14,19 @@ import (
 // the volume's chunks in the bucket are unreadable rubble.
 //
 // It runs under systemd as litestream@<vol-id>.service rather than as a child
-// of hostd, because it has to outlive a hostd restart and a host reboot for
-// the same reason the machines do: the durability it provides is not a
-// property of whether the daemon happens to be up.
+// of hostd, because it has to outlive a hostd restart for the same reason the
+// machines do: the durability it provides is not a property of whether the
+// daemon happens to be up.
+//
+// Started, never ENABLED. An enabled unit comes back on its own at the next
+// boot, before hostd, against whatever meta.db the disk still holds -- and a
+// host that rebooted after dying is exactly the host whose copy is stale,
+// because a survivor rescued the volume meanwhile and has been writing it
+// since. On the rig, a rebooted host's unit published its pre-death metadata
+// as the newest generation in the bucket within a minute of coming up, which
+// is what the next rescue anywhere would have restored. A volume this host
+// owns gets its replication back through Attach, after restoreMeta has put
+// the bucket's copy in place.
 
 // UnitFor is the systemd unit that replicates one volume's metadata.
 func UnitFor(id string) string { return "litestream@" + id + ".service" }
@@ -60,10 +71,34 @@ func (m *Manager) writeConfig(id string) error {
 
 // startReplication brings up the volume's Litestream unit.
 func (m *Manager) startReplication(ctx context.Context, id string) error {
-	if _, err := m.run(ctx, "systemctl", "enable", "--now", UnitFor(id)); err != nil {
+	if _, err := m.run(ctx, "systemctl", "start", UnitFor(id)); err != nil {
 		return fmt.Errorf("volumes: start replication for %s: %w", id, err)
 	}
 	return nil
+}
+
+// DisableLegacyReplicationUnits un-enables every litestream@ unit an earlier
+// hostd enabled, once, at startup, so the next reboot cannot start them ahead
+// of hostd. Units for volumes this host still owns are started again by the
+// Attach their machines' next wake or cold boot goes through. The units are
+// left running now: stopping one for a volume this host is serving would open
+// a replication gap for nothing.
+func (m *Manager) DisableLegacyReplicationUnits(ctx context.Context) {
+	out, err := m.run(ctx, "systemctl", "list-unit-files", "--state=enabled",
+		"--no-legend", "--plain", "litestream@*.service")
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || !strings.HasPrefix(fields[0], "litestream@") {
+			continue
+		}
+		if _, err := m.run(ctx, "systemctl", "disable", fields[0]); err != nil {
+			slog.Warn("could not un-enable a legacy replication unit; it will start "+
+				"ahead of hostd at the next boot", "unit", fields[0], "err", err)
+		}
+	}
 }
 
 // stopReplication stops it, which is what a move does before handing the

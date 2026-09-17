@@ -444,6 +444,12 @@ func run() error {
 	// A host upgraded in place still carries the image cache an earlier hostd
 	// materialised; nothing writes it now, so it goes once, here.
 	mgr.RemoveLegacyImageCache()
+	// Likewise the volume replication units an earlier hostd enabled: they
+	// must not come back at the next boot ahead of the restore that makes
+	// them safe. See volumes.DisableLegacyReplicationUnits.
+	if v, ok := volumeManager.(interface{ DisableLegacyReplicationUnits(context.Context) }); ok {
+		v.DisableLegacyReplicationUnits(ctx)
+	}
 	// Every host publishes its own row, fleet or not, so that GET /v1/hosts on
 	// any host lists at least the one answering.
 	startHeartbeat(ctx, cfg, store, meshKeys, meshed, mgr)
