@@ -7059,7 +7059,7 @@ async function agentDeployAssertions() {
       const result = await client.callTool({
         name: 'build',
         arguments: { dir: DJANGO_FIXTURE, dockerfile: broken },
-      }, BUILD_CALL);
+      }, undefined, BUILD_CALL);
       assert(result.isError, `the broken build did not fail: ${toolText(result).slice(0, 400)}`);
 
       const lines = toolText(result).split('\n').filter((l) => l.trim());
@@ -7083,7 +7083,7 @@ async function agentDeployAssertions() {
       const result = await client.callTool({
         name: 'build',
         arguments: { dir: DJANGO_FIXTURE, dockerfile },
-      }, BUILD_CALL);
+      }, undefined, BUILD_CALL);
       assert(!result.isError, `the corrected build failed: ${toolText(result).slice(-600)}`);
       const parsed = JSON.parse(toolText(result));
       assert(parsed.rootfs_build_id, `no rootfs build id: ${toolText(result)}`);
@@ -7101,7 +7101,7 @@ async function agentDeployAssertions() {
           port: 8080,
           health: { type: 'http', path: '/', grace: 60 },
         },
-      }, BUILD_CALL);
+      }, undefined, BUILD_CALL);
       assert(!result.isError, `deploy failed: ${toolText(result)}`);
       service = JSON.parse(toolText(result));
       assert(service.service_id, `no service id: ${toolText(result)}`);
@@ -7148,7 +7148,7 @@ async function agentDeployAssertions() {
       const result = await client.callTool({
         name: 'deploy',
         arguments: { dir: WEBJS_FIXTURE, app: webjsApp },
-      }, BUILD_CALL);
+      }, undefined, BUILD_CALL);
       assert(!result.isError, `the one-call deploy failed: ${toolText(result).slice(-800)}`);
       const body = JSON.parse(toolText(result));
       assert(body.services?.length === 1, `services = ${JSON.stringify(body.services)}`);
@@ -7212,7 +7212,7 @@ async function agentDeployAssertions() {
       const deployed = await client.callTool({
         name: 'deploy',
         arguments: { dir: WORKSPACE_FIXTURE, app: workspaceApp },
-      }, BUILD_CALL);
+      }, undefined, BUILD_CALL);
       assert(!deployed.isError, `the monorepo deploy failed: ${toolText(deployed).slice(-800)}`);
       const body = JSON.parse(toolText(deployed));
       assert(body.services.length === 2, `services = ${JSON.stringify(body.services)}`);
@@ -7228,7 +7228,7 @@ async function agentDeployAssertions() {
       unknownDir = dir;
       writeFileSync(join(dir, 'README.md'), '# nothing deployable here\n');
 
-      const result = await client.callTool({ name: 'deploy', arguments: { dir } }, BUILD_CALL);
+      const result = await client.callTool({ name: 'deploy', arguments: { dir } }, undefined, BUILD_CALL);
       assert(result.isError, `an empty directory deployed: ${toolText(result)}`);
       const body = JSON.parse(toolText(result));
       assert(body.code === 'unknown_framework', `code = ${body.code}`);
@@ -7261,7 +7261,7 @@ async function agentDeployAssertions() {
       const result = await client.callTool({
         name: 'deploy',
         arguments: { dir: unknownDir, app: recoveredApp },
-      }, BUILD_CALL);
+      }, undefined, BUILD_CALL);
       assert(!result.isError, `the recovered deploy failed: ${toolText(result).slice(-800)}`);
       const deployed = JSON.parse(toolText(result));
       assertOpenableURL(deployed.services[0].url, 'the recovered service');
@@ -7302,7 +7302,7 @@ async function agentDeployAssertions() {
           app: brokenApp,
           health: { type: 'http', path: '/', grace: 20 },
         },
-      }, BUILD_CALL);
+      }, undefined, BUILD_CALL);
       assert(result.isError, `an app that never listens deployed: ${toolText(result).slice(0, 400)}`);
       const raw = toolText(result);
       const body = JSON.parse(raw.split('\n').filter((l) => l.trim()).pop());
