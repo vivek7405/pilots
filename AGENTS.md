@@ -246,6 +246,40 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
   same host declares itself caught up, which is the judgement section 28
   refuses to make.
 
+**Budget the batteries before starting them.** `scripts/e2e.mjs` takes about
+35 minutes on the laptop host and `gate.sh` two to three hours on the rig,
+neither has a section filter, and they share one bucket so they cannot
+overlap. One day of work lost four and a half hours to this, so the rules are:
+
+- **Say the duration and the ETA before launching a run**, and launch it in
+  the background. The user reads silence as a loop.
+- **Batch fixes, then run once.** Never re-run the full battery to confirm
+  one fix. Reproduce the fix by hand in its own minute (a create, an exec, a
+  curl), commit it, keep going, and run the battery once for the whole wave.
+  A run per fix is the single largest waste this repo has seen.
+- **A failure that only a battery shows is diagnosed by hand, not by re-running.**
+  Read the step's code, reproduce its calls with the CLI or curl, read the
+  host's journal for that minute. Four of today's "flakes" were real bugs that
+  three earlier runs had been paying for.
+- **Before a timing run, check the host is fit to be measured**: `df -h /`
+  under 85% (a near-full copy-on-write disk doubles every snapshot write),
+  no leftover `e2e-*`/`hostile-*`/`probe-*` machines, and the rig VMs idle.
+  When a timing SLO fails, A/B the previous binary on the same host before
+  reading code: today the same binary measured 300 ms at 15:20 and 800 ms at
+  20:00. The laptop tier's numbers are budgets, not the product's SLOs; the
+  metal tier is what is sold.
+- **The rig runs what you last installed there**, not the branch. After a
+  change to hostd, the guest agent or the rootfs, swap the binary (rig skill)
+  and, for agent changes, rebuild and ship the templates: seven agent commits
+  once went to review with main's rootfs pin still in place.
+- **A worktree has no `scripts/rootfs/*.ext4`.** They are gitignored and live
+  in the main checkout; a host bootstrapped from a worktree cannot build.
+  Symlink them in before any gate run, and remove the links before `go test`
+  or the agent-pin test compares against the wrong image.
+- **`pgrep -f <pattern>` matches the shell running it.** Bracket the first
+  character or check the process's own argv, or a finished run reads as
+  running forever.
+
 **Where a new test belongs** — the split is what can *observe* the assertion:
 
 | The assertion needs… | It goes in |
