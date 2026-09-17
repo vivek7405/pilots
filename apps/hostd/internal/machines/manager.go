@@ -209,6 +209,7 @@ type Manager struct {
 	// flight, and the memory image a flush unpinned from a row but could not
 	// yet delete. See rootflush.go.
 	flushing sync.Map // machine id -> true
+	flushDue sync.Map // machine id -> time.Time the next flush is due
 	staleMem sync.Map // machine id -> memory build id
 	// pulling is every template build a background hydration is running
 	// for, so a burst of creates on a cold host starts one pull, not one

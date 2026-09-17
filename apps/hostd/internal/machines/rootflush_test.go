@@ -108,3 +108,41 @@ func TestRootFlushLeavesAMachineItIsNotRunningAlone(t *testing.T) {
 			after.MemBuildID, after.RootfsBuildID)
 	}
 }
+
+// Flushes are spread across the interval, one due time per machine, and a
+// machine is due once per interval however often the loop looks.
+func TestFlushesAreSpreadAcrossTheIntervalAndDueOncePerInterval(t *testing.T) {
+	interval := time.Minute
+	m := New(Options{HostID: "host-a", RootFlushInterval: interval})
+	rows := []state.Machine{
+		{ID: "m-a", HostID: "host-a", State: StateRunning},
+		{ID: "m-b", HostID: "host-a", State: StateRunning},
+		{ID: "m-c", HostID: "host-a", State: StateRunning},
+	}
+	for _, r := range rows {
+		if p := flushPhase(r.ID, interval); p < 0 || p >= interval {
+			t.Fatalf("phase of %s is %v, outside [0, %v)", r.ID, p, interval)
+		}
+	}
+	if flushTick(interval) >= interval {
+		t.Fatalf("the loop looks every %v for a %v interval; nothing can spread", flushTick(interval), interval)
+	}
+
+	start := time.Now()
+	seen := map[string]int{}
+	for tick := time.Duration(0); tick < 2*interval; tick += flushTick(interval) {
+		for _, id := range m.dueFlushes(rows, start.Add(tick)) {
+			seen[id]++
+		}
+	}
+	for _, r := range rows {
+		if seen[r.ID] != 2 {
+			t.Errorf("%s was due %d times in two intervals, want 2: %v", r.ID, seen[r.ID], seen)
+		}
+	}
+	// A machine no longer flushable is forgotten, so the map is bounded.
+	_ = m.dueFlushes(rows[:1], start.Add(3*interval))
+	if _, still := m.flushDue.Load("m-c"); still {
+		t.Error("a machine that left the flushable set kept its due time")
+	}
+}

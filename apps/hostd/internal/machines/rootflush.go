@@ -2,6 +2,7 @@ package machines
 
 import (
 	"context"
+	"hash/fnv"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -32,7 +33,7 @@ func (m *Manager) RunRootFlush(ctx context.Context) {
 		return
 	}
 	live := metrics.NewLoop("root-flush", 3*interval)
-	ticker := time.NewTicker(interval)
+	ticker := time.NewTicker(flushTick(interval))
 	defer ticker.Stop()
 
 	for {
@@ -46,6 +47,25 @@ func (m *Manager) RunRootFlush(ctx context.Context) {
 	}
 }
 
+// flushTick is how often the loop looks for machines due a flush: a fraction
+// of the interval, so due times spread across it rather than all landing on
+// one tick. One tick for every machine meant every flush started together and
+// then queued on flushSlots, and the realised window was the interval plus
+// the whole queue's length -- thirty machines at a few seconds each is a
+// window twice what is published, measured but not kept.
+func flushTick(interval time.Duration) time.Duration {
+	return max(interval/8, time.Second)
+}
+
+// flushPhase is where in the interval a machine's flushes fall, a stable
+// function of its id, so a host's machines are spread across the window and
+// stay spread across restarts.
+func flushPhase(id string, interval time.Duration) time.Duration {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(id))
+	return time.Duration(h.Sum64() % uint64(interval))
+}
+
 // flushRoots starts a flush for every machine due one. Each runs in its own
 // goroutine: a flush is an upload, and one slow machine must not hold the
 // others' windows open. A machine whose previous flush is still running is
@@ -56,7 +76,7 @@ func (m *Manager) flushRoots(ctx context.Context) {
 		slog.Error("root flush could not list machines", "err", err)
 		return
 	}
-	for _, id := range m.selectFlushable(rows) {
+	for _, id := range m.dueFlushes(rows, time.Now()) {
 		if _, busy := m.flushing.LoadOrStore(id, true); busy {
 			continue
 		}
@@ -82,6 +102,38 @@ func (m *Manager) flushRoots(ctx context.Context) {
 
 // flushSlots bounds how many root flushes run at once on this host.
 var flushSlots = make(chan struct{}, 2)
+
+// dueFlushes is the flushable machines whose flush is due at now, and it
+// advances each one's due time by the interval as it names it. A machine
+// seen for the first time is due at its phase within the interval, so a
+// host's machines spread across the window from their first flush; a machine
+// that has left the flushable set is forgotten, so the map is bounded by what
+// runs here.
+func (m *Manager) dueFlushes(rows []state.Machine, now time.Time) []string {
+	interval := m.opts.RootFlushInterval
+	flushable := m.selectFlushable(rows)
+	live := make(map[string]bool, len(flushable))
+	var due []string
+	for _, id := range flushable {
+		live[id] = true
+		next, seen := m.flushDue.Load(id)
+		if !seen {
+			next = now.Add(flushPhase(id, interval) - interval)
+		}
+		if now.Before(next.(time.Time)) {
+			continue
+		}
+		m.flushDue.Store(id, now.Add(interval))
+		due = append(due, id)
+	}
+	m.flushDue.Range(func(k, _ any) bool {
+		if !live[k.(string)] {
+			m.flushDue.Delete(k)
+		}
+		return true
+	})
+	return due
+}
 
 // selectFlushable is the choice flushRoots acts on, split out so it can be
 // asserted without an engine behind it: this host's own running machines, and
