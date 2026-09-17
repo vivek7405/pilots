@@ -1334,10 +1334,19 @@ async function timingAssertions() {
           assert(status === 201, `checkpoint ${i + 1}: HTTP ${status}`);
           gaps.push(json.resume_gap_ms ?? 0);
           const after = await writeTotals();
+          // The histogram is host-wide, labelled by snapshot type and not by
+          // machine, so another machine's suspend or checkpoint landing in
+          // this window counts here too. Exactly one write is what THIS
+          // checkpoint owes; more than one means the host was busy, and that
+          // sample is not this machine's to keep.
           const dCount = after.count - before.count;
-          assert(dCount === 1,
-            `checkpoint ${i + 1} recorded ${dCount} snapshot writes, want exactly 1`);
-          writeSamples.push((after.sum - before.sum) * 1000);
+          assert(dCount >= 1,
+            `checkpoint ${i + 1} recorded no snapshot write`);
+          if (dCount === 1) {
+            writeSamples.push((after.sum - before.sum) * 1000);
+          } else {
+            console.log(`      checkpoint ${i + 1}: ${dCount - 1} other snapshot write(s) on the host meanwhile; its write sample is not used`);
+          }
         }
         const first = gaps[0];
         const rest = median(gaps.slice(1));
@@ -1370,9 +1379,11 @@ async function timingAssertions() {
         // right moment is worth a test of its own.
         const fullCount = await scrapeMetric('pilots_snapshot_write_seconds_count{type="Full"}');
         const diffCount = await scrapeMetric('pilots_snapshot_write_seconds_count{type="Diff"}');
-        console.log(`      snapshot write: checkpoint 1 ${writeSamples[0].toFixed(0)}ms, `
-          + `2-4 p50 ${median(writeSamples.slice(1)).toFixed(0)}ms  `
-          + `[${writeSamples.map((w) => w.toFixed(0)).join(', ')}]`);
+        if (writeSamples.length >= 2) {
+          console.log(`      snapshot write: first ${writeSamples[0].toFixed(0)}ms, `
+            + `later p50 ${median(writeSamples.slice(1)).toFixed(0)}ms  `
+            + `[${writeSamples.map((w) => w.toFixed(0)).join(', ')}]`);
+        }
         console.log(`      snapshot types on this host: ${fullCount} Full, ${diffCount} Diff`);
         assert(diffCount >= 3,
           `the host recorded ${diffCount} Diff snapshot writes; checkpoints 2-4 `
