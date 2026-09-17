@@ -191,10 +191,15 @@ func (m *Manager) flushRoot(ctx context.Context, id string) {
 		m.discardBuilds(ctx, build.String())
 		return
 	}
-	if row.State != StateRunning || row.HostID != m.opts.HostID {
-		// Suspended, destroyed or handed over while this flushed. Whatever
-		// did that captured the disk itself, so this build is superseded
-		// before it was ever named.
+	if cur, ok := m.get(id); !ok || cur != fcm ||
+		row.State != StateRunning || row.HostID != m.opts.HostID {
+		// Suspended, destroyed, handed over, or restarted into a new
+		// lifetime -- a wake, a redeploy, a resize -- while this flushed.
+		// The row alone cannot tell the last case apart: it reads running
+		// on this host again, but the guest the pause ran on is gone and
+		// whatever replaced it captured the disk itself. Naming this build
+		// would pin the previous lifetime's disk and discard the newer
+		// capture as superseded. The registry is the lifetime.
 		m.discardBuilds(ctx, build.String())
 		return
 	}
