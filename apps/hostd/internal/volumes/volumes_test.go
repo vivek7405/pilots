@@ -158,7 +158,7 @@ func TestFormatArgs(t *testing.T) {
 		"--storage":     "s3",
 		"--block-size":  "4096",
 		"--compress":    "none",
-		"--trash-days":  "0",
+		"--trash-days":  "1",
 		"--access-key":  "AK",
 		"--secret-key":  "SK",
 		"--bucket":      "https://fsn1.your-objectstorage.com/pilots/volumes",
@@ -253,7 +253,7 @@ func TestCreateOrdersItsSteps(t *testing.T) {
 	// mke2fs is the last step and needs a real mount; let it fail there.
 	_, _ = m.Create(context.Background(), "data", 64, "/data")
 
-	want := []string{"juicefs format", "systemctl enable", "juicefs mount"}
+	want := []string{"juicefs format", "systemctl start", "juicefs mount"}
 	got := rec.names()
 	if len(got) < len(want) {
 		t.Fatalf("ran %v, want at least %v", got, want)
@@ -386,4 +386,64 @@ func fsUUID(t *testing.T, path string) string {
 	}
 	t.Fatalf("no filesystem uuid in:\n%s", out)
 	return ""
+}
+
+// Replication is started, never enabled: an enabled unit comes back at the
+// next boot ahead of hostd, against a meta.db that is stale by then if a
+// survivor rescued the volume in between, and publishes it as the newest
+// generation. Create and Attach both start it; only Detach and Delete disable
+// it, which also un-enables what an earlier hostd left behind.
+func TestReplicationIsStartedNotEnabled(t *testing.T) {
+	m, rec := newTestManager(t)
+	if _, err := m.Create(context.Background(), "data", 64, "/data"); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	for _, c := range rec.calls {
+		if filepath.Base(c.name) == "systemctl" && strings.Contains(strings.Join(c.args, " "), "enable") {
+			t.Fatalf("Create enabled the replication unit: %v", c.args)
+		}
+	}
+	var started bool
+	for _, n := range rec.names() {
+		if n == "systemctl start" {
+			started = true
+		}
+	}
+	if !started {
+		t.Fatalf("Create did not start replication: %v", rec.names())
+	}
+}
+
+// An older volume is brought to the trash retention that keeps a compaction's
+// replaced objects around for longer than the metadata replication lag, on
+// its next attach, after its metadata has been restored and before it is
+// replicated or mounted.
+func TestAttachKeepsCompactedSlicesOnAnOlderVolume(t *testing.T) {
+	m, rec := newTestManager(t)
+	// Attach ends by refusing a mount with no image behind it, which the
+	// recorder never creates; the order of what it ran before that is the
+	// assertion.
+	_ = m.Attach(context.Background(), &state.Volume{ID: "vol-1", HostID: "host-b"})
+	names := rec.names()
+	restore, config, start := -1, -1, -1
+	for i, n := range names {
+		switch n {
+		case "litestream restore":
+			restore = i
+		case "juicefs config":
+			config = i
+		case "systemctl start":
+			start = i
+		}
+	}
+	if restore < 0 || config < 0 || start < 0 || !(restore < config && config < start) {
+		t.Fatalf("ran %v, want restore, then config --trash-days, then start", names)
+	}
+	for _, c := range rec.calls {
+		if len(c.args) > 0 && c.args[0] == "config" {
+			if v, ok := flagValue(c.args, "--trash-days"); !ok || v != "1" {
+				t.Fatalf("juicefs config set trash-days to %q, want 1: %v", v, c.args)
+			}
+		}
+	}
 }

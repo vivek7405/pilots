@@ -84,6 +84,9 @@ func (m *Manager) Attach(ctx context.Context, v *state.Volume) error {
 	if err := m.restoreMeta(ctx, v.ID); err != nil {
 		return err
 	}
+	if err := m.keepCompactedSlices(ctx, v.ID); err != nil {
+		return err
+	}
 	if err := m.startReplication(ctx, v.ID); err != nil {
 		return err
 	}
