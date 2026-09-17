@@ -59,6 +59,24 @@ of principle 1: the alternatives wake at L7 through a central tier because
 they have one. (`docs/prior-art/e2b-infra.md` REJECT "L7-only, API-mediated
 wake-on-request"; `docs/prior-art/fly-io.md` §on fly-proxy.)
 
+**The wake is at par with Fly's or better, and that is measured, not
+asserted.** Fly Machines are the established suspend-on-idle platform, so
+they are the bar, and the comparison is the same image on both: the webjs
+website, 512 MB, suspend on idle, one request sent only after the platform
+itself reports the machine `suspended`, and the number is the server wait
+(time to first byte minus the connect and TLS handshake, so the network path
+to Fly's region counts against neither side). Measured 2026-09-17, five
+rounds each, with the method in the PR that shipped the S3-backed root:
+
+| | pilots (laptop host) | Fly (`shared-cpu-1x`, `sin`) |
+|---|---|---|
+| wake, median | **0.58 s** | 4.4 s |
+| wake, best / worst | 0.46 s / 0.62 s | 3.1 s / 9.6 s |
+
+A change that moves pilots' figure toward Fly's is a regression, whatever
+else it improves; the e2e battery's wake and resume SLOs are the floor and
+this table is what they exist to protect.
+
 ## 3. A suspended machine occupies next to nothing on its host.
 
 No process, no veth, no reserved memory, no per-machine object left warm on
