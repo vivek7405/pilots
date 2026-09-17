@@ -62,10 +62,26 @@ func (m *Manager) flushRoots(ctx context.Context) {
 		}
 		go func(id string) {
 			defer m.flushing.Delete(id)
+			// Bounded across the host. Every running machine comes due on
+			// the same tick, and a flush is a chunkify and an upload: all of
+			// them at once was a burst of disk and network I/O every minute
+			// that a checkpoint or a wake landing inside it paid for -- the
+			// resume gap p50 went from 300 ms on a quiet host to 673 ms under
+			// a full battery. A few at a time keeps the window while keeping
+			// the burst off the operations the host is sold on.
+			select {
+			case flushSlots <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-flushSlots }()
 			m.flushRoot(ctx, id)
 		}(id)
 	}
 }
+
+// flushSlots bounds how many root flushes run at once on this host.
+var flushSlots = make(chan struct{}, 2)
 
 // selectFlushable is the choice flushRoots acts on, split out so it can be
 // asserted without an engine behind it: this host's own running machines, and
