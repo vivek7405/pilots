@@ -118,6 +118,22 @@ long time". Grep them out; they are not a code bug.
 `e2e-*`, `hostile-*`, `taken-*` and anything in `error` state are debris.
 `website`, `web` and `gallery` are not.
 
+**Run the gate from a checkout that has `scripts/rootfs/*.ext4`.** The
+golden and builder rootfs images are gitignored and live only in the main
+checkout; a worktree has neither. Section 11 bootstraps a NEW host with
+`host-bootstrap.sh` from `$REPO`, and a host bootstrapped without
+`builder.ext4` cannot build: the push section's delivery landed on exactly
+that host and failed with `the builder rootfs: stat .../builder.ext4: no such
+file or directory`, four assertions down, in a journal nobody was reading.
+Symlink the two files into the worktree before a run.
+
+**`pgrep -f` matches YOUR OWN shell**, including the check `pgrep -f
+'[c]luster/gate.sh'`, because the shell running that check carries the
+literal text. A gate that had finished half an hour earlier read as still
+running for three checks in a row. Look for a process whose *argv[0]* is bash
+and whose script is the gate (`ps -C bash -o pid=,args= | grep 'gate.sh$'`),
+or use the log's final "Result" block.
+
 **Never edit a script while it is running.** Bash reads a script
 incrementally by byte offset, so editing `gate.sh` mid-run corrupts execution
 in a way that looks like a random syntax error. Stop the run first.
