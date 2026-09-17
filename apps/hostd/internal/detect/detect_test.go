@@ -721,3 +721,63 @@ func TestTheSharedCacheSeedMatchesTheRecipe(t *testing.T) {
 			build.SeedDockerfile, recipe.Dockerfile[:min(len(recipe.Dockerfile), 200)])
 	}
 }
+
+// A compose file's build: context is a directory like any other: one with no
+// Dockerfile is recognised by the same detector a bare directory gets, and one
+// nothing recognises is refused at plan time with what an agent needs, not
+// by the builder after the other services have already rolled out.
+func TestAComposeBuildContextWithNoDockerfileIsDetected(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "compose.yaml", "services:\n  web:\n    build: ./web\n  postgres:\n    image: postgres:17\n")
+	mkdir(t, dir, "web")
+	write(t, dir, "web/package.json", `{"name":"web","dependencies":{"@webjsdev/core":"1"}}`)
+
+	res, planErr, unknown, err := Plan(context.Background(), dir, Options{App: "shop"})
+	mustPlan(t, res, planErr, unknown, err)
+	byName := map[string]compose.Step{}
+	found := map[string]compose.Detected{}
+	for i, s := range res.Plan.Steps {
+		byName[s.Name] = s
+		found[s.Name] = res.Detected[i]
+	}
+	if !strings.Contains(byName["web"].Dockerfile, "ENV PORT=8080") {
+		t.Errorf("the recipe's text did not reach the build step: %q", byName["web"].Dockerfile)
+	}
+	if byName["web"].Build == nil || byName["web"].Build.Context == "" {
+		t.Error("the step lost its build context, so the CLI would upload nothing")
+	}
+	if h := byName["web"].Health; h == nil || h.Path != "/__webjs/ready" {
+		t.Errorf("the recipe's readiness check did not reach the step: %+v", h)
+	}
+	if d := found["web"]; d.Source != "recipe" || d.Framework != "webjs" {
+		t.Errorf("detected = %+v, want a webjs recipe", d)
+	}
+	if d := found["postgres"]; d.Source != "compose" || byName["postgres"].Dockerfile != "FROM postgres:17\n" {
+		t.Errorf("an image: service was touched: %+v %q", d, byName["postgres"].Dockerfile)
+	}
+
+	// The author's own file still wins.
+	write(t, dir, "web/Dockerfile", "FROM scratch\n")
+	res, planErr, unknown, err = Plan(context.Background(), dir, Options{App: "shop"})
+	mustPlan(t, res, planErr, unknown, err)
+	for _, s := range res.Plan.Steps {
+		if s.Name == "web" && s.Dockerfile != "" {
+			t.Error("a generated Dockerfile was carried over the context's own")
+		}
+	}
+
+	// Nothing recognised and no Dockerfile: refused with the context named.
+	rm(t, dir, "web/Dockerfile")
+	rm(t, dir, "web/package.json")
+	write(t, dir, "web/Makefile", "all:\n")
+	_, _, unknown, err = Plan(context.Background(), dir, Options{App: "shop"})
+	if err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+	if unknown == nil {
+		t.Fatal("an unrecognised build context planned as something")
+	}
+	if !strings.Contains(unknown.Details.Dir, "web") {
+		t.Errorf("the refusal names %q, want the web context", unknown.Details.Dir)
+	}
+}
