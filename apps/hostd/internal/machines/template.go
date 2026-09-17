@@ -396,7 +396,13 @@ func (m *Manager) materializeTemplate(ctx context.Context, memID, rootfsID uuid.
 	}
 	b.Close()
 
+	// One pull per build. Every create on a cold host reaches here, and N of
+	// them started N goroutines writing the same bytes into the same file.
+	if _, busy := m.pulling.LoadOrStore(rootfsID, true); busy {
+		return nil
+	}
 	go func() {
+		defer m.pulling.Delete(rootfsID)
 		// Detached from the request: the template outlives whatever asked
 		// for it. A failure here costs nothing durable -- the block server
 		// keeps serving from the bucket, and the next machine's server or the
