@@ -2,6 +2,8 @@ package volumes
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -477,5 +479,56 @@ func TestLegacyReplicationUnitsAreFoundThroughTheirSymlinks(t *testing.T) {
 	}
 	if strings.Join(disabled, ",") != "litestream@vol-1.service,litestream@vol-2.service" {
 		t.Fatalf("disabled %v, want exactly the two litestream instances", disabled)
+	}
+}
+
+// The trash retention is read before it is set: an attach is a wake, and a
+// volume already at the value must not cost an exec there.
+func TestTrashDaysAreReadBeforeTheyAreSet(t *testing.T) {
+	m, rec := newTestManager(t)
+	meta := m.MetaPath("vol-1")
+	if err := os.MkdirAll(filepath.Dir(meta), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(days int) {
+		t.Helper()
+		os.Remove(meta)
+		db, err := sql.Open("sqlite", meta)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if _, err := db.Exec(`CREATE TABLE jfs_setting (name TEXT PRIMARY KEY, value TEXT)`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO jfs_setting VALUES ('format', ?)`,
+			fmt.Sprintf(`{"Name":"vol-1","TrashDays":%d}`, days)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	configs := func() int {
+		n := 0
+		for _, c := range rec.calls {
+			if len(c.args) > 0 && c.args[0] == "config" {
+				n++
+			}
+		}
+		return n
+	}
+
+	write(TrashDays)
+	if err := m.keepCompactedSlices(context.Background(), "vol-1"); err != nil {
+		t.Fatal(err)
+	}
+	if configs() != 0 {
+		t.Fatalf("a volume already at %d days was reconfigured: %v", TrashDays, rec.names())
+	}
+
+	write(0)
+	if err := m.keepCompactedSlices(context.Background(), "vol-1"); err != nil {
+		t.Fatal(err)
+	}
+	if configs() != 1 {
+		t.Fatalf("a volume at 0 days was not brought to %d: %v", TrashDays, rec.names())
 	}
 }

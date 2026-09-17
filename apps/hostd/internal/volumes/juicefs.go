@@ -1,8 +1,12 @@
 package volumes
 
 import (
+	"database/sql"
+	"encoding/json"
+
 	"context"
 	"fmt"
+	_ "modernc.org/sqlite" // the volume metadata is SQLite; pure Go, like the state store
 	"os"
 	"strconv"
 	"strings"
@@ -26,12 +30,42 @@ const TrashDays = 1
 // keepCompactedSlices sets TrashDays on a volume formatted before it was the
 // default, so an older volume gets the same protection on its next attach.
 // Idempotent: JuiceFS answers "no change" for a volume already at the value.
+//
+// The setting is read from the metadata database first and the command run
+// only when it differs: this sits on every attach, which is every wake of a
+// volume-backed machine, and an exec there for a value that is already right
+// is time on the wake path for nothing.
 func (m *Manager) keepCompactedSlices(ctx context.Context, id string) error {
+	if days, ok := trashDaysOf(m.MetaPath(id)); ok && days == TrashDays {
+		return nil
+	}
 	if _, err := m.run(ctx, m.cfg.JuiceFSBin, "config", m.metaURL(id),
 		"--trash-days", strconv.Itoa(TrashDays)); err != nil {
 		return fmt.Errorf("volumes: keep compacted slices for %s: %w", id, err)
 	}
 	return nil
+}
+
+// trashDaysOf reads a volume's trash retention out of its metadata database:
+// JuiceFS keeps the format as JSON under the "format" setting. False when it
+// cannot be read, in which case the caller sets it rather than guessing.
+func trashDaysOf(metaPath string) (int, bool) {
+	db, err := sql.Open("sqlite", "file:"+metaPath+"?mode=ro")
+	if err != nil {
+		return 0, false
+	}
+	defer db.Close()
+	var raw string
+	if err := db.QueryRow(`SELECT value FROM jfs_setting WHERE name = 'format'`).Scan(&raw); err != nil {
+		return 0, false
+	}
+	var format struct {
+		TrashDays *int `json:"TrashDays"`
+	}
+	if err := json.Unmarshal([]byte(raw), &format); err != nil || format.TrashDays == nil {
+		return 0, false
+	}
+	return *format.TrashDays, true
 }
 
 // formatArgs builds `juicefs format`.
