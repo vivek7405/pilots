@@ -258,6 +258,10 @@ overlap. One day of work lost four and a half hours to this, so the rules are:
   `PILOTS_E2E_LIST=1`). A narrowed run prints every section it did not run
   and exits 2, so it can never pass for a full run; the full battery is still
   owed once per wave of fixes, not once per fix.
+- **A change to a battery section is run through that section before it is
+  committed.** `node --check` proves syntax, nothing more: a timeout passed in
+  the wrong argument position went to main syntax-clean and turned twelve
+  steps red on the next full run. With the filter that check is two minutes.
 - **Batch fixes, then run once.** Never re-run the full battery to confirm
   one fix. Reproduce the fix by hand in its own minute (a create, an exec, a
   curl), commit it, keep going, and run the battery once for the whole wave.
