@@ -900,7 +900,28 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 	lock := m.lockFor(id)
 	lock.Lock()
 	defer lock.Unlock()
+	return m.suspendLocked(ctx, id)
+}
 
+// errBusy is a suspend the idle monitor declined because a request was in
+// flight by the time it held the lock.
+var errBusy = errors.New("machines: a request is in flight")
+
+// suspendIfIdle is Suspend for the idle monitor: the in-flight check is made
+// again under the machine's lock, because the monitor's own check ran before
+// it queued behind whoever held the lock, and a build can begin in between.
+// A machine found busy is left alone and reconsidered on the next pass.
+func (m *Manager) suspendIfIdle(ctx context.Context, id string) error {
+	lock := m.lockFor(id)
+	lock.Lock()
+	defer lock.Unlock()
+	if m.flight.count(id) > 0 {
+		return errBusy
+	}
+	return m.suspendLocked(ctx, id)
+}
+
+func (m *Manager) suspendLocked(ctx context.Context, id string) error {
 	row, err := m.opts.Store.GetMachine(ctx, id)
 	if err != nil {
 		return err

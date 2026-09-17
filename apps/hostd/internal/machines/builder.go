@@ -83,32 +83,26 @@ func (m *Manager) EnsureBuilder(ctx context.Context, orgID string) (string, func
 		}
 	}
 
-	// Running or suspended, the same call handles both: Wake returns
-	// immediately for a machine that is already up, and it is safe from any
-	// in-process caller.
-	if _, ok := m.get(id); !ok {
-		if err := m.Wake(ctx, id); err != nil {
-			return "", nil, fmt.Errorf("machines: wake the builder %s: %w", id, err)
-		}
-	}
-
-	slot, ok := m.SlotFor(id)
-	if !ok {
-		return "", nil, fmt.Errorf("machines: builder %s is not running: %w", id, ErrNotFound)
-	}
-
-	// Bracket the whole build, and take the bracket BEFORE the wait below
-	// rather than after it.
+	// Bracket the whole build, and take the bracket BEFORE anything else --
+	// under the machine's own lock, which is the lock a suspend holds.
 	//
 	// Without the bracket at all, the idle monitor suspends the daemon in the
 	// middle of a solve, which surfaces as a build that dies against a
 	// connection that simply stopped answering. Taking it after the wait
-	// leaves the same window open, only narrower: shouldSuspend needs nothing
-	// in flight and a stale LastActivity, which is exactly the state a builder
-	// is in when a build arrives at its idle boundary, and the wait can run
-	// for the whole dial timeout on a cold boot. Touch immediately after, so
-	// the row also says this builder was just used.
+	// leaves the same window open, only narrower. Taking it before the wait
+	// but without the lock left one more: a suspend already past its idle
+	// check and inside its snapshot saw no bracket, this saw a process that
+	// still existed and skipped the wake, and the dial then ran its whole
+	// ninety seconds against a machine that had gone to sleep five seconds
+	// in. Under the lock, this waits for that suspend to finish and then sees
+	// no process, so it wakes; and a suspend that starts after this re-checks
+	// the bracket under the same lock (see suspendIfIdle). Touch immediately
+	// after, so the row also says this builder was just used.
+	lock := m.lockFor(id)
+	lock.Lock()
+	_, running := m.get(id)
 	m.Begin(id)
+	lock.Unlock()
 	m.Touch(context.WithoutCancel(ctx), id)
 	released := false
 	release := func() {
@@ -118,6 +112,22 @@ func (m *Manager) EnsureBuilder(ctx context.Context, orgID string) (string, func
 		released = true
 		m.End(id)
 		m.Touch(context.WithoutCancel(ctx), id)
+	}
+
+	// Running or suspended, the same call handles both: Wake returns
+	// immediately for a machine that is already up, and it is safe from any
+	// in-process caller.
+	if !running {
+		if err := m.Wake(ctx, id); err != nil {
+			release()
+			return "", nil, fmt.Errorf("machines: wake the builder %s: %w", id, err)
+		}
+	}
+
+	slot, ok := m.SlotFor(id)
+	if !ok {
+		release()
+		return "", nil, fmt.Errorf("machines: builder %s is not running: %w", id, ErrNotFound)
 	}
 
 	// A running machine is not the same as a daemon accepting connections.

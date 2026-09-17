@@ -374,3 +374,35 @@ func TestStaleBuilderSelection(t *testing.T) {
 		t.Fatalf("selectStaleBuilders = %v, want [m_old]", got)
 	}
 }
+
+// The idle monitor's check runs before it queues for the machine's lock, and
+// a build can bracket the machine in between. The suspend re-checks under the
+// lock and declines, so a builder a build has just taken is not put to sleep
+// under the dial: that was a ninety-second timeout against a machine that
+// went to sleep five seconds in.
+func TestAnIdleSuspendDeclinesAMachineTakenMeanwhile(t *testing.T) {
+	ctx := context.Background()
+	m, st := storeManager(t)
+	row := &state.Machine{ID: "m-1", HostID: "host-a", State: StateRunning}
+	if err := st.PutMachine(ctx, row); err != nil {
+		t.Fatal(err)
+	}
+
+	m.Begin("m-1")
+	if err := m.suspendIfIdle(ctx, "m-1"); !errors.Is(err, errBusy) {
+		t.Fatalf("a machine with a request in flight was not declined: %v", err)
+	}
+	got, _ := st.GetMachine(ctx, "m-1")
+	if got.State != StateRunning {
+		t.Fatalf("the declined suspend changed the row to %q", got.State)
+	}
+
+	m.End("m-1")
+	if err := m.suspendIfIdle(ctx, "m-1"); err != nil {
+		t.Fatalf("an idle machine was refused: %v", err)
+	}
+	got, _ = st.GetMachine(ctx, "m-1")
+	if got.State == StateRunning {
+		t.Error("the suspend did nothing once the machine was idle")
+	}
+}
