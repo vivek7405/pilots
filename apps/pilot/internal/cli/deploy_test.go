@@ -110,3 +110,46 @@ func tarHas(t *testing.T, body io.Reader, name string) bool {
 		}
 	}
 }
+
+// build: . is the common case, and then the context IS the compose project:
+// the host answers with the plan of the whole file, and the step to take is
+// the one with our name, not whichever service sorts first. Taking the first
+// once built the web service from postgres's Dockerfile.
+func TestAContextThatIsTheComposeProjectIsMatchedByName(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte("services:\n  web:\n    build: .\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(pilots.ComposePlanResponse{
+			Plan: pilots.ComposePlan{App: "shop", Steps: []pilots.ComposeStep{
+				{Name: "postgres", Dockerfile: "FROM postgres:17\n", Private: true,
+					Health: &pilots.HealthCheck{Type: "process"}},
+				{Name: "web", Build: &pilots.ComposeBuild{Context: "."},
+					Dockerfile: "FROM node\nENV PORT=8080\n",
+					Health:     &pilots.HealthCheck{Type: "http", Path: "/__webjs/ready"}},
+			}},
+			Detected: []pilots.ComposeDetected{
+				{Service: "postgres", Source: "compose", Dir: "."},
+				{Service: "web", Source: "recipe", Framework: "webjs", Dir: "."},
+			},
+		})
+	}))
+	defer srv.Close()
+	client := pilots.New("k", pilots.WithBaseURL(srv.URL))
+
+	plan := pilots.ComposePlan{App: "shop", Steps: []pilots.ComposeStep{
+		{Name: "postgres", Dockerfile: "FROM postgres:17\n", Private: true, Health: &pilots.HealthCheck{Type: "process"}},
+		{Name: "web", Build: &pilots.ComposeBuild{Context: "."}},
+	}}
+	if err := recogniseBuildContexts(context.Background(), client, &plan, dir, nil); err != nil {
+		t.Fatalf("recogniseBuildContexts: %v", err)
+	}
+	web := plan.Steps[1]
+	if !strings.Contains(web.Dockerfile, "FROM node") {
+		t.Errorf("web got %q, want its own step's Dockerfile", web.Dockerfile)
+	}
+	if web.Health == nil || web.Health.Type != "http" {
+		t.Errorf("web got %+v, want its own step's health", web.Health)
+	}
+}

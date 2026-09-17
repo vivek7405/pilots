@@ -486,18 +486,32 @@ func recogniseBuildContexts(ctx context.Context, client *pilots.Client, plan *pi
 		if err != nil {
 			return explainUnknown(err)
 		}
-		if len(res.Plan.Steps) == 0 || res.Plan.Steps[0].Dockerfile == "" {
-			// A context the host planned as something with a Dockerfile of
-			// its own that the stat above did not see, or a nested compose
-			// project; the builder answers for those.
+		// The context is usually the compose file's own directory (build: .),
+		// so the host answers with the plan of the whole file, in which our
+		// step is the one carrying our name -- never the first one, which is
+		// whichever service sorts first. A context of its own answers with a
+		// single step the host named itself.
+		picked := -1
+		for j, s := range res.Plan.Steps {
+			if s.Name == step.Name {
+				picked = j
+			}
+		}
+		if picked < 0 && len(res.Plan.Steps) == 1 && len(res.Detected) == 1 && res.Detected[0].Source == "recipe" {
+			picked = 0
+		}
+		if picked < 0 || res.Plan.Steps[picked].Dockerfile == "" {
+			// A context the host could not match to this step, or one it
+			// planned from a Dockerfile the stat above did not see; the
+			// builder answers for those.
 			continue
 		}
-		step.Dockerfile = res.Plan.Steps[0].Dockerfile
+		step.Dockerfile = res.Plan.Steps[picked].Dockerfile
 		if step.Health == nil {
-			step.Health = res.Plan.Steps[0].Health
+			step.Health = res.Plan.Steps[picked].Health
 		}
-		if len(res.Detected) > 0 && note != nil {
-			d := res.Detected[0]
+		if picked < len(res.Detected) && note != nil {
+			d := res.Detected[picked]
 			note("%s: %s (%s) in %s", step.Name, d.Source, d.Framework, filepath.Join(".", step.Build.Context))
 		}
 	}
