@@ -6948,6 +6948,13 @@ async function replicaRuleAssertions() {
   }
 }
 
+// A build-and-deploy through the MCP is minutes of work by nature -- an image
+// from a cold layer cache, a rollout, a health gate -- and the SDK's default
+// is sixty seconds per request. Run 8 lost the one-call deploy and the
+// monorepo deploy to that default on a loaded laptop, for builds that
+// completed. The engine's own budget for a build is the bound here.
+const BUILD_CALL = { timeout: 600_000 };
+
 async function agentDeployAssertions() {
   const tag = Math.random().toString(36).slice(2, 8);
   const app = `gate-django-${tag}`;
@@ -7041,7 +7048,7 @@ async function agentDeployAssertions() {
       const result = await client.callTool({
         name: 'build',
         arguments: { dir: DJANGO_FIXTURE, dockerfile: broken },
-      });
+      }, BUILD_CALL);
       assert(result.isError, `the broken build did not fail: ${toolText(result).slice(0, 400)}`);
 
       const lines = toolText(result).split('\n').filter((l) => l.trim());
@@ -7065,7 +7072,7 @@ async function agentDeployAssertions() {
       const result = await client.callTool({
         name: 'build',
         arguments: { dir: DJANGO_FIXTURE, dockerfile },
-      });
+      }, BUILD_CALL);
       assert(!result.isError, `the corrected build failed: ${toolText(result).slice(-600)}`);
       const parsed = JSON.parse(toolText(result));
       assert(parsed.rootfs_build_id, `no rootfs build id: ${toolText(result)}`);
@@ -7083,7 +7090,7 @@ async function agentDeployAssertions() {
           port: 8080,
           health: { type: 'http', path: '/', grace: 60 },
         },
-      });
+      }, BUILD_CALL);
       assert(!result.isError, `deploy failed: ${toolText(result)}`);
       service = JSON.parse(toolText(result));
       assert(service.service_id, `no service id: ${toolText(result)}`);
@@ -7130,7 +7137,7 @@ async function agentDeployAssertions() {
       const result = await client.callTool({
         name: 'deploy',
         arguments: { dir: WEBJS_FIXTURE, app: webjsApp },
-      });
+      }, BUILD_CALL);
       assert(!result.isError, `the one-call deploy failed: ${toolText(result).slice(-800)}`);
       const body = JSON.parse(toolText(result));
       assert(body.services?.length === 1, `services = ${JSON.stringify(body.services)}`);
@@ -7194,7 +7201,7 @@ async function agentDeployAssertions() {
       const deployed = await client.callTool({
         name: 'deploy',
         arguments: { dir: WORKSPACE_FIXTURE, app: workspaceApp },
-      });
+      }, BUILD_CALL);
       assert(!deployed.isError, `the monorepo deploy failed: ${toolText(deployed).slice(-800)}`);
       const body = JSON.parse(toolText(deployed));
       assert(body.services.length === 2, `services = ${JSON.stringify(body.services)}`);
@@ -7210,7 +7217,7 @@ async function agentDeployAssertions() {
       unknownDir = dir;
       writeFileSync(join(dir, 'README.md'), '# nothing deployable here\n');
 
-      const result = await client.callTool({ name: 'deploy', arguments: { dir } });
+      const result = await client.callTool({ name: 'deploy', arguments: { dir } }, BUILD_CALL);
       assert(result.isError, `an empty directory deployed: ${toolText(result)}`);
       const body = JSON.parse(toolText(result));
       assert(body.code === 'unknown_framework', `code = ${body.code}`);
@@ -7243,7 +7250,7 @@ async function agentDeployAssertions() {
       const result = await client.callTool({
         name: 'deploy',
         arguments: { dir: unknownDir, app: recoveredApp },
-      });
+      }, BUILD_CALL);
       assert(!result.isError, `the recovered deploy failed: ${toolText(result).slice(-800)}`);
       const deployed = JSON.parse(toolText(result));
       assertOpenableURL(deployed.services[0].url, 'the recovered service');
@@ -7284,7 +7291,7 @@ async function agentDeployAssertions() {
           app: brokenApp,
           health: { type: 'http', path: '/', grace: 20 },
         },
-      });
+      }, BUILD_CALL);
       assert(result.isError, `an app that never listens deployed: ${toolText(result).slice(0, 400)}`);
       const raw = toolText(result);
       const body = JSON.parse(raw.split('\n').filter((l) => l.trim()).pop());
