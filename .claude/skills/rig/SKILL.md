@@ -71,7 +71,44 @@ fail through ANY host. Run it on the single laptop host
 
 The gate takes **two to three hours**. There is no section filter, deliberately:
 a skip is how an assertion retires without anyone noticing. Budget the time or
-do not start it.
+do not start it, and say the ETA before starting.
+
+The e2e takes **about 35 minutes** in full. It HAS a filter:
+`PILOTS_E2E_ONLY=timing,services node scripts/e2e.mjs` runs only those
+sections (`PILOTS_E2E_LIST=1` lists them), prints every section it did not
+run, and exits 2 so it can never pass for a full run. Confirm a fix with the
+sections it touches; run the full battery once per wave of fixes, never once
+per fix. A day that ran the full battery four times lost four and a half
+hours to exactly that.
+
+## Before any timing run
+
+- `df -h /` under 85%. A near-full copy-on-write disk doubles every snapshot
+  write; the same binary measured 300 ms and 800 ms an afternoon apart on
+  a disk that had filled with orphaned builds meanwhile (the reaper sweeps
+  them now, but check).
+- No leftover battery machines (`e2e-*`, `hostile-*`, `probe-*`, anything
+  in `error`), and the rig VMs idle.
+- When a timing SLO fails, A/B the previous binary on the same host BEFORE
+  reading code: `git worktree add /tmp/ab <old-sha>`, build, install, measure
+  five checkpoints, put the tip back. Ten minutes that settle it.
+- The laptop tier's numbers are budgets; the metal tier is the product's SLO.
+
+## The rig runs what you last installed
+
+Not the branch. After a hostd change, swap the binary (above). After a
+guest-agent or rootfs change, rebuild both images (`scripts/build-golden-rootfs.sh`
+and `VARIANT=builder scripts/build-golden-rootfs.sh`, about four minutes
+each, Docker needed), commit the new `*.sha256` pins, and ship the images:
+
+```sh
+zstd -q -T0 -c scripts/rootfs/golden.ext4 | $SSH root@$ip \
+  'zstd -q -d --sparse -o /var/lib/pilots/templates/golden.ext4.new &&
+   mv /var/lib/pilots/templates/golden.ext4.new /var/lib/pilots/templates/golden.ext4'
+# same for builder.ext4, then systemctl restart hostd
+```
+
+Seven agent commits once reached review with main's pins still in place.
 
 ## Traps
 
