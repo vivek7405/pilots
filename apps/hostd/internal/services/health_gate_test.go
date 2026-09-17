@@ -154,18 +154,44 @@ func TestAGateFailedReplicaIsParkedForDiagnosisThenPruned(t *testing.T) {
 			gate.Replica, suspended, destroyed, fm.events)
 	}
 
+	// A second failed deploy keeps ITS replica as the evidence and prunes the
+	// first failure's, so a run of failed deploys does not stack parked
+	// replicas, each holding a slot and its builds.
+	fm.events = nil
+	_, err = m.Deploy(ctx, "svc-1", "rootfs-3", nil)
+	var second *api.HealthGateDetails
+	if !errors.As(err, &second) {
+		t.Fatalf("the third deploy did not fail its gate: %v", err)
+	}
+	var firstPruned, secondParked bool
+	for _, e := range fm.events {
+		if e == "destroy:"+gate.Replica {
+			firstPruned = true
+		}
+		if e == "suspend:"+second.Replica {
+			secondParked = true
+		}
+		if e == "destroy:m-1" {
+			t.Fatalf("the current release's replica was pruned by a failed deploy: %v", fm.events)
+		}
+	}
+	if !firstPruned || !secondParked {
+		t.Fatalf("second failure: first parked %s pruned=%v, second %s parked=%v: %v",
+			gate.Replica, firstPruned, second.Replica, secondParked, fm.events)
+	}
+
 	fm.events = nil
 	fm.createUnhealthy = false
-	if _, err := m.Deploy(ctx, "svc-1", "rootfs-3", nil); err != nil {
-		t.Fatalf("the third deploy failed: %v", err)
+	if _, err := m.Deploy(ctx, "svc-1", "rootfs-4", nil); err != nil {
+		t.Fatalf("the fourth deploy failed: %v", err)
 	}
 	pruned := false
 	for _, e := range fm.events {
-		if e == "destroy:"+gate.Replica {
+		if e == "destroy:"+second.Replica {
 			pruned = true
 		}
 	}
 	if !pruned {
-		t.Errorf("the parked replica %s survived the next successful deploy: %v", gate.Replica, fm.events)
+		t.Errorf("the parked replica %s survived the next successful deploy: %v", second.Replica, fm.events)
 	}
 }

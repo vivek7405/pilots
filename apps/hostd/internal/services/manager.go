@@ -229,8 +229,12 @@ func (m *Manager) Deploy(ctx context.Context, serviceID, rootfsBuildID string,
 			// refusal tells the caller to read its console, and diagnose
 			// reads it back. Destroying it here made both a lie -- by the
 			// time anyone looked, the machine named in the 422 was gone.
-			// Suspended, so it stops billing, and pruned by the next deploy
-			// that succeeds, like any superseded release's replicas.
+			// Suspended, so it stops billing. The LATEST failure is the
+			// evidence worth keeping: an earlier failed deploy's parked
+			// replicas go now, so a run of failed deploys leaves one set,
+			// not one per attempt, each holding a slot and its builds. The
+			// current release and its rollback target are kept as ever.
+			m.pruneExcept(ctx, svc.ID, svc.ReleaseID, m.rollbackTargetOf(ctx, svc), rel.ID)
 			m.park(ctx, svc.ID, fresh)
 			return nil, err
 		}
@@ -864,6 +868,31 @@ const cleanupTimeout = 2 * time.Minute
 // prune destroys the machines of every release except the current one and the
 // one being kept as a rollback target.
 func (m *Manager) prune(ctx context.Context, serviceID, keepA, keepB string) {
+	m.pruneExcept(ctx, serviceID, keepA, keepB)
+}
+
+// rollbackTargetOf is the release Rollback would flip to: the newest healthy
+// one that is not current. Empty when there is none.
+func (m *Manager) rollbackTargetOf(ctx context.Context, svc *state.Service) string {
+	rels, err := m.opts.Store.ReleasesFor(ctx, svc.ID)
+	if err != nil {
+		return ""
+	}
+	for _, r := range rels {
+		if r.ID != svc.ReleaseID && r.Healthy {
+			return r.ID
+		}
+	}
+	return ""
+}
+
+// pruneExcept destroys the machines of every release of a service except the
+// ones named.
+func (m *Manager) pruneExcept(ctx context.Context, serviceID string, keep ...string) {
+	kept := map[string]bool{"": true}
+	for _, k := range keep {
+		kept[k] = true
+	}
 	all, err := m.opts.Store.ListMachines(ctx)
 	if err != nil {
 		return
@@ -873,7 +902,7 @@ func (m *Manager) prune(ctx context.Context, serviceID, keepA, keepB string) {
 			continue
 		}
 		rel := mach.ReleaseID
-		if rel == keepA || rel == keepB || rel == "" {
+		if kept[rel] {
 			continue
 		}
 		if err := m.opts.Machines.Destroy(ctx, mach.ID); err != nil {
