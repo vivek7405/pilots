@@ -615,12 +615,24 @@ CONF
 systemctl daemon-reload
 runuser -u pilot -- env XDG_RUNTIME_DIR="/run/user/$PILOT_UID" \
   systemctl --user daemon-reload >/dev/null 2>&1 || true
-if runuser -u pilot -- env XDG_RUNTIME_DIR="/run/user/$PILOT_UID" \
-     systemctl --user enable --now buildkitd >/dev/null 2>&1; then
-  echo "  buildkitd running"
-else
-  echo "  WARNING: buildkitd did not start; builds will fail on this host" >&2
-fi
+
+# The daemon is NOT started, and the unit is NOT enabled.
+#
+# Builds run inside a per-org builder microVM now, and the build path only
+# ever dials that guest over TCP (netns.Slot.BuildkitAddr). Nothing on any
+# host dials a local buildkit socket. A host daemon left enabled with
+# lingering therefore ran from boot to shutdown serving nobody: it held
+# memory that placement counts against the host, kept a rootless runtime
+# nothing used, and made the fleet gate's "no host daemon, builds are
+# isolated" assertion false on every host.
+#
+# The unit file and the binaries stay on disk. buildctl is the CLIENT the
+# host uses to drive the builder machine, and leaving the unit costs nothing
+# while making it obvious how to start a daemon by hand if one is ever wanted
+# for debugging.
+runuser -u pilot -- env XDG_RUNTIME_DIR="/run/user/$PILOT_UID" \
+  systemctl --user disable --now buildkitd >/dev/null 2>&1 || true
+echo "  buildkit client installed; no host daemon (builds run in a microVM)"
 REMOTE
 
 # ---------------------------------------------------------------------------
@@ -1040,10 +1052,11 @@ REFLINK=$(curl -sf http://127.0.0.1:8080/v1/health |
 if [ "$REFLINK" = True ]; then
   echo "  reflink: yes"
 else
-  echo "  reflink: NO -- $(findmnt -no FSTYPE -T /var/lib/pilots) cannot share extents." >&2
-  echo "    Every machine image copy will be a real copy: create and checkpoint" >&2
-  echo "    will run several times slower than the engine is designed for." >&2
-  echo "    Put /var/lib/pilots on btrfs, or on XFS made with -m reflink=1." >&2
+  echo "  reflink: no -- $(findmnt -no FSTYPE -T /var/lib/pilots) does not share extents." >&2
+  echo "    Nothing per machine depends on it: create, wake and checkpoint meet their" >&2
+  echo "    targets on any filesystem. Only the once-per-host template build copies" >&2
+  echo "    an image in full here. btrfs, or XFS made with -m reflink=1, makes that" >&2
+  echo "    one copy cheaper; PILOT_REQUIRE_REFLINK=1 still refuses without it." >&2
   # An `&&` chain here would be the last command in the script, so a false
   # test would exit non-zero under `set -e` and fail the bootstrap of a host
   # that is merely slow.

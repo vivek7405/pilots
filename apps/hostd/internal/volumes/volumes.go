@@ -82,6 +82,9 @@ type Config struct {
 	MountRoot  string
 	CacheRoot  string
 	ConfigRoot string
+	// SystemdRoot is where systemd keeps the symlinks `enable` writes; only
+	// DisableLegacyReplicationUnits reads it. Default /etc/systemd/system.
+	SystemdRoot string
 }
 
 // runner executes an external command.
@@ -118,6 +121,9 @@ func New(cfg Config) *Manager {
 	}
 	if cfg.CacheSizeMiB == 0 {
 		cfg.CacheSizeMiB = 20480
+	}
+	if cfg.SystemdRoot == "" {
+		cfg.SystemdRoot = "/etc/systemd/system"
 	}
 	for _, d := range []struct {
 		field *string

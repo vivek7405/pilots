@@ -38,6 +38,9 @@ type MachineManager interface {
 	// fleet-wide.
 	Touch(ctx context.Context, id string)
 	Exec(ctx context.Context, machineID string, req api.ExecRequest) (*api.ExecResponse, error)
+	// Processes is what the guest agent supervises in a machine, as the
+	// agent's own JSON: a list of {name, state, restarts, port}.
+	Processes(ctx context.Context, machineID string) ([]byte, error)
 	// CreateVolume makes one, for a service whose engine replicates between
 	// its own ordinals and therefore needs a volume per ordinal.
 	CreateVolume(ctx context.Context, req api.CreateVolumeRequest) (*state.Volume, error)
@@ -112,6 +115,9 @@ type Manager struct {
 	// tombstone to collect.
 	mu      sync.Mutex
 	rolling map[string]struct{}
+	// restartsSeen is the app process restart count the process health check
+	// last saw per machine, so a restart between two probes is visible.
+	restartsSeen sync.Map
 }
 
 func New(opts Options) *Manager {
@@ -217,6 +223,21 @@ func (m *Manager) Deploy(ctx context.Context, serviceID, rootfsBuildID string,
 	fresh, err := m.rollOut(ctx, svc, rel, health, replicas, knobs)
 	if err != nil {
 		// Nothing has been flipped, so the old release is still serving.
+		var gate *api.HealthGateDetails
+		if errors.As(err, &gate) {
+			// A replica that came up and failed its gate is the evidence: the
+			// refusal tells the caller to read its console, and diagnose
+			// reads it back. Destroying it here made both a lie -- by the
+			// time anyone looked, the machine named in the 422 was gone.
+			// Suspended, so it stops billing. The LATEST failure is the
+			// evidence worth keeping: an earlier failed deploy's parked
+			// replicas go now, so a run of failed deploys leaves one set,
+			// not one per attempt, each holding a slot and its builds. The
+			// current release and its rollback target are kept as ever.
+			m.pruneExcept(ctx, svc.ID, svc.ReleaseID, m.rollbackTargetOf(ctx, svc), rel.ID)
+			m.park(ctx, svc.ID, fresh)
+			return nil, err
+		}
 		// Clear up what was half-built rather than leaving it to bill.
 		m.cleanUp(ctx, svc.ID, fresh, "deploy")
 		return nil, err
@@ -675,6 +696,18 @@ func (m *Manager) snapshotRelease(ctx context.Context, machineID string, rel *st
 	// them first let a failed recording publish a memory image with no vmstate
 	// to go with it.
 	rel.MemBuildID = ck.MemBuildID
+	// The checkpoint's DISK, with it. The memory image was captured over THIS
+	// disk -- its page cache, its inode tables, the block the agent's token
+	// was rewritten into -- so a replica that restores that memory onto any
+	// other disk, the pristine image included, reads blocks that are not
+	// there. A version of this adopted the diff only when its parent was the
+	// golden template, on the belief that the image plus the memory image was
+	// "the same pair it always restored"; every replica after the first then
+	// answered 401 to its own token install, because the token file the
+	// restored kernel believed in lived in blocks only the checkpoint's disk
+	// held. createFromRelease now attaches whatever parent a build's header
+	// names, so the diff restores wherever it was diffed from -- the golden
+	// template for a restored replica, the image for a booted one.
 	if ck.RootfsBuildID != "" {
 		rel.RootfsBuildID = ck.RootfsBuildID
 	}
@@ -710,7 +743,7 @@ func (m *Manager) Rollback(ctx context.Context, serviceID string) (*state.Releas
 		}
 	}
 	if target == nil {
-		return nil, fmt.Errorf("services: %s has no earlier healthy release to roll back to", serviceID)
+		return nil, &api.NoRollbackTargetError{Service: serviceID}
 	}
 
 	health, err := ParseHealth(svc.Health)
@@ -813,6 +846,21 @@ func (m *Manager) cleanUp(ctx context.Context, serviceID string, machines []stri
 	}
 }
 
+// park suspends the machines of a rollout that failed its health gate, on the
+// same detached context and for the same reason cleanUp uses one.
+func (m *Manager) park(ctx context.Context, serviceID string, machines []string) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), cleanupTimeout)
+	defer cancel()
+
+	for _, id := range machines {
+		if err := m.opts.Machines.Suspend(ctx, id); err != nil {
+			slog.Warn("could not park a replica that failed its health gate; "+
+				"it stays up until the idle monitor reaches it",
+				"machine", id, "service", serviceID, "err", err)
+		}
+	}
+}
+
 // cleanupTimeout bounds the detached cleanup above. Generous: a Destroy stops
 // a guest, tears down a namespace and removes its caches.
 const cleanupTimeout = 2 * time.Minute
@@ -820,6 +868,31 @@ const cleanupTimeout = 2 * time.Minute
 // prune destroys the machines of every release except the current one and the
 // one being kept as a rollback target.
 func (m *Manager) prune(ctx context.Context, serviceID, keepA, keepB string) {
+	m.pruneExcept(ctx, serviceID, keepA, keepB)
+}
+
+// rollbackTargetOf is the release Rollback would flip to: the newest healthy
+// one that is not current. Empty when there is none.
+func (m *Manager) rollbackTargetOf(ctx context.Context, svc *state.Service) string {
+	rels, err := m.opts.Store.ReleasesFor(ctx, svc.ID)
+	if err != nil {
+		return ""
+	}
+	for _, r := range rels {
+		if r.ID != svc.ReleaseID && r.Healthy {
+			return r.ID
+		}
+	}
+	return ""
+}
+
+// pruneExcept destroys the machines of every release of a service except the
+// ones named.
+func (m *Manager) pruneExcept(ctx context.Context, serviceID string, keep ...string) {
+	kept := map[string]bool{"": true}
+	for _, k := range keep {
+		kept[k] = true
+	}
 	all, err := m.opts.Store.ListMachines(ctx)
 	if err != nil {
 		return
@@ -829,7 +902,7 @@ func (m *Manager) prune(ctx context.Context, serviceID, keepA, keepB string) {
 			continue
 		}
 		rel := mach.ReleaseID
-		if rel == keepA || rel == keepB || rel == "" {
+		if kept[rel] {
 			continue
 		}
 		if err := m.opts.Machines.Destroy(ctx, mach.ID); err != nil {

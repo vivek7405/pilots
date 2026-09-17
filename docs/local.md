@@ -479,6 +479,15 @@ PILOTS_E2E=1 PILOTS_E2E_FULL=1 \
   PILOT_API=http://127.0.0.1:8080 PILOT_API_KEY="$KEY" node scripts/e2e.mjs
 ```
 
+The full run takes about 35 minutes. To confirm one change, run only the
+sections it touches -- `PILOTS_E2E_ONLY=timing,services` with the names from
+`PILOTS_E2E_LIST=1` -- which takes minutes; the summary then lists every
+section it did not run and the exit status is 2, so a narrowed run never
+reads as a full one. Run the full battery once per wave of changes, not once
+per change. Before a timing run, check `df -h /` is under 85% and the host
+has no leftover battery machines: a near-full disk doubles every snapshot
+write and reads as a regression that is not there.
+
 Without `PILOTS_E2E_FULL=1` it runs the process-only half and skips everything
 that boots a machine, which on a Firecracker host is most of what you want. The
 `POST /v1/plan` cases are in that half: a tar in, a plan out, no Firecracker

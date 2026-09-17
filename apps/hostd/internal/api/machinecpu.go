@@ -50,7 +50,7 @@ func (d Deps) machineCPU() MachineCPUView {
 // one. Absent is normal, not an error: it is what a machine that predates this
 // table reads as, and the API omits both fields.
 //
-// # Why a miss falls back to the store
+// # Why both are consulted, and the newer wins
 //
 // On a fleet the view is the subscription cache, which lags its own host's
 // writes by however long the subscription takes to deliver them. A CREATE
@@ -58,27 +58,37 @@ func (d Deps) machineCPU() MachineCPUView {
 // had not seen the write yet and answering with no last_start at all -- for the
 // one machine whose start it had just recorded. A second later a GET showed it.
 //
-// A client cannot tell "this machine has no recorded start" from "ask again in
-// a moment", so it reads the create as a cold boot that never happened. The
-// store is local, authoritative and already open; consulting it on a miss costs
-// one query in the rare case and removes the race entirely.
+// Falling back to the store only when the cache MISSED fixed the create and
+// left a worse bug behind it. Every start after the first finds a non-empty
+// LastStart already in the cache, so the fallback never ran and the API served
+// the PREVIOUS start: a wake answered with the start before it, indefinitely
+// one behind. That is invisible while a machine keeps restoring, and wrong the
+// moment the kind changes -- a machine that had just cold-booted reported
+// "restore", and its next ordinary restore reported "cold_boot", which reads
+// exactly like a machine that reboots forever.
 //
-// Cache FIRST, because on a fleet most reads are for machines this host does
-// not own and the cache is the only place their row is.
+// So both are consulted and the newer row wins. The store is local,
+// authoritative, already open, and has Corrosion's applied rows from every
+// peer too, so it is never worse than the cache -- it is simply the only one
+// that has seen THIS host's write before the subscription delivers it back.
+// The cache still answers for machines this host does not own, which is what
+// it is for.
+//
+// Compared on LastStartAt, NOT UpdatedAt: the subscription selects only id,
+// kind, vendor, last_start and last_start_at, so a cached row's UpdatedAt is
+// always zero and comparing on it would silently always prefer the store.
 func (d Deps) startOf(ctx context.Context, id string) state.MachineCPU {
-	view := d.machineCPU()
-	if view == nil {
-		return state.MachineCPU{}
+	var best state.MachineCPU
+	if view := d.machineCPU(); view != nil {
+		if row, ok := view.MachineCPU(ctx, id); ok {
+			best = row
+		}
 	}
-	if row, ok := view.MachineCPU(ctx, id); ok && row.LastStart != "" {
-		return row
+	if d.Store != nil {
+		if row, err := d.Store.GetMachineCPU(ctx, id); err == nil && row != nil &&
+			row.LastStartAt >= best.LastStartAt {
+			best = *row
+		}
 	}
-	if d.Store == nil {
-		return state.MachineCPU{}
-	}
-	row, err := d.Store.GetMachineCPU(ctx, id)
-	if err != nil || row == nil {
-		return state.MachineCPU{}
-	}
-	return *row
+	return best
 }

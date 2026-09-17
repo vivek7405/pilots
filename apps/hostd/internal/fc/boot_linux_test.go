@@ -78,7 +78,7 @@ func TestBootRealMachine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateMAC: %v", err)
 	}
-	if err := netns.Setup(slot, mac, 0); err != nil {
+	if err := netns.Setup(slot, 0); err != nil {
 		t.Fatalf("netns.Setup: %v", err)
 	}
 	t.Cleanup(func() { _ = netns.Teardown(slot) })

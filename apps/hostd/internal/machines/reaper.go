@@ -2,6 +2,7 @@ package machines
 
 import (
 	"context"
+	"github.com/google/uuid"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -51,6 +52,7 @@ func (m *Manager) RunReaper(ctx context.Context) {
 			// nothing is using" already lives, and a second timer for
 			// checkpoints would be a second thing to reason about.
 			m.ExpireCheckpoints(ctx)
+			m.sweepOrphanBuilds(ctx)
 			live.Tick()
 		}
 	}
@@ -162,4 +164,123 @@ func machineIDFromCmdline(path string) string {
 		}
 	}
 	return ""
+}
+
+// orphanBuildAge is how old a build directory nothing references must be
+// before the sweep removes it. Generous, because a build is on disk before
+// the row that will name it exists -- a create pulling its template, a
+// checkpoint chunkifying, a flush uploading -- and none of those take hours.
+const orphanBuildAge = 2 * time.Hour
+
+// sweepOrphanBuilds removes this host's build directories that no row names.
+//
+// Every path that supersedes a build removes its directory, but nothing ever
+// walked the directory for what those paths missed: a build whose machine
+// was destroyed on another host's say-so, a checkpoint expired before its
+// row was read here, a flush whose row write failed after the upload. On a
+// laptop that ran four batteries in a day that was 1,700 directories and
+// 134 GB, on a filesystem then at 98%, and every snapshot write paid for it.
+// Local only: the bucket is shared and another host may still name what
+// this one does not.
+func (m *Manager) sweepOrphanBuilds(ctx context.Context) {
+	referenced, ok := m.referencedBuilds(ctx)
+	if !ok {
+		return
+	}
+	entries, err := os.ReadDir(m.buildDir())
+	if err != nil {
+		return
+	}
+	var dirs []buildDirInfo
+	now := time.Now()
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		dirs = append(dirs, buildDirInfo{id: e.Name(), age: now.Sub(info.ModTime())})
+	}
+	removed := 0
+	for _, id := range selectOrphanBuilds(dirs, referenced) {
+		if err := os.RemoveAll(filepath.Join(m.buildDir(), id)); err != nil {
+			slog.Warn("could not remove an orphaned build directory", "build", id, "err", err)
+			continue
+		}
+		removed++
+	}
+	if removed > 0 {
+		slog.Info("swept build directories nothing references", "count", removed)
+	}
+}
+
+type buildDirInfo struct {
+	id  string
+	age time.Duration
+}
+
+// selectOrphanBuilds is the choice sweepOrphanBuilds acts on: directories
+// no row names, old enough that no operation can still be about to name
+// them.
+func selectOrphanBuilds(dirs []buildDirInfo, referenced map[string]bool) []string {
+	var out []string
+	for _, d := range dirs {
+		if referenced[d.id] || d.age < orphanBuildAge {
+			continue
+		}
+		out = append(out, d.id)
+	}
+	return out
+}
+
+// referencedBuilds is every build id a row on this host can name: a
+// machine's own disk and memory, the template it was created from, the image
+// it booted, its checkpoints, every release of every service, and the
+// templates this host adopted. False when any of those could not be read, in
+// which case nothing is swept: a listing that failed is not a listing that
+// was empty.
+func (m *Manager) referencedBuilds(ctx context.Context) (map[string]bool, bool) {
+	ref := map[string]bool{}
+	add := func(ids ...string) {
+		for _, id := range ids {
+			if id != "" && id != uuid.Nil.String() {
+				ref[id] = true
+			}
+		}
+	}
+	rows, err := m.opts.Store.ListMachines(ctx)
+	if err != nil {
+		return nil, false
+	}
+	for _, r := range rows {
+		add(r.RootfsBuildID, r.MemBuildID, r.TemplateMemBuildID, r.TemplateRootfsBuildID, r.ImageRef)
+		cks, err := m.opts.Store.ListCheckpoints(ctx, r.ID)
+		if err != nil {
+			return nil, false
+		}
+		for _, c := range cks {
+			add(c.RootfsBuildID, c.MemBuildID)
+		}
+	}
+	svcs, err := m.opts.Store.ListServiceNames(ctx)
+	if err != nil {
+		return nil, false
+	}
+	for _, s := range svcs {
+		rels, err := m.opts.Store.ReleasesFor(ctx, s.ID)
+		if err != nil {
+			return nil, false
+		}
+		for _, rel := range rels {
+			add(rel.RootfsBuildID, rel.MemBuildID)
+		}
+	}
+	for _, v := range []variant{variantGolden, variantBuilder} {
+		if t, err := m.loadTemplateManifest(v); err == nil && t != nil {
+			add(t.MemBuildID.String(), t.RootfsBuildID.String())
+		}
+	}
+	return ref, true
 }

@@ -3,6 +3,8 @@ package machines
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"sort"
 	"testing"
 )
@@ -83,4 +85,55 @@ func TestDiscardBuildsToleratesFailure(t *testing.T) {
 func TestDiscardBuildsWithoutAStore(t *testing.T) {
 	m := &Manager{opts: Options{}}
 	m.discardBuilds(context.Background(), "build-a")
+}
+
+// The local half, which was missing and is the one that fills a host.
+//
+// <CacheRoot>/builds/<id> is a cache of the objects being deleted beside it,
+// and nothing else ever removed one: a suspend, a checkpoint and a root flush
+// each mint a build, so a host accumulated a directory per capture forever
+// (99 GB across 1448 of them on the box this was found on). A build whose
+// objects are gone caches nothing, and leaving a partial one behind is exactly
+// the holey build the completion marker exists to refuse.
+func TestDiscardBuildsRemovesTheLocalDirectoryToo(t *testing.T) {
+	store := &deletingStore{}
+	m := &Manager{opts: Options{Chunks: store, CacheRoot: t.TempDir()}}
+
+	kept := filepath.Join(m.buildDir(), "build-keep")
+	gone := filepath.Join(m.buildDir(), "build-a")
+	for _, dir := range []string{kept, gone} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "data"), []byte("bytes"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m.discardBuilds(context.Background(), "build-a")
+
+	if _, err := os.Stat(gone); !os.IsNotExist(err) {
+		t.Error("a superseded build's directory is still on this host's disk")
+	}
+	if _, err := os.Stat(kept); err != nil {
+		t.Errorf("a build nobody discarded was removed: %v", err)
+	}
+}
+
+// A host whose object store cannot delete still must not keep the bytes. The
+// build is then still in the bucket, which makes the local copy a pure cache
+// and its removal free -- so the local half is not gated on the remote half.
+func TestDiscardBuildsRemovesTheLocalDirectoryWithoutADeleter(t *testing.T) {
+	m := &Manager{opts: Options{CacheRoot: t.TempDir()}}
+
+	dir := filepath.Join(m.buildDir(), "build-a")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	m.discardBuilds(context.Background(), "build-a")
+
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Error("a host with no deletable object store kept the local build")
+	}
 }

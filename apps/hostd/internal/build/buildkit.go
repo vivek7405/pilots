@@ -46,8 +46,23 @@ func (b *Builder) solveArgs(addr, contextDir, out, cacheDir, seedDir, metadata s
 	// and no WORKDIR, and the machine has nothing to start. The frontend has
 	// already resolved it, so this asks for what it knows rather than pulling
 	// the image a second time. Written HOST-side, like every other path here.
+	//
+	// A SECOND output, an OCI layout directory, because the metadata file
+	// alone does not carry the config and on a tar-only build is not written
+	// at all. buildkit 0.32 publishes `containerimage.config.digest` and never
+	// `containerimage.config`, so the key this used to read has never been
+	// present on any host and every build silently lost its base image's
+	// start command. The layout is an OCI spec artifact rather than a
+	// buildkit-version-specific key, so reading the config out of it does not
+	// move again the next time an exporter's metadata changes. It is deleted
+	// as soon as it has been read.
 	if metadata != "" {
-		args = append(args, "--metadata-file", metadata)
+		args = append(args,
+			"--metadata-file", metadata,
+			// compression=uncompressed: the layout exists to be read for one
+			// config blob and is deleted at once, and the default re-gzips
+			// every layer of every build to produce it.
+			"--output", "type=oci,tar=false,compression=uncompressed,dest="+ociLayoutDir(metadata))
 	}
 
 	// The cache is what makes a redeploy cheap. Both directories are on the
@@ -106,6 +121,7 @@ func (b *Builder) solveWithConfig(ctx context.Context, addr, contextDir, out, ca
 	if metadata == "" {
 		return nil, nil
 	}
+	defer os.RemoveAll(ociLayoutDir(metadata)) // the layers are already in the tar
 	cfg, err := readImageConfig(metadata)
 	if err != nil {
 		// Advisory, never fatal. The filesystem is built and correct; all that

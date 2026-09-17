@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -332,4 +333,36 @@ func firstDiff(a, b []byte) int {
 		}
 	}
 	return len(a)
+}
+
+// A parent that is only partly here is worse than a missing one. OpenLocalBuild
+// cannot see holes, so a diff against it would record every unhydrated block as
+// "unchanged, same as parent", and that build is durable corruption nothing
+// ever reports. It is refused before a byte is compared.
+func TestChunkifyRefusesAnIncompleteParent(t *testing.T) {
+	dir := t.TempDir()
+	in := writeBlocks(t, dir, 1, 2)
+	parentDir := filepath.Join(dir, "parent")
+	chunkifyTo(t, in, parentDir, "", uuid.New())
+
+	// The same directory with its marker gone is what an interrupted pull
+	// leaves: header and data both present, the right length, unknown holes.
+	if err := os.Remove(filepath.Join(parentDir, "data.complete")); err != nil {
+		t.Fatal(err)
+	}
+
+	child := writeBlocks(t, dir, 1, 3)
+	_, _, err := Chunkify(context.Background(), ChunkifyOpts{
+		In: child, OutDir: filepath.Join(dir, "out"), BuildID: uuid.New(),
+		BlockSize: testBlock, ParentDir: parentDir,
+	})
+	if err == nil {
+		t.Fatal("a diff was taken against a parent that is not fully hydrated")
+	}
+	if !strings.Contains(err.Error(), "not fully hydrated") {
+		t.Fatalf("got %v, want the hydration refusal", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, "out", "header")); statErr == nil {
+		t.Error("a refused diff still wrote a header")
+	}
 }

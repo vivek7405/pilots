@@ -109,6 +109,9 @@ func newDeployCmd(env *Env, getenv config.Env) *cobra.Command {
 				}
 				plan = *p
 				env.W.Notef("%s: compose file", filepath.Base(composeFile))
+				if err := recogniseBuildContexts(ctx, client, &plan, composeDir, env.W.Notef); err != nil {
+					return err
+				}
 			} else {
 				tarBytes, err := tarDirectory(dir)
 				if err != nil {
@@ -133,7 +136,7 @@ func newDeployCmd(env *Env, getenv config.Env) *cobra.Command {
 			env.W.Notef("plan: %d services in app %s", len(plan.Steps), plan.App)
 
 			creds, _ := config.Load(getenv)
-			secrets := secretsFor(creds, plan.App)
+			secrets := withEnvSecrets(secretsFor(creds, plan.App), plan, getenv)
 
 			results, err := executePlan(ctx, env, client, plan, composeDir, secrets, wait, verbose)
 			if err != nil {
@@ -203,6 +206,46 @@ func secretsFor(creds *config.Credentials, app string) map[string]string {
 		return nil
 	}
 	return all[app]
+}
+
+// withEnvSecrets overlays the environment on the credentials file: a secret
+// the plan references is taken from PILOT_SECRET_<NAME> when that is set,
+// with NAME upper-cased and every character outside [A-Z0-9] as `_`, so
+// `database_url` reads PILOT_SECRET_DATABASE_URL. This is the store a CI
+// runner has -- it has no credentials file and never ran `pilot secrets set`
+// -- and it is the convention the previous CLI and the battery already use.
+// The environment wins over the file, the way an override should.
+func withEnvSecrets(secrets map[string]string, plan pilots.ComposePlan, getenv config.Env) map[string]string {
+	if getenv == nil {
+		return secrets
+	}
+	for _, step := range plan.Steps {
+		for _, name := range step.SecretRefs {
+			v := getenv(secretEnvVar(name))
+			if v == "" {
+				continue
+			}
+			if secrets == nil {
+				secrets = map[string]string{}
+			}
+			secrets[name] = v
+		}
+	}
+	return secrets
+}
+
+// secretEnvVar is the environment variable a secret name is read from.
+func secretEnvVar(name string) string {
+	var b strings.Builder
+	b.WriteString("PILOT_SECRET_")
+	for _, r := range strings.ToUpper(name) {
+		if (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	return b.String()
 }
 
 // resolveSecrets turns a step's secret_refs (env name -> secret name) into
@@ -403,6 +446,76 @@ func refuseVolumeChange(ctx context.Context, client *pilots.Client, app string, 
 	}
 	return out.Failf("a service's volume is set when it is created",
 		"%s: mounts %s and the compose file names %s", step.Name, mountedName, wantName)
+}
+
+// recogniseBuildContexts asks the host what each build: context with no
+// Dockerfile is, and carries its answer into the step.
+//
+// A compose file plans from its text, so the host never sees what a build:
+// context contains; a plain directory plans from a tar of itself, and that is
+// where the host recognises a framework and writes its Dockerfile. A context
+// with no Dockerfile is such a directory, so it gets the same call: the
+// host's Dockerfile becomes the step's generated one, uploaded over the
+// context exactly as an image: step's is, and its readiness check fills a
+// health the service did not declare. Without this the step reached the
+// builder, which refused it after every other service had already been built
+// and rolled out. Nothing here reads the source: the host still decides.
+func recogniseBuildContexts(ctx context.Context, client *pilots.Client, plan *pilots.ComposePlan, dir string,
+	note func(string, ...any)) error {
+	for i := range plan.Steps {
+		step := &plan.Steps[i]
+		if step.Build == nil || step.Dockerfile != "" {
+			continue
+		}
+		contextDir := dir
+		if step.Build.Context != "" {
+			contextDir = filepath.Join(dir, step.Build.Context)
+		}
+		named := step.Build.Dockerfile
+		if named == "" {
+			named = "Dockerfile"
+		}
+		if _, err := os.Stat(filepath.Join(contextDir, named)); err == nil {
+			continue
+		}
+		tarBytes, err := tarDirectory(contextDir)
+		if err != nil {
+			return err
+		}
+		res, err := client.Plan(ctx, bytes.NewReader(tarBytes), step.Name)
+		if err != nil {
+			return explainUnknown(err)
+		}
+		// The context is usually the compose file's own directory (build: .),
+		// so the host answers with the plan of the whole file, in which our
+		// step is the one carrying our name -- never the first one, which is
+		// whichever service sorts first. A context of its own answers with a
+		// single step the host named itself.
+		picked := -1
+		for j, s := range res.Plan.Steps {
+			if s.Name == step.Name {
+				picked = j
+			}
+		}
+		if picked < 0 && len(res.Plan.Steps) == 1 && len(res.Detected) == 1 && res.Detected[0].Source == "recipe" {
+			picked = 0
+		}
+		if picked < 0 || res.Plan.Steps[picked].Dockerfile == "" {
+			// A context the host could not match to this step, or one it
+			// planned from a Dockerfile the stat above did not see; the
+			// builder answers for those.
+			continue
+		}
+		step.Dockerfile = res.Plan.Steps[picked].Dockerfile
+		if step.Health == nil {
+			step.Health = res.Plan.Steps[picked].Health
+		}
+		if picked < len(res.Detected) && note != nil {
+			d := res.Detected[picked]
+			note("%s: %s (%s) in %s", step.Name, d.Source, d.Framework, filepath.Join(".", step.Build.Context))
+		}
+	}
+	return nil
 }
 
 // buildStep packs the step's context and streams the build. The plan's

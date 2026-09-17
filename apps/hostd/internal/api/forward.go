@@ -5,7 +5,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
@@ -26,13 +25,10 @@ func (d Deps) serviceArbiter(ctx context.Context, serviceID string) (string, boo
 	if err != nil {
 		return "", false
 	}
-	live := make([]state.Host, 0, len(hosts))
-	for _, h := range hosts {
-		if time.Since(time.Unix(h.LastSeen, 0)) < 90*time.Second {
-			live = append(live, h)
-		}
-	}
-	return state.OwnerFor(serviceID, live)
+	// state.LiveHosts, not a window of this package's own: an arbiter chosen
+	// from a longer window than the store's claim guard uses is a host the
+	// fleet has already given up on, and the forward then dials a corpse.
+	return state.OwnerFor(serviceID, state.LiveHosts(hosts))
 }
 
 // forwardToArbiter sends a service-scoped write to the host that owns it.

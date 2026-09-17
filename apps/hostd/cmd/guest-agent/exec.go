@@ -12,7 +12,9 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -166,10 +168,81 @@ func prepareCommand(cmd *exec.Cmd, username, cwd string, env map[string]string) 
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
+
+	// The MACHINE's own environment, before the caller's.
+	//
+	// applyUserCredential builds cmd.Env from scratch -- HOME, USER, PATH and
+	// little else -- so an exec'd command did not inherit the agent's
+	// environment and nothing ever added the machine's. Every PILOT_ variable
+	// was therefore empty inside `pilot exec`, which is not a cosmetic gap:
+	// `$PILOT_BROKER_URL/token` expanded to "/token", and the SDK's
+	// InsideMachine() is `os.Getenv("PILOT_BROKER_URL") != ""`, so an agent
+	// running through exec could not tell it was inside a machine at all.
+	//
+	// This is the one chokepoint: exec, the terminal, the stream and sessions
+	// all prepare their command through here.
+	//
+	// Read fresh rather than cached. A deploy rewrites this file, and a
+	// long-lived agent that cached it at boot would hand out the previous
+	// release's environment. A missing or unreadable file is not an error:
+	// that is simply a machine with nothing declared, which is every machine
+	// built from a plain image.
+	if raw, err := os.ReadFile(envPath); err == nil {
+		for k, v := range parseEnvFile(string(raw)) {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+	}
+
+	// LAST, so an explicitly requested variable still wins: Go takes the final
+	// occurrence of a duplicated key.
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
+
+	// Resolve a bare command name against the PATH the command will RUN
+	// with, not the one the agent was started with. exec.Command looks the
+	// name up at construction, in the agent's own environment -- and the
+	// agent is the guest's init, started by the kernel with no PATH at all,
+	// so every relative name failed with "executable file not found" and
+	// `pilot exec <machine> -- echo hi` exited 127 while `/bin/echo hi`
+	// worked. The shell path (/exec with a cmd string) never noticed, since
+	// the shell is named by its absolute path and does its own lookup.
+	if cmd.Err != nil || !strings.ContainsRune(cmd.Path, os.PathSeparator) {
+		if p, err := lookPathIn(envValue(cmd.Env, "PATH"), cmd.Args[0]); err == nil {
+			cmd.Path, cmd.Err = p, nil
+		}
+	}
 	return nil
+}
+
+// lookPathIn is exec.LookPath against an explicit PATH rather than the
+// process's own.
+func lookPathIn(pathEnv, file string) (string, error) {
+	if strings.ContainsRune(file, os.PathSeparator) {
+		return file, nil
+	}
+	for _, dir := range filepath.SplitList(pathEnv) {
+		if dir == "" {
+			dir = "."
+		}
+		candidate := filepath.Join(dir, file)
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return candidate, nil
+		}
+	}
+	return "", &exec.Error{Name: file, Err: exec.ErrNotFound}
+}
+
+// envValue is the LAST value of key in a KEY=value list, which is the one
+// the kernel hands the process when a key is duplicated.
+func envValue(env []string, key string) string {
+	val := ""
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok && k == key {
+			val = v
+		}
+	}
+	return val
 }
 
 // imageDefaultUser is the USER the image's Dockerfile declared, from the start

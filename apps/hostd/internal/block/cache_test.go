@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/google/uuid"
 	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"golang.org/x/sys/unix"
@@ -170,6 +171,62 @@ func TestExportToDiffCopiesOnlyWrittenBlocks(t *testing.T) {
 	// Untouched blocks stay zero.
 	if !bytes.Equal(raw[0:testBlock], make([]byte, testBlock)) {
 		t.Error("an untouched block was written by the export")
+	}
+}
+
+// A checkpoint stages the cow inside the pause, so the copy has to cost what
+// the machine wrote rather than what its disk is sized: blocks the bitmap does
+// not name must not be read, let alone land in the copy.
+func TestCopyDirtyRangesCopiesOnlyDirtyBlocks(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "cow")
+
+	// Every block of the source holds data, but the bitmap owns only two of
+	// them. The other two are allocated bytes the copy must leave behind.
+	f, err := os.Create(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := int64(0); i < 4; i++ {
+		if _, err := f.WriteAt(bytes.Repeat([]byte{byte(i + 1)}, int(testBlock)), i*testBlock); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	dirty := roaring.New()
+	dirty.Add(1)
+	dirty.Add(3)
+
+	dst := filepath.Join(dir, "staged")
+	if err := CopyDirtyRanges(src, dst, dirty, testBlock); err != nil {
+		t.Fatalf("CopyDirtyRanges: %v", err)
+	}
+
+	raw, err := os.ReadFile(dst)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(raw)) != 4*testBlock {
+		t.Fatalf("staged file is %d bytes, want the source's %d", len(raw), 4*testBlock)
+	}
+	if !bytes.Equal(raw[testBlock:2*testBlock], bytes.Repeat([]byte{2}, int(testBlock))) {
+		t.Error("block 1 did not survive the copy")
+	}
+	if !bytes.Equal(raw[3*testBlock:4*testBlock], bytes.Repeat([]byte{4}, int(testBlock))) {
+		t.Error("block 3 did not survive the copy")
+	}
+	// Blocks the bitmap does not own read back as holes...
+	for _, idx := range []int64{0, 2} {
+		if !bytes.Equal(raw[idx*testBlock:(idx+1)*testBlock], make([]byte, testBlock)) {
+			t.Errorf("block %d was copied although it is not dirty", idx)
+		}
+	}
+	// ...and never got allocated: the staged file occupies less than the
+	// source, which is the whole point of copying by bitmap.
+	if got, want := blocksAllocated(t, dst), blocksAllocated(t, src); got >= want {
+		t.Errorf("staged file occupies %d bytes, the source %d; the copy was not confined to the dirty blocks", got, want)
 	}
 }
 
@@ -443,5 +500,114 @@ func TestOverlayReadsAreCountedAsCacheHitsAndMisses(t *testing.T) {
 	}
 	if d := metrics.NBDCacheMisses.Load() - misses; d != 0 {
 		t.Errorf("a written block counted %d misses, want 0", d)
+	}
+}
+
+// The periodic root flush copies only what was written since the previous
+// flush, so the cache keeps a second set: written since the last acknowledged
+// flush. A block written between the read and the acknowledgement must stay
+// unflushed, which is why the acknowledgement clears what was handed out and
+// not everything.
+func TestCacheTracksWritesSinceTheLastAcknowledgedFlush(t *testing.T) {
+	c := newTestCache(t, 4*testBlock)
+	block := bytes.Repeat([]byte{1}, int(testBlock))
+
+	if _, err := c.WriteAt(block, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.WriteAt(block, 2*testBlock); err != nil {
+		t.Fatal(err)
+	}
+	first := c.Unflushed()
+	if first.GetCardinality() != 2 || !first.Contains(0) || !first.Contains(2) {
+		t.Fatalf("unflushed after two writes is %v, want blocks 0 and 2", first.ToArray())
+	}
+
+	// Written after the read, before the acknowledgement.
+	if _, err := c.WriteAt(block, 3*testBlock); err != nil {
+		t.Fatal(err)
+	}
+	c.MarkFlushed()
+
+	rest := c.Unflushed()
+	if rest.GetCardinality() != 1 || !rest.Contains(3) {
+		t.Fatalf("unflushed after the acknowledgement is %v, want only block 3", rest.ToArray())
+	}
+	// The cumulative set is untouched: a flush forgets nothing about what
+	// the cache owns.
+	if got := c.Dirty(); got.GetCardinality() != 3 {
+		t.Errorf("dirty is %v after a flush, want blocks 0, 2 and 3", got.ToArray())
+	}
+	// That read handed out block 3, so acknowledging clears it -- and an
+	// acknowledgement with nothing handed out since forgets nothing, however
+	// much was written in between.
+	c.MarkFlushed()
+	if _, err := c.WriteAt(block, testBlock); err != nil {
+		t.Fatal(err)
+	}
+	c.MarkFlushed()
+	if got := c.Unflushed(); got.GetCardinality() != 1 || !got.Contains(1) {
+		t.Errorf("an acknowledgement with nothing handed out left unflushed at %v, want only block 1", got.ToArray())
+	}
+}
+
+// A staged copy that persists between flushes is the whole cow as of the last
+// pause only if a merge leaves what it already held alone.
+func TestMergeDirtyRangesKeepsWhatTheStagedCopyAlreadyHolds(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "cow")
+	staged := filepath.Join(dir, "staged")
+
+	f, err := os.Create(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := int64(0); i < 4; i++ {
+		if _, err := f.WriteAt(bytes.Repeat([]byte{byte(i + 1)}, int(testBlock)), i*testBlock); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// First flush: block 1. Second flush: block 3 only, merged.
+	first := roaring.New()
+	first.Add(1)
+	if err := CopyDirtyRanges(src, staged, first, testBlock); err != nil {
+		t.Fatalf("CopyDirtyRanges: %v", err)
+	}
+	second := roaring.New()
+	second.Add(3)
+	if err := MergeDirtyRanges(src, staged, second, testBlock); err != nil {
+		t.Fatalf("MergeDirtyRanges: %v", err)
+	}
+
+	raw, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw[testBlock:2*testBlock], bytes.Repeat([]byte{2}, int(testBlock))) {
+		t.Error("the merge discarded the block the first flush staged")
+	}
+	if !bytes.Equal(raw[3*testBlock:4*testBlock], bytes.Repeat([]byte{4}, int(testBlock))) {
+		t.Error("the merged block did not land")
+	}
+	for _, idx := range []int64{0, 2} {
+		if !bytes.Equal(raw[idx*testBlock:(idx+1)*testBlock], make([]byte, testBlock)) {
+			t.Errorf("block %d was copied although neither flush named it", idx)
+		}
+	}
+	// And a fresh copy over the same path starts over, which is what the
+	// first flush after an attach relies on.
+	if err := CopyDirtyRanges(src, staged, second, testBlock); err != nil {
+		t.Fatalf("CopyDirtyRanges over an existing file: %v", err)
+	}
+	raw, err = os.ReadFile(staged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(raw[testBlock:2*testBlock], make([]byte, testBlock)) {
+		t.Error("a fresh copy kept a block from the previous staged file")
 	}
 }

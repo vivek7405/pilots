@@ -373,3 +373,87 @@ func TestTheImageDefaultUserComesFromTheStartSpec(t *testing.T) {
 		t.Errorf("no start spec at all: got %q, want empty", got)
 	}
 }
+
+// An exec'd command must see the machine's own environment.
+//
+// applyUserCredential rebuilds cmd.Env from scratch, so nothing inherited the
+// agent's environment and nothing added the machine's: every PILOT_ variable
+// was empty inside `pilot exec`. That is not cosmetic. The credential broker's
+// URL lives there, so `$PILOT_BROKER_URL/token` expanded to "/token", and the
+// Go SDK decides it is running inside a machine by testing that same variable
+// for emptiness -- so an agent invoked through exec could not tell.
+func TestAnExecSeesTheMachinesOwnEnvironment(t *testing.T) {
+	dir := t.TempDir()
+	saved := envPath
+	envPath = filepath.Join(dir, "env")
+	t.Cleanup(func() { envPath = saved })
+
+	if err := os.WriteFile(envPath, []byte(
+		"PILOT_BROKER_URL=\"http://169.254.0.22:3002\"\nAPP_MODE=production\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command("true")
+	if err := prepareCommand(cmd, "", "", map[string]string{"APP_MODE": "override"}); err != nil {
+		t.Fatalf("prepareCommand: %v", err)
+	}
+
+	got := map[string]string{}
+	for _, kv := range cmd.Env {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			got[k] = v // later wins, which is what exec itself does
+		}
+	}
+	if got["PILOT_BROKER_URL"] != "http://169.254.0.22:3002" {
+		t.Errorf("PILOT_BROKER_URL = %q; the broker URL is invisible to an exec, so "+
+			"$PILOT_BROKER_URL/token expands to /token", got["PILOT_BROKER_URL"])
+	}
+	// The caller's explicit value wins over the machine's.
+	if got["APP_MODE"] != "override" {
+		t.Errorf("APP_MODE = %q, want the caller's \"override\"", got["APP_MODE"])
+	}
+}
+
+// A machine with no env file is every machine built from a plain image. It
+// must not fail, and it must still get its account defaults.
+func TestAnExecWithNoMachineEnvStillRuns(t *testing.T) {
+	dir := t.TempDir()
+	saved := envPath
+	envPath = filepath.Join(dir, "absent")
+	t.Cleanup(func() { envPath = saved })
+
+	cmd := exec.Command("true")
+	if err := prepareCommand(cmd, "", "", nil); err != nil {
+		t.Fatalf("prepareCommand with no env file: %v", err)
+	}
+}
+
+// A bare command name resolves against the PATH the command will run with.
+// The agent is the guest's init and starts with no PATH of its own, so the
+// lookup exec.Command does at construction found nothing, and every
+// `pilot exec <machine> -- <name>` exited 127 unless the name was absolute.
+func TestABareCommandNameResolvesAgainstTheCommandsOwnPath(t *testing.T) {
+	dir := t.TempDir()
+	tool := filepath.Join(dir, "greet")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\necho hi\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", "")
+
+	cmd := exec.Command("greet")
+	if cmd.Err == nil {
+		t.Fatal("the fixture is wrong: exec.Command found greet with no PATH")
+	}
+	cmd.Env = []string{"PATH=" + dir}
+	if p, err := lookPathIn(envValue(cmd.Env, "PATH"), cmd.Args[0]); err != nil {
+		t.Fatalf("greet not found on the command's own PATH: %v", err)
+	} else if p != tool {
+		t.Fatalf("resolved %s, want %s", p, tool)
+	}
+	if _, err := lookPathIn(dir, "absent"); err == nil {
+		t.Fatal("a name that is on no PATH entry resolved")
+	}
+	if envValue([]string{"PATH=a", "PATH=b"}, "PATH") != "b" {
+		t.Fatal("a duplicated key must yield its last value, as the kernel does")
+	}
+}

@@ -36,7 +36,7 @@ func TestSetupTeardownRoundTrip(t *testing.T) {
 	requireRoot(t)
 	s := testSlot(t, 901)
 
-	if err := Setup(s, "02:00:00:00:09:01", 0); err != nil {
+	if err := Setup(s, 0); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 	if !nsExists(s.NetnsName) {
@@ -86,7 +86,7 @@ func TestSetupIsIdempotent(t *testing.T) {
 	s := testSlot(t, 902)
 
 	for attempt := 0; attempt < 3; attempt++ {
-		if err := Setup(s, "02:00:00:00:09:02", 0); err != nil {
+		if err := Setup(s, 0); err != nil {
 			t.Fatalf("Setup attempt %d: %v", attempt, err)
 		}
 		if !nsExists(s.NetnsName) {
@@ -111,7 +111,7 @@ func TestTeardownOnAbsentSlotIsNoError(t *testing.T) {
 func TestFirewallRuleOrdering(t *testing.T) {
 	requireRoot(t)
 	s := testSlot(t, 904)
-	if err := Setup(s, "02:00:00:00:09:04", 0); err != nil {
+	if err := Setup(s, 0); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -145,7 +145,7 @@ func TestFirewallRuleOrdering(t *testing.T) {
 func TestNATRulesBothDirections(t *testing.T) {
 	requireRoot(t)
 	s := testSlot(t, 905)
-	if err := Setup(s, "02:00:00:00:09:05", 0); err != nil {
+	if err := Setup(s, 0); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -181,7 +181,7 @@ func TestCreateDestroyChurnLeavesNothingBehind(t *testing.T) {
 		if err != nil {
 			t.Fatalf("iteration %d: Take: %v", i, err)
 		}
-		if err := Setup(slot, "02:00:00:00:0a:01", 0); err != nil {
+		if err := Setup(slot, 0); err != nil {
 			t.Fatalf("iteration %d: Setup: %v", i, err)
 		}
 		if err := Teardown(slot); err != nil {
@@ -204,7 +204,7 @@ func TestCreateDestroyChurnLeavesNothingBehind(t *testing.T) {
 func TestIPv6DataPathIsBuilt(t *testing.T) {
 	requireRoot(t)
 	s := testSlot(t, 906)
-	if err := Setup(s, "02:00:00:00:09:06", 0); err != nil {
+	if err := Setup(s, 0); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -259,7 +259,7 @@ func TestIPv6DataPathIsBuilt(t *testing.T) {
 func TestNAT66RulesBothDirections(t *testing.T) {
 	requireRoot(t)
 	s := testSlot(t, 907)
-	if err := Setup(s, "02:00:00:00:09:07", 0); err != nil {
+	if err := Setup(s, 0); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -283,7 +283,7 @@ func TestNAT66RulesBothDirections(t *testing.T) {
 func TestFirewallOrdersTheTenantBoundary(t *testing.T) {
 	requireRoot(t)
 	s := testSlot(t, 908)
-	if err := Setup(s, "02:00:00:00:09:08", 0); err != nil {
+	if err := Setup(s, 0); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 
@@ -333,7 +333,7 @@ func TestFirewallOrdersTheTenantBoundary(t *testing.T) {
 func TestNeighbourDiscoverySurvivesTheLinkLocalDrop(t *testing.T) {
 	requireRoot(t)
 	s := testSlot(t, 909)
-	if err := Setup(s, "02:00:00:00:09:09", 0); err != nil {
+	if err := Setup(s, 0); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 

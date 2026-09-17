@@ -1,7 +1,9 @@
 package build
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -9,9 +11,16 @@ import (
 	"testing"
 )
 
-// writeMetadata writes a buildctl --metadata-file the way buildkit does: the
-// image config as base64 under containerimage.config, beside keys this code
-// ignores.
+// writeMetadata writes a --metadata-file carrying the image config inline
+// under containerimage.config.
+//
+// NO SHIPPED BUILDKIT WRITES THIS. 0.32 publishes only the config's digest,
+// and a tar-only build writes no metadata file at all. This fixture describes
+// the forward-compatible branch readImageConfig keeps for a version that
+// might publish the config inline; it was once believed to be what buildkit
+// did, which is how a broken reader stayed green for the life of the feature.
+// The real shape is exercised by
+// TestTheBaseConfigIsRecoveredFromWhatBuildkitReallyWrites.
 func writeMetadata(t *testing.T, cfg map[string]any) string {
 	t.Helper()
 	doc, err := json.Marshal(map[string]any{"config": cfg})
@@ -33,7 +42,7 @@ func writeMetadata(t *testing.T, cfg map[string]any) string {
 	return path
 }
 
-func TestReadImageConfigDecodesWhatBuildkitWrites(t *testing.T) {
+func TestReadImageConfigDecodesAnInlineConfigIfOneIsEverPublished(t *testing.T) {
 	path := writeMetadata(t, map[string]any{
 		"Env":          []string{"PATH=/usr/local/bin:/usr/bin", "PGDATA=/var/lib/postgresql/data"},
 		"Cmd":          []string{"postgres"},
@@ -230,5 +239,150 @@ func TestSolveArgsAsksForTheImageConfig(t *testing.T) {
 	without := strings.Join(b.solveArgs(testBuilderAddr, "/ctx", "/out.tar", "", "", ""), " ")
 	if strings.Contains(without, "--metadata-file") {
 		t.Errorf("solveArgs passed an empty --metadata-file: %s", without)
+	}
+}
+
+// writeOCILayout writes a real OCI image layout: index.json naming a manifest
+// blob, the manifest naming a config blob, and the config carrying cfg. This
+// is the shape a `--output type=oci,tar=false` export actually leaves on disk.
+func writeOCILayout(t *testing.T, dir string, cfg map[string]any) {
+	t.Helper()
+	blobs := filepath.Join(dir, "blobs", "sha256")
+	if err := os.MkdirAll(blobs, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	put := func(name string, v any) string {
+		raw, err := json.Marshal(v)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sum := sha256.Sum256(raw)
+		hex := hex.EncodeToString(sum[:])
+		if err := os.WriteFile(filepath.Join(blobs, hex), raw, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return "sha256:" + hex
+	}
+	cfgDigest := put("config", map[string]any{"config": cfg})
+	manDigest := put("manifest", map[string]any{
+		"mediaType": "application/vnd.oci.image.manifest.v1+json",
+		"config":    map[string]any{"digest": cfgDigest},
+		"layers":    []any{},
+	})
+	idx, err := json.Marshal(map[string]any{
+		"manifests": []any{map[string]any{
+			"mediaType": "application/vnd.oci.image.manifest.v1+json",
+			"digest":    manDigest,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "index.json"), idx, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// The regression that mattered: on the buildkit this product actually pins,
+// the metadata file carries only the config's DIGEST, never the config. Every
+// build therefore lost its base image's start command, so `FROM alpine` with
+// no CMD of its own reported "this image declares no CMD or ENTRYPOINT" even
+// though alpine declares /bin/sh. The old test passed throughout, because its
+// fixture invented a containerimage.config key no buildkit version writes.
+func TestTheBaseConfigIsRecoveredFromWhatBuildkitReallyWrites(t *testing.T) {
+	dir := t.TempDir()
+	meta := filepath.Join(dir, "metadata.json")
+
+	// Exactly what buildkit 0.32 publishes: the digest, and no config.
+	raw, err := json.Marshal(map[string]any{
+		"containerimage.config.digest": "sha256:" + strings.Repeat("b", 64),
+		"containerimage.digest":        "sha256:" + strings.Repeat("c", 64),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(meta, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeOCILayout(t, ociLayoutDir(meta), map[string]any{
+		"Cmd": []string{"/bin/sh"},
+		"Env": []string{"PATH=/usr/local/sbin:/usr/local/bin"},
+	})
+
+	cfg, err := readImageConfig(meta)
+	if err != nil {
+		t.Fatalf("readImageConfig: %v", err)
+	}
+	if cfg == nil {
+		t.Fatal("no config recovered; the base image's CMD is lost and the build " +
+			"will refuse an image that declares one")
+	}
+	if len(cfg.Cmd) != 1 || cfg.Cmd[0] != "/bin/sh" {
+		t.Errorf("Cmd = %v, want [/bin/sh]", cfg.Cmd)
+	}
+	if len(cfg.Env) != 1 {
+		t.Errorf("Env = %v, want the base image's PATH", cfg.Env)
+	}
+}
+
+// A layout that is an index pointing at an index pointing at a manifest, which
+// is what a multi-platform export leaves.
+func TestTheBaseConfigIsRecoveredThroughANestedIndex(t *testing.T) {
+	dir := t.TempDir()
+	meta := filepath.Join(dir, "metadata.json")
+	if err := os.WriteFile(meta, []byte(`{}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	layout := ociLayoutDir(meta)
+	writeOCILayout(t, layout, map[string]any{"Cmd": []string{"postgres"}})
+
+	// Wrap the existing index in one more level.
+	inner, err := os.ReadFile(filepath.Join(layout, "index.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(inner)
+	h := hex.EncodeToString(sum[:])
+	if err := os.WriteFile(filepath.Join(layout, "blobs", "sha256", h), inner, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	outer, err := json.Marshal(map[string]any{
+		"manifests": []any{map[string]any{"digest": "sha256:" + h}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(layout, "index.json"), outer, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := readImageConfig(meta)
+	if err != nil || cfg == nil {
+		t.Fatalf("readImageConfig through a nested index: cfg=%v err=%v", cfg, err)
+	}
+	if len(cfg.Cmd) != 1 || cfg.Cmd[0] != "postgres" {
+		t.Errorf("Cmd = %v, want [postgres]", cfg.Cmd)
+	}
+}
+
+// A digest that tries to climb out of the blob store is refused rather than
+// read. The layout is written by a build, but a build runs tenant input.
+func TestAnEscapingDigestIsRefused(t *testing.T) {
+	dir := t.TempDir()
+	layout := filepath.Join(dir, "x.oci")
+	if err := os.MkdirAll(layout, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	idx, err := json.Marshal(map[string]any{
+		"manifests": []any{map[string]any{"digest": "sha256:../../../../etc/passwd"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(layout, "index.json"), idx, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := configFromOCILayout(layout); err == nil {
+		t.Fatal("a digest containing path separators was accepted")
 	}
 }

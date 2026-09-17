@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/netns"
 )
@@ -25,6 +26,12 @@ type Config struct {
 	// State. In phase 2 this is a local SQLite file; from phase 4 the same
 	// schema is served by Corrosion and this becomes its replica path.
 	StateDSN string // PILOT_STATE_DSN
+
+	// RootFlushInterval bounds how long a running machine's root disk can
+	// hold writes that are not yet in object storage: the published root RPO.
+	// Zero disables the periodic flush. See ARCHITECTURE.md, "Two durability
+	// tiers".
+	RootFlushInterval time.Duration // PILOT_ROOT_FLUSH_INTERVAL, default 60s
 
 	// Firecracker artifacts, installed by scripts/fetch-*.sh.
 	KernelPath     string // PILOT_KERNEL
@@ -220,6 +227,18 @@ func env(key, def string) string {
 	return def
 }
 
+// envDuration reads a Go duration ("60s", "2m", "0"), keeping the default on
+// anything that does not parse: a typo must not silently switch a durability
+// bound off, and "0" is the only spelling of off.
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d >= 0 {
+			return d
+		}
+	}
+	return def
+}
+
 // Load reads the environment and validates what the process cannot run without.
 func Load() (*Config, error) {
 	host, _ := os.Hostname()
@@ -230,6 +249,8 @@ func Load() (*Config, error) {
 		PublicIP:   os.Getenv("PILOT_PUBLIC_IP"),
 
 		StateDSN: env("PILOT_STATE_DSN", "/var/lib/pilots/state.db"),
+
+		RootFlushInterval: envDuration("PILOT_ROOT_FLUSH_INTERVAL", 60*time.Second),
 
 		KernelPath:      env("PILOT_KERNEL", "/opt/pilots/kernels/vmlinux-6.1.158/vmlinux.bin"),
 		FirecrackerBin:  env("PILOT_FIRECRACKER", "/opt/pilots/bin/firecracker"),

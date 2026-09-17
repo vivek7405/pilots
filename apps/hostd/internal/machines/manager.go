@@ -111,6 +111,12 @@ type Options struct {
 	// served on. One pool per host, because the devices are a host resource.
 	NBDDevices *nbd.DevicePool
 
+	// RootFlushInterval is how often a running machine's disk is made
+	// durable in object storage without a checkpoint: the published root RPO
+	// (ARCHITECTURE.md, "Two durability tiers"). Zero switches the flush
+	// off, which leaves the root at checkpoint granularity.
+	RootFlushInterval time.Duration
+
 	// HandlerEnv is passed to the block and fault servers. It is an ALLOWLIST
 	// built by HandlerEnv(), not this daemon's environment: those processes
 	// read their builds through a per-machine chunk socket and hold no storage
@@ -198,8 +204,18 @@ type Manager struct {
 	// unix socket, so no handler holds a storage credential. See chunks.go.
 	chunks *chunkServers
 
-	locks  sync.Map // machine id -> *sync.Mutex
-	flight *inFlight
+	locks sync.Map // machine id -> *sync.Mutex
+	// The periodic root flush's bookkeeping: which machines have a flush in
+	// flight, and the memory image a flush unpinned from a row but could not
+	// yet delete. See rootflush.go.
+	flushing sync.Map // machine id -> true
+	flushDue sync.Map // machine id -> time.Time the next flush is due
+	staleMem sync.Map // machine id -> memory build id
+	// pulling is every template build a background hydration is running
+	// for, so a burst of creates on a cold host starts one pull, not one
+	// per create.
+	pulling sync.Map // build id -> true
+	flight  *inFlight
 
 	// retired keeps the engine counters monotonic across a machine going
 	// away. See retiredUffd.
@@ -504,6 +520,13 @@ func (m *Manager) Create(ctx context.Context, req api.CreateMachineRequest) (*st
 		fcm, err = m.startNewMachine(ctx, row, token, req.Volume, req.Image, env.Cmd)
 	}
 	if err != nil {
+		// Said here as well as returned. The caller is often nobody: a
+		// rollout started by a build whose client has gone reads this into a
+		// build log nobody fetches, and the row then sits in `error` with no
+		// process, no directory and no line in the journal to say why.
+		slog.Warn("machine failed to start; its row is marked error",
+			"machine", id, "service", req.Service, "release", req.Release,
+			"start", startKind, "err", err)
 		row.State = StateError
 		stampSlot(row, nil)
 		row.UpdatedAt = time.Now().Unix()
@@ -834,6 +857,13 @@ func (m *Manager) deleteRemoteState(ctx context.Context, id string) error {
 	if row, err := m.opts.Store.GetMachine(ctx, id); err == nil {
 		builds = append(builds, row.MemBuildID, row.RootfsBuildID)
 	}
+	// The memory image a root flush unpinned from the row and was holding
+	// until the fault handler no longer needed it. Suspend and Redeploy drain
+	// it on their way; a machine destroyed between a flush and its next
+	// suspend would otherwise leave its last image in the bucket for good.
+	if stale, ok := m.staleMem.LoadAndDelete(id); ok {
+		builds = append(builds, stale.(string))
+	}
 	if cks, err := m.opts.Store.ListCheckpoints(ctx, id); err == nil {
 		for _, c := range cks {
 			keys = append(keys, checkpointSnapKey(id, c.ID))
@@ -882,7 +912,28 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 	lock := m.lockFor(id)
 	lock.Lock()
 	defer lock.Unlock()
+	return m.suspendLocked(ctx, id)
+}
 
+// errBusy is a suspend the idle monitor declined because a request was in
+// flight by the time it held the lock.
+var errBusy = errors.New("machines: a request is in flight")
+
+// suspendIfIdle is Suspend for the idle monitor: the in-flight check is made
+// again under the machine's lock, because the monitor's own check ran before
+// it queued behind whoever held the lock, and a build can begin in between.
+// A machine found busy is left alone and reconsidered on the next pass.
+func (m *Manager) suspendIfIdle(ctx context.Context, id string) error {
+	lock := m.lockFor(id)
+	lock.Lock()
+	defer lock.Unlock()
+	if m.flight.count(id) > 0 {
+		return errBusy
+	}
+	return m.suspendLocked(ctx, id)
+}
+
+func (m *Manager) suspendLocked(ctx context.Context, id string) error {
 	row, err := m.opts.Store.GetMachine(ctx, id)
 	if err != nil {
 		return err
@@ -1011,8 +1062,13 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 
 	// The builds this suspend replaces. Nothing else can be reading them: a
 	// checkpoint mints its own ids, so a machine's suspend builds are named by
-	// its row and nowhere else.
+	// its row and nowhere else. And the image a root flush unpinned but left
+	// in storage while the fault handler could still need it: this suspend's
+	// image replaces it for good.
 	superseded := []string{row.MemBuildID, row.RootfsBuildID}
+	if stale, ok := m.staleMem.LoadAndDelete(id); ok {
+		superseded = append(superseded, stale.(string))
+	}
 
 	row.State = StateSuspended
 	// The slot is gone for an ordinary machine: it holds no index and is
@@ -1046,22 +1102,35 @@ func (m *Manager) Suspend(ctx context.Context, id string) error {
 	return nil
 }
 
-// discardBuilds removes builds nothing references any more.
+// discardBuilds removes builds nothing references any more, from object
+// storage AND from this host's disk.
 //
 // Every suspend writes a fresh memory build, so without this each one leaks a
 // full memory diff into object storage forever -- the largest objects the
 // system produces, growing without bound for a machine that wakes and sleeps
 // on a schedule.
 //
-// Best effort: a failure here costs storage, while failing the suspend over it
-// would cost the machine.
+// The LOCAL half matters just as much and was missing: <CacheRoot>/builds/<id>
+// is a cache of the objects being deleted here, and nothing else ever removed
+// one. A suspend, a checkpoint and a root flush each mint a build, so a host
+// accumulated a directory per capture forever -- 99 GB across 1448 of them on
+// the box this was found on, which is the same disk fill this issue removed
+// from <CacheRoot>/images, arriving by another door. A build whose objects are
+// gone is not a cache of anything, and a directory left behind is worse than
+// useless: an incomplete one is exactly the holey build the marker exists to
+// refuse.
+//
+// Local removal is deliberately NOT gated on object storage being deletable.
+// A host that cannot delete remotely still must not keep the bytes: the build
+// is then still in the bucket, which makes the local copy a pure cache and its
+// removal free.
+//
+// Best effort throughout: a failure here costs storage, while failing the
+// suspend over it would cost the machine.
 func (m *Manager) discardBuilds(ctx context.Context, ids ...string) {
-	deleter, ok := m.opts.Chunks.(interface {
+	deleter, _ := m.opts.Chunks.(interface {
 		Delete(ctx context.Context, key string) error
 	})
-	if !ok {
-		return
-	}
 
 	for _, id := range ids {
 		if id == "" {
@@ -1080,11 +1149,17 @@ func (m *Manager) discardBuilds(ctx context.Context, ids ...string) {
 				"build", id)
 			continue
 		}
-		for _, name := range []string{id + "/header", id + "/data"} {
-			if err := deleter.Delete(ctx, name); err != nil {
-				slog.Warn("a superseded build was left in object storage",
-					"build", id, "key", name, "err", err)
+		if deleter != nil {
+			for _, name := range []string{id + "/header", id + "/data"} {
+				if err := deleter.Delete(ctx, name); err != nil {
+					slog.Warn("a superseded build was left in object storage",
+						"build", id, "key", name, "err", err)
+				}
 			}
+		}
+		if err := os.RemoveAll(filepath.Join(m.buildDir(), id)); err != nil {
+			slog.Warn("a superseded build was left on this host's disk",
+				"build", id, "err", err)
 		}
 	}
 }
@@ -1335,6 +1410,9 @@ func (m *Manager) Redeploy(ctx context.Context, id string, req api.RedeployReque
 	// discarded after it -- never before, or a failed write would leave the
 	// row naming objects that no longer exist.
 	superseded := []string{row.MemBuildID, row.RootfsBuildID}
+	if stale, ok := m.staleMem.LoadAndDelete(id); ok {
+		superseded = append(superseded, stale.(string))
+	}
 	row.MemBuildID, row.RootfsBuildID = "", ""
 	if err := os.RemoveAll(filepath.Join(m.opts.CacheRoot, "machines", id)); err != nil {
 		slog.Warn("redeploy could not clear the machine cache",

@@ -239,6 +239,14 @@ func Adopted(st State, stateRoot string, pool *nbd.DevicePool) *Machine {
 		StateDir:  filepath.Join(stateRoot, st.MachineID),
 		SerialLog: st.SerialLog,
 		StartedAt: time.Unix(0, st.StartedAtNs),
+		// The flush clock starts NOW, not at the machine's start. The daemon
+		// that ran until a moment ago was flushing this disk every interval;
+		// what it last flushed is not persisted, but it is at most one
+		// interval old. Left zero, the first flush after a restart measured
+		// its lag from StartedAt and reported hours of a window that was
+		// never open, which pulled a mean of thirty sub-minute samples past
+		// the published RPO.
+		lastRootFlush: time.Now(),
 	}
 
 	// Re-attach the handlers. They outlived this daemon by design -- that is

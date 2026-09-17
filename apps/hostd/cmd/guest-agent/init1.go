@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"github.com/vivek7405/pilots/hostd/internal/netns"
 	"log"
 	"os"
 	"os/exec"
@@ -59,6 +60,33 @@ var initMounts = []mountpoint{
 	{"devpts", "/dev/pts", "devpts", unix.MS_NOSUID | unix.MS_NOEXEC, "gid=5,mode=620", 0o755},
 	{"tmpfs", "/run", "tmpfs", unix.MS_NOSUID | unix.MS_NODEV, "mode=0755", 0o755},
 	{"tmpfs", "/tmp", "tmpfs", unix.MS_NOSUID | unix.MS_NODEV, "mode=1777", 0o1777},
+	// /dev/shm, which POSIX shared memory lives in: postgres's dynamic shared
+	// memory, python's multiprocessing, anything using shm_open. Docker
+	// mounts one in every container, so an image never carries it.
+	{"tmpfs", "/dev/shm", "tmpfs", unix.MS_NOSUID | unix.MS_NODEV, "mode=1777", 0o1777},
+}
+
+// devLinks are the links every init makes under /dev and devtmpfs does not:
+// /dev/fd is what a shell's process substitution `<(...)` opens, and the
+// postgres image's entrypoint uses exactly that, so without it initdb died on
+// "/dev/fd/63: No such file or directory" and the service restarted forever.
+var devLinks = map[string]string{
+	"/dev/fd":     "/proc/self/fd",
+	"/dev/stdin":  "/proc/self/fd/0",
+	"/dev/stdout": "/proc/self/fd/1",
+	"/dev/stderr": "/proc/self/fd/2",
+}
+
+// linkDevices makes devLinks, leaving alone anything already there.
+func linkDevices(links map[string]string) {
+	for name, target := range links {
+		if _, err := os.Lstat(name); err == nil {
+			continue
+		}
+		if err := os.Symlink(target, name); err != nil {
+			log.Printf("guest-agent: link %s -> %s: %v", name, target, err)
+		}
+	}
 }
 
 // runAsInit does what PID 1 owes the rest of the guest, then returns so the
@@ -87,6 +115,7 @@ func runAsInit() {
 			log.Printf("guest-agent: mount %s on %s: %v", m.fstype, m.target, err)
 		}
 	}
+	linkDevices(devLinks)
 
 	// Only PID 1 does this, and for a BUILT image that is always this binary --
 	// bootMachine passes init=/opt/pilot-agent/guest-agent on the kernel
@@ -100,6 +129,9 @@ func runAsInit() {
 	// being passed, a systemd-carrying base would boot systemd instead and lose
 	// .internal with nothing else failing.
 	configureNetwork()
+	// Beside the network, for the app port: peers arrive over IPv6 and most
+	// apps bind IPv4 only.
+	go dualStackShim(netns.GuestAppPort)
 
 	go reapChildren()
 }

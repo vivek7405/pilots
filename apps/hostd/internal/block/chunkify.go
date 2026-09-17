@@ -119,7 +119,16 @@ func Chunkify(ctx context.Context, opts ChunkifyOpts) (*Header, ChunkifyStats, e
 		var parent *LocalBuild
 		// A missing parent is fatal, never a silent fall back to a
 		// self-contained build: the caller asked for a diff because it
-		// expects the parent's bytes to still be reachable.
+		// expects the parent's bytes to still be reachable. And a parent
+		// that is only partly here is worse than missing: OpenLocalBuild
+		// cannot see holes, so the diff would record every unhydrated block
+		// as "unchanged, same as parent" and the build would be durable
+		// corruption.
+		if !BuildComplete(opts.ParentDir) {
+			return nil, stats, fmt.Errorf(
+				"block: parent build %s is not fully hydrated; diffing against it "+
+					"would encode its holes as unchanged ranges", opts.ParentDir)
+		}
 		parent, err = OpenLocalBuild(opts.ParentDir)
 		if err != nil {
 			return nil, stats, fmt.Errorf("block: open parent build: %w", err)

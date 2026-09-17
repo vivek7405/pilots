@@ -13,10 +13,12 @@ import (
 	"hash/fnv"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/vivek7405/pilots/hostd/internal/metrics"
+	"github.com/vivek7405/pilots/hostd/internal/quota"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -32,7 +34,7 @@ const (
 	// moment of the claim. A rescuer using a shorter window than the store
 	// would have its claims refused; a longer one and the store would accept
 	// claims this loop should never have made.
-	DeadAfter = 30 * time.Second
+	DeadAfter = state.DeadAfter
 
 	// RescueInterval is how often the fleet is checked for orphans.
 	RescueInterval = 10 * time.Second
@@ -256,6 +258,26 @@ func Tick(ctx context.Context, opts Options) {
 		if liveIDs[m.HostID] || m.State == state.StateDestroyed {
 			continue
 		}
+		// A builder dies with its host, on purpose.
+		//
+		// Its name encodes the host it belongs to (machines.BuilderName),
+		// because the name check scans the whole fleet and two hosts must be
+		// able to hold a builder for the same org at once. Rescuing one moves
+		// a row named for host A onto host B, where nothing can use it:
+		// findBuilder requires the row's host to match, so B ignores it and
+		// mints its own, and A -- once it is back -- can never mint its own
+		// again, because the name it must use is held by that stranded row.
+		// Two of three rig hosts were bricked for building that way, every
+		// build on them failing with "the name ... is already taken".
+		//
+		// Nothing is lost by letting it go. A builder holds no durable state;
+		// it is a cache of layers that also live in object storage, and the
+		// next build on A makes a fresh one in seconds.
+		if strings.HasPrefix(m.Name, quota.BuilderNamePrefix) {
+			slog.Info("not rescuing a builder; its host is gone and its name belongs to that host",
+				"machine", m.ID, "name", m.Name)
+			continue
+		}
 		if rescuer, ok := RescuerFor(m.ID, opts.Fleet.MachineVendor(m.ID), live); !ok || rescuer != opts.HostID {
 			continue
 		}
@@ -345,10 +367,22 @@ func rescue(ctx context.Context, opts Options, m state.Machine) {
 		return
 	}
 
-	// A machine with no memory image cannot be restored anywhere: it was never
-	// suspended or checkpointed, so there is nothing in object storage to
-	// bring back. Looping on it every tick forever helps nobody.
-	if m.MemBuildID == "" {
+	// A machine with NEITHER a memory image nor a disk cannot be restored
+	// anywhere: it was never suspended, checkpointed or flushed, so there is
+	// nothing in object storage to bring back. Looping on it every tick
+	// forever helps nobody.
+	//
+	// A machine with a DISK and no memory image is a different thing entirely
+	// and must not be given up on: machines.bringUp cold-boots it from that
+	// disk, which is tier 3 in place. Testing the memory image alone abandoned
+	// exactly the machines whose disk DID survive their host -- the state a
+	// periodic root flush leaves on every pass (it points the row at the
+	// flushed disk and drops the memory image, because that image describes a
+	// disk the machine has moved past), and the state an exit leaves behind
+	// when it captured the disk on the way out. Both are machines whose last
+	// writes are in object storage and whose host is now gone, which is the
+	// case this loop exists for.
+	if m.MemBuildID == "" && m.RootfsBuildID == "" {
 		// Nothing is written to the row. Claiming a machine this host cannot
 		// restore would be destruction, not rescue: the owner may only be
 		// partitioned, still running the machine -- a claim here makes the

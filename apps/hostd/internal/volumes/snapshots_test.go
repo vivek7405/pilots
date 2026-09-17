@@ -211,7 +211,15 @@ func TestCheckPassesACorrectedFilesystemAndRefusesAWorseOne(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m, _ := newTestManager(t)
-			m.run = func(context.Context, string, ...string) ([]byte, error) {
+			var cleared bool
+			m.run = func(_ context.Context, name string, args ...string) ([]byte, error) {
+				if name == "debugfs" {
+					cleared = true
+					if got := strings.Join(args, " "); !strings.Contains(got, "rmdir lost+found") {
+						t.Errorf("debugfs was run for something else: %v", args)
+					}
+					return nil, nil
+				}
 				if tc.exit == 0 {
 					return nil, nil
 				}
@@ -223,6 +231,12 @@ func TestCheckPassesACorrectedFilesystemAndRefusesAWorseOne(t *testing.T) {
 			}
 			if !tc.wantRefuse && err != nil {
 				t.Errorf("exit %d was refused: %v", tc.exit, err)
+			}
+			// A forced e2fsck puts lost+found back on every check, so a check
+			// that passes has to clear it again, or the guest mounts a volume
+			// initdb refuses. A refused volume is not touched further.
+			if cleared != !tc.wantRefuse {
+				t.Errorf("exit %d: lost+found cleared after the check = %v, want %v", tc.exit, cleared, !tc.wantRefuse)
 			}
 		})
 	}

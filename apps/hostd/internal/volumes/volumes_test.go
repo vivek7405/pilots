@@ -2,6 +2,9 @@ package volumes
 
 import (
 	"context"
+	"database/sql"
+	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -62,10 +65,11 @@ func newTestManager(t *testing.T) (*Manager, *recorder) {
 		Bucket:    "pilots",
 		AccessKey: "AK", SecretKey: "SK",
 		JuiceFSBin: "/opt/pilots/bin/juicefs", LitestreamBin: "/opt/pilots/bin/litestream",
-		MetaRoot:   filepath.Join(root, "meta"),
-		MountRoot:  filepath.Join(root, "mnt"),
-		CacheRoot:  filepath.Join(root, "cache"),
-		ConfigRoot: filepath.Join(root, "etc"),
+		MetaRoot:    filepath.Join(root, "meta"),
+		MountRoot:   filepath.Join(root, "mnt"),
+		CacheRoot:   filepath.Join(root, "cache"),
+		ConfigRoot:  filepath.Join(root, "etc"),
+		SystemdRoot: filepath.Join(root, "systemd"),
 	})
 	rec := &recorder{}
 	m.run = rec.run
@@ -158,7 +162,7 @@ func TestFormatArgs(t *testing.T) {
 		"--storage":     "s3",
 		"--block-size":  "4096",
 		"--compress":    "none",
-		"--trash-days":  "0",
+		"--trash-days":  "1",
 		"--access-key":  "AK",
 		"--secret-key":  "SK",
 		"--bucket":      "https://fsn1.your-objectstorage.com/pilots/volumes",
@@ -253,7 +257,7 @@ func TestCreateOrdersItsSteps(t *testing.T) {
 	// mke2fs is the last step and needs a real mount; let it fail there.
 	_, _ = m.Create(context.Background(), "data", 64, "/data")
 
-	want := []string{"juicefs format", "systemctl enable", "juicefs mount"}
+	want := []string{"juicefs format", "systemctl start", "juicefs mount"}
 	got := rec.names()
 	if len(got) < len(want) {
 		t.Fatalf("ran %v, want at least %v", got, want)
@@ -352,6 +356,13 @@ func TestCreateImageProducesAMountableExt4(t *testing.T) {
 	if !strings.Contains(string(out), "Block size:               4096") {
 		t.Errorf("expected 4096-byte blocks:\n%s", out)
 	}
+	// Empty, the way a Docker volume is: initdb refuses a data directory
+	// that holds mke2fs's lost+found.
+	if ls, err := exec.Command("debugfs", "-R", "ls -l /", m.ImagePath(id)).CombinedOutput(); err != nil {
+		t.Fatalf("debugfs could not list the image: %v: %s", err, ls)
+	} else if strings.Contains(string(ls), "lost+found") {
+		t.Errorf("a fresh volume still carries lost+found:\n%s", ls)
+	}
 
 	// Idempotent, and that is not politeness: a retried create must never
 	// reformat a volume that already holds a machine's data.
@@ -379,4 +390,145 @@ func fsUUID(t *testing.T, path string) string {
 	}
 	t.Fatalf("no filesystem uuid in:\n%s", out)
 	return ""
+}
+
+// Replication is started, never enabled: an enabled unit comes back at the
+// next boot ahead of hostd, against a meta.db that is stale by then if a
+// survivor rescued the volume in between, and publishes it as the newest
+// generation. Create and Attach both start it; only Detach and Delete disable
+// it, which also un-enables what an earlier hostd left behind.
+func TestReplicationIsStartedNotEnabled(t *testing.T) {
+	m, rec := newTestManager(t)
+	if _, err := m.Create(context.Background(), "data", 64, "/data"); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	for _, c := range rec.calls {
+		if filepath.Base(c.name) == "systemctl" && strings.Contains(strings.Join(c.args, " "), "enable") {
+			t.Fatalf("Create enabled the replication unit: %v", c.args)
+		}
+	}
+	var started bool
+	for _, n := range rec.names() {
+		if n == "systemctl start" {
+			started = true
+		}
+	}
+	if !started {
+		t.Fatalf("Create did not start replication: %v", rec.names())
+	}
+}
+
+// An older volume is brought to the trash retention that keeps a compaction's
+// replaced objects around for longer than the metadata replication lag, on
+// its next attach, after its metadata has been restored and before it is
+// replicated or mounted.
+func TestAttachKeepsCompactedSlicesOnAnOlderVolume(t *testing.T) {
+	m, rec := newTestManager(t)
+	// Attach ends by refusing a mount with no image behind it, which the
+	// recorder never creates; the order of what it ran before that is the
+	// assertion.
+	_ = m.Attach(context.Background(), &state.Volume{ID: "vol-1", HostID: "host-b"})
+	names := rec.names()
+	restore, config, start := -1, -1, -1
+	for i, n := range names {
+		switch n {
+		case "litestream restore":
+			restore = i
+		case "juicefs config":
+			config = i
+		case "systemctl start":
+			start = i
+		}
+	}
+	if restore < 0 || config < 0 || start < 0 || !(restore < config && config < start) {
+		t.Fatalf("ran %v, want restore, then config --trash-days, then start", names)
+	}
+	for _, c := range rec.calls {
+		if len(c.args) > 0 && c.args[0] == "config" {
+			if v, ok := flagValue(c.args, "--trash-days"); !ok || v != "1" {
+				t.Fatalf("juicefs config set trash-days to %q, want 1: %v", v, c.args)
+			}
+		}
+	}
+}
+
+// The units an earlier hostd enabled are found through the symlinks enable
+// wrote, because list-unit-files does not list a template's instances, and
+// each is disabled -- not stopped, since one may be replicating a volume this
+// host is serving.
+func TestLegacyReplicationUnitsAreFoundThroughTheirSymlinks(t *testing.T) {
+	m, rec := newTestManager(t)
+	wants := filepath.Join(m.cfg.SystemdRoot, "multi-user.target.wants")
+	if err := os.MkdirAll(wants, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"litestream@vol-1.service", "litestream@vol-2.service", "hostd.service"} {
+		if err := os.WriteFile(filepath.Join(wants, name), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	m.DisableLegacyReplicationUnits(context.Background())
+	var disabled []string
+	for _, c := range rec.calls {
+		if filepath.Base(c.name) == "systemctl" && len(c.args) == 2 && c.args[0] == "disable" {
+			disabled = append(disabled, c.args[1])
+		}
+		if strings.Contains(strings.Join(c.args, " "), "stop") {
+			t.Fatalf("a legacy unit was stopped, not just un-enabled: %v", c.args)
+		}
+	}
+	if strings.Join(disabled, ",") != "litestream@vol-1.service,litestream@vol-2.service" {
+		t.Fatalf("disabled %v, want exactly the two litestream instances", disabled)
+	}
+}
+
+// The trash retention is read before it is set: an attach is a wake, and a
+// volume already at the value must not cost an exec there.
+func TestTrashDaysAreReadBeforeTheyAreSet(t *testing.T) {
+	m, rec := newTestManager(t)
+	meta := m.MetaPath("vol-1")
+	if err := os.MkdirAll(filepath.Dir(meta), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(days int) {
+		t.Helper()
+		os.Remove(meta)
+		db, err := sql.Open("sqlite", meta)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		if _, err := db.Exec(`CREATE TABLE jfs_setting (name TEXT PRIMARY KEY, value TEXT)`); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`INSERT INTO jfs_setting VALUES ('format', ?)`,
+			fmt.Sprintf(`{"Name":"vol-1","TrashDays":%d}`, days)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	configs := func() int {
+		n := 0
+		for _, c := range rec.calls {
+			if len(c.args) > 0 && c.args[0] == "config" {
+				n++
+			}
+		}
+		return n
+	}
+
+	write(TrashDays)
+	if err := m.keepCompactedSlices(context.Background(), "vol-1"); err != nil {
+		t.Fatal(err)
+	}
+	if configs() != 0 {
+		t.Fatalf("a volume already at %d days was reconfigured: %v", TrashDays, rec.names())
+	}
+
+	write(0)
+	if err := m.keepCompactedSlices(context.Background(), "vol-1"); err != nil {
+		t.Fatal(err)
+	}
+	if configs() != 1 {
+		t.Fatalf("a volume at 0 days was not brought to %d: %v", TrashDays, rec.names())
+	}
 }

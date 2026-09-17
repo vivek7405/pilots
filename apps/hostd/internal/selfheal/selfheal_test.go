@@ -341,6 +341,40 @@ func TestAMachineWithNoSnapshotIsNotRetriedForever(t *testing.T) {
 	}
 }
 
+// A machine with a DISK and no memory image is rescued by cold-booting that
+// disk, not abandoned.
+//
+// This is the state a periodic root flush leaves on every pass: it points the
+// row at the flushed disk and drops the memory image, because that image
+// describes a disk the machine has moved past. An exit that captured the disk
+// on the way out leaves the same shape. Testing the memory image alone gave up
+// on exactly the machines whose last writes DID survive their host, which is
+// the case this loop exists for -- and machines.bringUp cold-boots them
+// happily (tier 3 in place).
+func TestAFlushedMachineIsRescuedByColdBootingItsDisk(t *testing.T) {
+	now := time.Now()
+	flushed := machine("m-1", "host-dead")
+	flushed.MemBuildID = ""            // dropped by the flush
+	flushed.RootfsBuildID = "rootfs-1" // ...which pointed the row here
+
+	store := newFakeStore(flushed)
+	restores := 0
+
+	opts := Options{
+		HostID:  "host-a",
+		Fleet:   &fakeFleet{machines: []state.Machine{flushed}, hosts: []state.Host{host("host-a", now), host("host-dead", now.Add(-5*time.Minute))}},
+		Store:   store,
+		Now:     func() time.Time { return now },
+		Restore: func(context.Context, *state.Machine) error { restores++; return nil },
+	}
+	Tick(context.Background(), opts)
+
+	if restores != 1 {
+		t.Fatalf("restored a flushed machine %d times, want 1; its disk is in object "+
+			"storage and bringUp cold-boots it", restores)
+	}
+}
+
 // A full host declines and says so; the next tick re-hashes against whatever
 // the live set is by then, so nothing gets wedged.
 func TestNoCapacityDeclinesRatherThanWedging(t *testing.T) {

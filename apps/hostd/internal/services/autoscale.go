@@ -313,12 +313,4 @@ func (m *Manager) scaleUp(ctx context.Context, svc *state.Service, machines []st
 	return err
 }
 
-func liveOnly(hosts []state.Host) []state.Host {
-	out := make([]state.Host, 0, len(hosts))
-	for _, h := range hosts {
-		if time.Since(time.Unix(h.LastSeen, 0)) < 90*time.Second {
-			out = append(out, h)
-		}
-	}
-	return out
-}
+func liveOnly(hosts []state.Host) []state.Host { return state.LiveHosts(hosts) }

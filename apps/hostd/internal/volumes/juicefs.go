@@ -1,8 +1,12 @@
 package volumes
 
 import (
+	"database/sql"
+	"encoding/json"
+
 	"context"
 	"fmt"
+	_ "modernc.org/sqlite" // the volume metadata is SQLite; pure Go, like the state store
 	"os"
 	"strconv"
 	"strings"
@@ -18,6 +22,52 @@ import (
 // architecture exists to avoid.
 func (m *Manager) metaURL(id string) string { return "sqlite3://" + m.MetaPath(id) }
 
+// TrashDays is how long JuiceFS keeps the objects a compaction replaced. See
+// formatArgs: it has to outlast the metadata replication lag, and a day is
+// the smallest value the option takes.
+const TrashDays = 1
+
+// keepCompactedSlices sets TrashDays on a volume formatted before it was the
+// default, so an older volume gets the same protection on its next attach.
+// Idempotent: JuiceFS answers "no change" for a volume already at the value.
+//
+// The setting is read from the metadata database first and the command run
+// only when it differs: this sits on every attach, which is every wake of a
+// volume-backed machine, and an exec there for a value that is already right
+// is time on the wake path for nothing.
+func (m *Manager) keepCompactedSlices(ctx context.Context, id string) error {
+	if days, ok := trashDaysOf(m.MetaPath(id)); ok && days == TrashDays {
+		return nil
+	}
+	if _, err := m.run(ctx, m.cfg.JuiceFSBin, "config", m.metaURL(id),
+		"--trash-days", strconv.Itoa(TrashDays)); err != nil {
+		return fmt.Errorf("volumes: keep compacted slices for %s: %w", id, err)
+	}
+	return nil
+}
+
+// trashDaysOf reads a volume's trash retention out of its metadata database:
+// JuiceFS keeps the format as JSON under the "format" setting. False when it
+// cannot be read, in which case the caller sets it rather than guessing.
+func trashDaysOf(metaPath string) (int, bool) {
+	db, err := sql.Open("sqlite", "file:"+metaPath+"?mode=ro")
+	if err != nil {
+		return 0, false
+	}
+	defer db.Close()
+	var raw string
+	if err := db.QueryRow(`SELECT value FROM jfs_setting WHERE name = 'format'`).Scan(&raw); err != nil {
+		return 0, false
+	}
+	var format struct {
+		TrashDays *int `json:"TrashDays"`
+	}
+	if err := json.Unmarshal([]byte(raw), &format); err != nil || format.TrashDays == nil {
+		return 0, false
+	}
+	return *format.TrashDays, true
+}
+
 // formatArgs builds `juicefs format`.
 //
 //   - --block-size is in KiB and matches the 4KiB blocks everything else in
@@ -25,9 +75,17 @@ func (m *Manager) metaURL(id string) string { return "sqlite3://" + m.MetaPath(i
 //   - --compress none keeps ranges byte-addressable: a compressed object
 //     cannot serve a partial read of the image without inflating the whole
 //     chunk, and the guest reads this image in scattered 4KiB pieces forever.
-//   - --trash-days 0 because the image is one file that is never deleted;
-//     a trash retention would keep a copy of every overwritten chunk and
-//     silently multiply what the volume costs to store.
+//   - --trash-days 1, and not 0. The trash does not only hold deleted files:
+//     it is also where JuiceFS parks the objects a compaction has replaced,
+//     and with 0 days those are deleted the moment the compaction's metadata
+//     commit lands. That commit reaches object storage through Litestream,
+//     up to a second later. A host that died inside that second -- and one
+//     did, on the rig, with the compaction's objects timestamped the same
+//     second as its last journal entry -- left a replicated metadata whose
+//     slice list named objects that no longer existed, and the survivor
+//     that rescued the volume could not read its superblock. A day in the
+//     trash costs one day of overwritten chunks; the alternative is a volume
+//     that can be lost by a hard kill.
 func (m *Manager) formatArgs(id string) []string {
 	return []string{
 		"format",
@@ -37,7 +95,7 @@ func (m *Manager) formatArgs(id string) []string {
 		"--secret-key", m.cfg.SecretKey,
 		"--block-size", "4096",
 		"--compress", "none",
-		"--trash-days", "0",
+		"--trash-days", strconv.Itoa(TrashDays),
 		m.metaURL(id),
 		id,
 	}

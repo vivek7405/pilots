@@ -9,6 +9,7 @@ import (
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
 	"github.com/vivek7405/pilots/hostd/internal/quota"
+	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
 // validateName rejects a name that cannot work as a URL.
@@ -144,15 +145,42 @@ func nameLabel(s string, n int) string {
 // after a service would not merely collide with it: it would take the
 // service's URL away from every host at once, which is the same permanence
 // this function exists to protect.
+// A DESTROYED row still holds its name, and that is deliberate for a machine
+// a client named: its URL was permanent, so handing the name to a different
+// machine would hand over a URL somebody may still be holding.
+//
+// It cannot be true of a BUILDER. A builder's name is derived from its org and
+// its host (BuilderName), so there is exactly one possible name per org per
+// host and it is not a URL anyone was given. Reserving it forever meant that
+// the first time a builder was destroyed, that org could never build on that
+// host again: findBuilder correctly skips the destroyed row and asks for a new
+// builder, and this function then refused to make one, quoting the tombstone
+// of the row findBuilder had just stepped over. createBuilder even destroys
+// its own failed row "so the name goes now rather than at the next build",
+// which is precisely the belief this contradicted. Two hosts on the rig were
+// bricked for building that way, and the only visible symptom was every build
+// failing with "the name ... is already taken".
 func (m *Manager) ensureNameFree(ctx context.Context, name string) error {
 	rows, err := m.opts.Store.ListMachines(ctx)
 	if err != nil {
 		return err
 	}
+	reusable := strings.HasPrefix(name, builderNamePrefix)
 	for _, row := range rows {
-		if row.Name == name {
-			return fmt.Errorf("machines: the name %q is already taken", name)
+		if row.Name != name {
+			continue
 		}
+		// Destroyed, or stranded on a host this name does not belong to.
+		//
+		// The second case is what a rescue used to leave behind: a builder
+		// named for host A restored onto host B keeps A's name, and findBuilder
+		// requires the row's host to match, so B ignores it and A can never
+		// mint its own again. Self-heal no longer rescues builders, but rows
+		// stranded before that fix must not keep a host bricked forever.
+		if reusable && (row.State == state.StateDestroyed || row.HostID != m.opts.HostID) {
+			continue
+		}
+		return fmt.Errorf("machines: the name %q is already taken", name)
 	}
 	services, err := m.opts.Store.ListServices(ctx)
 	if err != nil {

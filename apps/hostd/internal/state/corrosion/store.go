@@ -14,8 +14,10 @@ import (
 // deadAfter is how long a host may go without heartbeating before the fleet
 // treats it as gone. It must match the self-heal loop's threshold: the driver
 // re-checks it on a claim, and a disagreement would let a claim through that
-// the rescue loop would not have made.
-const deadAfter = 30 * time.Second
+// the rescue loop would not have made. It is the same fact for arbitration
+// and placement too, so there is one spelling of it (state.DeadAfter) rather
+// than a constant here that another package is asked to keep in step.
+const deadAfter = state.DeadAfter
 
 // Store is the cluster's machine state, replicated by Corrosion.
 //

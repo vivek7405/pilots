@@ -31,6 +31,14 @@ type Cache struct {
 	// dirty holds the indices of blocks this cache owns. A block not in here
 	// must be served by whatever sits underneath.
 	dirty *roaring.Bitmap
+	// unflushed holds the blocks written since the last acknowledged root
+	// flush -- a subset of dirty, cleared by MarkFlushed. It is what keeps a
+	// periodic flush's pause proportional to what was written since the
+	// previous one rather than to everything written since the wake.
+	unflushed *roaring.Bitmap
+	// pendingFlush is what the last Unflushed call handed out, so that
+	// MarkFlushed clears exactly that and nothing written afterwards.
+	pendingFlush *roaring.Bitmap
 }
 
 // NewCache opens or creates a cache file.
@@ -42,7 +50,7 @@ type Cache struct {
 func NewCache(size, blockSize int64, path string, dirtyFile bool) (*Cache, error) {
 	c := &Cache{
 		size: size, blockSize: blockSize, path: path,
-		dirty: roaring.New(),
+		dirty: roaring.New(), unflushed: roaring.New(),
 	}
 
 	// A zero-size cache is legal -- a machine with no disk of its own -- and
@@ -131,8 +139,9 @@ func (c *Cache) WriteAt(p []byte, off int64) (int, error) {
 	}
 
 	n := copy(c.data[off:], p)
-	c.dirty.AddRange(uint64(BlockIdx(off, c.blockSize)),
-		uint64(BlockCeilIdx(off+int64(n), c.blockSize)))
+	first, last := uint64(BlockIdx(off, c.blockSize)), uint64(BlockCeilIdx(off+int64(n), c.blockSize))
+	c.dirty.AddRange(first, last)
+	c.unflushed.AddRange(first, last)
 	return n, nil
 }
 
@@ -141,6 +150,32 @@ func (c *Cache) Dirty() *roaring.Bitmap {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.dirty.Clone()
+}
+
+// Unflushed returns a copy of the blocks written since the last MarkFlushed,
+// and remembers the set it handed out so MarkFlushed can clear exactly that.
+//
+// The caller is expected to hold the guest paused from this call through
+// MarkFlushed: then nothing is written in between, the remembered set is the
+// whole unflushed set, and a caller that copies what it was given and then
+// acknowledges has lost nothing.
+func (c *Cache) Unflushed() *roaring.Bitmap {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pendingFlush = c.unflushed.Clone()
+	return c.unflushed.Clone()
+}
+
+// MarkFlushed forgets the blocks the last Unflushed handed out. A block
+// written since then stays unflushed, which is why this clears the remembered
+// set rather than everything.
+func (c *Cache) MarkFlushed() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.pendingFlush != nil {
+		c.unflushed.AndNot(c.pendingFlush)
+		c.pendingFlush = nil
+	}
 }
 
 // Sync flushes the mapping to the backing file.
@@ -187,7 +222,8 @@ func (c *Cache) Close() error {
 // set that was written.
 //
 // Used at suspend: the result is chunkified into a build while the cache
-// itself is discarded.
+// itself is discarded. The copy is CopyDirtyRanges over this cache's own
+// file, so it costs what the machine wrote, not what its disk is sized.
 func (c *Cache) ExportToDiff(dstPath string) (*roaring.Bitmap, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -199,14 +235,56 @@ func (c *Cache) ExportToDiff(dstPath string) (*roaring.Bitmap, error) {
 	if c.file != nil {
 		_ = unix.SyncFileRange(int(c.file.Fd()), 0, 0, unix.SYNC_FILE_RANGE_WRITE)
 	}
+	if err := CopyDirtyRanges(c.path, dstPath, c.dirty, c.blockSize); err != nil {
+		return nil, err
+	}
+	return c.dirty.Clone(), nil
+}
 
-	dst, err := os.OpenFile(dstPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o600)
+// CopyDirtyRanges copies the blocks in dirty from srcPath into a fresh sparse
+// file at dstPath of the same apparent size, at the same offsets.
+//
+// Only the dirty ranges are read, so the cost is proportional to what the
+// machine has written, not to the size of its disk, on every filesystem. That
+// is what lets a checkpoint stage its cow inside the pause without a
+// filesystem that can share extents: a reflink of the whole cow was free
+// where extents are shared and a full copy of the disk everywhere else, and
+// the pause must not depend on which of the two the host has.
+func CopyDirtyRanges(srcPath, dstPath string, dirty *roaring.Bitmap, blockSize int64) error {
+	return copyDirtyRanges(srcPath, dstPath, dirty, blockSize, os.O_TRUNC)
+}
+
+// MergeDirtyRanges is CopyDirtyRanges into a file that is kept: the ranges
+// land over whatever dstPath already holds, and everything else in it stays.
+//
+// For a staged copy that persists between root flushes. Each flush merges
+// only the blocks written since the previous one, so the file is always the
+// whole cow as of the last pause while each pause costs only the delta.
+func MergeDirtyRanges(srcPath, dstPath string, dirty *roaring.Bitmap, blockSize int64) error {
+	return copyDirtyRanges(srcPath, dstPath, dirty, blockSize, 0)
+}
+
+func copyDirtyRanges(srcPath, dstPath string, dirty *roaring.Bitmap, blockSize int64, truncate int) error {
+	src, err := os.Open(srcPath)
 	if err != nil {
-		return nil, fmt.Errorf("block: create diff %s: %w", dstPath, err)
+		return fmt.Errorf("block: open %s: %w", srcPath, err)
+	}
+	defer src.Close()
+	st, err := src.Stat()
+	if err != nil {
+		return fmt.Errorf("block: stat %s: %w", srcPath, err)
+	}
+	size := st.Size()
+
+	dst, err := os.OpenFile(dstPath, os.O_RDWR|os.O_CREATE|truncate, 0o600)
+	if err != nil {
+		return fmt.Errorf("block: create %s: %w", dstPath, err)
 	}
 	defer dst.Close()
-	if err := dst.Truncate(c.size); err != nil {
-		return nil, fmt.Errorf("block: truncate diff %s: %w", dstPath, err)
+	// Sparse: the same apparent size as the source, allocating nothing until
+	// a dirty range lands.
+	if err := dst.Truncate(size); err != nil {
+		return fmt.Errorf("block: truncate %s: %w", dstPath, err)
 	}
 
 	// CopyFileRange lets the kernel share extents where it can. Once it fails
@@ -214,30 +292,45 @@ func (c *Cache) ExportToDiff(dstPath string) (*roaring.Bitmap, error) {
 	// fail for every subsequent range too, so the fallback is sticky rather
 	// than retried per range.
 	useCopyFileRange := true
+	var buf []byte
 
-	for _, r := range BitsetRanges(c.dirty) {
-		off := r.Start * c.blockSize
-		length := (r.End - r.Start) * c.blockSize
-		if off+length > c.size {
-			length = c.size - off
+	for _, r := range BitsetRanges(dirty) {
+		off := r.Start * blockSize
+		length := (r.End - r.Start) * blockSize
+		if off+length > size {
+			length = size - off
 		}
 
 		if useCopyFileRange {
-			if err := copyFileRange(c.file, dst, off, length); err != nil {
+			if err := copyFileRange(src, dst, off, length); err != nil {
 				if !isUnsupported(err) {
-					return nil, err
+					return err
 				}
 				useCopyFileRange = false
 			} else {
 				continue
 			}
 		}
-		if _, err := dst.WriteAt(c.data[off:off+length], off); err != nil {
-			return nil, fmt.Errorf("block: copy diff range at %d: %w", off, err)
+		if buf == nil {
+			buf = make([]byte, copyBufSize)
+		}
+		for done := int64(0); done < length; {
+			n := min(int64(len(buf)), length-done)
+			if _, err := src.ReadAt(buf[:n], off+done); err != nil {
+				return fmt.Errorf("block: read range at %d: %w", off+done, err)
+			}
+			if _, err := dst.WriteAt(buf[:n], off+done); err != nil {
+				return fmt.Errorf("block: copy range at %d: %w", off+done, err)
+			}
+			done += n
 		}
 	}
-	return c.dirty.Clone(), nil
+	return nil
 }
+
+// copyBufSize bounds the fallback copy's buffer when the kernel cannot copy
+// a range for us: one dirty run can be most of a disk.
+const copyBufSize = 4 << 20
 
 // PopulateFromSlicer replays a build into this cache.
 //

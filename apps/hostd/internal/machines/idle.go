@@ -220,8 +220,11 @@ func (m *Manager) suspendIdleMachines(ctx context.Context, tick func()) {
 		if !m.shouldSuspend(ctx, row) {
 			continue
 		}
-		err := m.Suspend(ctx, row.ID)
+		err := m.suspendIfIdle(ctx, row.ID)
 		tick() // one unit of work done, whatever its outcome
+		if errors.Is(err, errBusy) {
+			continue
+		}
 		if err != nil {
 			slog.Error("idle suspend failed", "machine", row.ID, "err", err)
 			continue

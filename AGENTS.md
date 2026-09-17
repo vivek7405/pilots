@@ -15,6 +15,10 @@ Every plan written into an issue and every line of code is measured against
 this, in order. It is loaded into context automatically (`CLAUDE.md` is
 `@AGENTS.md`), so it applies while planning AND while implementing.
 
+**`PRODUCT-PRINCIPLES.md` is why these bars exist** — the six non-negotiables
+about what pilots is for. Bars 6 and 7 below are the enforceable form of four
+of them. Read it once; argue with the bar here.
+
 1. **At par with the best microVM platforms in production, or better.** Never
    below any of them on a capability they have. The prior-art repo carries the
    scorecard; a design that lands a "~" or "✗" where an established platform
@@ -40,6 +44,26 @@ this, in order. It is loaded into context automatically (`CLAUDE.md` is
    a checkpoint's resume gap is independent of machine size. The numbers are
    the SLO table in #7 and the levers beyond it are #22; a change that makes
    any of them slower is a regression even if every test stays green.
+6. **A suspended machine costs the host nothing, and wakes from any host.**
+   Cost efficiency is why the platform exists: suspend leaves no process, no
+   veth, no reserved memory and no per-machine object behind (the wake sink
+   is ONE dummy interface per host for the whole address block), and the
+   wake it feeds is the extremely fast one in #5. Cross-host is the default
+   case, not an edge case: wake, restore, rescue and every volume must work
+   on a host other than the one that suspended the machine, within the
+   CPU-vendor pool of ARCHITECTURE.md rule 6. A design that keeps anything
+   warm per suspended machine, or that only works on the host the machine
+   last ran on, has failed this bar.
+7. **One storage model: S3 is the volume, the host disk is only a cache.**
+   The machine root and the volume are one S3-backed thing (#122), durable
+   in the bucket with local NVMe as a read-through cache that can be wiped
+   at any time. Not two models (a local rootfs copy plus a network volume),
+   and never a host-pinned disk: Fly's own account is that it "took 3 years
+   to get workload migration right with attached storage, and it's still not
+   'easy'" (`docs/prior-art/fly-io.md` §7). Sprites is the shape to match —
+   the whole root is a read-through cache over object storage
+   (`docs/prior-art/sprites-dev.md` §4) — and e2b the shape to avoid, at
+   three storage models (`docs/prior-art/e2b-infra.md` §9).
 
 When a phase plan, an issue body, or a review comment conflicts with one of
 these, this section wins and the conflict is stated in the issue.
@@ -60,7 +84,10 @@ What makes it different:
   Adding a host is `scripts/host-bootstrap.sh <ip>`.
 - **One primitive, two faces.** A sandbox and a production service are the
   same `machine` with different lifecycle knobs. `promote` turns one into
-  the other without changing its URL.
+  the other without changing its URL. Fly and Sprites are the comparison:
+  two products built separately and combined after the fact, still shipping
+  two CLIs (`fly` and `sprite`, both installed locally). Pilots is one
+  product, one primitive, one CLI, designed as the 2-in-1 from the start.
 
 Tracking: [project board](https://github.com/users/vivek7405/projects/10).
 Master plan and phase breakdown: issues #1–#7.
@@ -219,6 +246,45 @@ workspaces never see it. Run Go commands from `apps/hostd/`.
   same host declares itself caught up, which is the judgement section 28
   refuses to make.
 
+**Budget the batteries before starting them.** `scripts/e2e.mjs` takes about
+35 minutes on the laptop host and `gate.sh` two to three hours on the rig,
+neither has a section filter, and they share one bucket so they cannot
+overlap. One day of work lost four and a half hours to this, so the rules are:
+
+- **Say the duration and the ETA before launching a run**, and launch it in
+  the background. The user reads silence as a loop.
+- **Narrow a confirmation to the sections a fix touches:**
+  `PILOTS_E2E_ONLY=timing,services node scripts/e2e.mjs` (names from
+  `PILOTS_E2E_LIST=1`). A narrowed run prints every section it did not run
+  and exits 2, so it can never pass for a full run; the full battery is still
+  owed once per wave of fixes, not once per fix.
+- **Batch fixes, then run once.** Never re-run the full battery to confirm
+  one fix. Reproduce the fix by hand in its own minute (a create, an exec, a
+  curl), commit it, keep going, and run the battery once for the whole wave.
+  A run per fix is the single largest waste this repo has seen.
+- **A failure that only a battery shows is diagnosed by hand, not by re-running.**
+  Read the step's code, reproduce its calls with the CLI or curl, read the
+  host's journal for that minute. Four of today's "flakes" were real bugs that
+  three earlier runs had been paying for.
+- **Before a timing run, check the host is fit to be measured**: `df -h /`
+  under 85% (a near-full copy-on-write disk doubles every snapshot write),
+  no leftover `e2e-*`/`hostile-*`/`probe-*` machines, and the rig VMs idle.
+  When a timing SLO fails, A/B the previous binary on the same host before
+  reading code: today the same binary measured 300 ms at 15:20 and 800 ms at
+  20:00. The laptop tier's numbers are budgets, not the product's SLOs; the
+  metal tier is what is sold.
+- **The rig runs what you last installed there**, not the branch. After a
+  change to hostd, the guest agent or the rootfs, swap the binary (rig skill)
+  and, for agent changes, rebuild and ship the templates: seven agent commits
+  once went to review with main's rootfs pin still in place.
+- **A worktree has no `scripts/rootfs/*.ext4`.** They are gitignored and live
+  in the main checkout; a host bootstrapped from a worktree cannot build.
+  Symlink them in before any gate run, and remove the links before `go test`
+  or the agent-pin test compares against the wrong image.
+- **`pgrep -f <pattern>` matches the shell running it.** Bracket the first
+  character or check the process's own argv, or a finished run reads as
+  running forever.
+
 **Where a new test belongs** — the split is what can *observe* the assertion:
 
 | The assertion needs… | It goes in |
@@ -231,10 +297,10 @@ e2e half asserts what a client would see, the gate half asserts that the host
 kept none of the wreckage. Neither half may retire an assertion, and neither
 may *skip* one — a block that cannot set itself up fails loudly, because a
 quiet early return retires every assertion below it at runtime.
-- The **metal tier** runs only under `PILOTS_E2E_METAL=1` on a host whose
-  `/v1/health` reports `reflink: true`. It replaces the laptop budgets with
-  the SLOs the product is sold on; the flag on a host that cannot share
-  extents fails the run rather than downgrading it.
+- The **metal tier** runs only under `PILOTS_E2E_METAL=1`, which is the
+  operator asserting dedicated hardware. It replaces the laptop budgets with
+  the SLOs the product is sold on; nothing the host reports stands in for
+  that assertion, and there is no degraded tier beneath the laptop budgets.
 
 ---
 

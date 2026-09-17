@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/google/uuid"
@@ -62,6 +64,50 @@ type RemoteBuild struct {
 // the next open serve those holes as zeros with no error anywhere. The marker
 // is the only thing that distinguishes "complete" from "the right length".
 const completeMarker = "data.complete"
+
+// BuildComplete reports whether a build directory holds every byte it claims.
+//
+// A stat of "header" and "data" is NOT that. OpenRemoteBuild truncates "data"
+// to its full packed size before fetching a single block, so a pull
+// interrupted by a SIGKILL or a reboot leaves a full-length file of holes that
+// passes any size check -- and LocalBuild's validateDataSize catches a
+// TRUNCATED file, not a holey one. Those holes then read back as zeros with no
+// error anywhere, and Chunkify with this directory as ParentDir encodes them
+// into a durable build as "unchanged, same as parent". The marker is the only
+// thing that distinguishes "complete" from "the right length", so it is the
+// only thing that licenses reading a build directory locally.
+func BuildComplete(dir string) bool {
+	if _, err := os.Stat(filepath.Join(dir, "header")); err != nil {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(dir, completeMarker))
+	return err == nil
+}
+
+// AwaitBuildComplete waits until BuildComplete(dir) holds, polling, or until
+// the timeout or ctx ends.
+//
+// For a caller that would otherwise read a build still being hydrated -- a
+// checkpoint chunkifying against a template the block server is still pulling
+// from object storage. The server hydrates in the background from the moment
+// it attaches, so the wait is normally already over; it is bounded because a
+// hydration that failed would otherwise hold the caller forever.
+func AwaitBuildComplete(ctx context.Context, dir string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		if BuildComplete(dir) {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("block: build %s was not fully hydrated within %s", dir, timeout)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+}
 
 // OpenRemoteBuild fetches a build's header and prepares its local cache.
 func OpenRemoteBuild(ctx context.Context, store ObjectStore, buildID uuid.UUID, cacheRoot string) (*RemoteBuild, error) {
@@ -328,5 +374,41 @@ func (b *RemoteBuild) Prefault(ctx context.Context) error {
 		return nil
 	}
 
+	// One hydrator per build directory, across processes. The manager pulls
+	// a template it adopts, and every block server on a machine restored
+	// from it pulls the same template for the same reason; a three-replica
+	// deploy on a cold host was four full downloads of one object into one
+	// file. The lock is advisory and per directory, so the first to take it
+	// pulls and the rest keep serving lazily and let the marker say when the
+	// bytes have landed. Released with the process, so a hydrator that dies
+	// hands the file to the next one that asks.
+	release, held := takeHydrateLock(b.dir)
+	if !held {
+		return nil
+	}
+	defer release()
+
 	return b.fetchRange(ctx, 0, total)
+}
+
+// hydrateLock is the advisory lock file a hydrating process holds.
+const hydrateLock = "data.hydrating"
+
+// takeHydrateLock takes the build directory's hydrate lock without waiting.
+// It reports false when another process holds it. A directory that cannot
+// hold a lock file at all is treated as unlocked: a pull that cannot be
+// deduplicated is still a pull.
+func takeHydrateLock(dir string) (release func(), held bool) {
+	f, err := os.OpenFile(filepath.Join(dir, hydrateLock), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return func() {}, true
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		return nil, false
+	}
+	return func() {
+		_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		_ = f.Close()
+	}, true
 }

@@ -889,7 +889,7 @@ func toStep(name string, svc types.ServiceConfig) (Step, error) {
 		MemMiB:       memMiBOf(svc),
 		Ports:        portsOf(svc),
 		Volumes:      volumesOf(svc, x.SizeGiB),
-		Health:       healthOf(svc),
+		Health:       healthOf(svc, x.Private),
 		DependsOn:    slices.Sorted(maps.Keys(svc.DependsOn)),
 		Knobs:        knobs,
 		Domain:       x.Domain,
@@ -1030,9 +1030,20 @@ func volumesOf(svc types.ServiceConfig, sizeGiB int) []Volume {
 }
 
 // healthOf maps a compose healthcheck onto the platform's, in whole seconds.
-func healthOf(svc types.ServiceConfig) *api.HealthCheck {
+//
+// A service that declares none is left to the platform's default, an HTTP
+// probe of the app port -- except a private one. Private means "nothing to
+// answer on the app port", so probing it there can only fail: a stock
+// postgres image with x-pilots.private and no healthcheck was refused as
+// "not listening on 0.0.0.0:$PORT" while it served 5432 perfectly. Such a
+// service gets Docker's own semantics for a container with no HEALTHCHECK:
+// its process is up and stays up.
+func healthOf(svc types.ServiceConfig, private bool) *api.HealthCheck {
 	hc := svc.HealthCheck
 	if hc == nil {
+		if private {
+			return &api.HealthCheck{Type: "process"}
+		}
 		return nil
 	}
 	// Docker's own way of saying "no check", and disable: true means the same.

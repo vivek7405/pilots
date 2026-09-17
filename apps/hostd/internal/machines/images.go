@@ -6,11 +6,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sync"
 
 	"github.com/google/uuid"
 
-	"github.com/vivek7405/pilots/hostd/internal/block"
 	"github.com/vivek7405/pilots/hostd/internal/build"
 	"github.com/vivek7405/pilots/hostd/internal/fc"
 	"github.com/vivek7405/pilots/hostd/internal/netns"
@@ -26,52 +24,82 @@ import (
 // describes the golden template's disk, and resuming it against somebody
 // else's root filesystem is a guest whose memory and disk have never met.
 
-// imageOnce serialises materialising one image. Two concurrent creates from a
-// fresh build would otherwise each write the same multi-gigabyte file, and the
-// second's rename would land under a name the first was still copying from.
-var imageOnce sync.Map // build id -> *sync.Mutex
-
-// imagesDir holds materialised rootfs images, one per build id. A cache: it
-// can be deleted at any time and costs a re-materialise, never data.
-func (m *Manager) imagesDir() string { return filepath.Join(m.opts.CacheRoot, "images") }
-
-// imageForBuild returns a local ext4 file holding a build's contents.
+// RemoveLegacyImageCache deletes the materialised image cache an earlier hostd
+// kept under the cache root: one full-size ext4 per build, which nothing ever
+// deleted and which filled a rig host's disk.
 //
-// Cached per build id, because the file is then reflink-copied once per
-// machine -- exactly the way the golden rootfs is. The first machine from a
-// build pays for the materialise; every one after that pays a metadata
-// operation.
-func (m *Manager) imageForBuild(ctx context.Context, buildID uuid.UUID) (string, error) {
-	path := filepath.Join(m.imagesDir(), buildID.String()+".ext4")
+// Nothing writes it any more -- a booted machine's root is served from its
+// build -- so this is not a collector with a job, it is the one removal a
+// host upgraded in place needs to stop carrying those gigabytes forever. A
+// fresh host has nothing here and this is a no-op.
+func (m *Manager) RemoveLegacyImageCache() {
+	dir := filepath.Join(m.opts.CacheRoot, "images")
+	if _, err := os.Stat(dir); err != nil {
+		return
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		slog.Warn("could not remove the legacy image cache; nothing writes it, "+
+			"and it can be deleted by hand", "dir", dir, "err", err)
+		return
+	}
+	slog.Info("removed the legacy materialised image cache", "dir", dir)
+}
 
-	lock, _ := imageOnce.LoadOrStore(buildID.String(), &sync.Mutex{})
-	lock.(*sync.Mutex).Lock()
-	defer lock.(*sync.Mutex).Unlock()
+// pinBootTemplate decides which build a booting machine's root is served from
+// and records that decision on the row.
+//
+// The disk is served over NBD straight from the build, exactly as a restored
+// machine's is: there is no per-machine rootfs file, so a host's disk holds
+// one copy of a build however many machines boot it, and a host that has
+// never seen the build pulls it from object storage rather than from another
+// host. The row is pinned to the same build the device reads, so the
+// machine's later disk diffs resolve against the bytes it actually booted.
+func (m *Manager) pinBootTemplate(ctx context.Context, row *state.Machine,
+	image string) (fc.Backends, error) {
 
-	if _, err := os.Stat(path); err == nil {
-		return path, nil
-	}
-	if err := os.MkdirAll(m.imagesDir(), 0o755); err != nil {
-		return "", fmt.Errorf("machines: image cache dir: %w", err)
+	backends := fc.Backends{CacheRoot: m.buildDir()}
+
+	if image != "" {
+		buildID, err := uuid.Parse(image)
+		if err != nil {
+			return backends, fmt.Errorf("machines: %q is not a build id: %w", image, err)
+		}
+		// The build's header now, its bytes in the background: the block
+		// server serves the guest from object storage while the local copy
+		// hydrates, and everything that needs the copy complete -- a flush,
+		// a checkpoint -- waits for the marker rather than for this create.
+		// It still lands in the layout every other build directory has,
+		// which is what lets this machine's later disk diffs resolve against
+		// it. A foreground pull here held every replica placed on a host
+		// that had never seen its image for the whole download.
+		if err := m.materializeTemplate(ctx, uuid.Nil, buildID); err != nil {
+			return backends, fmt.Errorf("machines: fetch build %s: %w", buildID, err)
+		}
+		backends.RootfsTemplateDir = filepath.Join(m.buildDir(), buildID.String())
+		backends.RootfsTemplateID = buildID
+		row.ImageRef = image
+		// The build IS this machine's disk template. Its later snapshots are
+		// diffs whose unchanged ranges resolve against it by offset, and the
+		// bytes it booted from are exactly this build's -- so pinning anything
+		// else here, the golden template included, hands a restored guest
+		// another image's blocks.
+		row.TemplateRootfsBuildID = image
+	} else {
+		t, err := m.EnsureTemplate(ctx)
+		if err != nil {
+			return backends, err
+		}
+		backends.RootfsTemplateDir = m.rootfsTemplateDir(t)
+		backends.RootfsTemplateID = t.RootfsBuildID
+		row.TemplateRootfsBuildID = t.RootfsBuildID.String()
 	}
 
-	// Pull the build local first. It is content-addressed and already in
-	// object storage, so this is a download, and it lands in exactly the
-	// layout every other build directory has -- which is what lets this
-	// machine's later disk diffs resolve against it.
-	if err := m.materializeBuild(ctx, buildID); err != nil {
-		return "", fmt.Errorf("machines: fetch build %s: %w", buildID, err)
-	}
-	built, err := block.OpenLocalBuild(filepath.Join(m.buildDir(), buildID.String()))
-	if err != nil {
-		return "", fmt.Errorf("machines: open build %s: %w", buildID, err)
-	}
-	defer built.Close()
-
-	if err := block.Materialize(ctx, built, path); err != nil {
-		return "", fmt.Errorf("machines: materialize build %s: %w", buildID, err)
-	}
-	return path, nil
+	// No memory parent, and recorded explicitly rather than left empty. This
+	// guest booted; its pages are not a divergence from any template's
+	// photographed memory, and diffing against one would resolve every
+	// coincidentally identical page from a completely different machine.
+	row.TemplateMemBuildID = uuid.Nil.String()
+	return backends, nil
 }
 
 // bootMachine starts a machine that cannot be restored from the golden
@@ -83,41 +111,17 @@ func (m *Manager) imageForBuild(ctx context.Context, buildID uuid.UUID) (string,
 func (m *Manager) bootMachine(ctx context.Context, row *state.Machine,
 	token, volumeID, image, appCmd string) (*fc.Machine, error) {
 
-	rootfs := m.opts.FCConfig.TemplateRootfs
+	backends, err := m.pinBootTemplate(ctx, row, image)
+	if err != nil {
+		return nil, err
+	}
 	initPath := ""
-
 	if image != "" {
-		buildID, err := uuid.Parse(image)
-		if err != nil {
-			return nil, fmt.Errorf("machines: %q is not a build id: %w", image, err)
-		}
-		if rootfs, err = m.imageForBuild(ctx, buildID); err != nil {
-			return nil, err
-		}
-		row.ImageRef = image
 		// The kernel is told what to run, rather than the image being edited
 		// to say it: a base image that ships its own init keeps it, and tar
 		// cannot override an existing /sbin/init symlink anyway.
 		initPath = build.AgentPathInImage
-		// The build IS this machine's disk template. Its later snapshots are
-		// diffs whose unchanged ranges resolve against it by offset, and the
-		// bytes it booted from are exactly this build's -- so pinning anything
-		// else here, the golden template included, hands a restored guest
-		// another image's blocks.
-		row.TemplateRootfsBuildID = image
-	} else {
-		t, err := m.EnsureTemplate(ctx)
-		if err != nil {
-			return nil, err
-		}
-		row.TemplateRootfsBuildID = t.RootfsBuildID.String()
 	}
-
-	// No memory parent, and recorded explicitly rather than left empty. This
-	// guest booted; its pages are not a divergence from any template's
-	// photographed memory, and diffing against one would resolve every
-	// coincidentally identical page from a completely different machine.
-	row.TemplateMemBuildID = uuid.Nil.String()
 
 	var vol *state.Volume
 	if volumeID != "" {
@@ -138,16 +142,24 @@ func (m *Manager) bootMachine(ctx context.Context, row *state.Machine,
 		m.pool.Return(slot.Idx)
 		return nil, err
 	}
-	if err := netns.Setup(slot, mac, m.opts.FCConfig.JailUID); err != nil {
-		m.pool.Return(slot.Idx)
-		return nil, err
-	}
 
+	// No netns.Setup here: BootFromDisk does it, teardown-first, alongside
+	// starting the block server.
 	cfg := m.machineFCConfig(row, slot, mac)
-	cfg.TemplateRootfs = rootfs
 	cfg.InitPath = initPath
 
-	fcm, err := fc.Boot(ctx, cfg)
+	boot := fc.InstantConfig{
+		Config:   cfg,
+		Backends: backends,
+		Env:      m.opts.HandlerEnv,
+	}
+	boot.ChunksSock = m.chunks.start(row.ID, boot.StateDir,
+		m.opts.BlockStore, allowedBuilds(boot))
+
+	fcm, err := fc.BootFromDisk(ctx, boot, m.opts.BlockStore, m.opts.NBDDevices)
+	if fcm != nil {
+		m.joinHandlersToCgroup(fcm)
+	}
 	if err != nil {
 		_ = netns.Teardown(slot)
 		m.pool.Return(slot.Idx)

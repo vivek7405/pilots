@@ -25,8 +25,17 @@ import (
 //
 //	{"type":"http","path":"/__webjs/ready","interval":15,"timeout":3,"grace":40,"healthy_threshold":2}
 //	{"type":"cmd","test":["CMD-SHELL","pg_isready -U postgres"],"interval":15,"timeout":3,"grace":40,"retries":5}
+//	{"type":"process","interval":15,"timeout":3,"grace":40,"healthy_threshold":2}
+//
+// "process" is the check for a service that declared none and has no HTTP
+// port to probe -- a private database from a stock image. It is Docker's own
+// semantics for a container with no HEALTHCHECK: started, and staying up. The
+// supervised app process has to be running and must not have restarted
+// between consecutive checks, so an entrypoint that dies and is restarted
+// every few seconds (initdb refusing its data directory, say) fails the gate
+// rather than being reported as deployed.
 type HealthSpec struct {
-	Type string `json:"type"` // "http" | "cmd" | "none"
+	Type string `json:"type"` // "http" | "cmd" | "process" | "none"
 
 	// Path is the HTTP check's request path.
 	Path string `json:"path,omitempty"`
@@ -104,9 +113,75 @@ func (m *Manager) probe(ctx context.Context, machineID string, h HealthSpec) err
 	switch h.Type {
 	case "cmd":
 		return m.probeCmd(ctx, machineID, h)
+	case "process":
+		return m.probeProcess(ctx, machineID)
 	default:
 		return m.probeHTTP(ctx, machineID, h)
 	}
+}
+
+// agentProcess is the part of the guest agent's process status the gate
+// reads. The agent's own type is the contract; this is a projection of it.
+type agentProcess struct {
+	Name     string `json:"name"`
+	State    string `json:"state"`
+	Restarts int    `json:"restarts"`
+	Port     bool   `json:"port"`
+}
+
+// probeProcess passes when the machine's app process is running and has not
+// restarted since the previous probe. The first probe of a machine only
+// establishes the baseline it is running at; a restart is only visible
+// between two probes, which is why the check needs HealthyThreshold > 1 to
+// mean anything and why Defaults gives it 2.
+func (m *Manager) probeProcess(ctx context.Context, machineID string) error {
+	raw, err := m.opts.Machines.Processes(ctx, machineID)
+	if err != nil {
+		return &probeFailure{api.HealthLast{Error: "the replica's agent could not list its processes: " + err.Error()}}
+	}
+	// The agent answers {"processes":[...]} -- see handleProcesses in
+	// cmd/guest-agent. Decoded through that envelope, not as a bare list: the
+	// first cut of this decoded a list, its fake agreed with it, and the real
+	// agent's answer was "unreadable" on every probe.
+	var listing struct {
+		Processes []agentProcess `json:"processes"`
+	}
+	if err := json.Unmarshal(raw, &listing); err != nil {
+		return &probeFailure{api.HealthLast{Error: "the replica's process list was unreadable: " + err.Error()}}
+	}
+	app, ok := appProcess(listing.Processes)
+	if !ok {
+		return &probeFailure{api.HealthLast{Error: "the replica supervises no app process"}}
+	}
+	if app.State != "running" {
+		return &probeFailure{api.HealthLast{Error: fmt.Sprintf(
+			"the app process is %s after %d restarts: read the replica's console", app.State, app.Restarts)}}
+	}
+	if last, seen := m.restartsSeen.Swap(machineID, app.Restarts); seen && app.Restarts != last.(int) {
+		return &probeFailure{api.HealthLast{Error: fmt.Sprintf(
+			"the app process exited and was restarted (%d restarts so far): read the replica's console",
+			app.Restarts)}}
+	}
+	return nil
+}
+
+// appProcess picks the process the gate judges: the one holding the app port,
+// else the one named for the image's own command, else the only one there is.
+func appProcess(procs []agentProcess) (agentProcess, bool) {
+	for _, p := range procs {
+		if p.Port {
+			return p, true
+		}
+	}
+	for _, p := range procs {
+		if p.Name == "app" {
+			return p, true
+		}
+	}
+	if len(procs) == 1 {
+		return procs[0], true
+	}
+	return agentProcess{}, false
 }
 
 // probeFailure is one failed probe with no address in it.
@@ -225,6 +300,10 @@ func (m *Manager) waitHealthy(ctx context.Context, machineID string, h HealthSpe
 	if h.Disabled() {
 		return nil
 	}
+	// The process check compares consecutive probes; a gate starts with no
+	// history, and leaves none behind for the next rollout of this machine.
+	m.restartsSeen.Delete(machineID)
+	defer m.restartsSeen.Delete(machineID)
 	deadline := time.Now().Add(time.Duration(h.GraceSec) * time.Second)
 	interval := time.Duration(h.IntervalSec) * time.Second
 

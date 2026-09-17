@@ -14,18 +14,21 @@ import (
 	"github.com/vivek7405/pilots/hostd/internal/netns"
 )
 
-// BootFromDisk boots a kernel against a machine's OWN disk chain, served over
-// NBD, rather than restoring its memory image. It is what a machine gets on a
-// host whose CPU vendor cannot restore the image: the disk is vendor-free, the
-// memory is not.
+// BootFromDisk boots a kernel against a machine's disk chain, served over NBD,
+// rather than restoring a memory image. Two callers: a machine whose memory
+// image cannot be restored on this host's CPU vendor (the disk is vendor-free,
+// the memory is not), and a machine created from its own build or with a
+// volume, which has no memory image to restore yet. Either way the root is a
+// device over the build, never a per-machine file: the disk on the host holds
+// one copy of a build however many machines boot from it.
 //
 // It composes RestoreInstant's disk half with Boot's kernel half, because
-// neither does both. Boot cannot take an NBD-backed drive: prepareJail
-// reflink-copies the template rootfs to the baked path, which would discard
-// every write the machine ever made. RestoreInstant cannot boot: it loads a
-// vmstate. What CAN take a device is Firecracker itself -- configure declares
-// the drive as the baked path and does not care whether that path is a file or
-// a block node, which is exactly how a restore already works.
+// neither does both. Boot cannot take an NBD-backed drive: prepareJail copies
+// a rootfs file to the baked path, which would discard every write the machine
+// ever made. RestoreInstant cannot boot: it loads a vmstate. What CAN take a
+// device is Firecracker itself -- configure declares the drive as the baked
+// path and does not care whether that path is a file or a block node, which is
+// exactly how a restore already works.
 //
 // No uffd handler and no vmstate: the guest's memory comes from a kernel boot.
 func BootFromDisk(ctx context.Context, cfg InstantConfig, store block.ObjectStore,
@@ -70,7 +73,7 @@ func BootFromDisk(ctx context.Context, cfg InstantConfig, store block.ObjectStor
 	err = inParallel(
 		func() error {
 			// Teardown-first, so re-creating an existing namespace is safe.
-			if err := netns.Setup(cfg.Slot, cfg.MAC, cfg.JailUID); err != nil {
+			if err := netns.Setup(cfg.Slot, cfg.JailUID); err != nil {
 				return fmt.Errorf("fc: netns for a cold boot: %w", err)
 			}
 			return nil

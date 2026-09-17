@@ -25,11 +25,18 @@ say()  { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 
 api() { # api <ip> <method> <path> [body]
   local ip=$1 method=$2 path=$3 body=${4:-}
+  # --fail-with-body, NOT -f. Both exit non-zero on a refusal, which every
+  # `api ... && ok || bad` here depends on, but -f also DISCARDS the response
+  # body -- so a refusal printed nothing and the assertion reported an empty
+  # string. Three separate investigations were sent at the wrong subsystem by
+  # that: a 429 "quota exceeded" read as a broken create path, a 503 from a
+  # dead arbiter read as a 401, and a 400 "repo and ref are both required"
+  # read as a broken database planner. The body names the cause every time.
   if [ -n "$body" ]; then
-    curl -sf -m 180 -X "$method" "http://${ip}:8080${path}" -H "$AUTH" \
+    curl -s --fail-with-body -m 180 -X "$method" "http://${ip}:8080${path}" -H "$AUTH" \
       -H 'Content-Type: application/json' -d "$body"
   else
-    curl -sf -m 180 -X "$method" "http://${ip}:8080${path}" -H "$AUTH"
+    curl -s --fail-with-body -m 180 -X "$method" "http://${ip}:8080${path}" -H "$AUTH"
   fi
 }
 
@@ -87,6 +94,41 @@ case "$KEY" in
   *) bad "could not mint a key on ${IPS[0]}"; exit 1 ;;
 esac
 sleep 3
+
+# ---------------------------------------------------------------------------
+# Headroom, before anything creates a machine.
+#
+# This battery creates dozens of machines across its sections. The default org
+# quota is 20, so a full run exhausts it partway through and EVERY create from
+# that point answers 429 -- and because api() uses `curl -sf`, the body that
+# says "quota exceeded" is discarded and each assertion reports an empty
+# string. A run once failed 28 assertions across a dozen sections that way,
+# all of them reading "could not create ...: " with nothing after the colon,
+# none of them about the thing the section was testing.
+#
+# So the quota is raised first, and the raise is CHECKED. The e2e battery
+# already lifts quotas for the same reason. A gate that cannot get headroom
+# must say so here rather than discover it fifteen sections later.
+GATE_ORG="${PILOT_ORG:-ops}"
+Q_CODE=$(curl -s -m 15 -o /tmp/gate-quota.json -w '%{http_code}' \
+  -X PUT "http://${IPS[0]}:8080/v1/quotas/${GATE_ORG}" -H "$AUTH" \
+  -H 'Content-Type: application/json' \
+  -d '{"max_machines":400,"max_vcpus":800,"max_mem_mib":8388608,"max_volume_gib":500,"max_builds":400,"max_snapshot_gib":500}' 2>/dev/null)
+case "$Q_CODE" in
+  2*) ok "raised the ${GATE_ORG} org's quota so a full run cannot exhaust it" ;;
+  *)  bad "could not raise the ${GATE_ORG} quota (HTTP ${Q_CODE}): $(head -c 200 /tmp/gate-quota.json 2>/dev/null); later sections will fail on 429, not on what they test" ;;
+esac
+
+# Battery debris from earlier runs counts against that quota too, and a rig
+# left full is the same outage one run later. Anything in `error` is wreckage
+# by definition; it is reported rather than silently swept, so a run that
+# starts dirty says so.
+DEBRIS=$(api "${IPS[0]}" GET /v1/machines 2>/dev/null | python3 -c "
+import sys, json
+try: rows = json.load(sys.stdin)
+except Exception: rows = []
+print(sum(1 for m in rows if m.get('state') not in ('destroyed', None)))" 2>/dev/null || echo 0)
+echo "  ${DEBRIS} machine(s) already exist on this fleet before the run"
 
 say "1. Every host sees the whole fleet"
 for ip in "${IPS[@]}"; do
@@ -335,13 +377,214 @@ slice_of() {
     2>/dev/null | tr -d '[:space:]'
 }
 
-# fc_pid reads the Firecracker pid out of the machine's own slice. pgrep will
-# not do it: the jailer execve()s Firecracker over itself, so the --id that
-# named the machine is gone from the command line by the time it matters.
+# fc_pid reads the Firecracker pid out of the machine's own slice.
+#
+# NOT `pgrep -f 'firecracker.*--id <id>'`, for a reason that is worth stating
+# accurately because an earlier version of this comment stated it wrongly. The
+# --id IS still on the command line: the jailer execve()s Firecracker over
+# itself and the resulting cmdline carries it, which is exactly how
+# internal/machines/reaper.go finds a process. What breaks pgrep -f is that
+# the REMOTE SHELL running the pgrep has the pattern in its own command line
+# and matches itself, so the count is never zero and the pid is often that
+# shell. The cgroup is the machine's own, and nothing else is in it.
 fc_pid() {
   local slice; slice=$(slice_of "$1" "$2")
   [ -z "$slice" ] && return
   $SSH "root@$1" "head -1 ${slice}/cgroup.procs" 2>/dev/null | tr -d '[:space:]'
+}
+
+# fc_pid_of is the comm-checked variant: it finds a Firecracker by the --id
+# on its command line, the way internal/machines/reaper.go does, after
+# confirming /proc/<pid>/comm is firecracker. That comm check is what keeps
+# it from matching the shell that carries the pattern, which is the trap
+# pgrep -f falls into. Top level, NOT inside a section: it was defined inside
+# section 21's conditional, so a run that skipped that branch left every
+# later caller silently calling a command that did not exist.
+fc_pid_of() { $SSH "root@$1" "for p in /proc/[0-9]*; do [ \"\$(cat \$p/comm 2>/dev/null)\" = firecracker ] || continue; tr '\\0' ' ' < \$p/cmdline | grep -q -- '--id $2 ' && basename \$p; done" 2>/dev/null | head -1 | tr -d '[:space:]'; }
+
+# ---------------------------------------------------------------------------
+# Finding the host a machine actually runs on.
+#
+# The host that RECEIVES a create is usually not the host that runs it. The
+# receiver ranks the fleet from its own replica and offers the machine to the
+# best candidate (internal/api/place.go); only if every candidate refuses does
+# it serve the create itself. So `api "$ip" POST /v1/machines` tells you where
+# the request went, never where the machine went.
+#
+# Every assertion that reads a HOST SHELL -- a cgroup slice, a Firecracker pid,
+# an NBD device, a uffd handler, a journal line -- has to be pointed at the
+# owning host or it reads an empty host and reports the machine as broken. That
+# is not a placement bug to be worked around by pinning creates: cross-host is
+# the default case here, so it is the test that must ask who owns the machine.
+# Sections that hard-coded one host passed only when the ranker happened to
+# choose locally.
+# ---------------------------------------------------------------------------
+
+HOST_IP_MAP="" # "<host-id>=<ip> <host-id>=<ip> ..."
+
+build_host_map() {
+  local ip hid
+  HOST_IP_MAP=""
+  for ip in "${IPS[@]}" ${NEW_IP:-}; do
+    hid=$(curl -sf -m 5 "http://${ip}:8080/v1/health" 2>/dev/null | jf host_id)
+    [ -n "$hid" ] && HOST_IP_MAP="${HOST_IP_MAP}${hid}=${ip} "
+  done
+}
+
+# ip_of_host <host-id> -> <ip>, rebuilding the map once if the id is unknown
+# (a host that was rebuilt takes a new identity, and retired identities linger
+# in the fleet listing long after the host is gone).
+ip_of_host() {
+  local pair
+  [ -z "$HOST_IP_MAP" ] && build_host_map
+  for pair in $HOST_IP_MAP; do
+    [ "${pair%%=*}" = "$1" ] && { echo "${pair#*=}"; return; }
+  done
+  build_host_map
+  for pair in $HOST_IP_MAP; do
+    [ "${pair%%=*}" = "$1" ] && { echo "${pair#*=}"; return; }
+  done
+}
+
+# owner_ip <machine-id> [fallback-ip] -> the IP of the host running it.
+# Asks every live host, because the machine's row reaches each replica by
+# gossip and the one nearest to hand may not have it yet.
+owner_ip() {
+  local ip owner="" try
+  # Retried: the row reaches the other replicas by gossip, so a lookup fired
+  # the instant a create returned can miss it on every host but the one that
+  # served it -- and that host is not necessarily the first one asked.
+  for try in 1 2 3 4 5; do
+    for ip in "${IPS[@]}" ${NEW_IP:-}; do
+      owner=$(curl -sf -m 8 -H "$AUTH" \
+        "http://${ip}:8080/v1/machines/$1" 2>/dev/null | jf host_id)
+      [ -n "$owner" ] && break 2
+    done
+    sleep 2
+  done
+  [ -z "$owner" ] && { echo "${2:-}"; return; }
+  local oip; oip=$(ip_of_host "$owner")
+  echo "${oip:-${2:-}}"
+}
+
+# delete_machine <id> -- destroy it through whichever host will take the call.
+#
+# Not through a caller-chosen address: the sections that need this are the ones
+# that have just killed or faulted a host, and a DELETE aimed at a host that is
+# down leaves the machine alive and counting against the org's quota. That is
+# how a run exhausts its quota mid-way and turns every later create into a 429.
+delete_machine() {
+  local ip
+  for ip in "${IPS[@]}" ${NEW_IP:-}; do
+    curl -sf -m 60 -X DELETE -H "$AUTH" \
+      "http://${ip}:8080/v1/machines/$1" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
+# create_on_host <api-ip> <target-ip> <body> -> the create JSON of a machine
+# the ranker placed on <target-ip>.
+#
+# Some sections need two machines on ONE host (a noisy neighbour is only a
+# neighbour if it shares the host). Nothing in the API pins a create, on
+# purpose, so the only honest way to co-locate is to create until one lands
+# where it is wanted and keep the misses as filler -- a miss lowers its own
+# host's free memory, so the next attempt ranks elsewhere. Deleting a miss
+# immediately would free that host again and loop forever on it, which is the
+# trap section 7 documents.
+#
+# It cleans up after ITSELF, through delete_machine, rather than leaving
+# $CREATE_FILLERS to a caller who may be holding a dead host's address. The
+# variable is still set, so the existing caller-side loops are harmless.
+#
+# On failure it echoes the HTTP status and body rather than an empty string.
+# Twenty-eight assertions once failed reading "could not create ...: " with
+# nothing after the colon, because api() uses `curl -sf` and the "quota
+# exceeded" body went in the bin.
+CREATE_FILLERS=""
+create_on_host() {
+  local api_ip="$1" want_ip="$2" body="$3" m mid mip code f
+  CREATE_FILLERS=""
+  # BALLAST first, then the real machine.
+  #
+  # The ranker prefers the host with the most free memory, and on this rig that
+  # is emphatically ONE host: three creates addressed to three different hosts
+  # all landed on the same one. So the target does not come up by chance. It
+  # comes up once every host ahead of it is full, and the cheapest way to get
+  # there is to sink those hosts with LARGE throwaway machines rather than with
+  # copies of the caller's, which may be 512 MiB and would need a dozen.
+  #
+  # Each probe creates one 2 GiB ballast machine and asks where it went. Landing
+  # on the target means the target is now the emptiest host, so the ballast is
+  # released and the caller's machine is created in its place. Landing anywhere
+  # else means that host was emptier, so the ballast STAYS -- releasing it would
+  # free the host again and the next probe would pick it right back, which is
+  # the loop section 7 documents.
+  local ballast='{"vcpus":1,"mem_mib":2048,"knobs":{"auto_stop":"off"}}'
+  local probe pid_ ok_=""
+  for _ in $(seq 10); do
+    code=$(curl -s -m 180 -o /tmp/gate-create.json -w '%{http_code}' \
+      -X POST "http://${api_ip}:8080/v1/machines" -H "$AUTH" \
+      -H 'Content-Type: application/json' -d "$ballast" 2>/dev/null)
+    probe=$(cat /tmp/gate-create.json 2>/dev/null)
+    pid_=$(echo "$probe" | jf id)
+    if [ -z "$pid_" ]; then
+      for f in $CREATE_FILLERS; do delete_machine "$f"; done
+      CREATE_FILLERS=""
+      echo "HTTP ${code}: $(echo "$probe" | head -c 200)"
+      return 1
+    fi
+    if [ "$(owner_ip "$pid_" "")" = "$want_ip" ]; then
+      delete_machine "$pid_"   # make room for the machine that is actually wanted
+      sleep 3
+      ok_=yes
+      break
+    fi
+    CREATE_FILLERS="${CREATE_FILLERS} ${pid_}"
+    sleep 4 # let the reservation reach the gossip before ranking again
+  done
+
+  if [ -z "$ok_" ]; then
+    for f in $CREATE_FILLERS; do delete_machine "$f"; done
+    CREATE_FILLERS=""
+    echo "no ballast ever landed on ${want_ip}; it is not the emptiest host and cannot be made so"
+    return 1
+  fi
+
+  # The target is the emptiest host now, so the caller's create lands there.
+  # Verified rather than assumed: something else on the fleet may have moved.
+  #
+  # A miss is DELETED before the next attempt, which the ballast probes above
+  # deliberately do not do. The reason is the caller's body may NAME the
+  # machine, and a name is held by the row that has it: retrying with the same
+  # body then answers 500 "the name is already taken", the helper bails, and
+  # the caller sees a blank failure about its own second attempt. Deleting the
+  # miss frees the name, and the fillers that sank the other hosts stay put, so
+  # the target is still the emptiest.
+  for _ in 1 2 3; do
+    code=$(curl -s -m 180 -o /tmp/gate-create.json -w '%{http_code}' \
+      -X POST "http://${api_ip}:8080/v1/machines" -H "$AUTH" \
+      -H 'Content-Type: application/json' -d "$body" 2>/dev/null)
+    m=$(cat /tmp/gate-create.json 2>/dev/null)
+    mid=$(echo "$m" | jf id)
+    if [ -z "$mid" ]; then
+      for f in $CREATE_FILLERS; do delete_machine "$f"; done
+      CREATE_FILLERS=""
+      echo "HTTP ${code}: $(echo "$m" | head -c 200)"
+      return 1
+    fi
+    if [ "$(owner_ip "$mid" "")" = "$want_ip" ]; then
+      echo "$m"
+      return 0
+    fi
+    delete_machine "$mid" # frees the name for the next attempt
+    sleep 4
+  done
+
+  for f in $CREATE_FILLERS; do delete_machine "$f"; done
+  CREATE_FILLERS=""
+  echo "ballast reached ${want_ip} but the create did not follow it there"
+  return 1
 }
 
 # curl_from <ip> <machine> <url> -> "<http_code> <resolved ip>"
@@ -367,6 +610,46 @@ curl_until() {
     sleep 3
   done
   echo "$out"
+}
+
+# revive_host brings a deliberately killed host back, and waits for it to be
+# USEFUL rather than merely reachable.
+#
+# Every destructive section asserts what it came to assert while the host is
+# down. What follows needs the fleet whole again: a battery that accumulates
+# damage stops testing its own properties and starts testing how much damage
+# has accumulated, which is how a run reached section 25 with one host alive
+# and forty cascading failures that named things no code had broken.
+#
+# Two waits, not one. Serving is when the API answers; CAUGHT UP is when the
+# host's replica has applied what it missed, and only then can it rescue,
+# resolve a peer or take a handoff. A section starting in the gap between them
+# fails "for a reason that has nothing to do with what it asserts" -- section
+# 7's own words about this exact hazard, which it then only half-guarded by
+# waiting on health alone. That gap is what made the peer-wake step below fail
+# one run and pass the next.
+revive_host() { # revive_host <domain> <ip> <what it is coming back from>
+  local dom=$1 ip=$2 why=$3
+  [ -n "$dom" ] || return 0
+  sudo virsh start "$dom" >/dev/null 2>&1
+  local i
+  for i in $(seq 90); do
+    curl -sf -m 3 "http://${ip}:8080/v1/health" >/dev/null 2>&1 && break
+    sleep 2
+  done
+  if ! curl -sf -m 3 "http://${ip}:8080/v1/health" >/dev/null 2>&1; then
+    bad "${dom} did not come back after ${why}; the sections below have no fleet to work with"
+    return 0
+  fi
+  for i in $(seq 90); do
+    curl -sf -m 4 "http://${ip}:8080/v1/health" 2>/dev/null \
+      | grep -q '"replication_complete":true' && break
+    sleep 2
+  done
+  curl -sf -m 4 "http://${ip}:8080/v1/health" 2>/dev/null \
+    | grep -q '"replication_complete":true' \
+    && ok "brought ${dom} back after ${why}, caught up and able to claim" \
+    || bad "${dom} is serving after ${why} but its replica has not caught up; it can rescue nothing"
 }
 
 if [ -n "$WEB_ID" ] && [ -n "$DB_ID" ]; then
@@ -493,15 +776,7 @@ done
 # not rejoined gossip cannot rescue anything, and a step that starts against
 # one fails for a reason that has nothing to do with what it asserts.
 if [ -n "${DOM:-}" ]; then
-  sudo virsh start "$DOM" >/dev/null 2>&1
-  REVIVE_IP="${DB_OWNER_IP:-$B_IP}"
-  for _ in $(seq 60); do
-    curl -sf -m 3 "http://${REVIVE_IP}:8080/v1/health" >/dev/null 2>&1 && break
-    sleep 2
-  done
-  curl -sf -m 3 "http://${REVIVE_IP}:8080/v1/health" >/dev/null 2>&1 \
-    && ok "brought ${DOM} back for the fleet steps" \
-    || bad "${DOM} did not come back; the steps below have no fleet to work with"
+  revive_host "$DOM" "${DB_OWNER_IP:-$B_IP}" "the rescue in step 7"
 fi
 
 say "7b. A promoted service at floor zero frees its Firecracker when idle, and not while a peer holds a session"
@@ -560,15 +835,69 @@ if [ "${#LIVE_IPS[@]}" -ge 2 ]; then
 
     # 3. A silent, open session holds it up. This is the half that keeps a
     # database alive mid-transaction, and no packet counter can see it.
-    api "$B_IP" POST "/v1/machines/${CLIENT_ID}/exec" \
-      "{\"cmd\":\"nohup bash -c 'exec 3<>/dev/tcp/${SZ_NAME}.internal/3001; sleep 300' >/dev/null 2>&1 & echo held\",\"user\":\"root\"}" \
-      >/dev/null 2>&1
-    sleep 75
-    STATE=$(api "$A_IP" GET "/v1/machines/${SZ_ID}" | jf state)
-    if [ "$STATE" = "running" ] && [ -n "$(fc_pid "$SZ_HOST_IP" "$SZ_ID")" ]; then
-      ok "a held session kept it running past the scale-down window"
+    #
+    # The session's establishment is VERIFIED before anything is asserted about
+    # what it should cause. It used to be fired off into nohup with its output
+    # discarded and the exec's result thrown away, so if the connect never
+    # happened -- and it often did not, because step 2 has just woken a machine
+    # whose idle timeout is shorter than this step takes -- the assertion below
+    # was checking that a machine with NO session open on it stayed awake. That
+    # tests nothing and fails honestly-looking. A setup that cannot set itself
+    # up has to say so (AGENTS.md).
+    # NOT against the agent's port 3001. The guest agent is an http.Server with
+    # ReadHeaderTimeout 10s and no IdleTimeout, so it hangs up on a connection
+    # that never sends a request line -- correct slowloris defence, and fatal
+    # to this assertion: the hold was verified at t+5, the agent closed it at
+    # t+10, conntrack left ESTABLISHED, and the replica was legitimately idle
+    # long before the state was read at t+80. The section then blamed the
+    # platform for dropping a session that the test had already lost.
+    #
+    # A real peer mid-transaction is connected to the WORKLOAD, so the replica
+    # runs a listener of its own that does not hang up. Written through base64
+    # because the JSON, the shell and python would otherwise be three layers of
+    # quoting over one line.
+    SZ_HOLD_PORT=5000
+    SZ_LISTENER=$(printf '%s\n' \
+      'import socket, itertools' \
+      's = socket.socket(socket.AF_INET6)' \
+      's.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)' \
+      "s.bind((\"::\", ${SZ_HOLD_PORT}))" \
+      's.listen(16)' \
+      '# every accepted connection stays referenced, or it is closed at once' \
+      'keep = [s.accept() for _ in itertools.count()]' | base64 -w0)
+    LISTENING=$(api "$A_IP" POST "/v1/machines/${SZ_ID}/exec" \
+      "{\"cmd\":\"echo ${SZ_LISTENER} | base64 -d > /tmp/hold.py; nohup setsid python3 /tmp/hold.py >/dev/null 2>&1 & sleep 3; timeout 3 bash -c 'exec 3<>/dev/tcp/127.0.0.1/${SZ_HOLD_PORT}' && echo listening || echo no-listener\",\"user\":\"root\"}" \
+      | jf stdout | tr -d '[:space:]')
+    if [ "$LISTENING" != "listening" ]; then
+      bad "could not start a listener in the replica to hold a session against (got '${LISTENING}'); what follows would assert nothing"
     else
-      bad "it was given back with a session open on it (state '${STATE}'): a transaction died mid-flight"
+      ok "the replica listens on ${SZ_HOLD_PORT} for a peer to hold open"
+    fi
+
+    HELD=$(api "$B_IP" POST "/v1/machines/${CLIENT_ID}/exec" \
+      "{\"cmd\":\"rm -f /tmp/held-ok; nohup bash -c 'exec 3<>/dev/tcp/${SZ_NAME}.internal/${SZ_HOLD_PORT} && touch /tmp/held-ok && sleep 300' >/dev/null 2>&1 & sleep 5; test -e /tmp/held-ok && echo held || echo not-held\",\"user\":\"root\"}" \
+      | jf stdout | tr -d '[:space:]')
+    if [ "$LISTENING" != "listening" ] || [ "$HELD" != "held" ]; then
+      bad "the peer could not open a session to hold it (got '${HELD}'); what follows would assert nothing"
+    else
+      ok "a peer holds a silent session open on it"
+      sleep 75
+      # Re-verified, not assumed. The setup proving itself at t+5 and being
+      # false by t+10 is precisely the hole this section fell through, so the
+      # holder is checked to be alive and still holding its fd BEFORE the
+      # state is read. A hold that died is a broken test, not a failed
+      # assertion, and has to say which.
+      STILL=$(api "$B_IP" POST "/v1/machines/${CLIENT_ID}/exec" \
+        "{\"cmd\":\"p=\$(pgrep -f 'sleep 300' | head -1); test -n \\\"\$p\\\" && test -e /proc/\$p/fd/3 && echo holding || echo gone\",\"user\":\"root\"}" \
+        | jf stdout | tr -d '[:space:]')
+      STATE=$(api "$A_IP" GET "/v1/machines/${SZ_ID}" | jf state)
+      if [ "$STILL" != "holding" ]; then
+        bad "the peer's session did not survive the 75s window (got '${STILL}'); this step asserted nothing about the platform"
+      elif [ "$STATE" = "running" ] && [ -n "$(fc_pid "$SZ_HOST_IP" "$SZ_ID")" ]; then
+        ok "a held session kept it running past the scale-down window"
+      else
+        bad "it was given back with a session open on it (state '${STATE}'): a transaction died mid-flight"
+      fi
     fi
 
     # 4. And it sleeps again once the client lets go.
@@ -594,6 +923,39 @@ if [ "${#LIVE_IPS[@]}" -ge 2 ]; then
   done
 fi
 
+say "7c. A write nobody checkpointed is made durable by the root flush"
+# The published root RPO, as a behaviour rather than a number: everything
+# above this line was captured by a checkpoint or a suspend, and what follows
+# is a plain write to a running machine's root with no capture of any kind.
+# The flush loop makes it durable within PILOT_ROOT_FLUSH_INTERVAL (60s), and
+# the row says so -- rootfs_build_id moves to the flushed disk and
+# mem_build_id is cleared, because the memory image taken at the last suspend
+# describes a disk this one has moved past. Step 10 then proves the write is
+# still there after the host that held it is destroyed and the machine is
+# rescued elsewhere from that flushed disk alone.
+FLUSH_MARKER="after-last-capture-$$"
+# The owner's counter, because a flush runs on the owning host only.
+FLUSH_OWNER=$(api "${IPS[0]}" GET "/v1/machines/${ID}" | jf host_id)
+FLUSH_OWNER_IP=""
+for ip in "${IPS[@]}"; do
+  HID=$($SSH "root@${ip}" "grep PILOT_HOST_ID /etc/pilots/config | cut -d= -f2" 2>/dev/null)
+  [ "$HID" = "$FLUSH_OWNER" ] && FLUSH_OWNER_IP="$ip"
+done
+flush_count() { curl -sf -m 5 "http://$1:8080/metrics" | awk '/^pilots_root_flush_lag_seconds_count/ {print $2}'; }
+FLUSH_BEFORE=$(flush_count "${FLUSH_OWNER_IP:-${IPS[0]}}"); FLUSH_BEFORE=${FLUSH_BEFORE:-0}
+api "${IPS[0]}" POST "/v1/machines/${ID}/exec" "{\"cmd\":\"echo ${FLUSH_MARKER} > /var/tmp/flushed-marker && sync\"}" >/dev/null
+START=$SECONDS; FLUSH_AFTER=$FLUSH_BEFORE
+while [ $((SECONDS - START)) -lt 150 ]; do
+  FLUSH_AFTER=$(flush_count "${FLUSH_OWNER_IP:-${IPS[0]}}"); FLUSH_AFTER=${FLUSH_AFTER:-0}
+  [ "${FLUSH_AFTER%.*}" -gt "${FLUSH_BEFORE%.*}" ] && break
+  sleep 5
+done
+if [ "${FLUSH_AFTER%.*}" -gt "${FLUSH_BEFORE%.*}" ]; then
+  ok "the owner ${FLUSH_OWNER} completed a root flush $((SECONDS - START))s after the write (${FLUSH_BEFORE%.*} -> ${FLUSH_AFTER%.*})"
+else
+  bad "no root flush completed on ${FLUSH_OWNER} within 150s (count stayed ${FLUSH_BEFORE%.*}); is PILOT_ROOT_FLUSH_INTERVAL 0?"
+fi
+
 say "8. Hard-kill the host that owns it"
 OWNER=$(api "${IPS[0]}" GET "/v1/machines/${ID}" | jf host_id)
 OWNER_IP=""
@@ -605,6 +967,24 @@ done
 
 SURVIVOR=""
 for ip in "${IPS[@]}"; do [ "$ip" != "$OWNER_IP" ] && SURVIVOR="$ip" && break; done
+
+# Make every survivor a COLD host for the rescue: drop the marker that says
+# its copy of the golden disk template is whole. The bytes stay, so machines
+# already running on it are untouched; what changes is that the rescued
+# machine's block server finds no complete local template, serves it from
+# object storage, and hydrates the directory behind the running guest. Step
+# 10 asserts both halves: the machine answers, and the marker comes back.
+TEMPLATE_ROOTFS=""
+for ip in "${IPS[@]}"; do
+  [ "$ip" = "$OWNER_IP" ] && continue
+  T=$($SSH "root@${ip}" 'python3 -c "import json;print(json.load(open(\"/var/cache/pilots/template/template.json\"))[\"rootfs_build_id\"])"' 2>/dev/null)
+  [ -n "$T" ] || continue
+  TEMPLATE_ROOTFS="$T"
+  $SSH "root@${ip}" "rm -f /var/cache/pilots/builds/${T}/data.complete" 2>/dev/null \
+    && ok "${ip} no longer holds a complete template ${T:0:8}; the rescue must serve it from the bucket" \
+    || bad "${ip}: could not drop the template's completion marker"
+done
+[ -n "$TEMPLATE_ROOTFS" ] || bad "no survivor names a golden template, so the cold-host rescue cannot be set up"
 
 DOMAIN=$(sudo virsh list --name | while read -r d; do
   [ -n "$d" ] && sudo virsh domifaddr "$d" --source lease 2>/dev/null | grep -q "$OWNER_IP" && echo "$d"
@@ -674,6 +1054,42 @@ done
 [ "$(echo "$OUT" | tr -d '[:space:]')" = "before-failover" ] \
   && ok "the machine came back with what it had written" \
   || bad "exec after rescue returned '${OUT}'"
+
+# The write from step 7c: captured by nothing but the root flush, and the
+# host that held it is gone. Its survival here is the published RPO.
+OUT=$(api "$SURVIVOR" POST "/v1/machines/${ID}/exec" '{"cmd":"cat /var/tmp/flushed-marker"}' 2>/dev/null | jf stdout)
+[ "$(echo "$OUT" | tr -d '[:space:]')" = "$FLUSH_MARKER" ] \
+  && ok "the uncheckpointed write survived the host's death via the root flush" \
+  || bad "the flushed write did not survive the rescue (got '${OUT}', want '${FLUSH_MARKER}')"
+
+# And it was served from the bucket while the survivor's copy of the template
+# hydrated behind it: the marker step 8 removed comes back on its own, after
+# the machine already answered above.
+if [ -n "$TEMPLATE_ROOTFS" ]; then
+  HYDRATED=""
+  for ip in "${IPS[@]}"; do
+    [ "$ip" = "$OWNER_IP" ] && continue
+    HID=$($SSH "root@${ip}" "grep PILOT_HOST_ID /etc/pilots/config | cut -d= -f2" 2>/dev/null)
+    [ "$HID" = "$NEWOWNER" ] || continue
+    START=$SECONDS
+    while [ $((SECONDS - START)) -lt 180 ]; do
+      $SSH "root@${ip}" "test -e /var/cache/pilots/builds/${TEMPLATE_ROOTFS}/data.complete" 2>/dev/null && HYDRATED="${ip}" && break
+      sleep 5
+    done
+    if [ -n "$HYDRATED" ]; then
+      ok "the rescuing host served the template from the bucket and finished hydrating it $((SECONDS - START))s later"
+    else
+      bad "the rescuing host ${ip} never completed its copy of template ${TEMPLATE_ROOTFS:0:8}; it served, but nothing hydrated behind it"
+    fi
+  done
+  [ -n "$HYDRATED" ] || [ -z "$NEWOWNER" ] || true
+fi
+
+# Steps 8 to 10 have had everything they came for: the owner died, a survivor
+# claimed the machine, the URL held, the disk came back and the template was
+# served from the bucket while it hydrated. The fleet goes back to whole before
+# step 11, which needs hosts to add one to.
+revive_host "${DOMAIN:-}" "$OWNER_IP" "the hard kill in step 8"
 
 say "11. One command turns a new IP into a serving host"
 # "Add a host = give an IP" is the claim. On real hardware the machine is
@@ -746,28 +1162,42 @@ if [ -n "$NEW_IP" ]; then
     bad "the one command failed"
   fi
 
-  # Live hosts only: the one killed in step 5 is still down on purpose, so the
-  # fleet the new host should see is the survivors plus itself.
-  LIVE=$(( ${#IPS[@]} - 1 + 1 ))
+  # Every host killed on purpose above has been brought back and waited for
+  # (revive_host), so the fleet the new host should see is ALL of them plus
+  # itself. This used to subtract the one step 8 left dead; once that host
+  # comes back the arithmetic was one short, and the poll below then spun for
+  # its full two minutes and reported whatever it last read.
+  LIVE=$(( ${#IPS[@]} + 1 ))
 
   # Poll rather than assert once. The checklist asks for schedulable and
   # serving "within minutes", not instantly: a host that has just joined still
   # has to exchange gossip and heartbeat once before anyone counts it alive.
   # Asserting the moment the bootstrap returns measures convergence latency
   # and calls it a failure.
+  # A call that FAILED answers empty, never 0. Reporting a failed read as a
+  # legitimate "sees zero hosts" is how the assertion below once accused a
+  # host of seeing no fleet at the same moment the next step proved it was
+  # routing for one.
   live_seen() { # live_seen <ip>
     api "$1" GET /v1/hosts 2>/dev/null | python3 -c "
 import sys, json
-print(sum(1 for h in json.load(sys.stdin) if h.get('alive')))" 2>/dev/null || echo 0
+print(sum(1 for h in json.load(sys.stdin) if h.get('alive')))" 2>/dev/null
   }
 
+  # Five minutes, not two. A brand-new host serves the API only once its
+  # replica has caught up (the join gate), and catching up means pulling the
+  # fleet's whole history: on a rig that has run batteries for days that is
+  # half a million versions, and the API answered nothing readable for the
+  # whole of a two-minute window while the bootstrap itself had succeeded.
+  # The checklist asks for "within minutes"; the time is printed so a slower
+  # join is seen as one rather than hidden inside a wider budget.
   START=$SECONDS; N=0
-  while [ $((SECONDS - START)) -lt 120 ]; do
+  while [ $((SECONDS - START)) -lt 300 ]; do
     N=$(live_seen "$NEW_IP"); [ "$N" = "$LIVE" ] && break
     sleep 5
   done
   [ "$N" = "$LIVE" ] && ok "the new host sees ${N} live hosts after $((SECONDS - START))s" \
-    || bad "the new host sees ${N} live hosts, want ${LIVE}"
+    || bad "the new host sees ${N:-<no readable answer from /v1/hosts>} live hosts after $((SECONDS - START))s, want ${LIVE}"
 
   START=$SECONDS; N=0
   while [ $((SECONDS - START)) -lt 120 ]; do
@@ -775,7 +1205,7 @@ print(sum(1 for h in json.load(sys.stdin) if h.get('alive')))" 2>/dev/null || ec
     sleep 5
   done
   [ "$N" = "$LIVE" ] && ok "the existing hosts see it too" \
-    || bad "an existing host sees ${N} live hosts, want ${LIVE}"
+    || bad "an existing host sees ${N:-<no readable answer from /v1/hosts>} live hosts, want ${LIVE}"
 
   # Serving, not merely present. A host that joined gossip but cannot route is
   # in the fleet's tables and useless to a client.
@@ -845,6 +1275,10 @@ else
   [ "$(echo "$OUT" | tr -d '[:space:]')" = "before-failover" ] \
     && ok "the retry was served by ${NEXT} after $((SECONDS - START))s, same machine, same disk" \
     || bad "the retry never succeeded (got '${OUT}')"
+
+  # Asserted; the fleet goes back to whole. Section 13 needs somewhere for a
+  # volume to move TO.
+  revive_host "${DOM:-}" "$CUR_IP" "the mid-request kill in step 12"
 fi
 
 say "13. A volume survives the death of the host that had it mounted"
@@ -917,13 +1351,26 @@ else
     [ -n "$SVOLID" ] && ok "created the service's volume ${SVOLID} on ${VHOST}" \
       || bad "service volume create failed: $SVOL"
 
-    SVCVOL=$(api "$VHOST" POST /v1/services \
-      "{\"name\":\"gate-vol-$$\",\"app\":\"gate-vol-$$\",\"replicas\":1,\"volume\":\"${SVOLID}\",\"health\":{\"type\":\"cmd\",\"test\":[\"CMD-SHELL\",\"true\"],\"grace\":90,\"interval\":2,\"healthy_threshold\":1}}")
+    # Deliberately NOT api(): it uses `curl -sf`, which prints NOTHING on a
+    # non-2xx. A create that FAILED therefore reached the assertion below as an
+    # empty volume_id and was reported as "did not record its volume" -- a
+    # misdiagnosis that hid the real error across two gate runs and sent the
+    # investigation at the volume-binding code, which was fine all along. The
+    # status and the body are what separate the two, so they are captured.
+    SVCVOL_RAW=$(curl -s -m 180 -w '\n%{http_code}' -X POST "http://${VHOST}:8080/v1/services" \
+      -H "$AUTH" -H 'Content-Type: application/json' \
+      -d "{\"name\":\"gate-vol-$$\",\"app\":\"gate-vol-$$\",\"replicas\":1,\"volume\":\"${SVOLID}\",\"health\":{\"type\":\"cmd\",\"test\":[\"CMD-SHELL\",\"true\"],\"grace\":90,\"interval\":2,\"healthy_threshold\":1}}")
+    SVCVOL_CODE=$(printf '%s' "$SVCVOL_RAW" | tail -n1)
+    SVCVOL=$(printf '%s' "$SVCVOL_RAW" | sed '$d')
     SVCVOLID=$(echo "$SVCVOL" | jf id)
     SVCVOLBOUND=$(echo "$SVCVOL" | jf volume_id)
-    [ "$SVCVOLBOUND" = "$SVOLID" ] \
-      && ok "service ${SVCVOLID} mounts ${SVOLID}" \
-      || bad "the service create did not record its volume (got '${SVCVOLBOUND}'): $SVCVOL"
+    if [ "$SVCVOL_CODE" != 201 ] && [ "$SVCVOL_CODE" != 200 ]; then
+      bad "the volume-backed service create FAILED with HTTP ${SVCVOL_CODE:-000}: $(printf '%s' "$SVCVOL" | head -c 300)"
+    elif [ "$SVCVOLBOUND" = "$SVOLID" ]; then
+      ok "service ${SVCVOLID} mounts ${SVOLID}"
+    else
+      bad "the service create returned ${SVCVOL_CODE} but recorded volume '${SVCVOLBOUND}', want ${SVOLID}: $(printf '%s' "$SVCVOL" | head -c 300)"
+    fi
 
     SVCBUILD=$(build_image "$VHOST" 'FROM alpine:3.20
 RUN mkdir /www && echo ok > /www/index.html
@@ -1075,9 +1522,23 @@ print(mine[0]['id'] if len(mine) == 1 else '')
         printf '    (deploying through %s, which is NOT the replica owner %s)\n' "$DEPLOY_VIA" "$SOWNER"
       fi
 
-      api "$DEPLOY_VIA" POST "/v1/services/${SVCVOLID}/deploy" "{\"build\":\"${SVCBUILD}\"}" >/dev/null \
-        && ok "redeployed the rescued volume-backed service through ${DEPLOY_VIA}" \
-        || bad "the deploy after the rescue failed; a peer call that cannot authenticate answers 401"
+      # The status and body are CAPTURED rather than guessed at. This used to
+      # assert a cause -- "a peer call that cannot authenticate answers 401" --
+      # that it had never observed, and api() uses curl -sf, so every non-2xx
+      # landed on that one sentence. It was in fact a 503: the deploy was
+      # forwarded to the host this section had just powered off, because
+      # arbitration counted a host live for 90s while the claim guard buried
+      # it at 30s. Naming a cause the test did not see cost an investigation
+      # aimed at the wrong subsystem, which is the reason this reads the real
+      # answer now. The service-create block above does the same.
+      DPL_BODY=$(curl -s -m 180 -o /tmp/gate-deploy-body -w '%{http_code}' \
+        -X POST "http://${DEPLOY_VIA}:8080/v1/services/${SVCVOLID}/deploy" \
+        -H "$AUTH" -H 'Content-Type: application/json' \
+        -d "{\"build\":\"${SVCBUILD}\"}" 2>/dev/null)
+      case "$DPL_BODY" in
+        2*) ok "redeployed the rescued volume-backed service through ${DEPLOY_VIA}" ;;
+        *)  bad "the deploy after the rescue failed with HTTP ${DPL_BODY}: $(head -c 200 /tmp/gate-deploy-body 2>/dev/null)" ;;
+      esac
 
       SREPS=$(api "$VSURVIVOR" GET /v1/machines | python3 -c "
 import sys, json
@@ -1100,6 +1561,12 @@ print(' '.join(m['id'] for m in rows if m.get('service_id') == '${SVCVOLID}' and
         || bad "the redeploy lost the volume's data (got '${SAFTER}')"
     fi
   fi
+
+  # The volume has been through everything this section exists to put it
+  # through. Its host comes back, and it is the LAST of the three kills, so
+  # from here the fleet is whole for every section below -- which is what the
+  # thirty sections after this one have never once had.
+  revive_host "${VDOM:-}" "$VHOST" "the volume host's death in step 13"
 fi
 
 say "13b. A key minted on a dead host still authenticates on every survivor"
@@ -1262,15 +1729,18 @@ else
   echo "  live hosts: ${HOSTILE_IPS[*]}"
   H1=$(api "$H_IP" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
   H1_ID=$(echo "$H1" | jf id)
-  [ -n "$H1_ID" ] && ok "created ${H1_ID} on ${H_IP}" || bad "create failed: $H1"
+  # The create was ADDRESSED to $H_IP; the ranker decides where it runs. Every
+  # host-shell read below has to follow the machine, not the request.
+  H1_IP=$(owner_ip "$H1_ID" "$H_IP")
+  [ -n "$H1_ID" ] && ok "created ${H1_ID}, running on ${H1_IP}" || bad "create failed: $H1"
 fi
 
 if [ -n "$H1_ID" ]; then
-  H1_FCPID=$(fc_pid "$H_IP" "$H1_ID")
+  H1_FCPID=$(fc_pid "$H1_IP" "$H1_ID")
   [ -n "$H1_FCPID" ] && ok "its Firecracker is pid ${H1_FCPID}" \
-    || bad "could not find the Firecracker process for ${H1_ID}"
+    || bad "could not find the Firecracker process for ${H1_ID} on ${H1_IP}"
 
-  BEFORE_NBD=$(nbd_attached "$H_IP")
+  BEFORE_NBD=$(nbd_attached "$H1_IP")
   if [ -z "$BEFORE_NBD" ]; then
     bad "no NBD device is attached, so freeing one cannot be asserted"
   else
@@ -1283,7 +1753,7 @@ if [ -n "$H1_ID" ]; then
   # Five seconds, polled. The disconnect is synchronous but the kernel's own
   # teardown is not, and WaitDetached is what the pool waits on.
   for _ in $(seq 25); do
-    AFTER_NBD=$(nbd_attached "$H_IP")
+    AFTER_NBD=$(nbd_attached "$H1_IP")
     FREED=$(comm -23 <(echo "$BEFORE_NBD") <(echo "$AFTER_NBD"))
     [ -n "$FREED" ] && break
     sleep 0.2
@@ -1293,7 +1763,7 @@ if [ -n "$H1_ID" ]; then
     || bad "no NBD device was freed within 5s; the disconnect ioctl did not run"
 
   if [ -n "$H1_FCPID" ]; then
-    STAT=$($SSH "root@$H_IP" "ps -o stat= -p ${H1_FCPID} 2>/dev/null" 2>/dev/null | tr -d '[:space:]')
+    STAT=$($SSH "root@$H1_IP" "ps -o stat= -p ${H1_FCPID} 2>/dev/null" 2>/dev/null | tr -d '[:space:]')
     case "$STAT" in
       "")  ok "the Firecracker process is gone" ;;
       *D*) bad "the Firecracker process is in uninterruptible sleep ('${STAT}'); the host is wedged" ;;
@@ -1302,15 +1772,42 @@ if [ -n "$H1_ID" ]; then
   fi
 
   # A device that was freed but not reusable is the same outage one create
-  # later, so the assertion runs until the device is back in service.
-  H1B=$(api "$H_IP" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
+  # later -- so what has to be true is that the freed device is back in
+  # SERVICE and a later create succeeds.
+  #
+  # NOT that the later create takes that same index. DevicePool.Acquire
+  # round-robins from where it left off rather than reusing the lowest free
+  # index, deliberately and for correctness: the kernel clears a device's size
+  # asynchronously after a detach, so handing an index straight back lets the
+  # old teardown zero the size the new handler just set, and the device then
+  # never becomes usable (internal/nbd/pool.go). Demanding immediate reuse
+  # asserted the one behaviour the allocator documents as wrong; it passed only
+  # when the cursor happened to wrap, and this branch -- where every machine
+  # takes a device -- made it fail every time. Section 15's hundred cycles are
+  # what prove the pool does not leak.
+  #
+  # So the assertion is the pool's OWN two criteria for handing a device out
+  # again: no pid file, and a size the kernel has cleared. Either the device is
+  # idle and meets them, or it was handed straight back out and is in use --
+  # both mean it returned to the pool. The failure is the limbo in between.
+  # On the host that FREED the device, or the question being asked is about
+  # some other host's pool.
+  H1B=$(create_on_host "$H_IP" "$H1_IP" '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
   H1B_ID=$(echo "$H1B" | jf id)
+  for f in $CREATE_FILLERS; do api "$H_IP" DELETE "/v1/machines/${f}" >/dev/null 2>&1; done
   if [ -z "$H1B_ID" ]; then
-    bad "a create after the destroy failed: $H1B"
+    bad "a create after the destroy never landed on ${H1_IP}: $H1B"
   else
-    REUSED=$(nbd_attached "$H_IP" | comm -12 - <(echo "$FREED"))
-    [ -n "$REUSED" ] && ok "the later create reused $(echo "$REUSED" | tr '\n' ' ')" \
-      || bad "the freed device was not reused; it is out of the pool"
+    FREED_DEV=$(echo "$FREED" | head -1)
+    AVAIL=$($SSH "root@${H1_IP}" "
+      if [ -s /sys/block/${FREED_DEV}/pid ]; then echo inuse
+      elif [ \"\$(cat /sys/block/${FREED_DEV}/size 2>/dev/null)\" = 0 ]; then echo available
+      else echo limbo; fi" 2>/dev/null | tr -d '[:space:]')
+    case "$AVAIL" in
+      available) ok "${FREED_DEV} is back in the pool: no owner, and the kernel cleared its size" ;;
+      inuse)     ok "${FREED_DEV} was handed straight back out and is serving again" ;;
+      *)         bad "${FREED_DEV} is neither free nor reused (size not cleared); the kernel left it mid-teardown, which is the state that wedges the next handler" ;;
+    esac
     OUT=$(api "$H_IP" POST "/v1/machines/${H1B_ID}/exec" '{"cmd":"echo nbd-alive","user":"root"}' 2>/dev/null | jf stdout)
     [ "$(echo "$OUT" | tr -d '[:space:]')" = "nbd-alive" ] \
       && ok "and the machine on it serves" || bad "the machine on the reused device does not serve (got '${OUT}')"
@@ -1329,11 +1826,18 @@ say "15. A hundred create/destroy cycles return the host to its baseline"
 # stale namespace and the next create on that slot fails with "file exists".
 CHURN_N=${GATE_CHURN_N:-100}
 if [ -n "$H_IP" ]; then
-  BASE_COUNTS=$(host_counts "$H_IP")
-  # Read on the NODE, not here: journalctl --since is interpreted by the node's
-  # clock, and any skew between the two silently moves the window.
-  SINCE=$($SSH "root@$H_IP" "date '+%Y-%m-%d %H:%M:%S'" 2>/dev/null | tr -d '\n')
-  ok "baseline on ${H_IP}: netns/veth/nbd = ${BASE_COUNTS}"
+  # Every live host, not just the one the creates are addressed to: the ranker
+  # spreads this churn across the fleet, so a baseline taken on one host would
+  # be compared against a host that never ran most of the cycles -- equal, and
+  # meaningless. The leak this looks for can land on any of them.
+  BASE_ALL=""; SINCE_ALL=""
+  for ip in "${HOSTILE_IPS[@]}"; do
+    BASE_ALL="${BASE_ALL}${ip}:$(host_counts "$ip") "
+    # Read on the NODE, not here: journalctl --since is interpreted by the
+    # node's clock, and any skew between the two silently moves the window.
+    SINCE_ALL="${SINCE_ALL}${ip}=$($SSH "root@$ip" "date '+%Y-%m-%d %H:%M:%S'" 2>/dev/null | tr -d '\n' | tr ' ' '_') "
+  done
+  ok "baseline netns/veth/nbd: ${BASE_ALL}"
 
   CHURN_FAIL=0
   for i in $(seq "$CHURN_N"); do
@@ -1347,23 +1851,31 @@ if [ -n "$H_IP" ]; then
 
   # Teardown is asynchronous at the edges, so the counts are given a moment to
   # settle rather than read the instant the last delete returned.
-  AFTER_COUNTS=""
+  AFTER_ALL=""
   for _ in $(seq 30); do
-    AFTER_COUNTS=$(host_counts "$H_IP")
-    [ "$AFTER_COUNTS" = "$BASE_COUNTS" ] && break
+    AFTER_ALL=""
+    for ip in "${HOSTILE_IPS[@]}"; do
+      AFTER_ALL="${AFTER_ALL}${ip}:$(host_counts "$ip") "
+    done
+    [ "$AFTER_ALL" = "$BASE_ALL" ] && break
     sleep 2
   done
-  [ "$AFTER_COUNTS" = "$BASE_COUNTS" ] \
-    && ok "netns, veth halves and NBD devices are all back to baseline (${AFTER_COUNTS})" \
-    || bad "the host did not return to baseline: ${BASE_COUNTS} -> ${AFTER_COUNTS}"
+  [ "$AFTER_ALL" = "$BASE_ALL" ] \
+    && ok "netns, veth halves and NBD devices are back to baseline on every host" \
+    || bad "a host did not return to baseline: ${BASE_ALL} -> ${AFTER_ALL}"
 
   # The retry itself is silent by design -- deleteNamedNS logs nothing until it
   # has exhausted all ten attempts -- so what is asserted is the observable
   # half: across a hundred races, not one teardown surfaced as an error.
-  ERRS=$($SSH "root@$H_IP" "journalctl -u hostd --since '${SINCE}' --no-pager 2>/dev/null | grep -c -e 'still EBUSY after' -e 'netns: delete'" 2>/dev/null | tr -d '[:space:]')
-  [ "${ERRS:-0}" = "0" ] \
-    && ok "no teardown error in the journal across ${CHURN_N} cycles" \
-    || bad "${ERRS} teardown error(s) in the journal; an EBUSY retry gave up"
+  ERRS_TOTAL=0
+  for pair in $SINCE_ALL; do
+    ip="${pair%%=*}"; since="$(echo "${pair#*=}" | tr '_' ' ')"
+    e=$($SSH "root@$ip" "journalctl -u hostd --since '${since}' --no-pager 2>/dev/null | grep -c -e 'still EBUSY after' -e 'netns: delete'" 2>/dev/null | tr -d '[:space:]')
+    ERRS_TOTAL=$(( ERRS_TOTAL + ${e:-0} ))
+  done
+  [ "$ERRS_TOTAL" = "0" ] \
+    && ok "no teardown error in any host's journal across ${CHURN_N} cycles" \
+    || bad "${ERRS_TOTAL} teardown error(s) across the fleet; an EBUSY retry gave up"
 fi
 
 say "15b. A replica suspended and woken ten times holds one slot and one address"
@@ -1393,6 +1905,10 @@ if [ -n "$H_IP" ]; then
   SL=$(api "$H_IP" POST /v1/machines \
     "{\"app\":\"${SL_APP}\",\"vcpus\":1,\"mem_mib\":512,\"cmd\":\"sleep 86400\",\"knobs\":{\"auto_stop\":\"off\"}}")
   SL_ID=$(echo "$SL" | jf id); SL_NAME=$(echo "$SL" | jf name)
+  # The slot, the veth half and pilots_slots_free all belong to the host that
+  # RUNS the replica, which the ranker picked; reading them on the host the
+  # create was addressed to compares a machine against a host it never touched.
+  SL_IP=$(owner_ip "$SL_ID" "$H_IP")
   # The resolver is a peer in the same app that never sleeps itself, so the
   # address is read from outside the machine under test.
   SLC=$(api "$H_IP" POST /v1/machines \
@@ -1414,16 +1930,16 @@ if [ -n "$H_IP" ]; then
     SL_BASE_ADDR=""
     OUT=$(curl_until "$H_IP" "$SLC_ID" "http://${SL_NAME}.internal:3001/health")
     [ "${OUT%% *}" = "200" ] && SL_BASE_ADDR="${OUT##* }"
-    BASE_COUNTS=$(host_counts "$H_IP")
-    BASE_VETH=$($SSH "root@$H_IP" "ip -o link 2>/dev/null | grep -o 'veth-[0-9]*' | sort | tr '\n' ' '" 2>/dev/null | tr -d '\r')
-    BASE_FREE=$(curl -sf -m 5 "http://${H_IP}:8080/metrics" 2>/dev/null | awk '$1=="pilots_slots_free"{print $2}')
+    BASE_COUNTS=$(host_counts "$SL_IP")
+    BASE_VETH=$($SSH "root@$SL_IP" "ip -o link 2>/dev/null | grep -o 'veth-[0-9]*' | sort | tr '\n' ' '" 2>/dev/null | tr -d '\r')
+    BASE_FREE=$(curl -sf -m 5 "http://${SL_IP}:8080/metrics" 2>/dev/null | awk '$1=="pilots_slots_free"{print $2}')
 
     if [ -z "$SL_BASE_ADDR" ]; then
       bad "the replica never resolved over .internal (curl said '${OUT}'); this step has no baseline"
     elif [ -z "$BASE_FREE" ]; then
-      bad "pilots_slots_free is not on ${H_IP}'s scrape; this step has no baseline"
+      bad "pilots_slots_free is not on ${SL_IP}'s scrape; this step has no baseline"
     else
-      ok "baseline on ${H_IP}: address ${SL_BASE_ADDR}, pilots_slots_free ${BASE_FREE}"
+      ok "baseline on ${SL_IP}: address ${SL_BASE_ADDR}, pilots_slots_free ${BASE_FREE}"
 
       SLOT_FAIL=0
       for i in $(seq "$SLOT_CYCLES"); do
@@ -1431,7 +1947,7 @@ if [ -n "$H_IP" ]; then
         START=$SECONDS; STATE=""
         while [ $((SECONDS - START)) -lt 60 ]; do
           STATE=$(api "$H_IP" GET "/v1/machines/${SL_ID}" | jf state)
-          [ "$STATE" = "suspended" ] && [ -z "$(fc_pid "$H_IP" "$SL_ID")" ] && break
+          [ "$STATE" = "suspended" ] && [ -z "$(fc_pid "$SL_IP" "$SL_ID")" ] && break
           sleep 2
         done
         if [ "$STATE" != "suspended" ]; then
@@ -1441,7 +1957,7 @@ if [ -n "$H_IP" ]; then
         START=$SECONDS; STATE=""
         while [ $((SECONDS - START)) -lt 60 ]; do
           STATE=$(api "$H_IP" GET "/v1/machines/${SL_ID}" | jf state)
-          [ "$STATE" = "running" ] && [ -n "$(fc_pid "$H_IP" "$SL_ID")" ] && break
+          [ "$STATE" = "running" ] && [ -n "$(fc_pid "$SL_IP" "$SL_ID")" ] && break
           sleep 2
         done
         if [ "$STATE" != "running" ]; then
@@ -1461,8 +1977,8 @@ if [ -n "$H_IP" ]; then
 
       AFTER_VETH=""; AFTER_COUNTS=""
       for _ in $(seq 30); do
-        AFTER_VETH=$($SSH "root@$H_IP" "ip -o link 2>/dev/null | grep -o 'veth-[0-9]*' | sort | tr '\n' ' '" 2>/dev/null | tr -d '\r')
-        AFTER_COUNTS=$(host_counts "$H_IP")
+        AFTER_VETH=$($SSH "root@$SL_IP" "ip -o link 2>/dev/null | grep -o 'veth-[0-9]*' | sort | tr '\n' ' '" 2>/dev/null | tr -d '\r')
+        AFTER_COUNTS=$(host_counts "$SL_IP")
         [ "$AFTER_VETH" = "$BASE_VETH" ] && [ "$AFTER_COUNTS" = "$BASE_COUNTS" ] && break
         sleep 2
       done
@@ -1476,7 +1992,7 @@ if [ -n "$H_IP" ]; then
       # Greater-or-equal, not equal: an unrelated machine idling out in the
       # background can only RAISE this gauge, and the leak being asserted
       # lowers it by one per wake.
-      AFTER_FREE=$(curl -sf -m 5 "http://${H_IP}:8080/metrics" 2>/dev/null | awk '$1=="pilots_slots_free"{print $2}')
+      AFTER_FREE=$(curl -sf -m 5 "http://${SL_IP}:8080/metrics" 2>/dev/null | awk '$1=="pilots_slots_free"{print $2}')
       if [ -n "$AFTER_FREE" ] && [ "$(printf '%.0f' "$AFTER_FREE")" -ge "$(printf '%.0f' "$BASE_FREE")" ]; then
         ok "pilots_slots_free is ${AFTER_FREE}, no lower than the ${BASE_FREE} it started at"
       else
@@ -1499,7 +2015,12 @@ say "16. A guest's memory and fork bombs stay inside its own cgroup slice"
 if [ -n "$H_IP" ]; then
   NB=$(api "$H_IP" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
   NB_ID=$(echo "$NB" | jf id)
-  [ -n "$NB_ID" ] && ok "neighbour ${NB_ID} is up" || bad "could not create the neighbour: $NB"
+  # The neighbour's host is where the bomb has to go off. A noisy neighbour on
+  # a DIFFERENT host proves nothing at all -- the latency assertion below would
+  # pass on any healthy fleet -- so the bomb is placed onto this host or the
+  # section fails loudly rather than asserting nothing.
+  NB_IP=$(owner_ip "$NB_ID" "$H_IP")
+  [ -n "$NB_ID" ] && ok "neighbour ${NB_ID} is up on ${NB_IP}" || bad "could not create the neighbour: $NB"
 
   BASE_MS=0
   if [ -n "$NB_ID" ]; then
@@ -1510,18 +2031,20 @@ if [ -n "$H_IP" ]; then
       || bad "could not measure the neighbour's baseline latency (samples: $(echo "$SAMPLES" | tr '\n' ' '))"
   fi
 
-  BOMB=$(api "$H_IP" POST /v1/machines '{"vcpus":1,"mem_mib":256,"knobs":{"auto_stop":"off"}}')
+  BOMB=$(create_on_host "$H_IP" "$NB_IP" '{"vcpus":1,"mem_mib":256,"knobs":{"auto_stop":"off"}}')
   BOMB_ID=$(echo "$BOMB" | jf id)
-  [ -n "$BOMB_ID" ] && ok "the hostile machine ${BOMB_ID} is up" || bad "could not create it: $BOMB"
+  for f in $CREATE_FILLERS; do api "$H_IP" DELETE "/v1/machines/${f}" >/dev/null 2>&1; done
+  [ -n "$BOMB_ID" ] && ok "the hostile machine ${BOMB_ID} is up beside it on ${NB_IP}" \
+    || bad "could not place the hostile machine on the neighbour's host ${NB_IP}: $BOMB"
 
   if [ -n "$BOMB_ID" ] && [ -n "$NB_ID" ]; then
-    BOMB_SLICE=$(slice_of "$H_IP" "$BOMB_ID")
+    BOMB_SLICE=$(slice_of "$NB_IP" "$BOMB_ID")
     [ -n "$BOMB_SLICE" ] && ok "its slice is ${BOMB_SLICE}" \
       || bad "the machine has no cgroup slice; nothing is limiting it"
 
     if [ -n "$BOMB_SLICE" ]; then
-      MEM_MAX=$($SSH "root@$H_IP" "cat ${BOMB_SLICE}/memory.max" 2>/dev/null | tr -d '[:space:]')
-      PIDS_MAX=$($SSH "root@$H_IP" "cat ${BOMB_SLICE}/pids.max" 2>/dev/null | tr -d '[:space:]')
+      MEM_MAX=$($SSH "root@$NB_IP" "cat ${BOMB_SLICE}/memory.max" 2>/dev/null | tr -d '[:space:]')
+      PIDS_MAX=$($SSH "root@$NB_IP" "cat ${BOMB_SLICE}/pids.max" 2>/dev/null | tr -d '[:space:]')
       [ -n "$MEM_MAX" ] && [ "$MEM_MAX" != "max" ] \
         && ok "memory.max is ${MEM_MAX} and pids.max is ${PIDS_MAX}" \
         || bad "memory.max is '${MEM_MAX}'; the slice has no memory limit at all"
@@ -1537,7 +2060,7 @@ if [ -n "$H_IP" ]; then
       MEM_PEAK=0; PIDS_PEAK=0
       sample_while() {
         while kill -0 "$1" 2>/dev/null; do
-          READING=$($SSH "root@$H_IP" "cat ${BOMB_SLICE}/memory.current ${BOMB_SLICE}/pids.current 2>/dev/null | tr '\n' ' '" 2>/dev/null)
+          READING=$($SSH "root@$NB_IP" "cat ${BOMB_SLICE}/memory.current ${BOMB_SLICE}/pids.current 2>/dev/null | tr '\n' ' '" 2>/dev/null)
           CUR_MEM=$(echo "$READING" | awk '{print $1}'); CUR_PIDS=$(echo "$READING" | awk '{print $2}')
           [ -n "$CUR_MEM" ] && [ "$CUR_MEM" -gt "$MEM_PEAK" ] 2>/dev/null && MEM_PEAK=$CUR_MEM
           [ -n "$CUR_PIDS" ] && [ "$CUR_PIDS" -gt "$PIDS_PEAK" ] 2>/dev/null && PIDS_PEAK=$CUR_PIDS
@@ -1562,7 +2085,7 @@ if [ -n "$H_IP" ]; then
       # A guest that OOMs its own processes and a slice that OOM-kills the VMM
       # are both containment; a slice whose memory.current sailed past
       # memory.max is not, and neither is a host that lost its free memory.
-      OOM=$($SSH "root@$H_IP" "awk '/^oom_kill /{print \$2}' ${BOMB_SLICE}/memory.events" 2>/dev/null | tr -d '[:space:]')
+      OOM=$($SSH "root@$NB_IP" "awk '/^oom_kill /{print \$2}' ${BOMB_SLICE}/memory.events" 2>/dev/null | tr -d '[:space:]')
       [ "$MEM_PEAK" -le "$MEM_MAX" ] 2>/dev/null \
         && ok "the slice held: memory.current peaked at ${MEM_PEAK} of ${MEM_MAX} (oom_kill=${OOM:-0})" \
         || bad "memory.current reached ${MEM_PEAK}, past memory.max ${MEM_MAX}"
@@ -1571,7 +2094,7 @@ if [ -n "$H_IP" ]; then
         && ok "pids.max is ${PIDS_MAX} and pids.current peaked at ${PIDS_PEAK}" \
         || bad "pids.max is '${PIDS_MAX}'; the fork bomb has no ceiling"
 
-      AVAIL=$($SSH "root@$H_IP" "awk '/MemAvailable/{print int(\$2/1024)}' /proc/meminfo" 2>/dev/null | tr -d '[:space:]')
+      AVAIL=$($SSH "root@$NB_IP" "awk '/MemAvailable/{print int(\$2/1024)}' /proc/meminfo" 2>/dev/null | tr -d '[:space:]')
       [ "${AVAIL:-0}" -gt 512 ] 2>/dev/null \
         && ok "the host still has ${AVAIL} MiB available" \
         || bad "the host is down to ${AVAIL} MiB available; the bomb reached it"
@@ -1603,7 +2126,8 @@ H5_OPS=${GATE_H5_OPS:-1000}
 if [ -n "$H_IP" ]; then
   H5=$(api "$H_IP" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
   H5_ID=$(echo "$H5" | jf id)
-  [ -n "$H5_ID" ] && ok "created ${H5_ID}" || bad "create failed: $H5"
+  H5_IP=$(owner_ip "$H5_ID" "$H_IP") # the host the ranker put it on, not $H_IP
+  [ -n "$H5_ID" ] && ok "created ${H5_ID} on ${H5_IP}" || bad "create failed: $H5"
 
   if [ -n "$H5_ID" ]; then
     # A first suspend/wake so there is something to resume from, the way
@@ -1617,11 +2141,12 @@ if [ -n "$H_IP" ]; then
     # one makes the remote command 'ls /proc//fd', which the kernel resolves to
     # the non-existent /proc/fd, so wc -l prints 0 -- and 0 -> 0 passes the fd
     # assertion below on a machine that has no Firecracker at all.
-    H5_FCPID=$(fc_pid "$H_IP" "$H5_ID")
-    [ -n "$H5_FCPID" ] && ok "its Firecracker is pid ${H5_FCPID}" \
-      || bad "could not find the Firecracker process for ${H5_ID}; the fd counts below mean nothing"
-    FD_BEFORE=$($SSH "root@$H_IP" "ls /proc/${H5_FCPID}/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
-    HOSTD_FD_BEFORE=$($SSH "root@$H_IP" "ls /proc/\$(pgrep -x hostd | head -1)/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
+    H5_IP=$(owner_ip "$H5_ID" "$H5_IP") # a wake may have resumed it elsewhere
+    H5_FCPID=$(fc_pid "$H5_IP" "$H5_ID")
+    [ -n "$H5_FCPID" ] && ok "its Firecracker is pid ${H5_FCPID} on ${H5_IP}" \
+      || bad "could not find the Firecracker process for ${H5_ID} on ${H5_IP}; the fd counts below mean nothing"
+    FD_BEFORE=$($SSH "root@$H5_IP" "ls /proc/${H5_FCPID}/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
+    HOSTD_FD_BEFORE=$($SSH "root@$H5_IP" "ls /proc/\$(pgrep -x hostd | head -1)/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
     ok "Firecracker holds ${FD_BEFORE} fds and hostd holds ${HOSTD_FD_BEFORE} before the loop"
 
     FAILED_AT=0
@@ -1639,10 +2164,31 @@ if [ -n "$H_IP" ]; then
 
     # Re-read: every wake restores into a NEW Firecracker, so the pid the loop
     # ended on is not the one it started with.
-    H5_FCPID_AFTER=$(fc_pid "$H_IP" "$H5_ID")
-    [ -n "$H5_FCPID_AFTER" ] || bad "no Firecracker is running for ${H5_ID} after the loop"
-    FD_AFTER=$($SSH "root@$H_IP" "ls /proc/${H5_FCPID_AFTER}/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
-    HOSTD_FD_AFTER=$($SSH "root@$H_IP" "ls /proc/\$(pgrep -x hostd | head -1)/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
+    H5_IP=$(owner_ip "$H5_ID" "$H5_IP")
+    H5_FCPID_AFTER=$(fc_pid "$H5_IP" "$H5_ID")
+    [ -n "$H5_FCPID_AFTER" ] || bad "no Firecracker is running for ${H5_ID} on ${H5_IP} after the loop"
+    FD_AFTER=$($SSH "root@$H5_IP" "ls /proc/${H5_FCPID_AFTER}/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
+
+    # hostd's count is taken as the LOWEST of several samples, not the first.
+    #
+    # A leak never settles; a busy fleet does. hostd holds a chunk-socket
+    # listener per running machine and a connection per in-flight operation,
+    # so sampling the instant a thousand-operation loop ends measures how busy
+    # the host was, not what it is holding on to -- and it read exactly the
+    # threshold on a run where the fleet was whole, while measurement on an
+    # idle rig showed the same counts falling back (47 -> 16) and staying
+    # there. Taking the floor over half a minute keeps a real leak caught,
+    # because a real one has no floor to fall to.
+    HOSTD_FD_AFTER=""
+    for _ in $(seq 6); do
+      HOSTD_FD_SAMPLE=$($SSH "root@$H5_IP" "ls /proc/\$(pgrep -x hostd | head -1)/fd 2>/dev/null | wc -l" 2>/dev/null | tr -d '[:space:]')
+      case "$HOSTD_FD_SAMPLE" in
+        ''|*[!0-9]*) ;;
+        *) [ -z "$HOSTD_FD_AFTER" ] && HOSTD_FD_AFTER=$HOSTD_FD_SAMPLE
+           [ "$HOSTD_FD_SAMPLE" -lt "$HOSTD_FD_AFTER" ] && HOSTD_FD_AFTER=$HOSTD_FD_SAMPLE ;;
+      esac
+      sleep 5
+    done
     # hostd is the side that would hold a leaked keepalive connection open, so
     # it is asserted as well as Firecracker's own count.
     [ $(( FD_AFTER - FD_BEFORE )) -lt 20 ] 2>/dev/null \
@@ -1667,6 +2213,15 @@ say "18. hostd killed at ten random points converges to the running set"
 # The kill lands at a random point in the create on purpose: the interesting
 # window is between spawning a Firecracker and recording it.
 if [ -n "$H_IP" ]; then
+  # Something for a restart to re-adopt. By this point in the run the host
+  # may hold no machines at all -- its earlier ones were rescued elsewhere or
+  # destroyed by the sections above -- and then no kill can adopt anything
+  # and the journal assertion below fails for want of a subject, which is
+  # what it did on a run where every earlier assertion here was green.
+  KILL_ANCHOR=$(create_on_host "$H_IP" "$H_IP" '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}' | jf id)
+  for f in $CREATE_FILLERS; do api "$H_IP" DELETE "/v1/machines/${f}" >/dev/null 2>&1; done
+  [ -n "$KILL_ANCHOR" ] && ok "anchored ${KILL_ANCHOR} on ${H_IP} for the restarts to re-adopt" \
+    || bad "could not place an anchor machine on ${H_IP}; the re-adoption assertion below has no subject"
   KILL_BASE=$(host_counts "$H_IP")
   KILL_IDS_BEFORE=$(machine_ids_on "$H_IP")
   KILL_SINCE=$($SSH "root@$H_IP" "date '+%Y-%m-%d %H:%M:%S'" 2>/dev/null | tr -d '\n')
@@ -1698,6 +2253,7 @@ if [ -n "$H_IP" ]; then
   $SSH "root@$H_IP" "journalctl -u hostd --since '${KILL_SINCE}' --no-pager 2>/dev/null | grep -q 're-adopted machines from a previous run'" >/dev/null 2>&1 \
     && ok "the journal shows machines re-adopted by comm across a restart" \
     || bad "no restart re-adopted anything; the running machines were abandoned"
+  [ -n "$KILL_ANCHOR" ] && api "$H_IP" DELETE "/v1/machines/${KILL_ANCHOR}" >/dev/null 2>&1
 
   # Past the reaper's 5-minute interval, so an orphan has actually been swept
   # rather than merely not looked at yet.
@@ -1738,7 +2294,7 @@ FAULT_IP=""
 if [ -z "$FAULT_IP" ]; then
   bad "no host is alive to reproduce the wedge on"
 else
-  $SSH "root@$FAULT_IP" "mkdir -p /etc/pilots && printf 'PILOT_FAULTS=1\nPILOT_FAULT_NBD_SKIP_DISCONNECT=1\n' >> /etc/pilots/hostd.env && systemctl restart hostd" >/dev/null 2>&1
+  $SSH "root@$FAULT_IP" "mkdir -p /etc/pilots && touch /etc/pilots/hostd.env && sed -i -e '\$a\\' /etc/pilots/hostd.env && printf 'PILOT_FAULTS=1\nPILOT_FAULT_NBD_SKIP_DISCONNECT=1\n' >> /etc/pilots/hostd.env && systemctl restart hostd" >/dev/null 2>&1
   if wait_serving "$FAULT_IP" 120; then
     ok "armed the NBD fault on ${FAULT_IP} and hostd came back"
   else
@@ -1749,10 +2305,15 @@ else
   # named rather than inferred from an intersection with everything else the
   # host has attached.
   WEDGE_NBD_BEFORE=$(nbd_attached "$FAULT_IP")
-  WEDGE=$(api "$FAULT_IP" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
+  # On the FAULTED host specifically. The fault is armed on one host's hostd,
+  # so a machine the ranker placed anywhere else tears down normally and the
+  # wedge simply does not reproduce -- which reads as "the fault did not take
+  # effect" and silently retires section 14's counterfactual.
+  WEDGE=$(create_on_host "$FAULT_IP" "$FAULT_IP" '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
   WEDGE_ID=$(echo "$WEDGE" | jf id)
+  for f in $CREATE_FILLERS; do api "$FAULT_IP" DELETE "/v1/machines/${f}" >/dev/null 2>&1; done
   if [ -z "$WEDGE_ID" ]; then
-    bad "could not create the machine to wedge: $WEDGE"
+    bad "could not place a machine on the faulted host ${FAULT_IP}: $WEDGE"
   else
     WEDGE_PID=$(fc_pid "$FAULT_IP" "$WEDGE_ID")
     WEDGE_OWN=$(comm -13 <(echo "$WEDGE_NBD_BEFORE") <(nbd_attached "$FAULT_IP"))
@@ -1784,7 +2345,7 @@ else
   fi
 
   # Disarm before the reboot, so a host that comes back is a normal host.
-  $SSH "root@$FAULT_IP" "sed -i '/^PILOT_FAULTS=/d;/^PILOT_FAULT_NBD_SKIP_DISCONNECT=/d' /etc/pilots/hostd.env" >/dev/null 2>&1
+  $SSH "root@$FAULT_IP" "sed -i '/PILOT_FAULTS=/d;/PILOT_FAULT_NBD_SKIP_DISCONNECT=/d' /etc/pilots/hostd.env" >/dev/null 2>&1
   LEFT=$($SSH "root@$FAULT_IP" "grep -c PILOT_FAULT /etc/pilots/hostd.env" 2>/dev/null | tr -d '[:space:]')
   [ "${LEFT:-1}" = "0" ] && ok "the fault flags are out of hostd.env" \
     || bad "a PILOT_FAULT line is still in /etc/pilots/hostd.env on ${FAULT_IP}"
@@ -1845,6 +2406,11 @@ else
     CB_ID=$(echo "$CB" | jf id)
     CB_URL=$(echo "$CB" | jf url)
     CB_HOST=$(echo "$CB" | jf host_id)
+    # Where it actually runs. Every host read below is about THIS machine's
+    # host, and the assertion further down is that it does not move, so the
+    # address is resolved once from the row rather than assumed to be the host
+    # the create was addressed to.
+    CB_IP=$(ip_of_host "$CB_HOST"); CB_IP="${CB_IP:-$FAULT_IP}"
     if [ -z "$CB_ID" ]; then
       bad "could not create the machine to cold-boot: $CB"
     else
@@ -1855,12 +2421,48 @@ else
       # carry the forced one and resume normally -- which is the design, and is
       # what step 6 below asserts.
       api "$FAULT_IP" POST "/v1/machines/${CB_ID}/suspend" '{}' >/dev/null 2>&1
-      CB_BEFORE=$(curl -sf -m 5 "http://${FAULT_IP}:8080/metrics" 2>/dev/null \
+
+      # Armed on EVERY live host, not just the one driving the API.
+      #
+      # The machine's pool has to be empty for a cold boot to be the only way
+      # back, and "empty" is a property of the whole fleet: forcing one host to
+      # report the other vendor removes it from the pool and leaves every other
+      # live host still in it, so the machine simply restores on one of those.
+      # That is exactly what happened once the sections above stopped leaving
+      # the fleet dead -- the section had been relying on being run against a
+      # rig that earlier sections had already destroyed, and it read "the last
+      # live host" because by then there usually was only one. A section that
+      # needs a degraded fleet degrades it itself.
+      # The live set is computed HERE rather than reused. LIVE_IPS was built
+      # further up with the hosts of steps 8 and 12 deliberately excluded,
+      # because they were dead at the time; they are revived now, and arming a
+      # subset would leave the machine's pool populated by exactly the hosts
+      # the list forgot.
+      CB_HOSTS=()
+      for ip in "${IPS[@]}" ${NEW_IP:-}; do
+        curl -sf -m 5 "http://${ip}:8080/v1/health" >/dev/null 2>&1 && CB_HOSTS+=("$ip")
+      done
+      CB_ARMED=""
+      for ip in "${CB_HOSTS[@]}"; do
+        $SSH "root@$ip" "mkdir -p /etc/pilots && touch /etc/pilots/hostd.env && sed -i -e '\$a\\' /etc/pilots/hostd.env && printf 'PILOT_FAULTS=1\nPILOT_FAULT_CPU_VENDOR=%s\n' '$CB_OTHER' >> /etc/pilots/hostd.env && systemctl restart hostd" >/dev/null 2>&1
+        wait_serving "$ip" 120 && CB_ARMED="${CB_ARMED}${ip} "
+      done
+      ok "forced ${CB_OTHER} on every live host (${CB_ARMED}), so the machine's own pool has none left"
+
+      # The baselines are taken HERE, after the arming, not before it.
+      #
+      # Arming restarts hostd on every host, and pilots_machine_starts_total
+      # is an in-process counter: a restart puts it back to zero. Reading it
+      # first meant comparing a pre-restart number against a post-restart one,
+      # so the section reported the cold-boot counter going 1 -> 0 and called
+      # a correct cold boot a failure. The NBD count is read here for the same
+      # reason: a restart re-attaches the devices of the machines it adopts,
+      # so the figure before it is not the figure this step is diffing.
+      CB_BEFORE=$(curl -sf -m 5 "http://${CB_IP}:8080/metrics" 2>/dev/null \
         | awk '$1=="pilots_machine_starts_total{kind=\"cold_boot\"}"{print $2}')
       CB_BEFORE="${CB_BEFORE:-0}"
-      CB_NBD_BEFORE=$(nbd_attached "$FAULT_IP" | wc -l)
+      CB_NBD_BEFORE=$(nbd_attached "$CB_IP" | wc -l)
 
-      $SSH "root@$FAULT_IP" "mkdir -p /etc/pilots && printf 'PILOT_FAULTS=1\nPILOT_FAULT_CPU_VENDOR=%s\n' '$CB_OTHER' >> /etc/pilots/hostd.env && systemctl restart hostd" >/dev/null 2>&1
       if wait_serving "$FAULT_IP" 120; then
         CB_HEALTH=$(curl -sf -m 5 "http://${FAULT_IP}:8080/v1/health" 2>/dev/null)
         if [ "$(echo "$CB_HEALTH" | jf cpu_vendor)" = "$CB_OTHER" ] \
@@ -1873,7 +2475,10 @@ else
         CB_START=$(date +%s%N)
         api "$FAULT_IP" POST "/v1/machines/${CB_ID}/wake" '{}' >/dev/null 2>&1
         CB_MS=$(( ($(date +%s%N) - CB_START) / 1000000 ))
-        CB_ROW=$(api "$FAULT_IP" GET "/v1/machines/${CB_ID}")
+        # Read from the OWNER. Any host serves this route, but only the owner
+        # has certainly applied its own write; a peer's copy arrives by gossip
+        # and can still be showing the start before this one.
+        CB_ROW=$(api "$CB_IP" GET "/v1/machines/${CB_ID}")
 
         # 60s is the RIG ceiling, not the product budget. The tiered budget --
         # 5s on metal, 25s under nested KVM -- is asserted by scripts/e2e.mjs;
@@ -1901,7 +2506,7 @@ else
           && ok "the machine stayed on ${CB_HOST}" \
           || bad "host_id moved: ${CB_HOST} -> $(echo "$CB_ROW" | jf host_id)"
 
-        CB_AFTER=$(curl -sf -m 5 "http://${FAULT_IP}:8080/metrics" 2>/dev/null \
+        CB_AFTER=$(curl -sf -m 5 "http://${CB_IP}:8080/metrics" 2>/dev/null \
           | awk '$1=="pilots_machine_starts_total{kind=\"cold_boot\"}"{print $2}')
         [ "${CB_AFTER:-0}" = "$(( CB_BEFORE + 1 ))" ] \
           && ok "pilots_machine_starts_total{kind=cold_boot} grew by one" \
@@ -1911,18 +2516,26 @@ else
         # KERNEL, so there is no fault handler at all -- a uffd handler here
         # would mean the machine restored something and this section proved
         # nothing.
-        CB_FC=$($SSH "root@$FAULT_IP" "pgrep -fc 'firecracker.*--id ${CB_ID}' || true" 2>/dev/null | tr -d '[:space:]')
-        CB_PID=$(fc_pid "$FAULT_IP" "$CB_ID")
-        [ -n "$CB_PID" ] && [ "${CB_FC:-0}" -le 1 ] \
+        # Counted from the machine's own cgroup, NOT with `pgrep -f
+        # 'firecracker.*--id <id>'`: pgrep -f matches the remote shell running
+        # the pgrep, whose own command line contains the pattern. That is how
+        # this read reported "2 Firecracker processes" on a host running one
+        # (1 firecracker + 1 shell) and "1 uffd handler" for a machine that
+        # had none.
+        CB_SLICE=$(slice_of "$CB_IP" "$CB_ID")
+        CB_FC=$($SSH "root@$CB_IP" "n=0; for p in \$(cat ${CB_SLICE}/cgroup.procs 2>/dev/null); do [ \"\$(cat /proc/\$p/comm 2>/dev/null)\" = firecracker ] && n=\$((n+1)); done; echo \$n" 2>/dev/null | tr -d '[:space:]')
+        CB_PID=$(fc_pid "$CB_IP" "$CB_ID")
+        [ -n "$CB_PID" ] && [ "${CB_FC:-0}" = 1 ] \
           && ok "exactly one Firecracker is serving ${CB_ID}" \
-          || bad "found ${CB_FC:-0} Firecracker processes for ${CB_ID} (cgroup pid '${CB_PID}')"
+          || bad "found ${CB_FC:-0} Firecracker processes for ${CB_ID} in ${CB_SLICE:-no slice} (cgroup pid '${CB_PID}')"
 
-        CB_NBD_AFTER=$(nbd_attached "$FAULT_IP" | wc -l)
+        CB_NBD_AFTER=$(nbd_attached "$CB_IP" | wc -l)
         [ "$CB_NBD_AFTER" = "$(( CB_NBD_BEFORE + 1 ))" ] \
           && ok "the cold boot took exactly one NBD device with a live server" \
           || bad "NBD devices went ${CB_NBD_BEFORE} -> ${CB_NBD_AFTER}, want one more"
 
-        CB_UFFD=$($SSH "root@$FAULT_IP" "pgrep -fc 'uffd-handler.*${CB_ID}' || true" 2>/dev/null | tr -d '[:space:]')
+        # Bracketed so the pattern cannot match the shell that carries it.
+        CB_UFFD=$($SSH "root@$CB_IP" "pgrep -fc '[u]ffd-handler.*${CB_ID}' || true" 2>/dev/null | tr -d '[:space:]')
         [ "${CB_UFFD:-0}" = "0" ] \
           && ok "no uffd handler was started; the memory came from a kernel" \
           || bad "${CB_UFFD} uffd handlers are running for a machine that booted"
@@ -1930,9 +2543,14 @@ else
         # And the machine is normal again. Its suspend image now belongs to the
         # pool it landed in, so the next wake is an ordinary restore -- if it is
         # not, the cold boot produced a machine that reboots forever.
-        api "$FAULT_IP" POST "/v1/machines/${CB_ID}/suspend" '{}' >/dev/null 2>&1
-        api "$FAULT_IP" POST "/v1/machines/${CB_ID}/wake" '{}' >/dev/null 2>&1
-        CB_ROW2=$(api "$FAULT_IP" GET "/v1/machines/${CB_ID}")
+        # The status is checked. A suspend that failed makes the wake below a
+        # no-op, which leaves last_start reading 'cold_boot' from the previous
+        # start -- indistinguishable from the bug this step looks for.
+        api "$CB_IP" POST "/v1/machines/${CB_ID}/suspend" '{}' >/dev/null 2>&1 \
+          || bad "the suspend after the cold boot failed; the wake below asserts nothing"
+        api "$CB_IP" POST "/v1/machines/${CB_ID}/wake" '{}' >/dev/null 2>&1 \
+          || bad "the wake after the cold boot failed"
+        CB_ROW2=$(api "$CB_IP" GET "/v1/machines/${CB_ID}")
         [ "$(echo "$CB_ROW2" | jf last_start)" = "restore" ] \
           && ok "the next wake is an ordinary restore" \
           || bad "the second wake reports '$(echo "$CB_ROW2" | jf last_start)'; the machine cold-boots forever"
@@ -1949,17 +2567,25 @@ else
       api "$FAULT_IP" DELETE "/v1/machines/${CB_ID}" >/dev/null 2>&1
     fi
 
-    # Disarm, always, so this section leaves the rig as it found it.
-    $SSH "root@$FAULT_IP" "sed -i '/^PILOT_FAULTS=/d;/^PILOT_FAULT_CPU_VENDOR=/d' /etc/pilots/hostd.env && systemctl restart hostd" >/dev/null 2>&1
-    if wait_serving "$FAULT_IP" 120; then
-      CB_LEFT=$($SSH "root@$FAULT_IP" "grep -c PILOT_FAULT /etc/pilots/hostd.env" 2>/dev/null | tr -d '[:space:]')
-      CB_NOW=$(curl -sf -m 5 "http://${FAULT_IP}:8080/v1/health" 2>/dev/null | jf cpu_vendor)
-      [ "${CB_LEFT:-1}" = "0" ] && [ "$CB_NOW" = "$CB_REAL" ] \
-        && ok "the fault is disarmed and ${FAULT_IP} reports ${CB_REAL} again" \
-        || bad "${FAULT_IP} still carries a PILOT_FAULT line or reports '${CB_NOW}'"
-    else
-      bad "${FAULT_IP} did not come back after disarming the CPU vendor fault"
-    fi
+    # Disarm every host it was armed on, always, so this section leaves the rig
+    # as it found it. A stray PILOT_FAULT_CPU_VENDOR left on ANY host turns
+    # every wake in the fleet into a reboot, so the cleanup is checked per host
+    # rather than trusted.
+    CB_DIRTY=""
+    for ip in "${CB_HOSTS[@]:-${LIVE_IPS[@]}}"; do
+      $SSH "root@$ip" "sed -i '/PILOT_FAULTS=/d;/PILOT_FAULT_CPU_VENDOR=/d' /etc/pilots/hostd.env && systemctl restart hostd" >/dev/null 2>&1
+      if wait_serving "$ip" 120; then
+        CB_LEFT=$($SSH "root@$ip" "grep -c PILOT_FAULT /etc/pilots/hostd.env" 2>/dev/null | tr -d '[:space:]')
+        CB_NOW=$(curl -sf -m 5 "http://${ip}:8080/v1/health" 2>/dev/null | jf cpu_vendor)
+        [ "${CB_LEFT:-1}" = "0" ] && [ -n "$CB_NOW" ] && [ "$CB_NOW" != "$CB_OTHER" ] \
+          || CB_DIRTY="${CB_DIRTY}${ip}(left=${CB_LEFT:-?},vendor=${CB_NOW:-?}) "
+      else
+        CB_DIRTY="${CB_DIRTY}${ip}(did not come back) "
+      fi
+    done
+    [ -z "$CB_DIRTY" ] \
+      && ok "the fault is disarmed on every host and each reports its real vendor again" \
+      || bad "the vendor fault was left behind on: ${CB_DIRTY}"
   fi
 fi
 
@@ -1974,21 +2600,40 @@ say "21. A Firecracker killed on the host is reaped and its machine comes back"
 # child's wait, as an adopted process's pidfd after a hostd restart, and as a
 # dead pid found by reconcile when the process died while hostd was down.
 if [ -n "$H_IP" ]; then
-  EX_BASE=$(host_counts "$H_IP")
+  # Every live host's counts BEFORE the create, so the one the machine lands
+  # on can be compared against its own empty state.
+  #
+  # Taking the baseline after the create instead put the machine under test
+  # INSIDE the baseline, so the counts at the end were one lower than the
+  # start rather than equal, and the section reported "the exit path leaked"
+  # about a teardown that had worked perfectly. The host is not known until
+  # the create returns, so all of them are recorded and one is chosen.
+  EX_BASE_ALL=""
+  for ip in "${HOSTILE_IPS[@]}"; do
+    EX_BASE_ALL="${EX_BASE_ALL}${ip}=$(host_counts "$ip" | tr ' ' '_') "
+  done
+
   EX_ROW=$(api "$H_IP" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
   EX_ID=$(echo "$EX_ROW" | jf id); EX_URL=$(echo "$EX_ROW" | jf url)
+  # The kill, the reap, the handler pids and the journal are all on the host
+  # that RUNS this machine, not the one the create was addressed to.
+  EX_IP=$(owner_ip "$EX_ID" "$H_IP")
+  EX_BASE=""
+  for pair in $EX_BASE_ALL; do
+    [ "${pair%%=*}" = "$EX_IP" ] && EX_BASE="$(echo "${pair#*=}" | tr '_' ' ')"
+  done
+  [ -n "$EX_BASE" ] || EX_BASE=$(host_counts "$EX_IP")
   api "$H_IP" POST "/v1/machines/${EX_ID}/exec" \
     '{"cmd":"echo exit-marker > /var/tmp/marker-exit && sync","user":"root"}' >/dev/null 2>&1
 
   # The pid by --id in cmdline and comm, the way reaper.go's
   # firecrackerProcesses finds one: the pid file alone can name a recycled pid.
-  fc_pid_of() { $SSH "root@$1" "for p in /proc/[0-9]*; do [ \"\$(cat \$p/comm 2>/dev/null)\" = firecracker ] || continue; tr '\\0' ' ' < \$p/cmdline | grep -q -- '--id $2 ' && basename \$p; done" 2>/dev/null | head -1 | tr -d '[:space:]'; }
   state_field() { $SSH "root@$1" "python3 -c \"import json;print(json.load(open('/var/lib/pilots/machines/$2/state.json')).get('$3',0))\"" 2>/dev/null | tr -d '[:space:]'; }
 
-  EX_PID=$(fc_pid_of "$H_IP" "$EX_ID")
-  EX_NBD=$(state_field "$H_IP" "$EX_ID" nbd_pid)
-  EX_UFFD=$(state_field "$H_IP" "$EX_ID" uffd_pid)
-  EX_SINCE=$($SSH "root@$H_IP" "date '+%Y-%m-%d %H:%M:%S'" 2>/dev/null | tr -d '\n')
+  EX_PID=$(fc_pid_of "$EX_IP" "$EX_ID")
+  EX_NBD=$(state_field "$EX_IP" "$EX_ID" nbd_pid)
+  EX_UFFD=$(state_field "$EX_IP" "$EX_ID" uffd_pid)
+  EX_SINCE=$($SSH "root@$EX_IP" "date '+%Y-%m-%d %H:%M:%S'" 2>/dev/null | tr -d '\n')
   [ -n "$EX_PID" ] \
     && ok "found ${EX_ID}'s firecracker at pid ${EX_PID}" \
     || bad "no firecracker carries --id ${EX_ID}"
@@ -1998,15 +2643,15 @@ if [ -n "$H_IP" ]; then
     && ok "${EX_ID} records its handlers (nbd ${EX_NBD}, uffd ${EX_UFFD})" \
     || bad "could not read ${EX_ID}'s handler pids from its state.json (nbd '${EX_NBD}', uffd '${EX_UFFD}')"
 
-  $SSH "root@$H_IP" "kill -9 ${EX_PID}" >/dev/null 2>&1
+  $SSH "root@$EX_IP" "kill -9 ${EX_PID}" >/dev/null 2>&1
   sleep 5
   # A zombie is the whole bug: kill(pid, 0) succeeds on one, so before #78 the
   # corpse stayed <defunct> under hostd and every check called it alive.
-  EX_STAT=$($SSH "root@$H_IP" "ps -o stat= -p ${EX_PID} 2>/dev/null" | tr -d '[:space:]')
+  EX_STAT=$($SSH "root@$EX_IP" "ps -o stat= -p ${EX_PID} 2>/dev/null" | tr -d '[:space:]')
   [ -z "$EX_STAT" ] \
     && ok "pid ${EX_PID} is reaped within 5s (no <defunct>)" \
     || bad "pid ${EX_PID} is still present as '${EX_STAT}'"
-  $SSH "root@$H_IP" "kill -0 ${EX_NBD:-0} 2>/dev/null || kill -0 ${EX_UFFD:-0} 2>/dev/null" >/dev/null 2>&1 \
+  $SSH "root@$EX_IP" "kill -0 ${EX_NBD:-0} 2>/dev/null || kill -0 ${EX_UFFD:-0} 2>/dev/null" >/dev/null 2>&1 \
     && bad "a handler of ${EX_ID} (nbd ${EX_NBD}, uffd ${EX_UFFD}) outlived its firecracker" \
     || ok "both handlers of ${EX_ID} are gone within 5s"
 
@@ -2027,7 +2672,7 @@ if [ -n "$H_IP" ]; then
   [ "$(echo "$EX_NOW" | jf url)" = "$EX_URL" ] \
     && ok "the URL did not move" \
     || bad "the URL moved to $(echo "$EX_NOW" | jf url)"
-  EX_PID2=$(fc_pid_of "$H_IP" "$EX_ID")
+  EX_PID2=$(fc_pid_of "$EX_IP" "$EX_ID")
   [ -n "$EX_PID2" ] && [ "$EX_PID2" != "$EX_PID" ] \
     && ok "a new firecracker (pid ${EX_PID2}) serves ${EX_ID}" \
     || bad "no new firecracker for ${EX_ID}"
@@ -2038,21 +2683,21 @@ if [ -n "$H_IP" ]; then
     || bad "the disk did not survive: '${EX_MARK}'"
   # The incident's signature, in the journal: 82 frozen-guest lines and not one
   # word about an exit.
-  EX_FROZEN=$($SSH "root@$H_IP" "journalctl -u hostd --since '${EX_SINCE}' --no-pager 2>/dev/null | grep -c 'could not be resumed; it is frozen'" | tr -d '[:space:]')
+  EX_FROZEN=$($SSH "root@$EX_IP" "journalctl -u hostd --since '${EX_SINCE}' --no-pager 2>/dev/null | grep -c 'could not be resumed; it is frozen'" | tr -d '[:space:]')
   # The settleExit line specifically: onExit's success line ("a machine that
   # exited on its own is running again") carries the same phrase, so a bare
   # grep for it counts two per exit and never equals one.
-  EX_EXITS=$($SSH "root@$H_IP" "journalctl -u hostd --since '${EX_SINCE}' --no-pager 2>/dev/null | grep -c \"a machine's firecracker exited on its own\"" | tr -d '[:space:]')
+  EX_EXITS=$($SSH "root@$EX_IP" "journalctl -u hostd --since '${EX_SINCE}' --no-pager 2>/dev/null | grep -c \"a machine's firecracker exited on its own\"" | tr -d '[:space:]')
   [ "${EX_FROZEN:-1}" = 0 ] && [ "${EX_EXITS:-0}" = 1 ] \
     && ok "the journal has one exit line and no frozen-guest retries" \
     || bad "journal: ${EX_EXITS} exit line(s), ${EX_FROZEN} frozen-guest line(s)"
 
   # The adopted path: hostd restarts (KillMode=process keeps the guest), so the
   # machine is no longer its child and only a pidfd reports its exit.
-  $SSH "root@$H_IP" "systemctl restart hostd" >/dev/null 2>&1
-  wait_serving "$H_IP" 120 || bad "hostd did not come back for the adoption half"
-  EX_PID3=$(fc_pid_of "$H_IP" "$EX_ID")
-  $SSH "root@$H_IP" "kill -9 ${EX_PID3}" >/dev/null 2>&1
+  $SSH "root@$EX_IP" "systemctl restart hostd" >/dev/null 2>&1
+  wait_serving "$EX_IP" 120 || bad "hostd did not come back for the adoption half"
+  EX_PID3=$(fc_pid_of "$EX_IP" "$EX_ID")
+  $SSH "root@$EX_IP" "kill -9 ${EX_PID3}" >/dev/null 2>&1
   # The pid has to be read BEFORE the kill and has to be real, or the loop
   # below compares against an empty string and passes on the machine that was
   # never killed at all.
@@ -2061,7 +2706,7 @@ if [ -n "$H_IP" ]; then
     || bad "no firecracker carries --id ${EX_ID} after the hostd restart"
   EX_OK=0; EX_UP=0; EX_T0=$SECONDS
   while [ $((SECONDS - EX_T0)) -lt 60 ]; do
-    EX_PID4=$(fc_pid_of "$H_IP" "$EX_ID")
+    EX_PID4=$(fc_pid_of "$EX_IP" "$EX_ID")
     [ "$(api "$H_IP" GET "/v1/machines/${EX_ID}" | jf state)" = running ] \
       && [ -n "$EX_PID4" ] && [ "$EX_PID4" != "$EX_PID3" ] \
       && { EX_OK=1; EX_UP=$((SECONDS - EX_T0)); break; }
@@ -2074,12 +2719,12 @@ if [ -n "$H_IP" ]; then
   # The while-down path: the process dies with hostd stopped, so no watcher of
   # any kind saw it. Reconcile finds breadcrumbs for a dead pid and a row that
   # still says running, and reacts.
-  $SSH "root@$H_IP" "systemctl stop hostd; kill -9 \$(for p in /proc/[0-9]*; do [ \"\$(cat \$p/comm 2>/dev/null)\" = firecracker ] && tr '\\0' ' ' < \$p/cmdline | grep -q -- '--id ${EX_ID} ' && basename \$p; done) 2>/dev/null; systemctl start hostd" >/dev/null 2>&1
-  wait_serving "$H_IP" 120 || bad "hostd did not come back for the while-down half"
+  $SSH "root@$EX_IP" "systemctl stop hostd; kill -9 \$(for p in /proc/[0-9]*; do [ \"\$(cat \$p/comm 2>/dev/null)\" = firecracker ] && tr '\\0' ' ' < \$p/cmdline | grep -q -- '--id ${EX_ID} ' && basename \$p; done) 2>/dev/null; systemctl start hostd" >/dev/null 2>&1
+  wait_serving "$EX_IP" 120 || bad "hostd did not come back for the while-down half"
   EX_OK=0; EX_UP=0; EX_T0=$SECONDS
   while [ $((SECONDS - EX_T0)) -lt 90 ]; do
     [ "$(api "$H_IP" GET "/v1/machines/${EX_ID}" | jf state)" = running ] \
-      && [ -n "$(fc_pid_of "$H_IP" "$EX_ID")" ] \
+      && [ -n "$(fc_pid_of "$EX_IP" "$EX_ID")" ] \
       && { EX_OK=1; EX_UP=$((SECONDS - EX_T0)); break; }
     sleep 1
   done
@@ -2089,7 +2734,7 @@ if [ -n "$H_IP" ]; then
 
   api "$H_IP" DELETE "/v1/machines/${EX_ID}" >/dev/null 2>&1
   sleep 3
-  EX_AFTER=$(host_counts "$H_IP")
+  EX_AFTER=$(host_counts "$EX_IP")
   [ "$EX_AFTER" = "$EX_BASE" ] \
     && ok "namespaces, veths and NBD devices are back to the baseline (${EX_BASE})" \
     || bad "host counts went ${EX_BASE} -> ${EX_AFTER}; the exit path leaked"
@@ -2118,6 +2763,19 @@ GH_PORT=9418
 GH_PID=""
 GH_TMP=$(mktemp -d)
 GH_KEY="${GH_TMP}/gate-app.pem"
+
+# LIVE_IPS is RECOMPUTED here, not inherited.
+#
+# Section 13 narrowed it to the hosts it had not just powered off, and every
+# section after that inherited the narrower list. By the time a push lands the
+# fleet is whole again, so this section armed and counted two hosts while the
+# delivery's owner election ran over all four live ones -- and an election that
+# picks a host the section is not watching looks exactly like no host acting at
+# all.
+LIVE_IPS=()
+for ip in "${IPS[@]}" ${NEW_IP:-}; do
+  curl -sf -m 5 "http://${ip}:8080/v1/health" >/dev/null 2>&1 && LIVE_IPS+=("$ip")
+done
 GH_OPIP=$(ip route get "${LIVE_IPS[0]}" 2>/dev/null | awk '/src/ {for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)
 
 if [ "${#LIVE_IPS[@]}" -lt 1 ]; then
@@ -2154,7 +2812,7 @@ else
     $SSH "root@$ip" "mkdir -p /etc/pilots" >/dev/null 2>&1
     scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -i "$SSH_KEY" \
       "$GH_KEY" "root@${ip}:/etc/pilots/gate-app.pem" >/dev/null 2>&1
-    $SSH "root@$ip" "sed -i '/^PILOT_GITHUB_/d' /etc/pilots/hostd.env; cat >> /etc/pilots/hostd.env <<EOF
+    $SSH "root@$ip" "sed -i '/PILOT_GITHUB_/d' /etc/pilots/hostd.env; sed -i -e '\$a\\' /etc/pilots/hostd.env; cat >> /etc/pilots/hostd.env <<EOF
 PILOT_GITHUB_APP_ID=1
 PILOT_GITHUB_APP_KEY=/etc/pilots/gate-app.pem
 PILOT_GITHUB_WEBHOOK_SECRET=gate
@@ -2206,7 +2864,11 @@ systemctl restart hostd" >/dev/null 2>&1
   journal_grep_build() {
     local ip=$1 needle=$2 line
     line=$($SSH "root@$ip" "journalctl -u hostd --since '${GH_SINCE}' --no-pager 2>/dev/null | grep '${needle}' | tail -1" 2>/dev/null)
-    printf '%s' "$line" | grep -o 'build=[^ ]*' | tail -1 | cut -d= -f2
+    # hostd logs JSON (slog.NewJSONHandler), so the field reads "build":"bld-…"
+    # and never build=bld-…. The logfmt pattern could not match a single line,
+    # so this returned empty on every run and the assertions built on it read
+    # as a build that carried no id.
+    printf '%s' "$line" | grep -o '"build":"[^"]*"' | tail -1 | cut -d'"' -f4
   }
 
   # The service a push deploys into. No health of its own, so the plan's is
@@ -2272,7 +2934,7 @@ print(h.get('path', ''))
 
   # The record a person reads. The build id is in the journal line, and the
   # log route answers for it exactly as it answers for a failed build.
-  GH_BUILD=$(printf '%s' "$GH_CODE" | grep -o 'build=[^ ]*' | head -1 | cut -d= -f2)
+  GH_BUILD=$(printf '%s' "$GH_CODE" | grep -o '"build":"[^"]*"' | head -1 | cut -d'"' -f4)
   if [ -n "$GH_BUILD" ]; then
     GH_LOG=$(curl -sf -m 30 "http://${LIVE_IPS[0]}:8080/v1/builds/${GH_BUILD}/logs" -H "$AUTH" 2>/dev/null | tail -1)
     case "$GH_LOG" in
@@ -2513,7 +3175,7 @@ print(det[0].get('framework', ''))
   # Disarm. The rig goes back to having no GitHub App, so nothing below and
   # no later run inherits a fleet pointed at a stand-in that is gone.
   for ip in "${LIVE_IPS[@]}"; do
-    $SSH "root@$ip" "sed -i '/^PILOT_GITHUB_/d' /etc/pilots/hostd.env; rm -f /etc/pilots/gate-app.pem; systemctl restart hostd" >/dev/null 2>&1
+    $SSH "root@$ip" "sed -i '/PILOT_GITHUB_/d' /etc/pilots/hostd.env; rm -f /etc/pilots/gate-app.pem; systemctl restart hostd" >/dev/null 2>&1
     wait_serving "$ip" 120 || bad "${ip} did not come back after the github env was removed"
   done
   GH_LEFT=$($SSH "root@${LIVE_IPS[0]}" "grep -c PILOT_GITHUB_ /etc/pilots/hostd.env" 2>/dev/null | tr -d '[:space:]')
@@ -2580,14 +3242,19 @@ try:
     rows = json.load(sys.stdin)
 except Exception:
     rows = []
-print(rows[0]['id'] if rows else '')" 2>/dev/null)
+print(rows[0]['id'] if rows and rows[0].get('healthy') else '')" 2>/dev/null)
       [ -n "$DV_REL" ] && break
       sleep 4
     done
+    # A HEALTHY release, not the first row: the rollout records the release
+    # before it gates the replica, and the verdict line in the build log and
+    # the service's release_id are both written when the gate passes. Read
+    # in that window, the log ended at "deploying" and every host reported
+    # release_id empty, for a deploy that went through seconds later.
     if [ -z "$DV_REL" ]; then
-      bad "no release was cut for ${DV_SVC}: a build nobody watched deployed nothing"
+      bad "no healthy release was cut for ${DV_SVC}: a build nobody watched deployed nothing"
     else
-      ok "${DV_READER} sees release ${DV_REL}, cut with no client attached"
+      ok "${DV_READER} sees release ${DV_REL}, cut and gated with no client attached"
 
       DV_N=$(api "$DV_READER" GET "/v1/services/${DV_SVC}/releases" 2>/dev/null \
         | python3 -c "import sys, json; print(len(json.load(sys.stdin)))" 2>/dev/null)
@@ -2743,9 +3410,17 @@ PYEOF" >/dev/null 2>&1
 
       # A create is the only thing that reaches for the snapshot, so it is
       # the only thing that can discover the manifest is unusable.
-      TT_M=$(api "$TT_IP" POST /v1/machines "{\"name\":\"tmpl-heal-$$\"}" | jf id)
+      # On TT_IP specifically: the manifest was broken on TT_IP, so a machine
+      # the ranker placed elsewhere restores against a HEALTHY template and
+      # proves nothing about re-derivation.
+      # Captured, THEN read. Piping straight into jf discards the helper's
+      # own failure message, which is how "the create failed outright" was
+      # reported with nothing after it.
+      TT_OUT=$(create_on_host "$TT_IP" "$TT_IP" "{\"name\":\"tmpl-heal-$$\"}")
+      TT_M=$(echo "$TT_OUT" | jf id)
+      for f in $CREATE_FILLERS; do api "$TT_IP" DELETE "/v1/machines/${f}" >/dev/null 2>&1; done
       if [ -z "$TT_M" ]; then
-        bad "the create failed outright; a host with an unusable template must re-derive one, not refuse"
+        bad "the create failed outright; a host with an unusable template must re-derive one, not refuse: ${TT_OUT}"
       else
         ok "the create succeeded (${TT_M}) despite the template naming a missing snapshot"
 
@@ -2773,10 +3448,12 @@ PYEOF" >/dev/null 2>&1
 
       # A second create must be ordinary: the fix re-derives once, it does not
       # rebuild on every create forever.
-      TT_M2=$(api "$TT_IP" POST /v1/machines "{\"name\":\"tmpl-heal2-$$\"}" | jf id)
+      TT_OUT2=$(create_on_host "$TT_IP" "$TT_IP" "{\"name\":\"tmpl-heal2-$$\"}")
+      TT_M2=$(echo "$TT_OUT2" | jf id)
+      for f in $CREATE_FILLERS; do api "$TT_IP" DELETE "/v1/machines/${f}" >/dev/null 2>&1; done
       [ -n "$TT_M2" ] \
         && ok "the next create is ordinary again" \
-        || bad "the host did not settle; a second create still fails"
+        || bad "the host did not settle; a second create still fails: ${TT_OUT2}"
       [ -n "$TT_M2" ] && api "$TT_IP" DELETE "/v1/machines/${TT_M2}" >/dev/null 2>&1
     fi
   fi
@@ -2793,7 +3470,13 @@ BM_IP="${LIVE_IPS[0]:-${IPS[0]}}"
 # This is the whole change stated as one assertion. If buildkitd is running
 # here, a customer RUN step is executing on this kernel beside other tenants'
 # machines, which is exactly what a builder machine exists to stop.
-BM_DAEMON=$($SSH "root@${BM_IP}" "pgrep -c buildkitd 2>/dev/null || echo 0" 2>/dev/null | tr -d '[:space:]')
+# `pgrep -c` PRINTS 0 and EXITS 1 when nothing matches, so `|| echo 0` ran as
+# well and the reading was the string "00" -- which is not "0", so the section
+# reported a daemon on a host that had none. It only surfaced once the host
+# daemon was actually removed: while one was running, pgrep exited 0 and the
+# fallback never fired. `|| true` swallows the exit status without adding a
+# second line.
+BM_DAEMON=$($SSH "root@${BM_IP}" "pgrep -c buildkitd 2>/dev/null || true" 2>/dev/null | tr -d '[:space:]')
 if [ "${BM_DAEMON:-0}" = 0 ]; then
   ok "no buildkitd process on the host"
 else
@@ -2819,6 +3502,9 @@ else
 fi
 
 BM_NAMES=$($SSH "root@${BM_IP}" "sqlite3 /var/lib/pilots/corrosion/store.db \"SELECT name FROM machines WHERE name LIKE 'builder-%' AND state != 'destroyed';\"" 2>/dev/null)
+# The ID as well as the name: a Firecracker's command line carries --id, never
+# the machine's NAME, so the kill below has to ask for it by id.
+BM_MID=$($SSH "root@${BM_IP}" "sqlite3 /var/lib/pilots/corrosion/store.db \"SELECT id FROM machines WHERE name LIKE 'builder-%' AND state != 'destroyed' LIMIT 1;\"" 2>/dev/null | tr -d '[:space:]')
 if [ -n "$BM_NAMES" ]; then
   ok "the build left a builder machine behind to reuse"
 else
@@ -2855,7 +3541,14 @@ printf 'FROM alpine\nRUN sleep 120\n' > "${BM_TMP}/Dockerfile"
 ( tar -cf - -C "$BM_TMP" Dockerfile | curl -s -m 300 -X POST "http://${BM_IP}:8080/v1/builds" -H "$AUTH" -H 'Content-Type: application/x-tar' --data-binary @- > "${BM_TMP}/ndjson" 2>/dev/null ) &
 BM_PID=$!
 sleep 25
-BM_FC=$($SSH "root@${BM_IP}" "pgrep -f 'firecracker.*builder-' | head -1" 2>/dev/null | tr -d '[:space:]')
+# From the machine's own cgroup, by id. The old read was
+# `pgrep -f 'firecracker.*builder-'`, which could never match a real
+# Firecracker -- its command line carries --id <machine-id>, not the name --
+# so the ONLY thing it ever matched was the remote shell carrying the pattern.
+# The kill below then killed that dead shell, and the step reported "killed
+# the builder's Firecracker mid-build" as a pass while the build failed for an
+# entirely unrelated reason.
+BM_FC=$(fc_pid "${BM_IP}" "${BM_MID}")
 if [ -n "$BM_FC" ]; then
   $SSH "root@${BM_IP}" "kill -9 ${BM_FC}" >/dev/null 2>&1
   ok "killed the builder's Firecracker mid-build (pid ${BM_FC})"
@@ -2917,6 +3610,9 @@ HD_ID=$(echo "$HD" | jf id)
 if [ -z "$HD_ID" ]; then
   bad "could not create a machine to inspect its handlers: $HD"
 else
+  # Its handlers, its cgroup and its state dir are on the host the ranker put
+  # it on, not the host the create was addressed to.
+  HD_IP=$(owner_ip "$HD_ID" "$HD_IP")
   ok "machine ${HD_ID} is up on ${HD_IP}"
 
   # 26a. No PILOT_ variable in any handler's environ. /proc/<pid>/environ is
@@ -2992,6 +3688,9 @@ CS_ID=$(echo "$CS" | jf id)
 if [ -z "$CS_ID" ]; then
   bad "could not create a machine to inspect its chunk socket: $CS"
 else
+  # The socket lives beside the machine, on the machine's own host: reading a
+  # non-owner finds nothing and reports that the handlers bypassed it.
+  CS_IP=$(owner_ip "$CS_ID" "$CS_IP")
   CS_SOCK="/var/lib/pilots/machines/${CS_ID}/chunks.sock"
   if $SSH "root@$CS_IP" "test -S ${CS_SOCK}" 2>/dev/null; then
     ok "the machine has a chunk socket at ${CS_SOCK}"
@@ -3287,8 +3986,14 @@ else
 
   # A guest actually leaves from it. This is the only assertion that proves the
   # whole path rather than its pieces, so it runs against a real machine.
-  EG_M=$(api "$EG_IP" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
+  # On EG_IP, because EG_IP is the only host this section checked for an
+  # egress prefix. A machine the ranker placed on a host with no prefix
+  # configured has no egress address to report, and the assertion below would
+  # fail on a correct fleet. Dormant while no host is configured; a false
+  # failure the day one is.
+  EG_M=$(create_on_host "$EG_IP" "$EG_IP" '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
   EG_MID=$(echo "$EG_M" | jf id)
+  for f in $CREATE_FILLERS; do api "$EG_IP" DELETE "/v1/machines/${f}" >/dev/null 2>&1; done
   if [ -z "$EG_MID" ]; then
     bad "could not create a machine to check what address it leaves from: $EG_M"
   else
@@ -3371,7 +4076,12 @@ else
   # A machine created ON the host about to be drained, with something written
   # inside it: the point of a drain is that the machine survives, not merely
   # that a row moves.
-  DR_M=$(api "$DR_FROM" POST /v1/machines '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
+  # ON the host about to be drained, not merely addressed to it. A create the
+  # ranker sent elsewhere leaves the drain with nothing to move, and then
+  # "the machine moved from A to B" fails on a fleet where nothing is wrong.
+  DR_FILLERS=""
+  DR_M=$(create_on_host "$DR_ENTRY" "$DR_FROM" '{"vcpus":1,"mem_mib":512,"knobs":{"auto_stop":"off"}}')
+  DR_FILLERS="$CREATE_FILLERS"
   DR_ID=$(echo "$DR_M" | jf id)
   if [ -z "$DR_ID" ]; then
     bad "could not create a machine to drain: $DR_M"
@@ -3383,9 +4093,15 @@ else
     # And one ALREADY asleep when the drain starts. A drain must move it, not
     # wake it: taking every suspended machine back up on the target turned a
     # drain into a mass wake of every scale-to-zero sandbox on the host.
-    DR_S=$(api "$DR_FROM" POST /v1/machines '{"vcpus":1,"mem_mib":512}')
+    DR_S=$(create_on_host "$DR_ENTRY" "$DR_FROM" '{"vcpus":1,"mem_mib":512}')
+    DR_FILLERS="${DR_FILLERS} ${CREATE_FILLERS}"
     DR_SID=$(echo "$DR_S" | jf id)
     [ -n "$DR_SID" ] && api "$DR_FROM" POST "/v1/machines/${DR_SID}/suspend" >/dev/null 2>&1
+
+    # Fillers go BEFORE the drain. One left on the draining host is another
+    # machine the drain has to move; one left on the target changes the "a new
+    # machine went elsewhere" assertion at the end.
+    for f in $DR_FILLERS; do api "$DR_ENTRY" DELETE "/v1/machines/${f}" >/dev/null 2>&1; done
 
     # Drained through the OTHER host, which is the shape an operator uses: any
     # host serves the route and forwards it to the one named.
@@ -3428,7 +4144,10 @@ else
 
     # Nothing of the machine may be left on the source. A leftover jailer root
     # is a disk leak; a leftover Firecracker is two processes for one id.
-    DR_LEFT=$($SSH "root@$DR_FROM" "pgrep -fc \"firecracker.*${DR_ID}\"" 2>/dev/null | tr -d '[:space:]')
+    # Bracketed, and `|| true`. The unbracketed pattern matched the remote
+    # shell carrying it, so the count was never 0 and this could not pass; and
+    # pgrep -c exits 1 on no matches, which here is the PASSING case.
+    DR_LEFT=$($SSH "root@$DR_FROM" "pgrep -fc '[f]irecracker.*${DR_ID}' || true" 2>/dev/null | tr -d '[:space:]')
     [ "${DR_LEFT:-0}" = "0" ] \
       && ok "no Firecracker for it is left on the source host" \
       || bad "${DR_LEFT} Firecracker process(es) for ${DR_ID} still run on ${DR_FROM}"
@@ -3471,6 +4190,10 @@ else
   if [ -z "$SN_MID" ]; then
     bad "could not create a machine on the volume: $SN_M"
   else
+    # A volume-backed create is ranked like any other -- there is no volume
+    # exception in place.go -- and the volume is mounted on the machine's own
+    # host, so the snapshot files are there and nowhere else.
+    SN_IP=$(owner_ip "$SN_MID" "$SN_IP")
     # A marker, a snapshot, then a SECOND marker. The snapshot must hold the
     # first and not the second: that is the whole of what point-in-time means.
     api "$SN_IP" POST "/v1/machines/${SN_MID}/exec" '{"cmd":"echo one > /data/marker && sync"}' >/dev/null 2>&1
@@ -3483,7 +4206,7 @@ else
     # shares no blocks with the image it came from, which makes it a full copy
     # wearing the name of a snapshot.
     if [ -n "$SN_TS" ]; then
-      if $SSH "root@$SN_IP" "test -f /var/lib/pilots/volumes-mnt/${SN_VOLID}/snapshots/${SN_TS}/disk.img" 2>/dev/null; then
+      if $SSH "root@$SN_IP" "test -f /mnt/pilot-volumes/${SN_VOLID}/snapshots/${SN_TS}/disk.img" 2>/dev/null; then
         ok "the snapshot is a clone inside the volume's filesystem"
       else
         bad "no clone at snapshots/${SN_TS}/disk.img inside the volume"
@@ -3491,7 +4214,7 @@ else
 
       # A clone costs no blocks. Compared against the live image, which is a
       # whole gibibyte: a full copy would show as one.
-      SN_USED=$($SSH "root@$SN_IP" "du -sm --apparent-size /var/lib/pilots/volumes-mnt/${SN_VOLID}/snapshots 2>/dev/null | cut -f1" | tr -d '[:space:]')
+      SN_USED=$($SSH "root@$SN_IP" "du -sm --apparent-size /mnt/pilot-volumes/${SN_VOLID}/snapshots 2>/dev/null | cut -f1" | tr -d '[:space:]')
       echo "  MEASURED snapshot_apparent_mib=${SN_USED:-unknown}"
     fi
 
@@ -3708,7 +4431,7 @@ DB_COMPOSE=$(echo "$DB_RECIPE" | jq -r '
     ([.value | to_entries[] | "    \(.key): \(.value|tojson)"] | join("\n"))] | join("\n")) +
   "\nvolumes:\n" + ([.volumes | keys[] | "  \(.): {}"] | join("\n"))' 2>/dev/null)
 
-DB_PLAN=$(api "$DB_IP" POST /v1/plan "$(jq -n --arg c "$DB_COMPOSE" '{compose:$c}')")
+DB_PLAN=$(api "$DB_IP" POST /v1/compose/plan "$(jq -n --arg c "$DB_COMPOSE" '{compose:$c}')")
 DB_STEPS=$(echo "$DB_PLAN" | jq '.steps | length' 2>/dev/null)
 DB_PROCS=$(echo "$DB_PLAN" | jq '.steps[0].processes | length' 2>/dev/null)
 if [ "${DB_STEPS:-0}" = "1" ] && [ "${DB_PROCS:-0}" = "2" ]; then
@@ -3742,7 +4465,7 @@ for engine in postgres mysql redis mongo; do
       ([.companions | to_entries[] | "  \(.key):\n" +
         ([.value | to_entries[] | "    \(.key): \(.value|tojson)"] | join("\n"))] | join("\n")) + "\n" end) +
     "volumes:\n" + ([.volumes | keys[] | "  \(.): {}"] | join("\n"))' 2>/dev/null)
-  ENG_PLAN=$(api "$DB_IP" POST /v1/plan "$(jq -n --arg c "$ENG_COMPOSE" '{compose:$c}')")
+  ENG_PLAN=$(api "$DB_IP" POST /v1/compose/plan "$(jq -n --arg c "$ENG_COMPOSE" '{compose:$c}')")
   if [ "$(echo "$ENG_PLAN" | jq '.steps | length' 2>/dev/null)" != "1" ]; then
     DB_BAD="${DB_BAD} ${engine}"
   fi
@@ -3764,6 +4487,9 @@ BK_ID=$(echo "$BK_M" | jf id)
 if [ -z "$BK_ID" ]; then
   bad "could not create a machine to broker for: $BK_M"
 else
+  # The namespace, the socket, the on-disk databases and the hostd this
+  # section restarts all belong to the machine's own host.
+  BK_IP=$(owner_ip "$BK_ID" "$BK_IP")
   # The namespace name is the machine id, the way every other section finds it.
   BK_NS=$($SSH "root@$BK_IP" "ip netns list 2>/dev/null | grep -o '[^ ]*${BK_ID}[^ ]*' | head -1" 2>/dev/null | tr -d '[:space:]')
   if [ -z "$BK_NS" ]; then
@@ -3797,8 +4523,14 @@ else
 
   # A token minted on THIS host is accepted by another, with no forward header
   # and no row anywhere. That is the whole reason it is a signed claim.
-  if [ -n "$BK_TOKEN" ] && [ "${#LIVE_IPS[@]}" -gt 1 ]; then
-    BK_OTHER="${LIVE_IPS[1]}"
+  # Picked by EXCLUSION, not by index: now that BK_IP follows the machine it
+  # can itself be LIVE_IPS[1], and "another host" would then be the minting
+  # host testing itself.
+  BK_OTHER=""
+  for ip in "${LIVE_IPS[@]}"; do
+    [ "$ip" != "$BK_IP" ] && { BK_OTHER="$ip"; break; }
+  done
+  if [ -n "$BK_TOKEN" ] && [ -n "$BK_OTHER" ]; then
     BK_CODE=$(curl -sk -o /dev/null -w '%{http_code}' \
       -H "Authorization: Bearer ${BK_TOKEN}" "http://${BK_OTHER}:8080/v1/whoami" 2>/dev/null)
     [ "$BK_CODE" = "200" ] \
@@ -3854,6 +4586,7 @@ MX_ID=$(echo "$MX_M" | jf id)
 if [ -z "$MX_ID" ]; then
   bad "could not create a machine to measure: $MX_M"
 else
+  MX_IP=$(owner_ip "$MX_ID" "$MX_IP")
   # The API's number against the cgroup's own file. A reading that agreed with
   # itself but not with the kernel would be a confident wrong answer, which is
   # the only kind worth testing for here.
@@ -3880,8 +4613,13 @@ else
   # A scrape on a host that does NOT own the machine still carries it. That is
   # the whole promise of a fleet-wide scrape, and it is the half that cannot be
   # tested on one host.
-  if [ "${#LIVE_IPS[@]}" -gt 1 ]; then
-    MX_OTHER="${LIVE_IPS[1]}"
+  # By exclusion, for the same reason BK_OTHER is: a "non-owner" that turns
+  # out to be the owner asserts nothing.
+  MX_OTHER=""
+  for ip in "${LIVE_IPS[@]}"; do
+    [ "$ip" != "$MX_IP" ] && { MX_OTHER="$ip"; break; }
+  done
+  if [ -n "$MX_OTHER" ]; then
     MX_SCRAPE=$(curl -s -H "Authorization: Bearer ${KEY}" "http://${MX_OTHER}:8080/v1/metrics" 2>/dev/null | grep -c "machine=\"${MX_ID}\"")
     [ "${MX_SCRAPE:-0}" -ge 1 ] \
       && ok "a scrape on a non-owner host carries a machine owned elsewhere" \
@@ -4028,7 +4766,10 @@ else
         bad "could not find the address of ${HA_LEADER_HOST}"
       else
         HA_START=$(date +%s)
-        $SSH "root@$HA_HOST_IP" "pkill -9 -f 'firecracker.*${HA_LEADER}'" >/dev/null 2>&1 || true
+        # Bracketed so the pattern cannot match the shell carrying it, which
+        # would SIGKILL that shell alongside the guest and make the exit
+        # status meaningless.
+        $SSH "root@$HA_HOST_IP" "pkill -9 -f '[f]irecracker.*${HA_LEADER}'" >/dev/null 2>&1 || true
 
         # Time to a WRITE through the unchanged address, which is the number
         # anybody actually cares about: not "a node was promoted" but "my
@@ -4080,11 +4821,49 @@ else
   fi
 fi
 
+say "45. No host holds a per-machine copy of a root filesystem"
+# The host-shell half of the e2e step "a custom-image machine leaves no
+# materialised rootfs behind", and what would have caught the 40 GB disk fill:
+# a deploy-heavy host once held one full-size ext4 per build under the image
+# cache plus one per booted machine in its jail. Now every machine's root is a
+# block device served from a build the host holds once, and the only rootfs
+# FILE anywhere belongs to the throwaway machine a template is photographed
+# from. So: no images directory; every rootfs under the jailer base a device
+# node, tmpl- machines excepted; and the jail's footprint scaling with the
+# number of machines (a kernel and a vmstate each) rather than with the size
+# of an image.
+for ip in "${LIVE_IPS[@]}"; do
+  wait_serving "$ip" 30 || continue
+  IMAGES=$($SSH "root@${ip}" 'test -e /var/cache/pilots/images && echo present || echo absent' 2>/dev/null)
+  [ "$IMAGES" = "absent" ] \
+    && ok "${ip}: no materialised image cache" \
+    || bad "${ip}: /var/cache/pilots/images exists; something materialised a rootfs"
+
+  FILES=$($SSH "root@${ip}" 'find /var/lib/pilots/jailer -path "*/srv/pilots/rootfs.ext4" -type f 2>/dev/null | grep -v "/tmpl-" | wc -l' 2>/dev/null)
+  NODES=$($SSH "root@${ip}" 'find /var/lib/pilots/jailer -path "*/srv/pilots/rootfs.ext4" -type b 2>/dev/null | wc -l' 2>/dev/null)
+  [ "${FILES:-1}" = 0 ] \
+    && ok "${ip}: every machine's rootfs is a block device node (${NODES:-0} of them), none a file" \
+    || bad "${ip}: ${FILES} machine(s) have a rootfs FILE in their jail; their root was copied, not served"
+
+  # Per running machine the jail holds a kernel (hardlinked where it can be)
+  # and a few MiB of vmstate; a copied image is gigabytes. 128 MiB per
+  # machine plus 256 MiB of slack is a bound no image fits under.
+  RUNNING=$(live_machines_on "$ip")
+  USED=$($SSH "root@${ip}" 'du -sm /var/lib/pilots/jailer 2>/dev/null | cut -f1' 2>/dev/null)
+  BOUND=$(( 256 + 128 * ${RUNNING:-0} ))
+  [ "${USED:-0}" -le "$BOUND" ] \
+    && ok "${ip}: the jail base holds ${USED:-0} MiB for ${RUNNING:-0} running machine(s), under ${BOUND} MiB" \
+    || bad "${ip}: the jail base holds ${USED} MiB for ${RUNNING} machine(s); an image-sized copy is in there"
+done
+
 say "Result"
 echo "  ${PASS} passed, ${FAIL} failed"
 echo
 echo "This run left the rig changed on purpose:"
-echo "  - three hosts are powered off (steps 8, 12 and 13); sudo virsh start <domain>"
+echo "  - the three hosts killed on purpose (steps 8, 12 and 13) were brought"
+echo "    back and waited for, each once its own section had asserted what it"
+echo "    came for, so every section runs against a whole fleet rather than"
+echo "    against whatever the sections above it left standing."
 echo "  - the fleet is one host bigger (step 11), and cluster.env records it,"
 echo "    so the next run adds another. cluster-down.sh resets it."
 echo "  - one host was hard reset (step 19) after the NBD wedge was reproduced"

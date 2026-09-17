@@ -33,18 +33,23 @@ type fakeMachines struct {
 	creates          int
 	noSnap           bool // Checkpoint produces no memory build
 	suspends         []string
-	touches          []string
+	// createUnhealthy makes every machine created from now on fail its probe.
+	createUnhealthy bool
+	touches         []string
 	// healthyAfterRedeploy is what a redeployed machine's probe answers. False
 	// is how a test drives a failed gate onto the recovery path.
 	healthyAfterRedeploy bool
 	// onCreate runs after each successful create. A test uses it to hang up
 	// the caller at the one moment that matters -- with a machine built and
 	// its gate not yet passed.
-	onCreate func()
+	onCreate     func()
+	restartsByID map[string]int
+	// processes, when set, is what Processes answers for every machine.
+	processes []byte
 }
 
 func newFakeMachines(store state.Store) *fakeMachines {
-	return &fakeMachines{store: store, healthy: map[string]bool{}, healthyAfterRedeploy: true}
+	return &fakeMachines{store: store, healthy: map[string]bool{}, restartsByID: map[string]int{}, healthyAfterRedeploy: true}
 }
 
 func (f *fakeMachines) log(format string, a ...any) {
@@ -93,7 +98,7 @@ func (f *fakeMachines) Create(ctx context.Context, req api.CreateMachineRequest)
 	if err := f.store.PutMachine(ctx, row); err != nil {
 		return nil, err
 	}
-	f.healthy[id] = true
+	f.healthy[id] = !f.createUnhealthy
 	if f.onCreate != nil {
 		f.onCreate()
 	}
@@ -185,6 +190,27 @@ func (f *fakeMachines) Checkpoint(ctx context.Context, id, comment string) (*sta
 }
 
 func (f *fakeMachines) AppAddr(id string) (string, bool) { return "", false }
+
+// Processes answers the way the agent does for a machine whose app is up
+// (healthy) or crash-looping (not): the restart count climbs on every read.
+// The envelope is the agent's own, {"processes":[...]}, copied from a real
+// answer; a fake that returned a bare list once passed a gate the real agent
+// failed on every probe.
+func (f *fakeMachines) Processes(ctx context.Context, id string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if f.processes != nil {
+		return f.processes, nil
+	}
+	if f.healthy[id] {
+		return []byte(`{"processes":[{"name":"app","cmd":"serve","state":"running","pid":42,"restarts":0,"port":true}]}`), nil
+	}
+	f.restartsByID[id]++
+	return []byte(fmt.Sprintf(`{"processes":[{"name":"app","cmd":"serve","state":"running","pid":42,"restarts":%d,"port":true}]}`, f.restartsByID[id])), nil
+}
 
 // The real one is a pure function of the two ids, so the fake spells the same
 // layout rather than returning a sentinel: a test that asserts a replica

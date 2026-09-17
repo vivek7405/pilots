@@ -264,15 +264,22 @@ func (m *Manager) CopySnapshotTo(ctx context.Context, id, stamp, destImage strin
 // and the volume is not handed over.
 func (m *Manager) Check(ctx context.Context, id string) error {
 	out, err := m.run(ctx, "e2fsck", fsckArgs(m.ImagePath(id))...)
-	if err == nil {
-		return nil
-	}
-	if code, ok := exitCode(err); ok && code == 1 {
+	if err != nil {
+		code, ok := exitCode(err)
+		if !ok || code != 1 {
+			return fmt.Errorf("%w: %s: %s", ErrVolumeCorrupt, id, strings.TrimSpace(string(out)))
+		}
 		// Errors found and corrected. Worth saying out loud -- it means this
 		// volume's host died mid-write at some point -- but not worth refusing.
-		return nil
 	}
-	return fmt.Errorf("%w: %s: %s", ErrVolumeCorrupt, id, strings.TrimSpace(string(out)))
+	// e2fsck's pass 3 puts lost+found back whenever it is missing, and -f
+	// makes it run pass 3 on every check. So the directory createImage cleared
+	// is back on every attach, and a database that owns its data directory
+	// refuses the mount again. Clear it again here, after the check, which is
+	// the last thing that touches the image before the guest does. debugfs's
+	// rmdir refuses a directory that is not empty, so a lost+found that fsck
+	// actually put something in is kept.
+	return m.clearLostAndFound(ctx, id)
 }
 
 // exitCode pulls a process exit status out of an error, through whatever

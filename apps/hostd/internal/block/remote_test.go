@@ -484,3 +484,97 @@ func TestRemoteBuildServesItsOwnChunkifyWithoutFetching(t *testing.T) {
 		t.Errorf("a wake on the host that chunkified the build fetched %d ranges; want 0", store.ranges)
 	}
 }
+
+// The predicate materializeBuild used to be a stat of "header" and "data",
+// which an abandoned pull satisfies: OpenRemoteBuild truncates the data file
+// to its full packed size before fetching a byte, so a killed handler leaves
+// exactly the right length and none of the content. The marker is the only
+// thing that tells the two apart.
+func TestBuildCompleteRejectsAHoleyCache(t *testing.T) {
+	dir := t.TempDir()
+	store := newFakeStore()
+	ctx := context.Background()
+
+	in := writeBlocks(t, dir, 1, 2, 3, 4)
+	id := uuid.New()
+	publish(t, store, filepath.Join(dir, "build"), in, id, "")
+
+	cacheRoot := filepath.Join(dir, "cache")
+	abandoned, err := OpenRemoteBuild(ctx, store, id, cacheRoot)
+	if err != nil {
+		t.Fatalf("OpenRemoteBuild: %v", err)
+	}
+	abandoned.Close()
+
+	cached := filepath.Join(cacheRoot, id.String())
+	for _, name := range []string{"header", "data"} {
+		if _, err := os.Stat(filepath.Join(cached, name)); err != nil {
+			t.Fatalf("setup: the abandoned cache has no %s, so it cannot model the hazard", name)
+		}
+	}
+	if BuildComplete(cached) {
+		t.Fatal("a full-length data file with nothing in it was reported complete")
+	}
+
+	// And a build that really is whole -- pulled in full, or chunkified here --
+	// is reported so, or every local template looks incomplete forever.
+	whole, err := OpenRemoteBuild(ctx, store, id, cacheRoot)
+	if err != nil {
+		t.Fatalf("second OpenRemoteBuild: %v", err)
+	}
+	readWhole(t, whole)
+	whole.Close()
+	if !BuildComplete(cached) {
+		t.Error("a fully pulled cache was not reported complete")
+	}
+	if !BuildComplete(filepath.Join(dir, "build")) {
+		t.Error("a build chunkified on this host was not reported complete")
+	}
+	if BuildComplete(filepath.Join(dir, "nowhere")) {
+		t.Error("a directory that does not exist was reported complete")
+	}
+}
+
+// A build directory has one hydrator at a time, across processes: a second
+// Prefault against a directory whose lock another holder has yields at once,
+// leaving the file to the one already pulling, and pulls once the lock is
+// free.
+func TestPrefaultYieldsToTheHydratorAlreadyPulling(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	store := newFakeStore()
+	src := filepath.Join(dir, "src.bin")
+	if err := os.WriteFile(src, bytes.Repeat([]byte{7}, int(4*testBlock)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	id := uuid.New()
+	publish(t, store, filepath.Join(dir, "pub"), src, id, "")
+
+	cacheRoot := filepath.Join(dir, "cache")
+	b, err := OpenRemoteBuild(ctx, store, id, cacheRoot)
+	if err != nil {
+		t.Fatalf("OpenRemoteBuild: %v", err)
+	}
+	defer b.Close()
+
+	// Another process holds the lock: modelled by a second descriptor with
+	// the lock taken, which is what flock sees from another process too.
+	release, held := takeHydrateLock(b.dir)
+	if !held {
+		t.Fatal("the lock could not be taken on an empty directory")
+	}
+	before := store.ranges
+	if err := b.Prefault(ctx); err != nil {
+		t.Fatalf("Prefault with the lock held elsewhere: %v", err)
+	}
+	if store.ranges != before {
+		t.Fatalf("Prefault pulled %d ranges while another hydrator held the lock", store.ranges-before)
+	}
+	release()
+	if err := b.Prefault(ctx); err != nil {
+		t.Fatalf("Prefault after the lock was released: %v", err)
+	}
+	if store.ranges == before {
+		t.Fatal("Prefault pulled nothing once the lock was free")
+	}
+}

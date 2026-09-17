@@ -29,7 +29,7 @@ func TestEveryLifecycleWriteHasItsLedgerHook(t *testing.T) {
 	got := ledgerHooks(t)
 	want := map[string][]string{
 		"Open":       {"Create", "Rescue", "RescueOnVolume", "Resize", "Take", "Take"},
-		"Transition": {"Redeploy", "Redeploy", "Redeploy", "Resize", "Resize", "RestoreCheckpoint", "RestoreCheckpoint", "Suspend", "Wake", "Wake", "settleExit"},
+		"Transition": {"Redeploy", "Redeploy", "Redeploy", "Resize", "Resize", "RestoreCheckpoint", "RestoreCheckpoint", "Wake", "Wake", "settleExit", "suspendLocked"},
 		"Close":      {"Destroy", "StopLocal", "offerTo"},
 	}
 	for method, wantCallers := range want {

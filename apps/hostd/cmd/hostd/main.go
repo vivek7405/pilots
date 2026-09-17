@@ -112,16 +112,17 @@ func run() error {
 		}
 	}
 
-	// Probe once, at startup, before anything can be created. The engine's
-	// image copies use --reflink=auto, which falls back to a full copy without
-	// reporting anything, so a host on the wrong filesystem is slow in a way
-	// that looks like nothing is wrong. Say it out loud instead.
+	// Probe once, at startup, and report it on /v1/health. It is a fact about
+	// the host an operator wants, not a precondition: no per-machine path
+	// copies a whole file any more, so create, wake and checkpoint meet
+	// their targets on any filesystem. The one whole-file copy left -- the
+	// template build, once per host -- is cheaper where extents are shared,
+	// and that is all the probe now says.
 	reflink := fc.SupportsReflink(cfg.ChrootBase)
 	if !reflink {
-		slog.Warn("this host's machine store cannot share extents, so every "+
-			"image copy is a real copy: create and checkpoint will be several "+
-			"times slower than the engine is designed for. Put "+
-			"PILOT_CHROOT_BASE on btrfs, or on XFS formatted with reflink=1.",
+		slog.Info("this host's machine store does not share extents; the "+
+			"once-per-host template build copies its image in full, and nothing "+
+			"per machine does",
 			"chroot_base", cfg.ChrootBase)
 	}
 
@@ -302,6 +303,9 @@ func run() error {
 		Chunks:        chunks,
 		BlockStore:    chunkReader(chunks),
 		NBDDevices:    devices,
+		// The published root RPO: how long a machine's writes may sit only on
+		// this host's disk before a flush puts them in object storage.
+		RootFlushInterval: cfg.RootFlushInterval,
 		// An ALLOWLIST, not this daemon's environment. The handlers read their
 		// builds through a per-machine socket now, so nothing they do needs a
 		// storage credential, and a process sitting next to a guest holding
@@ -434,6 +438,18 @@ func run() error {
 	// Sweeps up Firecrackers this host has no record of -- the residue of a
 	// hostd killed mid-create, or a destroy that failed partway.
 	go mgr.RunReaper(ctx)
+	// Makes every running machine's disk durable on a timer -- the root RPO
+	// the product publishes, measured by pilots_root_flush_lag_seconds.
+	go mgr.RunRootFlush(ctx)
+	// A host upgraded in place still carries the image cache an earlier hostd
+	// materialised; nothing writes it now, so it goes once, here.
+	mgr.RemoveLegacyImageCache()
+	// Likewise the volume replication units an earlier hostd enabled: they
+	// must not come back at the next boot ahead of the restore that makes
+	// them safe. See volumes.DisableLegacyReplicationUnits.
+	if v, ok := volumeManager.(interface{ DisableLegacyReplicationUnits(context.Context) }); ok {
+		v.DisableLegacyReplicationUnits(ctx)
+	}
 	// Every host publishes its own row, fleet or not, so that GET /v1/hosts on
 	// any host lists at least the one answering.
 	startHeartbeat(ctx, cfg, store, meshKeys, meshed, mgr)
@@ -942,6 +958,18 @@ func settleReconciled(found []fc.Reconciled, root string, mgr *machines.Manager,
 	for _, st := range dead {
 		mgr.ExitedWhileDown(context.Background(), st)
 		_ = fc.ClearBreadcrumbs(filepath.Join(root, st.MachineID))
+	}
+
+	// After the machines with a process, the ones without: a suspended
+	// machine keeps its slot and its address across a restart only if
+	// something re-reserves it, and adoption cannot, having no process to
+	// find. Without this the next create lands on a sleeping machine's
+	// address behind its wake trap.
+	if n, err := mgr.ReserveHeldSlots(context.Background()); err != nil {
+		slog.Error("could not re-reserve suspended machines' slots; a create may "+
+			"be handed a sleeping machine's address", "err", err)
+	} else if n > 0 {
+		slog.Info("re-reserved the slots of suspended machines", "count", n)
 	}
 
 	// After both loops, so every machine's liveness is already decided: an

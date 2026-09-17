@@ -348,10 +348,8 @@ func (m *Manager) adoptFleetTemplate(ctx context.Context, v variant) (*Template,
 	}
 
 	start := time.Now()
-	for _, id := range []uuid.UUID{t.MemBuildID, t.RootfsBuildID} {
-		if err := m.materializeBuild(ctx, id); err != nil {
-			return nil, err
-		}
+	if err := m.materializeTemplate(ctx, t.MemBuildID, t.RootfsBuildID); err != nil {
+		return nil, err
 	}
 	if err := m.saveTemplate(v, t); err != nil {
 		return nil, err
@@ -363,6 +361,61 @@ func (m *Manager) adoptFleetTemplate(ctx context.Context, v variant) (*Template,
 	return t, nil
 }
 
+// materializeTemplate makes a template's two builds usable on this host, and
+// returns as soon as they are: the memory build in full, the disk build's
+// header only, with its bytes still arriving.
+//
+// The two differ because their readers do. The fault handler reads the memory
+// build locally, so every page has to be here before a restore. The block
+// server does not: it serves a template that is not complete on disk straight
+// from object storage and caches what the guest touches
+// (nbd.openTemplate), so a create or a rescue on a host that has never held
+// the template answers before the template has finished downloading. Reads
+// do not block on hydration. The background pull fills in the rest for the
+// checkpoint path, which diffs against the local directory and waits for its
+// marker.
+func (m *Manager) materializeTemplate(ctx context.Context, memID, rootfsID uuid.UUID) error {
+	// The nil memory build is the recorded absence of a parent, written by a
+	// machine that booted. There is nothing to fetch.
+	if memID != uuid.Nil {
+		if err := m.materializeBuild(ctx, memID); err != nil {
+			return err
+		}
+	}
+	if rootfsID == uuid.Nil || block.BuildComplete(filepath.Join(m.buildDir(), rootfsID.String())) {
+		return nil
+	}
+	if m.opts.BlockStore == nil {
+		return fmt.Errorf("machines: cannot pull build %s without object storage", rootfsID)
+	}
+	// Opening the build writes its header next to the (empty) cache file,
+	// which is all a restore needs to attach it.
+	b, err := block.OpenRemoteBuild(ctx, m.opts.BlockStore, rootfsID, m.buildDir())
+	if err != nil {
+		return fmt.Errorf("machines: open template build %s: %w", rootfsID, err)
+	}
+	b.Close()
+
+	// One pull per build. Every create on a cold host reaches here, and N of
+	// them started N goroutines writing the same bytes into the same file.
+	if _, busy := m.pulling.LoadOrStore(rootfsID, true); busy {
+		return nil
+	}
+	go func() {
+		defer m.pulling.Delete(rootfsID)
+		// Detached from the request: the template outlives whatever asked
+		// for it. A failure here costs nothing durable -- the block server
+		// keeps serving from the bucket, and the next machine's server or the
+		// next adopt tries again.
+		if err := m.materializeBuild(context.Background(), rootfsID); err != nil {
+			slog.Warn("the template's disk build did not finish hydrating; "+
+				"machines keep being served from object storage",
+				"build", rootfsID, "err", err)
+		}
+	}()
+	return nil
+}
+
 // materializeBuild pulls a build from object storage into the local build
 // directory, unless it is already there.
 //
@@ -371,10 +424,11 @@ func (m *Manager) adoptFleetTemplate(ctx context.Context, v variant) (*Template,
 // directories before this host can snapshot anything against them.
 func (m *Manager) materializeBuild(ctx context.Context, id uuid.UUID) error {
 	dir := filepath.Join(m.buildDir(), id.String())
-	if _, err := os.Stat(filepath.Join(dir, "header")); err == nil {
-		if _, err := os.Stat(filepath.Join(dir, "data")); err == nil {
-			return nil
-		}
+	// The marker, never a stat of the files: a pull interrupted by a SIGKILL
+	// or a reboot leaves a full-length data file of holes, and this used to
+	// call that "already there" and serve it. See block.BuildComplete.
+	if block.BuildComplete(dir) {
+		return nil
 	}
 	if m.opts.BlockStore == nil {
 		return fmt.Errorf("machines: cannot pull build %s without object storage", id)
@@ -440,10 +494,21 @@ func (m *Manager) loadTemplateManifest(v variant) (*Template, error) {
 
 	// A manifest naming builds that were cleaned away is worse than none: the
 	// first create would fail on a missing header rather than rebuild.
-	for _, dir := range []string{m.memParentDir(&t), m.rootfsTemplateDir(&t)} {
-		if _, err := os.Stat(filepath.Join(dir, "header")); err != nil {
-			return nil, fmt.Errorf("machines: template build %s is gone: %w", dir, err)
-		}
+	//
+	// "On disk" means two different things for the two builds. The memory
+	// build must be COMPLETE: the fault handler reads it locally, and a
+	// holey one hands the guest zeros as memory. The disk build needs only
+	// its header: the block server serves an incomplete one from object
+	// storage while it hydrates (materializeTemplate), and a checkpoint waits
+	// for the marker before diffing against it. A memory build without its
+	// marker is reported gone, which re-pulls it; there is no such repair for
+	// a served disk, so it must not be gated the same way.
+	if dir := m.memParentDir(&t); !block.BuildComplete(dir) {
+		return nil, fmt.Errorf("machines: template memory build %s is gone or incomplete", dir)
+	}
+	rootfsDir := m.rootfsTemplateDir(&t)
+	if _, err := os.Stat(filepath.Join(rootfsDir, "header")); err != nil {
+		return nil, fmt.Errorf("machines: template build %s is gone: %w", rootfsDir, err)
 	}
 
 	// A memory image photographed at another page size cannot be restored
@@ -715,7 +780,7 @@ func (m *Manager) captureTemplate(ctx context.Context, v variant, snapKey string
 	if err != nil {
 		return uuid.Nil, uuid.Nil, err
 	}
-	if err := netns.Setup(slot, mac, m.opts.FCConfig.JailUID); err != nil {
+	if err := netns.Setup(slot, m.opts.FCConfig.JailUID); err != nil {
 		return uuid.Nil, uuid.Nil, err
 	}
 
@@ -840,17 +905,12 @@ func (m *Manager) templateFor(ctx context.Context, row *state.Machine) (*Templat
 	// A template this host has never held. The builds are content-addressed
 	// and already in object storage, so this is a download rather than a
 	// rebuild -- the same path adoptFleetTemplate takes, and what makes a
-	// machine restorable on a host that has never seen its template.
-	for _, id := range []uuid.UUID{memID, rootfsID} {
-		// The nil memory build is the recorded absence of a parent, written by
-		// a machine that booted. There is nothing to fetch.
-		if id == uuid.Nil {
-			continue
-		}
-		if err := m.materializeBuild(ctx, id); err != nil {
-			return nil, fmt.Errorf("machines: fetch the template machine %s was built from: %w",
-				row.ID, err)
-		}
+	// machine restorable on a host that has never seen its template. The
+	// disk half is served while it downloads, so this returns as soon as the
+	// memory build is here.
+	if err := m.materializeTemplate(ctx, memID, rootfsID); err != nil {
+		return nil, fmt.Errorf("machines: fetch the template machine %s was built from: %w",
+			row.ID, err)
 	}
 
 	// The vmstate key is only needed to START from a template. A machine being

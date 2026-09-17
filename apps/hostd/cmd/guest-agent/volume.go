@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -97,6 +98,7 @@ func mountVolume(device, mountPath string) error {
 	if err := unix.Mount(device, mountPath, "ext4", 0, ""); err != nil {
 		return fmt.Errorf("mount %s at %s: %w", device, mountPath, err)
 	}
+	clearEmptyLostAndFound(mountPath)
 	return nil
 }
 
@@ -146,4 +148,24 @@ func unescapeMounts(s string) string {
 		s = strings.ReplaceAll(s, sub[0], sub[1])
 	}
 	return s
+}
+
+// clearEmptyLostAndFound removes an empty lost+found so the volume mounts
+// EMPTY, the way a Docker volume does.
+//
+// A database that owns its data directory checks that it is empty before
+// initialising it: postgres's initdb refused "/var/lib/postgresql/data exists
+// but is not empty -- it contains a lost+found directory", exited 1 and was
+// restarted forever. mke2fs leaves the directory, and so does the forced
+// e2fsck hostd runs before every attach, which puts it back whenever it is
+// missing -- so this runs after every mount, not only after a format here.
+// rmdir refuses a directory with entries in it, so a lost+found that fsck has
+// put recovered files into is kept: that is the user's data.
+func clearEmptyLostAndFound(mountPath string) {
+	lf := filepath.Join(mountPath, "lost+found")
+	err := os.Remove(lf)
+	if err == nil || os.IsNotExist(err) || errors.Is(err, unix.ENOTEMPTY) {
+		return
+	}
+	log.Printf("guest-agent: could not clear %s on a volume: %v", lf, err)
 }

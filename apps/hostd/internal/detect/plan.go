@@ -94,11 +94,34 @@ func Plan(ctx context.Context, dir string, opts Options) (*Result, *compose.Plan
 			return nil, planErr, nil, err
 		}
 		detected := make([]compose.Detected, 0, len(plan.Steps))
-		for _, step := range plan.Steps {
-			detected = append(detected, compose.Detected{
+		for i := range plan.Steps {
+			step := &plan.Steps[i]
+			d := compose.Detected{
 				Service: step.Name, Source: "compose",
-				Dir: contextOf(step), Port: portOf(step), Health: step.Health,
-			})
+				Dir: contextOf(*step), Port: portOf(*step), Health: step.Health,
+			}
+			// A build: context with no Dockerfile is a directory the platform
+			// has to recognise, exactly as it would have to if the compose
+			// file were not there. Without this the step reached the builder,
+			// which refused it with "no Dockerfile at its root" after the
+			// other services had already been built and rolled out -- for the
+			// shipped two-service example, whose web is a webjs app beside a
+			// stock postgres.
+			if step.Build != nil && !hasDockerfile(dir, *step) {
+				recipe, ok := GenerateIn(filepath.Join(dir, contextOf(*step)), dir)
+				if !ok {
+					unknown := unknownDetails(filepath.Join(dir, contextOf(*step)), nil)
+					unknown.Dir = contextOf(*step)
+					return nil, nil, &Unknown{Details: unknown}, nil
+				}
+				step.Dockerfile = recipe.Dockerfile
+				if step.Health == nil {
+					step.Health = recipe.Health
+				}
+				d.Source, d.Framework = "recipe", string(recipe.Framework)
+				d.Port, d.Health, d.Notes = recipe.Port, step.Health, recipe.Notes
+			}
+			detected = append(detected, d)
 		}
 		return &Result{Plan: *plan, Detected: detected}, nil, nil, nil
 	}
@@ -252,6 +275,17 @@ func findCompose(dir string) string {
 		}
 	}
 	return ""
+}
+
+// hasDockerfile reports whether a build: step's context carries the Dockerfile
+// the step names, or Dockerfile when it names none.
+func hasDockerfile(dir string, step compose.Step) bool {
+	named := step.Build.Dockerfile
+	if named == "" {
+		named = "Dockerfile"
+	}
+	_, err := os.Stat(filepath.Join(dir, contextOf(step), named))
+	return err == nil
 }
 
 func contextOf(step compose.Step) string {
