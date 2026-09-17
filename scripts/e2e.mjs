@@ -7317,7 +7317,11 @@ async function agentDeployAssertions() {
         PILOT_SECRET_DATABASE_URL: `postgres://postgres:pw-${tag}@postgres.internal:5432/postgres`,
       });
       assert(res.code === 0, `the example deploy failed: ${res.stderr.slice(-800)}`);
-      const out = JSON.parse(res.stdout);
+      // The Go CLI prints the services as the array they are; the previous
+      // CLI wrapped them. Both drive this battery (CLI_BIN), so both shapes
+      // are read, and a third would fail here rather than as "undefined".
+      const parsed = JSON.parse(res.stdout);
+      const out = { services: Array.isArray(parsed) ? parsed : parsed.services };
       assert(out.services?.length === 2, `services = ${JSON.stringify(out.services)}`);
       for (const svc of out.services) serviceIDs.push(svc.id);
 
