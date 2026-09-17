@@ -3210,10 +3210,17 @@ async function deployOnVerdictAssertions() {
 
     let release;
     await step('the release is cut anyway, and the build log carries its id', async () => {
+      // A HEALTHY release, not the first row. The rollout records the release
+      // before it gates the replica, so a poll that lands in that window sees
+      // healthy: false on a release that is about to pass -- and this step's
+      // cleanup then destroyed the replica mid-gate, deleting the service row
+      // under it. That read as "the release was flipped without its gate" and
+      // as a replica that "failed to start" for a service that was not
+      // there, and it sent two investigations at the rollout.
       await waitFor(async () => {
         const { json } = await request(`/v1/services/${svc.id}/releases`);
-        return (json ?? []).length > 0;
-      }, { timeoutMs: 600_000, everyMs: 2_000, what: 'the abandoned build to cut its release' });
+        return (json ?? []).some((r) => r.healthy);
+      }, { timeoutMs: 600_000, everyMs: 2_000, what: 'the abandoned build to cut its release and gate it' });
 
       const { json: releases } = await request(`/v1/services/${svc.id}/releases`);
       assert(releases.length === 1,
