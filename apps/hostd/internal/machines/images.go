@@ -64,11 +64,15 @@ func (m *Manager) pinBootTemplate(ctx context.Context, row *state.Machine,
 		if err != nil {
 			return backends, fmt.Errorf("machines: %q is not a build id: %w", image, err)
 		}
-		// Pull the build local first. It is content-addressed and already in
-		// object storage, so this is a download, and it lands in exactly the
-		// layout every other build directory has -- which is what lets this
-		// machine's later disk diffs resolve against it.
-		if err := m.materializeBuild(ctx, buildID); err != nil {
+		// The build's header now, its bytes in the background: the block
+		// server serves the guest from object storage while the local copy
+		// hydrates, and everything that needs the copy complete -- a flush,
+		// a checkpoint -- waits for the marker rather than for this create.
+		// It still lands in the layout every other build directory has,
+		// which is what lets this machine's later disk diffs resolve against
+		// it. A foreground pull here held every replica placed on a host
+		// that had never seen its image for the whole download.
+		if err := m.materializeTemplate(ctx, uuid.Nil, buildID); err != nil {
 			return backends, fmt.Errorf("machines: fetch build %s: %w", buildID, err)
 		}
 		backends.RootfsTemplateDir = filepath.Join(m.buildDir(), buildID.String())
