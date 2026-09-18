@@ -679,20 +679,23 @@ REMOTE
 
 # ---------------------------------------------------------------------------
 say "[6/10] hostd and the guest agent"
-( cd "${REPO}/apps/hostd" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/pilots-hostd ./cmd/hostd )
-scp $SSH_OPTS -q /tmp/pilots-hostd "root@${IP}:/opt/pilots/bin/hostd.new"
+# A directory of this run's own. A fixed path under /tmp is shared by every
+# bootstrap on this machine, and three hosts bootstrapped side by side delete
+# each other's binary between the build and the copy.
+BUILD_TMP=$(mktemp -d)
+trap 'rm -rf "$BUILD_TMP"' EXIT
+( cd "${REPO}/apps/hostd" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "${BUILD_TMP}/hostd" ./cmd/hostd )
+scp $SSH_OPTS -q "${BUILD_TMP}/hostd" "root@${IP}:/opt/pilots/bin/hostd.new"
 on_host "chmod 0755 /opt/pilots/bin/hostd.new && mv /opt/pilots/bin/hostd.new /opt/pilots/bin/hostd"
-rm -f /tmp/pilots-hostd
 
 # The agent is injected into every image a build produces. Without it a built
 # machine boots and is unreachable: exec, the clock poke and the port proxy all
 # go through it. Static, because the guest has no toolchain and no shared
 # libraries we control -- and it may end up as the guest's PID 1.
 ( cd "${REPO}/apps/hostd" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -ldflags="-s -w" -o /tmp/pilots-guest-agent ./cmd/guest-agent )
-scp $SSH_OPTS -q /tmp/pilots-guest-agent "root@${IP}:/opt/pilots/bin/guest-agent.new"
+    go build -ldflags="-s -w" -o "${BUILD_TMP}/guest-agent" ./cmd/guest-agent )
+scp $SSH_OPTS -q "${BUILD_TMP}/guest-agent" "root@${IP}:/opt/pilots/bin/guest-agent.new"
 on_host "chmod 0755 /opt/pilots/bin/guest-agent.new && mv /opt/pilots/bin/guest-agent.new /opt/pilots/bin/guest-agent"
-rm -f /tmp/pilots-guest-agent
 
 # ---------------------------------------------------------------------------
 say "[7/10] Mesh identity and host configuration"
@@ -1031,6 +1034,8 @@ else
   echo "    Builds will unpack under fakeroot instead, which works and is slower."
 fi
 rm -rf "$PROBE"
+
+PILOT_UID=$(id -u pilot 2>/dev/null || echo 0)
 
 # The builder image. A build runs inside a builder machine, never in a daemon
 # on the host, so what a host needs in order to build is this one file. A host
