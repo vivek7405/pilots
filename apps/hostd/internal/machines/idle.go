@@ -189,6 +189,54 @@ func (m *Manager) RunIdleMonitor(ctx context.Context) {
 	}
 }
 
+// idleSuspendBudget is how long ONE idle suspend may take before this loop
+// stops vouching for it.
+//
+// A suspend uploads the machine's memory image, and the bucket is a network
+// away: measured on the first production fleet, one stream to object storage
+// in the same datacentre carries about 55 MB/s, so a 512 MiB machine is ten
+// seconds of upload and an 8 GiB one is two and a half minutes. Generous on
+// purpose. It is not a target, it is the point past which "slow" stops being
+// the likelier explanation than "wedged".
+const idleSuspendBudget = 15 * time.Minute
+
+// vouchWhile runs one unit of a monitored loop's work and keeps the loop's
+// liveness tick going while that unit is inside its own budget.
+//
+// A tick after each unit was not enough. The unit itself, one suspend, outran
+// the loop's 30s budget as soon as the bucket was a real one: the watchdog
+// killed hostd in the middle of the upload, the restarted hostd found the same
+// machine still idle, and suspended it again. The host restarted every fifty
+// seconds for as long as any machine on it was idle, which on a platform built
+// on scale-to-zero is always. Local object storage hid it on every rig.
+//
+// The unit gets a deadline of its own instead. Inside it the loop is alive and
+// says so; past it the context is cancelled, which is what unblocks a stuck
+// upload, and the ticking STOPS, so a unit that ignores its context is still
+// caught by the watchdog exactly as before. What changes is only that slow is
+// no longer treated as dead.
+func vouchWhile(ctx context.Context, budget, every time.Duration, tick func(),
+	unit func(context.Context) error) error {
+
+	uctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- unit(uctx) }()
+
+	beat := time.NewTicker(every)
+	defer beat.Stop()
+	for {
+		select {
+		case err := <-done:
+			return err
+		case <-beat.C:
+			if uctx.Err() == nil {
+				tick()
+			}
+		}
+	}
+}
+
 // tick is called after each unit of work (a suspend, a snapshot) so the
 // liveness loop can tell a long pass from a wedged one.
 func (m *Manager) suspendIdleMachines(ctx context.Context, tick func()) {
@@ -220,7 +268,9 @@ func (m *Manager) suspendIdleMachines(ctx context.Context, tick func()) {
 		if !m.shouldSuspend(ctx, row) {
 			continue
 		}
-		err := m.suspendIfIdle(ctx, row.ID)
+		err := vouchWhile(ctx, idleSuspendBudget, idleCheckInterval, tick, func(ctx context.Context) error {
+			return m.suspendIfIdle(ctx, row.ID)
+		})
 		tick() // one unit of work done, whatever its outcome
 		if errors.Is(err, errBusy) {
 			continue
