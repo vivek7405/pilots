@@ -81,6 +81,18 @@ test('an address nothing matches under /dashboard gets the product 404, not the 
   assert.doesNotMatch(body, /\/public\/site\.css/);
 });
 
+test('robots.txt keeps crawlers out of the product in every group', async () => {
+  const body = await (await app.handle(new Request('http://localhost/robots.txt'))).text();
+  const groups = body.split(/\n\n/).filter((g) => g.startsWith('User-agent:'));
+  assert.ok(groups.length > 5, 'the wildcard and the named agents');
+  for (const group of groups) {
+    for (const path of ['/dashboard', '/login', '/oauth', '/api']) {
+      assert.match(group, new RegExp(`^Disallow: ${path}$`, 'm'), `${group.split('\n')[0]} is kept out of ${path}`);
+    }
+    assert.match(group, /^Allow: \/$/m);
+  }
+});
+
 test('the links between the two shells are full page loads', async () => {
   const home = await (await app.handle(new Request('http://localhost/'))).text();
   const tag = home.match(/<a\b[^>]*href="\/dashboard"[^>]*>/);
