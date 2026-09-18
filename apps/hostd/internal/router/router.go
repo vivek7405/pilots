@@ -101,6 +101,15 @@ type Options struct {
 	// Store.ListMachines.
 	Service func(label string) (state.Service, []state.Machine, bool)
 
+	// CustomDomain names the service a VERIFIED custom hostname belongs to, by
+	// its address label (the `web` of web.<domain>). Local state only (rule
+	// 2). Nil, and a miss, mean the hostname is not one of ours.
+	//
+	// Without it a custom domain is a row and a certificate and nothing else:
+	// ParseHost refuses any name off the workload suffix, so the request was
+	// never resolved to the service the row names.
+	CustomDomain func(host string) (label string, ok bool)
+
 	// URLAuthOf says who may reach an object's URL: "public" or "org".
 	// Nothing recorded is public. Reads local state only (rule 2).
 	URLAuthOf func(ctx context.Context, id string) string
@@ -164,7 +173,23 @@ func ParseHost(host, domain string) (name string, port int, ok bool) {
 func (r *Router) resolve(ctx context.Context, host string) (*Target, error) {
 	name, port, ok := ParseHost(host, r.opts.Domain)
 	if !ok {
-		return nil, fmt.Errorf("router: %q is not a machine hostname", host)
+		// Not under the workload suffix. A verified custom hostname is a
+		// service's second address, so it resolves as that service's label
+		// and takes the service branch below: replicas, wake, cross-host and
+		// URL auth all follow from the service, exactly as for its own name.
+		label, custom := r.customLabel(host)
+		if !custom {
+			return nil, fmt.Errorf("router: %q is not a machine hostname", host)
+		}
+		svc, replicas, found := r.serviceByLabel(ctx, label)
+		if !found {
+			return nil, fmt.Errorf("router: %q names service address %q, which does not exist", host, label)
+		}
+		m, picked := pickReplica(replicas, r.opts.HostID)
+		if !picked {
+			return nil, &noReplicaError{label: label, service: svc.ID}
+		}
+		return &Target{Machine: m, Port: netns.GuestAppPort}, nil
 	}
 
 	// The subscription cache first: a mutex and a map lookup, no query at
@@ -235,6 +260,23 @@ func (r *Router) resolve(ctx context.Context, host string) (*Target, error) {
 		return nil, err
 	}
 	return nil, fmt.Errorf("router: no machine named %q", name)
+}
+
+// customLabel is the service label a custom hostname stands for.
+func (r *Router) customLabel(host string) (string, bool) {
+	if r.opts.CustomDomain == nil {
+		return "", false
+	}
+	return r.opts.CustomDomain(NormalizeHost(host))
+}
+
+// NormalizeHost is a Host header as a lookup key: no port, no trailing dot,
+// lower case. The same form a domain row's hostname is stored in.
+func NormalizeHost(host string) string {
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return strings.ToLower(strings.TrimSuffix(host, "."))
 }
 
 // noReplicaError is a service whose address resolves but which has nothing to

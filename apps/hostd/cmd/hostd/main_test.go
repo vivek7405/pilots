@@ -20,6 +20,7 @@ func TestDispatchClaimsTheAPIHostnameBeforeTheWorkloadSuffix(t *testing.T) {
 	d := dispatch(
 		&config.Config{WorkloadDomain: "pilotrun.app", APIHostname: "api.pilotrun.app"},
 		handler("router"), handler("ctrl"),
+		func(host string) (string, bool) { return "web", host == "shop.example.com" },
 	)
 
 	for _, tc := range []struct{ host, want string }{
@@ -35,6 +36,12 @@ func TestDispatchClaimsTheAPIHostnameBeforeTheWorkloadSuffix(t *testing.T) {
 
 		// Off the suffix entirely: the control API, as before.
 		{"pilots.run", "ctrl"},
+
+		// Off the suffix but a VERIFIED custom hostname: a workload. Without
+		// this a custom domain is answered 401 by the API on every request.
+		{"shop.example.com", "router"},
+		{"Shop.Example.com:443", "router"},
+		{"shop.example.com.", "router"},
 	} {
 		served = ""
 		req := httptest.NewRequest(http.MethodGet, "/v1/health", nil)

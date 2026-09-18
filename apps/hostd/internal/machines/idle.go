@@ -189,6 +189,17 @@ func (m *Manager) RunIdleMonitor(ctx context.Context) {
 	}
 }
 
+// idleSuspendBudget is how long ONE idle suspend may take before this loop
+// stops vouching for it.
+//
+// A suspend uploads the machine's memory image, and the bucket is a network
+// away: measured on the first production fleet, one stream to object storage
+// in the same datacentre carries about 55 MB/s, so a 512 MiB machine is ten
+// seconds of upload and an 8 GiB one is two and a half minutes. Generous on
+// purpose. It is not a target, it is the point past which "slow" stops being
+// the likelier explanation than "wedged".
+const idleSuspendBudget = 15 * time.Minute
+
 // tick is called after each unit of work (a suspend, a snapshot) so the
 // liveness loop can tell a long pass from a wedged one.
 func (m *Manager) suspendIdleMachines(ctx context.Context, tick func()) {
@@ -220,7 +231,9 @@ func (m *Manager) suspendIdleMachines(ctx context.Context, tick func()) {
 		if !m.shouldSuspend(ctx, row) {
 			continue
 		}
-		err := m.suspendIfIdle(ctx, row.ID)
+		err := metrics.VouchWhile(ctx, idleSuspendBudget, idleCheckInterval, tick, func(ctx context.Context) error {
+			return m.suspendIfIdle(ctx, row.ID)
+		})
 		tick() // one unit of work done, whatever its outcome
 		if errors.Is(err, errBusy) {
 			continue

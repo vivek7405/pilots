@@ -1,8 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -35,8 +39,21 @@ type DomainResponse struct {
 // and the rate limit is per registered domain, so one bad entry can lock out
 // every real customer.
 func (d Deps) handleAddDomain(w http.ResponseWriter, r *http.Request) {
+	// Read into memory and put back, because this handler has to READ the body
+	// to learn which service it is for, and may then FORWARD the request to
+	// that service's arbiter. Every other arbiter forward takes the service id
+	// from the path and never touches the body. This one decoded it and then
+	// forwarded the drained request: the proxy sent a Content-Length with no
+	// bytes behind it, and the add failed with a 503 on every host but the
+	// arbiter, which on a three-host fleet is two requests in three.
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(), NextBadBody, nil)
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(raw))
 	var req AddDomainRequest
-	if err := decodeBody(r, &req); err != nil {
+	if err := json.Unmarshal(raw, &req); err != nil {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(), NextBadBody, nil)
 		return
 	}
@@ -74,6 +91,25 @@ func (d Deps) handleAddDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	target := svc.Domain + "." + d.Domain
+
+	// A hostname another service holds is not this caller's to take. PutDomain
+	// is an upsert keyed on the hostname, and the A-record half of the check
+	// below passes for ANY name that already points at this fleet, which every
+	// live custom domain does. So without this, one POST naming the caller's
+	// own service moved somebody else's verified hostname onto it, certificate
+	// and all, and since a verified hostname routes, their traffic with it.
+	// The holder removes it first; that delete is ownership-checked.
+	existing, err := d.Store.GetDomain(r.Context(), host)
+	if err != nil && !errors.Is(err, state.ErrNotFound) {
+		writeMapped(w, err)
+		return
+	}
+	if existing != nil && existing.ServiceID != svc.ID {
+		WriteError(w, http.StatusConflict, CodeConflict,
+			fmt.Sprintf("%s is already attached to another service", host),
+			"remove it from the service that holds it first, then add it here", nil)
+		return
+	}
 
 	row := &state.Domain{
 		Hostname: host, ServiceID: svc.ID, CreatedAt: time.Now().Unix(),
