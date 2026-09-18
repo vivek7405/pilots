@@ -64,6 +64,23 @@ test('an address nothing matches gets the marketing 404 inside its shell', async
   assert.match(body, /\/public\/site\.css/, 'styled, not a bare fragment: there is no root layout to wrap it');
 });
 
+test('the marketing 404 is a routed page, so its components are shipped', async () => {
+  // The root not-found renders with no route and therefore no module scripts:
+  // the theme toggle is drawn and does nothing. The catch-all makes it routed.
+  const body = await (await app.handle(new Request('http://localhost/no/such/page'))).text();
+  assert.match(body, /this address does not resolve/);
+  assert.match(body, /site\/components\/theme-toggle\.ts/, 'the layout\'s island is loaded on the 404 too');
+});
+
+test('an address nothing matches under /dashboard gets the product 404, not the marketing one', async () => {
+  const res = await app.handle(new Request('http://localhost/dashboard/no-such-page'));
+  assert.equal(res.status, 404);
+  const body = await res.text();
+  assert.match(body, /Back to your apps/);
+  assert.match(body, /\/public\/tailwind\.css/);
+  assert.doesNotMatch(body, /\/public\/site\.css/);
+});
+
 test('the links between the two shells are full page loads', async () => {
   const home = await (await app.handle(new Request('http://localhost/'))).text();
   const tag = home.match(/<a\b[^>]*href="\/dashboard"[^>]*>/);

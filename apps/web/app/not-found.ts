@@ -9,6 +9,13 @@
  *
  * It is the marketing 404 on purpose: `/` is the marketing site, and someone
  * guessing a URL under it is looking at pilots.run, not at their dashboard.
+ *
+ * This is the FALLBACK, not the usual path. A mistyped address is caught by
+ * a catch-all page in each shell (`(site)/[...rest]` and
+ * `(product)/dashboard/[...rest]`), which answers a routed 404 inside the
+ * real layout chain, component modules included. The framework renders this
+ * file with no route, so it ships no module scripts; it is what is left for a
+ * `notFound()` raised where there is no route to render it in.
  */
 import type { LayoutProps } from '@webjsdev/core';
 import SiteLayout from './(site)/layout.ts';
