@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -90,6 +91,25 @@ func (d Deps) handleAddDomain(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	target := svc.Domain + "." + d.Domain
+
+	// A hostname another service holds is not this caller's to take. PutDomain
+	// is an upsert keyed on the hostname, and the A-record half of the check
+	// below passes for ANY name that already points at this fleet, which every
+	// live custom domain does. So without this, one POST naming the caller's
+	// own service moved somebody else's verified hostname onto it, certificate
+	// and all, and since a verified hostname routes, their traffic with it.
+	// The holder removes it first; that delete is ownership-checked.
+	existing, err := d.Store.GetDomain(r.Context(), host)
+	if err != nil && !errors.Is(err, state.ErrNotFound) {
+		writeMapped(w, err)
+		return
+	}
+	if existing != nil && existing.ServiceID != svc.ID {
+		WriteError(w, http.StatusConflict, CodeConflict,
+			fmt.Sprintf("%s is already attached to another service", host),
+			"remove it from the service that holds it first, then add it here", nil)
+		return
+	}
 
 	row := &state.Domain{
 		Hostname: host, ServiceID: svc.ID, CreatedAt: time.Now().Unix(),
