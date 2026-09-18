@@ -199,8 +199,15 @@ on_host() { ssh $SSH_OPTS "root@${IP}" "$@"; }
 # streamed form ended early with "unexpected end of file" on a real host while
 # a small round trip through the same pipe worked, and the file form is the
 # one that shipped the image and matched the pin.
+#
+# The source is resolved first: in a worktree the images are symlinks into the
+# main checkout, and zstd declines a symlink without a word under -q, so the
+# far end saw an empty stream and reported "unexpected end of file". Not -q on
+# the compressor, so the next refusal is heard.
 ship_image() { # ship_image <local path> <remote path>
-  zstd -q -T0 -c "$1" | on_host "cat > '$2.zst'"
+  local src
+  src=$(readlink -f "$1")
+  zstd -T0 -c "$src" | on_host "cat > '$2.zst'"
   on_host "zstd -q -d --sparse -f -o '$2.new' '$2.zst' && rm -f '$2.zst' && mv -f '$2.new' '$2'"
 }
 
@@ -859,7 +866,7 @@ path = "/run/pilots/corrosion/admin.sock"
 CONF
 
 # Corrosion 1.0.0 SILENTLY IGNORES a key it does not recognise: Config::load
-# deserialises through the `config` crate's try_deserialize and no struct
+# deserialises through the config crate's try_deserialize and no struct
 # carries deny_unknown_fields. So a typo -- processing_queue_length for
 # processing_queue_len -- starts an agent that reports healthy and runs on the
 # default forever. Nothing else in the system would ever say so, which is why
