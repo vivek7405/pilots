@@ -1,8 +1,11 @@
 package api
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -35,8 +38,21 @@ type DomainResponse struct {
 // and the rate limit is per registered domain, so one bad entry can lock out
 // every real customer.
 func (d Deps) handleAddDomain(w http.ResponseWriter, r *http.Request) {
+	// Read into memory and put back, because this handler has to READ the body
+	// to learn which service it is for, and may then FORWARD the request to
+	// that service's arbiter. Every other arbiter forward takes the service id
+	// from the path and never touches the body. This one decoded it and then
+	// forwarded the drained request: the proxy sent a Content-Length with no
+	// bytes behind it, and the add failed with a 503 on every host but the
+	// arbiter, which on a three-host fleet is two requests in three.
+	raw, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	if err != nil {
+		WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(), NextBadBody, nil)
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(raw))
 	var req AddDomainRequest
-	if err := decodeBody(r, &req); err != nil {
+	if err := json.Unmarshal(raw, &req); err != nil {
 		WriteError(w, http.StatusBadRequest, CodeBadRequest, err.Error(), NextBadBody, nil)
 		return
 	}
