@@ -1027,6 +1027,15 @@ func (m *Manager) suspendLocked(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	// Past this line the Firecracker is dead and its image is in the bucket,
+	// so nothing below may be cancelled. The caller's context can now expire:
+	// the idle monitor and the autoscaler run a suspend under a deadline, and
+	// an upload that finishes as the deadline passes would otherwise fail the
+	// PutMachine below on a cancelled context. The row would go on saying
+	// running for a machine with no process, the next pass would mark it
+	// stopped, and it would cold-boot instead of waking from an image that was
+	// uploaded successfully. Values are kept, the cancellation is not.
+	ctx = context.WithoutCancel(ctx)
 	m.drop(id)
 
 	// A service replica KEEPS its slot index reserved while suspended.
