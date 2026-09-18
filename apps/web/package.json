@@ -66,7 +66,7 @@
           "output": "public/tailwind.css",
           "command": "tailwindcss -i ./public/input.css -o ./public/tailwind.css --minify",
           "inputs": [
-            "app",
+            "app/(product)",
             "components",
             "modules",
             "lib",

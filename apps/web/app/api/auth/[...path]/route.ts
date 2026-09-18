@@ -39,7 +39,7 @@ export async function GET(req: Request): Promise<Response> {
     // With nowhere carried, a sign-in lands on the product's home. The
     // framework's own landing is `/`, which is the marketing site now: someone
     // who just signed in would arrive on the page that asks them to sign in.
-    const next = localPath(carried, '') || DASHBOARD;
+    const next = localPath(carried, DASHBOARD);
     return withHeaders(res, (h) => {
       // Only the framework's own landing is overridden. A failed sign-in goes
       // to `pages.error` and keeps going there.

@@ -14,8 +14,9 @@
  * webjs page, and replaces the page with `This page could not be loaded.`
  * (`data-webjs-nav-error`). The attribute is the router's own opt-out, read via
  * `hasAttribute` in `@webjsdev/core`'s browser bundle, and it costs nothing
- * with scripting off because there is then no router to opt out of. It is the
- * only use of `data-no-router` in `apps/`; do not tidy it away.
+ * with scripting off because there is then no router to opt out of. The only
+ * other use in the app is the marketing header's link to `/dashboard`, which
+ * crosses shells and so stylesheets; do not tidy either away.
  */
 import { html } from '@webjsdev/core';
 import type { TemplateResult } from '@webjsdev/core';
