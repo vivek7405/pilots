@@ -1,8 +1,16 @@
 package main
 
 import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"math/big"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/caddyserver/certmagic"
 	"github.com/libdns/cloudflare"
@@ -173,4 +181,70 @@ func TestPublicURLOnASingleBoxCarriesThePlainPort(t *testing.T) {
 	if got := publicURLFor(cfg).Of("webapp.pilots.localhost"); got != want {
 		t.Errorf("renders %q, want %q", got, want)
 	}
+}
+
+// The wildcard's config must NOT be an on-demand config.
+//
+// certmagic defers every name of an on-demand config to the first handshake
+// and orders nothing at startup, and the handshake that would order it carries
+// "api.pilotrun.app" as its name, which the decider refuses. One shared config
+// therefore never obtains the wildcard, on any host, forever, while logging
+// that it manages it. This asserts the shape that avoids that, and that the
+// listener's config can still see what the eager one obtains.
+func TestTheWildcardIsManagedByAConfigThatIsNotOnDemand(t *testing.T) {
+	names := []string{"*.pilotrun.app", "pilotrun.app", "pilots.run"}
+	storage := &certmagic.FileStorage{Path: t.TempDir()}
+	eager, onDemand := newCertConfigs(storage, names,
+		func(context.Context, string) error { return nil })
+
+	if eager.OnDemand != nil {
+		t.Fatal("the eager config is on-demand: certmagic will defer the wildcard " +
+			"to a handshake that can never name it, and order nothing at startup")
+	}
+	if onDemand.OnDemand == nil || onDemand.OnDemand.DecisionFunc == nil {
+		t.Fatal("the listener's config has no on-demand decision: custom domains " +
+			"cannot be obtained, or are obtained for any name at all")
+	}
+	if eager.Storage != storage || onDemand.Storage != storage {
+		t.Fatal("a config is not on the shared storage: its certificates and its " +
+			"ACME account would live where no other host reads them")
+	}
+
+	// One cache: put a certificate in through the eager config and the
+	// listener's config must serve it for a name under the wildcard.
+	cert := selfSigned(t, "*.pilotrun.app")
+	if _, err := eager.CacheUnmanagedTLSCertificate(context.Background(), cert, nil); err != nil {
+		t.Fatalf("caching through the eager config: %v", err)
+	}
+	got, err := onDemand.GetCertificate(&tls.ClientHelloInfo{ServerName: "api.pilotrun.app"})
+	if err != nil {
+		t.Fatalf("the listener's config cannot serve api.pilotrun.app from the "+
+			"wildcard the eager config holds: %v", err)
+	}
+	if got.Leaf == nil || got.Leaf.DNSNames[0] != "*.pilotrun.app" {
+		t.Fatalf("served %v, want the wildcard", got.Leaf)
+	}
+}
+
+func selfSigned(t *testing.T, name string) tls.Certificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		DNSNames:     []string{name},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key, Leaf: leaf}
 }
