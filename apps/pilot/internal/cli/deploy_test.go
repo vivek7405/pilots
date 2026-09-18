@@ -153,3 +153,29 @@ func TestAContextThatIsTheComposeProjectIsMatchedByName(t *testing.T) {
 		t.Errorf("web got %+v, want its own step's health", web.Health)
 	}
 }
+
+// --app must reach the host BEFORE it plans. A compose file with no name is
+// refused at planning, so a flag applied to the returned plan never runs.
+func TestAppFlagNamesTheComposeProjectBeforeThePlan(t *testing.T) {
+	got := withProjectName(nil, "shop")
+	if got["COMPOSE_PROJECT_NAME"] != "shop" {
+		t.Fatalf("--app shop sent %v to the planner; a nameless compose file is "+
+			"refused before --app is ever applied", got)
+	}
+	// compose's own override wins over the flag that borrows it.
+	explicit := map[string]string{"COMPOSE_PROJECT_NAME": "store", "TAG": "v1"}
+	got = withProjectName(explicit, "shop")
+	if got["COMPOSE_PROJECT_NAME"] != "store" || got["TAG"] != "v1" {
+		t.Fatalf("an explicit project name was overwritten: %v", got)
+	}
+	// No flag, nothing added: the host derives the name as before.
+	if got := withProjectName(map[string]string{"TAG": "v1"}, ""); len(got) != 1 {
+		t.Fatalf("with no --app the environment changed: %v", got)
+	}
+	// The caller's map is never written to.
+	in := map[string]string{"TAG": "v1"}
+	withProjectName(in, "shop")
+	if _, leaked := in["COMPOSE_PROJECT_NAME"]; leaked {
+		t.Fatal("withProjectName wrote into the map it was given")
+	}
+}

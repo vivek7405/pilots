@@ -81,6 +81,7 @@ func newDeployCmd(env *Env, getenv config.Env) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			interp = withProjectName(interp, app)
 
 			// A compose file plans on the host from its text; a plain directory
 			// is tarred and planned from what it contains. Either way the
@@ -745,4 +746,25 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n-1] + "…"
+}
+
+// withProjectName seeds the compose project name from --app.
+//
+// The host refuses a compose file that names no app ("the compose file has no
+// name"), and it decides that while PLANNING. --app used to be applied to the
+// plan that came back, which is after the refusal: `pilot deploy --app shop`
+// on a nameless compose file failed with an error telling the user to do the
+// thing the flag exists to do. An explicit COMPOSE_PROJECT_NAME in --env still
+// wins, because it is compose's own override and --app's only by adoption.
+func withProjectName(interp map[string]string, app string) map[string]string {
+	const key = "COMPOSE_PROJECT_NAME"
+	if app == "" || interp[key] != "" {
+		return interp
+	}
+	out := make(map[string]string, len(interp)+1)
+	for k, v := range interp {
+		out[k] = v
+	}
+	out[key] = app
+	return out
 }
