@@ -193,7 +193,7 @@ suite('accessibility of the live components', () => {
     const staging = document.createElement('div');
     render(servicePanel(detail, 'deployments', { app: 'gallery' }), staging);
     const el = document.createElement('slide-over');
-    el.setAttribute('back', '/apps/gallery');
+    el.setAttribute('back', '/dashboard/apps/gallery');
     el.append(...staging.childNodes);
     document.body.appendChild(el);
     await el.updateComplete;

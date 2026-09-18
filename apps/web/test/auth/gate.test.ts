@@ -5,7 +5,7 @@
  * page, so this asserts it holds for every page under it, including ones added
  * later: the loop below is the whole route list.
  *
- * Counterfactual: delete `app/dashboard/(app)/middleware.ts` and every page below
+ * Counterfactual: delete `app/(product)/dashboard/(app)/middleware.ts` and every page below
  * answers 200 to an anonymous request instead of 302.
  */
 

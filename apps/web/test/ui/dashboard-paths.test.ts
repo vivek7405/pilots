@@ -44,7 +44,8 @@ function bareProductPaths(text: string): number[] {
 
 test('no product path is written without the /dashboard prefix', () => {
   const offenders: string[] = [];
-  for (const dir of ['app', 'components', 'modules', 'lib']) {
+  // The product half only: the marketing site has a /sandboxes page of its own.
+  for (const dir of ['app/(product)', 'app/api', 'components', 'modules', 'lib']) {
     for (const file of sources(join(ROOT, dir))) {
       for (const line of bareProductPaths(readFileSync(file, 'utf8'))) {
         offenders.push(`${relative(ROOT, file)}:${line}`);
@@ -65,13 +66,14 @@ test('the check fires on a bare product path and not on a prefixed or API one', 
 });
 
 test('the product pages live where the prefix says', () => {
-  const dir = join(ROOT, 'app', DASHBOARD.slice(1));
+  const dir = join(ROOT, 'app', '(product)', DASHBOARD.slice(1));
   assert.ok(statSync(join(dir, 'page.ts')).isFile(), 'the product home');
   for (const section of SECTIONS) {
     assert.ok(statSync(join(dir, '(app)', section)).isDirectory(), `${section} is under the prefix, behind the gate`);
   }
-  for (const stays of ['api', 'login', 'oauth']) {
-    assert.ok(statSync(join(ROOT, 'app', stays)).isDirectory(), `/${stays} stays at the root: something outside the app holds its address`);
+  // Route groups are not in the URL: (product)/login is still /login.
+  for (const stays of ['api', join('(product)', 'login'), join('(product)', 'oauth')]) {
+    assert.ok(statSync(join(ROOT, 'app', stays)).isDirectory(), `${stays} keeps its root address: something outside the app holds it`);
   }
 });
 

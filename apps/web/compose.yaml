@@ -1,4 +1,5 @@
-# The dashboard, deployed by the platform it administers.
+# pilots.run: the marketing site at / and the product at /dashboard, one app,
+# deployed by the platform it administers.
 #
 #   docker compose up --build      →  http://localhost:8080
 #   pilot deploy                   →  https://pilots.run
@@ -12,14 +13,17 @@
 # a SEPARATE apex from `pilotrun.app`. A workload sharing the dashboard's apex
 # could set cookies scoped to it.
 x-pilots:
-  app: dashboard
+  app: pilots
   custom_domain: pilots.run
   # Keep one instance warm. This is the sign-in page and the key-minting path;
   # a cold start on the way to `pilot login` is the wrong first impression.
   min_machines_running: 1
 
 services:
-  app:
+  # The service name is the permanent address: web.pilotrun.app, with pilots.run
+  # on top as the custom domain. It is `web` and not `app` because it cannot be
+  # renamed after the first production deploy without minting a new URL.
+  web:
     build:
       context: ../..
       dockerfile: apps/web/Dockerfile

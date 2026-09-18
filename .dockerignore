@@ -28,15 +28,6 @@ docs
 *.md
 !apps/web/README.md
 
-# The other web app. Its package.json stays in, because the dashboard image
-# installs from the ROOT lockfile with npm workspaces, and npm ci refuses to
-# resolve a lockfile whose workspace manifests are not all present. The
-# negation only works against `apps/website/*`: an excluded parent directory
-# blocks every child negation, the same rule the `.webjs/*` entry below
-# documents.
-apps/website/*
-!apps/website/package.json
-
 # webjs per-machine caches, EXCEPT the committed vendor manifest. Do not
 # collapse to `**/.webjs`: excluding the parent blocks the child negation and
 # the vendor files would silently never ship.

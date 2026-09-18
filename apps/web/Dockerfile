@@ -30,7 +30,6 @@ WORKDIR /app
 # workspace the root lockfile names has to be present for `npm ci` to resolve.
 COPY package.json package-lock.json ./
 COPY apps/web/package.json ./apps/web/
-COPY apps/website/package.json ./apps/website/
 COPY sdks/js/package.json ./sdks/js/
 RUN npm install --no-audit --no-fund --workspace=apps/web --workspace=sdks/js --include-workspace-root
 

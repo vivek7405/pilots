@@ -71,3 +71,4 @@ coverage/
 db/dev.db
 db/dev.db-journal
 db/dev.db-*
+public/site.css

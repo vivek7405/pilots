@@ -175,7 +175,7 @@ suite('slide-over', () => {
   async function mountPanel() {
     await import('../../../components/slide-over.ts');
     const el = document.createElement('slide-over');
-    el.setAttribute('back', '/apps/gallery');
+    el.setAttribute('back', '/dashboard/apps/gallery');
     el.innerHTML =
       '<div class="p-6"><h2 id="service-panel-title" tabindex="-1" class="m-0 text-title font-semibold">web</h2>' +
       '<p><input aria-label="A field"></p></div>';
@@ -200,7 +200,7 @@ suite('slide-over', () => {
       e.preventDefault();
     });
     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
-    assert.equal(intent, '/apps/gallery');
+    assert.equal(intent, '/dashboard/apps/gallery');
   });
 
   test('Escape inside a text field is left to the field', async () => {

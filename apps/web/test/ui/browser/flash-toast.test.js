@@ -35,7 +35,7 @@ async function mountViewport() {
 }
 
 async function mountAt(search) {
-  history.replaceState({}, '', '/machines' + search);
+  history.replaceState({}, '', '/dashboard/machines' + search);
   await import('../../../components/flash-toast.ts');
   const el = document.createElement('flash-toast');
   document.body.appendChild(el);

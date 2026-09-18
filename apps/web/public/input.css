@@ -4,11 +4,11 @@
    unversioned <link>. See components/terminal/vendor/README for the pinned
    version and how to update it. */
 @import "./xterm.css";
-@import "tailwindcss";
+@import "tailwindcss" source(none);
 
 /* Scan app sources so their utility classes make it into the compiled bundle.
    Tailwind v4 auto-scans the project too; these @source lines are explicit. */
-@source "../app/**/*.{ts,js}";
+@source "../app/(product)/**/*.{ts,js}";
 @source "../components/**/*.{ts,js}";
 @source "../modules/**/*.{ts,js}";
 @source "../lib/**/*.{ts,js}";

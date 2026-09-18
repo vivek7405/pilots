@@ -194,7 +194,7 @@ test('every token public/input.css maps into a utility reaches the served page',
 });
 
 test('the theme is a real choice, not a light-only page with dark tokens nobody reaches', () => {
-  const layout = readFileSync(join(APP_DIR, 'app', 'layout.ts'), 'utf8');
+  const layout = readFileSync(join(APP_DIR, 'app', '(product)', 'layout.ts'), 'utf8');
   assert.match(layout, /light-dark\(/, 'the palette carries both halves of every colour');
   assert.match(layout, /\[data-theme='dark'\]\s*\{\s*color-scheme:\s*dark/, 'and an explicit dark forces the scheme');
   assert.match(layout, /classList\.toggle\('dark'/, "and syncs the class the kit's dark: variants key on");
@@ -239,7 +239,7 @@ test('no source file paints a raw Tailwind colour', () => {
   // which is the one styling rule this app states without exception. The kit's
   // sonner shipped three, and they are tokens here because we own the copy.
   const offenders: string[] = [];
-  const dirs = ['app', 'components', 'modules', 'lib'];
+  const dirs = ['app/(product)', 'app/api', 'components', 'modules', 'lib'];
   const walk = (dir: string): string[] => {
     const out: string[] = [];
     for (const entry of readdirSync(join(APP_DIR, dir), { withFileTypes: true })) {
@@ -271,24 +271,24 @@ test('no source file paints a raw Tailwind colour', () => {
  * test below pass by reading the wrong file. A stale entry throws on the read.
  */
 const PAGE_FILES: Record<string, string> = {
-  '/dashboard': 'app/dashboard/page.ts',
-  '/dashboard/apps/gallery': 'app/dashboard/(app)/apps/[app]/page.ts',
-  '/dashboard/apps/gallery?service=svc-1&tab=settings': 'app/dashboard/(app)/apps/[app]/page.ts',
-  '/dashboard/apps/gallery?service=svc-1&tab=variables': 'app/dashboard/(app)/apps/[app]/page.ts',
-  '/dashboard/apps/gallery?service=svc-1&tab=metrics': 'app/dashboard/(app)/apps/[app]/page.ts',
-  '/dashboard/apps/gallery?service=svc-1&tab=terminal': 'app/dashboard/(app)/apps/[app]/page.ts',
-  '/dashboard/services/svc-1?tab=terminal': 'app/dashboard/(app)/services/[id]/page.ts',
-  '/dashboard/sandboxes': 'app/dashboard/(app)/sandboxes/page.ts',
-  '/dashboard/machines/m-1': 'app/dashboard/(app)/machines/[id]/page.ts',
-  '/dashboard/machines/m-1/terminal': 'app/dashboard/(app)/machines/[id]/terminal/page.ts',
-  '/dashboard/services/new': 'app/dashboard/(app)/services/new/page.ts',
-  '/dashboard/services/svc-1': 'app/dashboard/(app)/services/[id]/page.ts',
-  '/dashboard/storage': 'app/dashboard/(app)/storage/page.ts',
-  '/dashboard/domains': 'app/dashboard/(app)/domains/page.ts',
-  '/dashboard/usage': 'app/dashboard/(app)/usage/page.ts',
-  '/dashboard/logs': 'app/dashboard/(app)/logs/page.ts',
-  '/dashboard/keys': 'app/dashboard/(app)/keys/page.ts',
-  '/dashboard/org': 'app/dashboard/(app)/org/page.ts',
+  '/dashboard': 'app/(product)/dashboard/page.ts',
+  '/dashboard/apps/gallery': 'app/(product)/dashboard/(app)/apps/[app]/page.ts',
+  '/dashboard/apps/gallery?service=svc-1&tab=settings': 'app/(product)/dashboard/(app)/apps/[app]/page.ts',
+  '/dashboard/apps/gallery?service=svc-1&tab=variables': 'app/(product)/dashboard/(app)/apps/[app]/page.ts',
+  '/dashboard/apps/gallery?service=svc-1&tab=metrics': 'app/(product)/dashboard/(app)/apps/[app]/page.ts',
+  '/dashboard/apps/gallery?service=svc-1&tab=terminal': 'app/(product)/dashboard/(app)/apps/[app]/page.ts',
+  '/dashboard/services/svc-1?tab=terminal': 'app/(product)/dashboard/(app)/services/[id]/page.ts',
+  '/dashboard/sandboxes': 'app/(product)/dashboard/(app)/sandboxes/page.ts',
+  '/dashboard/machines/m-1': 'app/(product)/dashboard/(app)/machines/[id]/page.ts',
+  '/dashboard/machines/m-1/terminal': 'app/(product)/dashboard/(app)/machines/[id]/terminal/page.ts',
+  '/dashboard/services/new': 'app/(product)/dashboard/(app)/services/new/page.ts',
+  '/dashboard/services/svc-1': 'app/(product)/dashboard/(app)/services/[id]/page.ts',
+  '/dashboard/storage': 'app/(product)/dashboard/(app)/storage/page.ts',
+  '/dashboard/domains': 'app/(product)/dashboard/(app)/domains/page.ts',
+  '/dashboard/usage': 'app/(product)/dashboard/(app)/usage/page.ts',
+  '/dashboard/logs': 'app/(product)/dashboard/(app)/logs/page.ts',
+  '/dashboard/keys': 'app/(product)/dashboard/(app)/keys/page.ts',
+  '/dashboard/org': 'app/(product)/dashboard/(app)/org/page.ts',
 };
 
 /** Every `#`-aliased specifier a file imports, as a repo-relative path. */
@@ -350,11 +350,11 @@ function elementsIn(body: string): string[] {
  * it is where the services page's missing copy button lived.
  *
  * Counterfactual: drop `import '#components/copy-button.ts'` from
- * `app/dashboard/(app)/services/page.ts` and this fails on `/dashboard/services` for the empty org.
+ * `app/(product)/dashboard/(app)/services/page.ts` and this fails on `/dashboard/services` for the empty org.
  */
 test('every custom element a page renders is one that page imports', async () => {
   // The layout is on every page, so what it registers counts as available.
-  const fromLayout = registeredBy('app/layout.ts');
+  const fromLayout = registeredBy('app/(product)/layout.ts');
   const empty = await signInAs(app.handle, { id: 7011, login: 'newcomer' });
   let checked = 0;
 
@@ -412,7 +412,7 @@ test('no page invents a fifth type step', () => {
       }
     }
   };
-  for (const root of ['app', 'modules', 'components', 'lib']) walk(join(APP_DIR, root));
+  for (const root of ['app/(product)', 'app/api', 'modules', 'components', 'lib']) walk(join(APP_DIR, root));
   assert.deepEqual(
     offenders,
     [],

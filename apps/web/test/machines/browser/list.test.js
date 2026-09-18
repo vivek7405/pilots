@@ -246,7 +246,7 @@ suite('machine-list, chips filter and row navigation', () => {
   test('a row carries its destination, and the action buttons do not swallow it', async () => {
     const el = await mountTiers();
     const row = el.querySelector('tbody tr');
-    assert.equal(row.dataset.href, '/machines/m-run', 'the whole row knows where it goes');
+    assert.equal(row.dataset.href, '/dashboard/machines/m-run', 'the whole row knows where it goes');
 
     // The click handler reads `data-href` off the closest ancestor that has
     // one, and bails when the click landed on a control. Both halves are

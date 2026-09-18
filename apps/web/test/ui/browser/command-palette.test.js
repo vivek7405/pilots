@@ -100,9 +100,9 @@ suite('command-palette', () => {
     // shortcut has three tests of its own; this one is about the keyboard.
     el.open = true;
     el.hits = [
-      { kind: 'service', id: 'svc-web', label: 'web', href: '/services/svc-web' },
-      { kind: 'machine', id: 'm-1', label: 'box', href: '/machines/m-1' },
-      { kind: 'page', id: 'usage', label: 'Usage', href: '/usage' },
+      { kind: 'service', id: 'svc-web', label: 'web', href: '/dashboard/services/svc-web' },
+      { kind: 'machine', id: 'm-1', label: 'box', href: '/dashboard/machines/m-1' },
+      { kind: 'page', id: 'usage', label: 'Usage', href: '/dashboard/usage' },
     ];
     await until(() => el.querySelectorAll('[role="option"]').length === 3);
     await el.updateComplete;

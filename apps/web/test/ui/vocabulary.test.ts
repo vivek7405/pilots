@@ -36,7 +36,7 @@ const BANNED =
   /\b(machines?|volumes?|fleet|orgs?|releases?|checkpoints?|replicas?|hosts?|exec|rootfs|samples?|knobs?)\b/i;
 
 /** Where product copy lives. `lib/vocabulary.ts` is the one file that may say them. */
-const ROOTS = ['app', 'modules', 'components'];
+const ROOTS = ['app/(product)', 'app/api', 'modules', 'components'];
 const EXEMPT = ['components/ui/', 'components/terminal/vendor/'];
 
 function sources(): string[] {

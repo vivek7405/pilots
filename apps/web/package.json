@@ -10,7 +10,9 @@
     "#*": "./*"
   },
   "scripts": {
-    "css:build": "tailwindcss -i ./public/input.css -o ./public/tailwind.css --minify",
+    "css:build": "npm run css:build:product && npm run css:build:site",
+    "css:build:product": "tailwindcss -i ./public/input.css -o ./public/tailwind.css --minify",
+    "css:build:site": "tailwindcss -i ./public/site.input.css -o ./public/site.css --minify",
     "gallery:clear": "node scripts/clear-gallery.mjs",
     "dev": "webjs dev",
     "start": "webjs start",
@@ -56,7 +58,8 @@
     "dev": {
       "before": [
         "webjs db migrate",
-        "tailwindcss -i ./public/input.css -o ./public/tailwind.css --minify"
+        "tailwindcss -i ./public/input.css -o ./public/tailwind.css --minify",
+        "tailwindcss -i ./public/site.input.css -o ./public/site.css --minify"
       ],
       "regenerate": [
         {
@@ -69,13 +72,24 @@
             "lib",
             "public/input.css"
           ]
+        },
+        {
+          "output": "public/site.css",
+          "command": "tailwindcss -i ./public/site.input.css -o ./public/site.css --minify",
+          "inputs": [
+            "app/(site)",
+            "app/not-found.ts",
+            "site",
+            "public/site.input.css"
+          ]
         }
       ]
     },
     "start": {
       "before": [
         "webjs db migrate",
-        "tailwindcss -i ./public/input.css -o ./public/tailwind.css --minify"
+        "tailwindcss -i ./public/input.css -o ./public/tailwind.css --minify",
+        "tailwindcss -i ./public/site.input.css -o ./public/site.css --minify"
       ]
     },
     "doctor": {

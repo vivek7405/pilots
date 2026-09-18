@@ -1,13 +1,19 @@
-import { html } from '@webjsdev/core';
-import { buttonClass } from '#components/ui/button.ts';
-import { cn } from '#lib/utils/cn.ts';
+/**
+ * The 404 for an address nothing in the app matches.
+ *
+ * The app has two shells and no root layout, because the marketing site and
+ * the product share no chrome. A page's own `notFound()` is answered by its
+ * group's not-found inside that group's layout. An address that matches no
+ * route at all belongs to neither group, so the framework renders THIS file
+ * with no layout around it, which would be an unstyled page.
+ *
+ * It is the marketing 404 on purpose: `/` is the marketing site, and someone
+ * guessing a URL under it is looking at pilots.run, not at their dashboard.
+ */
+import type { LayoutProps } from '@webjsdev/core';
+import SiteLayout from './(site)/layout.ts';
+import NotFound from './(site)/not-found.ts';
 
-export default function NotFound() {
-  return html`
-    <div class="py-24 flex flex-col items-center gap-4 text-center">
-      <h1 class="text-title font-semibold m-0">Not found</h1>
-      <p class="text-muted-foreground m-0">That page does not exist, or it is not yours.</p>
-      <a href="/dashboard" class=${cn(buttonClass({ variant: 'outline' }), 'no-underline')}>Back to your apps</a>
-    </div>
-  `;
+export default function RootNotFound(props: LayoutProps) {
+  return SiteLayout({ ...props, children: NotFound() });
 }

@@ -129,17 +129,33 @@ function excludedByRootIgnore(file: string): boolean {
 
 test('every path the Dockerfile copies survives the root .dockerignore', () => {
   const sources = [...dockerfile.matchAll(/^COPY\s+(?!--from)(.+?)\s+\S+\s*$/gm)].flatMap((m) => m[1].split(/\s+/));
-  assert.ok(sources.length >= 6, `parsed the COPY lines: ${sources.join(', ')}`);
+  assert.ok(sources.length >= 5, `parsed the COPY lines: ${sources.join(', ')}`);
   for (const src of sources) {
     const probe = src.endsWith('/') || !src.includes('.') ? `${src.replace(/\/$/, '')}/package.json` : src;
     assert.equal(excludedByRootIgnore(probe), false, `${src} is in the build context`);
   }
 });
 
-test('the website manifest is the only part of that app in the context', () => {
-  assert.equal(excludedByRootIgnore('apps/website/package.json'), false, 'npm ci needs the workspace manifest');
-  assert.equal(excludedByRootIgnore('apps/website/app/page.ts'), true, 'and nothing else from the other app ships');
+test('the marketing site ships in the image, and nothing outside the app does', () => {
+  // The site is part of this app now, so its pages, its sources and the input
+  // its stylesheet is built from at start all have to be in the context. A
+  // missing one is not a build failure: the image builds and the homepage 500s.
+  for (const file of ['apps/web/app/(site)/page.ts', 'apps/web/site/lib/links.ts', 'apps/web/public/site.input.css', 'apps/web/public/og.png']) {
+    assert.equal(excludedByRootIgnore(file), false, `${file} ships`);
+  }
   assert.equal(excludedByRootIgnore('apps/hostd/go.mod'), true, 'the Go data plane never enters a web image');
   assert.equal(excludedByRootIgnore('apps/web/.webjs/vendor/importmap.json'), false, 'the vendor manifest ships');
   assert.equal(excludedByRootIgnore('apps/web/test/auth/gate.test.ts'), true, 'tests do not');
+});
+
+test('both stylesheets are built before the app starts', () => {
+  const pkg = JSON.parse(readFileSync(join(APP_DIR, 'package.json'), 'utf8'));
+  // The compiled files are gitignored, so the image has neither until `start`
+  // builds them. One shell per stylesheet: drop either and that half of
+  // pilots.run renders as unstyled HTML, with every test here still green.
+  for (const phase of ['dev', 'start'] as const) {
+    const before: string[] = pkg.webjs[phase].before;
+    assert.ok(before.some((c) => c.includes('-o ./public/tailwind.css')), `${phase} builds the product stylesheet`);
+    assert.ok(before.some((c) => c.includes('-o ./public/site.css')), `${phase} builds the marketing stylesheet`);
+  }
 });
