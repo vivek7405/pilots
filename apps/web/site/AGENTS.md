@@ -215,8 +215,8 @@ Two things it learned the hard way, worth knowing before adding a rule:
   as Tailwind class-group config inside a comment and renders nothing, so a
   raw-source scan failed a file with no design in it at all. The class rules
   run on template contents, and every rule strips comments first.
-- **Markup is not the only surface.** The roadmap holds its phase gates in a
-  plain data array, so a template-only scan called the page clean while an
+- **Markup is not the only surface.** The roadmap page, since removed, held its
+  phase gates in a plain data array, so a template-only scan called the page clean while an
   unsourced "under 500 milliseconds" sat on it. Prose string literals are
   scanned too, identified by sentence punctuation, which is what separates a
   sentence from a Tailwind class list or a Cache-Control header.

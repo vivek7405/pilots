@@ -56,6 +56,5 @@ export const NAV = [
   { label: 'Agents', href: '/agents' },
   { label: 'Architecture', href: '/architecture' },
   { label: 'Internals', href: '/architecture/internals' },
-  { label: 'Roadmap', href: '/roadmap' },
   { label: 'Brand', href: '/brand' },
 ];

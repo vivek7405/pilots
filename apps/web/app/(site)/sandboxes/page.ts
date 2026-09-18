@@ -233,7 +233,7 @@ export default function Sandboxes() {
           </p>
           <div class="flex flex-wrap gap-3 mt-6">
             <a class=${BTN_PRIMARY} href="/deploy">How deploying works</a>
-            <a class=${BTN_GHOST} href="/roadmap">Where it actually is</a>
+            <a class=${BTN_GHOST} href="/architecture">How it is built</a>
           </div>
         </div>
       </div>

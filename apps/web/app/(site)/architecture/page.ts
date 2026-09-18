@@ -52,6 +52,39 @@ const INVARIANTS = [
   ],
 ];
 
+/**
+ * The system as five layers, in plain words.
+ *
+ * This is the on-ramp the page lacked. Everything below it assumes the reader
+ * already holds the whole shape in their head, and most do not. The layers are
+ * the order the system was built in, which is also the order it makes sense
+ * in: each one works without the ones above it. They used to live on a roadmap
+ * page as phases with gates and issue numbers, which is project history. What
+ * a reader wanted from that page was this list.
+ */
+const LAYERS = [
+  [
+    'One machine on one box',
+    'A small virtual machine that boots, runs a command, and can be paused, photographed and brought back exactly as it was. A router in front of it holds a request open and wakes the machine when one arrives, and a monitor puts it back to sleep when nothing is using it. Everything else is this, made faster, spread wider, and given a product face.',
+  ],
+  [
+    'Making it instant',
+    'A photograph of a machine is stored as small blocks, and only the blocks that differ from a shared starting point are kept. Memory and disk are then loaded on demand rather than up front, so a machine starts running before most of it has arrived. That is why creating one is a restore rather than a boot, and why saving one does not wait for the upload.',
+  ],
+  [
+    'Many boxes, and nobody in charge',
+    'Every server runs the same software and can answer any request about any machine. They share what they know by gossiping it to each other, over a private encrypted network, instead of asking a central database. When a server dies the others notice on their own and bring its machines back, with the same addresses.',
+  ],
+  [
+    'Storage that outlives the server',
+    'Nothing a machine owns lives only on the server running it. Its disk and its volume are both kept in object storage, and the server’s own fast disk is a cache in front of that. A volume is saved on every write, and a machine’s disk is saved within a short, published window. Lose a server and you lose speed for a while, not data.',
+  ],
+  [
+    'The product on top',
+    'A Dockerfile, or a framework the platform recognises, becomes the same kind of image a sandbox starts from. A service is one or more machines behind an address that never changes, deployed behind a health check with a rollback. Around that sit custom domains with automatic certificates, organisations, scoped keys and quotas, a command line, typed clients, and a dashboard that runs on the platform it describes.',
+  ],
+];
+
 export default function Architecture() {
   return html`
     ${pageHero({
@@ -61,6 +94,32 @@ export default function Architecture() {
         forces are the interesting part, and they are all below.`,
       actions: html`<a class=${BTN_GHOST} href="/architecture/internals">The internals, with diagrams</a>
         <a class=${BTN_GHOST} href=${GH_URL} target="_blank" rel="noopener">Read ARCHITECTURE.md${NEW_TAB}</a>`,
+    })}
+
+    ${section({
+      id: 'layers',
+      heading: 'The whole system, as five layers',
+      lede: html`Read this first if the rest of the page is more detail than you came for. Each layer
+        works without the ones above it, which is also the order it was built in.`,
+      body: html`
+        <ol class="m-0 p-0 list-none flex flex-col">
+          ${LAYERS.map(
+            ([title, body], i) => html`
+              <li class="grid grid-cols-[2.5rem_1fr] gap-4 py-6 ${i > 0 ? 'border-t border-rule' : ''}">
+                <span class="font-mono text-sm text-ink-subtle pt-1">${i + 1}</span>
+                <div>
+                  <h3 class="text-h3 font-semibold m-0">${title}</h3>
+                  <p class="${PROSE} m-0 mt-2">${body}</p>
+                </div>
+              </li>
+            `,
+          )}
+        </ol>
+        <p class="${PROSE} mt-8">
+          The rest of this page is what those five sentences cost to make true.
+          <a class=${LINK} href="/architecture/internals">The internals page</a> draws each layer.
+        </p>
+      `,
     })}
 
     ${section({
@@ -320,8 +379,7 @@ export default function Architecture() {
         <p class="${PROSE} mt-10">
           If this is the kind of thing you want to argue with, the design is written down in full and
           the code is next to it. <a class=${LINK} href="/architecture/internals">The internals page</a>
-          draws all of it, one mechanism at a time, and
-          <a class=${LINK} href="/roadmap">the roadmap</a> says which parts are finished.
+          draws all of it, one mechanism at a time.
         </p>
       `,
     })}

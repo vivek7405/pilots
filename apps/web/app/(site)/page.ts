@@ -72,8 +72,8 @@ export default function Home() {
             </div>
 
             <p class="text-sm text-ink-subtle mt-6 m-0">
-              Being built in the open, one phase at a time.
-              <a class=${LINK} href="/roadmap">See exactly where it is.</a>
+              Built in the open.
+              <a class=${LINK} href="/architecture/internals">See how it works, drawn.</a>
             </p>
           </div>
 
@@ -281,7 +281,7 @@ export default function Home() {
         </p>
         <div class="flex flex-wrap gap-3 mt-7">
           <a class=${BTN_PRIMARY} href="/architecture">Read the architecture</a>
-          <a class=${BTN_GHOST} href="/roadmap">See what is done</a>
+          <a class=${BTN_GHOST} href="/architecture/internals">See it drawn</a>
         </div>
       </div>
     </div>

@@ -18,7 +18,7 @@ export default function NotFound() {
       <div class="flex flex-wrap gap-3 mt-8">
         <a class=${BTN_PRIMARY} href="/">Home</a>
         <a class=${BTN_GHOST} href="/architecture">Architecture</a>
-        <a class=${BTN_GHOST} href="/roadmap">Roadmap</a>
+        <a class=${BTN_GHOST} href="/architecture/internals">Internals</a>
       </div>
     </div>
   `;

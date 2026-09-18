@@ -27,9 +27,7 @@ import { pipelineFigure } from '#site/modules/internals/diagrams/pipeline.ts';
  *
  * Everything here is drawn from ARCHITECTURE.md and the phase issues #2 to #7 and #15.
  * Nothing is invented to fill a figure. Where a mechanism is not built yet the
- * page says which phase owns it rather than describing it in the present tense,
- * because a roadmap written in the present tense is the thing this project's
- * own roadmap page exists to avoid.
+ * page says so rather than describing it in the present tense.
  *
  * On the figures: they are hand-authored inline SVG through #lib/ui/diagram.ts,
  * which carries the reasoning for that choice. The one rule worth repeating

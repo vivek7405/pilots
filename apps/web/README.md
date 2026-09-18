@@ -18,7 +18,7 @@ fleet call, and `test/site/cold-homepage.test.ts` holds that.
 
 | Route | What it is |
 |---|---|
-| `/`, `/sandboxes`, `/deploy`, `/agents`, `/architecture`, `/roadmap`, `/brand` | the marketing site |
+| `/`, `/sandboxes`, `/deploy`, `/agents`, `/architecture`, `/brand` | the marketing site |
 | `/dashboard` | your apps, one card each with a thumbnail of its canvas; a service in no app is its own card |
 | `/dashboard/apps/[app]` | one app's canvas, and the service panel in a slide-over when a card is clicked (`?service=&tab=`) |
 | `/dashboard/services/[id]` | the same panel full width: Deployments, Variables, Metrics, Terminal, Settings |

@@ -194,9 +194,8 @@ export default function Deploy() {
           database and a place for everything else.
         </p>
         <p class="${PROSE} mt-4">
-          Volumes shipped with Phase 5, and its gate asserts that volume data survives the host
-          dying and the machine being rescued elsewhere.
-          <a class=${LINK} href="/roadmap">The roadmap</a> says what is still open.
+          The fleet's own test battery asserts this rather than assuming it: volume data survives
+          the host dying and the machine being rescued elsewhere.
         </p>
       `,
     })}
