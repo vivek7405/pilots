@@ -6,7 +6,7 @@
 # The BUILD CONTEXT is the repo root, not this directory, because the dashboard
 # imports `@pilots/sdk` from the `sdks/js` workspace. A context of `.` would
 # reach an `npm install` inside the image that cannot resolve a workspace
-# package that is not published. See ../../Dockerfile.dashboard.
+# package that is not published. See ./Dockerfile.
 #
 # `pilots.run` is an ordinary custom domain on this service and is deliberately
 # a SEPARATE apex from `pilotrun.app`. A workload sharing the dashboard's apex
@@ -22,7 +22,7 @@ services:
   app:
     build:
       context: ../..
-      dockerfile: apps/dashboard/Dockerfile
+      dockerfile: apps/web/Dockerfile
     ports:
       - "8080:8080"
     # ONE replica, and this is a requirement rather than a default. Two would

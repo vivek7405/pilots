@@ -11,7 +11,7 @@ Monorepo:
 | Path | What |
 |---|---|
 | `apps/hostd/` | Go, the entire per-host data plane (FC lifecycle, router, TLS, wake, snapshots, self-heal) |
-| `apps/dashboard/` | webjs: accounts, API keys, UI (deployed on pilots itself) |
+| `apps/web/` | webjs: accounts, API keys, UI (deployed on pilots itself) |
 | `apps/website/` | webjs: the marketing site |
 | `apps/pilot/` | the `pilot` CLI and TUI, and the stdio MCP server |
 | `apps/vscode/` | the VS Code extension: a machine as a workspace folder |

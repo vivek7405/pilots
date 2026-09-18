@@ -68,7 +68,7 @@ test('the rollout gates on the readiness path, not on any HTTP answer', () => {
 
 test('the image builds from the repo root, because the SDK is a workspace', () => {
   assert.match(compose, /context: \.\.\/\.\./, 'the context is the monorepo root');
-  assert.match(compose, /dockerfile: apps\/dashboard\/Dockerfile/);
+  assert.match(compose, /dockerfile: apps\/web\/Dockerfile/);
   assert.match(dockerfile, /npm run build --workspace=sdks\/js/, 'and the SDK is compiled into the image');
   assert.match(dockerfile, /FROM node:24/, 'on the Node version the framework pins');
 });
@@ -140,6 +140,6 @@ test('the website manifest is the only part of that app in the context', () => {
   assert.equal(excludedByRootIgnore('apps/website/package.json'), false, 'npm ci needs the workspace manifest');
   assert.equal(excludedByRootIgnore('apps/website/app/page.ts'), true, 'and nothing else from the other app ships');
   assert.equal(excludedByRootIgnore('apps/hostd/go.mod'), true, 'the Go data plane never enters a web image');
-  assert.equal(excludedByRootIgnore('apps/dashboard/.webjs/vendor/importmap.json'), false, 'the vendor manifest ships');
-  assert.equal(excludedByRootIgnore('apps/dashboard/test/auth/gate.test.ts'), true, 'tests do not');
+  assert.equal(excludedByRootIgnore('apps/web/.webjs/vendor/importmap.json'), false, 'the vendor manifest ships');
+  assert.equal(excludedByRootIgnore('apps/web/test/auth/gate.test.ts'), true, 'tests do not');
 });

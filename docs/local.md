@@ -364,7 +364,7 @@ machine name (there is no wildcard in a hosts file), or a dnsmasq wildcard —
 | Process | Port | Set where |
 |---|---|---|
 | hostd | 8080 | the default; the e2e battery, `e2e-restart.sh` and the rig all assume it |
-| dashboard | 3000 | `PORT=3000` in `apps/dashboard/.env` |
+| dashboard | 3000 | `PORT=3000` in `apps/web/.env` |
 | website | 3001 | `PORT=3001` in `apps/website/.env` |
 
 hostd keeps 8080 and the web apps move, because 8080 is baked into more places.
@@ -437,7 +437,7 @@ pilots.New(key, pilots.WithBaseURL("http://api.pilots.localhost:8080"))
 
 Both also read `PILOT_API_URL`.
 
-The dashboard throws at boot without five values in `apps/dashboard/.env`:
+The dashboard throws at boot without five values in `apps/web/.env`:
 
 ```
 PORT=3000
@@ -452,7 +452,7 @@ The last two cannot be faked: every page behind `/login` needs a real GitHub
 OAuth round trip, so a placeholder boots the app and serves the sign-in page
 but gets you no further. Register an App with
 `http://localhost:3000/api/auth/callback/github` as a callback URL. See
-`apps/dashboard/README.md`.
+`apps/web/README.md`.
 
 The routes worth opening once it is up:
 

@@ -26,7 +26,7 @@ scripts
 # Docs and research notes.
 docs
 *.md
-!apps/dashboard/README.md
+!apps/web/README.md
 
 # The other web app. Its package.json stays in, because the dashboard image
 # installs from the ROOT lockfile with npm workspaces, and npm ci refuses to

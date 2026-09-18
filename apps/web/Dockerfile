@@ -2,7 +2,7 @@
 #
 # The build context is the REPO ROOT, not this directory. The dashboard imports
 # `@pilots/sdk` from the `sdks/js` workspace, which is not published, so an
-# `npm install` run inside a context of `apps/dashboard` could never resolve
+# `npm install` run inside a context of `apps/web` could never resolve
 # it. Installing from the root with npm workspaces is the only shape that does.
 #
 # webjs serves `.ts` directly by stripping types at the runtime layer, so there
@@ -29,10 +29,10 @@ WORKDIR /app
 # Manifests first, so this layer caches unless a dependency changes. Every
 # workspace the root lockfile names has to be present for `npm ci` to resolve.
 COPY package.json package-lock.json ./
-COPY apps/dashboard/package.json ./apps/dashboard/
+COPY apps/web/package.json ./apps/web/
 COPY apps/website/package.json ./apps/website/
 COPY sdks/js/package.json ./sdks/js/
-RUN npm install --no-audit --no-fund --workspace=apps/dashboard --workspace=sdks/js --include-workspace-root
+RUN npm install --no-audit --no-fund --workspace=apps/web --workspace=sdks/js --include-workspace-root
 
 # The SDK's sources, then its build: `@pilots/sdk` resolves through `exports`
 # to `dist/`, which is gitignored and therefore never in the context.
@@ -40,9 +40,9 @@ COPY sdks/js ./sdks/js
 RUN npm run build --workspace=sdks/js
 
 # The app itself. node_modules and local state are excluded by .dockerignore.
-COPY apps/dashboard ./apps/dashboard
+COPY apps/web ./apps/web
 
-WORKDIR /app/apps/dashboard
+WORKDIR /app/apps/web
 
 ENV NODE_ENV=production
 ENV PORT=8080

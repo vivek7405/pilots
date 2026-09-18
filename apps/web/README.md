@@ -1,4 +1,4 @@
-# apps/dashboard
+# apps/web
 
 The pilots dashboard: the product's own UI, plus accounts, orgs, tokens, usage
 and the GitHub App's product half. A [webjs](https://webjs.dev) app, deployed
@@ -100,10 +100,10 @@ in no compose file, no image, and no row in the clear.
 ## Local development
 
 ```sh
-cp apps/dashboard/.env.example apps/dashboard/.env    # then fill in the values
+cp apps/web/.env.example apps/web/.env    # then fill in the values
 npm install                                            # from the repo root
 npm run build:sdk-js                                   # @pilots/sdk resolves to dist/
-PORT=3000 npm run dev --workspace=apps/dashboard       # http://localhost:3000
+PORT=3000 npm run dev --workspace=apps/web       # http://localhost:3000
 ```
 
 Port 3000 rather than the default, because hostd keeps 8080 and the dashboard
@@ -171,14 +171,14 @@ navigation. `<machine-terminal>` is the large one; see
 `components/terminal/vendor/README.md` for the one vendored browser module in
 this app and why it is here.
 
-`apps/dashboard/AGENTS.md` has a Conventions section recording the decisions
+`apps/web/AGENTS.md` has a Conventions section recording the decisions
 these encode, each with the defect that produced it.
 
 ## Tests
 
 ```sh
-npm run test:dashboard              # from the repo root: check, typecheck, server tests
-npm run test:dashboard:browser      # the browser layer; needs Chromium
+npm run test:web              # from the repo root: check, typecheck, server tests
+npm run test:web:browser      # the browser layer; needs Chromium
 npx playwright install chromium     # first run only
 ```
 
@@ -234,7 +234,7 @@ All three empty turns the engine's webhook route off.
 ## Deploying
 
 ```sh
-cd apps/dashboard
+cd apps/web
 PILOT_API_KEY=<the bootstrap key> pilot deploy
 ```
 
