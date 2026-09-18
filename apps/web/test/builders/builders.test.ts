@@ -96,7 +96,7 @@ after(() => {
 });
 
 test('the team page lists this team’s builders and nobody else’s', async () => {
-  const res = await app.handle(new Request('http://localhost/org', asUser(ownerCookie)));
+  const res = await app.handle(new Request('http://localhost/dashboard/org', asUser(ownerCookie)));
   assert.equal(res.status, 200);
   const body = await res.text();
 
@@ -117,7 +117,7 @@ test('an owner resets a builder, and the fleet is asked for that host', async ()
   })) as Envelope;
 
   assert.equal(result.success, true);
-  assert.equal(result.redirect, '/org?ok=builder-reset');
+  assert.equal(result.redirect, '/dashboard/org?ok=builder-reset');
   assert.deepEqual(app.fleet.data.builderResets.at(-1), { host: 'host-a', org: orgId });
   assert.equal(
     app.fleet.data.machines.some((m) => m.id === 'm-builder-1'),
@@ -183,7 +183,7 @@ test('a fleet with no builders route leaves the section empty rather than losing
     },
   };
   try {
-    const res = await app.handle(new Request('http://localhost/org', asUser(ownerCookie)));
+    const res = await app.handle(new Request('http://localhost/dashboard/org', asUser(ownerCookie)));
     assert.equal(res.status, 200, 'the whole team page must not depend on a route the fleet may not serve');
     assert.match(await res.text(), /Nothing has been built for this team yet/);
   } finally {

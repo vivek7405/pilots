@@ -62,7 +62,7 @@ export default async function NewOrgPage({ actionData }: PageProps) {
       <team-name-field .error=${result.fieldErrors?.name ?? ''}></team-name-field>
       <div class="flex items-center gap-3">
         <button type="submit" class=${buttonClass()}>Create team</button>
-        <a href="/org" class=${buttonClass({ variant: 'ghost', size: 'sm' })}>Cancel</a>
+        <a href="/dashboard/org" class=${buttonClass({ variant: 'ghost', size: 'sm' })}>Cancel</a>
       </div>
     </form>
 

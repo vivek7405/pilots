@@ -355,7 +355,7 @@ class MachineList extends WebComponent({
             ${dataTable<Machine>({
               caption: this.sandboxes ? 'Sandboxes in this team' : 'Everything running in this team',
               rows: paged,
-              rowHref: (m) => `/machines/${m.id}`,
+              rowHref: (m) => `/dashboard/machines/${m.id}`,
               columns: this.columns(),
             })}
           </div>`}
@@ -481,7 +481,7 @@ class MachineList extends WebComponent({
       {
         header: 'Name',
         cell: (m: Machine) => html`
-          <a href=${`/machines/${m.id}`} class="text-foreground">${m.name || m.id}</a>
+          <a href=${`/dashboard/machines/${m.id}`} class="text-foreground">${m.name || m.id}</a>
           ${isBuilder(m)
             ? html`<span class=${cn(badgeClass({ variant: 'outline' }), 'ml-2 align-middle')}>builder</span>`
             : ''}
@@ -525,7 +525,7 @@ class MachineList extends WebComponent({
           <ui-tooltip>
             <ui-tooltip-trigger>
               <a
-                href=${`/machines/${m.id}#console`}
+                href=${`/dashboard/machines/${m.id}#console`}
                 class=${buttonClass({ variant: 'ghost', size: 'icon-sm' })}
                 aria-label=${`Logs for ${m.name || m.id}`}
                 @click=${stop}
@@ -537,7 +537,7 @@ class MachineList extends WebComponent({
           </ui-tooltip>
 
           <a
-            href=${`/machines/${m.id}/terminal`}
+            href=${`/dashboard/machines/${m.id}/terminal`}
             class=${buttonClass({ variant: 'outline', size: 'xs' })}
             @click=${stop}
           >

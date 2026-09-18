@@ -82,12 +82,12 @@ export default async function Home({ searchParams }: PageProps) {
   const replicasOf = (id: string) => machines.filter((m) => m.service_id === id) as BrowserMachine[];
 
 
-  const viewHref = (v: 'grid' | 'list') => `/?sort=${sort}&view=${v}`;
+  const viewHref = (v: 'grid' | 'list') => `/dashboard?sort=${sort}&view=${v}`;
 
   return html`
     <div class="flex flex-wrap items-center gap-3">
       ${pageHeading(NOUN.Apps)}
-      <a href="/services/new" class=${cn(buttonClass({ size: 'sm' }), 'ml-auto')}>New app</a>
+      <a href="/dashboard/services/new" class=${cn(buttonClass({ size: 'sm' }), 'ml-auto')}>New app</a>
     </div>
     ${lede(
       html`An app is a group of services that reach each other by name. Open one to see what talks to what, in
@@ -100,7 +100,7 @@ export default async function Home({ searchParams }: PageProps) {
           <list-filter for="apps" placeholder="Search apps"></list-filter>
           <span class="text-meta text-muted-foreground">${apps.length} ${apps.length === 1 ? 'app' : 'apps'}</span>
           <auto-submit class="contents">
-            <form method="get" action="/" class="flex items-center gap-2">
+            <form method="get" action="/dashboard" class="flex items-center gap-2">
               <input type="hidden" name="view" value=${view}>
               <label for="sort" class="text-meta text-muted-foreground">Sort by</label>
               <div class=${nativeSelectWrapperClass()}>
@@ -120,7 +120,7 @@ export default async function Home({ searchParams }: PageProps) {
         ${apps.length === 0 && loose.length === 0
           ? sectionEmpty('No apps yet', {
               text: 'Deploy a repository, then it appears here as an app you can open, watch and change.',
-              href: '/services/new',
+              href: '/dashboard/services/new',
             })
           : view === 'grid'
             ? html`<link-rows>
@@ -132,12 +132,12 @@ export default async function Home({ searchParams }: PageProps) {
                 ${dataTable<AppGroup<Service>>({
                   caption: 'Your apps',
                   rows: apps,
-                  rowHref: (app) => `/apps/${encodeURIComponent(app.name)}`,
+                  rowHref: (app) => `/dashboard/apps/${encodeURIComponent(app.name)}`,
                   columns: [
                     {
                       header: NOUN.App,
                       cell: (app) =>
-                        html`<a href=${`/apps/${encodeURIComponent(app.name)}`} class="text-foreground font-medium"
+                        html`<a href=${`/dashboard/apps/${encodeURIComponent(app.name)}`} class="text-foreground font-medium"
                           >${app.name}</a
                         >`,
                     },
@@ -197,7 +197,7 @@ function liveService(service: Service, replicas: BrowserMachine[], rels: HealthR
  * card's text.
  */
 function appCard(app: AppGroup<Service>, releases: Record<string, HealthRelease[]>) {
-  const href = `/apps/${encodeURIComponent(app.name)}`;
+  const href = `/dashboard/apps/${encodeURIComponent(app.name)}`;
   const layout = layoutApp(app.services.map((s) => ({ id: s.id, name: s.name, dependsOn: s.depends_on ?? [] })));
   return html`
     <div class=${cn(cardClass(), 'gap-0 py-0 cursor-pointer transition-colors hover:border-border-strong')} data-filter-row data-href=${href}>
@@ -222,7 +222,7 @@ function appCard(app: AppGroup<Service>, releases: Record<string, HealthRelease[
  * one-node canvas and links to the service, since there is no app to open.
  */
 function looseCard(service: Service, replicas: BrowserMachine[], rels: HealthRelease[]) {
-  const href = `/services/${service.id}`;
+  const href = `/dashboard/services/${service.id}`;
   const layout = layoutApp([{ id: service.id, name: service.name, dependsOn: [] }]);
   return html`
     <div class=${cn(cardClass(), 'gap-0 py-0 cursor-pointer transition-colors hover:border-border-strong')} data-filter-row data-href=${href}>

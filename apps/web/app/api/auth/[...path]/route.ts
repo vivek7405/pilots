@@ -17,6 +17,7 @@
 import { handlers } from '#modules/auth/auth.server.ts';
 import { readCookie } from '#modules/auth/session.server.ts';
 import { localPath } from '#lib/utils/local-path.ts';
+import { DASHBOARD } from '#lib/paths.ts';
 
 export const NEXT_COOKIE = 'pilots_next';
 
@@ -35,13 +36,15 @@ export async function GET(req: Request): Promise<Response> {
 
   if (url.pathname === CALLBACK && res.status === 302) {
     const carried = readCookie(req, NEXT_COOKIE);
-    if (carried === null) return res;
-    const next = localPath(carried, '');
+    // With nowhere carried, a sign-in lands on the product's home. The
+    // framework's own landing is `/`, which is the marketing site now: someone
+    // who just signed in would arrive on the page that asks them to sign in.
+    const next = localPath(carried, '') || DASHBOARD;
     return withHeaders(res, (h) => {
       // Only the framework's own landing is overridden. A failed sign-in goes
       // to `pages.error` and keeps going there.
-      if (next && h.get('location') === '/') h.set('location', next);
-      h.append('set-cookie', clearNextCookie());
+      if (h.get('location') === '/') h.set('location', next);
+      if (carried !== null) h.append('set-cookie', clearNextCookie());
     });
   }
 

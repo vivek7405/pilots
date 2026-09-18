@@ -1,5 +1,5 @@
 /**
- * `/volumes` is now `/storage`.
+ * `/dashboard/volumes` is now `/dashboard/storage`.
  *
  * "Volume" is the engine's word for a disk that outlives the machine it is
  * attached to. "Storage" is what a person calls the same thing, and it is the
@@ -8,5 +8,5 @@
 import { redirect } from '@webjsdev/core';
 
 export default function VolumesRedirect(): never {
-  throw redirect('/storage', 308);
+  throw redirect('/dashboard/storage', 308);
 }

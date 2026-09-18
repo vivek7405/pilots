@@ -1,5 +1,5 @@
 /**
- * The app list at `/`: the first step of the journey.
+ * The app list at `/dashboard`: the first step of the journey.
  *
  * One card per app with its service count as a status line, a thumbnail
  * drawn from the same layout the canvas uses, and a whole-card link to the
@@ -76,21 +76,21 @@ after(() => {
 });
 
 async function list(query = ''): Promise<string> {
-  const res = await app.handle(new Request(`http://localhost/${query}`, asUser(cookie)));
-  assert.equal(res.status, 200, 'signed in, / is the app list');
+  const res = await app.handle(new Request(`http://localhost/dashboard${query}`, asUser(cookie)));
+  assert.equal(res.status, 200, 'signed in, /dashboard is the app list');
   return res.text();
 }
 
 /** The app names in the order their cards appear. */
 function cardOrder(body: string): string[] {
-  return [...body.matchAll(/data-href="\/apps\/([^"]+)"/g)].map((m) => decodeURIComponent(m[1]!));
+  return [...body.matchAll(/data-href="\/dashboard\/apps\/([^"]+)"/g)].map((m) => decodeURIComponent(m[1]!));
 }
 
 test('one card per app, linking to its canvas, with a status line and a thumbnail', async () => {
   const body = await list();
   assert.deepEqual(new Set(cardOrder(body)), new Set(['gallery', 'shop']), 'two apps, two cards');
 
-  const gallery = body.slice(body.indexOf('data-href="/apps/gallery"'), body.indexOf('data-href="/apps/shop"'));
+  const gallery = body.slice(body.indexOf('data-href="/dashboard/apps/gallery"'), body.indexOf('data-href="/dashboard/apps/shop"'));
   assert.match(gallery, /2\/2 services online/, 'a sleeping service still answers, so it counts as online');
   assert.match(gallery, /<svg[^>]*role="img"[^>]*aria-label="2 services, 1 connection"/, 'the thumbnail is the canvas');
   assert.match(gallery, /deployed\s*<relative-time/, 'the last deploy across the app');
@@ -102,8 +102,8 @@ test('a service with no app is its own card in the grid, linking to the service'
   // No leftover table: the loose service is a card like every app, drawn as a
   // one-node canvas and navigating to the service, since there is no app.
   assert.ok(!body.includes('Not in an app'), 'no separate table for loose services');
-  assert.match(body, /data-href="\/services\/svc-docs"/, 'the loose service is a navigating card');
-  const card = body.slice(body.indexOf('data-href="/services/svc-docs"'), body.indexOf('data-href="/services/svc-docs"') + 900);
+  assert.match(body, /data-href="\/dashboard\/services\/svc-docs"/, 'the loose service is a navigating card');
+  const card = body.slice(body.indexOf('data-href="/dashboard/services/svc-docs"'), body.indexOf('data-href="/dashboard/services/svc-docs"') + 900);
   assert.match(card, /<svg[^>]*role="img"/, 'the loose card draws its own one-node canvas');
 });
 
@@ -116,7 +116,7 @@ test('the sort is a GET parameter, applied on the server', async () => {
 
   const body = await list('?sort=name');
   assert.match(body, /<option value="name" selected(="")?>/, 'the select shows the sort in force');
-  assert.match(body, /<form method="get" action="\/"/, 'and it is a plain form');
+  assert.match(body, /<form method="get" action="\/dashboard"/, 'and it is a plain form');
   assert.match(body, /<list-filter[^>]*\bfor="apps"[^>]*placeholder="Search apps"/);
 });
 
@@ -124,11 +124,11 @@ test('the list view is the same apps as rows, one link each', async () => {
   const body = await list('?view=list');
   const table = body.slice(body.indexOf('<table'), body.indexOf('</table>'));
   assert.match(table, /Your apps/);
-  assert.match(table, /data-href="\/apps\/gallery"/);
-  assert.match(table, /data-href="\/apps\/shop"/);
+  assert.match(table, /data-href="\/dashboard\/apps\/gallery"/);
+  assert.match(table, /data-href="\/dashboard\/apps\/shop"/);
   assert.ok(!table.includes('<svg'), 'no thumbnails in the list view');
-  assert.match(body, /href="\/\?sort=activity&amp;view=grid"[^>]*aria-current="false"/);
-  assert.match(body, /href="\/\?sort=activity&amp;view=list"[^>]*aria-current="true"/);
+  assert.match(body, /href="\/dashboard\?sort=activity&amp;view=grid"[^>]*aria-current="false"/);
+  assert.match(body, /href="\/dashboard\?sort=activity&amp;view=list"[^>]*aria-current="true"/);
 });
 
 test('limits and capacity are not on the apps page', async () => {
@@ -141,13 +141,13 @@ test('limits and capacity are not on the apps page', async () => {
 
 test('an org with nothing in it is told what to do, not just that it is empty', async () => {
   const other = await signInAs(app.handle, { id: 7301, login: 'newcomer' });
-  const res = await app.handle(new Request('http://localhost/', asUser(other)));
+  const res = await app.handle(new Request('http://localhost/dashboard', asUser(other)));
   const body = await res.text();
 
   assert.equal(res.status, 200);
   assert.match(body, /No apps yet/, 'the empty state names what is missing');
   assert.match(body, /border-dashed/, 'and it is the padded box, not a bare line');
-  assert.match(body, /href="\/services\/new"/, 'with a link to the page that explains the fix');
+  assert.match(body, /href="\/dashboard\/services\/new"/, 'with a link to the page that explains the fix');
 });
 
 /**

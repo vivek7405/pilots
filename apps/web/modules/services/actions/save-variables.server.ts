@@ -143,5 +143,5 @@ export async function saveVariables(formData: FormData) {
       .run();
   }
 
-  return { success: true, redirect: backTo(formData, `/services/${id}`, 'variables-saved') };
+  return { success: true, redirect: backTo(formData, `/dashboard/services/${id}`, 'variables-saved') };
 }

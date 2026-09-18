@@ -58,7 +58,7 @@ test('the releases route returns the engine rows for an owned service', async ()
 });
 
 test('only the previous HEALTHY release is offered as a rollback target', async () => {
-  const res = await app.handle(new Request('http://localhost/services/svc-1', asUser(cookie)));
+  const res = await app.handle(new Request('http://localhost/dashboard/services/svc-1', asUser(cookie)));
   assert.equal(res.status, 200);
   const body = await res.text();
 
@@ -85,11 +85,11 @@ test('submitting the rollback form calls the engine and returns to the service',
   // The page carries the service id as a hidden field, which is what a browser
   // would post; `submitForm` sends only what it is handed, so it is passed here
   // and asserted on the rendered form separately.
-  const page = await app.handle(new Request('http://localhost/services/svc-1', asUser(cookie)));
+  const page = await app.handle(new Request('http://localhost/dashboard/services/svc-1', asUser(cookie)));
   assert.match(await page.text(), /name="service" value="svc-1"/);
 
   app.fleet.calls.length = 0;
-  const res = await submitForm(app.handle, '/services/svc-1', { service: 'svc-1' }, {
+  const res = await submitForm(app.handle, '/dashboard/services/svc-1', { service: 'svc-1' }, {
     cookies: cookie,
     match: 'Roll back to this',
   });
@@ -98,7 +98,7 @@ test('submitting the rollback form calls the engine and returns to the service',
   // ?ok= is what the redirect carries the outcome in: the app runs no session
   // middleware, so there is no flash bag, and <flash-toast> reads this and
   // strips it. Without it a rollback would look like a page that did nothing.
-  assert.equal(res.headers.get('location'), '/services/svc-1?ok=rolled-back');
+  assert.equal(res.headers.get('location'), '/dashboard/services/svc-1?ok=rolled-back');
   assert.deepEqual(
     app.fleet.calls.find((c) => c.method === 'services.rollback')!.args,
     ['svc-1'],

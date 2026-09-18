@@ -19,7 +19,7 @@ export async function createSandbox(formData: FormData) {
     const machine = await fleetAs(ctx.org.id).machines.create({});
     // The sandbox's own page, not back to the list: a sandbox is worth having
     // open, and its page is where the terminal is.
-    return { success: true, redirect: `/machines/${encodeURIComponent(machine.id)}?ok=created` };
+    return { success: true, redirect: `/dashboard/machines/${encodeURIComponent(machine.id)}?ok=created` };
   } catch (err) {
     return { success: false, error: `Could not open a sandbox: ${(err as Error).message}`, status: 502 };
   }

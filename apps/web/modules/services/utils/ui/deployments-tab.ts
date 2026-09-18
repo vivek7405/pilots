@@ -120,7 +120,7 @@ export function deploymentsTab({ detail, back, errors, build }: TabProps): Templ
                   ? html`<ul class="m-0 grid list-none gap-1 p-0 text-meta">
                       ${replicas.map(
                         (m) => html`<li class="flex items-center gap-3">
-                          <a href=${`/machines/${m.id}`} class="text-foreground">${m.name || m.id}</a>
+                          <a href=${`/dashboard/machines/${m.id}`} class="text-foreground">${m.name || m.id}</a>
                           <live-machine-state machine-id=${m.id} mode="since"
                             >${machineStateSince(m)}</live-machine-state
                           >
@@ -202,7 +202,7 @@ export function deploymentsTab({ detail, back, errors, build }: TabProps): Templ
               columns: [
                 {
                   header: 'Preview',
-                  cell: (m) => html`<a href=${`/machines/${m.id}`} class="text-foreground">${m.name}</a>`,
+                  cell: (m) => html`<a href=${`/dashboard/machines/${m.id}`} class="text-foreground">${m.name}</a>`,
                 },
                 { header: 'Status', cell: (m) => machineStateSince(m) },
                 { header: 'URL', cell: (m) => (m.url ? html`<a href=${m.url} rel="noopener">${m.url}</a>` : '') },

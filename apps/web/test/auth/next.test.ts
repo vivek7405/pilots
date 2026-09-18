@@ -41,16 +41,16 @@ after(() => {
 });
 
 test('the gate carries the path, and the login page hands it to the sign-in link', async () => {
-  const bounced = await app.handle(new Request('http://localhost/services/abc?tab=releases'));
+  const bounced = await app.handle(new Request('http://localhost/dashboard/services/abc?tab=releases'));
   assert.equal(bounced.status, 302);
   const location = bounced.headers.get('location')!;
-  assert.equal(location, '/login?next=%2Fservices%2Fabc%3Ftab%3Dreleases');
+  assert.equal(location, '/login?next=%2Fdashboard%2Fservices%2Fabc%3Ftab%3Dreleases');
 
   const login = await app.handle(new Request(`http://localhost${location}`));
   assert.equal(login.status, 200);
   assert.match(
     await login.text(),
-    /href="\/api\/auth\/signin\/github\?next=%2Fservices%2Fabc%3Ftab%3Dreleases"/,
+    /href="\/api\/auth\/signin\/github\?next=%2Fdashboard%2Fservices%2Fabc%3Ftab%3Dreleases"/,
     'the link names the target',
   );
 });
@@ -81,9 +81,9 @@ test('the sign-in start sets the target cookie for a same-origin path only', asy
 });
 
 test('the callback lands on the target and clears the cookie', async () => {
-  const { callback } = await driveOAuth(app.handle, profile(), { signin: '/api/auth/signin/github?next=%2Fservices%2Fabc' });
+  const { callback } = await driveOAuth(app.handle, profile(), { signin: '/api/auth/signin/github?next=%2Fdashboard%2Fservices%2Fabc' });
   assert.equal(callback.status, 302);
-  assert.equal(callback.headers.get('location'), '/services/abc');
+  assert.equal(callback.headers.get('location'), '/dashboard/services/abc');
   const cookies = getSetCookies(callback);
   assert.ok(cookies.some((c) => c.startsWith('webjs.auth=')), 'and the visitor is signed in');
   const cleared = cookies.find((c) => c.startsWith('pilots_next='));
@@ -91,16 +91,18 @@ test('the callback lands on the target and clears the cookie', async () => {
   assert.match(cleared, /Max-Age=0/);
 });
 
-test('without a target the callback lands on the default', async () => {
+test('without a target the callback lands on the product, not the marketing page', async () => {
   const { callback } = await driveOAuth(app.handle, profile());
-  assert.equal(callback.headers.get('location'), '/');
+  // `/` is the marketing site: landing there after a sign-in would show the
+  // page that asks the visitor to sign in.
+  assert.equal(callback.headers.get('location'), '/dashboard');
   assert.equal(getSetCookies(callback).some((c) => c.startsWith('pilots_next=')), false, 'nothing to clear');
 });
 
 test('a forged target cookie cannot redirect off the origin', async () => {
   for (const next of ['//evil.com', '/\\evil.com', 'https://evil.com']) {
     const { callback } = await driveOAuth(app.handle, profile(), { extraCookies: `pilots_next=${encodeURIComponent(next)}` });
-    assert.equal(callback.headers.get('location'), '/', `a cookie of ${next} is dropped`);
+    assert.equal(callback.headers.get('location'), '/dashboard', `a cookie of ${next} is dropped`);
     assert.ok(getSetCookies(callback).some((c) => c.startsWith('pilots_next=') && c.includes('Max-Age=0')), 'and cleared');
   }
 });

@@ -40,7 +40,7 @@ export default async function MachinePage({ params }: PageProps) {
   return html`
     <div class="flex flex-wrap items-center gap-3">
       ${pageHeading(machine.name || machine.id)} ${statusDot(machine.state)}
-      <a href=${`/machines/${machine.id}/terminal`} class=${cn(buttonClass({ size: 'sm' }), 'ml-auto')}
+      <a href=${`/dashboard/machines/${machine.id}/terminal`} class=${cn(buttonClass({ size: 'sm' }), 'ml-auto')}
         >Open a terminal</a
       >
     </div>
@@ -81,7 +81,7 @@ export default async function MachinePage({ params }: PageProps) {
     <section class="mt-8">
       <div class="flex flex-wrap items-center justify-between gap-3">
         ${sectionHeading(NOUN.Terminal, 'A shell inside this instance, as if you had opened one on the box it runs on.')}
-        <a href=${`/machines/${machine.id}/terminal`} class="text-meta">Full screen</a>
+        <a href=${`/dashboard/machines/${machine.id}/terminal`} class="text-meta">Full screen</a>
       </div>
       <div class="h-[24rem] overflow-hidden rounded-md border border-border">
         <machine-terminal machine-id=${machine.id} class="flex h-full min-h-0 flex-col"></machine-terminal>

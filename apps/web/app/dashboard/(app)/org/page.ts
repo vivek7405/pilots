@@ -185,7 +185,7 @@ export default async function OrgPage({ actionData }: PageProps) {
         ${orgs.length > 1
           ? html`
               <form action=${switchOrg} class=${formRowClass()}>
-                <input type="hidden" name="back" value="/org">
+                <input type="hidden" name="back" value="/dashboard/org">
                 ${field({
                   id: 'org-switch',
                   label: 'Team',
@@ -202,7 +202,7 @@ export default async function OrgPage({ actionData }: PageProps) {
               </form>
             `
           : ''}
-        <a href="/org/new" class=${buttonClass({ variant: 'outline', size: 'sm' })}>Create a team</a>
+        <a href="/dashboard/org/new" class=${buttonClass({ variant: 'outline', size: 'sm' })}>Create a team</a>
         <form method="POST" action="/api/auth/signout">
           <button type="submit" class=${buttonClass({ variant: 'outline', size: 'sm' })}>Sign out</button>
         </form>
@@ -304,7 +304,7 @@ function buildersSection(builders: Builder[], manages: boolean) {
       ${builders.length === 0
         ? sectionEmpty('Nothing has been built for this team yet.', {
             text: `Deploy an ${NOUN.App.toLowerCase()} to get one`,
-            href: '/services/new',
+            href: '/dashboard/services/new',
           })
         : dataTable<Builder>({
             caption: 'Builders for this team',

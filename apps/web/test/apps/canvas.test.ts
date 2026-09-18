@@ -1,5 +1,5 @@
 /**
- * The app canvas at `/apps/<app>` and the panel it opens.
+ * The app canvas at `/dashboard/apps/<app>` and the panel it opens.
  *
  * What is asserted is the contract the journey rests on: the picture is in
  * the served bytes (cards and arrows, drawn by the server); `?service=` and
@@ -8,7 +8,7 @@
  * the canvas rather than throwing the reader off it.
  *
  * Counterfactuals: drop the `back` hidden field and the redirect test lands
- * on `/services/svc-web`; filter `?service=` against nothing and the
+ * on `/dashboard/services/svc-web`; filter `?service=` against nothing and the
  * foreign-service test renders a panel it must not; layer every card at 0
  * and the position assertions fail.
  */
@@ -74,21 +74,21 @@ async function page(path: string): Promise<{ status: number; body: string }> {
 // next deploy replaces. Showing that address unlabelled is what made a moving
 // URL look like the app's own, so the label is the fix and the assertion.
 test('a service with no address shows its instance address, labelled as the instance', async () => {
-  const { body } = await page('/apps/quiet-app');
+  const { body } = await page('/dashboard/apps/quiet-app');
   assert.match(body, /instance quiet-1\.example/, 'the instance address is labelled');
   assert.match(body, /It changes on the next deploy/, 'and says what that costs');
   // A service with its own address is never labelled: it does not move.
-  const gallery = await page('/apps/gallery');
+  const gallery = await page('/dashboard/apps/gallery');
   assert.doesNotMatch(gallery.body, /instance web\.example/);
 });
 
 test('a service with no address and no instance says so plainly', async () => {
-  const { body } = await page('/apps/quiet-app');
+  const { body } = await page('/dashboard/apps/quiet-app');
   assert.match(body, /No URL yet/);
 });
 
 test('the canvas is drawn by the server: one card per service, one arrow per edge, storage on the mounting card', async () => {
-  const { status, body } = await page('/apps/gallery');
+  const { status, body } = await page('/dashboard/apps/gallery');
   assert.equal(status, 200);
   assert.equal((body.match(/data-canvas-card/g) ?? []).length, 2, 'two cards');
   assert.equal((body.match(/<line/g) ?? []).length, 1, 'one arrow, from web up to api');
@@ -96,8 +96,8 @@ test('the canvas is drawn by the server: one card per service, one arrow per edg
   assert.match(body, /data-canvas-stage[^>]*data-width="240"[^>]*data-height="336"/, 'two rows, one column');
 
   // api dials nothing, so it is the top row; web sits under it.
-  assert.match(body, /href="\/apps\/gallery\?service=svc-api"[\s\S]*?style="left:0px;top:0px"/);
-  assert.match(body, /href="\/apps\/gallery\?service=svc-web"[\s\S]*?style="left:0px;top:216px"/);
+  assert.match(body, /href="\/dashboard\/apps\/gallery\?service=svc-api"[\s\S]*?style="left:0px;top:0px"/);
+  assert.match(body, /href="\/dashboard\/apps\/gallery\?service=svc-web"[\s\S]*?style="left:0px;top:216px"/);
 
   const apiCard = body.slice(body.indexOf('service=svc-api'), body.indexOf('</a>', body.indexOf('service=svc-api')));
   assert.match(apiCard, /app-data/, 'the volume hangs off the service that mounts it');
@@ -107,8 +107,8 @@ test('the canvas is drawn by the server: one card per service, one arrow per edg
 });
 
 test('?service= opens the panel in a slide-over and marks the card', async () => {
-  const { body } = await page('/apps/gallery?service=svc-web');
-  assert.match(body, /<slide-over[^>]*back="\/apps\/gallery"/);
+  const { body } = await page('/dashboard/apps/gallery?service=svc-web');
+  assert.match(body, /<slide-over[^>]*back="\/dashboard\/apps\/gallery"/);
   const webCard = body.slice(body.indexOf('service=svc-web"'), body.indexOf('</a>', body.indexOf('service=svc-web"')));
   assert.match(webCard, /aria-current="true"/);
   assert.match(webCard, /ring-primary/);
@@ -117,66 +117,66 @@ test('?service= opens the panel in a slide-over and marks the card', async () =>
 
   // The Deployments tab is the default and shows what is live.
   assert.match(body, /aria-label="Service sections"/);
-  assert.match(body, /href="\/apps\/gallery\?service=svc-web&amp;tab=deployments"[^>]*aria-current="page"/);
+  assert.match(body, /href="\/dashboard\/apps\/gallery\?service=svc-web&amp;tab=deployments"[^>]*aria-current="page"/);
   assert.match(body, /data-current-deployment/);
   assert.match(body, /rel-w/);
   assert.match(body, /Roll back to this/, 'the older healthy deployment is a roll-back target');
-  assert.match(body, /aria-label="Close"[^>]*|href="\/apps\/gallery"[^>]*aria-label="Close"/, 'close is a link');
+  assert.match(body, /aria-label="Close"[^>]*|href="\/dashboard\/apps\/gallery"[^>]*aria-label="Close"/, 'close is a link');
 });
 
 test('&tab=settings renders the Instances form, and its forms return to the canvas', async () => {
-  const { body } = await page('/apps/gallery?service=svc-web&tab=settings');
-  assert.match(body, /href="\/apps\/gallery\?service=svc-web&amp;tab=settings"[^>]*aria-current="page"/);
+  const { body } = await page('/dashboard/apps/gallery?service=svc-web&tab=settings');
+  assert.match(body, /href="\/dashboard\/apps\/gallery\?service=svc-web&amp;tab=settings"[^>]*aria-current="page"/);
   assert.match(body, /name="replicas"/);
   // The Instances form itself, not any form on the page, carries the return.
   const instancesForm = body.slice(body.lastIndexOf('<form', body.indexOf('name="replicas"')), body.indexOf('</form>', body.indexOf('name="replicas"')));
-  assert.match(instancesForm, /name="back" value="\/apps\/gallery\?service=svc-web&amp;tab=settings"/);
+  assert.match(instancesForm, /name="back" value="\/dashboard\/apps\/gallery\?service=svc-web&amp;tab=settings"/);
   assert.ok(!body.includes('data-current-deployment'), 'only the selected tab renders');
 
   app.fleet.calls.length = 0;
   const res = await submitForm(
     app.handle,
-    '/apps/gallery?service=svc-web&tab=settings',
-    { service: 'svc-web', replicas: '2', back: '/apps/gallery?service=svc-web&tab=settings' },
+    '/dashboard/apps/gallery?service=svc-web&tab=settings',
+    { service: 'svc-web', replicas: '2', back: '/dashboard/apps/gallery?service=svc-web&tab=settings' },
     { cookies: cookie, match: 'Save' },
   );
   assert.equal(res.status, 303);
-  assert.equal(res.headers.get('location'), '/apps/gallery?service=svc-web&tab=settings&ok=saved');
+  assert.equal(res.headers.get('location'), '/dashboard/apps/gallery?service=svc-web&tab=settings&ok=saved');
   assert.deepEqual(app.fleet.calls.find((c) => c.method === 'services.patch')!.args, ['svc-web', { replicas: 2 }]);
 });
 
 test('the Terminal tab is a shell on a running instance, with a full-screen link', async () => {
-  const { body } = await page('/apps/gallery?service=svc-web&tab=terminal');
+  const { body } = await page('/dashboard/apps/gallery?service=svc-web&tab=terminal');
   assert.match(body, /<machine-terminal[^>]*machine-id="m-web"/);
-  assert.match(body, /href="\/machines\/m-web\/terminal"/);
+  assert.match(body, /href="\/dashboard\/machines\/m-web\/terminal"/);
   assert.match(body, /pilot console web-1/, 'with scripting off the CLI is named');
 });
 
 test('a service with nothing running gets an empty Terminal tab pointing at Deployments', async () => {
   app.fleet.data.machines.find((m) => m.id === 'm-web')!.state = 'suspended';
   try {
-    const { body } = await page('/apps/gallery?service=svc-web&tab=terminal');
+    const { body } = await page('/dashboard/apps/gallery?service=svc-web&tab=terminal');
     assert.ok(!body.includes('<machine-terminal'));
     assert.match(body, /No instance is running right now/);
-    assert.match(body, /href="\/apps\/gallery\?service=svc-web&amp;tab=deployments"/);
+    assert.match(body, /href="\/dashboard\/apps\/gallery\?service=svc-web&amp;tab=deployments"/);
   } finally {
     app.fleet.data.machines.find((m) => m.id === 'm-web')!.state = 'running';
   }
 });
 
 test('a service of another app is not a panel on this canvas', async () => {
-  const { status, body } = await page('/apps/gallery?service=svc-other');
+  const { status, body } = await page('/dashboard/apps/gallery?service=svc-other');
   assert.equal(status, 200);
   assert.ok(!body.includes('<slide-over'));
   assert.equal((body.match(/data-canvas-card/g) ?? []).length, 2, 'the canvas still draws its own services');
 });
 
 test('an app with no services is a 404', async () => {
-  assert.equal((await page('/apps/nope')).status, 404);
+  assert.equal((await page('/dashboard/apps/nope')).status, 404);
 });
 
 test("another org's app is a 404, not a canvas of someone else's services", async () => {
   const other = await signInAs(app.handle, { id: 7401, login: 'stranger' });
-  const res = await app.handle(new Request('http://localhost/apps/gallery', asUser(other)));
+  const res = await app.handle(new Request('http://localhost/dashboard/apps/gallery', asUser(other)));
   assert.equal(res.status, 404);
 });

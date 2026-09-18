@@ -17,5 +17,5 @@ export async function deleteDomain(formData: FormData) {
   } catch (err) {
     return { success: false, error: `The fleet refused: ${(err as Error).message}`, status: 502 };
   }
-  return { success: true, redirect: backTo(formData, '/domains', 'destroyed') };
+  return { success: true, redirect: backTo(formData, '/dashboard/domains', 'destroyed') };
 }

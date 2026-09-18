@@ -35,15 +35,15 @@ export interface Named {
 
 /** The static destinations, matched by the same query as everything else. */
 export const PAGES: SearchHit[] = [
-  { kind: 'page', id: 'apps', label: NOUN.Apps, href: '/' },
-  { kind: 'page', id: 'new', label: 'New app', href: '/services/new' },
-  { kind: 'page', id: 'sandboxes', label: NOUN.Sandboxes, href: '/sandboxes' },
-  { kind: 'page', id: 'storage', label: NOUN.Storage, href: '/storage' },
-  { kind: 'page', id: 'domains', label: NOUN.Domains, href: '/domains' },
-  { kind: 'page', id: 'usage', label: NOUN.Usage, href: '/usage' },
-  { kind: 'page', id: 'logs', label: NOUN.Logs, href: '/logs' },
-  { kind: 'page', id: 'keys', label: NOUN.Tokens, href: '/keys' },
-  { kind: 'page', id: 'org', label: NOUN.Team, href: '/org' },
+  { kind: 'page', id: 'apps', label: NOUN.Apps, href: '/dashboard' },
+  { kind: 'page', id: 'new', label: 'New app', href: '/dashboard/services/new' },
+  { kind: 'page', id: 'sandboxes', label: NOUN.Sandboxes, href: '/dashboard/sandboxes' },
+  { kind: 'page', id: 'storage', label: NOUN.Storage, href: '/dashboard/storage' },
+  { kind: 'page', id: 'domains', label: NOUN.Domains, href: '/dashboard/domains' },
+  { kind: 'page', id: 'usage', label: NOUN.Usage, href: '/dashboard/usage' },
+  { kind: 'page', id: 'logs', label: NOUN.Logs, href: '/dashboard/logs' },
+  { kind: 'page', id: 'keys', label: NOUN.Tokens, href: '/dashboard/keys' },
+  { kind: 'page', id: 'org', label: NOUN.Team, href: '/dashboard/org' },
 ];
 
 /** How many of each kind come back. A palette is a shortcut, not a list page. */
@@ -59,7 +59,7 @@ export function rankHits(services: Named[], machines: Named[], query: string): S
         id: s.id,
         label: s.name ?? s.id,
         ...(s.app ? { detail: s.app } : {}),
-        href: `/services/${s.id}`,
+        href: `/dashboard/services/${s.id}`,
       }),
     ),
     ...machines.map(
@@ -69,7 +69,7 @@ export function rankHits(services: Named[], machines: Named[], query: string): S
         // The state as the word a person reads, never the engine's own value.
         ...(m.state ? { detail: stateLabel(m.state).word } : {}),
         label: m.name || m.id,
-        href: `/machines/${m.id}`,
+        href: `/dashboard/machines/${m.id}`,
       }),
     ),
     ...PAGES,

@@ -51,7 +51,7 @@ export default async function DomainsPage({ actionData }: PageProps) {
                 {
                   header: 'Service',
                   cell: ({ service }) =>
-                    service ? html`<a href=${`/services/${service.id}`} class="text-foreground">${service.name}</a>` : '-',
+                    service ? html`<a href=${`/dashboard/services/${service.id}`} class="text-foreground">${service.name}</a>` : '-',
                 },
                 {
                   header: 'Certificate',

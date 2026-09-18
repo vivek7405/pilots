@@ -45,5 +45,5 @@ export async function removeMember(formData: FormData) {
   }
 
   await db.delete(memberships).where(eq(memberships.id, row.id));
-  return { success: true, redirect: '/org?ok=removed' };
+  return { success: true, redirect: '/dashboard/org?ok=removed' };
 }

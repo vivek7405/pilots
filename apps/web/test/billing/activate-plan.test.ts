@@ -80,7 +80,7 @@ test('activating pro writes the plan and pushes its bundle to the fleet as the q
   })) as Envelope;
 
   assert.equal(result.success, true);
-  assert.equal(result.redirect, '/org?ok=plan-changed');
+  assert.equal(result.redirect, '/dashboard/org?ok=plan-changed');
 
   const call = app.fleet.calls.find((c) => c.method === 'quotas.put');
   assert.ok(call, 'a plan nothing sends to the fleet is a number nothing enforces');

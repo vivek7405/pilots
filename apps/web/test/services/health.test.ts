@@ -129,7 +129,7 @@ test('the doctor card names the replicas, the checks and the next command', asyn
   const out = await renderToString(doctorCard({ health, replicas, serviceName: 'web' }));
 
   assert.match(out, /has not passed its health check in 40 s/);
-  assert.match(out, /href="\/machines\/m-1"/, 'the failing replica is a link, not a mention');
+  assert.match(out, /href="\/dashboard\/machines\/m-1"/, 'the failing replica is a link, not a mention');
   assert.match(out, /PORT/);
   assert.match(out, /secret:\/\//);
   assert.match(out, /pilot machines logs m-1/);

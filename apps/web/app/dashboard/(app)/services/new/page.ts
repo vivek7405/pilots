@@ -61,7 +61,7 @@ export default async function NewAppPage({ searchParams, actionData }: PageProps
   const fieldErrors = errors.fieldErrors ?? {};
 
   const lookForm = html`
-    <form method="get" action="/services/new" class="grid gap-3">
+    <form method="get" action="/dashboard/services/new" class="grid gap-3">
       ${field({
         id: 'repo',
         label: 'Repository',
@@ -89,7 +89,7 @@ export default async function NewAppPage({ searchParams, actionData }: PageProps
   let result: unknown = '';
   if (repo) {
     if (!isRepoSlug(repo)) {
-      result = sectionEmpty('That is not a repository', { text: 'Use the owner/name form, like acme/shop.', href: '/services/new' });
+      result = sectionEmpty('That is not a repository', { text: 'Use the owner/name form, like acme/shop.', href: '/dashboard/services/new' });
     } else {
       const owner = repo.split('/')[0];
       const installation = await installationFor(owner).catch(() => null);

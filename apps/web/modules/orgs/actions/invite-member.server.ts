@@ -70,5 +70,5 @@ export async function inviteMember(formData: FormData) {
   if (already) return { success: false, fieldErrors: { login: 'Already a member' } };
 
   await db.insert(memberships).values({ userId: user.id, orgId: ctx.org.id, role: wanted });
-  return { success: true, redirect: '/org?ok=invited' };
+  return { success: true, redirect: '/dashboard/org?ok=invited' };
 }

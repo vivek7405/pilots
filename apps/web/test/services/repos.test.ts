@@ -160,7 +160,7 @@ test('the service page form claims the repository too, not only the JSON route',
 
   const res = await submitForm(
     app.handle,
-    '/services/svc-mine?tab=settings',
+    '/dashboard/services/svc-mine?tab=settings',
     { service: 'svc-mine', repo: 'octo/app', branch: 'main', autodeploy: 'on' },
     { cookies: cookie, match: 'Connect' },
   );

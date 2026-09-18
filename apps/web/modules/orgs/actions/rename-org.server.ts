@@ -37,7 +37,7 @@ export async function renameOrg(formData: FormData) {
   if (!slugify(name)) {
     return { success: false, fieldErrors: { name: 'Use at least one letter or number' } };
   }
-  if (name === ctx.org.name) return { success: true, redirect: '/org?ok=saved' };
+  if (name === ctx.org.name) return { success: true, redirect: '/dashboard/org?ok=saved' };
 
   const orgId = ctx.org.id;
   const currentSlug = ctx.org.slug;
@@ -46,5 +46,5 @@ export async function renameOrg(formData: FormData) {
     tx.update(orgs).set({ name, slug }).where(eq(orgs.id, orgId)).run();
   });
 
-  return { success: true, redirect: '/org?ok=saved' };
+  return { success: true, redirect: '/dashboard/org?ok=saved' };
 }

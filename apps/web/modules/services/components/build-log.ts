@@ -267,7 +267,7 @@ export class BuildLog extends WebComponent({
   private land() {
     if (this.left) return;
     this.left = true;
-    const target = this.back || `/services/${this.serviceId}?tab=deployments`;
+    const target = this.back || `/dashboard/services/${this.serviceId}?tab=deployments`;
     navigate(`${target}${target.includes('?') ? '&' : '?'}ok=deployed` as Route);
   }
 

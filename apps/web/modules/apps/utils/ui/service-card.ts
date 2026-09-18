@@ -53,7 +53,7 @@ export function serviceCard(opts: {
   selected: boolean;
 }): TemplateResult {
   const { app, service, placed, replicas, volume, selected } = opts;
-  const href = `/apps/${encodeURIComponent(app)}?service=${encodeURIComponent(service.id)}`;
+  const href = `/dashboard/apps/${encodeURIComponent(app)}?service=${encodeURIComponent(service.id)}`;
   // Every service created now has an address of its own, so this fallback is
   // for the two that do not: one created private, and one that predates minted
   // addresses. Their running instance still has a routable name-based one, so

@@ -59,6 +59,6 @@ export async function createOrg(formData: FormData): Promise<Response | CreateOr
   // one reads as a create that did not happen.
   return new Response(null, {
     status: 303,
-    headers: { location: '/org?ok=created', 'set-cookie': orgCookie(org.id) },
+    headers: { location: '/dashboard/org?ok=created', 'set-cookie': orgCookie(org.id) },
   });
 }

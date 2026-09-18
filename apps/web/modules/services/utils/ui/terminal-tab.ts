@@ -50,7 +50,7 @@ export function terminalTab({ detail, app, instance }: TabProps): TemplateResult
           </nav>`
         : html`<span class="text-meta text-muted-foreground">${chosen.name || chosen.id}</span>`}
       <a
-        href=${`/machines/${chosen.id}/terminal`}
+        href=${`/dashboard/machines/${chosen.id}/terminal`}
         class=${cn(buttonClass({ variant: 'outline', size: 'sm' }), 'ml-auto no-underline')}
         >Open full screen</a
       >

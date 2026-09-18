@@ -41,7 +41,7 @@ test('a page is reachable by its own name, so Tokens finds /keys', () => {
   // nobody types the path of a page they cannot see.
   assert.deepEqual(
     rankHits([], [], 'token').map((h) => h.href),
-    ['/keys'],
+    ['/dashboard/keys'],
   );
 });
 
@@ -49,7 +49,7 @@ test('a sandbox is reachable by its id as well as its name', () => {
   const hits = rankHits([], machines, 'm-17');
   assert.deepEqual(
     hits.map((h) => h.href),
-    ['/machines/m-17'],
+    ['/dashboard/machines/m-17'],
   );
 });
 

@@ -40,5 +40,5 @@ export async function setAddress(formData: FormData) {
     // message says which, so it is passed through rather than replaced.
     return { success: false, fieldErrors: { domain: (err as Error).message } };
   }
-  return { success: true, redirect: backTo(formData, `/services/${id}`, 'saved') };
+  return { success: true, redirect: backTo(formData, `/dashboard/services/${id}`, 'saved') };
 }

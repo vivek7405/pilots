@@ -65,7 +65,7 @@ test('an owned job streams its lines as NDJSON, following when asked', async () 
 
 test('the Deployments tab follows a build it owns and lists the rest', async () => {
   const following = await app.handle(
-    new Request('http://localhost/services/svc-b?tab=deployments&build=bld-mine', asUser(cookie)),
+    new Request('http://localhost/dashboard/services/svc-b?tab=deployments&build=bld-mine', asUser(cookie)),
   );
   const body = await following.text();
   assert.match(body, /Building/);
@@ -73,7 +73,7 @@ test('the Deployments tab follows a build it owns and lists the rest', async () 
   assert.match(body, /<build-log[^>]*build-id="bld-mine"[^>]*service-id="svc-b"[^>]*autodeploy/, 'the element follows and deploys');
   assert.match(body, /the Deploy form below takes it/, 'the scripting-off path is stated');
 
-  const listed = await app.handle(new Request('http://localhost/services/svc-b?tab=deployments', asUser(cookie)));
+  const listed = await app.handle(new Request('http://localhost/dashboard/services/svc-b?tab=deployments', asUser(cookie)));
   const list = await listed.text();
   assert.match(list, />Builds</);
   assert.match(list, /href="\/api\/builds\/bld-mine\/logs"/, 'the raw log link');
@@ -146,7 +146,7 @@ test('the tab waits on a fresh build and only shows the log of an old one', asyn
   ] as never;
 
   const res = await app.handle(
-    new Request('http://localhost/services/svc-old?tab=deployments&build=bld-old', asUser(cookie)),
+    new Request('http://localhost/dashboard/services/svc-old?tab=deployments&build=bld-old', asUser(cookie)),
   );
   const body = await res.text();
   const element = body.slice(body.indexOf('<build-log'), body.indexOf('</build-log>'));
@@ -176,7 +176,7 @@ test('the deployment is readable without the build log, which is what the fallba
 
 test('a build someone else owns is not followed even when named', async () => {
   const res = await app.handle(
-    new Request('http://localhost/services/svc-b?tab=deployments&build=bld-theirs', asUser(cookie)),
+    new Request('http://localhost/dashboard/services/svc-b?tab=deployments&build=bld-theirs', asUser(cookie)),
   );
   const body = await res.text();
   assert.ok(!body.includes('<build-log'), 'a foreign job id is ignored, not followed');

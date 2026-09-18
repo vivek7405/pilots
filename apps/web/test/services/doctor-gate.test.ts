@@ -47,14 +47,14 @@ test('a health-gate refusal is a 422 whose card names the instance and quotes it
 
   const res = await submitForm(
     app.handle,
-    '/services/svc-g?tab=deployments',
-    { service: 'svc-g', release: 'rel-1', back: '/services/svc-g?tab=deployments' },
+    '/dashboard/services/svc-g?tab=deployments',
+    { service: 'svc-g', release: 'rel-1', back: '/dashboard/services/svc-g?tab=deployments' },
     { cookies: cookie, match: 'Deploy' },
   );
   assert.equal(res.status, 422);
   const body = await res.text();
   assert.match(body, /did not answer its health check within 30 s/, 'the symptom names the grace window');
-  assert.match(body, /href="\/machines\/m-g"[^>]*>api-9</, 'the instance is named and linked');
+  assert.match(body, /href="\/dashboard\/machines\/m-g"[^>]*>api-9</, 'the instance is named and linked');
   assert.match(body, /503 database not ready/, 'the last answer is quoted');
   assert.match(body, /href="\/api\/builds\/bld-g\/logs"[^>]*>Open the build log/, 'the build log is one click away');
   app.fleet.data.deployError = null;
@@ -64,8 +64,8 @@ test('any other deploy failure is still a plain refusal, not a diagnosis', async
   app.fleet.data.deployError = new Error('the image does not exist');
   const res = await submitForm(
     app.handle,
-    '/services/svc-g?tab=deployments',
-    { service: 'svc-g', release: 'rel-1', back: '/services/svc-g?tab=deployments' },
+    '/dashboard/services/svc-g?tab=deployments',
+    { service: 'svc-g', release: 'rel-1', back: '/dashboard/services/svc-g?tab=deployments' },
     { cookies: cookie, match: 'Deploy' },
   );
   assert.equal(res.status, 502);

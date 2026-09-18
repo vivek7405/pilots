@@ -39,23 +39,23 @@ const activePath = signal('');
  * worse than one missing entry.
  */
 const LINKS: { href: string; label: string }[] = [
-  { href: '/', label: NOUN.Apps },
-  { href: '/sandboxes', label: NOUN.Sandboxes },
-  { href: '/logs', label: NOUN.Logs },
+  { href: '/dashboard', label: NOUN.Apps },
+  { href: '/dashboard/sandboxes', label: NOUN.Sandboxes },
+  { href: '/dashboard/logs', label: NOUN.Logs },
 ];
 
 /**
  * Paths a nav entry owns that do not sit under it.
  *
- * A URL segment is an address and `/machines/<id>` keeps its path, so a
- * sandbox's own page does not live under `/sandboxes`. Without this the nav
+ * A URL segment is an address and `/dashboard/machines/<id>` keeps its path, so a
+ * sandbox's own page does not live under `/dashboard/sandboxes`. Without this the nav
  * goes dark the moment you open one, which reads as having left the section
  * you are plainly still in. Likewise a service's page belongs to Apps, which
  * is where the service was found.
  */
 const OWNS: Record<string, string[]> = {
-  '/sandboxes': ['/machines'],
-  '/': ['/apps', '/services'],
+  '/dashboard/sandboxes': ['/dashboard/machines'],
+  '/dashboard': ['/dashboard/apps', '/dashboard/services'],
 };
 
 export class AppNav extends WebComponent({ current: prop(String), orientation: prop(String) }) {
@@ -75,7 +75,7 @@ export class AppNav extends WebComponent({ current: prop(String), orientation: p
   }
 
   render() {
-    const active = activePath.get() || this.current || '/';
+    const active = activePath.get() || this.current || '/dashboard';
     const vertical = this.orientation === 'vertical';
     return html`
       <nav
@@ -85,12 +85,12 @@ export class AppNav extends WebComponent({ current: prop(String), orientation: p
         aria-label="Primary"
       >
         ${LINKS.map((link) => {
-          // A section owns its subroutes, so /apps/<app> keeps Apps lit. '/'
+          // A section owns its subroutes, so /dashboard/apps/<app> keeps Apps lit. '/dashboard'
           // is exact, or it would match every path, and it owns the paths in
           // OWNS instead.
           const under = (base: string) => active === base || active.startsWith(base + '/');
           const owned = (OWNS[link.href] ?? []).some(under);
-          const on = link.href === '/' ? active === '/' || owned : under(link.href) || owned;
+          const on = link.href === '/dashboard' ? active === '/dashboard' || owned : under(link.href) || owned;
           return html`<a
             href=${link.href}
             aria-current=${on ? 'page' : 'false'}

@@ -215,7 +215,7 @@ export default async function RootLayout({ children, url }: LayoutProps) {
             class="fixed inset-y-0 left-0 z-40 hidden w-[var(--sidebar-w)] flex-col border-r border-border bg-card/60 md:flex"
           >
             <div class="flex h-[var(--header-h)] items-center px-4">
-              <a href="/" class="font-semibold tracking-tight no-underline text-foreground">pilots</a>
+              <a href="/dashboard" class="font-semibold tracking-tight no-underline text-foreground">pilots</a>
             </div>
 
             <div class="flex-1 overflow-y-auto px-3 py-2">
@@ -224,9 +224,9 @@ export default async function RootLayout({ children, url }: LayoutProps) {
               <div class="my-3 border-t border-border"></div>
 
               <nav aria-label="Account" class="flex flex-col gap-1">
-                <a href="/usage" class="rounded-md px-3 py-2 text-body no-underline text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground">Usage</a>
-                <a href="/keys" class="rounded-md px-3 py-2 text-body no-underline text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground">Tokens</a>
-                <a href="/org" class="rounded-md px-3 py-2 text-body no-underline text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground">Team</a>
+                <a href="/dashboard/usage" class="rounded-md px-3 py-2 text-body no-underline text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground">Usage</a>
+                <a href="/dashboard/keys" class="rounded-md px-3 py-2 text-body no-underline text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground">Tokens</a>
+                <a href="/dashboard/org" class="rounded-md px-3 py-2 text-body no-underline text-muted-foreground transition-colors hover:bg-accent/60 hover:text-foreground">Team</a>
               </nav>
             </div>
 
@@ -281,7 +281,7 @@ export default async function RootLayout({ children, url }: LayoutProps) {
             style="border-right: var(--wj-scrollbar-compensation, 0px) solid transparent"
           >
             <div class="flex min-h-[3.5rem] items-center gap-4 px-4 py-2 sm:px-6">
-              <a href="/" class="font-semibold tracking-tight no-underline text-foreground md:hidden">pilots</a>
+              <a href="/dashboard" class="font-semibold tracking-tight no-underline text-foreground md:hidden">pilots</a>
               <nav aria-label="Breadcrumb" class="min-w-0">
                 <ol class="flex items-center gap-1.5 list-none m-0 p-0 text-meta">
                   ${crumbs.map(
@@ -348,9 +348,9 @@ export default async function RootLayout({ children, url }: LayoutProps) {
                             <ui-dropdown-menu-separator></ui-dropdown-menu-separator>
                           `
                         : ''}
-                      <ui-dropdown-menu-item><a href="/usage" class="no-underline text-foreground">Usage</a></ui-dropdown-menu-item>
-                      <ui-dropdown-menu-item><a href="/keys" class="no-underline text-foreground">Tokens</a></ui-dropdown-menu-item>
-                      <ui-dropdown-menu-item><a href="/org" class="no-underline text-foreground">Team</a></ui-dropdown-menu-item>
+                      <ui-dropdown-menu-item><a href="/dashboard/usage" class="no-underline text-foreground">Usage</a></ui-dropdown-menu-item>
+                      <ui-dropdown-menu-item><a href="/dashboard/keys" class="no-underline text-foreground">Tokens</a></ui-dropdown-menu-item>
+                      <ui-dropdown-menu-item><a href="/dashboard/org" class="no-underline text-foreground">Team</a></ui-dropdown-menu-item>
                       <ui-dropdown-menu-separator></ui-dropdown-menu-separator>
                       <ui-dropdown-menu-item variant="destructive">
                         <button type="submit" form="signout" class="w-full text-left bg-transparent border-0 p-0 font-inherit text-inherit cursor-pointer">Sign out</button>
@@ -368,7 +368,7 @@ export default async function RootLayout({ children, url }: LayoutProps) {
                 </org-switcher>
 
                 <form id="signout" method="POST" action="/api/auth/signout" class="hidden"></form>
-                <noscript><a href="/org" class="text-muted-foreground">Account</a></noscript>
+                <noscript><a href="/dashboard/org" class="text-muted-foreground">Account</a></noscript>
               </div>
             </div>
           </header>
@@ -379,7 +379,7 @@ export default async function RootLayout({ children, url }: LayoutProps) {
             style="border-right: var(--wj-scrollbar-compensation, 0px) solid transparent"
           >
             <div class="max-w-6xl mx-auto px-6 py-3 flex items-center gap-4">
-              <a href="/" class="font-semibold tracking-tight no-underline text-foreground">pilots</a>
+              <a href="/dashboard" class="font-semibold tracking-tight no-underline text-foreground">pilots</a>
               <div class="ml-auto"><theme-toggle></theme-toggle></div>
             </div>
           </header>

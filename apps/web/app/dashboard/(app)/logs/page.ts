@@ -49,7 +49,7 @@ export default async function LogsPage() {
     ${sources.length === 0
       ? sectionEmpty('Nothing is running', {
           text: 'Logs start at an instance’s last boot, so there is nothing to show until something is up.',
-          href: '/',
+          href: '/dashboard',
         })
       : html`
           <log-stream .sources=${sources}></log-stream>

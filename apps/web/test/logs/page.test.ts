@@ -30,7 +30,7 @@ before(async () => {
 });
 
 async function logs(ck = cookie): Promise<string> {
-  const res = await app.handle(new Request('http://localhost/logs', asUser(ck)));
+  const res = await app.handle(new Request('http://localhost/dashboard/logs', asUser(ck)));
   assert.equal(res.status, 200);
   return res.text();
 }

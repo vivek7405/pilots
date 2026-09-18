@@ -42,8 +42,8 @@ async function signInAnchor(path: string): Promise<string> {
   return tag[0];
 }
 
-test('the home page sign-in anchor carries data-no-router', async () => {
-  const tag = await signInAnchor('/');
+test('the dashboard home sign-in anchor carries data-no-router', async () => {
+  const tag = await signInAnchor('/dashboard');
   assert.match(tag, /\bdata-no-router\b/, 'the sign-in anchor opts out of the client router');
 });
 

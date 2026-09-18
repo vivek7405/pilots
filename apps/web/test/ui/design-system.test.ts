@@ -34,20 +34,20 @@ let org = '';
 
 /** The pages that render at least one seeded table row or one form control. */
 const PAGES = [
-  '/',
-  '/apps/gallery',
-  '/apps/gallery?service=svc-1&tab=settings',
-  '/apps/gallery?service=svc-1&tab=variables',
-  '/apps/gallery?service=svc-1&tab=metrics',
-  '/sandboxes',
-  '/services/new',
-  '/services/svc-1',
-  '/storage',
-  '/domains',
-  '/usage',
-  '/logs',
-  '/keys',
-  '/org',
+  '/dashboard',
+  '/dashboard/apps/gallery',
+  '/dashboard/apps/gallery?service=svc-1&tab=settings',
+  '/dashboard/apps/gallery?service=svc-1&tab=variables',
+  '/dashboard/apps/gallery?service=svc-1&tab=metrics',
+  '/dashboard/sandboxes',
+  '/dashboard/services/new',
+  '/dashboard/services/svc-1',
+  '/dashboard/storage',
+  '/dashboard/domains',
+  '/dashboard/usage',
+  '/dashboard/logs',
+  '/dashboard/keys',
+  '/dashboard/org',
 ] as const;
 
 before(async () => {
@@ -163,7 +163,7 @@ test('every visible control carries an accessible name', async () => {
 });
 
 test('the one-shot key banner is an alert, so it is announced and not just seen', async () => {
-  const body = await render('/keys');
+  const body = await render('/dashboard/keys');
   // Every banner the pages can render goes through the same two helpers, so
   // asserting the ROLE is on each one catches a page that hand-rolls its own.
   for (const banner of body.match(/<div[^>]*data-slot="alert-title"[\s\S]*?<\/div>/g) ?? []) {
@@ -179,7 +179,7 @@ test('every token public/input.css maps into a utility reaches the served page',
   // comments truncates the block and everything after it silently disappears
   // from the page while the file still reads correctly. Asserting on the source
   // would pass through exactly that failure.
-  const body = await render('/sandboxes');
+  const body = await render('/dashboard/sandboxes');
 
   // Each `--color-x: var(--y)` in an @theme block promises that `--y` has a
   // value somewhere. The layout is the only place this app defines one.
@@ -201,7 +201,7 @@ test('the theme is a real choice, not a light-only page with dark tokens nobody 
 });
 
 test('the app chrome is a fixed header, one toast viewport and the flash reader', async () => {
-  const body = await render('/sandboxes');
+  const body = await render('/dashboard/sandboxes');
 
   // Fixed, never sticky: sticky flickers its background for one frame on iOS
   // WebKit during a client-router navigation, and every iOS browser is WebKit.
@@ -219,7 +219,7 @@ test('the app chrome is a fixed header, one toast viewport and the flash reader'
 });
 
 test('the identity menu holds the account chores and the nav holds the product', async () => {
-  const body = await render('/sandboxes');
+  const body = await render('/dashboard/sandboxes');
   const header = body.slice(body.indexOf('<header'), body.indexOf('</header>'));
 
   for (const label of ['Usage', 'Tokens', 'Team', 'Sign out']) {
@@ -271,24 +271,24 @@ test('no source file paints a raw Tailwind colour', () => {
  * test below pass by reading the wrong file. A stale entry throws on the read.
  */
 const PAGE_FILES: Record<string, string> = {
-  '/': 'app/page.ts',
-  '/apps/gallery': 'app/(app)/apps/[app]/page.ts',
-  '/apps/gallery?service=svc-1&tab=settings': 'app/(app)/apps/[app]/page.ts',
-  '/apps/gallery?service=svc-1&tab=variables': 'app/(app)/apps/[app]/page.ts',
-  '/apps/gallery?service=svc-1&tab=metrics': 'app/(app)/apps/[app]/page.ts',
-  '/apps/gallery?service=svc-1&tab=terminal': 'app/(app)/apps/[app]/page.ts',
-  '/services/svc-1?tab=terminal': 'app/(app)/services/[id]/page.ts',
-  '/sandboxes': 'app/(app)/sandboxes/page.ts',
-  '/machines/m-1': 'app/(app)/machines/[id]/page.ts',
-  '/machines/m-1/terminal': 'app/(app)/machines/[id]/terminal/page.ts',
-  '/services/new': 'app/(app)/services/new/page.ts',
-  '/services/svc-1': 'app/(app)/services/[id]/page.ts',
-  '/storage': 'app/(app)/storage/page.ts',
-  '/domains': 'app/(app)/domains/page.ts',
-  '/usage': 'app/(app)/usage/page.ts',
-  '/logs': 'app/(app)/logs/page.ts',
-  '/keys': 'app/(app)/keys/page.ts',
-  '/org': 'app/(app)/org/page.ts',
+  '/dashboard': 'app/dashboard/page.ts',
+  '/dashboard/apps/gallery': 'app/dashboard/(app)/apps/[app]/page.ts',
+  '/dashboard/apps/gallery?service=svc-1&tab=settings': 'app/dashboard/(app)/apps/[app]/page.ts',
+  '/dashboard/apps/gallery?service=svc-1&tab=variables': 'app/dashboard/(app)/apps/[app]/page.ts',
+  '/dashboard/apps/gallery?service=svc-1&tab=metrics': 'app/dashboard/(app)/apps/[app]/page.ts',
+  '/dashboard/apps/gallery?service=svc-1&tab=terminal': 'app/dashboard/(app)/apps/[app]/page.ts',
+  '/dashboard/services/svc-1?tab=terminal': 'app/dashboard/(app)/services/[id]/page.ts',
+  '/dashboard/sandboxes': 'app/dashboard/(app)/sandboxes/page.ts',
+  '/dashboard/machines/m-1': 'app/dashboard/(app)/machines/[id]/page.ts',
+  '/dashboard/machines/m-1/terminal': 'app/dashboard/(app)/machines/[id]/terminal/page.ts',
+  '/dashboard/services/new': 'app/dashboard/(app)/services/new/page.ts',
+  '/dashboard/services/svc-1': 'app/dashboard/(app)/services/[id]/page.ts',
+  '/dashboard/storage': 'app/dashboard/(app)/storage/page.ts',
+  '/dashboard/domains': 'app/dashboard/(app)/domains/page.ts',
+  '/dashboard/usage': 'app/dashboard/(app)/usage/page.ts',
+  '/dashboard/logs': 'app/dashboard/(app)/logs/page.ts',
+  '/dashboard/keys': 'app/dashboard/(app)/keys/page.ts',
+  '/dashboard/org': 'app/dashboard/(app)/org/page.ts',
 };
 
 /** Every `#`-aliased specifier a file imports, as a repo-relative path. */
@@ -350,7 +350,7 @@ function elementsIn(body: string): string[] {
  * it is where the services page's missing copy button lived.
  *
  * Counterfactual: drop `import '#components/copy-button.ts'` from
- * `app/(app)/services/page.ts` and this fails on `/services` for the empty org.
+ * `app/dashboard/(app)/services/page.ts` and this fails on `/dashboard/services` for the empty org.
  */
 test('every custom element a page renders is one that page imports', async () => {
   // The layout is on every page, so what it registers counts as available.

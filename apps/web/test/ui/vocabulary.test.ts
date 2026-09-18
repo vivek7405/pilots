@@ -17,7 +17,7 @@
  *  - `<code>` and `<pre>` spans are dropped. A CLI command legitimately says
  *    `pilot machines logs`, and forbidding that would make the docs wrong to
  *    make the copy right.
- *  - Tags and comments are dropped, so `href="/machines/1"` and a class of
+ *  - Tags and comments are dropped, so `href="/dashboard/machines/1"` and a class of
  *    `text-muted-foreground` are addresses and styles rather than prose.
  *
  * `components/ui/` is exempt: those files are the kit's, they carry no product

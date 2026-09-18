@@ -47,5 +47,5 @@ export async function leaveOrg() {
     .delete(memberships)
     .where(and(eq(memberships.userId, ctx.user.id), eq(memberships.orgId, ctx.org.id)));
 
-  return { success: true, redirect: '/org?ok=left' };
+  return { success: true, redirect: '/dashboard/org?ok=left' };
 }

@@ -48,8 +48,8 @@ export function tabOf(raw: unknown, service?: Pick<Service, 'labels'>): Tab {
  */
 export function tabHref(detail: Pick<ServiceDetail, 'service'>, tab: Tab, app?: string, extra = ''): string {
   return app
-    ? `/apps/${encodeURIComponent(app)}?service=${encodeURIComponent(detail.service.id)}&tab=${tab}${extra}`
-    : `/services/${detail.service.id}?tab=${tab}${extra}`;
+    ? `/dashboard/apps/${encodeURIComponent(app)}?service=${encodeURIComponent(detail.service.id)}&tab=${tab}${extra}`
+    : `/dashboard/services/${detail.service.id}?tab=${tab}${extra}`;
 }
 
 export interface PanelErrors {

@@ -18,6 +18,8 @@
  * item links to where you already are is a control that does nothing.
  */
 
+import { DASHBOARD } from '#lib/paths.ts';
+
 export interface Crumb {
   label: string;
   /** Absent on the last crumb, which is the page you are on. */
@@ -26,22 +28,25 @@ export interface Crumb {
 
 /** A path segment as the section name a person would recognise. */
 const SECTION: Record<string, { label: string; href: string }> = {
-  sandboxes: { label: 'Sandboxes', href: '/sandboxes' },
-  machines: { label: 'Sandboxes', href: '/sandboxes' },
-  storage: { label: 'Storage', href: '/storage' },
-  domains: { label: 'Domains', href: '/domains' },
-  logs: { label: 'Logs', href: '/logs' },
-  usage: { label: 'Usage', href: '/usage' },
-  keys: { label: 'Tokens', href: '/keys' },
-  org: { label: 'Team', href: '/org' },
-  services: { label: 'Apps', href: '/' },
+  sandboxes: { label: 'Sandboxes', href: '/dashboard/sandboxes' },
+  machines: { label: 'Sandboxes', href: '/dashboard/sandboxes' },
+  storage: { label: 'Storage', href: '/dashboard/storage' },
+  domains: { label: 'Domains', href: '/dashboard/domains' },
+  logs: { label: 'Logs', href: '/dashboard/logs' },
+  usage: { label: 'Usage', href: '/dashboard/usage' },
+  keys: { label: 'Tokens', href: '/dashboard/keys' },
+  org: { label: 'Team', href: '/dashboard/org' },
+  services: { label: 'Apps', href: DASHBOARD },
 };
 
 export function breadcrumb(path: string): Crumb[] {
-  const parts = path.split('/').filter(Boolean);
+  const all = path.split('/').filter(Boolean);
+  // The prefix is where the product lives, not a place in it: it never renders
+  // as a crumb of its own, and the root crumb is what links to it.
+  const parts = all[0] === DASHBOARD.slice(1) ? all.slice(1) : all;
   if (parts.length === 0) return [{ label: 'pilots' }];
 
-  const trail: Crumb[] = [{ label: 'pilots', href: '/' }];
+  const trail: Crumb[] = [{ label: 'pilots', href: DASHBOARD }];
   const [first, second, third] = parts;
 
   // An app name IS a name, so it is the one dynamic segment that renders.

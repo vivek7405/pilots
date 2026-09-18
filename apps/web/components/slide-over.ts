@@ -1,5 +1,5 @@
 /**
- * <slide-over back="/apps/x">: the panel that opens beside the canvas.
+ * <slide-over back="/dashboard/apps/x">: the panel that opens beside the canvas.
  *
  * Not a `<dialog>` and not `aria-modal`: the canvas has to stay usable
  * behind it, and a modal makes everything else inert. The panel is fixed

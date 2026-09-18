@@ -49,5 +49,5 @@ export async function resetBuilder(formData: FormData) {
     return { success: false, error: `The fleet refused: ${(err as Error).message}`, status: 502 };
   }
 
-  return { success: true, redirect: '/org?ok=builder-reset' };
+  return { success: true, redirect: '/dashboard/org?ok=builder-reset' };
 }

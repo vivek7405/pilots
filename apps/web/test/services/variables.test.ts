@@ -32,7 +32,7 @@ before(async () => {
 });
 
 async function tab(name: string): Promise<string> {
-  const res = await app.handle(new Request(`http://localhost/services/svc-var?tab=${name}`, asUser(cookie)));
+  const res = await app.handle(new Request(`http://localhost/dashboard/services/svc-var?tab=${name}`, asUser(cookie)));
   assert.equal(res.status, 200);
   return res.text();
 }
@@ -63,8 +63,8 @@ test('saving without the confirm is refused and touches nothing', async () => {
   app.fleet.calls.length = 0;
   const res = await submitForm(
     app.handle,
-    '/services/svc-var?tab=variables',
-    { service: 'svc-var', back: '/services/svc-var?tab=variables', env: 'A=1' },
+    '/dashboard/services/svc-var?tab=variables',
+    { service: 'svc-var', back: '/dashboard/services/svc-var?tab=variables', env: 'A=1' },
     { cookies: cookie, match: 'Save' },
   );
   assert.equal(res.status, 422);
@@ -76,8 +76,8 @@ test('an empty save and a malformed line are refused with the line named', async
   app.fleet.calls.length = 0;
   const empty = await submitForm(
     app.handle,
-    '/services/svc-var?tab=variables',
-    { service: 'svc-var', back: '/services/svc-var?tab=variables', env: '', confirm: 'on' },
+    '/dashboard/services/svc-var?tab=variables',
+    { service: 'svc-var', back: '/dashboard/services/svc-var?tab=variables', env: '', confirm: 'on' },
     { cookies: cookie, match: 'Save' },
   );
   assert.equal(empty.status, 422);
@@ -85,8 +85,8 @@ test('an empty save and a malformed line are refused with the line named', async
 
   const bad = await submitForm(
     app.handle,
-    '/services/svc-var?tab=variables',
-    { service: 'svc-var', back: '/services/svc-var?tab=variables', env: 'A=1\nNOEQUALS', confirm: 'on' },
+    '/dashboard/services/svc-var?tab=variables',
+    { service: 'svc-var', back: '/dashboard/services/svc-var?tab=variables', env: 'A=1\nNOEQUALS', confirm: 'on' },
     { cookies: cookie, match: 'Save' },
   );
   assert.equal(bad.status, 422);
@@ -98,10 +98,10 @@ test('a valid save patches hostd with both kinds, stores names only, and returns
   app.fleet.calls.length = 0;
   const res = await submitForm(
     app.handle,
-    '/services/svc-var?tab=variables',
+    '/dashboard/services/svc-var?tab=variables',
     {
       service: 'svc-var',
-      back: '/services/svc-var?tab=variables',
+      back: '/dashboard/services/svc-var?tab=variables',
       env: 'NODE_ENV=production\n# a comment\nLOG_LEVEL=info',
       // The form helper cannot repeat a field, so one secret row is sent; the
       // action pairs names and values by position either way.
@@ -112,7 +112,7 @@ test('a valid save patches hostd with both kinds, stores names only, and returns
     { cookies: cookie, match: 'Save' },
   );
   assert.equal(res.status, 303);
-  assert.equal(res.headers.get('location'), '/services/svc-var?tab=variables&ok=variables-saved');
+  assert.equal(res.headers.get('location'), '/dashboard/services/svc-var?tab=variables&ok=variables-saved');
 
   const patch = app.fleet.calls.find((c) => c.method === 'services.patch');
   assert.ok(patch, 'hostd was patched');
@@ -146,8 +146,8 @@ test('saving one kind leaves the other kind alone on hostd', async () => {
   app.fleet.calls.length = 0;
   const res = await submitForm(
     app.handle,
-    '/services/svc-var?tab=variables',
-    { service: 'svc-var', back: '/services/svc-var?tab=variables', env: 'ONLY=plain', confirm: 'on' },
+    '/dashboard/services/svc-var?tab=variables',
+    { service: 'svc-var', back: '/dashboard/services/svc-var?tab=variables', env: 'ONLY=plain', confirm: 'on' },
     { cookies: cookie, match: 'Save' },
   );
   assert.equal(res.status, 303);
@@ -169,8 +169,8 @@ test('a remove box empties one kind on hostd and drops its names here', async ()
   app.fleet.calls.length = 0;
   const res = await submitForm(
     app.handle,
-    '/services/svc-var?tab=variables',
-    { service: 'svc-var', back: '/services/svc-var?tab=variables', env: '', clear_secrets: 'on', confirm: 'on' },
+    '/dashboard/services/svc-var?tab=variables',
+    { service: 'svc-var', back: '/dashboard/services/svc-var?tab=variables', env: '', clear_secrets: 'on', confirm: 'on' },
     { cookies: cookie, match: 'Save' },
   );
   assert.equal(res.status, 303);
@@ -187,8 +187,8 @@ test('ticking remove and typing a value of the same kind is refused, not guessed
   app.fleet.calls.length = 0;
   const res = await submitForm(
     app.handle,
-    '/services/svc-var?tab=variables',
-    { service: 'svc-var', back: '/services/svc-var?tab=variables', env: 'A=1', clear_env: 'on', confirm: 'on' },
+    '/dashboard/services/svc-var?tab=variables',
+    { service: 'svc-var', back: '/dashboard/services/svc-var?tab=variables', env: 'A=1', clear_env: 'on', confirm: 'on' },
     { cookies: cookie, match: 'Save' },
   );
   assert.equal(res.status, 422);

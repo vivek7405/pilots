@@ -60,5 +60,5 @@ export async function transferOwnership(formData: FormData) {
     tx.update(orgs).set({ ownerId: userId }).where(eq(orgs.id, orgId)).run();
   });
 
-  return { success: true, redirect: '/org?ok=transferred' };
+  return { success: true, redirect: '/dashboard/org?ok=transferred' };
 }

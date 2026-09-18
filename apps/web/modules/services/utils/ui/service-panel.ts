@@ -3,7 +3,7 @@
  * and the tab in force.
  *
  * The same fragment renders in the slide-over on the app's canvas and
- * full-width at `/services/<id>`, so a bookmark, an app-less service and a
+ * full-width at `/dashboard/services/<id>`, so a bookmark, an app-less service and a
  * card click all show one thing. A tab is a URL, not a `<ui-tabs>`: a reload
  * restores it, only the selected tab renders, and the terminal emulator is
  * not shipped to someone reading settings.
@@ -121,7 +121,7 @@ export function servicePanel(detail: ServiceDetail, tab: Tab, ctx: PanelContext 
         </div>
         ${ctx.app
           ? html`<a
-              href=${`/apps/${encodeURIComponent(ctx.app)}`}
+              href=${`/dashboard/apps/${encodeURIComponent(ctx.app)}`}
               aria-label="Close"
               class=${cn(buttonClass({ variant: 'ghost', size: 'icon-sm' }), 'shrink-0')}
             >

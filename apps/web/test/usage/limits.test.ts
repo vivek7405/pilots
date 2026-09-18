@@ -15,7 +15,7 @@ before(async () => {
 });
 
 test('the usage page carries the four limit bars and the capacity strip', async () => {
-  const res = await app.handle(new Request('http://localhost/usage', asUser(cookie)));
+  const res = await app.handle(new Request('http://localhost/dashboard/usage', asUser(cookie)));
   assert.equal(res.status, 200);
   const body = await res.text();
   assert.ok(body.includes('>Limits<'), 'a Limits section');

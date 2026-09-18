@@ -24,5 +24,5 @@ export async function addDomain(formData: FormData) {
   } catch (err) {
     return { success: false, error: `The fleet refused: ${(err as Error).message}`, status: 502 };
   }
-  return { success: true, redirect: backTo(formData, '/domains', 'saved') };
+  return { success: true, redirect: backTo(formData, '/dashboard/domains', 'saved') };
 }

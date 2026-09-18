@@ -29,5 +29,5 @@ export async function disconnectRepo(formData: FormData) {
   }
 
   await db.delete(repoConnections).where(eq(repoConnections.serviceId, id));
-  return { success: true, redirect: backTo(formData, `/services/${id}`, 'disconnected') };
+  return { success: true, redirect: backTo(formData, `/dashboard/services/${id}`, 'disconnected') };
 }

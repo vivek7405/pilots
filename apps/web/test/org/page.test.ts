@@ -22,7 +22,7 @@ let memberCookie = '';
 let ownerCookie = '';
 
 async function page(cookie: string): Promise<string> {
-  const res = await app.handle(new Request('http://localhost/org', asUser(cookie)));
+  const res = await app.handle(new Request('http://localhost/dashboard/org', asUser(cookie)));
   assert.equal(res.status, 200);
   return res.text();
 }

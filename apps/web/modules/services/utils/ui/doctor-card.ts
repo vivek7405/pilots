@@ -41,7 +41,7 @@ export function doctorCard(opts: {
   const gated = gate ? replicas.find((r) => r.id === gate.replica || r.name === gate.replica) : undefined;
   const symptom = gate
     ? html`Instance
-        <a href=${`/machines/${gated?.id ?? gate.replica}`} class="underline">${gated?.name ?? gate.replica}</a>
+        <a href=${`/dashboard/machines/${gated?.id ?? gate.replica}`} class="underline">${gated?.name ?? gate.replica}</a>
         did not answer its health check within ${gate.grace_sec} s.`
     : opts.symptom ??
     (health.release
@@ -62,7 +62,7 @@ export function doctorCard(opts: {
         ${named.length === 1 ? 'The instance' : 'The instances'} involved:
         ${named.map(
           (replica, index) =>
-            html`${index > 0 ? ', ' : ''}<a href=${`/machines/${replica.id}`} class="text-primary underline"
+            html`${index > 0 ? ', ' : ''}<a href=${`/dashboard/machines/${replica.id}`} class="text-primary underline"
               >${replica.name || replica.id}</a
             >`,
         )}

@@ -4,7 +4,7 @@
  *
  * There is no `/v1/apps` resource on purpose (bar 3): an app is what the
  * services say it is. This is the one place that grouping and that count are
- * computed, so the card on `/` and the heading on `/apps/<app>` cannot
+ * computed, so the card on `/` and the heading on `/dashboard/apps/<app>` cannot
  * disagree about either.
  */
 

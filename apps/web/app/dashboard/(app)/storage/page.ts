@@ -33,7 +33,7 @@ export default async function StoragePage() {
             {
               header: 'Attached to',
               cellClass: 'font-mono text-muted-foreground',
-              cell: (v) => (v.machine_id ? html`<a href=${`/machines/${v.machine_id}`}>${v.machine_id}</a>` : '-'),
+              cell: (v) => (v.machine_id ? html`<a href=${`/dashboard/machines/${v.machine_id}`}>${v.machine_id}</a>` : '-'),
             },
           ],
         })}

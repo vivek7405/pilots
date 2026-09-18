@@ -42,7 +42,7 @@ export function metricsTab({ detail }: TabProps): TemplateResult {
                   <div class=${cn(cardClass(), 'gap-0 py-0')}>
                     <div class=${cn(cardBody(), 'grid gap-2')}>
                       <div class="flex items-center justify-between gap-2">
-                        <a href=${`/machines/${m.id}`} class="truncate font-medium text-foreground">${m.name || m.id}</a>
+                        <a href=${`/dashboard/machines/${m.id}`} class="truncate font-medium text-foreground">${m.name || m.id}</a>
                         <live-machine-state machine-id=${m.id} mode="dot">${statusDot(m.state)}</live-machine-state>
                       </div>
                       ${isStaleReplica(m, service)
@@ -60,7 +60,7 @@ export function metricsTab({ detail }: TabProps): TemplateResult {
                       <p class="m-0 flex flex-wrap gap-x-3 text-meta">
                         <span>${m.vcpus ?? 1} vCPU</span>
                         <span>${((m.mem_mib ?? 512) / 1024).toFixed(1)} GB</span>
-                        <a href=${`/machines/${m.id}`} class="ml-auto">Logs</a>
+                        <a href=${`/dashboard/machines/${m.id}`} class="ml-auto">Logs</a>
                       </p>
                     </div>
                   </div>
@@ -77,7 +77,7 @@ export function metricsTab({ detail }: TabProps): TemplateResult {
                 <h3 class="m-0 mb-3 text-body font-medium">${title}</h3>
                 ${sectionEmpty('Not recorded yet', {
                   text: 'pilots meters instance-seconds for billing and does not yet keep CPU or memory over time for a service.',
-                  href: '/usage',
+                  href: '/dashboard/usage',
                 })}
               </div>
             </div>

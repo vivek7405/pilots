@@ -10,7 +10,7 @@
  * canvas still behind it, so a reload, a bookmark and a no-script visitor
  * all see the same thing.
  *
- * The URL contract: `/apps/<app>?service=<id>&tab=<deployments|terminal|settings>`.
+ * The URL contract: `/dashboard/apps/<app>?service=<id>&tab=<deployments|terminal|settings>`.
  */
 import { html, notFound } from '@webjsdev/core';
 import type { PageProps } from '@webjsdev/core';
@@ -59,7 +59,7 @@ export default async function AppPage({ params, searchParams, actionData }: Page
   return html`
     <div class="flex flex-wrap items-center gap-3">
       ${pageHeading(app)}
-      <a href=${`/services/new?app=${encodeURIComponent(app)}`} class=${cn(buttonClass({ size: 'sm' }), 'ml-auto')}
+      <a href=${`/dashboard/services/new?app=${encodeURIComponent(app)}`} class=${cn(buttonClass({ size: 'sm' }), 'ml-auto')}
         >Add a service</a
       >
     </div>
@@ -97,7 +97,7 @@ export default async function AppPage({ params, searchParams, actionData }: Page
     </app-canvas>
 
     ${detail
-      ? html`<slide-over back=${`/apps/${encodeURIComponent(app)}`}>
+      ? html`<slide-over back=${`/dashboard/apps/${encodeURIComponent(app)}`}>
           ${servicePanel(detail, tab, { app, errors, instance, build })}
         </slide-over>`
       : ''}

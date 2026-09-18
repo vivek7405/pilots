@@ -100,10 +100,10 @@ after(() => {
 });
 
 test('creating a team makes the creator its owner and switches to it', async () => {
-  const res = await submitForm(app.handle, '/org/new', { name: 'Acme Rockets' }, { cookies: ownerCookie, match: /name="name"/ });
+  const res = await submitForm(app.handle, '/dashboard/org/new', { name: 'Acme Rockets' }, { cookies: ownerCookie, match: /name="name"/ });
 
   assert.equal(res.status, 303);
-  assert.equal(res.headers.get('location'), '/org?ok=created');
+  assert.equal(res.headers.get('location'), '/dashboard/org?ok=created');
 
   const org = (await db.query.orgs.findMany()).find((o) => o.name === 'Acme Rockets');
   assert.ok(org, 'the team exists');
@@ -123,7 +123,7 @@ test('creating a team makes the creator its owner and switches to it', async () 
 });
 
 test('a second team with the same name gets its own address rather than failing', async () => {
-  const res = await submitForm(app.handle, '/org/new', { name: 'Acme Rockets' }, { cookies: ownerCookie, match: /name="name"/ });
+  const res = await submitForm(app.handle, '/dashboard/org/new', { name: 'Acme Rockets' }, { cookies: ownerCookie, match: /name="name"/ });
   assert.equal(res.status, 303);
   const slugs = (await db.query.orgs.findMany()).filter((o) => o.name === 'Acme Rockets').map((o) => o.slug);
   assert.deepEqual(slugs.sort(), ['acme-rockets', 'acme-rockets-2']);
@@ -131,7 +131,7 @@ test('a second team with the same name gets its own address rather than failing'
 
 test('a name with no letters or digits is a field error, not a team called nothing', async () => {
   const before = (await db.query.orgs.findMany()).length;
-  const res = await submitForm(app.handle, '/org/new', { name: '///' }, { cookies: ownerCookie, match: /name="name"/ });
+  const res = await submitForm(app.handle, '/dashboard/org/new', { name: '///' }, { cookies: ownerCookie, match: /name="name"/ });
   assert.equal(res.headers.get('location'), null, 'no redirect, so the form re-renders with its error');
   assert.equal((await db.query.orgs.findMany()).length, before, 'and nothing was written');
 });
@@ -282,7 +282,7 @@ test('an empty team is deleted, its memberships go, and its tokens are revoked',
   })) as Envelope;
 
   assert.equal(result.success, true);
-  assert.equal(result.redirect, '/org?ok=deleted');
+  assert.equal(result.redirect, '/dashboard/org?ok=deleted');
   assert.equal((await db.query.orgs.findMany()).some((o) => o.id === orgId), false);
   assert.equal((await db.query.memberships.findMany()).some((m) => m.orgId === orgId), false);
 

@@ -77,7 +77,7 @@ after(() => {
 });
 
 async function page(query = ''): Promise<string> {
-  const res = await app.handle(new Request(`http://localhost/services/new${query}`, asUser(cookie)));
+  const res = await app.handle(new Request(`http://localhost/dashboard/services/new${query}`, asUser(cookie)));
   assert.equal(res.status, 200);
   return res.text();
 }
@@ -88,7 +88,7 @@ test('the page is a look form first, and creates nothing by looking', async () =
   app.fleet.calls.length = 0;
   const body = await page();
   assert.match(body, /New app/);
-  assert.match(body, /<form method="get" action="\/services\/new"/, 'looking is a plain GET');
+  assert.match(body, /<form method="get" action="\/dashboard\/services\/new"/, 'looking is a plain GET');
   assert.match(body, /Look inside/);
   assert.ok(!app.fleet.calls.some((c) => c.method === 'services.create'), 'nothing is created on the way in');
 });
@@ -165,7 +165,7 @@ test('one deployable service renders the confirmation and a bound Deploy form', 
 async function create(fields: Record<string, string>) {
   return submitForm(
     app.handle,
-    `/services/new${LOOK}`,
+    `/dashboard/services/new${LOOK}`,
     { repo: 'acme/shop', ref: 'main', app: 'shop', name: 'web', domain: 'web', ...fields },
     { cookies: cookie, match: 'Deploy' },
   );
@@ -200,7 +200,7 @@ test('a one-step plan starts the build, creates the service as the org, and land
   app.fleet.data.plan = ONE_STEP;
   const res = await create({});
   assert.equal(res.status, 303);
-  assert.equal(res.headers.get('location'), '/services/svc-new?tab=deployments&build=bld-fake&ok=building');
+  assert.equal(res.headers.get('location'), '/dashboard/services/svc-new?tab=deployments&build=bld-fake&ok=building');
 
   assert.ok(app.fleet.calls.some((c) => c.method === 'as' && c.args[0] === org), 'acted as the visitor org');
   const build = app.fleet.calls.find((c) => c.method === 'builds.createFromRepo')!;

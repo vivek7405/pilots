@@ -26,7 +26,7 @@ after(() => {
 });
 
 /** The bytes between <header> and </header> on a served page. */
-async function header(cookie: string, path = '/sandboxes'): Promise<string> {
+async function header(cookie: string, path = '/dashboard/sandboxes'): Promise<string> {
   const res = await app.handle(new Request(`http://localhost${path}`, asUser(cookie)));
   assert.equal(res.status, 200, `${path} is served`);
   const body = await res.text();
@@ -107,7 +107,7 @@ test('a user in more than one org gets a radio group in the menu', async () => {
 
 test('the header is fixed and its height is reserved', async () => {
   const cookie = await signInAs(app.handle, { id: 8103, login: 'layout-pilot' });
-  const res = await app.handle(new Request('http://localhost/sandboxes', asUser(cookie)));
+  const res = await app.handle(new Request('http://localhost/dashboard/sandboxes', asUser(cookie)));
   const body = await res.text();
 
   // Fixed, never sticky: sticky flickers on iOS WebKit during a soft
@@ -123,12 +123,12 @@ test('the header is fixed and its height is reserved', async () => {
 
 test('the account actions also exist as plain forms on /org', async () => {
   const cookie = await signInAs(app.handle, { id: 8104, login: 'noscript-pilot' });
-  const res = await app.handle(new Request('http://localhost/org', asUser(cookie)));
+  const res = await app.handle(new Request('http://localhost/dashboard/org', asUser(cookie)));
   const body = await res.text();
 
   // The identity menu's panel is a popover, invisible with scripting off, so
   // the same sign out has to be reachable on a real page.
   assert.match(body, />Account</);
   assert.match(body, /action="\/api\/auth\/signout"/);
-  assert.match(body, /<noscript><a href="\/org"/, 'the header points a scriptless visitor here');
+  assert.match(body, /<noscript><a href="\/dashboard\/org"/, 'the header points a scriptless visitor here');
 });

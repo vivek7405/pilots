@@ -2,7 +2,7 @@
  * Where a service form returns to after it succeeds.
  *
  * A service's forms render in two places: the full-width page at
- * `/services/<id>` and the slide-over on the app's canvas. An action that
+ * `/dashboard/services/<id>` and the slide-over on the app's canvas. An action that
  * always redirected to the page would throw a reader off the canvas every
  * time they saved a setting. So each form carries a hidden `back`, the
  * action reads it through the same local-path rule every redirect in this

@@ -74,7 +74,7 @@ export default async function Authorize({ url }: PageProps) {
       <div class="max-w-md mx-auto py-24 grid gap-4">
         ${errorAlert(parsed.title)}
         <p class="text-meta text-muted-foreground m-0">${parsed.detail}</p>
-        <a class=${buttonClass({ variant: 'outline' })} href="/keys">Your ${NOUN.Tokens.toLowerCase()}</a>
+        <a class=${buttonClass({ variant: 'outline' })} href="/dashboard/keys">Your ${NOUN.Tokens.toLowerCase()}</a>
       </div>
     `;
   }

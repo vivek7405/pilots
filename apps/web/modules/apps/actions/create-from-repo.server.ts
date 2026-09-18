@@ -181,7 +181,7 @@ export async function createFromRepo(formData: FormData) {
 
     return {
       success: true,
-      redirect: `/services/${service.id}?tab=deployments&build=${encodeURIComponent(jobId)}&ok=building`,
+      redirect: `/dashboard/services/${service.id}?tab=deployments&build=${encodeURIComponent(jobId)}&ok=building`,
     };
   } catch (err) {
     if (err instanceof PilotsError) {

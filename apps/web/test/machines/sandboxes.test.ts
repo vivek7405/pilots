@@ -32,7 +32,7 @@ before(async () => {
 });
 
 test('the list offers one button, and it says what it does', async () => {
-  const res = await app.handle(new Request('http://localhost/sandboxes', asUser(cookie)));
+  const res = await app.handle(new Request('http://localhost/dashboard/sandboxes', asUser(cookie)));
   assert.equal(res.status, 200);
   const body = await res.text();
   assert.match(body, /Create a sandbox/);
@@ -44,27 +44,27 @@ test('the list offers one button, and it says what it does', async () => {
   assert.match(body, />Create a sandbox<\/button>/, 'it is a button');
   assert.ok(!/<a[^>]*>\s*Create a sandbox/.test(body), 'not a link dressed as one');
   assert.match(body, /<form[^>]+action=/, 'the button sits in a posting form');
-  assert.ok(!body.includes('/sandboxes/playground'), 'the playground is gone, not merely unlinked');
+  assert.ok(!body.includes('/dashboard/sandboxes/playground'), 'the playground is gone, not merely unlinked');
 });
 
 test('the button creates as the visitor org and lands on the sandbox', async () => {
   app.fleet.calls.length = 0;
-  const res = await submitForm(app.handle, '/sandboxes', {}, { cookies: cookie, match: 'Create a sandbox' });
+  const res = await submitForm(app.handle, '/dashboard/sandboxes', {}, { cookies: cookie, match: 'Create a sandbox' });
   assert.equal(res.status, 303);
   // The sandbox's own page, where the terminal is -- not back to the list.
-  assert.match(res.headers.get('location') ?? '', /^\/machines\/m-[a-z0-9-]+\?ok=created$/);
+  assert.match(res.headers.get('location') ?? '', /^\/dashboard\/machines\/m-[a-z0-9-]+\?ok=created$/);
   assert.ok(app.fleet.calls.some((c) => c.method === 'as' && c.args[0] === org), 'created as the visitor org');
   assert.ok(app.fleet.calls.some((c) => c.method === 'machines.create'), 'a machine was created');
 });
 
 test('a signed-out visitor is not offered one', async () => {
-  const res = await app.handle(new Request('http://localhost/sandboxes'));
+  const res = await app.handle(new Request('http://localhost/dashboard/sandboxes'));
   assert.ok(res.status === 302 || res.status === 401, `got ${res.status}`);
 });
 
 test('the retired playground page is a 404, not a redirect', async () => {
   // A stale bookmark should say the page is gone rather than quietly land
   // somewhere else, which is how a removed surface goes on looking alive.
-  const res = await app.handle(new Request('http://localhost/sandboxes/playground', asUser(cookie)));
+  const res = await app.handle(new Request('http://localhost/dashboard/sandboxes/playground', asUser(cookie)));
   assert.equal(res.status, 404);
 });

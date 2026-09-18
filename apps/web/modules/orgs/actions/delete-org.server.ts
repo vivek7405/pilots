@@ -102,5 +102,5 @@ export async function deleteOrg(formData: FormData) {
   await db.delete(memberships).where(eq(memberships.orgId, ctx.org.id));
   await db.delete(orgs).where(eq(orgs.id, ctx.org.id));
 
-  return { success: true, redirect: '/org?ok=deleted' };
+  return { success: true, redirect: '/dashboard/org?ok=deleted' };
 }

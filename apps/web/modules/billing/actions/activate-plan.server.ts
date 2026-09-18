@@ -80,5 +80,5 @@ export async function activatePlan(formData: FormData) {
   const next = await provider.setup(ctx.org);
   if (next) return { success: true, redirect: next.url };
 
-  return { success: true, redirect: '/org?ok=plan-changed' };
+  return { success: true, redirect: '/dashboard/org?ok=plan-changed' };
 }
