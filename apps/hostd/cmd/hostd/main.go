@@ -602,6 +602,8 @@ func run() error {
 		urlAuth = newURLAuthGate(f.cache.URLAuthKnown, store)
 		routerOpts.URLAuthOf = urlAuth.Mode
 	}
+	customHosts := newCustomDomains(store)
+	routerOpts.CustomDomain = customHosts.Label
 	rtr := router.New(routerOpts)
 
 	// One listener, two audiences: requests for a workload hostname are
@@ -753,12 +755,12 @@ func run() error {
 	// The forwarding marker is a fleet-internal signal set by peers proxying
 	// over the mesh. Stripped here so a client on the public listener cannot
 	// forge it and make a non-owner host act on a machine-scoped call.
-	handler := router.StripForwardMarker(dispatch(cfg, rtr, rtr.ForwardAPI(owner, controlAPI)))
+	handler := router.StripForwardMarker(dispatch(cfg, rtr, rtr.ForwardAPI(owner, controlAPI), customHosts.Label))
 
 	if f != nil && f.dev != nil {
 		// Peers reach the same dispatch, guarded so a forwarded request is
 		// never forwarded again.
-		internal := router.InternalAPIHandler(dispatch(cfg, rtr.InternalHandler(), controlAPI))
+		internal := router.InternalAPIHandler(dispatch(cfg, rtr.InternalHandler(), controlAPI, customHosts.Label))
 		if err := startInternalListener(ctx, f.dev, internal); err != nil {
 			return err
 		}
@@ -838,7 +840,13 @@ func dashboardURL(cfg *config.Config) string {
 
 // dispatch sends workload hostnames to the router and everything else to the
 // control API.
-func dispatch(cfg *config.Config, rtr http.Handler, ctrl http.Handler) http.Handler {
+//
+// A verified custom hostname is a workload hostname too. It used to fall to
+// the control API with everything else off the suffix, so a custom domain got
+// a row, a verification and a certificate, and then every request to it was
+// answered 401 by the API. custom is nil-safe: a host with no index routes as
+// before.
+func dispatch(cfg *config.Config, rtr http.Handler, ctrl http.Handler, custom func(host string) (string, bool)) http.Handler {
 	suffix := "." + strings.ToLower(cfg.WorkloadDomain)
 	apiHost := strings.ToLower(cfg.APIHostname)
 
@@ -856,6 +864,12 @@ func dispatch(cfg *config.Config, rtr http.Handler, ctrl http.Handler) http.Hand
 		if strings.HasSuffix(host, suffix) {
 			rtr.ServeHTTP(w, r)
 			return
+		}
+		if custom != nil {
+			if _, ok := custom(router.NormalizeHost(host)); ok {
+				rtr.ServeHTTP(w, r)
+				return
+			}
 		}
 		ctrl.ServeHTTP(w, r)
 	})
