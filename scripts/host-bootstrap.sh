@@ -29,6 +29,16 @@
 #                              which is what lets a machine cold-boot on the
 #                              other vendor; T2 and T2S are refused on a fleet
 #                              host because neither pairs with T2A.
+#   PILOT_CPU_MODEL_PIN        the alternative to a template for a fleet of
+#                              IDENTICAL CPUs: <family>/<model>/<stepping> as
+#                              /proc/cpuinfo reports them (6/94/3). Snapshots
+#                              then carry raw CPUID, which restores anywhere the
+#                              CPUID is the same, and this refuses to bootstrap
+#                              any host whose CPU is not exactly that. It is
+#                              the only way onto a fleet host for a CPU no
+#                              template is declared safe on -- a Skylake desktop
+#                              part, say, which lacks the AVX-512 a T2CL guest
+#                              would be shown. Such a fleet never mixes models.
 #   PILOT_CPU_TEMPLATE_UNVERIFIED=1
 #                              accepts a template on a CPU generation
 #                              Firecracker has not declared it safe on, and
@@ -109,6 +119,12 @@ S3_REGION="${PILOT_S3_REGION:-}"
 # application's instruction stream (ARCHITECTURE.md rule 6). T2 and T2S have no
 # AMD counterpart and are refused on a fleet host.
 CPU_TEMPLATE="${PILOT_CPU_TEMPLATE:-}"
+CPU_MODEL_PIN="${PILOT_CPU_MODEL_PIN:-}"
+if [ -n "$CPU_TEMPLATE" ] && [ -n "$CPU_MODEL_PIN" ]; then
+  echo "PILOT_CPU_TEMPLATE and PILOT_CPU_MODEL_PIN are two answers to one question;" >&2
+  echo "a fleet is pinned to a template OR to one exact CPU model, never both." >&2
+  exit 2
+fi
 ACME_EMAIL="${PILOT_ACME_EMAIL:-}"
 CF_TOKEN="${PILOT_CLOUDFLARE_API_TOKEN:-}"
 SSH_OPTS="${SSH_OPTS:--o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null}"
@@ -151,7 +167,7 @@ done
 # without a pinned CPU template restores nothing a later host generation took,
 # and the failure appears months later as an unrestorable snapshot rather than
 # here as a missing variable.
-if [ "${PILOT_REQUIRE_REFLINK:-0}" = 1 ] && [ -z "$CPU_TEMPLATE" ]; then
+if [ "${PILOT_REQUIRE_REFLINK:-0}" = 1 ] && [ -z "$CPU_TEMPLATE" ] && [ -z "$CPU_MODEL_PIN" ]; then
   echo "PILOT_CPU_TEMPLATE must be set on a fleet host: Firecracker memory" >&2
   echo "snapshots carry raw CPUID, and a template normalises it WITHIN a" >&2
   echo "vendor so a later host generation can restore what this one took." >&2
@@ -162,11 +178,38 @@ if [ "${PILOT_REQUIRE_REFLINK:-0}" = 1 ] && [ -z "$CPU_TEMPLATE" ]; then
   echo "  is the only one with instruction-set parity across vendors, which is" >&2
   echo "  what lets a machine cold-boot on the other vendor when its own pool" >&2
   echo "  has no live host." >&2
+  echo >&2
+  echo "  A fleet of IDENTICAL CPUs that no template is declared safe on can" >&2
+  echo "  set PILOT_CPU_MODEL_PIN=<family>/<model>/<stepping> instead; every" >&2
+  echo "  host is then refused unless its CPU is exactly that." >&2
   exit 2
 fi
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 on_host() { ssh $SSH_OPTS "root@${IP}" "$@"; }
+# ship_image copies a rootfs image to the host sparse-aware: compressed on the
+# wire and re-holed on arrival. scp neither compresses nor keeps holes, so the
+# 32 GiB-apparent builder image, a few hundred MiB of data, was fifty minutes
+# of zeros over a home uplink and 32 GiB of zeros on the host's disk. Written
+# beside the target and moved into place, so a copy that dies leaves the
+# previous image intact.
+#
+# The compressed bytes land as a file first and are decompressed on the host
+# afterwards, rather than streamed through zstd -d on the far end: the
+# streamed form ended early with "unexpected end of file" on a real host while
+# a small round trip through the same pipe worked, and the file form is the
+# one that shipped the image and matched the pin.
+#
+# The source is resolved first: in a worktree the images are symlinks into the
+# main checkout, and zstd declines a symlink without a word under -q, so the
+# far end saw an empty stream and reported "unexpected end of file". Not -q on
+# the compressor, so the next refusal is heard.
+ship_image() { # ship_image <local path> <remote path>
+  local src
+  src=$(readlink -f "$1")
+  zstd -T0 -c "$src" | on_host "cat > '$2.zst'"
+  on_host "zstd -q -d --sparse -f -o '$2.new' '$2.zst' && rm -f '$2.zst' && mv -f '$2.new' '$2'"
+}
 
 say "Bootstrapping ${IP}${PEER:+ (joining via ${PEER})}"
 
@@ -189,7 +232,7 @@ on_host bash -euo pipefail -s <<'REMOTE'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq curl ca-certificates iproute2 iptables nftables \
-  e2fsprogs wireguard-tools sqlite3 python3 \
+  e2fsprogs wireguard-tools sqlite3 python3 zstd \
   fuse3 uidmap slirp4netns fakeroot >/dev/null
 # fuse3 is what a JuiceFS mount is; uidmap and slirp4netns are what rootless
 # BuildKit needs to have a user namespace and a network without root; fakeroot
@@ -428,8 +471,8 @@ if [ -f "${REPO}/scripts/rootfs/golden.ext4" ]; then
   if [ "$WANT" = "$HAVE" ]; then
     echo "  golden rootfs already present"
   else
-    echo "  copying the golden rootfs (2 GiB)"
-    scp $SSH_OPTS -q "${REPO}/scripts/rootfs/golden.ext4" "root@${IP}:/var/lib/pilots/templates/golden.ext4"
+    echo "  copying the golden rootfs (2 GiB apparent, compressed on the wire)"
+    ship_image "${REPO}/scripts/rootfs/golden.ext4" /var/lib/pilots/templates/golden.ext4
   fi
 else
   echo "  no local golden rootfs; the host will need one before creating machines"
@@ -459,15 +502,14 @@ if [ -f "${REPO}/scripts/rootfs/builder.ext4" ]; then
     exit 1
   }
   echo "  builder rootfs matches the pin"
-  # Sparse: 32 GiB apparent, a few hundred MiB on the wire. --sparse=always so
-  # the holes are not written out as zeros on the receiving end.
+  # Sparse: 32 GiB apparent, a few hundred MiB on the wire; see ship_image.
   WANT=$(sha256sum "${REPO}/scripts/rootfs/builder.ext4" | cut -d' ' -f1)
   HAVE=$(on_host "sha256sum /var/lib/pilots/templates/builder.ext4 2>/dev/null | cut -d' ' -f1" || true)
   if [ "$WANT" = "$HAVE" ]; then
     echo "  builder rootfs already present"
   else
-    echo "  copying the builder rootfs (sparse)"
-    scp $SSH_OPTS -q "${REPO}/scripts/rootfs/builder.ext4" "root@${IP}:/var/lib/pilots/templates/builder.ext4"
+    echo "  copying the builder rootfs (32 GiB apparent, sparse on the wire and on disk)"
+    ship_image "${REPO}/scripts/rootfs/builder.ext4" /var/lib/pilots/templates/builder.ext4
   fi
 else
   echo "  no local builder rootfs; this host will refuse builds until it has one"
@@ -637,20 +679,23 @@ REMOTE
 
 # ---------------------------------------------------------------------------
 say "[6/10] hostd and the guest agent"
-( cd "${REPO}/apps/hostd" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /tmp/pilots-hostd ./cmd/hostd )
-scp $SSH_OPTS -q /tmp/pilots-hostd "root@${IP}:/opt/pilots/bin/hostd.new"
+# A directory of this run's own. A fixed path under /tmp is shared by every
+# bootstrap on this machine, and three hosts bootstrapped side by side delete
+# each other's binary between the build and the copy.
+BUILD_TMP=$(mktemp -d)
+trap 'rm -rf "$BUILD_TMP"' EXIT
+( cd "${REPO}/apps/hostd" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o "${BUILD_TMP}/hostd" ./cmd/hostd )
+scp $SSH_OPTS -q "${BUILD_TMP}/hostd" "root@${IP}:/opt/pilots/bin/hostd.new"
 on_host "chmod 0755 /opt/pilots/bin/hostd.new && mv /opt/pilots/bin/hostd.new /opt/pilots/bin/hostd"
-rm -f /tmp/pilots-hostd
 
 # The agent is injected into every image a build produces. Without it a built
 # machine boots and is unreachable: exec, the clock poke and the port proxy all
 # go through it. Static, because the guest has no toolchain and no shared
 # libraries we control -- and it may end up as the guest's PID 1.
 ( cd "${REPO}/apps/hostd" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -ldflags="-s -w" -o /tmp/pilots-guest-agent ./cmd/guest-agent )
-scp $SSH_OPTS -q /tmp/pilots-guest-agent "root@${IP}:/opt/pilots/bin/guest-agent.new"
+    go build -ldflags="-s -w" -o "${BUILD_TMP}/guest-agent" ./cmd/guest-agent )
+scp $SSH_OPTS -q "${BUILD_TMP}/guest-agent" "root@${IP}:/opt/pilots/bin/guest-agent.new"
 on_host "chmod 0755 /opt/pilots/bin/guest-agent.new && mv /opt/pilots/bin/guest-agent.new /opt/pilots/bin/guest-agent"
-rm -f /tmp/pilots-guest-agent
 
 # ---------------------------------------------------------------------------
 say "[7/10] Mesh identity and host configuration"
@@ -698,6 +743,8 @@ PILOT_S3_ACCESS_KEY=${S3_KEY}
 PILOT_S3_SECRET_KEY=${S3_SECRET}
 PILOT_S3_REGION=${S3_REGION}
 PILOT_CPU_TEMPLATE=${CPU_TEMPLATE}
+# The exact CPU this fleet is pinned to instead of a template, when it is.
+PILOT_CPU_MODEL_PIN=${CPU_MODEL_PIN}
 # Recorded on the host, not just typed once at bootstrap: an operator reading
 # /etc/pilots/config months later has to be able to see that this host's
 # template was accepted on a generation Firecracker never declared it safe on.
@@ -822,7 +869,7 @@ path = "/run/pilots/corrosion/admin.sock"
 CONF
 
 # Corrosion 1.0.0 SILENTLY IGNORES a key it does not recognise: Config::load
-# deserialises through the `config` crate's try_deserialize and no struct
+# deserialises through the config crate's try_deserialize and no struct
 # carries deny_unknown_fields. So a typo -- processing_queue_length for
 # processing_queue_len -- starts an agent that reports healthy and runs on the
 # default forever. Nothing else in the system would ever say so, which is why
@@ -934,7 +981,9 @@ REMOTE
 # own copy of the table.
 if [ -n "$PEER" ]; then
   say "[9/10] Introducing ${HOST_ID} to the fleet"
-  PEER_TOKEN=$(ssh $SSH_OPTS "root@${PEER}" "grep PILOT_CORROSION_TOKEN /etc/pilots/config | cut -d= -f2")
+  # -f2- and not -f2: a base64 token ends in "=" padding, and -f2 cuts it off,
+  # which the peer answers with a 401 this step then reports as a warning.
+  PEER_TOKEN=$(ssh $SSH_OPTS "root@${PEER}" "grep PILOT_CORROSION_TOKEN /etc/pilots/config | cut -d= -f2-")
   ssh $SSH_OPTS "root@${PEER}" "curl -sf --http2-prior-knowledge \
     -X POST http://127.0.0.1:51002/v1/transactions \
     -H 'Content-Type: application/json' \
@@ -986,14 +1035,16 @@ else
 fi
 rm -rf "$PROBE"
 
-# The rootless build daemon. A host whose buildkitd is not listening still
-# serves machines perfectly well and cannot build anything, which is worth a
-# line rather than a surprise on the first deploy.
 PILOT_UID=$(id -u pilot 2>/dev/null || echo 0)
-if [ -S "/run/user/${PILOT_UID}/buildkit/buildkitd.sock" ]; then
-  echo "  buildkitd: listening"
+
+# The builder image. A build runs inside a builder machine, never in a daemon
+# on the host, so what a host needs in order to build is this one file. A host
+# without it serves machines perfectly well and fails every build that lands
+# on it, which is worth a line rather than a surprise on the first deploy.
+if [ -s /var/lib/pilots/templates/builder.ext4 ]; then
+  echo "  builder image: present"
 else
-  echo "  buildkitd: NOT listening -- builds will fail on this host" >&2
+  echo "  builder image: MISSING -- builds will fail on this host" >&2
 fi
 
 # The hugepage pool guest memory comes out of. Unlike reflink this is not
@@ -1154,6 +1205,20 @@ echo "  reachable: ${REACHED}"
 #
 # Checked by family/model/stepping rather than by "model name": the marketing
 # string varies by SKU, the numbers do not.
+if [ -n "$CPU_MODEL_PIN" ]; then
+  IFS='|' read -r VENDOR FAMILY MODEL STEPPING <<<"$(on_host "awk -F': *' '
+    /^vendor_id/ && v==\"\" {v=\$2} /^cpu family/ && f==\"\" {f=\$2}
+    /^model[[:space:]]/ && m==\"\" {m=\$2} /^stepping/ && s==\"\" {s=\$2}
+    END {print v \"|\" f \"|\" m \"|\" s}' /proc/cpuinfo")"
+  if [ "${FAMILY}/${MODEL}/${STEPPING}" != "$CPU_MODEL_PIN" ]; then
+    echo "  cpu pin: NO -- the fleet is pinned to CPU ${CPU_MODEL_PIN} and this host is" >&2
+    echo "    ${VENDOR} ${FAMILY}/${MODEL}/${STEPPING}. With no template a snapshot carries" >&2
+    echo "    this host's raw CPUID, and a different model cannot restore it. Either" >&2
+    echo "    this host does not belong in the fleet, or the pin is wrong. Refusing." >&2
+    exit 1
+  fi
+  echo "  cpu pin: ${VENDOR} ${CPU_MODEL_PIN}, no template; every host in this fleet is this exact CPU"
+fi
 if [ -n "$CPU_TEMPLATE" ]; then
   # Guarded with == \"\" rather than with !, and joined on a separator rather
   # than on spaces. A value of 0 is falsy in awk, so ! would let the NEXT
