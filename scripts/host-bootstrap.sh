@@ -193,8 +193,15 @@ on_host() { ssh $SSH_OPTS "root@${IP}" "$@"; }
 # of zeros over a home uplink and 32 GiB of zeros on the host's disk. Written
 # beside the target and moved into place, so a copy that dies leaves the
 # previous image intact.
+#
+# The compressed bytes land as a file first and are decompressed on the host
+# afterwards, rather than streamed through zstd -d on the far end: the
+# streamed form ended early with "unexpected end of file" on a real host while
+# a small round trip through the same pipe worked, and the file form is the
+# one that shipped the image and matched the pin.
 ship_image() { # ship_image <local path> <remote path>
-  zstd -q -T0 -c "$1" | on_host "zstd -q -d --sparse -o '$2.new' && mv -f '$2.new' '$2'"
+  zstd -q -T0 -c "$1" | on_host "cat > '$2.zst'"
+  on_host "zstd -q -d --sparse -f -o '$2.new' '$2.zst' && rm -f '$2.zst' && mv -f '$2.new' '$2'"
 }
 
 say "Bootstrapping ${IP}${PEER:+ (joining via ${PEER})}"
