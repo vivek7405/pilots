@@ -187,6 +187,15 @@ fi
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 on_host() { ssh $SSH_OPTS "root@${IP}" "$@"; }
+# ship_image copies a rootfs image to the host sparse-aware: compressed on the
+# wire and re-holed on arrival. scp neither compresses nor keeps holes, so the
+# 32 GiB-apparent builder image, a few hundred MiB of data, was fifty minutes
+# of zeros over a home uplink and 32 GiB of zeros on the host's disk. Written
+# beside the target and moved into place, so a copy that dies leaves the
+# previous image intact.
+ship_image() { # ship_image <local path> <remote path>
+  zstd -q -T0 -c "$1" | on_host "zstd -q -d --sparse -o '$2.new' && mv -f '$2.new' '$2'"
+}
 
 say "Bootstrapping ${IP}${PEER:+ (joining via ${PEER})}"
 
@@ -209,7 +218,7 @@ on_host bash -euo pipefail -s <<'REMOTE'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y -qq curl ca-certificates iproute2 iptables nftables \
-  e2fsprogs wireguard-tools sqlite3 python3 \
+  e2fsprogs wireguard-tools sqlite3 python3 zstd \
   fuse3 uidmap slirp4netns fakeroot >/dev/null
 # fuse3 is what a JuiceFS mount is; uidmap and slirp4netns are what rootless
 # BuildKit needs to have a user namespace and a network without root; fakeroot
@@ -448,8 +457,8 @@ if [ -f "${REPO}/scripts/rootfs/golden.ext4" ]; then
   if [ "$WANT" = "$HAVE" ]; then
     echo "  golden rootfs already present"
   else
-    echo "  copying the golden rootfs (2 GiB)"
-    scp $SSH_OPTS -q "${REPO}/scripts/rootfs/golden.ext4" "root@${IP}:/var/lib/pilots/templates/golden.ext4"
+    echo "  copying the golden rootfs (2 GiB apparent, compressed on the wire)"
+    ship_image "${REPO}/scripts/rootfs/golden.ext4" /var/lib/pilots/templates/golden.ext4
   fi
 else
   echo "  no local golden rootfs; the host will need one before creating machines"
@@ -479,15 +488,14 @@ if [ -f "${REPO}/scripts/rootfs/builder.ext4" ]; then
     exit 1
   }
   echo "  builder rootfs matches the pin"
-  # Sparse: 32 GiB apparent, a few hundred MiB on the wire. --sparse=always so
-  # the holes are not written out as zeros on the receiving end.
+  # Sparse: 32 GiB apparent, a few hundred MiB on the wire; see ship_image.
   WANT=$(sha256sum "${REPO}/scripts/rootfs/builder.ext4" | cut -d' ' -f1)
   HAVE=$(on_host "sha256sum /var/lib/pilots/templates/builder.ext4 2>/dev/null | cut -d' ' -f1" || true)
   if [ "$WANT" = "$HAVE" ]; then
     echo "  builder rootfs already present"
   else
-    echo "  copying the builder rootfs (sparse)"
-    scp $SSH_OPTS -q "${REPO}/scripts/rootfs/builder.ext4" "root@${IP}:/var/lib/pilots/templates/builder.ext4"
+    echo "  copying the builder rootfs (32 GiB apparent, sparse on the wire and on disk)"
+    ship_image "${REPO}/scripts/rootfs/builder.ext4" /var/lib/pilots/templates/builder.ext4
   fi
 else
   echo "  no local builder rootfs; this host will refuse builds until it has one"
