@@ -73,20 +73,11 @@ func startTLS(ctx context.Context, cfg *config.Config, store state.Store,
 		return nil
 	}
 
-	magic := certmagic.NewDefault()
-	magic.Storage = certs.New(objects, cfg.HostID)
-
-	// On demand, and refused for anything the fleet does not know. This
-	// function runs on every handshake for an unrecognised SNI, so it is the
-	// whole abuse defence -- see certs.Decider.
 	decider := certs.NewDecider(store)
-	magic.OnDemand = &certmagic.OnDemandConfig{
-		DecisionFunc: func(ctx context.Context, name string) error {
-			return decider.Allow(ctx, name)
-		},
-	}
+	eager, magic := newCertConfigs(certs.New(objects, cfg.HostID), wildcardNames(cfg),
+		func(ctx context.Context, name string) error { return decider.Allow(ctx, name) })
 
-	issuer := certmagic.NewACMEIssuer(magic, certmagic.ACMEIssuer{
+	template := certmagic.ACMEIssuer{
 		CA:     certmagic.LetsEncryptProductionCA,
 		Email:  cfg.ACMEEmail,
 		Agreed: true,
@@ -107,8 +98,13 @@ func startTLS(ctx context.Context, cfg *config.Config, store state.Store,
 		// no Cloudflare token is set, which certmagic reads as "this issuer
 		// does not do DNS-01".
 		DNS01Solver: dnsSolver(cfg),
-	})
+	}
+	// One issuer per config, from one template: an issuer is bound to the
+	// config it was made for. They share the ACME account all the same,
+	// because the account lives in Storage and Storage is shared.
+	issuer := certmagic.NewACMEIssuer(magic, template)
 	magic.Issuers = []certmagic.Issuer{issuer}
+	eager.Issuers = []certmagic.Issuer{certmagic.NewACMEIssuer(eager, template)}
 
 	// The wildcard, both apexes, managed eagerly rather than on demand: an
 	// on-demand certificate is obtained during a handshake, and the first
@@ -121,7 +117,7 @@ func startTLS(ctx context.Context, cfg *config.Config, store state.Store,
 	// a host whose loss stops renewal.
 	if names := wildcardNames(cfg); len(names) > 0 && cfg.CloudflareAPIToken != "" {
 		go func() {
-			if err := magic.ManageAsync(ctx, names); err != nil {
+			if err := eager.ManageAsync(ctx, names); err != nil {
 				slog.Error("could not manage the wildcard certificate; the router "+
 					"will serve custom domains on demand and nothing else",
 					"names", names, "err", err)
@@ -169,6 +165,59 @@ func startTLS(ctx context.Context, cfg *config.Config, store state.Store,
 	}()
 	slog.Info("serving TLS on :443 with on-demand certificates")
 	return nil
+}
+
+// newCertConfigs builds the two certificate configs a host runs, over ONE
+// cache and ONE storage.
+//
+// Two, because certmagic treats on-demand as a property of the whole config:
+// given a config with OnDemand set, ManageAsync does not order anything. It
+// adds each name to an allowlist and defers the order to the first handshake
+// (certmagic config.go, "if on-demand is configured, defer obtain and renew
+// operations"). That handshake then asks the DecisionFunc about the SNI name,
+// which is "api.pilotrun.app" and never "*.pilotrun.app", and the decider
+// refuses it because it is not a custom domain. So a single config never
+// orders the wildcard at all, and every workload URL fails its handshake while
+// startup logs that the wildcard is being managed. The first fleet with a real
+// ACME contact found this; nothing short of a real CA could.
+//
+// eager carries the wildcard and the apexes and has NO OnDemand, so its names
+// are ordered at startup. onDemand serves the listener and obtains custom
+// domains during a handshake, behind the decider. They share a cache, which is
+// what lets the listener's config answer a workload name with the wildcard the
+// eager config obtained: the handshake looks the name up in the cache before
+// it considers obtaining anything.
+//
+// The cache is built here rather than taken from certmagic.NewDefault, whose
+// cache renews every certificate with certmagic's package default config:
+// file storage on this host's disk and no DNS-01 solver. A wildcard renewed
+// that way is renewed into a directory no other host reads.
+func newCertConfigs(storage certmagic.Storage, eagerNames []string,
+	allow func(ctx context.Context, name string) error) (eager, onDemand *certmagic.Config) {
+
+	managedEagerly := make(map[string]bool, len(eagerNames))
+	for _, n := range eagerNames {
+		managedEagerly[n] = true
+	}
+	cache := certmagic.NewCache(certmagic.CacheOptions{
+		GetConfigForCert: func(c certmagic.Certificate) (*certmagic.Config, error) {
+			for _, n := range c.Names {
+				if managedEagerly[n] {
+					return eager, nil
+				}
+			}
+			return onDemand, nil
+		},
+	})
+	eager = certmagic.New(cache, certmagic.Config{Storage: storage})
+	// On demand, and refused for anything the fleet does not know. The
+	// decision runs on every handshake for an unrecognised SNI, so it is the
+	// whole abuse defence -- see certs.Decider.
+	onDemand = certmagic.New(cache, certmagic.Config{
+		Storage:  storage,
+		OnDemand: &certmagic.OnDemandConfig{DecisionFunc: allow},
+	})
+	return eager, onDemand
 }
 
 // dnsSolver builds the ACME DNS-01 solver, or returns nil when the fleet has
