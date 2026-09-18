@@ -978,7 +978,9 @@ REMOTE
 # own copy of the table.
 if [ -n "$PEER" ]; then
   say "[9/10] Introducing ${HOST_ID} to the fleet"
-  PEER_TOKEN=$(ssh $SSH_OPTS "root@${PEER}" "grep PILOT_CORROSION_TOKEN /etc/pilots/config | cut -d= -f2")
+  # -f2- and not -f2: a base64 token ends in "=" padding, and -f2 cuts it off,
+  # which the peer answers with a 401 this step then reports as a warning.
+  PEER_TOKEN=$(ssh $SSH_OPTS "root@${PEER}" "grep PILOT_CORROSION_TOKEN /etc/pilots/config | cut -d= -f2-")
   ssh $SSH_OPTS "root@${PEER}" "curl -sf --http2-prior-knowledge \
     -X POST http://127.0.0.1:51002/v1/transactions \
     -H 'Content-Type: application/json' \
@@ -1030,14 +1032,14 @@ else
 fi
 rm -rf "$PROBE"
 
-# The rootless build daemon. A host whose buildkitd is not listening still
-# serves machines perfectly well and cannot build anything, which is worth a
-# line rather than a surprise on the first deploy.
-PILOT_UID=$(id -u pilot 2>/dev/null || echo 0)
-if [ -S "/run/user/${PILOT_UID}/buildkit/buildkitd.sock" ]; then
-  echo "  buildkitd: listening"
+# The builder image. A build runs inside a builder machine, never in a daemon
+# on the host, so what a host needs in order to build is this one file. A host
+# without it serves machines perfectly well and fails every build that lands
+# on it, which is worth a line rather than a surprise on the first deploy.
+if [ -s /var/lib/pilots/templates/builder.ext4 ]; then
+  echo "  builder image: present"
 else
-  echo "  buildkitd: NOT listening -- builds will fail on this host" >&2
+  echo "  builder image: MISSING -- builds will fail on this host" >&2
 fi
 
 # The hugepage pool guest memory comes out of. Unlike reflink this is not
