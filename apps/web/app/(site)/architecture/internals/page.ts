@@ -720,43 +720,60 @@ export default function Internals() {
     ${section({
       id: 'numbers',
       layout: 'split',
-      heading: 'Measured on a laptop, budgeted for metal',
-      lede: html`Two sets of numbers, kept apart on purpose. The first were printed by the battery on a
-        development rig whose disk cannot share extents, which makes them slower than the fleet should
-        be. The second are targets that nothing has met yet, because there is no fleet.`,
+      heading: 'Measured on metal, and held against its budgets',
+      lede: html`The fleet exists now, so these are its numbers rather than a laptop's. They were
+        printed by the same battery, run on one of the production hosts, and they are reported whether
+        or not they flatter the design. Two of the budgets below are not met yet.`,
       body: html`
         <div>
-          <p class="${FIELD_LABEL} m-0">What the battery printed</p>
+          <p class="${FIELD_LABEL} m-0">What the battery printed on a production host</p>
           <div class="grid gap-8 mt-5 mid:grid-cols-4">
             ${readout('createMeasured')} ${readout('wakeMeasured')} ${readout('resumeGapMeasured')}
-            ${readout('assertions')}
+            ${readout('urlWake')}
           </div>
         </div>
 
         <hr class="${HAIRLINE} my-10" />
 
         <div>
-          <p class="${FIELD_LABEL} m-0">What sign-off requires, and has not yet been run against</p>
+          <p class="${FIELD_LABEL} m-0">The budgets sign-off holds it to</p>
           <div class="grid gap-8 mt-5 mid:grid-cols-3">
             ${readout('metalCreate')} ${readout('metalWake')} ${readout('metalPromote')}
           </div>
         </div>
 
         <p class="${PROSE} mt-10">
+          Create is inside its budget, narrowly. Wake is not: ${inlineFact('wakeMeasured')} against
+          ${inlineFact('metalWake')}. The last readout in the first row is the same wake as a visitor
+          meets it, a request to a real site that had gone to sleep, with the network's share removed
+          by subtracting a warm request from the cold one. Promote has not been timed on the fleet.
+          The root flush is the other miss. Every pause one host recorded was under
+          ${inlineFact('rootFlushPauseMetal')}, and only a minority were inside the
+          ${inlineFact('rootFlushPause')} budget.
+        </p>
+
+        <p class="${PROSE} mt-6">
+          These hosts are older desktop-class processors with the bucket a network away, and the
+          development rig that produced the earlier figures was a newer processor with object storage
+          on the same machine. The rig was faster on every line, which is the opposite of what the page
+          used to predict, and it is why a budget is only worth stating against the hardware it will be
+          sold on.
+        </p>
+
+        <p class="${PROSE} mt-6">
           The largest single change since the engine closed is guest memory backed by
-          ${inlineFact('pageSize')} hugepages. On the same host, the same battery's checkpoint resume gap
-          fell from ${inlineFact('resumeGapSmallPages')} to ${inlineFact('resumeGapMeasured')}, because
+          ${inlineFact('pageSize')} hugepages. On the rig, the same battery's checkpoint resume gap
+          fell from ${inlineFact('resumeGapSmallPages')} to ${inlineFact('resumeGapHugepages')}, because
           the page size is recorded in every snapshot and a host that disagrees with the fleet refuses to
           restore rather than restoring slowly.
         </p>
 
         <p class="${PROSE} mt-6">
-          The fleet numbers that matter are not in either group, because the fleet does not exist yet.
-          The chaos gate is the closest thing there is: on a three-node rig, hard-killing the host that
-          owned a machine returned it on a survivor in ${inlineFact('rescue')} with the same address and
-          the disk intact, and a fourth host joined and started taking traffic ${inlineFact('join')}
-          after one command. Both are correctness results rather than latency results, and they are the
-          ones this design was actually built to produce.
+          The results this design was built to produce are about correctness rather than latency, and
+          those two are still rig figures. On a three-node rig, hard-killing the host that owned a
+          machine returned it on a survivor in ${inlineFact('rescue')} with the same address and the
+          disk intact, and a fourth host joined and started taking traffic ${inlineFact('join')} after
+          one command. Neither has been repeated by killing a production host.
         </p>
 
         <div class="mt-10 max-w-[54ch]">

@@ -20,13 +20,13 @@
  *                     port, a table width). Not a measurement at all, and
  *                     never to be dressed up as performance.
  *   kind: 'measured'  a timing the battery actually printed, on hardware the
- *                     source string NAMES. Every one below was measured on a
- *                     development rig whose machine store cannot share
- *                     extents, which is slower than the fleet will be and is
- *                     stated rather than quietly omitted.
- *   kind: 'budget'    a target the production sign-off has to hit and has NOT
- *                     hit yet, because the battery has not run on the production
- *                     fleet. A budget
+ *                     source string NAMES. Some are from the production fleet
+ *                     and some from a development rig, and the two are not
+ *                     comparable: the rig is a newer CPU with object storage on
+ *                     the same machine, the fleet is older metal with the
+ *                     bucket a network away. The source says which.
+ *   kind: 'budget'    a target the production sign-off has to hit. Whether the
+ *                     fleet has met it yet is in the source string. A budget
  *                     rendered as if it were a measurement is the exact lie
  *                     invariant 1 exists to prevent, so the kind is carried
  *                     separately and the source says which it is.
@@ -162,21 +162,21 @@ export const FACTS = {
   /* Measured. The rig is named in every source string because it is the whole
      caveat: no reflink support, so every copy is a real copy. */
   createMeasured: {
-    value: '142ms',
-    label: 'create, median',
-    source: 'Phase 6 perf PR #28, merged 2026-09-04: scripts/e2e.mjs on a nested-KVM host with 2MiB hugepages, no reflink support',
+    value: '468ms',
+    label: 'create, median on metal',
+    source: 'production fleet, 2026-09-18: the timing section of scripts/e2e.mjs under PILOTS_E2E_METAL=1, run on a Hetzner i7-6700 host, median of five',
     kind: 'measured',
   },
   wakeMeasured: {
-    value: '255ms',
-    label: 'wake, median',
-    source: 'Phase 6 perf PR #28, merged 2026-09-04: scripts/e2e.mjs on a nested-KVM host with 2MiB hugepages, no reflink support',
+    value: '302ms',
+    label: 'wake, median on metal',
+    source: 'production fleet, 2026-09-18: the timing section of scripts/e2e.mjs under PILOTS_E2E_METAL=1, run on a Hetzner i7-6700 host, median of five',
     kind: 'measured',
   },
   resumeGapMeasured: {
-    value: '300ms',
-    label: 'checkpoint resume gap, median',
-    source: 'Phase 6 perf PR #28, merged 2026-09-04: scripts/e2e.mjs on a nested-KVM host with 2MiB hugepages, no reflink support',
+    value: '403ms',
+    label: 'checkpoint resume gap, median on metal',
+    source: 'production fleet, 2026-09-18: the timing section of scripts/e2e.mjs under PILOTS_E2E_METAL=1, run on a Hetzner i7-6700 host, median of five',
     kind: 'measured',
   },
   resumeGapSmallPages: {
@@ -201,6 +201,24 @@ export const FACTS = {
     value: '15s',
     label: 'for a new host to be live and counted',
     source: 'Phase 4 issue #5 (closed): scripts/cluster/gate.sh step 8, one host-bootstrap.sh run',
+    kind: 'measured',
+  },
+  resumeGapHugepages: {
+    value: '300ms',
+    label: 'the same resume gap with hugepages, on the development rig',
+    source: 'Phase 6 perf PR #28, merged 2026-09-04: scripts/e2e.mjs on a nested-KVM host with 2MiB hugepages',
+    kind: 'measured',
+  },
+  urlWake: {
+    value: '352ms',
+    label: 'wake of a real site through its public address, median, network removed',
+    source: 'production fleet, 2026-09-18: the WebJs website at half a gibibyte, one request after the platform reported it suspended, cold server wait minus warm server wait, five rounds',
+    kind: 'measured',
+  },
+  rootFlushPauseMetal: {
+    value: '250ms',
+    label: 'ceiling on every root flush pause one metal host recorded',
+    source: 'production fleet, 2026-09-18: pilots_root_flush_pause_seconds on a Hetzner i7-6700 host over eighteen flushes, of which four were inside the budget',
     kind: 'measured',
   },
   rootFlushWindow: {
@@ -250,13 +268,13 @@ export const FACTS = {
   metalCreate: {
     value: '<500ms',
     label: 'create',
-    source: 'Phase 6 issue #7 sign-off budget, NOT yet measured: p50 on the Hetzner fleet',
+    source: 'Phase 6 issue #7 sign-off budget, as a median on the Hetzner fleet: met on 2026-09-18',
     kind: 'budget',
   },
   metalWake: {
     value: '<200ms',
     label: 'wake',
-    source: 'Phase 6 issue #7 sign-off budget, NOT yet measured: p50 on the Hetzner fleet',
+    source: 'Phase 6 issue #7 sign-off budget, as a median on the Hetzner fleet: NOT met on 2026-09-18',
     kind: 'budget',
   },
   metalRelease: {
@@ -268,7 +286,7 @@ export const FACTS = {
   metalPromote: {
     value: '<1.5s',
     label: 'promote a sandbox to a service',
-    source: 'Phase 6 issue #7 sign-off budget, NOT yet measured: p50 on the Hetzner fleet',
+    source: 'Phase 6 issue #7 sign-off budget, as a median on the Hetzner fleet: not yet measured there',
     kind: 'budget',
   },
 } as const satisfies Record<string, Fact>;
