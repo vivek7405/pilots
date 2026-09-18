@@ -29,6 +29,16 @@
 #                              which is what lets a machine cold-boot on the
 #                              other vendor; T2 and T2S are refused on a fleet
 #                              host because neither pairs with T2A.
+#   PILOT_CPU_MODEL_PIN        the alternative to a template for a fleet of
+#                              IDENTICAL CPUs: <family>/<model>/<stepping> as
+#                              /proc/cpuinfo reports them (6/94/3). Snapshots
+#                              then carry raw CPUID, which restores anywhere the
+#                              CPUID is the same, and this refuses to bootstrap
+#                              any host whose CPU is not exactly that. It is
+#                              the only way onto a fleet host for a CPU no
+#                              template is declared safe on -- a Skylake desktop
+#                              part, say, which lacks the AVX-512 a T2CL guest
+#                              would be shown. Such a fleet never mixes models.
 #   PILOT_CPU_TEMPLATE_UNVERIFIED=1
 #                              accepts a template on a CPU generation
 #                              Firecracker has not declared it safe on, and
@@ -109,6 +119,12 @@ S3_REGION="${PILOT_S3_REGION:-}"
 # application's instruction stream (ARCHITECTURE.md rule 6). T2 and T2S have no
 # AMD counterpart and are refused on a fleet host.
 CPU_TEMPLATE="${PILOT_CPU_TEMPLATE:-}"
+CPU_MODEL_PIN="${PILOT_CPU_MODEL_PIN:-}"
+if [ -n "$CPU_TEMPLATE" ] && [ -n "$CPU_MODEL_PIN" ]; then
+  echo "PILOT_CPU_TEMPLATE and PILOT_CPU_MODEL_PIN are two answers to one question;" >&2
+  echo "a fleet is pinned to a template OR to one exact CPU model, never both." >&2
+  exit 2
+fi
 ACME_EMAIL="${PILOT_ACME_EMAIL:-}"
 CF_TOKEN="${PILOT_CLOUDFLARE_API_TOKEN:-}"
 SSH_OPTS="${SSH_OPTS:--o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null}"
@@ -151,7 +167,7 @@ done
 # without a pinned CPU template restores nothing a later host generation took,
 # and the failure appears months later as an unrestorable snapshot rather than
 # here as a missing variable.
-if [ "${PILOT_REQUIRE_REFLINK:-0}" = 1 ] && [ -z "$CPU_TEMPLATE" ]; then
+if [ "${PILOT_REQUIRE_REFLINK:-0}" = 1 ] && [ -z "$CPU_TEMPLATE" ] && [ -z "$CPU_MODEL_PIN" ]; then
   echo "PILOT_CPU_TEMPLATE must be set on a fleet host: Firecracker memory" >&2
   echo "snapshots carry raw CPUID, and a template normalises it WITHIN a" >&2
   echo "vendor so a later host generation can restore what this one took." >&2
@@ -162,6 +178,10 @@ if [ "${PILOT_REQUIRE_REFLINK:-0}" = 1 ] && [ -z "$CPU_TEMPLATE" ]; then
   echo "  is the only one with instruction-set parity across vendors, which is" >&2
   echo "  what lets a machine cold-boot on the other vendor when its own pool" >&2
   echo "  has no live host." >&2
+  echo >&2
+  echo "  A fleet of IDENTICAL CPUs that no template is declared safe on can" >&2
+  echo "  set PILOT_CPU_MODEL_PIN=<family>/<model>/<stepping> instead; every" >&2
+  echo "  host is then refused unless its CPU is exactly that." >&2
   exit 2
 fi
 
@@ -698,6 +718,8 @@ PILOT_S3_ACCESS_KEY=${S3_KEY}
 PILOT_S3_SECRET_KEY=${S3_SECRET}
 PILOT_S3_REGION=${S3_REGION}
 PILOT_CPU_TEMPLATE=${CPU_TEMPLATE}
+# The exact CPU this fleet is pinned to instead of a template, when it is.
+PILOT_CPU_MODEL_PIN=${CPU_MODEL_PIN}
 # Recorded on the host, not just typed once at bootstrap: an operator reading
 # /etc/pilots/config months later has to be able to see that this host's
 # template was accepted on a generation Firecracker never declared it safe on.
@@ -1154,6 +1176,20 @@ echo "  reachable: ${REACHED}"
 #
 # Checked by family/model/stepping rather than by "model name": the marketing
 # string varies by SKU, the numbers do not.
+if [ -n "$CPU_MODEL_PIN" ]; then
+  IFS='|' read -r VENDOR FAMILY MODEL STEPPING <<<"$(on_host "awk -F': *' '
+    /^vendor_id/ && v==\"\" {v=\$2} /^cpu family/ && f==\"\" {f=\$2}
+    /^model[[:space:]]/ && m==\"\" {m=\$2} /^stepping/ && s==\"\" {s=\$2}
+    END {print v \"|\" f \"|\" m \"|\" s}' /proc/cpuinfo")"
+  if [ "${FAMILY}/${MODEL}/${STEPPING}" != "$CPU_MODEL_PIN" ]; then
+    echo "  cpu pin: NO -- the fleet is pinned to CPU ${CPU_MODEL_PIN} and this host is" >&2
+    echo "    ${VENDOR} ${FAMILY}/${MODEL}/${STEPPING}. With no template a snapshot carries" >&2
+    echo "    this host's raw CPUID, and a different model cannot restore it. Either" >&2
+    echo "    this host does not belong in the fleet, or the pin is wrong. Refusing." >&2
+    exit 1
+  fi
+  echo "  cpu pin: ${VENDOR} ${CPU_MODEL_PIN}, no template; every host in this fleet is this exact CPU"
+fi
 if [ -n "$CPU_TEMPLATE" ]; then
   # Guarded with == \"\" rather than with !, and joined on a separator rather
   # than on spaces. A value of 0 is falsy in awk, so ! would let the NEXT
