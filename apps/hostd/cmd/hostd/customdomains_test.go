@@ -17,10 +17,15 @@ type domainStore struct {
 	services []state.Service
 	fail     atomic.Bool
 	reads    atomic.Int64
+	// gate, when set, holds every ListDomains until it is closed.
+	gate chan struct{}
 }
 
 func (s *domainStore) ListDomains(context.Context) ([]state.Domain, error) {
 	s.reads.Add(1)
+	if s.gate != nil {
+		<-s.gate
+	}
 	if s.fail.Load() {
 		return nil, errors.New("store unwell")
 	}
@@ -116,4 +121,58 @@ func TestANewlyVerifiedHostnameAppearsAfterTheTTL(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("a verified hostname never became routable")
+}
+
+// A request that arrives while the FIRST load is still in flight waits for it.
+//
+// It used to read the nil index as a miss, so after every restart the requests
+// racing the first one were sent to the control API and answered 401 on a
+// hostname that was verified and routable.
+func TestARequestDuringTheFirstLoadWaitsForIt(t *testing.T) {
+	st := &domainStore{
+		services: []state.Service{{ID: "s-1", Domain: "web"}},
+		domains:  []state.Domain{{Hostname: "pilots.run", ServiceID: "s-1", VerifiedAt: 1}},
+		gate:     make(chan struct{}),
+	}
+	c, _ := newIndex(st)
+
+	answers := make(chan bool, 2)
+	go func() { _, ok := c.Label("pilots.run"); answers <- ok }()
+	for st.reads.Load() == 0 { // the first load is now inside the store
+		time.Sleep(time.Millisecond)
+	}
+	go func() { _, ok := c.Label("pilots.run"); answers <- ok }()
+	time.Sleep(20 * time.Millisecond) // let the second one reach the index
+	close(st.gate)
+
+	for i := 0; i < 2; i++ {
+		if ok := <-answers; !ok {
+			t.Fatal("a request racing the first load was told the hostname is not ours")
+		}
+	}
+}
+
+// A failed refresh is tried again in a second, not in a whole TTL: a store
+// that was not up when the host started must not cost every custom domain its
+// first ten seconds.
+func TestAFailedLoadIsRetriedSoonerThanTheTTL(t *testing.T) {
+	st := &domainStore{
+		services: []state.Service{{ID: "s-1", Domain: "web"}},
+		domains:  []state.Domain{{Hostname: "pilots.run", ServiceID: "s-1", VerifiedAt: 1}},
+	}
+	st.fail.Store(true)
+	c, now := newIndex(st)
+	if _, ok := c.Label("pilots.run"); ok {
+		t.Fatal("routed from a store that could not be read")
+	}
+	st.fail.Store(false)
+	*now = now.Add(customDomainRetry)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := c.Label("pilots.run"); ok {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("a failed first load was not retried after customDomainRetry")
 }

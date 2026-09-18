@@ -17,6 +17,9 @@ import (
 // hostnames costs a map lookup each.
 const customDomainTTL = 10 * time.Second
 
+// customDomainRetry is how soon a FAILED refresh is tried again.
+const customDomainRetry = time.Second
+
 // customDomains maps a verified custom hostname to the address label of the
 // service it belongs to, from the local replica only (rule 2): the request
 // path must not depend on any other host, and this is on it twice, once in
@@ -43,48 +46,53 @@ func newCustomDomains(store state.Store) *customDomains {
 // router.NormalizeHost produces.
 func (c *customDomains) Label(host string) (string, bool) {
 	c.mu.Lock()
-	stale := c.byHost == nil || c.now().Sub(c.at) >= customDomainTTL
-	if stale && !c.loading {
+	defer c.mu.Unlock()
+	if c.byHost == nil {
+		// The first read blocks, and blocks EVERY caller, because there is
+		// nothing to answer from: it runs under the lock, so a request that
+		// arrives while it is in flight waits for the index instead of reading
+		// a nil map as "not one of ours" and being answered 401 by the control
+		// API. That is every custom domain's first seconds after each restart.
+		c.apply(c.load())
+	} else if !c.loading && c.now().Sub(c.at) >= customDomainTTL {
+		// Every later one refreshes behind the request that noticed, which is
+		// served from the index it found: a request never waits on the store
+		// for a hostname the index already knows.
 		c.loading = true
-		first := c.byHost == nil
-		c.mu.Unlock()
-		// The first read blocks, because there is nothing to answer from. Every
-		// later one refreshes behind the request that noticed, which is served
-		// from the index it found: a request never waits on the store for a
-		// hostname the index already knows.
-		if first {
-			c.refresh()
-		} else {
-			go c.refresh()
-		}
-		c.mu.Lock()
+		go func() {
+			next, err := c.load()
+			c.mu.Lock()
+			defer c.mu.Unlock()
+			c.loading = false
+			c.apply(next, err)
+		}()
 	}
 	label, ok := c.byHost[host]
-	c.mu.Unlock()
 	return label, ok
 }
 
-func (c *customDomains) refresh() {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	next, err := c.load(ctx)
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.loading = false
-	c.at = c.now()
+// apply installs a loaded index, or keeps the last good one. Called with the
+// lock held.
+func (c *customDomains) apply(next map[string]string, err error) {
 	if err != nil {
 		// Keep what we had. A store that is briefly unwell must not turn a
 		// live custom domain into a 401 from the control API.
+		//
+		// And look again in a second rather than in a whole TTL. Still on a
+		// clock and never on a miss, but a store that was not up yet when this
+		// host started must not cost every custom domain its first ten seconds.
+		c.at = c.now().Add(customDomainRetry - customDomainTTL)
 		if c.byHost == nil {
 			c.byHost = map[string]string{}
 		}
 		return
 	}
-	c.byHost = next
+	c.byHost, c.at = next, c.now()
 }
 
-func (c *customDomains) load(ctx context.Context) (map[string]string, error) {
+func (c *customDomains) load() (map[string]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	domains, err := c.store.ListDomains(ctx)
 	if err != nil {
 		return nil, err
