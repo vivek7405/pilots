@@ -1,4 +1,4 @@
-# AGENTS.md for dashboard
+# AGENTS.md for apps/web (the product half; the marketing half is site/AGENTS.md)
 
 This is a WebJs app: AI-first, web-components-first, buildless, and
 progressively enhanced. Read this whole file before you edit anything, then
@@ -213,6 +213,19 @@ the playbook above has the modeling step. Never store app data in a JSON file,
 an in-memory array, or localStorage.
 
 ## Conventions this app has settled
+
+**One app, two shells, no root layout.** `pilots.run/` is the marketing site
+(`app/(site)/`, `site/`, `public/site.css`) and `pilots.run/dashboard` is the
+product (`app/(product)/`, `public/tailwind.css`). They share no chrome, so
+there is no `app/layout.ts`: each route group owns its document shell, its
+tokens and its stylesheet, and each Tailwind input scans only its own half.
+Where this file says `app/layout.ts` it means `app/(product)/layout.ts`.
+Every product path starts with `/dashboard` (`lib/paths.ts`), and
+`test/ui/dashboard-paths.test.ts` fails one written without it; `/login`,
+`/oauth` and `/api` are the exceptions, because the CLI and GitHub hold those
+addresses. A link across shells takes `data-no-router`. The marketing half
+follows `site/AGENTS.md`, and must not import the session, the database or the
+fleet client.
 
 These are decisions, not preferences. Each one exists because the alternative
 was tried and produced a specific defect.

@@ -1,23 +1,34 @@
 # apps/web
 
-The pilots dashboard: the product's own UI, plus accounts, orgs, tokens, usage
-and the GitHub App's product half. A [webjs](https://webjs.dev) app, deployed
-on `pilots.run` by the platform it administers.
+`pilots.run`, as one [webjs](https://webjs.dev) app deployed by the platform it
+administers. Two halves that share a process and no chrome:
+
+- **the marketing site** at `/`: `app/(site)/`, `site/`, its own stylesheet
+  (`public/site.css`) and its own design law, `site/AGENTS.md`;
+- **the product** at `/dashboard`: the product's own UI, plus accounts, orgs,
+  tokens, usage and the GitHub App's product half, in `app/(product)/`.
+
+`/login`, `/oauth` and `/api` stay at the root, because `pilot login` and the
+GitHub App's callback hold those addresses. A link from one half to the other
+carries `data-no-router`: the client router keeps the outgoing stylesheet on a
+soft navigation. The homepage renders without a session, a database query or a
+fleet call, and `test/site/cold-homepage.test.ts` holds that.
 
 ## The screens
 
 | Route | What it is |
 |---|---|
-| `/` | your apps, one card each with a thumbnail of its canvas; a service in no app is its own card |
-| `/apps/[app]` | one app's canvas, and the service panel in a slide-over when a card is clicked (`?service=&tab=`) |
-| `/services/[id]` | the same panel full width: Deployments, Variables, Metrics, Terminal, Settings |
-| `/services/new` | point pilots at a GitHub repository; it plans it, shows what it found, and deploys it to a URL |
-| `/sandboxes` | every sandbox, with a filter, a terminal action per row, and a create button |
-| `/machines/[id]` | one sandbox or instance: its facts, logs, an inline terminal and its snapshots |
-| `/machines/[id]/terminal` | the same shell, full screen, where `tmux` and `vim` work |
-| `/logs` | every running instance's console in one table, filterable by service and instance |
-| `/storage`, `/domains` | attributes of a service, reached from it |
-| `/usage`, `/keys`, `/org` | the account chores, reached from the rail; usage also carries the limits and capacity |
+| `/`, `/sandboxes`, `/deploy`, `/agents`, `/architecture`, `/roadmap`, `/brand` | the marketing site |
+| `/dashboard` | your apps, one card each with a thumbnail of its canvas; a service in no app is its own card |
+| `/dashboard/apps/[app]` | one app's canvas, and the service panel in a slide-over when a card is clicked (`?service=&tab=`) |
+| `/dashboard/services/[id]` | the same panel full width: Deployments, Variables, Metrics, Terminal, Settings |
+| `/dashboard/services/new` | point pilots at a GitHub repository; it plans it, shows what it found, and deploys it to a URL |
+| `/dashboard/sandboxes` | every sandbox, with a filter, a terminal action per row, and a create button |
+| `/dashboard/machines/[id]` | one sandbox or instance: its facts, logs, an inline terminal and its snapshots |
+| `/dashboard/machines/[id]/terminal` | the same shell, full screen, where `tmux` and `vim` work |
+| `/dashboard/logs` | every running instance's console in one table, filterable by service and instance |
+| `/dashboard/storage`, `/dashboard/domains` | attributes of a service, reached from it |
+| `/dashboard/usage`, `/dashboard/keys`, `/dashboard/org` | the account chores, reached from the rail; usage also carries the limits and capacity |
 
 `Ctrl K` opens a palette that reaches any of them, or any service or machine,
 by name.

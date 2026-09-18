@@ -99,8 +99,11 @@ agents/            the agent package: the skill, the Claude Code plugin, the
                    portable Agent Plugin, and the MCP toolset both servers
                    register (own go.mod)
 apps/hostd/        Go — the entire per-host data plane (own go.mod)
-apps/web/    webjs — the product UI: overview, services, machines, terminal,
-                   usage, tokens, team, GitHub App surface
+apps/web/          webjs — pilots.run, ONE app with two shells: the marketing site
+                   at / (app/(site), site/, design law in site/AGENTS.md) and the
+                   product at /dashboard (apps, services, machines, terminal,
+                   usage, tokens, team, GitHub App surface). /login, /oauth and
+                   /api stay at the root: the CLI and GitHub hold those addresses
 apps/pilot/        Go — the `pilot` CLI and `pilot tui`, one static binary on
                    sdks/go (own go.mod); the MCP server lives here too
 packages/cli/      the previous TypeScript `pilot` CLI, kept until apps/pilot
