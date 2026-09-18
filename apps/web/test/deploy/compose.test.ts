@@ -159,3 +159,19 @@ test('both stylesheets are built before the app starts', () => {
     assert.ok(before.some((c) => c.includes('-o ./public/site.css')), `${phase} builds the marketing stylesheet`);
   }
 });
+
+test('the domain and the warm floor are on the SERVICE, where the planner reads them', () => {
+  // `x-pilots` at the top level carries `app` and nothing else. The planner
+  // reads custom_domain and min_machines_running per service, and the same keys
+  // at the top level parse cleanly and are ignored: the first production deploy
+  // came up with no domain and no floor, and the homepage's machine idled out.
+  const web = compose.slice(compose.indexOf('\n  web:\n'));
+  const block = web.match(/\n    x-pilots:\n((?: {6}.*\n|\s*\n)+)/);
+  assert.ok(block, 'services.web has an x-pilots block of its own');
+  assert.match(block[1], /^ {6}custom_domain: pilots\.run$/m);
+  assert.match(block[1], /^ {6}min_machines_running: 1$/m);
+
+  const top = compose.match(/^x-pilots:\n((?: {2}.*\n)+)/m);
+  assert.ok(top, 'the top-level block is there');
+  assert.doesNotMatch(top[1], /custom_domain|min_machines_running/, 'and holds neither, where they would do nothing');
+});

@@ -14,16 +14,22 @@
 # could set cookies scoped to it.
 x-pilots:
   app: pilots
-  custom_domain: pilots.run
-  # Keep one instance warm. This is the sign-in page and the key-minting path;
-  # a cold start on the way to `pilot login` is the wrong first impression.
-  min_machines_running: 1
 
 services:
   # The service name is the permanent address: web.pilotrun.app, with pilots.run
   # on top as the custom domain. It is `web` and not `app` because it cannot be
   # renamed after the first production deploy without minting a new URL.
   web:
+    # Per SERVICE, which is the only place the planner reads these two. They
+    # sat at the top level next to `app`, where they parse and do nothing: the
+    # first production deploy came up with no floor and no domain, and the
+    # homepage's machine idled out.
+    x-pilots:
+      custom_domain: pilots.run
+      # Keep one instance warm. This is the homepage, the sign-in page and the
+      # key-minting path; a cold start on any of them is the wrong first
+      # impression.
+      min_machines_running: 1
     build:
       context: ../..
       dockerfile: apps/web/Dockerfile
