@@ -54,6 +54,7 @@ type Load interface {
 // on the half that is its own.
 func (m *Manager) RunAutoscaler(ctx context.Context, load Load) {
 	live := metrics.NewLoop("autoscaler", 3*ScaleInterval)
+	m.live.Store(live)
 	tick := time.NewTicker(ScaleInterval)
 	defer tick.Stop()
 
@@ -259,9 +260,27 @@ func (m *Manager) scaleService(ctx context.Context, load Load, svc *state.Servic
 		// Always local. Decide names only a replica this host holds, because
 		// the owner is the one host that can see whether it is busy and the
 		// one host entitled to write its row.
-		return m.opts.Machines.Suspend(ctx, d.Down)
+		//
+		// Vouched for, as the idle monitor's suspend is: this one uploads the
+		// same memory image to the same bucket inside the same 30s budget, and
+		// a replica of a CURRENT release is suspended here and nowhere else.
+		return metrics.VouchWhile(ctx, scaleDownBudget, ScaleInterval, m.scaleTick,
+			func(ctx context.Context) error { return m.opts.Machines.Suspend(ctx, d.Down) })
 	}
 	return nil
+}
+
+// scaleDownBudget is how long one scale-down suspend may take before the
+// autoscaler stops vouching for it. The same figure, for the same reason, as
+// idleSuspendBudget in the machines package.
+const scaleDownBudget = 15 * time.Minute
+
+// scaleTick is the running autoscaler's liveness tick, and nothing when a pass
+// is driven without the loop around it.
+func (m *Manager) scaleTick() {
+	if l := m.live.Load(); l != nil {
+		l.Tick()
+	}
 }
 
 // scaleUp wakes a suspended replica if there is one, and only creates a new

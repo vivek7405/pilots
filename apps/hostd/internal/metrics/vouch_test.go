@@ -1,4 +1,4 @@
-package machines
+package metrics
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 // beat in vouchWhile and ticks stays at zero.
 func TestASlowUnitInsideItsBudgetIsVouchedFor(t *testing.T) {
 	var ticks atomic.Int64
-	err := vouchWhile(context.Background(), time.Second, 5*time.Millisecond,
+	err := VouchWhile(context.Background(), time.Second, 5*time.Millisecond,
 		func() { ticks.Add(1) },
 		func(context.Context) error { time.Sleep(60 * time.Millisecond); return nil })
 	if err != nil {
@@ -37,7 +37,7 @@ func TestAUnitPastItsBudgetIsCancelledAndNoLongerVouchedFor(t *testing.T) {
 	cancelled := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- vouchWhile(context.Background(), 20*time.Millisecond, 5*time.Millisecond,
+		done <- VouchWhile(context.Background(), 20*time.Millisecond, 5*time.Millisecond,
 			func() { ticks.Add(1) },
 			func(ctx context.Context) error {
 				<-ctx.Done()
@@ -63,9 +63,11 @@ func TestAUnitPastItsBudgetIsCancelledAndNoLongerVouchedFor(t *testing.T) {
 	}
 }
 
-// The unit's result is the caller's result: errBusy still means "leave it".
+// The unit's result is the caller's result: the idle monitor's errBusy still
+// means "leave it".
 func TestTheUnitsErrorIsReturnedUnchanged(t *testing.T) {
-	err := vouchWhile(context.Background(), time.Second, time.Millisecond, func() {},
+	errBusy := errors.New("busy")
+	err := VouchWhile(context.Background(), time.Second, time.Millisecond, func() {},
 		func(context.Context) error { return errBusy })
 	if !errors.Is(err, errBusy) {
 		t.Fatalf("got %v, want errBusy", err)

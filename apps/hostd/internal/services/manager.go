@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/vivek7405/pilots/hostd/internal/metrics"
 	"github.com/vivek7405/pilots/hostd/internal/state"
 )
 
@@ -118,6 +120,9 @@ type Manager struct {
 	// restartsSeen is the app process restart count the process health check
 	// last saw per machine, so a restart between two probes is visible.
 	restartsSeen sync.Map
+	// live is the running autoscaler's liveness loop, so a scale-down suspend
+	// can be vouched for from inside a pass. Nil until RunAutoscaler starts.
+	live atomic.Pointer[metrics.Loop]
 }
 
 func New(opts Options) *Manager {
