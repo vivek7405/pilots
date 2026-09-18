@@ -364,10 +364,9 @@ machine name (there is no wildcard in a hosts file), or a dnsmasq wildcard —
 | Process | Port | Set where |
 |---|---|---|
 | hostd | 8080 | the default; the e2e battery, `e2e-restart.sh` and the rig all assume it |
-| dashboard | 3000 | `PORT=3000` in `apps/dashboard/.env` |
-| website | 3001 | `PORT=3001` in `apps/website/.env` |
+| web (site and dashboard) | 3000 | `PORT=3000` in `apps/web/.env` |
 
-hostd keeps 8080 and the web apps move, because 8080 is baked into more places.
+hostd keeps 8080 and the web app moves, because 8080 is baked into more places.
 A `webjs dev` server left on 8080 will make hostd's bind fail. With the
 dashboard on 3000, its GitHub App callback is
 `http://localhost:3000/api/auth/callback/github`.
@@ -437,7 +436,7 @@ pilots.New(key, pilots.WithBaseURL("http://api.pilots.localhost:8080"))
 
 Both also read `PILOT_API_URL`.
 
-The dashboard throws at boot without five values in `apps/dashboard/.env`:
+The dashboard throws at boot without five values in `apps/web/.env`:
 
 ```
 PORT=3000
@@ -452,19 +451,19 @@ The last two cannot be faked: every page behind `/login` needs a real GitHub
 OAuth round trip, so a placeholder boots the app and serves the sign-in page
 but gets you no further. Register an App with
 `http://localhost:3000/api/auth/callback/github` as a callback URL. See
-`apps/dashboard/README.md`.
+`apps/web/README.md`.
 
 The routes worth opening once it is up:
 
 | Route | What it is |
 |---|---|
-| `/` | your apps, one card each with a thumbnail of its canvas |
-| `/apps/<app>` | one app's canvas: its services as cards, an arrow from each to what it dials; click a card for its panel |
-| `/services/new` | point pilots at a GitHub repository and deploy it to a URL |
-| `/sandboxes` | every sandbox, with a filter, a terminal action per row, and a create button |
-| `/machines/<id>` | one sandbox or instance: its facts, logs, an inline terminal and its snapshots |
-| `/machines/<id>/terminal` | the same shell, full screen |
-| `/logs` | every running instance's console in one table, filterable by service and instance |
+| `/dashboard` | your apps, one card each with a thumbnail of its canvas |
+| `/dashboard/apps/<app>` | one app's canvas: its services as cards, an arrow from each to what it dials; click a card for its panel |
+| `/dashboard/services/new` | point pilots at a GitHub repository and deploy it to a URL |
+| `/dashboard/sandboxes` | every sandbox, with a filter, a terminal action per row, and a create button |
+| `/dashboard/machines/<id>` | one sandbox or instance: its facts, logs, an inline terminal and its snapshots |
+| `/dashboard/machines/<id>/terminal` | the same shell, full screen |
+| `/dashboard/logs` | every running instance's console in one table, filterable by service and instance |
 
 **The terminal needs a golden rootfs built after the `tty` exec-stream change.**
 It runs the shell on a pseudo-terminal through `tty=true`, which the guest

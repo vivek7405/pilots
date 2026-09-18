@@ -1869,7 +1869,7 @@ nowhere else. Nothing a pilots user is shown carries it.
 ```
 pilots/
   AGENTS.md  CLAUDE.md(@AGENTS.md)  ARCHITECTURE.md   # this plan's content
-  package.json            # npm workspaces: apps/dashboard, packages/cli, sdks/js
+  package.json            # npm workspaces: apps/web, packages/cli, sdks/js
   apps/
     hostd/                # Go, own go.mod — the entire data plane
       cmd/hostd/  cmd/guest-agent/  cmd/chunkify/
@@ -1878,7 +1878,7 @@ pilots/
                           #   the resolution ladder behind POST /v1/plan
       systemd/            # hostd.service, corrosion.service
     dashboard/            # webjs full-stack app (scaffolded `npm create webjs`);
-                          #   deployed by `pilot deploy` from apps/dashboard/,
+                          #   deployed by `pilot deploy` from apps/web/,
                           #   SQLite on a volume at /data, pilots.run as a
                           #   custom domain, one replica
   agents/                 # the agent package, three things in one directory:
@@ -1913,7 +1913,7 @@ machine gossiped fleet-wide, on a live schema, is hard rule 6 with extra steps.
 
 webjs facts to honor: app joins root `workspaces`; delete the scaffold's
 nested `.git`; commands run inside the app dir
-(`npm run dev --workspace=apps/dashboard`); Node ≥24; gitignore
+(`npm run dev --workspace=apps/web`); Node ≥24; gitignore
 `**/.webjs/*` + `!**/.webjs/vendor/` (commit the vendor importmap);
 `#*` subpath imports resolve per-member; SQLite via built-in `node:sqlite` +
 Drizzle (pinned 1.0.0-rc.3) is in the box; API routes =
