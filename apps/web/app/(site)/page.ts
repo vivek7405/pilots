@@ -166,9 +166,9 @@ export default function Home() {
           <div class="${PANEL} p-5">
             <p class="font-semibold m-0 mb-1.5">Lazy disk</p>
             <p class="text-sm text-ink-muted m-0 leading-relaxed">
-              The rootfs is a read-through overlay: a shared template underneath, a
-              copy-on-write cache of dirty blocks on top. A machine that changed nothing stores
-              nothing, and a checkpoint of it uploads nothing.
+              The root disk is a read-through overlay: a template shared by every machine on the
+              host underneath, the machine's own dirty blocks on top, and the bucket behind both. No
+              machine holds a copy of its disk, and one that changed nothing stores nothing.
             </p>
           </div>
         </div>
@@ -197,8 +197,8 @@ export default function Home() {
           <div>
             <p class="font-semibold m-0 mb-1.5">Object storage is the truth</p>
             <p class="text-sm text-ink-muted m-0">
-              Local NVMe is a cache. The design test is that you can wipe any host's disk and lose
-              nothing.
+              Local NVMe is a cache, for the root disk and the volume alike. The design test is
+              that you can wipe any host's disk and lose nothing.
             </p>
           </div>
           <div>

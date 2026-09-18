@@ -40,7 +40,7 @@ const INVARIANTS = [
   ],
   [
     'Object storage is the only truth',
-    'Local NVMe is a cache and nothing more. The design test is blunt: wipe any host’s disk and nothing is lost. Anything that fails that test is state living in the wrong place.',
+    'Local NVMe is a cache and nothing more, for a running machine’s root disk and for a volume alike. There is one storage model rather than a local disk plus a network one. The design test is blunt: wipe any host’s disk and nothing is lost. Anything that fails that test is state living in the wrong place.',
   ],
   [
     'URLs are permanent',
@@ -163,10 +163,11 @@ export default function Architecture() {
           <div>
             <h3 class="text-h3 font-semibold m-0">A constant path</h3>
             <p class="${PROSE} mt-3">
-              A snapshot bakes in the absolute path of its disk, and sharing one rootfs between
-              machines causes lockups after resume. So each machine gets a private copy, bind-mounted
-              onto the same path inside its own mount namespace. Every snapshot restores against a
-              path that exists identically everywhere.
+              A snapshot bakes in the absolute path of its disk, and sharing one rootfs file between
+              machines causes lockups after resume. So each machine gets a block device of its own,
+              mounted onto the same path inside its own mount namespace. No machine holds a copy of
+              the disk behind it. The path is the invariant, not what sits there, and every snapshot
+              restores against a path that exists identically everywhere.
             </p>
           </div>
         </div>
@@ -185,6 +186,49 @@ export default function Architecture() {
           Chains are exactly two levels deep, a template and one diff. A reference to a grandparent
           is rejected when the header is parsed rather than discovered later as a page that resolves
           to the wrong bytes.
+        </p>
+      `,
+    })}
+
+    ${section({
+      id: 'storage',
+      layout: 'split',
+      heading: 'One storage model, and the host disk is not in it',
+      lede: html`Platforms that pin a disk to a host spend years making that disk movable. pilots
+        never pins one. The machine root and the volume are both true only in the bucket, and the
+        host’s NVMe is a read-through cache in front of it that can be emptied at any time.`,
+      body: html`
+        <div class="grid gap-6 mid:grid-cols-2">
+          <div class="${PANEL} p-5">
+            <p class="font-semibold m-0 mb-1.5">The machine root</p>
+            <p class="text-sm text-ink-muted m-0 leading-relaxed">
+              The truth of a root disk is its chunked build chain in object storage. A host serves it
+              as a block device over a template every machine on that host shares, with the machine’s
+              own writes kept as dirty blocks. A host with a cold cache serves the root from the bucket
+              while it fills, rather than waiting for a copy. Durable as of the last checkpoint,
+              suspend, or flush, and a flush runs at most ${inlineFact('rootFlushWindow')} apart.
+            </p>
+          </div>
+          <div class="${PANEL} p-5">
+            <p class="font-semibold m-0 mb-1.5">The volume</p>
+            <p class="text-sm text-ink-muted m-0 leading-relaxed">
+              A filesystem whose blocks live in the same bucket, with its index replicated there
+              continuously. Durable per write, with write-back buffering deliberately off, which is
+              why a database belongs here and not on the root. It follows its machine to whichever
+              host runs it next, because it was never local to the last one.
+            </p>
+          </div>
+        </div>
+
+        <p class="${PROSE} mt-8">
+          The two promises are stated separately on purpose. A root that promised per-write
+          durability would pay an upload on every write to a scratch file, and a volume that
+          promised a window would be the wrong place for a ledger. A root flush pauses the guest for
+          the blocks written since the last one, budgeted at ${inlineFact('rootFlushPause')}, which is
+          small and is not zero. That is the one place this design trails a copy-on-write flush that
+          never stops the guest, and it is measured rather than hidden.
+          <a class=${LINK} href="/architecture/internals#storage">The internals page</a> draws the
+          three places a byte can be.
         </p>
       `,
     })}
@@ -235,7 +279,10 @@ export default function Architecture() {
         <fleet-demo></fleet-demo>
         <p class="${PROSE} mt-8">
           The rescued machines rebuild from object storage, which is the reason this works at all:
-          nothing needed from the dead host, because nothing authoritative was ever only there. The
+          nothing needed from the dead host, because nothing authoritative was ever only there. That
+          now covers the machines that were running as well as the ones asleep. A sleeping machine
+          wakes from its snapshot, and a running one cold-boots from its last flushed disk with the
+          same id, name and address, having lost at most the flush window. The
           slices tile the dead host’s machines with no overlap and no gaps, so the survivors do
           not need to agree with each other, only to run the same function.
         </p>
