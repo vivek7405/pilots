@@ -25,7 +25,8 @@
  *                     extents, which is slower than the fleet will be and is
  *                     stated rather than quietly omitted.
  *   kind: 'budget'    a target the production sign-off has to hit and has NOT
- *                     hit yet, because there is no production fleet. A budget
+ *                     hit yet, because the battery has not run on the production
+ *                     fleet. A budget
  *                     rendered as if it were a measurement is the exact lie
  *                     invariant 1 exists to prevent, so the kind is carried
  *                     separately and the source says which it is.
@@ -202,16 +203,22 @@ export const FACTS = {
     source: 'Phase 4 issue #5 (closed): scripts/cluster/gate.sh step 8, one host-bootstrap.sh run',
     kind: 'measured',
   },
-  rootfsCopy: {
-    value: '2196ms',
-    label: 'to duplicate the golden rootfs without reflink',
-    source: 'ARCHITECTURE.md engine mechanics: the ext4 finding behind the Phase 4 create overrun',
-    kind: 'measured',
+  rootFlushWindow: {
+    value: '60s',
+    label: 'at most between a write to a machine root and the bucket holding it',
+    source: 'ARCHITECTURE.md two durability tiers: the PILOT_ROOT_FLUSH_INTERVAL default, and the e2e battery asserts the realised lag against it',
+    kind: 'design',
   },
-  ext4Create: {
-    value: '2.6s',
-    label: 'create on a store that cannot share extents',
-    source: 'Phase 4 issue #5 (closed): battery run on the nested-KVM rig, flat across every node',
+  rootFlushPause: {
+    value: '25ms',
+    label: 'guest pause a root flush is allowed to cost, high percentile across a fleet',
+    source: 'ARCHITECTURE.md two durability tiers: the SLO on pilots_root_flush_pause_seconds, a fleet target the battery bounds and cannot yet measure at that percentile',
+    kind: 'budget',
+  },
+  bucketStream: {
+    value: '55 MB/s',
+    label: 'one upload stream from a host to object storage in the same datacentre',
+    source: 'first production fleet, 2026-09-18: one PUT of half a gibibyte from a Hetzner host to the Falkenstein bucket',
     kind: 'measured',
   },
   prefaultCold: {

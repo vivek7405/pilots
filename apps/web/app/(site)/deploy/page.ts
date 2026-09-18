@@ -4,6 +4,7 @@ import { section } from '#site/lib/ui/section.ts';
 import { PANEL, PROSE, LINK, BTN_PRIMARY, BTN_GHOST, HAIRLINE } from '#site/lib/design/recipes.ts';
 import { WORKLOAD_APEX, WEBJS_URL, GH_URL, NEW_TAB } from '#site/lib/links.ts';
 import { pageHero } from '#site/lib/ui/page-hero.ts';
+import { inlineFact } from '#site/lib/ui/stat.ts';
 
 /**
  * The PaaS face.
@@ -186,8 +187,11 @@ export default function Deploy() {
         <p class="${PROSE}">
           A machine with a volume mounted stays on its host while it holds it. When that host dies,
           the volume comes back wherever the machine is rescued, because the underlying storage was
-          never local to begin with. That is the difference between disk state that survives a host
-          failure and disk state that merely survives a restart.
+          never local to begin with. The root disk is stored the same way, in the same bucket, with
+          the host's NVMe as a cache in front of both. What differs is the promise. A volume write is
+          durable when it returns, and a root write is durable at the next flush, at most
+          ${inlineFact('rootFlushWindow')} later. That is the difference between a place for a
+          database and a place for everything else.
         </p>
         <p class="${PROSE} mt-4">
           Volumes shipped with Phase 5, and its gate asserts that volume data survives the host

@@ -3,6 +3,54 @@ import { box, frame, arrow, note, figure } from '#site/lib/ui/diagram.ts';
 import { inlineFact } from '#site/lib/ui/stat.ts';
 
 /**
+ * Figure: one storage model, three places a byte can be.
+ *
+ * "The disk is a cache" is easy to say and easy to mishear as "we back up to
+ * a bucket". The claim is stronger: nothing on a host is the only copy of
+ * anything, for the root disk and the volume alike, and the host's NVMe exists
+ * to make reads fast rather than to hold state. The figure is three columns
+ * because that is the whole model, and the two arrows back to the bucket carry
+ * different promises, which is the part a reader choosing where to put a
+ * database needs.
+ */
+export function storageModelFigure() {
+  return figure({
+    label:
+      'A guest sees a root disk and, if it asked for one, a volume. Both are served from caches on the host NVMe, and both are true only in the bucket. A read falls through the cache to the bucket. Writes reach the bucket on two different schedules.',
+    viewBox: '0 0 900 330',
+    minW: 'min-w-[780px]',
+    body: html`
+      ${frame({ x: 20, y: 40, w: 230, h: 250, label: 'inside the guest' })}
+      ${box({ x: 36, y: 76, w: 198, h: 58, label: 'the root disk', sub: 'a block device, read lazily' })}
+      ${box({ x: 36, y: 196, w: 198, h: 58, label: 'a volume', sub: 'a mounted filesystem' })}
+
+      ${frame({ x: 296, y: 40, w: 290, h: 250, label: 'host NVMe, a cache' })}
+      ${box({ x: 312, y: 70, w: 258, h: 40, label: 'this machine\u2019s writes', sub: 'dirty blocks only', small: true })}
+      ${box({ x: 312, y: 116, w: 258, h: 40, label: 'the template build', sub: 'one per host, shared by every machine', small: true, tone: 'sunken' })}
+      ${box({ x: 312, y: 206, w: 258, h: 40, label: 'volume block cache', sub: 'recently read chunks', small: true, tone: 'sunken' })}
+
+      ${frame({ x: 632, y: 40, w: 248, h: 250, label: 'the bucket, the truth', tone: 'signal' })}
+      ${box({ x: 648, y: 84, w: 216, h: 58, label: 'chunked build chain', sub: 'template, then one diff' })}
+      ${box({ x: 648, y: 196, w: 216, h: 58, label: 'volume chunks', sub: 'and a replica of its index' })}
+
+      ${arrow({ d: 'M 234 105 H 308', label: 'reads', lx: 271, ly: 97, anchor: 'middle' })}
+      ${arrow({ d: 'M 570 136 H 644', label: 'miss', lx: 607, ly: 128, anchor: 'middle' })}
+      ${arrow({ d: 'M 570 90 H 644', label: 'flush', lx: 607, ly: 82, anchor: 'middle', kind: 'dashed' })}
+
+      ${arrow({ d: 'M 234 225 H 308', label: 'reads', lx: 271, ly: 217, anchor: 'middle' })}
+      ${arrow({ d: 'M 570 225 H 644', label: 'each write', lx: 607, ly: 217, anchor: 'middle' })}
+
+      ${note({ x: 441, y: 312, text: 'wipe this column and nothing is lost', anchor: 'middle', strong: true })}
+    `,
+    caption: html`The dashed arrow and the solid one are the two durability tiers. A volume write is
+      uploaded as it is made. A root write reaches the bucket at the next flush, at most
+      ${inlineFact('rootFlushWindow')} later, or sooner at a checkpoint or a suspend. The middle column
+      is rebuilt from the right-hand one on demand, which is the design test stated as a picture: a
+      host that loses its disk loses speed for a while and nothing else.`,
+  });
+}
+
+/**
  * Figure: the on-disk shape of a build.
  *
  * Content addressing is usually explained with the word "deduplication", which
@@ -94,7 +142,7 @@ export function checkpointTimelineFigure() {
         396,
         240,
         'the pause',
-        ['pause the VM', 'write the snapshot', 'read the dirty bitmap', 'reflink the cow'],
+        ['pause the VM', 'write the snapshot', 'read the dirty bitmap', 'copy the dirty ranges'],
         'signal',
       )}
       ${zone(652, 228, 'after the resume', [

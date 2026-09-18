@@ -10,7 +10,7 @@ import { GH_URL, GH_BOARD_URL, NEW_TAB } from '#site/lib/links.ts';
 import { fleetFigure, splitBrainFigure } from '#site/modules/internals/diagrams/fleet.ts';
 import { hostFigure } from '#site/modules/internals/diagrams/host.ts';
 import { requestFigure } from '#site/modules/internals/diagrams/request.ts';
-import { snapshotFormatFigure, checkpointTimelineFigure } from '#site/modules/internals/diagrams/storage.ts';
+import { storageModelFigure, snapshotFormatFigure, checkpointTimelineFigure } from '#site/modules/internals/diagrams/storage.ts';
 import { lazyFigure } from '#site/modules/internals/diagrams/lazy.ts';
 import { networkFigure } from '#site/modules/internals/diagrams/network.ts';
 import { pipelineFigure } from '#site/modules/internals/diagrams/pipeline.ts';
@@ -59,7 +59,7 @@ const CONTENTS: [string, string][] = [
   ['host', 'One host'],
   ['state', 'State'],
   ['request', 'A request'],
-  ['storage', 'Snapshots'],
+  ['storage', 'Storage'],
   ['lazy', 'Lazy paging'],
   ['network', 'Networking'],
   ['pipeline', 'Build and deploy'],
@@ -101,6 +101,10 @@ const GLOSSARY: [string, unknown][] = [
   [
     'content-addressed storage',
     'Data is stored in fixed-size pieces, and a piece that already exists is referred to rather than stored again. A machine that changed almost nothing therefore uploads almost nothing, because most of its pieces are still the ones it started with.',
+  ],
+  [
+    'a read-through cache',
+    'A nearby copy that is filled by being asked. A read that finds the piece locally is served at once, and a read that does not fetches it from the real store, keeps it, and answers. Nothing in it is the only copy of anything, so it can be emptied at any moment at the price of speed. Here the nearby copy is the server disk and the real store is the bucket.',
   ],
   [
     'a page fault',
@@ -402,10 +406,67 @@ export default function Internals() {
 
     ${section({
       id: 'storage',
-      heading: 'A snapshot that does not know which host made it',
-      lede: html`Machine state lives in object storage as content-addressed blocks, and local disk is a
-        cache of it. The design test is blunt. Wipe any host's disk and nothing is lost.`,
+      heading: 'The bucket is the machine, and the disk is a cache of it',
+      lede: html`Machine state lives in object storage as content-addressed blocks, and the host's disk
+        is a cache of it. That is true of a running machine's root disk and of a volume, not only of a
+        snapshot at rest. The design test is blunt. Wipe any host's disk and nothing is lost.`,
       body: html`
+        ${storageModelFigure()}
+
+        <div class="grid gap-8 mt-12 wide:grid-cols-2">
+          <div>
+            <h3 class="text-h3 font-semibold m-0">No machine owns a copy of its disk</h3>
+            <p class="${PROSE} mt-3">
+              A create does not copy the template. It restores over a build that every machine on the
+              host shares, and only the machine's own writes land in a file of its own, as dirty blocks.
+              A read that the machine never wrote falls through to the template, and a host that has
+              never held that template serves it from the bucket range by range while a background pull
+              fills the cache. The machine attaches at once and its reads do not wait for the copy. A
+              marker file, never a file size, is what says a cached build is whole, because an
+              interrupted pull leaves a full-length file of holes.
+            </p>
+          </div>
+          <div>
+            <h3 class="text-h3 font-semibold m-0">Two promises, stated rather than implied</h3>
+            <p class="${PROSE} mt-3">
+              A volume is durable per write: the write is uploaded as it is made, and write-back
+              buffering is deliberately off. A machine root is durable as of its last checkpoint,
+              suspend, or root flush, whichever is most recent, and the flush runs at most
+              ${inlineFact('rootFlushWindow')} apart. A flush pauses the guest, reads which blocks
+              changed, copies only those, resumes, and uploads behind the resume. The pause is bounded
+              by what was written since the last flush and budgeted at ${inlineFact('rootFlushPause')},
+              which is small and is not zero. Data that cannot afford to lose that window belongs on a
+              volume.
+            </p>
+          </div>
+        </div>
+
+        <div class="grid gap-8 mt-10 wide:grid-cols-2">
+          <div>
+            <h3 class="text-h3 font-semibold m-0">Why the cache earns its place</h3>
+            <p class="${PROSE} mt-3">
+              The bucket is a network away even inside one datacentre. One upload stream from a host
+              measured ${inlineFact('bucketStream')}, which is fine for the truth and useless as a
+              root disk. So every hot read is served from NVMe, the bucket is read only on a miss,
+              and uploads happen behind the guest rather than in front of it. The cache makes the
+              design fast. It never makes it correct, which is why it can be thrown away.
+            </p>
+          </div>
+          <div>
+            <h3 class="text-h3 font-semibold m-0">What a dead host costs now</h3>
+            <p class="${PROSE} mt-3">
+              Because every running machine names a durable disk within that window, self-heal claims
+              every machine of a silent host, the running ones as well as the sleeping ones. A sleeping
+              machine wakes elsewhere from its snapshot. A running one cold-boots elsewhere from its
+              last flushed disk, keeping its id, its name and its address. The price is stated too: a
+              gossip stall long enough to look like a death now affects a whole host's machines, and a
+              returning owner finds its rows claimed and stops its own copies.
+            </p>
+          </div>
+        </div>
+
+        <hr class="${HAIRLINE} my-12" />
+
         ${snapshotFormatFigure()}
 
         <div class="grid gap-8 mt-12 wide:grid-cols-2">
@@ -421,15 +482,16 @@ export default function Internals() {
             </p>
           </div>
           <div>
-            <h3 class="text-h3 font-semibold m-0">The filesystem underneath matters</h3>
+            <h3 class="text-h3 font-semibold m-0">The filesystem underneath stopped mattering</h3>
             <p class="${PROSE} mt-3">
-              Create copies the golden template and checkpoint copies the snapshot inside the pause
-              window, and both are budgeted as metadata operations. That is only true on a filesystem
-              that can share extents. On one that cannot, nothing errors: the copy silently becomes a
-              real copy, ${inlineFact('rootfsCopy')} of it, and create measures
-              ${inlineFact('ext4Create')} against a ${inlineFact('create')} budget with no explanation
-              anywhere. Hosts now probe for this at startup, report it on the health endpoint, and the
-              bootstrap script refuses to finish without it when asked to.
+              An earlier design copied the template at create and copied the whole write layer inside
+              the checkpoint pause, and both were cheap only on a filesystem that shares extents. On
+              one that does not, nothing errored. The copies silently became real ones, and the
+              checkpoint pause grew with the size of the machine, which is the one property a
+              checkpoint cannot have. Serving the root as a block device removed both copies. A
+              checkpoint now copies the changed ranges alone, so the pause follows the writes rather
+              than the disk on every filesystem, and extent sharing is a convenience for the one
+              template copy a host makes.
             </p>
           </div>
         </div>
@@ -444,11 +506,14 @@ export default function Internals() {
           uploaded, which is what a restore anywhere else needs. A single flag would make every rollback
           wait for an upload it is never going to read.
         </p>
-        ${plainly(html`A machine is stored the way a photo album stores a burst of near-identical
+        ${plainly(html`The server's own disk works like a desk, and the bucket like the filing cabinet
+          behind it. Whatever is being worked on sits on the desk because reaching it is quick. The
+          cabinet holds the real copy of everything, so a desk that is cleared, or lost, costs a walk
+          to the cabinet and nothing more. Files in the cabinet are kept the way a photo album stores a burst of near-identical
           photographs. The first one is kept in full. Every one after it is kept as the handful of
           details that differ, plus a note saying the rest is unchanged. A machine that sat idle
           therefore takes almost no space and almost no time to save, and one that never wrote to its
-          disk skips being saved at all. The second figure is about a different confusion. Saving a
+          disk skips being saved at all. The last figure is about a different confusion. Saving a
           machine takes a while, but the machine is only frozen for the middle part of it, so timing
           the whole operation from outside makes the pause look several times worse than anyone inside
           it actually experienced.`)}
@@ -649,7 +714,7 @@ export default function Internals() {
             ['3', 4, 'closed', 'The instant engine', 'Everything under the storage and lazy-paging figures: content-addressed blocks, the header format, the two handlers, fault-order replay, and checkpoints that resume before they finish uploading.'],
             ['4', 5, 'closed', 'Cross-host and resilience', 'The gossiped replica replacing a local database, the encrypted mesh, any host serving any machine, and the self-heal loop with the standing-down rule.'],
             ['5', 15, 'closed', 'Volumes and the PaaS face', 'Durable volumes on object storage, the build pipeline, guest-to-guest naming, sealed environment values, and services with health-gated deploys. All three parts merged and the gate passed.'],
-            ['6', 7, 'in progress', 'Product surface and sign-off', 'Tenancy, scoped keys and quotas on the API, typed clients, the hostility suite, hugepage-backed guest memory, the command line with the agent tool server, and the dashboard have all merged. Streaming exec and three other routes the clients are written against, metering, and the fleet sign-off remain.'],
+            ['6', 7, 'in progress', 'Product surface and sign-off', 'Tenancy, scoped keys and quotas on the API, typed clients, the hostility suite, hugepage-backed guest memory, streaming exec, metering, the command line with the agent tool server, the dashboard, and the machine root served from object storage with the host disk as a cache have all merged. The sign-off run on the production fleet remains.'],
           ].map(
             ([n, issue, status, title, body], i) => html`
               <li class="py-7 ${i > 0 ? 'border-t border-rule' : ''}">
@@ -691,7 +756,7 @@ export default function Internals() {
 
     ${section({
       id: 'glossary',
-      heading: 'The eight words this page leans on',
+      heading: 'The nine words this page leans on',
       lede: html`A technical page usually loses a reader on vocabulary rather than on ideas. These are
         the terms doing the work above, defined without pretending the simple version is the whole
         story.`,

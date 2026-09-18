@@ -93,7 +93,7 @@ export default function Sandboxes() {
             <div>
               <p class="font-semibold m-0 mb-1.5">Durable in the background</p>
               <p class="text-sm text-ink-muted m-0">
-                The machine resumes as soon as the copy-on-write layer is cloned, and the upload happens
+                The machine resumes as soon as the blocks it changed are copied, and the upload happens
                 behind it. Durability is reported separately, so a client that genuinely needs the
                 bytes in object storage can wait for exactly that.
               </p>
