@@ -64,7 +64,6 @@ const CONTENTS: [string, string][] = [
   ['network', 'Networking'],
   ['pipeline', 'Build and deploy'],
   ['surface', 'The surface'],
-  ['phases', 'Phase by phase'],
   ['glossary', 'Glossary'],
   ['numbers', 'Numbers'],
 ];
@@ -697,60 +696,6 @@ export default function Internals() {
             </p>
           </div>
         </div>
-      `,
-    })}
-
-    ${section({
-      id: 'phases',
-      heading: 'Which part of the drawing each phase added',
-      lede: html`The build order is deliberate: correctness first, then speed, then a fleet, then the
-        product face. Nothing above was designed as a first version to be replaced later, and each phase
-        closes on a gate rather than on the code being written.`,
-      body: html`
-        <ol class="m-0 p-0 list-none flex flex-col">
-          ${[
-            ['1', 2, 'closed', 'Scaffold and contracts', 'The state schema, the API shape, the guest protocol, and the storage layout, all frozen before any parallel work started. Nothing on this page changed shape afterwards.'],
-            ['2', 3, 'closed', 'Engine core', 'One box end to end: boot, exec, pause and resume, snapshot and restore, the router with wake-on-request, the idle monitor, and the isolation layer. Allowed to be slow, and it was.'],
-            ['3', 4, 'closed', 'The instant engine', 'Everything under the storage and lazy-paging figures: content-addressed blocks, the header format, the two handlers, fault-order replay, and checkpoints that resume before they finish uploading.'],
-            ['4', 5, 'closed', 'Cross-host and resilience', 'The gossiped replica replacing a local database, the encrypted mesh, any host serving any machine, and the self-heal loop with the standing-down rule.'],
-            ['5', 15, 'closed', 'Volumes and the PaaS face', 'Durable volumes on object storage, the build pipeline, guest-to-guest naming, sealed environment values, and services with health-gated deploys. All three parts merged and the gate passed.'],
-            ['6', 7, 'in progress', 'Product surface and sign-off', 'Tenancy, scoped keys and quotas on the API, typed clients, the hostility suite, hugepage-backed guest memory, streaming exec, metering, the command line with the agent tool server, the dashboard, and the machine root served from object storage with the host disk as a cache have all merged. The sign-off run on the production fleet remains.'],
-          ].map(
-            ([n, issue, status, title, body], i) => html`
-              <li class="py-7 ${i > 0 ? 'border-t border-rule' : ''}">
-                <div class="grid gap-4 wide:grid-cols-[3rem_1fr_auto] wide:gap-8 wide:items-start">
-                  <span class="font-mono text-h2 leading-none text-ink-subtle">${n}</span>
-                  <div>
-                    <h3 class="text-h3 font-semibold m-0">${title}</h3>
-                    <p class="text-sm text-ink-muted m-0 mt-2 max-w-[74ch]">${body}</p>
-                  </div>
-                  <div class="flex wide:flex-col items-start gap-2 wide:text-right">
-                    <span
-                      class="font-mono text-[10px] uppercase tracking-[0.14em] px-2 py-1 rounded-[2px] whitespace-nowrap
-                             ${status === 'closed'
-                               ? 'bg-signal text-signal-ink'
-                               : status === 'in progress'
-                                 ? 'border border-rule-strong text-ink'
-                                 : 'border border-rule text-ink-subtle'}"
-                      >${status}</span
-                    >
-                    <a
-                      class="font-mono text-xs text-ink-subtle hover:text-ink no-underline whitespace-nowrap"
-                      href="${GH_URL}/issues/${issue}"
-                      target="_blank"
-                      rel="noopener"
-                      >issue #${issue}${NEW_TAB}</a
-                    >
-                  </div>
-                </div>
-              </li>
-            `,
-          )}
-        </ol>
-        <p class="${PROSE} mt-8">
-          <a class=${LINK} href="/roadmap">The roadmap</a> carries each gate in full, including the ones
-          that have not been met.
-        </p>
       `,
     })}
 
