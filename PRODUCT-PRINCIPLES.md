@@ -63,15 +63,39 @@ wake-on-request"; `docs/prior-art/fly-io.md` §on fly-proxy.)
 asserted.** Fly Machines are the established suspend-on-idle platform, so
 they are the bar, and the comparison is the same image on both: the webjs
 website, 512 MB, suspend on idle, one request sent only after the platform
-itself reports the machine `suspended`, and the number is the server wait
-(time to first byte minus the connect and TLS handshake, so the network path
-to Fly's region counts against neither side). Measured 2026-09-17, five
-rounds each, with the method in the PR that shipped the S3-backed root:
+itself reports the machine `suspended`. The number is the WAKE: the cold
+request's server wait (time to first byte minus the connect and TLS handshake)
+minus the same figure for a warm request sent straight after. Subtracting the
+warm request is what removes geography, because the client is not the same
+distance from Falkenstein as from Singapore and a raw server wait still
+carries one round trip to each. Measured 2026-09-18 on the production fleet,
+five rounds each, from one client, the two runs side by side:
 
-| | pilots (laptop host) | Fly (`shared-cpu-1x`, `sin`) |
+| | pilots (Hetzner i7-6700, `fsn1`) | Fly (`shared-cpu-1x`, `sin`) |
 |---|---|---|
-| wake, median | **0.58 s** | 4.4 s |
-| wake, best / worst | 0.46 s / 0.62 s | 3.1 s / 9.6 s |
+| wake, median | **0.35 s** | 2.25 s |
+| wake, best / worst | 0.34 s / 0.45 s | 0.66 s / 15.4 s |
+| warm request, median | 0.18 s | 0.12 s |
+
+Fly's rounds varied by more than twenty times and pilots' by a third. Fly's
+best round, 0.66 s, is the figure to beat rather than its median, because a
+best case is what a platform can do when nothing else is in the way. Pilots
+holds that comparison too. One difference in the setup is stated rather than
+corrected for: Fly took six to twelve minutes to suspend the idle machine and
+pilots under one, so every Fly round followed a longer idle than any pilots
+round did.
+
+The figure belongs to that image, and a heavier one is slower. The pilots.run
+app itself, the same day, same fleet, same method, woke in 0.99 s at the
+median of three rounds (0.91 s to 1.55 s): nearly three times the WebJs
+website, on a machine of the same size. That gap is unexplained and is the
+next thing to measure, because the bar is set by the app a customer brings,
+not by the one chosen for the benchmark.
+
+The same table measured on the laptop host on 2026-09-17, by the older method
+that did not subtract the warm request, read 0.58 s for pilots against 4.4 s.
+The battery's own wake on the fleet, an API call rather than a held request,
+is 302 ms at the median against a 200 ms budget it does not yet meet.
 
 A change that moves pilots' figure toward Fly's is a regression, whatever
 else it improves; the e2e battery's wake and resume SLOs are the floor and
