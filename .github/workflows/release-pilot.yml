@@ -57,6 +57,10 @@ concurrency:
 
 jobs:
   release:
+    # A dispatch can name any ref, and a branch carrying its own
+    # changelog/pilot/<version>.md would otherwise be built, tagged and staged
+    # without ever passing review. Only main releases.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
