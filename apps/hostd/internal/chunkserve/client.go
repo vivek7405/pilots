@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/block"
+	"github.com/pilotsrun/pilots/hostd/internal/block"
 )
 
 // Client is the handler's side: a block.ObjectStore that holds no credential

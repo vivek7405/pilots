@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/vivek7405/pilots/hostd/internal/fc"
+	"github.com/pilotsrun/pilots/hostd/internal/fc"
 )
 
 // Putting a machine's handlers in the machine's own cgroup.

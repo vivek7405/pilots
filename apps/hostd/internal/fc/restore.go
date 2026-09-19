@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/netns"
+	"github.com/pilotsrun/pilots/hostd/internal/netns"
 )
 
 // initRetryInterval and initDeadline bound the clock-correction poke.

@@ -9,10 +9,10 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/vivek7405/pilots/hostd/internal/build"
-	"github.com/vivek7405/pilots/hostd/internal/fc"
-	"github.com/vivek7405/pilots/hostd/internal/netns"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/build"
+	"github.com/pilotsrun/pilots/hostd/internal/fc"
+	"github.com/pilotsrun/pilots/hostd/internal/netns"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // Creating a machine from something a build produced.

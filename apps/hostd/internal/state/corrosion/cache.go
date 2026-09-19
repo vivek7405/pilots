@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // The router, the idle monitor and the self-heal loop all need the cluster's

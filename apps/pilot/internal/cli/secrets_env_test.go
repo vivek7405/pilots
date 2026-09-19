@@ -3,7 +3,7 @@ package cli
 import (
 	"testing"
 
-	pilots "github.com/vivek7405/pilots/sdks/go"
+	pilots "github.com/pilotsrun/pilots/sdks/go"
 )
 
 // A secret the plan references comes from PILOT_SECRET_<NAME> when that is

@@ -3,7 +3,7 @@ package machines
 import (
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // takeSlot is where every local bring-up gets its netns index, and it is the

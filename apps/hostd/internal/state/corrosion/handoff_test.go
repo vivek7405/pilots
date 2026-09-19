@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // offer inserts a handoff row directly, the way the source host's write would

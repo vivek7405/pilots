@@ -10,8 +10,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/vivek7405/pilots/hostd/internal/block"
-	"github.com/vivek7405/pilots/hostd/internal/uffd"
+	"github.com/pilotsrun/pilots/hostd/internal/block"
+	"github.com/pilotsrun/pilots/hostd/internal/uffd"
 )
 
 // runUffdHandler is hostd re-executed as a memory-fault server for one machine.

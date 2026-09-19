@@ -12,8 +12,8 @@ import (
 
 	"github.com/coder/websocket"
 
-	"github.com/vivek7405/pilots/hostd/internal/netns"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/netns"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // stubPeers is a fixed view of the other hosts.

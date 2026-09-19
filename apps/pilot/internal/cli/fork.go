@@ -3,9 +3,9 @@ package cli
 import (
 	"github.com/spf13/cobra"
 
-	pilots "github.com/vivek7405/pilots/sdks/go"
+	pilots "github.com/pilotsrun/pilots/sdks/go"
 
-	"github.com/vivek7405/pilots/cli/internal/out"
+	"github.com/pilotsrun/pilots/cli/internal/out"
 )
 
 // newMachinesForkCmd makes new machines out of an existing one's exact state.

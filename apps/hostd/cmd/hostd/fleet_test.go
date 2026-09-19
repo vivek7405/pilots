@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/config"
-	"github.com/vivek7405/pilots/hostd/internal/mesh"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/config"
+	"github.com/pilotsrun/pilots/hostd/internal/mesh"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // A /proc/meminfo from a host with a large hugepage pool reserved. The point

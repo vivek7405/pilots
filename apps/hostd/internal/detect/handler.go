@@ -9,10 +9,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
-	"github.com/vivek7405/pilots/hostd/internal/build"
-	"github.com/vivek7405/pilots/hostd/internal/compose"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/build"
+	"github.com/pilotsrun/pilots/hostd/internal/compose"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // Stager stages a repository the fleet's GitHub App can read, returning the

@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/s3"
+	"github.com/pilotsrun/pilots/hostd/internal/s3"
 )
 
 // memCacheStore is a CacheStore backed by a map, so the epoch mechanism can be

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/netns"
+	"github.com/pilotsrun/pilots/hostd/internal/netns"
 )
 
 func TestParseHost(t *testing.T) {

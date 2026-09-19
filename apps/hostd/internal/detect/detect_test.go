@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/build"
-	"github.com/vivek7405/pilots/hostd/internal/compose"
+	"github.com/pilotsrun/pilots/hostd/internal/build"
+	"github.com/pilotsrun/pilots/hostd/internal/compose"
 )
 
 const fixtures = "testdata/frameworks"

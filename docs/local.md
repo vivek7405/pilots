@@ -87,7 +87,7 @@ looks (`scripts/rootfs/golden.ext4`).
 
 ```sh
 curl -fsSL -o scripts/rootfs/golden.ext4.zst \
-  "https://github.com/vivek7405/pilots/releases/download/<tag>/golden-<tag>.ext4.zst"
+  "https://github.com/pilotsrun/pilots/releases/download/<tag>/golden-<tag>.ext4.zst"
 zstd -d -f scripts/rootfs/golden.ext4.zst -o scripts/rootfs/golden.ext4
 sha256sum -c scripts/rootfs/golden.ext4.sha256
 ```

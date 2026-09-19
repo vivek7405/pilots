@@ -6,9 +6,9 @@ import (
 
 	yaml "go.yaml.in/yaml/v3"
 
-	pilots "github.com/vivek7405/pilots/sdks/go"
+	pilots "github.com/pilotsrun/pilots/sdks/go"
 
-	"github.com/vivek7405/pilots/cli/internal/out"
+	"github.com/pilotsrun/pilots/cli/internal/out"
 )
 
 // Editing somebody's compose file, and putting it back readable.

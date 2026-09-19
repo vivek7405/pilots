@@ -11,8 +11,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
-	"github.com/vivek7405/pilots/hostd/internal/metrics"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/metrics"
 )
 
 // A machine lives on exactly one host, but a request for it can arrive at any

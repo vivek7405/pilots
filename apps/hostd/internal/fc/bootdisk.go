@@ -9,9 +9,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/block"
-	"github.com/vivek7405/pilots/hostd/internal/nbd"
-	"github.com/vivek7405/pilots/hostd/internal/netns"
+	"github.com/pilotsrun/pilots/hostd/internal/block"
+	"github.com/pilotsrun/pilots/hostd/internal/nbd"
+	"github.com/pilotsrun/pilots/hostd/internal/netns"
 )
 
 // BootFromDisk boots a kernel against a machine's disk chain, served over NBD,

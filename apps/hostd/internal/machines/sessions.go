@@ -11,7 +11,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
 )
 
 // Terminal sessions live in the guest agent (cmd/guest-agent/sessions.go);

@@ -8,8 +8,8 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/netns"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/netns"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // A request for a machine being MOVED follows the machine.

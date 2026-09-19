@@ -7,9 +7,9 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/cron"
-	"github.com/vivek7405/pilots/hostd/internal/quota"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/cron"
+	"github.com/pilotsrun/pilots/hostd/internal/quota"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // Point-in-time copies of a volume.

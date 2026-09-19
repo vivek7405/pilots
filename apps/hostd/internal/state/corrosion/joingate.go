@@ -9,8 +9,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/metrics"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/metrics"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // The join gate: a host that has just joined the fleet does not act on the

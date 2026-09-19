@@ -11,8 +11,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/vivek7405/pilots/hostd/internal/quota"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/quota"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // Rollout is the deploy surface. An interface so the API can be tested

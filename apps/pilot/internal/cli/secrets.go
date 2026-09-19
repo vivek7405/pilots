@@ -15,8 +15,8 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/vivek7405/pilots/cli/internal/config"
-	"github.com/vivek7405/pilots/cli/internal/out"
+	"github.com/pilotsrun/pilots/cli/internal/config"
+	"github.com/pilotsrun/pilots/cli/internal/out"
 )
 
 var secretName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*$`)

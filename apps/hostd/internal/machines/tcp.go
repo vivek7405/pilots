@@ -9,7 +9,7 @@ import (
 	"net/url"
 	"strconv"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
 )
 
 // TCPStream carries one TCP connection to a port inside the machine over

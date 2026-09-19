@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/usage"
+	"github.com/pilotsrun/pilots/hostd/internal/usage"
 )
 
 // UsageSource is this host's meter. An interface so the API can be tested

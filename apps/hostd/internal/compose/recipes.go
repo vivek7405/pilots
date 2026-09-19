@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
 )
 
 // The compose fragment a database is added as.

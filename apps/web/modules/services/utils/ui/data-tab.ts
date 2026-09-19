@@ -25,7 +25,7 @@ export function dataTab({ detail }: TabProps): TemplateResult {
   if (!engine) {
     return sectionEmpty('Not a database', {
       text: 'How to add one',
-      href: 'https://github.com/vivek7405/pilots#databases',
+      href: 'https://github.com/pilotsrun/pilots#databases',
     });
   }
   const help = ENGINE_HELP[engine];

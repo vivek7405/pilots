@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // A stream with no argv never reaches the machine. The agent would answer its

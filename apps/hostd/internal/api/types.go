@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/vivek7405/pilots/hostd/internal/cron"
+	"github.com/pilotsrun/pilots/hostd/internal/cron"
 )
 
 // Knobs are the per-machine lifecycle policy. There is no sandbox type and no

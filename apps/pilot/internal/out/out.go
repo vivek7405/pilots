@@ -16,7 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	pilots "github.com/vivek7405/pilots/sdks/go"
+	pilots "github.com/pilotsrun/pilots/sdks/go"
 	"io"
 	"os"
 	"strings"

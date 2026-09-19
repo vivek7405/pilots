@@ -13,7 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/vivek7405/pilots/hostd/internal/ctlsock"
+	"github.com/pilotsrun/pilots/hostd/internal/ctlsock"
 )
 
 // SubcommandName is the hidden argv[1] that turns hostd into a memory handler.

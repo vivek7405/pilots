@@ -4,7 +4,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // Machines are handed off in the order they were sorted into.

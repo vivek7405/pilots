@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
 )
 
 // Recipe is the Dockerfile the platform would write for a directory, with the

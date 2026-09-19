@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/metrics"
+	"github.com/pilotsrun/pilots/hostd/internal/metrics"
 )
 
 // fakeNotifySocket stands in for systemd: a datagram socket hostd writes to,

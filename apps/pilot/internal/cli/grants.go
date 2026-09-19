@@ -6,9 +6,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	pilots "github.com/vivek7405/pilots/sdks/go"
+	pilots "github.com/pilotsrun/pilots/sdks/go"
 
-	"github.com/vivek7405/pilots/cli/internal/out"
+	"github.com/pilotsrun/pilots/cli/internal/out"
 )
 
 // What a machine may ask its host for.

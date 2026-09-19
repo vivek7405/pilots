@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // labelServer is serviceServer with the control API's hostname configured and

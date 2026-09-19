@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"strings"
 
-	pilots "github.com/vivek7405/pilots/sdks/go"
+	pilots "github.com/pilotsrun/pilots/sdks/go"
 
-	"github.com/vivek7405/pilots/cli/internal/out"
+	"github.com/pilotsrun/pilots/cli/internal/out"
 )
 
 // resolveMachine turns what a person typed into a machine: an id first, then

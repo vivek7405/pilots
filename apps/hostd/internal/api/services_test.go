@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // fakeSealer is a fleet key that seals visibly, so a test can tell a sealed

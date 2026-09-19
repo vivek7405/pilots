@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // A build that names a service deploys it ON THE HOST, once, whether or not

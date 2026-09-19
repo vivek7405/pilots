@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/fc"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/fc"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // fakeCgroup writes one machine's slice with the files Stats reads.

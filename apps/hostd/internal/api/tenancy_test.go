@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // twoTenants seeds two orgs, each with one machine and one key, plus a third

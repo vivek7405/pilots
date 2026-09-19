@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // A zero interval is the operator switching the bound off, and off means no

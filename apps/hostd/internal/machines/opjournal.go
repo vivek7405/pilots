@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/fc"
+	"github.com/pilotsrun/pilots/hostd/internal/fc"
 )
 
 // A journal of the lifecycle operations that are in flight.

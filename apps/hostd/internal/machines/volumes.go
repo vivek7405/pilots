@@ -9,12 +9,12 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
-	"github.com/vivek7405/pilots/hostd/internal/fc"
-	"github.com/vivek7405/pilots/hostd/internal/netns"
-	"github.com/vivek7405/pilots/hostd/internal/s3"
-	"github.com/vivek7405/pilots/hostd/internal/state"
-	"github.com/vivek7405/pilots/hostd/internal/volumes"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/fc"
+	"github.com/pilotsrun/pilots/hostd/internal/netns"
+	"github.com/pilotsrun/pilots/hostd/internal/s3"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/volumes"
 )
 
 // VolumeManager is the volume surface this package drives. An interface so a

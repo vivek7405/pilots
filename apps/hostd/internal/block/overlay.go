@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
-	"github.com/vivek7405/pilots/hostd/internal/metrics"
+	"github.com/pilotsrun/pilots/hostd/internal/metrics"
 )
 
 // Overlay is a copy-on-write view: a writable cache in front of a read-only

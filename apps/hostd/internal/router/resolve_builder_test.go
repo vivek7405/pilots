@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // A builder is refused on the path that actually runs: the subscription cache.

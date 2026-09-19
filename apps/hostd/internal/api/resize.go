@@ -3,7 +3,7 @@ package api
 import (
 	"net/http"
 
-	"github.com/vivek7405/pilots/hostd/internal/quota"
+	"github.com/pilotsrun/pilots/hostd/internal/quota"
 )
 
 // Resizing a machine, over the public API.

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
 )
 
 // The probe answers "busy" only for a live session the guest says is running

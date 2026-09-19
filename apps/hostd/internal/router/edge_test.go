@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/machines"
-	"github.com/vivek7405/pilots/hostd/internal/netns"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/machines"
+	"github.com/pilotsrun/pilots/hostd/internal/netns"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // setEdgeHeaders alone, without a proxy in the way: the three headers it owns

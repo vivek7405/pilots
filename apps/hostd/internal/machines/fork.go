@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
-	"github.com/vivek7405/pilots/hostd/internal/state"
-	"github.com/vivek7405/pilots/hostd/internal/volumes"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/volumes"
 )
 
 // Making a new machine out of an existing one's exact state.

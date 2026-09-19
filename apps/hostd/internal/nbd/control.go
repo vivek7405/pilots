@@ -6,8 +6,8 @@ import (
 
 	"github.com/RoaringBitmap/roaring/v2"
 
-	"github.com/vivek7405/pilots/hostd/internal/block"
-	"github.com/vivek7405/pilots/hostd/internal/ctlsock"
+	"github.com/pilotsrun/pilots/hostd/internal/block"
+	"github.com/pilotsrun/pilots/hostd/internal/ctlsock"
 )
 
 // The handler runs as its own process, so hostd can be restarted -- or crash --

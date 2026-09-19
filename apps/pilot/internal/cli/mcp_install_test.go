@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vivek7405/pilots/agents"
+	"github.com/pilotsrun/pilots/agents"
 
-	"github.com/vivek7405/pilots/cli/internal/config"
-	"github.com/vivek7405/pilots/cli/internal/out"
+	"github.com/pilotsrun/pilots/cli/internal/config"
+	"github.com/pilotsrun/pilots/cli/internal/out"
 )
 
 func installEnv(t *testing.T) (*Env, config.Env, string) {

@@ -7,8 +7,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
-	"github.com/vivek7405/pilots/hostd/internal/compose"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/compose"
 )
 
 // composeNames is the order the CLI's finder uses and the order docker compose

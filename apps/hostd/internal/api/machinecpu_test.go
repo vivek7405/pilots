@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // A cold boot is a machine that came back with its URL, its disk and its

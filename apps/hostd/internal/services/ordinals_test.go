@@ -3,7 +3,7 @@ package services
 import (
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 func hosts(ids ...string) []state.Host {

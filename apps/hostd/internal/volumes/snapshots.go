@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
 )
 
 // Point-in-time copies of a volume, and forks from them.

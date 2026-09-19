@@ -15,9 +15,9 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/vivek7405/pilots/hostd/internal/nbd"
-	"github.com/vivek7405/pilots/hostd/internal/netns"
-	"github.com/vivek7405/pilots/hostd/internal/uffd"
+	"github.com/pilotsrun/pilots/hostd/internal/nbd"
+	"github.com/pilotsrun/pilots/hostd/internal/netns"
+	"github.com/pilotsrun/pilots/hostd/internal/uffd"
 )
 
 // BakedRootfsPath is where the guest kernel expects its root device to be, as

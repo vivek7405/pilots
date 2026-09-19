@@ -10,9 +10,9 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/vivek7405/pilots/agents"
-	"github.com/vivek7405/pilots/cli/internal/config"
-	"github.com/vivek7405/pilots/cli/internal/out"
+	"github.com/pilotsrun/pilots/agents"
+	"github.com/pilotsrun/pilots/cli/internal/config"
+	"github.com/pilotsrun/pilots/cli/internal/out"
 )
 
 func newMCPCmd(env *Env, getenv config.Env) *cobra.Command {
@@ -223,7 +223,7 @@ func newSkillCmd(env *Env, getenv config.Env) *cobra.Command {
 		How: "Writes the pages this binary embeds to ~/.local/share/pilots/skill\n" +
 			"and links ~/.claude/skills/pilots at that copy so Claude Code loads\n" +
 			"them everywhere. The Claude Code plugin is the other way to get\n" +
-			"them: /plugin marketplace add vivek7405/pilots.",
+			"them: /plugin marketplace add pilotsrun/pilots.",
 		Examples: []string{"pilot skill install"},
 	})
 	root.AddCommand(install)

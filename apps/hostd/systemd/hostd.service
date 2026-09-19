@@ -1,6 +1,6 @@
 [Unit]
 Description=pilots host daemon (data plane)
-Documentation=https://github.com/vivek7405/pilots
+Documentation=https://github.com/pilotsrun/pilots
 After=network-online.target
 Wants=network-online.target
 

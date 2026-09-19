@@ -8,9 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
-	"github.com/vivek7405/pilots/hostd/internal/metrics"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/metrics"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // DefaultIdleTimeout is how long a machine must be quiet before it suspends

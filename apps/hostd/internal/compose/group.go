@@ -7,7 +7,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
 )
 
 // ProcessesEnv is the environment variable a machine's process set travels in.

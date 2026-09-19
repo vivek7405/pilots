@@ -9,8 +9,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/quota"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/quota"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // recordingRollout answers a deploy and remembers the knobs it was handed, so

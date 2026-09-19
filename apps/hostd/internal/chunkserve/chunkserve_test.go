@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/block"
+	"github.com/pilotsrun/pilots/hostd/internal/block"
 )
 
 // fakeStore stands in for the bucket, and records what was actually asked of

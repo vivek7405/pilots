@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
 )
 
 // A follower gets the backlog AND everything after it, with no gap between the

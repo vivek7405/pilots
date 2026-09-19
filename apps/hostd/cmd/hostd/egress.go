@@ -6,10 +6,10 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/mesh"
-	"github.com/vivek7405/pilots/hostd/internal/metrics"
-	"github.com/vivek7405/pilots/hostd/internal/netns"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/mesh"
+	"github.com/pilotsrun/pilots/hostd/internal/metrics"
+	"github.com/pilotsrun/pilots/hostd/internal/netns"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // egressInterval is how often the root namespace's egress rules are

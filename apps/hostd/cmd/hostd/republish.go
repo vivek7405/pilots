@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // ownRowStore is the slice of state.Store republishing needs.

@@ -12,18 +12,18 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/vivek7405/pilots/cli/internal/out"
+	"github.com/pilotsrun/pilots/cli/internal/out"
 )
 
 // Version is stamped at build time:
 //
-//	go build -ldflags "-X github.com/vivek7405/pilots/cli/internal/cli.Version=v0.2.0"
+//	go build -ldflags "-X github.com/pilotsrun/pilots/cli/internal/cli.Version=v0.2.0"
 //
 // A binary built without it says "dev", and upgrade refuses to replace a dev
 // build, because the person running one is the person changing it.
 var Version = "dev"
 
-const releasesAPI = "https://api.github.com/repos/vivek7405/pilots/releases/latest"
+const releasesAPI = "https://api.github.com/repos/pilotsrun/pilots/releases/latest"
 
 type release struct {
 	TagName string `json:"tag_name"`

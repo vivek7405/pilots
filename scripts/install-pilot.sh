@@ -1,7 +1,7 @@
 #!/bin/sh
 # Install the `pilot` CLI.
 #
-#   curl -fsSL https://raw.githubusercontent.com/vivek7405/pilots/main/scripts/install-pilot.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/pilotsrun/pilots/main/scripts/install-pilot.sh | sh
 #
 # POSIX sh, not bash: this is piped into whatever /bin/sh is on the machine,
 # and a bashism here fails on Alpine, on Debian's dash, and inside a slim
@@ -14,7 +14,7 @@
 # other two.
 set -eu
 
-REPO="${PILOT_REPO:-vivek7405/pilots}"
+REPO="${PILOT_REPO:-pilotsrun/pilots}"
 # Where it lands. ~/.local/bin because it needs no privilege and is on PATH in
 # every modern distribution's default profile.
 BIN_DIR="${PILOT_BIN_DIR:-$HOME/.local/bin}"

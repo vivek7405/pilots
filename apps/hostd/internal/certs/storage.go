@@ -14,7 +14,7 @@ import (
 
 	"github.com/caddyserver/certmagic"
 
-	"github.com/vivek7405/pilots/hostd/internal/s3"
+	"github.com/pilotsrun/pilots/hostd/internal/s3"
 )
 
 // Storage is certmagic.Storage over the same bucket everything else uses.

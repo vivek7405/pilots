@@ -15,7 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/vivek7405/pilots/cli/internal/config"
+	"github.com/pilotsrun/pilots/cli/internal/config"
 )
 
 // A check is one line of the doctor's report.

@@ -7,7 +7,7 @@
   "description": "The pilot CLI and its MCP server: sandboxes and services on one primitive",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vivek7405/pilots.git",
+    "url": "git+https://github.com/pilotsrun/pilots.git",
     "directory": "packages/cli"
   },
   "bin": {

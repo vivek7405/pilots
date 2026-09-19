@@ -12,7 +12,7 @@ packages at once:
 - **A portable [Agent Plugins v1](https://agent-plugins.org/specification)
   package.** `plugin.json`, `mcp.json` and the same `skills/`, for Cursor,
   Codex, GitHub Copilot, Kiro and every other client that loads that format.
-- **A Go module** (`github.com/vivek7405/pilots/agents`) that embeds the skill
+- **A Go module** (`github.com/pilotsrun/pilots/agents`) that embeds the skill
   and holds the MCP toolset in `mcp/`. hostd serves the toolset at `/mcp` on
   every host and `pilot mcp` serves it on stdio; both read the pages from
   this embed, so the plugin, the CLI and the fleet ship the same words.
@@ -22,7 +22,7 @@ packages at once:
 Claude Code:
 
 ```
-/plugin marketplace add vivek7405/pilots
+/plugin marketplace add pilotsrun/pilots
 /plugin install pilots@pilots
 ```
 

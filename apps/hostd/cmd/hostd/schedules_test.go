@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
-	"github.com/vivek7405/pilots/hostd/internal/router"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/router"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // fleetWith is a fleetView over rows and services.

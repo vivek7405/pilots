@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/netns"
+	"github.com/pilotsrun/pilots/hostd/internal/netns"
 )
 
 // This is the integration test that proves the whole boot path: a real

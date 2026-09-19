@@ -22,7 +22,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/metrics"
+	"github.com/pilotsrun/pilots/hostd/internal/metrics"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -30,8 +30,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 
-	"github.com/vivek7405/pilots/hostd/internal/block"
-	"github.com/vivek7405/pilots/hostd/internal/fc"
+	"github.com/pilotsrun/pilots/hostd/internal/block"
+	"github.com/pilotsrun/pilots/hostd/internal/fc"
 )
 
 // ErrRangeNotSatisfiable reports an HTTP 416.

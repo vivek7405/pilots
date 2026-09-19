@@ -20,8 +20,8 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/vivek7405/pilots/agents"
-	pilots "github.com/vivek7405/pilots/sdks/go"
+	"github.com/pilotsrun/pilots/agents"
+	pilots "github.com/pilotsrun/pilots/sdks/go"
 )
 
 // FleetTools are the tools that need only the API. They are what /mcp

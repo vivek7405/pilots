@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/nbd"
-	"github.com/vivek7405/pilots/hostd/internal/uffd"
+	"github.com/pilotsrun/pilots/hostd/internal/nbd"
+	"github.com/pilotsrun/pilots/hostd/internal/uffd"
 )
 
 // Breadcrumb file names. The pid is kept separate from the JSON deliberately:

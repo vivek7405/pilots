@@ -6,7 +6,7 @@
   "description": "Typed client for the pilots API: sandboxes and services on one primitive",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/vivek7405/pilots.git",
+    "url": "git+https://github.com/pilotsrun/pilots.git",
     "directory": "sdks/js"
   },
   "exports": {

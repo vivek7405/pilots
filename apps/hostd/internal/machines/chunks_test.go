@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/vivek7405/pilots/hostd/internal/fc"
+	"github.com/pilotsrun/pilots/hostd/internal/fc"
 )
 
 // The assertion the scrubbed environment exists for: a handler process sits

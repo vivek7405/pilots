@@ -3,7 +3,7 @@ package api
 import (
 	"context"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // MachineCPUView answers how a machine last came up: a restore of its memory

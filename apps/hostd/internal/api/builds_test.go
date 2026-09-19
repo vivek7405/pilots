@@ -16,8 +16,8 @@ import (
 
 	"crypto/sha256"
 	"encoding/hex"
-	"github.com/vivek7405/pilots/hostd/internal/quota"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/quota"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // fakeBuilder stands in for BuildKit so the streaming contract can be tested

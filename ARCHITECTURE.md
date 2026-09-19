@@ -6,7 +6,7 @@ incidents in the predecessor codebase, and the contracts are what every
 phase builds against in parallel.
 
 **The phase plan and build order live in the issue tracker**, not here —
-see [#1](https://github.com/vivek7405/pilots/issues/1) (master plan) and
+see [#1](https://github.com/pilotsrun/pilots/issues/1) (master plan) and
 its sub-issues #2–#7. Workflow rules live in [`AGENTS.md`](./AGENTS.md).
 
 Change this file *before* changing code that contradicts it.
@@ -1892,7 +1892,7 @@ pilots/
     bin/  src/{commands,compose,mcp}/   #   is at parity; skill/pilots links to agents/
     examples/             # one-service, and two-services-volume-secret
   sdks/js/                # @pilots/sdk — typed client + sprites-compat adapter
-  sdks/go/                # github.com/vivek7405/pilots/sdks/go
+  sdks/go/                # github.com/pilotsrun/pilots/sdks/go
                           #   both hand-written; both carry a drift test that
                           #   parses internal/api and fails on a wire change
   scripts/                # bash one-shots ONLY: host-bootstrap.sh <ip>,

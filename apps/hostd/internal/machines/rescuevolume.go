@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // Rescuing a machine whose state is on a volume rather than in a snapshot.

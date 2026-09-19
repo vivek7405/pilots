@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
-	"github.com/vivek7405/pilots/hostd/internal/config"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/config"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // BootstrapKeyCommand mints the first admin key on a fleet and prints it.

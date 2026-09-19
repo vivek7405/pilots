@@ -51,7 +51,7 @@ jobs:
             # which is the whole point of shipping one file.
             CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
               -trimpath \
-              -ldflags "-s -w -X github.com/vivek7405/pilots/cli/internal/cli.Version=${version}" \
+              -ldflags "-s -w -X github.com/pilotsrun/pilots/cli/internal/cli.Version=${version}" \
               -o "dist/pilot_${goos}_${goarch}" ./cmd/pilot
           done
           ( cd dist && sha256sum pilot_* > checksums.txt )
@@ -77,7 +77,7 @@ jobs:
             Install or upgrade:
 
             ```sh
-            curl -fsSL https://raw.githubusercontent.com/vivek7405/pilots/main/scripts/install-pilot.sh | sh
+            curl -fsSL https://raw.githubusercontent.com/pilotsrun/pilots/main/scripts/install-pilot.sh | sh
             ```
 
             An existing install upgrades itself in place with `pilot upgrade`.

@@ -13,7 +13,7 @@ import (
 	"golang.org/x/net/http2/h2c"
 	"net/http/httptest"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // machineRow renders one machine as the subscription's columns.

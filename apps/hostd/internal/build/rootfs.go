@@ -4,7 +4,7 @@ import (
 	"archive/tar"
 	"context"
 	"fmt"
-	"github.com/vivek7405/pilots/hostd/internal/netns"
+	"github.com/pilotsrun/pilots/hostd/internal/netns"
 	"io"
 	"os"
 	"os/exec"

@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	pilots "github.com/vivek7405/pilots/sdks/go"
+	pilots "github.com/pilotsrun/pilots/sdks/go"
 )
 
 func newVolumesCmd(env *Env) *cobra.Command {

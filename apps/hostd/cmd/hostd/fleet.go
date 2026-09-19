@@ -20,15 +20,15 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
-	"github.com/vivek7405/pilots/hostd/internal/config"
-	"github.com/vivek7405/pilots/hostd/internal/machines"
-	"github.com/vivek7405/pilots/hostd/internal/mesh"
-	"github.com/vivek7405/pilots/hostd/internal/metrics"
-	"github.com/vivek7405/pilots/hostd/internal/router"
-	"github.com/vivek7405/pilots/hostd/internal/selfheal"
-	"github.com/vivek7405/pilots/hostd/internal/state"
-	"github.com/vivek7405/pilots/hostd/internal/state/corrosion"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/config"
+	"github.com/pilotsrun/pilots/hostd/internal/machines"
+	"github.com/pilotsrun/pilots/hostd/internal/mesh"
+	"github.com/pilotsrun/pilots/hostd/internal/metrics"
+	"github.com/pilotsrun/pilots/hostd/internal/router"
+	"github.com/pilotsrun/pilots/hostd/internal/selfheal"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state/corrosion"
 )
 
 // Everything that makes one host part of a fleet. On a single box none of it

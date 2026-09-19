@@ -11,13 +11,13 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/vivek7405/pilots/hostd/internal/block"
-	"github.com/vivek7405/pilots/hostd/internal/chunkserve"
-	"github.com/vivek7405/pilots/hostd/internal/config"
-	"github.com/vivek7405/pilots/hostd/internal/nbd"
-	"github.com/vivek7405/pilots/hostd/internal/procname"
-	"github.com/vivek7405/pilots/hostd/internal/s3"
-	"github.com/vivek7405/pilots/hostd/internal/uffd"
+	"github.com/pilotsrun/pilots/hostd/internal/block"
+	"github.com/pilotsrun/pilots/hostd/internal/chunkserve"
+	"github.com/pilotsrun/pilots/hostd/internal/config"
+	"github.com/pilotsrun/pilots/hostd/internal/nbd"
+	"github.com/pilotsrun/pilots/hostd/internal/procname"
+	"github.com/pilotsrun/pilots/hostd/internal/s3"
+	"github.com/pilotsrun/pilots/hostd/internal/uffd"
 )
 
 // runNBDHandler is hostd re-executed as a block-device server for one machine.

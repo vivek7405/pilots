@@ -1,17 +1,17 @@
-module github.com/vivek7405/pilots/hostd
+module github.com/pilotsrun/pilots/hostd
 
 go 1.26
 
 // The MCP toolset and the SDK it drives are in this repository; hostd serves
 // the toolset at /mcp and dials itself with the SDK.
-replace github.com/vivek7405/pilots/agents => ../../agents
+replace github.com/pilotsrun/pilots/agents => ../../agents
 
-replace github.com/vivek7405/pilots/sdks/go => ../../sdks/go
+replace github.com/pilotsrun/pilots/sdks/go => ../../sdks/go
 
 require (
 	github.com/modelcontextprotocol/go-sdk v1.7.0
-	github.com/vivek7405/pilots/agents v0.0.0-00010101000000-000000000000
-	github.com/vivek7405/pilots/sdks/go v0.0.0-00010101000000-000000000000
+	github.com/pilotsrun/pilots/agents v0.0.0-00010101000000-000000000000
+	github.com/pilotsrun/pilots/sdks/go v0.0.0-00010101000000-000000000000
 )
 
 require (

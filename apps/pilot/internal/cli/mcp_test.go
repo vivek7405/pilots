@@ -7,10 +7,10 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	pilotsmcp "github.com/vivek7405/pilots/agents/mcp"
-	pilots "github.com/vivek7405/pilots/sdks/go"
+	pilotsmcp "github.com/pilotsrun/pilots/agents/mcp"
+	pilots "github.com/pilotsrun/pilots/sdks/go"
 
-	"github.com/vivek7405/pilots/cli/internal/out"
+	"github.com/pilotsrun/pilots/cli/internal/out"
 )
 
 // `pilot mcp` is the fleet toolset plus the local tools, and nothing else:

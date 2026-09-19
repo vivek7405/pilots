@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	pilots "github.com/vivek7405/pilots/sdks/go"
+	pilots "github.com/pilotsrun/pilots/sdks/go"
 )
 
 // A compose build: context with no Dockerfile is planned by the host like any

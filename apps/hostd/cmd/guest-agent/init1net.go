@@ -8,8 +8,8 @@ import (
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 
-	"github.com/vivek7405/pilots/hostd/internal/mesh"
-	"github.com/vivek7405/pilots/hostd/internal/netns"
+	"github.com/pilotsrun/pilots/hostd/internal/mesh"
+	"github.com/pilotsrun/pilots/hostd/internal/netns"
 )
 
 // The guest's IPv6 half of its link, configured by the agent when it is PID 1.

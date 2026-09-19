@@ -18,7 +18,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/vivek7405/pilots/hostd/internal/block"
+	"github.com/pilotsrun/pilots/hostd/internal/block"
 )
 
 // The ioctls a test needs to stand in for the kernel side of Firecracker.

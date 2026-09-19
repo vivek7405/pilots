@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/block"
-	"github.com/vivek7405/pilots/hostd/internal/metrics"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/block"
+	"github.com/pilotsrun/pilots/hostd/internal/metrics"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // RunRootFlush makes every running machine's disk durable on a timer, until

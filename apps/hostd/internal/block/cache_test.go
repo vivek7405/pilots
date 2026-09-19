@@ -10,7 +10,7 @@ import (
 
 	"github.com/RoaringBitmap/roaring/v2"
 	"github.com/google/uuid"
-	"github.com/vivek7405/pilots/hostd/internal/metrics"
+	"github.com/pilotsrun/pilots/hostd/internal/metrics"
 	"golang.org/x/sys/unix"
 )
 
