@@ -24,7 +24,7 @@ import { pageHero } from '#site/lib/ui/page-hero.ts';
  */
 
 export const metadata = {
-  title: 'Architecture: no control plane, one primitive',
+  title: 'Architecture - no control plane, one primitive',
   description:
     'How Pilots runs Firecracker microVMs with no scheduler tier and no managed database. Gossiped CRDT state, content-addressed snapshots, and a router that wakes machines on request.',
 };

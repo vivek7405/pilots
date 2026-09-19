@@ -18,7 +18,7 @@ import { pageHero } from '#site/lib/ui/page-hero.ts';
  */
 
 export const metadata = {
-  title: 'Sandboxes: microVMs for AI agents',
+  title: 'Sandboxes - microVMs for AI agents',
   description:
     'Firecracker microVMs that restore instead of booting, checkpoint before every risky step, and restore in place without changing the URL or the agent token.',
 };

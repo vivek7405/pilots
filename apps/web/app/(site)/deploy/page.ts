@@ -17,7 +17,7 @@ import { inlineFact } from '#site/lib/ui/stat.ts';
  */
 
 export const metadata = {
-  title: 'Deploy: any Dockerfile to a durable service',
+  title: 'Deploy - any Dockerfile to a durable service',
   description:
     'Build any Dockerfile into a microVM, deploy behind a health gate that keeps the old release until the new one answers, and serve it on a custom domain with automatic certificates.',
 };

@@ -36,7 +36,7 @@ import { pipelineFigure } from '#site/modules/internals/diagrams/pipeline.ts';
  */
 
 export const metadata = {
-  title: 'Internals: the whole Pilots architecture, drawn',
+  title: 'Internals - the whole Pilots architecture, drawn',
   description:
     'A technical walkthrough of Pilots end to end: the fleet, one host, the CRDT state layer, the request path, content-addressed snapshots, lazy memory and disk, guest networking, and the build pipeline.',
 };

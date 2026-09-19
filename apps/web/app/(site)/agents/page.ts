@@ -20,7 +20,7 @@ import { ADAPTERS, HARNESSES, SDKS } from '#site/lib/agents.ts';
  */
 
 export const metadata = {
-  title: 'Agents: every coding agent, one fleet',
+  title: 'Agents - every coding agent, one fleet',
   description:
     'Point Claude Code, Codex, Cursor, OpenCode or any MCP client at a Pilots fleet, with typed clients for TypeScript, Python and Go and adapters for the agent frameworks.',
 };

@@ -10,21 +10,30 @@ import { brandMark } from '#site/lib/design/logo-candidates.ts';
 /**
  * Root layout: the only file that writes the document shell.
  *
- * The title leads with the CATEGORY, because that is what people type. "Sandbox"
- * and "microVM" are the phrases this product competes on, and a title naming
- * only the brand matches nothing in the strongest on-page signal there is.
- * 59 characters, inside the SERP truncation limit, brand first.
+ * The title is the home page's own headline behind the brand, so the browser
+ * tab, a search result, a shared link and the page all say one sentence. It
+ * used to lead with the category in our vocabulary ("microVM sandboxes and PaaS
+ * on one primitive"), which matched a search and told the searcher nothing.
+ * "Sandbox" and "production" are still in it, and "microVM" and "Firecracker"
+ * moved to the description, where there is room for them.
+ *
+ * A hyphen separates the brand from the rest, here and in every page title: a
+ * colon reads as a label in a tab that shows about twenty characters.
+ * 52 characters, inside the SERP truncation limit, brand first.
  */
-const TITLE = 'Pilots: microVM sandboxes and PaaS on one primitive';
+const TITLE = 'Pilots - from sandbox to production, on the same URL';
 /** The social card's revision. See the note where the image URL is built. */
 const OG_VERSION = '2';
 /**
- * 154 characters. Google renders about 160, so anything past that is written
- * for nobody. It states the differentiator rather than adjectives, because the
- * description is the one line a searcher reads before deciding to click.
+ * 159 characters. Google renders about 160, so anything past that is written
+ * for nobody. It is what happens to the reader, in order, because the
+ * description is the one line a searcher reads before deciding to click, and it
+ * is also the text every chat app prints under the social card. The category
+ * words a search matches on ("Firecracker", "microVM", "sandbox", "AI agents")
+ * are all still here.
  */
 const DESCRIPTION =
-  'Firecracker microVM sandboxes for AI agents and durable production services on one primitive. No central control plane. Every host serves the full API.';
+  'Run your app in an instant Firecracker microVM sandbox and get a live URL. Promote it to production when it is ready. The URL never changes. For AI agents too.';
 
 export function generateMetadata(ctx: { url: string }) {
   const { origin, pathname } = new URL(ctx.url);
@@ -95,7 +104,7 @@ export function generateMetadata(ctx: { url: string }) {
         '@id': `${SITE_ORIGIN}#organization`,
         name: 'Pilots',
         url: SITE_ORIGIN,
-        description: 'Firecracker microVM sandboxes and production services on one primitive.',
+        description: 'Firecracker microVM sandboxes and production services on one platform.',
       },
       {
         '@context': 'https://schema.org',
