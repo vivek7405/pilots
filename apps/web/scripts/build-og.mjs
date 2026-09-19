@@ -37,7 +37,9 @@
  *    site still ships none of them.
  *
  * The mark is the Delta from site/lib/design/logo-candidates.ts, and the blurb
- * is the footer's, word for word. test/site/og.test.ts holds both.
+ * is the footer's, word for word. test/site/og.test.ts holds both. The headline
+ * is the card's own: the home page keeps the thesis, the card leads with the
+ * outcome.
  */
 import { chromium } from 'playwright';
 import { readFileSync, statSync } from 'node:fs';
@@ -52,11 +54,17 @@ const face = (file) => `url(data:font/woff2;base64,${readFileSync(here(`./fonts/
 /** The light half of the palette in public/site.input.css. A PNG has no light-dark(). */
 const T = { paper: '#f7f4ee', elev: '#fffdf9', ink: '#16181c', muted: '#54585f', subtle: '#80858e', rule: '#ddd7ca', ruleStrong: '#c6bfae', signal: '#a3e635', signalInk: '#12160a' };
 
-// test/site/og.test.ts reads these two out of this file's source and holds them
-// to the home page and the footer, so keep each a plain single-quoted string.
-const HEADLINE = 'The sandbox and the service are the same machine.';
+// What happens to the reader, in the order it happens: a link preview gets a
+// couple of seconds, and an outcome lands in that time where the site's thesis
+// (the sandbox and the service are the same machine) has to be decoded first.
+// test/site/og.test.ts reads both out of this file's source and holds the blurb
+// to the footer, so keep each a plain single-quoted string with no apostrophe.
+const HEADLINE = 'From sandbox to production, on the same URL.';
+// Broken by hand, one clause a line. Left to the browser it breaks after
+// "production, on", which strands the preposition.
+const HEADLINE_HTML = HEADLINE.replace('sandbox to', 'sandbox<br>to').replace(', on', ',<br>on');
 const BLURB =
-  'Sandboxes and production services on the same platform. Start one as a sandbox, promote it to production, keep the URL.';
+  'Run your app in an instant sandbox and get a live URL. Promote it to production when it is ready. The URL never changes.';
 
 const HTML = `<!doctype html>
 <html><head><meta charset="utf-8"><style>
@@ -133,7 +141,7 @@ const HTML = `<!doctype html>
       </svg>
       <span class="word">pilots</span>
     </div>
-    <h1>${HEADLINE}</h1>
+    <h1>${HEADLINE_HTML}</h1>
     <p class="blurb">${BLURB}</p>
     <span class="pill">pilots.run</span>
   </div>

@@ -25,8 +25,8 @@ export function siteFooter() {
               <span>pilots</span>
             </span>
             <p class="text-sm text-ink-muted m-0 max-w-[34ch]">
-              Sandboxes and production services on the same platform. Start one as a sandbox,
-              promote it to production, keep the URL.
+              Run your app in an instant sandbox and get a live URL. Promote it to production
+              when it is ready. The URL never changes.
             </p>
           </div>
 
