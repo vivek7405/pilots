@@ -32,7 +32,7 @@ export const WORKLOAD_APEX = 'pilotrun.app';
  */
 export const DASHBOARD_HREF = '/dashboard';
 
-export const GH_URL = 'https://github.com/vivek7405/pilots';
+export const GH_URL = 'https://github.com/pilotsrun/pilots';
 
 /**
  * WebJs is the sibling product: the framework, where Pilots is the platform

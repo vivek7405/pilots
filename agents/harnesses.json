@@ -10,7 +10,7 @@
     "stdio": { "type": "stdio", "command": "pilot", "args": ["mcp"] },
     "after": [
       "Or install the plugin, which adds the skill, /pilots:status, /pilots:smoke and a guard that asks before a destructive call:",
-      "  /plugin marketplace add vivek7405/pilots",
+      "  /plugin marketplace add pilotsrun/pilots",
       "  /plugin install pilots@pilots"
     ],
     "verify": "/mcp, then ask: list my machines",

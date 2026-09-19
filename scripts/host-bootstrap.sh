@@ -448,7 +448,7 @@ else
   echo "  fetching golden-${PILOT_ROOTFS_TAG}.ext4.zst from the release"
   command -v zstd >/dev/null || { echo "  zstd is needed to unpack it" >&2; exit 1; }
   curl -fsSL -o "${REPO}/scripts/rootfs/golden.ext4.zst" \
-    "https://github.com/vivek7405/pilots/releases/download/${PILOT_ROOTFS_TAG}/golden-${PILOT_ROOTFS_TAG}.ext4.zst"
+    "https://github.com/pilotsrun/pilots/releases/download/${PILOT_ROOTFS_TAG}/golden-${PILOT_ROOTFS_TAG}.ext4.zst"
   zstd -d -f "${REPO}/scripts/rootfs/golden.ext4.zst" -o "${REPO}/scripts/rootfs/golden.ext4"
   rm -f "${REPO}/scripts/rootfs/golden.ext4.zst"
 fi
@@ -489,7 +489,7 @@ else
   echo "  fetching builder-${PILOT_ROOTFS_TAG}.ext4.zst from the release"
   command -v zstd >/dev/null || { echo "  zstd is needed to unpack it" >&2; exit 1; }
   curl -fsSL -o "${REPO}/scripts/rootfs/builder.ext4.zst" \
-    "https://github.com/vivek7405/pilots/releases/download/${PILOT_ROOTFS_TAG}/builder-${PILOT_ROOTFS_TAG}.ext4.zst"
+    "https://github.com/pilotsrun/pilots/releases/download/${PILOT_ROOTFS_TAG}/builder-${PILOT_ROOTFS_TAG}.ext4.zst"
   zstd -d -f "${REPO}/scripts/rootfs/builder.ext4.zst" -o "${REPO}/scripts/rootfs/builder.ext4"
   rm -f "${REPO}/scripts/rootfs/builder.ext4.zst"
 fi

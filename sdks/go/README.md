@@ -1,4 +1,4 @@
-# `github.com/vivek7405/pilots/sdks/go`
+# `github.com/pilotsrun/pilots/sdks/go`
 
 The typed Go client for the pilots API: instant sandboxes and durable
 production services on one primitive, Firecracker microVMs.
@@ -7,7 +7,7 @@ One dependency, `github.com/coder/websocket`, which is the same one hostd
 speaks the exec stream with.
 
 ```
-go get github.com/vivek7405/pilots/sdks/go
+go get github.com/pilotsrun/pilots/sdks/go
 ```
 
 ## Construction

@@ -108,7 +108,7 @@ export default function Agents() {
         <div class="grid gap-8 wide:grid-cols-[0.9fr_1.1fr] wide:items-start">
           <div class="${PANEL} p-6">
             ${terminal('Claude Code', [
-              { kind: 'cmd', text: '/plugin marketplace add vivek7405/pilots' },
+              { kind: 'cmd', text: '/plugin marketplace add pilotsrun/pilots' },
               { kind: 'cmd', text: '/plugin install pilots@pilots' },
               { kind: 'cmd', text: '/pilots:status' },
               { kind: 'mark', text: 'MCP tools: available' },

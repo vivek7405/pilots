@@ -2,7 +2,7 @@ defmodule Pilots.MixProject do
   use Mix.Project
 
   @version "0.1.0"
-  @source_url "https://github.com/vivek7405/pilots"
+  @source_url "https://github.com/pilotsrun/pilots"
 
   def project do
     [

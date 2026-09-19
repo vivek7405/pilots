@@ -23,7 +23,7 @@ import (
 // build, because the person running one is the person changing it.
 var Version = "dev"
 
-const releasesAPI = "https://api.github.com/repos/vivek7405/pilots/releases/latest"
+const releasesAPI = "https://api.github.com/repos/pilotsrun/pilots/releases/latest"
 
 type release struct {
 	TagName string `json:"tag_name"`

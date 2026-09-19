@@ -77,7 +77,7 @@ jobs:
             Install or upgrade:
 
             ```sh
-            curl -fsSL https://raw.githubusercontent.com/vivek7405/pilots/main/scripts/install-pilot.sh | sh
+            curl -fsSL https://raw.githubusercontent.com/pilotsrun/pilots/main/scripts/install-pilot.sh | sh
             ```
 
             An existing install upgrades itself in place with `pilot upgrade`.

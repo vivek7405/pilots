@@ -311,7 +311,7 @@ func TestServiceRoundTripsThroughCorrosion(t *testing.T) {
 	want := &state.Service{
 		ID: "svc-1", Name: "web", App: "shop", Replicas: 2,
 		Env: `{"PORT":"8080"}`, EnvSealed: "sealed-blob",
-		Repo: "vivek7405/pilots", Branch: "main", Autodeploy: true,
+		Repo: "pilotsrun/pilots", Branch: "main", Autodeploy: true,
 		CreatedAt: 1234,
 	}
 	if err := store.PutService(ctx, want); err != nil {

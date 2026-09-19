@@ -1,6 +1,6 @@
 # AGENTS.md — sdks/go
 
-`github.com/vivek7405/pilots/sdks/go`, a module of its own inside the
+`github.com/pilotsrun/pilots/sdks/go`, a module of its own inside the
 repository. Run every Go command from this directory.
 
 ## Wire types

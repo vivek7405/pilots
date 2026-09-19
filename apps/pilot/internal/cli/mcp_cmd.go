@@ -223,7 +223,7 @@ func newSkillCmd(env *Env, getenv config.Env) *cobra.Command {
 		How: "Writes the pages this binary embeds to ~/.local/share/pilots/skill\n" +
 			"and links ~/.claude/skills/pilots at that copy so Claude Code loads\n" +
 			"them everywhere. The Claude Code plugin is the other way to get\n" +
-			"them: /plugin marketplace add vivek7405/pilots.",
+			"them: /plugin marketplace add pilotsrun/pilots.",
 		Examples: []string{"pilot skill install"},
 	})
 	root.AddCommand(install)

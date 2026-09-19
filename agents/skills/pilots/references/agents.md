@@ -68,7 +68,7 @@ the prefix comes back with the prefixed name spelled out.
 ## The Claude Code plugin
 
 ```
-/plugin marketplace add vivek7405/pilots
+/plugin marketplace add pilotsrun/pilots
 /plugin install pilots@pilots
 ```
 
@@ -84,7 +84,7 @@ Plugins v1 manifest in the same directory.
 | --- | --- | --- |
 | TypeScript | `npm i @pilots/sdk` | Zero dependencies. Also `@pilots/sdk/tanstack` and `@pilots/sdk/sprites-compat`. |
 | Python | `pip install pilots-sdk` | Extras: `[adk]`, `[openai-agents]`, `[anthropic]`. Also `pilots.sprites_compat`. |
-| Go | `go get github.com/vivek7405/pilots/sdks/go` | One dependency. |
+| Go | `go get github.com/pilotsrun/pilots/sdks/go` | One dependency. |
 | Elixir | `{:pilots, "~> 0.1"}` | One dependency. HTTP through OTP's own `:httpc`. |
 
 The first three keep their own copy of the wire types, and each has a test
