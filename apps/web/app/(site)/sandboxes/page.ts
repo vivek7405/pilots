@@ -107,9 +107,9 @@ export default function Sandboxes() {
       heading: 'Streaming exec, because agents produce output for minutes',
       lede: html`Running a command and collecting its output at the end is fine for a script and
         useless for a model that emits tokens for several minutes. Both shapes exist in the guest
-        agent and in the typed clients: buffered when you want a result, streamed over a socket when
-        you want to watch. The streamed form does not answer on the public API yet, so the clients and
-        the command line are written against a route the engine still refuses.`,
+        agent, the public API and the typed clients: buffered when you want a result, streamed over a
+        socket when you want to watch. The web terminal and the command line's interactive shell are
+        the streamed form.`,
       body: html`
         <div class="grid gap-6 mid:grid-cols-2">
           <div class="${PANEL} p-5">

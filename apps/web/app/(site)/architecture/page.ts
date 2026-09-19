@@ -17,7 +17,7 @@ import { pageHero } from '#site/lib/ui/page-hero.ts';
  * page is dense on purpose: the audience reads, and thinning it out to look
  * approachable would remove the only thing that distinguishes it.
  *
- * Everything here comes from ARCHITECTURE.md and the phase issues. Nothing is
+ * Everything here comes from ARCHITECTURE.md. Nothing is
  * invented for the page, which is what AGENTS.md invariant 7 is about: generic
  * copy is generic because generation averages, and the antidote is knowledge
  * that is not in the average.
@@ -58,9 +58,7 @@ const INVARIANTS = [
  * This is the on-ramp the page lacked. Everything below it assumes the reader
  * already holds the whole shape in their head, and most do not. The layers are
  * the order the system was built in, which is also the order it makes sense
- * in: each one works without the ones above it. They used to live on a roadmap
- * page as phases with gates and issue numbers, which is project history. What
- * a reader wanted from that page was this list.
+ * in: each one works without the ones above it.
  */
 const LAYERS = [
   [

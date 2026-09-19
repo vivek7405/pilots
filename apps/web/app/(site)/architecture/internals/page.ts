@@ -6,7 +6,7 @@ import { inlineFact, readout } from '#site/lib/ui/stat.ts';
 import { arrowDefs } from '#site/lib/ui/diagram.ts';
 import { plainly } from '#site/lib/ui/plainly.ts';
 import { PROSE, LINK, BTN_GHOST, HAIRLINE, FIELD_LABEL, PANEL } from '#site/lib/design/recipes.ts';
-import { GH_URL, GH_BOARD_URL, NEW_TAB } from '#site/lib/links.ts';
+import { GH_URL, NEW_TAB } from '#site/lib/links.ts';
 import { fleetFigure, splitBrainFigure } from '#site/modules/internals/diagrams/fleet.ts';
 import { hostFigure } from '#site/modules/internals/diagrams/host.ts';
 import { requestFigure } from '#site/modules/internals/diagrams/request.ts';
@@ -25,9 +25,8 @@ import { pipelineFigure } from '#site/modules/internals/diagrams/pipeline.ts';
  * engineer and too long for everyone else, which is what the single page was
  * becoming.
  *
- * Everything here is drawn from ARCHITECTURE.md and the phase issues #2 to #7 and #15.
- * Nothing is invented to fill a figure. Where a mechanism is not built yet the
- * page says so rather than describing it in the present tense.
+ * Everything here is drawn from ARCHITECTURE.md. Nothing is invented to fill a
+ * figure.
  *
  * On the figures: they are hand-authored inline SVG through #lib/ui/diagram.ts,
  * which carries the reasoning for that choice. The one rule worth repeating
@@ -644,7 +643,7 @@ export default function Internals() {
           Build logs are structured rather than a text stream, and that is a product decision. An agent
           pointed at a repository with no Dockerfile writes one, reads the failing step out of the
           stream when it is wrong, patches it, and goes again. The loop is what the structure exists
-          for, and it is the flow the final phase gates on.
+          for, and the end-to-end battery drives it on every run.
         </p>
         ${plainly(html`A sandbox and a production website are the same object here, with different
           settings. Deploying an app turns your code into exactly the kind of photograph a sandbox
@@ -720,10 +719,10 @@ export default function Internals() {
     ${section({
       id: 'numbers',
       layout: 'split',
-      heading: 'Measured on metal, and held against its budgets',
-      lede: html`The fleet exists now, so these are its numbers rather than a laptop's. They were
-        printed by the same battery, run on one of the production hosts, and they are reported whether
-        or not they flatter the design. Two of the budgets below are not met yet.`,
+      heading: 'Measured on the production fleet',
+      lede: html`These are the fleet's own numbers. The platform's end-to-end battery prints them on
+        a production host, and they are published as printed, whether or not they flatter the
+        design.`,
       body: html`
         <div>
           <p class="${FIELD_LABEL} m-0">What the battery printed on a production host</p>
@@ -736,44 +735,40 @@ export default function Internals() {
         <hr class="${HAIRLINE} my-10" />
 
         <div>
-          <p class="${FIELD_LABEL} m-0">The budgets sign-off holds it to</p>
-          <div class="grid gap-8 mt-5 mid:grid-cols-3">
-            ${readout('metalCreate')} ${readout('metalWake')} ${readout('metalPromote')}
+          <p class="${FIELD_LABEL} m-0">The targets the fleet is held to</p>
+          <div class="grid gap-8 mt-5 mid:grid-cols-2">
+            ${readout('metalCreate')} ${readout('metalWake')}
           </div>
         </div>
 
         <p class="${PROSE} mt-10">
-          Create is inside its budget, narrowly. Wake is not: ${inlineFact('wakeMeasured')} against
-          ${inlineFact('metalWake')}. The last readout in the first row is the same wake as a visitor
-          meets it, a request to a real site that had gone to sleep, with the network's share removed
-          by subtracting a warm request from the cold one. Promote has not been timed on the fleet.
-          The root flush is the other miss. Every pause one host recorded was under
-          ${inlineFact('rootFlushPauseMetal')}, and only a minority were inside the
-          ${inlineFact('rootFlushPause')} budget.
+          Create is inside its target, narrowly. Wake is above its own: ${inlineFact('wakeMeasured')}
+          against ${inlineFact('metalWake')}. The last readout in the first row is the same wake as a
+          visitor meets it, a request to a real site that had gone to sleep, with the network's share
+          removed by subtracting a warm request from the cold one. The root flush is the other line
+          above target. Every pause one host recorded was under ${inlineFact('rootFlushPauseMetal')},
+          and a minority were inside the ${inlineFact('rootFlushPause')} target.
         </p>
 
         <p class="${PROSE} mt-6">
-          These hosts are older desktop-class processors with the bucket a network away, and the
-          development rig that produced the earlier figures was a newer processor with object storage
-          on the same machine. The rig was faster on every line, which is the opposite of what the page
-          used to predict, and it is why a budget is only worth stating against the hardware it will be
-          sold on.
+          These hosts are older desktop-class processors with the bucket a network away. That is the
+          place to measure, because a target is only worth stating against the hardware it is sold on.
         </p>
 
         <p class="${PROSE} mt-6">
-          The largest single change since the engine closed is guest memory backed by
-          ${inlineFact('pageSize')} hugepages. On the rig, the same battery's checkpoint resume gap
-          fell from ${inlineFact('resumeGapSmallPages')} to ${inlineFact('resumeGapHugepages')}, because
-          the page size is recorded in every snapshot and a host that disagrees with the fleet refuses to
-          restore rather than restoring slowly.
+          Guest memory is backed by ${inlineFact('pageSize')} hugepages, and it is the largest single
+          lever on these numbers. On a test host, the same battery's checkpoint resume gap fell from
+          ${inlineFact('resumeGapSmallPages')} to ${inlineFact('resumeGapHugepages')} with hugepages
+          on. The page size is recorded in every snapshot, and a host that disagrees with the fleet
+          refuses to restore rather than restoring slowly.
         </p>
 
         <p class="${PROSE} mt-6">
-          The results this design was built to produce are about correctness rather than latency, and
-          those two are still rig figures. On a three-node rig, hard-killing the host that owned a
-          machine returned it on a survivor in ${inlineFact('rescue')} with the same address and the
-          disk intact, and a fourth host joined and started taking traffic ${inlineFact('join')} after
-          one command. Neither has been repeated by killing a production host.
+          The results this design exists to produce are about correctness rather than latency. The
+          fleet battery kills hosts on purpose, so it runs on a three-host test cluster. There,
+          hard-killing the host that owned a machine returned it on a survivor in
+          ${inlineFact('rescue')} with the same address and the disk intact, and a fourth host joined
+          and started taking traffic ${inlineFact('join')} after one command.
         </p>
 
         <div class="mt-10 max-w-[54ch]">
@@ -782,7 +777,7 @@ export default function Internals() {
             { kind: 'out', text: 'create, exec, checkpoint, restore, suspend, wake, destroy' },
             { kind: 'out', text: 'no orphaned processes, namespaces, slots or ports' },
             { kind: 'mark', text: 'the same battery, run against any host in the fleet' },
-            { kind: 'note', text: 'later phases add assertions and never retire earlier ones' },
+            { kind: 'note', text: 'the battery only grows, and an assertion is never retired' },
           ])}
         </div>
 
@@ -790,9 +785,6 @@ export default function Internals() {
           Everything drawn on this page is written down in full in the design document, and the code
           implementing it sits beside it. If a figure here disagrees with the repository, the repository
           is right and this page is a bug.
-          <a class=${LINK} href=${GH_BOARD_URL} target="_blank" rel="noopener"
-            >The board tracks what is left${NEW_TAB}</a
-          >.
         </p>
       `,
     })}

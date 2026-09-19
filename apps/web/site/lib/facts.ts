@@ -11,22 +11,18 @@
  * process with no measurement behind it. A real number carrying a boring
  * source beats an impressive one carrying none.
  *
- * FOUR KINDS OF FACT, and conflating any two of them would be a lie:
+ * THREE KINDS OF FACT, and conflating any two of them would be a lie:
  *
- *   kind: 'gate'      a threshold the build is required to meet, which a
- *                     CLOSED phase issue confirms it met. Rendered with a
- *                     "<" or similar and attributed to the gate.
  *   kind: 'design'    a fixed constant of the architecture (a block size, a
  *                     port, a table width). Not a measurement at all, and
  *                     never to be dressed up as performance.
  *   kind: 'measured'  a timing the battery actually printed, on hardware the
- *                     source string NAMES. Some are from the production fleet
- *                     and some from a development rig, and the two are not
- *                     comparable: the rig is a newer CPU with object storage on
- *                     the same machine, the fleet is older metal with the
- *                     bucket a network away. The source says which.
- *   kind: 'budget'    a target the production sign-off has to hit. Whether the
- *                     fleet has met it yet is in the source string. A budget
+ *                     source string NAMES. Most are from the production fleet;
+ *                     the ones that need a host killed or a fleet setting
+ *                     changed are from a test cluster, and the two are not
+ *                     comparable. The source says which.
+ *   kind: 'budget'    a target the fleet is held to. Whether the fleet is
+ *                     inside it is in the source string. A budget
  *                     rendered as if it were a measurement is the exact lie
  *                     invariant 1 exists to prevent, so the kind is carried
  *                     separately and the source says which it is.
@@ -54,28 +50,10 @@ export type Fact = {
    * rather than a sentence.
    */
   source: string;
-  kind: 'gate' | 'design' | 'measured' | 'budget';
+  kind: 'design' | 'measured' | 'budget';
 };
 
 export const FACTS = {
-  create: {
-    value: '<1.5s',
-    label: 'create a machine from a template',
-    source: 'Phase 3 gate, issue #4 (closed): timed on the laptop rig',
-    kind: 'gate',
-  },
-  wake: {
-    value: '<1s',
-    label: 'wake a suspended machine',
-    source: 'Phase 3 gate, issue #4 (closed): warm cache, timed on the laptop rig',
-    kind: 'gate',
-  },
-  checkpoint: {
-    value: '<500ms',
-    label: 'checkpoint resume gap',
-    source: 'Phase 3 gate, issue #4 (closed): timed on the laptop rig',
-    kind: 'gate',
-  },
   deadHost: {
     value: '30s',
     label: 'silence before a host is presumed dead',
@@ -143,7 +121,7 @@ export const FACTS = {
   gossipMtu: {
     value: '1232',
     label: 'bytes of pinned gossip datagram',
-    source: 'Phase 4 issue #5 (closed): minimum WireGuard MTU less the IPv6 and UDP headers',
+    source: 'the Corrosion config host-bootstrap.sh writes, max_mtu: minimum WireGuard MTU less the IPv6 and UDP headers',
     kind: 'design',
   },
   pageSize: {
@@ -159,8 +137,8 @@ export const FACTS = {
     kind: 'design',
   },
 
-  /* Measured. The rig is named in every source string because it is the whole
-     caveat: no reflink support, so every copy is a real copy. */
+  /* Measured. The hardware is named in every source string because it is the
+     whole caveat. */
   createMeasured: {
     value: '468ms',
     label: 'create, median on metal',
@@ -182,31 +160,25 @@ export const FACTS = {
   resumeGapSmallPages: {
     value: '3726ms',
     label: 'the same resume gap without hugepages',
-    source: 'Phase 6 perf PR #28, merged 2026-09-04: the same battery on the same host at 4KiB pages',
-    kind: 'measured',
-  },
-  assertions: {
-    value: '104',
-    label: 'steps in the battery',
-    source: 'scripts/e2e.mjs on main, counted 2026-09-04: await step calls, beside 22 numbered sections in scripts/cluster/gate.sh',
+    source: 'scripts/e2e.mjs on a nested-KVM test host, 2026-09-04: the same battery on the same host at 4KiB pages',
     kind: 'measured',
   },
   rescue: {
     value: '125s',
     label: 'to rescue a hard-killed host’s machines',
-    source: 'Phase 4 issue #5 (closed): scripts/cluster/gate.sh step 7 on the three-node nested-KVM rig',
+    source: 'scripts/cluster/gate.sh, the dead-host section, on a three-host test cluster: the battery kills a host on purpose',
     kind: 'measured',
   },
   join: {
     value: '15s',
     label: 'for a new host to be live and counted',
-    source: 'Phase 4 issue #5 (closed): scripts/cluster/gate.sh step 8, one host-bootstrap.sh run',
+    source: 'scripts/cluster/gate.sh, the join section, on a three-host test cluster: one host-bootstrap.sh run',
     kind: 'measured',
   },
   resumeGapHugepages: {
     value: '300ms',
-    label: 'the same resume gap with hugepages, on the development rig',
-    source: 'Phase 6 perf PR #28, merged 2026-09-04: scripts/e2e.mjs on a nested-KVM host with 2MiB hugepages',
+    label: 'the same resume gap with hugepages, on a test host',
+    source: 'scripts/e2e.mjs on a nested-KVM test host, 2026-09-04: 2MiB hugepages',
     kind: 'measured',
   },
   urlWake: {
@@ -230,13 +202,13 @@ export const FACTS = {
   rootFlushPause: {
     value: '25ms',
     label: 'guest pause a root flush is allowed to cost, high percentile across a fleet',
-    source: 'ARCHITECTURE.md two durability tiers: the SLO on pilots_root_flush_pause_seconds, a fleet target the battery bounds and cannot yet measure at that percentile',
+    source: 'ARCHITECTURE.md two durability tiers: the SLO on pilots_root_flush_pause_seconds, a fleet target the battery bounds per flush',
     kind: 'budget',
   },
   bucketStream: {
     value: '55 MB/s',
     label: 'one upload stream from a host to object storage in the same datacentre',
-    source: 'first production fleet, 2026-09-18: one PUT of half a gibibyte from a Hetzner host to the Falkenstein bucket',
+    source: 'production fleet, 2026-09-18: one PUT of half a gibibyte from a Hetzner host to the Falkenstein bucket',
     kind: 'measured',
   },
   prefaultCold: {
@@ -268,25 +240,19 @@ export const FACTS = {
   metalCreate: {
     value: '<500ms',
     label: 'create',
-    source: 'Phase 6 issue #7 sign-off budget, as a median on the Hetzner fleet: met on 2026-09-18',
+    source: 'fleet target, as a median on the Hetzner fleet: met on 2026-09-18',
     kind: 'budget',
   },
   metalWake: {
     value: '<200ms',
     label: 'wake',
-    source: 'Phase 6 issue #7 sign-off budget, as a median on the Hetzner fleet: NOT met on 2026-09-18',
+    source: 'fleet target, as a median on the Hetzner fleet: the 2026-09-18 median is above it',
     kind: 'budget',
   },
   metalRelease: {
     value: '<1s',
     label: 'start a replica, roll back, or scale up',
-    source: 'Phase 6 issue #7 sign-off budget, NOT yet measured: p50 restore from a release on the Hetzner fleet',
-    kind: 'budget',
-  },
-  metalPromote: {
-    value: '<1.5s',
-    label: 'promote a sandbox to a service',
-    source: 'Phase 6 issue #7 sign-off budget, as a median on the Hetzner fleet: not yet measured there',
+    source: 'fleet target: median restore from a release on the Hetzner fleet',
     kind: 'budget',
   },
 } as const satisfies Record<string, Fact>;
