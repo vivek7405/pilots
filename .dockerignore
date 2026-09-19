@@ -27,6 +27,8 @@ scripts
 docs
 *.md
 !apps/web/README.md
+# The release notes are content, not docs: /changelog renders them.
+!changelog/**/*.md
 
 # webjs per-machine caches, EXCEPT the committed vendor manifest. Do not
 # collapse to `**/.webjs`: excluding the parent blocks the child negation and

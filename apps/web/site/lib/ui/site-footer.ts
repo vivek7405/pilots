@@ -38,6 +38,7 @@ export function siteFooter() {
 
           <nav class="${col}" aria-label="Source">
             <span class="${FIELD_LABEL}">Source</span>
+            <a class="${link}" href="/changelog">Changelog</a>
             <a class="${link}" href=${GH_URL} target="_blank" rel="noopener">Repository${NEW_TAB}</a>
             <a class="${link}" href="${GH_URL}/blob/main/LICENSE" target="_blank" rel="noopener">Apache 2.0 licence${NEW_TAB}</a>
           </nav>
