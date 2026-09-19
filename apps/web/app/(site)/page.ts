@@ -143,13 +143,14 @@ export default function Home() {
         answering before most of its memory has been read.`,
       body: html`
         <div class="grid gap-8 mid:grid-cols-3 mid:gap-6">
-          ${readout('create')} ${readout('wake')} ${readout('checkpoint')}
+          ${readout('createMeasured')} ${readout('wakeMeasured')} ${readout('resumeGapMeasured')}
         </div>
 
         <p class="${PROSE} mt-10">
-          Those are the thresholds Phase 3 had to clear to close, measured on a laptop rather than
-          on the metal this eventually runs on. Hover any number to see where it came from. When
-          the Hetzner fleet is up, real fleet timings replace them here and these become the floor.
+          Those are medians from the production fleet: bare-metal Hetzner hosts with the bucket a
+          network away, timed by the platform's own end-to-end battery. Hover any number to see
+          where it came from, or read
+          <a class=${LINK} href="/architecture/internals#numbers">how each one is measured</a>.
         </p>
 
         <div class="grid gap-6 mid:grid-cols-2 mt-10">

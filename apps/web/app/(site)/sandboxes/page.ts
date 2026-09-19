@@ -43,12 +43,11 @@ export default function Sandboxes() {
         touches it.`,
       body: html`
         <div class="grid gap-8 mid:grid-cols-3 mid:gap-6">
-          ${readout('create')} ${readout('wake')} ${readout('checkpoint')}
+          ${readout('createMeasured')} ${readout('wakeMeasured')} ${readout('resumeGapMeasured')}
         </div>
         <p class="${PROSE} mt-10">
-          These are the thresholds Phase 3 had to clear before it could close, timed on a laptop.
-          Every number on this site carries its source. Hover one to see it. Fleet numbers replace
-          these when there is a fleet to measure.
+          These are medians from the production fleet, printed by the test battery on one of its
+          hosts. Every number on this site carries its source. Hover one to see it.
         </p>
       `,
     })}
