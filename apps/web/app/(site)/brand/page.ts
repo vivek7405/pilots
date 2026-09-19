@@ -128,7 +128,7 @@ function lockupRow(c: Candidate, word: string, label: string) {
       <span class=${FIELD_LABEL}>${label}</span>
       ${WORD_FACES.map(
         (w) => html`
-          <div class="lab-paper flex items-center gap-2.5">
+          <div class="on-paper text-ink flex items-center gap-2.5">
             ${markSvg(c, 30)}
             <span class="${w.cls} text-[26px] leading-none text-ink">${word}</span>
           </div>
@@ -151,7 +151,7 @@ function headerMock(c: Candidate, word: string, label: string) {
       <p class="${FIELD_LABEL} mb-2">${label}</p>
       <div class="border border-rule bg-paper overflow-hidden">
       <div class="flex items-center gap-3 px-4 h-14">
-        <span class="lab-paper flex items-center gap-2 mr-2">
+        <span class="on-paper text-ink flex items-center gap-2 mr-2">
           ${markSvg(c, 22)}
           <span class="font-mono text-[15px] font-semibold tracking-tight text-ink">${word}</span>
         </span>
