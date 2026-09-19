@@ -70,6 +70,43 @@ url="$(fetch "$API" \
   | head -n 1)"
 [ -n "$url" ] || die "the latest release of $REPO carries no $asset"
 
+# Verify against the checksums.txt the release publishes beside the binary,
+# or install nothing.
+#
+# This script is run as `curl ... | sh`, so it fetches an executable over the
+# network and puts it on PATH. There is ONE outcome that installs: the digest
+# was read, the file was hashed, and the two agree. No hashing tool, a
+# checksums.txt that cannot be fetched, and one with no line for this asset
+# are each a refusal, which is what "verified" on the install page promises
+# and what `pilot upgrade` does in the same cases. sprites' installer, the
+# nearest prior art, dies on all three as well.
+#
+# All three are settled BEFORE the binary is downloaded: none of them needs
+# it, and a refusal should cost one small request, not the whole download.
+#
+# A machine with neither tool is rare (coreutils and BusyBox ship sha256sum,
+# macOS ships shasum) and is told what to install, or where to get the binary
+# by hand.
+sums_url="${url%/*}/checksums.txt"
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
+elif command -v shasum >/dev/null 2>&1; then
+  sha256_of() { shasum -a 256 "$1" | cut -d' ' -f1; }
+else
+  die "sha256sum or shasum is required to verify the download; nothing was installed.
+Install one (coreutils), or take the binary from https://github.com/$REPO/releases"
+fi
+
+# A line is the digest, then the name, which binary mode prefixes with `*`.
+# Matched as awk fields rather than with grep: the optional `*` would need
+# `\?`, which POSIX leaves undefined in a basic regex, and a grep that reads it
+# literally would refuse every install. It is the rule checksumFor follows in
+# apps/pilot/internal/cli/upgrade.go.
+need awk
+sums="$(fetch "$sums_url")" || die "could not fetch $sums_url, so the download cannot be verified; nothing was installed"
+want="$(printf '%s\n' "$sums" | awk -v a="$asset" '$2 == a || $2 == "*" a { print $1; exit }')"
+[ -n "$want" ] || die "$sums_url carries no checksum for $asset, so the download cannot be verified; nothing was installed"
+
 need mkdir
 mkdir -p "$BIN_DIR"
 # The temp file goes in BIN_DIR, not $TMPDIR. /tmp is usually a separate
@@ -85,33 +122,6 @@ trap 'rm -f "$tmp"' EXIT INT TERM
 say "pilot: downloading $url"
 fetch_to "$url" "$tmp"
 
-# Verify against the checksums.txt the release publishes beside the binary,
-# or install nothing.
-#
-# This script is run as `curl ... | sh`, so it fetches an executable over the
-# network and puts it on PATH. There is ONE outcome that installs: the digest
-# was read, the file was hashed, and the two agree. It used to skip the check,
-# with a notice, when the checksum could not be fetched or the machine had no
-# hashing tool, which made "verified" on the install page true only on the
-# happy path, and disagreed with `pilot upgrade`, which refuses in the same
-# case. sprites' installer, the nearest prior art, dies on all three as well.
-#
-# A machine with neither tool is rare (coreutils and BusyBox ship sha256sum,
-# macOS ships shasum) and is told what to install, or where to get the binary
-# by hand.
-sums_url="${url%/*}/checksums.txt"
-if command -v sha256sum >/dev/null 2>&1; then
-  sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
-elif command -v shasum >/dev/null 2>&1; then
-  sha256_of() { shasum -a 256 "$1" | cut -d' ' -f1; }
-else
-  die "sha256sum or shasum is required to verify the download; nothing was installed.
-Install one (coreutils), or take the binary from https://github.com/$REPO/releases"
-fi
-
-sums="$(fetch "$sums_url")" || die "could not fetch $sums_url, so the download cannot be verified; nothing was installed"
-want="$(printf '%s\n' "$sums" | grep " \*\?${asset}\$" | cut -d' ' -f1 | head -n 1)"
-[ -n "$want" ] || die "$sums_url carries no checksum for $asset, so the download cannot be verified; nothing was installed"
 got="$(sha256_of "$tmp")"
 if [ "$want" != "$got" ]; then
   die "checksum mismatch for $asset
