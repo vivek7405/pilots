@@ -16,6 +16,8 @@ import { brandMark } from '#site/lib/design/logo-candidates.ts';
  * 59 characters, inside the SERP truncation limit, brand first.
  */
 const TITLE = 'Pilots: microVM sandboxes and PaaS on one primitive';
+/** The social card's revision. See the note where the image URL is built. */
+const OG_VERSION = '2';
 /**
  * 154 characters. Google renders about 160, so anything past that is written
  * for nobody. It states the differentiator rather than adjectives, because the
@@ -26,7 +28,11 @@ const DESCRIPTION =
 
 export function generateMetadata(ctx: { url: string }) {
   const { origin, pathname } = new URL(ctx.url);
-  const image = `${origin}/public/og.png`;
+  // The version is part of the URL on purpose. X, WhatsApp, Slack and the rest
+  // key their cache on the image address and keep a card for days, so a new
+  // picture at the old address is simply not seen. Bump OG_VERSION whenever
+  // scripts/build-og.mjs is re-run.
+  const image = `${origin}/public/og.png?v=${OG_VERSION}`;
   /**
    * A site-wide canonical, derived here so EVERY page gets one from a single
    * place. Built from origin + pathname, so tracking query strings and a stray
@@ -65,6 +71,7 @@ export function generateMetadata(ctx: { url: string }) {
       description: DESCRIPTION,
       url: origin,
       image,
+      'image:type': 'image/png',
       'image:width': '1200',
       'image:height': '630',
       'image:alt': TITLE,
