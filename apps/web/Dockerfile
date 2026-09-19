@@ -44,7 +44,8 @@ COPY apps/web ./apps/web
 # The release notes /changelog renders. They live at the repository root
 # because landing one is what cuts a release (changelog/README.md), and the
 # page reads them from beside apps/, the same relative place they are in a
-# checkout. The root .dockerignore re-includes them past its `*.md` rule.
+# checkout. The root .dockerignore's `*.md` rule does not reach them: a bare
+# pattern matches the context root only.
 COPY changelog ./changelog
 
 WORKDIR /app/apps/web

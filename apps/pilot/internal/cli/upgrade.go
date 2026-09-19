@@ -130,7 +130,7 @@ func newUpgradeCmd(env *Env) *cobra.Command {
 			// The release workflow writes checksums.txt in the same step as
 			// the binaries, so a release without one was not cut by it.
 			if sumsURL == "" {
-				return out.Failf("re-run the installer: curl -fsSL https://pilots.run/install.sh | sh",
+				return out.Failf(unverifiableNext,
 					"release %s carries no %s, so the download cannot be verified", latest, checksumsAsset)
 			}
 			wantSum, err := fetchChecksum(c.Context(), sumsURL, want)
@@ -159,6 +159,11 @@ func newUpgradeCmd(env *Env) *cobra.Command {
 // checksumsAsset is the third name in the contract the release workflow and
 // the install script share with this file, beside the two binaries' names.
 const checksumsAsset = "checksums.txt"
+
+// unverifiableNext is the next step when a release cannot be verified. It is
+// NOT "re-run the installer": install.sh refuses the same release for the same
+// reason, so that advice sent the user from one refusal to an identical one.
+const unverifiableNext = "take the binary from https://github.com/pilotsrun/pilots/releases, or build from source: go build ./apps/pilot/cmd/pilot"
 
 // managedBy names the package manager that owns the binary at path, and the
 // command that upgrades it there, or two empty strings for a binary nobody
@@ -226,7 +231,7 @@ func checksumFor(r io.Reader, asset string) (string, error) {
 	if err := sc.Err(); err != nil {
 		return "", err
 	}
-	return "", out.Failf("re-run the installer: curl -fsSL https://pilots.run/install.sh | sh",
+	return "", out.Failf(unverifiableNext,
 		"%s publishes no digest for %s, so the download cannot be verified", checksumsAsset, asset)
 }
 

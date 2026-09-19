@@ -7,10 +7,12 @@ import type { Entry } from '#site/modules/changelog/parse.ts';
 
 /**
  * The repository's `changelog/`, five levels above this file. In the image it
- * is `/app/changelog`: the Dockerfile copies it in beside `apps/web`, and the
- * root `.dockerignore` re-includes it past its `*.md` rule. Both halves are
- * needed, and a page that renders no entries in production while rendering
- * them locally means one of them was dropped.
+ * is `/app/changelog`: the Dockerfile copies it in beside `apps/web`. That COPY
+ * is the whole of it. The root `.dockerignore` has a `*.md` rule, but a bare
+ * pattern matches the context root only, in Docker's matcher and in the one
+ * `pilot deploy` builds its context with (apps/pilot/internal/cli/tar.go), so
+ * `changelog/pilot/0.2.0.md` was never excluded. A page that renders entries
+ * locally and none in production means the COPY was dropped.
  */
 const CHANGELOG_DIR = resolve(import.meta.dirname, '..', '..', '..', '..', '..', 'changelog');
 

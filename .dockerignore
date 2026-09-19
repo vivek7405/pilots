@@ -23,12 +23,12 @@ vmlinux*
 # Operational scripts and local cluster state.
 scripts
 
-# Docs and research notes.
+# Docs and research notes. A bare `*.md` matches the context root only
+# (ARCHITECTURE.md, AGENTS.md, ...), in Docker's matcher and in the ones
+# `pilot deploy` packs a context with, so a nested .md is never excluded and
+# needs no `!` exception: apps/web/README.md and changelog/**/*.md ship as is.
 docs
 *.md
-!apps/web/README.md
-# The release notes are content, not docs: /changelog renders them.
-!changelog/**/*.md
 
 # webjs per-machine caches, EXCEPT the committed vendor manifest. Do not
 # collapse to `**/.webjs`: excluding the parent blocks the child negation and
