@@ -6,11 +6,12 @@
  *
  * Counterfactual: drop `process.argv.slice(2)` from bin/pilot.js and the
  * first test fails on the echoed arguments; drop the signal re-raise and the
- * third fails on the parent's exit.
+ * third fails on the parent's exit; go back to spawnSync and the fourth fails,
+ * because the launcher dies with the child still running under nobody.
  */
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { spawnSync } = require('node:child_process');
+const { spawn, spawnSync } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
@@ -47,6 +48,24 @@ test('a child killed by a signal ends the launcher by the same signal', () => {
   const { launcher } = packageWith('#!/bin/sh\nkill -TERM $$\n');
   const res = spawnSync(process.execPath, [launcher]);
   assert.equal(res.signal, 'SIGTERM');
+});
+
+test('a SIGTERM sent to the launcher alone reaches the binary', async () => {
+  const { launcher } = packageWith('#!/bin/sh\ntrap "echo got-term; exit 9" TERM\necho ready\nwhile :; do sleep 0.1; done\n');
+  const child = spawn(process.execPath, [launcher], { stdio: ['ignore', 'pipe', 'inherit'] });
+  let stdout = '';
+  const ended = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })));
+  await new Promise((resolve) => {
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+      if (stdout.includes('ready')) resolve();
+    });
+  });
+  child.kill('SIGTERM');
+  const { code, signal } = await ended;
+  assert.match(stdout, /got-term/, 'the binary never saw the signal');
+  assert.equal(signal, null);
+  assert.equal(code, 9, 'the launcher ends the way the binary chose to');
 });
 
 test('an incomplete package says to reinstall, not ENOENT on a path in node_modules', () => {
