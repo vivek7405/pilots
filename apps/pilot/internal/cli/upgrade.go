@@ -94,7 +94,7 @@ func newUpgradeCmd(env *Env) *cobra.Command {
 				return nil
 			}
 			if checkOnly {
-				env.W.Notef("pilot %s is available (you have %s); run pilot upgrade", latest, Version)
+				env.W.Notef("pilot %s is available (you have %s); run %s", latest, Version, upgradeCommand())
 				return nil
 			}
 			if Version == "dev" {
@@ -174,6 +174,20 @@ func managedBy(path string) (name, upgrade string) {
 		return "Homebrew", "brew upgrade pilot"
 	}
 	return "", ""
+}
+
+// upgradeCommand is what --check tells the reader to run. For a binary a
+// package manager owns that is the manager's command: `pilot upgrade` there
+// only refuses, so advising it costs a second run to learn the first answer.
+func upgradeCommand() string {
+	if self, err := os.Executable(); err == nil {
+		if self, err = filepath.EvalSymlinks(self); err == nil {
+			if _, cmd := managedBy(self); cmd != "" {
+				return cmd
+			}
+		}
+	}
+	return "pilot upgrade"
 }
 
 // fetchChecksum reads the sha256 the release publishes for one asset.
