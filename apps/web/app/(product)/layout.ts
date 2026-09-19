@@ -35,7 +35,14 @@ import '#components/ui/sonner.ts';
 
 export const metadata = {
   title: { default: 'pilots', template: '%s · pilots' },
-  icons: '/public/favicon.svg',
+  // The same set the marketing shell declares, for the same reasons.
+  icons: {
+    icon: [
+      { url: '/public/favicon-192.png', type: 'image/png', sizes: '192x192' },
+      { url: '/public/favicon.svg', type: 'image/svg+xml', sizes: 'any' },
+    ],
+    apple: { url: '/public/apple-touch-icon.png', sizes: '180x180' },
+  },
 };
 
 export default async function RootLayout({ children, url }: LayoutProps) {
