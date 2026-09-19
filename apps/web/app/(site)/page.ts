@@ -75,7 +75,7 @@ export default function Home() {
 
             <div class="flex flex-wrap gap-3 mt-8">
               <a class=${BTN_PRIMARY} href=${DASHBOARD_HREF} data-no-router>Start a sandbox</a>
-              <a class=${BTN_GHOST} href="/architecture">How it works</a>
+              <a class=${BTN_GHOST} href="/deploy">How deploying works</a>
             </div>
           </div>
 

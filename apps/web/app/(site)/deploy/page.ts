@@ -57,7 +57,7 @@ export default function Deploy() {
       lede: html`Point Pilots at any repository with a Dockerfile and it builds a microVM image, starts it
         behind a health check, and cuts traffic over only once the new release answers. The previous
         release stays alive until then, which is what makes a rollback instant rather than a rebuild.`,
-      actions: html`<a class=${BTN_PRIMARY} href="/architecture">How it works underneath</a>`,
+      actions: html`<a class=${BTN_PRIMARY} href="/architecture/internals">How it works underneath</a>`,
     })}
 
     ${section({

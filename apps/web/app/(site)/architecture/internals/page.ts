@@ -136,7 +136,6 @@ export default function Internals() {
         what a request actually does, why a snapshot restores on a machine that never made it, and
         where the freeze in a checkpoint really is. Every section also states its idea in ordinary
         words, so the page is readable without the background it otherwise assumes.`,
-      actions: html`<a class=${BTN_GHOST} href="/architecture">The shorter version</a>`,
     })}
 
     <nav aria-label="On this page" class="border-b border-rule">
