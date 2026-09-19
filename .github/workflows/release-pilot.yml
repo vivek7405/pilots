@@ -63,22 +63,36 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     steps:
+      # Full history: the push's own range is read below, and a push is not
+      # always one commit (a rebase merge lands several at once).
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 2
+          fetch-depth: 0
 
       - name: find the version this push releases
         id: v
         env:
           INPUT_VERSION: ${{ inputs.version }}
+          BEFORE: ${{ github.event.before }}
         run: |
           set -euo pipefail
           if [ -n "${INPUT_VERSION:-}" ]; then
             version="${INPUT_VERSION#v}"
           else
-            # Files ADDED by this push. An edit to an existing file releases
-            # nothing: a published version's notes are never the trigger twice.
-            mapfile -t added < <(git diff --name-only --diff-filter=A HEAD~1 HEAD -- 'changelog/pilot/*.md')
+            # Files ADDED by this push, across every commit in it: HEAD~1 is
+            # only the last one, and a file added by an earlier commit of the
+            # same push would release nothing, on a green run. An edit to an
+            # existing file releases nothing: a published version's notes are
+            # never the trigger twice.
+            base="HEAD~1"
+            if [ -n "${BEFORE:-}" ] && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+              base="$BEFORE"
+            fi
+            # Into a variable first, so a failing `git diff` fails the step
+            # instead of reading as "nothing to release".
+            names="$(git diff --name-only --diff-filter=A "$base" HEAD -- 'changelog/pilot/*.md')"
+            added=()
+            [ -z "$names" ] || mapfile -t added <<< "$names"
             if [ "${#added[@]}" -eq 0 ]; then
               echo "no new changelog/pilot/<version>.md in this push; nothing to release"
               echo "version=" >> "$GITHUB_OUTPUT"
