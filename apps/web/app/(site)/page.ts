@@ -61,8 +61,8 @@ export default function Home() {
 
             <p class="${PROSE} text-lede mt-6">
               Run your app in an instant sandbox and it has a live URL. Promote it when it turns
-              out to matter. It keeps its URL, its state, and its identity, because the sandbox
-              and the production service are the same machine.
+              out to matter. It keeps its URL, its state, and its identity. The sandbox and the
+              production service are the same machine.
             </p>
 
             <div class="flex flex-wrap gap-3 mt-8">
