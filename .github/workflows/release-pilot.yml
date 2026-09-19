@@ -10,11 +10,12 @@ name: release pilot
 #      changelog file's body as the notes,
 #   3. packs the `pilots` npm package with those same binaries, installs the
 #      tarball and checks the version it reports,
-#   4. STAGES it on npm. It goes live only when a maintainer approves it with
-#      2FA (`npm stage approve`), which this workflow cannot do.
+#   4. publishes it to npm over trusted publishing, then installs it from the
+#      registry and checks the version again. Nobody approves anything after
+#      the merge: the release PR is the gate.
 #
-# Every step is idempotent: a release that exists is not re-created, and a
-# version that is live or already staged is not staged again. So a run that died halfway is
+# Every step is idempotent: a release that exists is not re-created and a
+# version on the registry is not re-published. So a run that died halfway is
 # recovered by DISPATCHING this workflow with the version as input. Do not use
 # "Re-run failed jobs" for that: a re-run replays this file from its original
 # commit, so a run that predates a fix to the workflow never sees the fix.
@@ -58,7 +59,7 @@ concurrency:
 jobs:
   release:
     # A dispatch can name any ref, and a branch carrying its own
-    # changelog/pilot/<version>.md would otherwise be built, tagged and staged
+    # changelog/pilot/<version>.md would otherwise be built, tagged and published
     # without ever passing review. Only main releases.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
@@ -231,32 +232,34 @@ jobs:
       # exchanges the job's id-token for a short-lived credential scoped to
       # this workflow. Provenance is attached automatically on that path.
       #
-      # STAGED, not published. The package's Trusted Publisher on npmjs.com
-      # has "Allow npm publish" left unchecked, so this workflow can upload a
-      # version and cannot make it live: that takes a person passing 2FA
-      # (`npm stage approve <id>`, or the package's page). `pilots` carries
-      # executables, and this is the gate a compromised workflow, or a change
-      # that slipped through review, cannot open by itself. A plain
-      # `npm publish` here is REFUSED by the registry, by design; ticking that
-      # box is the only thing that would make it work.
+      # PUBLISHED, with nobody in the loop after the merge. The release PR is
+      # the human gate, on purpose the only one: a second approval on npm's
+      # side was tried for a day (staged publishing) and removed, because a
+      # release that waits for somebody's 2FA is not an automated release. What
+      # stands in for it: this job runs from main only, the package refuses
+      # every stored token (2FA required, tokens disallowed), and the only
+      # credential that can publish exists for the length of this run.
       #
-      # The smoke test therefore runs BEFORE the upload, on `npm pack` of the
-      # very tree being staged: it is installed the way a user installs it and
-      # asked its version under both command names. Nothing reaches the
-      # registry that has not already run.
+      # This needs "Allow npm publish" TICKED on the package's Trusted
+      # Publisher at npmjs.com. With it unticked the registry refuses this step
+      # and accepts only `npm stage publish`.
+      #
+      # The smoke test runs BEFORE the upload, on `npm pack` of the very tree
+      # being published: it is installed the way a user installs it and asked
+      # its version under both command names. A publish cannot be taken back,
+      # so nothing reaches the registry that has not already run.
       #
       # The version is written in the RUNNER's tree only. The repository's
       # apps/pilot/npm/package.json stays at 0.0.0 on purpose: the changelog
       # file's name is the one place a version is written.
-      - name: smoke the npm package, then stage it for approval
+      - name: smoke the npm package, then publish it
         if: steps.v.outputs.version != ''
         env:
           VERSION: ${{ steps.v.outputs.version }}
         run: |
           set -euo pipefail
           if [ "$(npm view "pilots@${VERSION}" version 2>/dev/null || true)" = "$VERSION" ]; then
-            echo "pilots@${VERSION} is already live on the registry; nothing to stage"
-            echo "npm: pilots@${VERSION} was already live." >> "$GITHUB_STEP_SUMMARY"
+            echo "pilots@${VERSION} is already on the registry; skipping"
             exit 0
           fi
           cd apps/pilot/npm
@@ -276,38 +279,29 @@ jobs:
           rm -f "$tarball"
           echo "the package installs and runs as v${VERSION}"
 
-          # Listing is best-effort: if the OIDC credential may stage but not
-          # list, the upload below still decides whether this step passed.
-          staged="$(npm stage list pilots --json 2>/dev/null || echo '[]')"
-          if printf '%s' "$staged" | grep -q "\"${VERSION}\""; then
-            echo "pilots@${VERSION} is already staged; not staging it twice"
-          else
-            # npm refuses a prerelease version with no explicit dist-tag, and
-            # `latest` is not where one belongs.
-            tag=latest
-            case "$VERSION" in *-*) tag=next ;; esac
-            npm stage publish . --access public --tag "$tag"
-            staged="$(npm stage list pilots --json 2>/dev/null || echo '[]')"
-          fi
-          echo "staged versions of pilots:"
-          printf '%s\n' "$staged"
+          # npm refuses a prerelease version with no explicit dist-tag, and
+          # `latest` is not where one belongs.
+          tag=latest
+          case "$VERSION" in *-*) tag=next ;; esac
+          npm publish --access public --tag "$tag"
 
-          {
-            echo "## pilots@${VERSION} is STAGED on npm, not live"
-            echo
-            echo "It goes live when a maintainer approves it with 2FA:"
-            echo
-            echo '```sh'
-            echo "npm stage list pilots        # shows the stage id"
-            echo "npm stage approve <stage-id>"
-            echo '```'
-            echo
-            echo "or from https://www.npmjs.com/package/pilots . Then check it:"
-            echo
-            echo '```sh'
-            echo "npm view pilots version      # ${VERSION}"
-            echo "npx pilots@${VERSION} version"
-            echo '```'
-            echo
-            echo "The GitHub release and \`install.sh\` are live already; only npm waits."
-          } >> "$GITHUB_STEP_SUMMARY"
+      # What was published, from the registry, the way a user gets it. The
+      # registry can take a moment to serve a version it just accepted, hence
+      # the wait. Runs on a recovery dispatch too, where the step above skipped.
+      - name: install pilots from the registry and ask it its version
+        if: steps.v.outputs.version != ''
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          prefix="$(mktemp -d)"
+          for attempt in 1 2 3 4 5 6; do
+            if npm install -g --prefix "$prefix" "pilots@${VERSION}"; then break; fi
+            [ "$attempt" -lt 6 ] || { echo "pilots@${VERSION} never became installable" >&2; exit 1; }
+            sleep 20
+          done
+          for name in pilot pilots; do
+            reported="$("$prefix/bin/$name" version --json | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p')"
+            test "$reported" = "v${VERSION}" || { echo "$name from npm says '$reported', released 'v${VERSION}'"; exit 1; }
+          done
+          echo "pilots@${VERSION} is live: \`npm install -g pilots\`" >> "$GITHUB_STEP_SUMMARY"
