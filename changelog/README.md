@@ -38,6 +38,10 @@ it: a third push that touches `changelog/pilot/` while one release runs and
 another waits cancels the one waiting, and that includes a push that only edits
 a note. Nothing is half-published when that happens, the cancelled version is
 simply not released; dispatch the workflow with its version to release it.
+The exception is when a HIGHER version has been released in the meantime: a
+dispatch would publish the lower one after it, and move npm's `latest` and the
+GitHub release `install.sh` reads back to it. Delete the cancelled file and
+carry its notes into the next version instead.
 
 Never edit a file for a version that has been published. Release the next
 version and say what changed there.
