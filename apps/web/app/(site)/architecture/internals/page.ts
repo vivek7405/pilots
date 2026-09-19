@@ -656,9 +656,10 @@ export default function Internals() {
     ${section({
       id: 'surface',
       heading: 'What drives all of this',
-      lede: html`The engine finished ahead of the surface over it. What exists on the API today is
-        tenancy, scoped keys, revocation, and quotas. The dashboard and the command line have landed,
-        and the tool server for agents ships inside the command line.`,
+      lede: html`The engine is driven through one API, and everything else is a client of it. The
+        API carries tenancy, scoped keys, revocation, and quotas. The dashboard and the command line
+        call it like any other client, and the tool server for agents ships inside the command
+        line.`,
       body: html`
         <div class="grid gap-10 wide:grid-cols-[0.9fr_1.1fr]">
           <div class="min-w-0">

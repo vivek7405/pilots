@@ -98,7 +98,7 @@ export default function Architecture() {
       id: 'layers',
       heading: 'The whole system, as five layers',
       lede: html`Read this first if the rest of the page is more detail than you came for. Each layer
-        works without the ones above it, which is also the order it was built in.`,
+        works without the ones above it.`,
       body: html`
         <ol class="m-0 p-0 list-none flex flex-col">
           ${LAYERS.map(
