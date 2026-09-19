@@ -232,9 +232,9 @@ export default function Home() {
       id: 'webjs',
       layout: 'split',
       heading: 'WebJs is the framework, Pilots is the platform',
-      lede: html`They are built by the same people, the way Next.js and Vercel are. You do not need
-        either one to use the other: Pilots runs any Dockerfile, and WebJs deploys anywhere a Node
-        process runs. They are just designed by people who know what the other one does.`,
+      lede: html`They are built by the same people, the way Next.js and Vercel are. Neither one
+        needs the other. Pilots runs any Dockerfile, and WebJs deploys anywhere a Node process
+        runs. They are just designed by people who know what the other one does.`,
       body: html`
         <div class="${PANEL} p-6 flex flex-col mid:flex-row mid:items-center gap-6 justify-between">
           <p class="${PROSE} m-0">
