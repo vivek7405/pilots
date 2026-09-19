@@ -27,7 +27,7 @@ export type Entry = {
   /** The directory name, which is also the release tag's prefix. */
   pkg: string;
   version: string;
-  /** ISO timestamp. Entries sort on it, newest first. */
+  /** ISO timestamp, normalised by `parseEntry`. Entries sort on it, newest first. */
   date: string;
   blocks: Block[];
 };
@@ -70,8 +70,12 @@ export function parseEntry(pkg: string, raw: string): Entry | null {
   const split = splitFrontmatter(raw);
   if (!split) return null;
   const { version, date } = split.fm;
-  if (!version || !date || Number.isNaN(Date.parse(date))) return null;
-  return { pkg, version, date, blocks: parseBody(split.body) };
+  const at = date ? Date.parse(date) : NaN;
+  if (!version || Number.isNaN(at)) return null;
+  // Normalised, because the format promises "anything Date.parse accepts" and
+  // the page prints the first ten characters and puts the whole value in a
+  // `datetime` attribute: `19 Sep 2026` would render as "19 Sep 202".
+  return { pkg, version, date: new Date(at).toISOString(), blocks: parseBody(split.body) };
 }
 
 export function parseBody(md: string): Block[] {
@@ -134,7 +138,9 @@ export function parseBody(md: string): Block[] {
  * plain text costs nothing.
  */
 function safeHref(href: string): boolean {
-  return /^https:\/\//.test(href) || (href.startsWith('/') && !href.startsWith('//'));
+  // `/\` as well as `//`: a browser reads a backslash there as a slash, so
+  // `/\host` leaves the site exactly as `//host` does.
+  return /^https:\/\//.test(href) || (href.startsWith('/') && !/^\/[/\\]/.test(href));
 }
 
 export function parseInline(text: string): Inline[] {

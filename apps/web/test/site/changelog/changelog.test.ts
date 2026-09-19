@@ -78,7 +78,11 @@ test('a changelog file parses into headings, items with paragraphs, and prose', 
   // A scheme a release note has no use for stays the text it was written as.
   assert.deepEqual(parseInline('[x](javascript:alert)'), [{ kind: 'text', text: '[x](javascript:alert)' }]);
   assert.deepEqual(parseInline('[x](//evil.example)'), [{ kind: 'text', text: '[x](//evil.example)' }]);
+  assert.deepEqual(parseInline('[x](/\\evil.example)'), [{ kind: 'text', text: '[x](/\\evil.example)' }]);
 
+  // The page slices the date and puts it in a `datetime` attribute, so any
+  // form Date.parse accepts leaves the parser as the one ISO form.
+  assert.equal(parseEntry('pilot', '---\nversion: 1.0.0\ndate: 19 Sep 2026 12:00 UTC\n---\n')?.date, '2026-09-19T12:00:00.000Z');
   assert.equal(parseEntry('pilot', 'no frontmatter'), null);
   assert.equal(parseEntry('pilot', '---\nversion: 1.0.0\ndate: not a date\n---\n'), null);
   assert.deepEqual(parseBody(''), []);
