@@ -25,8 +25,8 @@ export function siteFooter() {
               <span>pilots</span>
             </span>
             <p class="text-sm text-ink-muted m-0 max-w-[34ch]">
-              Sandboxes and production services on Firecracker microVMs. One primitive,
-              two faces, no control plane.
+              Sandboxes and production services on the same platform. Start one as a sandbox,
+              promote it to production, keep the URL.
             </p>
           </div>
 
