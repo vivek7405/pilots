@@ -86,14 +86,16 @@ func TestChecksumFor(t *testing.T) {
 	}
 }
 
+// The npm paths are where apps/pilot/npm really puts the binary (vendor/ inside
+// the installed package), read back from an install into a scratch prefix.
 func TestManagedBy(t *testing.T) {
 	for path, want := range map[string]string{
 		"/home/u/.local/bin/pilot": "",
 		"/usr/local/bin/pilot":     "",
-		"/usr/lib/node_modules/pilots/node_modules/@pilots/cli-linux-x64/bin/pilot":              "npm",
-		"/home/u/.nvm/versions/node/v24.0.0/lib/node_modules/@pilots/cli-darwin-arm64/bin/pilot": "npm",
-		"/opt/homebrew/Cellar/pilot/0.2.0/bin/pilot":                                             "Homebrew",
-		"/home/linuxbrew/.linuxbrew/Cellar/pilot/0.2.0/bin/pilot":                                "Homebrew",
+		"/usr/lib/node_modules/pilots/node_modules/@pilots/cli-linux-x64/bin/pilot":            "npm",
+		"/home/u/.nvm/versions/node/v24.0.0/lib/node_modules/pilots/vendor/pilot_darwin_arm64": "npm",
+		"/opt/homebrew/Cellar/pilot/0.2.0/bin/pilot":                                           "Homebrew",
+		"/home/linuxbrew/.linuxbrew/Cellar/pilot/0.2.0/bin/pilot":                              "Homebrew",
 	} {
 		name, cmd := managedBy(path)
 		if name != want {

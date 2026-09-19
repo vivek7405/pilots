@@ -1,0 +1,26 @@
+{
+  "name": "pilots",
+  "version": "0.0.0",
+  "description": "The pilot CLI and terminal dashboard for Pilots (https://pilots.run): instant sandboxes for AI agents and production services on Firecracker microVMs.",
+  "homepage": "https://pilots.run/install",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pilotsrun/pilots.git",
+    "directory": "apps/pilot/npm"
+  },
+  "bugs": "https://github.com/pilotsrun/pilots/issues",
+  "license": "Apache-2.0",
+  "author": "Vivek <vivek7405@gmail.com>",
+  "keywords": ["pilots", "pilot", "cli", "tui", "firecracker", "microvm", "sandbox", "paas", "deploy"],
+  "bin": {
+    "pilot": "bin/pilot.js",
+    "pilots": "bin/pilot.js"
+  },
+  "files": ["bin", "lib", "vendor", "README.md", "LICENSE"],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  }
+}

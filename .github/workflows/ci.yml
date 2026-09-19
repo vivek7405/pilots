@@ -98,6 +98,10 @@ jobs:
       # AFTER build:sdk-js because @pilots/sdk publishes out of dist/, and a
       # fresh checkout has nothing for the type check to resolve until then.
       - run: npm test --workspace=packages/cli
+      # The launcher `npm install -g pilots` puts in front of the Go binary. It
+      # is outside the npm workspaces (it has no dependencies to install), so
+      # it is reached by path.
+      - run: npm test --prefix apps/pilot/npm
       # Skips cleanly without PILOTS_E2E=1; this asserts the skip path works.
       - run: npm run test:e2e
 
