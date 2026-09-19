@@ -214,10 +214,17 @@ jobs:
 
           From npm: `npm install -g pilots@latest`. Every way in is on https://pilots.run/install.
           EOF
+          # A version with a suffix (0.3.0-rc.1) is a PRERELEASE on GitHub, so
+          # it is never `releases/latest`, which is the one address install.sh
+          # and `pilot upgrade` read: nobody is moved to a candidate by a
+          # command that promised them the latest release.
+          pre=()
+          case "$VERSION" in *-*) pre=(--prerelease) ;; esac
           gh release create "pilot-v${VERSION}" \
             --target "$GITHUB_SHA" \
             --title "pilot v${VERSION}" \
             --notes-file notes.md \
+            "${pre[@]}" \
             dist/pilot_* dist/checksums.txt
 
       # No NODE_AUTH_TOKEN: npm detects the Actions OIDC environment and
@@ -275,7 +282,11 @@ jobs:
           if printf '%s' "$staged" | grep -q "\"${VERSION}\""; then
             echo "pilots@${VERSION} is already staged; not staging it twice"
           else
-            npm stage publish . --access public
+            # npm refuses a prerelease version with no explicit dist-tag, and
+            # `latest` is not where one belongs.
+            tag=latest
+            case "$VERSION" in *-*) tag=next ;; esac
+            npm stage publish . --access public --tag "$tag"
             staged="$(npm stage list pilots --json 2>/dev/null || echo '[]')"
           fi
           echo "staged versions of pilots:"
