@@ -159,3 +159,23 @@ workaround.
 That is not a defeat. It is the same decision we made about building the tier:
 the honest answer to "should we operate your database" is usually no, and a
 platform that says so is more useful than one that implies otherwise.
+
+## Platform limits
+
+These were on the marketing site for a while, on the home page under "what it
+cannot do". They are here instead, because none of them is a decision a visitor
+makes while deciding whether to try the product, and all of them matter once
+somebody is running real traffic.
+
+| Limit | What it means for you |
+|---|---|
+| A memory snapshot never crosses the Intel/AMD boundary | The fleet may mix vendors, but a suspended machine wakes on a host of the same vendor, and a machine whose vendor pool has no live host cold-boots from its own disk instead. `ARCHITECTURE.md` rule 6 has the mechanism. |
+| A diff chain is exactly two levels | A template plus one per-machine diff. A checkpoint of a checkpoint of a checkpoint is refused when the header is parsed, rather than failing later at fault time. |
+| One region | Every host is in one European region today. Nothing in the design pins the fleet there, and a machine answers from that region wherever the request comes from. |
+
+## The `pilot` CLI
+
+| Limit | What it means for you |
+|---|---|
+| Linux and macOS, x64 and arm64 | There is no Windows binary, because the CLI does not build for Windows. WSL is Linux, so the install commands work there unchanged; on Windows itself the npm launcher says so and points at WSL. |
+| A checksum is not a signature | The checksum proves the file you received is the file the release published. Someone able to replace a release could replace its checksum file too. The npm package carries a provenance record tying it to the commit and workflow run that built it. |

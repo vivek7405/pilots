@@ -23,8 +23,13 @@ import { GH_URL, WEBJS_URL, WORKLOAD_APEX, NEW_TAB, DASHBOARD_HREF } from '#site
  *   instant         the reason a sandbox is usable at all: restore, not boot
  *   no control      the reason a service is trustworthy: nothing central to lose
  *   plane
- *   limits          what it cannot do, stated before you find out
  *   webjs           the sibling product, for readers who arrived from it
+ *
+ * There was a "what it cannot do" section here, and it is now docs/honesty.md.
+ * This is a page someone reads while deciding whether to try the product, and
+ * the CPU-vendor rule and the depth of a diff chain are not decisions they
+ * make. The operational limits that DO change someone's mind still have a
+ * page, and the pages that sell a capability still say where it stops.
  *
  * EVERY SECTION MUST STAND ALONE. Readers arrive mid-page from a search result
  * or a shared link, so a heading plus its first sentence has to resolve with
@@ -227,40 +232,6 @@ export default function Home() {
             </p>
           </div>
         </div>
-      `,
-    })}
-
-    <!-- LIMITS. Deliberately not hidden in a FAQ at the bottom. A reader
-         evaluating infrastructure is looking for whether you know your own
-         edges, and finding them stated plainly is worth more than another
-         paragraph of capability. -->
-    ${section({
-      id: 'limits',
-      heading: 'What it cannot do',
-      body: html`
-        <ul class="m-0 p-0 list-none grid gap-px bg-rule border border-rule rounded overflow-hidden">
-          ${[
-            [
-              'Snapshots are locked to a CPU vendor',
-              'A memory snapshot carries raw CPUID, so it will not restore across the Intel/AMD boundary. The whole fleet has to be one vendor, and a machine cannot migrate off it.',
-            ],
-            [
-              'Diff chains are exactly two levels',
-              'A template and a per-machine diff. A checkpoint of a checkpoint of a checkpoint is a hard error at parse time rather than a mystery at fault time.',
-            ],
-            [
-              'One region',
-              'Every host is in one European region. Nothing in the design pins the fleet there, but a machine answers from that region wherever the request comes from.',
-            ],
-          ].map(
-            ([title, body]) => html`
-              <li class="bg-paper-elev p-5">
-                <p class="font-semibold m-0 mb-1.5">${title}</p>
-                <p class="text-sm text-ink-muted m-0 max-w-[70ch]">${body}</p>
-              </li>
-            `,
-          )}
-        </ul>
       `,
     })}
 
