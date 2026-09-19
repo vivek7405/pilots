@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // recordingHandoffs is a HandoffNotifier that remembers what it was asked.

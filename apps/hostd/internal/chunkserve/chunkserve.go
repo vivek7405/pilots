@@ -51,7 +51,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/block"
+	"github.com/pilotsrun/pilots/hostd/internal/block"
 )
 
 // SocketName is the socket's name inside a machine's state directory.

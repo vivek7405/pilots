@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // Create makes a new volume and leaves it mounted on this host, ready to be

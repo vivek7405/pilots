@@ -16,7 +16,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/vivek7405/pilots/hostd/internal/block"
+	"github.com/pilotsrun/pilots/hostd/internal/block"
 )
 
 // faultWorkers service page faults in parallel.

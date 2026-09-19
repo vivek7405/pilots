@@ -13,11 +13,11 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/vivek7405/pilots/agents"
-	pilotsmcp "github.com/vivek7405/pilots/agents/mcp"
-	pilots "github.com/vivek7405/pilots/sdks/go"
+	"github.com/pilotsrun/pilots/agents"
+	pilotsmcp "github.com/pilotsrun/pilots/agents/mcp"
+	pilots "github.com/pilotsrun/pilots/sdks/go"
 
-	"github.com/vivek7405/pilots/cli/internal/config"
+	"github.com/pilotsrun/pilots/cli/internal/config"
 )
 
 // The MCP server over stdio: the fleet toolset every host also serves at

@@ -9,7 +9,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
 )
 
 // A gate that runs out of grace returns the typed failure, not a sentence.

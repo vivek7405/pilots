@@ -4,7 +4,7 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/vivek7405/pilots/hostd/internal/fc"
+	"github.com/pilotsrun/pilots/hostd/internal/fc"
 )
 
 // What a machine's checkpoints cost, and who is charged for it.

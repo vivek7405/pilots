@@ -8,8 +8,8 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/vivek7405/pilots/cli/internal/cli"
-	"github.com/vivek7405/pilots/cli/internal/config"
+	"github.com/pilotsrun/pilots/cli/internal/cli"
+	"github.com/pilotsrun/pilots/cli/internal/config"
 )
 
 func main() {

@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/naming"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/naming"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // Choosing which host runs a new machine.

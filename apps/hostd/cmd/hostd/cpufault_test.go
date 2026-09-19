@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/cpuvendor"
+	"github.com/pilotsrun/pilots/hostd/internal/cpuvendor"
 )
 
 // Both flags, always. One of them set by accident on a real host would make

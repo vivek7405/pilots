@@ -4,7 +4,7 @@ import (
 	"context"
 	"io"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
 )
 
 // The adapter between the builder and hostd's HTTP surface.

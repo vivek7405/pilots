@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/seal"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/seal"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 func envManager(t *testing.T, withKey bool) (*Manager, state.Store) {

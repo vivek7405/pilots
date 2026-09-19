@@ -1,6 +1,6 @@
 package machines
 
-import "github.com/vivek7405/pilots/hostd/internal/netns"
+import "github.com/pilotsrun/pilots/hostd/internal/netns"
 
 // SlotFor returns a running machine's network slot.
 //

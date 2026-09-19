@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // emptyCache is a subscription cache that knows nothing, which is exactly the

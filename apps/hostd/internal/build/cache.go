@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/s3"
+	"github.com/pilotsrun/pilots/hostd/internal/s3"
 )
 
 // CacheStore is object storage for the layer cache, as hostd addresses it.

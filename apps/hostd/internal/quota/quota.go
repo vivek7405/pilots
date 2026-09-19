@@ -20,7 +20,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // Defaults apply to an org with no row of its own. Generous enough that a

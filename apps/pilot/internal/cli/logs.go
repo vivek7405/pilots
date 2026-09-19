@@ -7,7 +7,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	pilots "github.com/vivek7405/pilots/sdks/go"
+	pilots "github.com/pilotsrun/pilots/sdks/go"
 )
 
 func newLogsCmd(env *Env) *cobra.Command {

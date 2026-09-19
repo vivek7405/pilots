@@ -6,9 +6,9 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/vivek7405/pilots/agents"
+	"github.com/pilotsrun/pilots/agents"
 
-	"github.com/vivek7405/pilots/cli/internal/config"
+	"github.com/pilotsrun/pilots/cli/internal/config"
 )
 
 // The skill: the same pages are three things at once -- files an agent reads

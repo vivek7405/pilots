@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/fc"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/fc"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // cpuManager is a manager whose state dir and cgroup root are both temporary,

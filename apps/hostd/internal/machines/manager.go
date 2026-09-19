@@ -23,16 +23,16 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
 
-	"github.com/vivek7405/pilots/hostd/internal/block"
-	"github.com/vivek7405/pilots/hostd/internal/fc"
-	"github.com/vivek7405/pilots/hostd/internal/metrics"
-	"github.com/vivek7405/pilots/hostd/internal/nbd"
-	"github.com/vivek7405/pilots/hostd/internal/netns"
-	"github.com/vivek7405/pilots/hostd/internal/seal"
-	"github.com/vivek7405/pilots/hostd/internal/state"
-	"github.com/vivek7405/pilots/hostd/internal/usage"
+	"github.com/pilotsrun/pilots/hostd/internal/block"
+	"github.com/pilotsrun/pilots/hostd/internal/fc"
+	"github.com/pilotsrun/pilots/hostd/internal/metrics"
+	"github.com/pilotsrun/pilots/hostd/internal/nbd"
+	"github.com/pilotsrun/pilots/hostd/internal/netns"
+	"github.com/pilotsrun/pilots/hostd/internal/seal"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/usage"
 )
 
 // Machine states.

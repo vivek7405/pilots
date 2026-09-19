@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/machines"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/machines"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // The whole point of the issue this file was written for: a service's address

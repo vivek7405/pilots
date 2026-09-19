@@ -2,7 +2,7 @@ package main
 
 import (
 	"bytes"
-	"github.com/vivek7405/pilots/hostd/internal/netns"
+	"github.com/pilotsrun/pilots/hostd/internal/netns"
 	"log"
 	"os"
 	"os/exec"

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	pilots "github.com/vivek7405/pilots/sdks/go"
+	pilots "github.com/pilotsrun/pilots/sdks/go"
 )
 
 // writerTo renders into buffers instead of the process streams.

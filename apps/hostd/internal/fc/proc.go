@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/netns"
+	"github.com/pilotsrun/pilots/hostd/internal/netns"
 )
 
 // killGrace is the SHARED deadline for every child of a machine to exit after

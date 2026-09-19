@@ -1,4 +1,4 @@
-module github.com/vivek7405/pilots/sdks/go
+module github.com/pilotsrun/pilots/sdks/go
 
 go 1.26
 

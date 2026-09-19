@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/vivek7405/pilots/hostd/internal/config"
-	"github.com/vivek7405/pilots/hostd/internal/mesh"
+	"github.com/pilotsrun/pilots/hostd/internal/config"
+	"github.com/pilotsrun/pilots/hostd/internal/mesh"
 )
 
 // MeshUpCommand brings the WireGuard interface up and exits.

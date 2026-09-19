@@ -7,10 +7,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/machines"
-	"github.com/vivek7405/pilots/hostd/internal/mesh"
-	"github.com/vivek7405/pilots/hostd/internal/metrics"
-	"github.com/vivek7405/pilots/hostd/internal/netns"
+	"github.com/pilotsrun/pilots/hostd/internal/machines"
+	"github.com/pilotsrun/pilots/hostd/internal/mesh"
+	"github.com/pilotsrun/pilots/hostd/internal/metrics"
+	"github.com/pilotsrun/pilots/hostd/internal/netns"
 )
 
 // guestLoad is what the autoscaler learns from the root namespace: which

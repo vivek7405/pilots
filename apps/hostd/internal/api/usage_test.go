@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
-	"github.com/vivek7405/pilots/hostd/internal/usage"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/usage"
 )
 
 // fakeUsage is a ledger that answers a fixed set and records what it was asked.

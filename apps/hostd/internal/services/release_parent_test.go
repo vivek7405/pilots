@@ -3,7 +3,7 @@ package services
 import (
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // A release adopts the checkpoint's disk whatever the replica was booted from.

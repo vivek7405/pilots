@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/vivek7405/pilots/cli/internal/out"
+	"github.com/pilotsrun/pilots/cli/internal/out"
 )
 
 // ignoreRule is one line of a .dockerignore: a pattern, and whether it

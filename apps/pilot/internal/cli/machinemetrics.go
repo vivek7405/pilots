@@ -6,7 +6,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	pilots "github.com/vivek7405/pilots/sdks/go"
+	pilots "github.com/pilotsrun/pilots/sdks/go"
 )
 
 // What a machine is using, and what a service's instances are using together.

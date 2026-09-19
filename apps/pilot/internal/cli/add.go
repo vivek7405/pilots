@@ -12,11 +12,11 @@ import (
 	"github.com/spf13/cobra"
 	yaml "go.yaml.in/yaml/v3"
 
-	"github.com/vivek7405/pilots/cli/internal/config"
+	"github.com/pilotsrun/pilots/cli/internal/config"
 
-	pilots "github.com/vivek7405/pilots/sdks/go"
+	pilots "github.com/pilotsrun/pilots/sdks/go"
 
-	"github.com/vivek7405/pilots/cli/internal/out"
+	"github.com/pilotsrun/pilots/cli/internal/out"
 )
 
 // Adding a database to a project.

@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // A suspended machine keeps its slot, and so its mesh address, across a

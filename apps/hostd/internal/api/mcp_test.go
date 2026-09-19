@@ -14,8 +14,8 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	pilotsmcp "github.com/vivek7405/pilots/agents/mcp"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	pilotsmcp "github.com/pilotsrun/pilots/agents/mcp"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // mcpServer is a live HTTP server whose SelfURL is itself, which is exactly

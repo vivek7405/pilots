@@ -3,8 +3,8 @@ package main
 import (
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/mesh"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/mesh"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 )
 

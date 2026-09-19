@@ -9,9 +9,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
-	"github.com/vivek7405/pilots/hostd/internal/selfheal"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/selfheal"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // What an ordinal's volume is, when the rollout has to make one.

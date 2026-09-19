@@ -1,6 +1,6 @@
 package compose
 
-import "github.com/vivek7405/pilots/hostd/internal/api"
+import "github.com/pilotsrun/pilots/hostd/internal/api"
 
 // The wire shapes of POST /v1/plan.
 //

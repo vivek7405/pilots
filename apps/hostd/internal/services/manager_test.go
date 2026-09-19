@@ -12,8 +12,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // fakeMachines is a machine layer that cannot boot, which is the point: the

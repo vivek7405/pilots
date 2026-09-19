@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/metrics"
-	"github.com/vivek7405/pilots/hostd/internal/quota"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/metrics"
+	"github.com/pilotsrun/pilots/hostd/internal/quota"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // BuildRunner is the build surface the handlers drive.

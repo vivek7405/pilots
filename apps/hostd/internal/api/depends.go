@@ -8,7 +8,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // internalRef matches a <name>.internal address inside an environment value.

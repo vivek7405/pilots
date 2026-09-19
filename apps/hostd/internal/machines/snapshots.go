@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/cron"
+	"github.com/pilotsrun/pilots/hostd/internal/cron"
 )
 
 // Snapshots a volume takes on its own.

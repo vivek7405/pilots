@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // A service row minted for a machine inherits the create's org, so the tenant

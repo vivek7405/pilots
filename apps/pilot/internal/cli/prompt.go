@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/vivek7405/pilots/cli/internal/out"
+	"github.com/pilotsrun/pilots/cli/internal/out"
 )
 
 // confirm asks before something irreversible. -y answers for a script or an

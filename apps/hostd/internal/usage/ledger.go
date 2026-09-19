@@ -46,7 +46,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/metrics"
+	"github.com/pilotsrun/pilots/hostd/internal/metrics"
 )
 
 // dayLayout names a ledger file. It is also parsed back, so the file name is

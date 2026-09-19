@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 func readEgress(t *testing.T, h http.Handler) EgressResponse {

@@ -3,7 +3,7 @@ package main
 import (
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // staticView is a fleetView over a fixed set of rows.

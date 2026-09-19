@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vivek7405/pilots/agents"
+	"github.com/pilotsrun/pilots/agents"
 
-	"github.com/vivek7405/pilots/cli/internal/out"
+	"github.com/pilotsrun/pilots/cli/internal/out"
 )
 
 // Zed and VS Code write JSONC. A settings file with comments in it is a

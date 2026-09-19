@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/uffd"
+	"github.com/pilotsrun/pilots/hostd/internal/uffd"
 )
 
 // This is the measurement issue #22 turns on, kept as a test rather than run

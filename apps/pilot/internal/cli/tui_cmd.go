@@ -6,8 +6,8 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/vivek7405/pilots/cli/internal/out"
-	"github.com/vivek7405/pilots/cli/internal/tui"
+	"github.com/pilotsrun/pilots/cli/internal/out"
+	"github.com/pilotsrun/pilots/cli/internal/tui"
 )
 
 func newTUICmd(env *Env) *cobra.Command {

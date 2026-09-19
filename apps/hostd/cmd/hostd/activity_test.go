@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/metrics"
+	"github.com/pilotsrun/pilots/hostd/internal/metrics"
 )
 
 // The counters are read off a table that is deleted and rebuilt whenever the

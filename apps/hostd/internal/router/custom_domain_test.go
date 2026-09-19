@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/machines"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/machines"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 func shopRouter(custom func(string) (string, bool), ms ...state.Machine) *Router {

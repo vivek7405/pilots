@@ -10,7 +10,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/metrics"
+	"github.com/pilotsrun/pilots/hostd/internal/metrics"
 )
 
 // Snapshot artifact names, both on disk and as object-storage keys.

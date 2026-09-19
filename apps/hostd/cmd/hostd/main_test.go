@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/config"
+	"github.com/pilotsrun/pilots/hostd/internal/config"
 )
 
 // The API hostname lives under the workload wildcard, so the suffix check

@@ -5,7 +5,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/router"
+	"github.com/pilotsrun/pilots/hostd/internal/router"
 )
 
 // What a peer call carries is what the internal listener requires.

@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/metrics"
+	"github.com/pilotsrun/pilots/hostd/internal/metrics"
 )
 
 // The systemd watchdog, driven by whether hostd's loops are actually running.

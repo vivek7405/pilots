@@ -3,7 +3,7 @@ package machines
 import (
 	"testing"
 
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // A row that says running with no process here is CORRECTED, not answered

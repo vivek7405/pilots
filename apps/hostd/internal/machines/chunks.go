@@ -8,9 +8,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/vivek7405/pilots/hostd/internal/block"
-	"github.com/vivek7405/pilots/hostd/internal/chunkserve"
-	"github.com/vivek7405/pilots/hostd/internal/fc"
+	"github.com/pilotsrun/pilots/hostd/internal/block"
+	"github.com/pilotsrun/pilots/hostd/internal/chunkserve"
+	"github.com/pilotsrun/pilots/hostd/internal/fc"
 )
 
 // Per-machine chunk sockets, so no handler holds a storage credential.

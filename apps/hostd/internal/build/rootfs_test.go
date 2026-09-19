@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/netns"
+	"github.com/pilotsrun/pilots/hostd/internal/netns"
 )
 
 // writeTar builds a flattened filesystem tarball of the shape BuildKit's tar

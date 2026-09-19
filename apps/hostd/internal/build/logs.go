@@ -4,7 +4,7 @@ import (
 	"context"
 	"sync"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
 )
 
 // A build's log, held so that a client can attach after the build started and

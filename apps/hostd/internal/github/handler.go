@@ -12,11 +12,11 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
-	"github.com/vivek7405/pilots/hostd/internal/build"
-	"github.com/vivek7405/pilots/hostd/internal/compose"
-	"github.com/vivek7405/pilots/hostd/internal/detect"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/build"
+	"github.com/pilotsrun/pilots/hostd/internal/compose"
+	"github.com/pilotsrun/pilots/hostd/internal/detect"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // previewMarker identifies our comment on a pull request so pushes update it

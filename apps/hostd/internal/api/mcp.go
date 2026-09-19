@@ -8,8 +8,8 @@ import (
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
-	pilotsmcp "github.com/vivek7405/pilots/agents/mcp"
-	pilots "github.com/vivek7405/pilots/sdks/go"
+	pilotsmcp "github.com/pilotsrun/pilots/agents/mcp"
+	pilots "github.com/pilotsrun/pilots/sdks/go"
 )
 
 // The hosted MCP endpoint: the fleet toolset (agents/mcp) over Streamable

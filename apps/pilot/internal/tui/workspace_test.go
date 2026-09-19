@@ -3,7 +3,7 @@ package tui
 import (
 	"testing"
 
-	pilots "github.com/vivek7405/pilots/sdks/go"
+	pilots "github.com/pilotsrun/pilots/sdks/go"
 )
 
 // newTestClient is a client that is never called: these tests drive the model,

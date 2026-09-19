@@ -13,11 +13,11 @@ import (
 	"github.com/libdns/cloudflare"
 	"github.com/mholt/acmez/v3"
 
-	"github.com/vivek7405/pilots/hostd/internal/api"
-	"github.com/vivek7405/pilots/hostd/internal/certs"
-	"github.com/vivek7405/pilots/hostd/internal/config"
-	"github.com/vivek7405/pilots/hostd/internal/s3"
-	"github.com/vivek7405/pilots/hostd/internal/state"
+	"github.com/pilotsrun/pilots/hostd/internal/api"
+	"github.com/pilotsrun/pilots/hostd/internal/certs"
+	"github.com/pilotsrun/pilots/hostd/internal/config"
+	"github.com/pilotsrun/pilots/hostd/internal/s3"
+	"github.com/pilotsrun/pilots/hostd/internal/state"
 )
 
 // tlsConfigured is the one definition of whether the FLEET serves TLS, and it
