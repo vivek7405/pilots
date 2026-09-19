@@ -32,6 +32,13 @@ These files do three jobs, which is why they are written with care:
    version and npm still serves the previous one.
 6. Redeploy `apps/web` so `/changelog` carries the entry.
 
+Land one release at a time, and let it finish before merging the next. The
+workflow runs one release at once, and GitHub keeps only ONE run waiting behind
+it: a third push that touches `changelog/pilot/` while one release runs and
+another waits cancels the one waiting, and that includes a push that only edits
+a note. Nothing is half-published when that happens, the cancelled version is
+simply not released; dispatch the workflow with its version to release it.
+
 Never edit a file for a version that has been published. Release the next
 version and say what changed there.
 
