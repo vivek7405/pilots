@@ -1,0 +1,5 @@
+# Copied in by the release workflow at publish time, never committed: the
+# binaries for every platform, and the repository's LICENSE.
+vendor/
+LICENSE
+*.tgz

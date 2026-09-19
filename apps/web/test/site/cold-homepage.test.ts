@@ -26,7 +26,7 @@ import { bootApp } from '../helpers/app.ts';
 import type { TestApp } from '../helpers/app.ts';
 
 const ROOT = join(import.meta.dirname, '..', '..');
-const PAGES = ['/', '/agents', '/architecture', '/architecture/internals', '/deploy', '/sandboxes', '/brand'];
+const PAGES = ['/', '/agents', '/architecture', '/architecture/internals', '/deploy', '/sandboxes', '/brand', '/install', '/changelog'];
 
 /** The product modules a marketing file may import. Pure helpers, no I/O. */
 const ALLOWED = new Set(['#lib/utils/cn.ts', '#lib/utils/dom.ts']);

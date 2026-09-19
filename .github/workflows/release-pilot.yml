@@ -1,83 +1,313 @@
 name: release pilot
 
-# Tag-driven, so a release is a deliberate act rather than a side effect of a
-# merge:
+# A release is a MERGED PULL REQUEST, not a pushed tag. Landing a new
+# `changelog/pilot/<version>.md` on main is the act (changelog/README.md), so
+# nothing is released that did not pass review, and nobody publishes from a
+# laptop. This workflow then, in order:
 #
-#     git tag pilot-v0.2.0 && git push origin pilot-v0.2.0
+#   1. builds the four binaries at that version and writes checksums.txt,
+#   2. creates the tag `pilot-v<version>` and the GitHub release, with the
+#      changelog file's body as the notes,
+#   3. packs the `pilots` npm package with those same binaries, installs the
+#      tarball and checks the version it reports,
+#   4. STAGES it on npm. It goes live only when a maintainer approves it with
+#      2FA (`npm stage approve`), which this workflow cannot do.
 #
-# The asset NAMES are a contract, not a convention. `pilot upgrade` asks the
-# GitHub API for the latest release and looks for an asset called exactly
-# `pilot_<goos>_<goarch>` (apps/pilot/internal/cli/upgrade.go), so a rename
-# here silently breaks in-place upgrades for everyone who already has the
-# binary. scripts/install-pilot.sh reads the same names.
+# Every step is idempotent: a release that exists is not re-created, and a
+# version that is live or already staged is not staged again. So a run that died halfway is
+# recovered by DISPATCHING this workflow with the version as input. Do not use
+# "Re-run failed jobs" for that: a re-run replays this file from its original
+# commit, so a run that predates a fix to the workflow never sees the fix.
+# The shape is the webjs repo's release.yml, which paid for each of those
+# sentences.
+#
+# THE ASSET NAMES ARE A CONTRACT. `pilot upgrade` asks the GitHub API for the
+# latest release and looks for an asset called exactly `pilot_<goos>_<goarch>`
+# (apps/pilot/internal/cli/upgrade.go); apps/web/public/install.sh reads the
+# same names, the npm launcher looks them up in vendor/
+# (apps/pilot/npm/lib/resolve.js), and all of them read checksums.txt.
+# apps/web/test/site/install-script.test.ts holds the spelling.
+#
+# NEVER RENAME THIS FILE. npm auth is trusted publishing (OIDC): there is no
+# NPM_TOKEN to store, rotate or leak, and the `pilots` package on npmjs.com
+# names owner `pilotsrun`, repo `pilots` and workflow `release-pilot.yml` as
+# its Trusted Publisher. A rename breaks publishing until that is updated, and
+# it fails as an opaque 404 on the publish PUT rather than as an auth error.
 on:
   push:
-    tags:
-      - 'pilot-v*'
+    branches: [main]
+    paths:
+      - 'changelog/pilot/**'
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Recover a release: the version to finish publishing, e.g. 0.2.0. changelog/pilot/<version>.md must be on main.'
+        required: true
+        type: string
+
+permissions:
+  contents: write # the tag and the GitHub release
+  id-token: write # the OIDC credential npm trusted publishing exchanges
+
+# One release at a time. Two changelog files landing minutes apart must not
+# race each other to the registry's `latest` tag.
+concurrency:
+  group: release-pilot
+  cancel-in-progress: false
 
 jobs:
-  build:
+  release:
+    # A dispatch can name any ref, and a branch carrying its own
+    # changelog/pilot/<version>.md would otherwise be built, tagged and staged
+    # without ever passing review. Only main releases.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
     steps:
+      # Full history: the push's own range is read below, and a push is not
+      # always one commit (a rebase merge lands several at once).
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: find the version this push releases
+        id: v
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            version="${INPUT_VERSION#v}"
+          else
+            # Files ADDED by this push, across every commit in it: HEAD~1 is
+            # only the last one, and a file added by an earlier commit of the
+            # same push would release nothing, on a green run. An edit to an
+            # existing file releases nothing: a published version's notes are
+            # never the trigger twice.
+            base="HEAD~1"
+            if [ -n "${BEFORE:-}" ] && git cat-file -e "${BEFORE}^{commit}" 2>/dev/null; then
+              base="$BEFORE"
+            fi
+            # Into a variable first, so a failing `git diff` fails the step
+            # instead of reading as "nothing to release".
+            names="$(git diff --name-only --diff-filter=A "$base" HEAD -- 'changelog/pilot/*.md')"
+            added=()
+            [ -z "$names" ] || mapfile -t added <<< "$names"
+            if [ "${#added[@]}" -eq 0 ]; then
+              echo "no new changelog/pilot/<version>.md in this push; nothing to release"
+              echo "version=" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            if [ "${#added[@]}" -gt 1 ]; then
+              echo "one release per push; this one adds: ${added[*]}" >&2
+              exit 1
+            fi
+            version="$(basename "${added[0]}" .md)"
+          fi
+          file="changelog/pilot/${version}.md"
+          [ -f "$file" ] || { echo "$file is not on this commit" >&2; exit 1; }
+          echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$' \
+            || { echo "'$version' is not a version (expected e.g. 0.2.0)" >&2; exit 1; }
+          declared="$(awk '/^---/{n++; next} n==1 && /^version:/{print $2; exit}' "$file" | tr -d '"')"
+          [ "$declared" = "$version" ] \
+            || { echo "$file declares version '$declared'" >&2; exit 1; }
+          echo "releasing pilot $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "file=$file" >> "$GITHUB_OUTPUT"
+
       - uses: actions/setup-go@v5
+        if: steps.v.outputs.version != ''
         with:
           go-version: '1.26'
           cache-dependency-path: apps/pilot/go.sum
 
+      # `registry-url` is REQUIRED for trusted publishing, not decoration: it
+      # writes the .npmrc the OIDC exchange authenticates against. Node 24's
+      # bundled npm clears trusted publishing's 11.5.1 floor. Do NOT add
+      # `npm install -g npm@latest`: that is npm 12, whose install-time
+      # defaults are not what anything here was tested on.
+      - uses: actions/setup-node@v4
+        if: steps.v.outputs.version != ''
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
       # The gate before anything is published. An unpublish is a far worse
       # thing to need than a red build.
       - name: check
-        working-directory: apps/pilot
-        run: |
-          test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
-          go vet ./...
-          go test ./...
-
-      - name: build every platform
-        working-directory: apps/pilot
+        if: steps.v.outputs.version != ''
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#pilot-}"
+          ( cd apps/pilot
+            test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+            go vet ./...
+            go test ./... )
+          npm test --prefix apps/pilot/npm
+
+      # A release that already exists is the source of the binaries, not a
+      # fresh build: what npm carries must be byte-for-byte what the release
+      # carries and what checksums.txt describes, on a recovery run as well.
+      - name: build every platform, or fetch the release that already has them
+        if: steps.v.outputs.version != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
           mkdir -p dist
-          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
-            goos="${target%/*}"
-            goarch="${target#*/}"
-            echo "building pilot_${goos}_${goarch} at ${version}"
-            # CGO off so the linux binaries are static and run on any distro,
-            # which is the whole point of shipping one file.
-            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
-              -trimpath \
-              -ldflags "-s -w -X github.com/pilotsrun/pilots/cli/internal/cli.Version=${version}" \
-              -o "dist/pilot_${goos}_${goarch}" ./cmd/pilot
-          done
-          ( cd dist && sha256sum pilot_* > checksums.txt )
+          if gh release view "pilot-v${VERSION}" >/dev/null 2>&1; then
+            echo "release pilot-v${VERSION} exists; using its assets"
+            gh release download "pilot-v${VERSION}" --dir dist --pattern 'pilot_*' --pattern 'checksums.txt'
+            echo "exists=true" >> "$GITHUB_ENV"
+          else
+            for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+              goos="${target%/*}"
+              goarch="${target#*/}"
+              echo "building pilot_${goos}_${goarch} at v${VERSION}"
+              # CGO off so the linux binaries are static and run on any
+              # distro, which is the whole point of shipping one file.
+              ( cd apps/pilot && CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" go build \
+                  -trimpath \
+                  -ldflags "-s -w -X github.com/pilotsrun/pilots/cli/internal/cli.Version=v${VERSION}" \
+                  -o "../../dist/pilot_${goos}_${goarch}" ./cmd/pilot )
+            done
+            ( cd dist && sha256sum pilot_* > checksums.txt )
+            echo "exists=false" >> "$GITHUB_ENV"
+          fi
+          ( cd dist && sha256sum --check checksums.txt )
+          chmod 0755 dist/pilot_*
           ls -l dist
 
-      # The version the binary reports must be the tag, or `pilot upgrade`
-      # compares "dev" against a release forever and never settles.
-      - name: the binary reports the tag
-        working-directory: apps/pilot
+      # The version the binary reports must be the tag's, or `pilot upgrade`
+      # compares the two forever and never settles.
+      - name: the binary reports the version
+        if: steps.v.outputs.version != ''
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
         run: |
           set -euo pipefail
-          version="${GITHUB_REF_NAME#pilot-}"
           reported="$(./dist/pilot_linux_amd64 version --json | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p')"
-          test "$reported" = "$version" || { echo "binary says '$reported', tag says '$version'"; exit 1; }
+          test "$reported" = "v${VERSION}" || { echo "binary says '$reported', releasing 'v${VERSION}'"; exit 1; }
 
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            apps/pilot/dist/pilot_*
-            apps/pilot/dist/checksums.txt
-          generate_release_notes: true
-          body: |
-            Install or upgrade:
+      - name: create the tag and the GitHub release
+        if: steps.v.outputs.version != '' && env.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.v.outputs.version }}
+          FILE: ${{ steps.v.outputs.file }}
+        run: |
+          set -euo pipefail
+          # The notes are the file's body. Site-relative links (`/install`)
+          # are right on pilots.run and dead on github.com, so they are made
+          # absolute on the way out.
+          awk 'n>=2{print} /^---/{n++}' "$FILE" | sed -E 's#\]\(/#](https://pilots.run/#g' > notes.md
+          cat >> notes.md <<'EOF'
 
-            ```sh
-            curl -fsSL https://raw.githubusercontent.com/pilotsrun/pilots/main/scripts/install-pilot.sh | sh
-            ```
+          ---
 
-            An existing install upgrades itself in place with `pilot upgrade`.
+          Install, or upgrade an install the script made:
+
+          ```sh
+          curl -fsSL https://pilots.run/install.sh | sh
+          pilot upgrade
+          ```
+
+          From npm: `npm install -g pilots@latest`. Every way in is on https://pilots.run/install.
+          EOF
+          # A version with a suffix (0.3.0-rc.1) is a PRERELEASE on GitHub, so
+          # it is never `releases/latest`, which is the one address install.sh
+          # and `pilot upgrade` read: nobody is moved to a candidate by a
+          # command that promised them the latest release.
+          pre=()
+          case "$VERSION" in *-*) pre=(--prerelease) ;; esac
+          gh release create "pilot-v${VERSION}" \
+            --target "$GITHUB_SHA" \
+            --title "pilot v${VERSION}" \
+            --notes-file notes.md \
+            "${pre[@]}" \
+            dist/pilot_* dist/checksums.txt
+
+      # No NODE_AUTH_TOKEN: npm detects the Actions OIDC environment and
+      # exchanges the job's id-token for a short-lived credential scoped to
+      # this workflow. Provenance is attached automatically on that path.
+      #
+      # STAGED, not published. The package's Trusted Publisher on npmjs.com
+      # has "Allow npm publish" left unchecked, so this workflow can upload a
+      # version and cannot make it live: that takes a person passing 2FA
+      # (`npm stage approve <id>`, or the package's page). `pilots` carries
+      # executables, and this is the gate a compromised workflow, or a change
+      # that slipped through review, cannot open by itself. A plain
+      # `npm publish` here is REFUSED by the registry, by design; ticking that
+      # box is the only thing that would make it work.
+      #
+      # The smoke test therefore runs BEFORE the upload, on `npm pack` of the
+      # very tree being staged: it is installed the way a user installs it and
+      # asked its version under both command names. Nothing reaches the
+      # registry that has not already run.
+      #
+      # The version is written in the RUNNER's tree only. The repository's
+      # apps/pilot/npm/package.json stays at 0.0.0 on purpose: the changelog
+      # file's name is the one place a version is written.
+      - name: smoke the npm package, then stage it for approval
+        if: steps.v.outputs.version != ''
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [ "$(npm view "pilots@${VERSION}" version 2>/dev/null || true)" = "$VERSION" ]; then
+            echo "pilots@${VERSION} is already live on the registry; nothing to stage"
+            echo "npm: pilots@${VERSION} was already live." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          cd apps/pilot/npm
+          mkdir -p vendor
+          cp ../../../dist/pilot_* vendor/
+          chmod 0755 vendor/pilot_*
+          cp ../../../LICENSE LICENSE
+          npm pkg set "version=${VERSION}"
+
+          tarball="$(npm pack --silent | tail -n 1)"
+          prefix="$(mktemp -d)"
+          npm install -g --prefix "$prefix" "./${tarball}"
+          for name in pilot pilots; do
+            reported="$("$prefix/bin/$name" version --json | sed -n 's/.*"version": *"\([^"]*\)".*/\1/p')"
+            test "$reported" = "v${VERSION}" || { echo "$name from the package says '$reported', releasing 'v${VERSION}'"; exit 1; }
+          done
+          rm -f "$tarball"
+          echo "the package installs and runs as v${VERSION}"
+
+          # Listing is best-effort: if the OIDC credential may stage but not
+          # list, the upload below still decides whether this step passed.
+          staged="$(npm stage list pilots --json 2>/dev/null || echo '[]')"
+          if printf '%s' "$staged" | grep -q "\"${VERSION}\""; then
+            echo "pilots@${VERSION} is already staged; not staging it twice"
+          else
+            # npm refuses a prerelease version with no explicit dist-tag, and
+            # `latest` is not where one belongs.
+            tag=latest
+            case "$VERSION" in *-*) tag=next ;; esac
+            npm stage publish . --access public --tag "$tag"
+            staged="$(npm stage list pilots --json 2>/dev/null || echo '[]')"
+          fi
+          echo "staged versions of pilots:"
+          printf '%s\n' "$staged"
+
+          {
+            echo "## pilots@${VERSION} is STAGED on npm, not live"
+            echo
+            echo "It goes live when a maintainer approves it with 2FA:"
+            echo
+            echo '```sh'
+            echo "npm stage list pilots        # shows the stage id"
+            echo "npm stage approve <stage-id>"
+            echo '```'
+            echo
+            echo "or from https://www.npmjs.com/package/pilots . Then check it:"
+            echo
+            echo '```sh'
+            echo "npm view pilots version      # ${VERSION}"
+            echo "npx pilots@${VERSION} version"
+            echo '```'
+            echo
+            echo "The GitHub release and \`install.sh\` are live already; only npm waits."
+          } >> "$GITHUB_STEP_SUMMARY"

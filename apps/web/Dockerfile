@@ -41,6 +41,12 @@ RUN npm run build --workspace=sdks/js
 # The app itself. node_modules and local state are excluded by .dockerignore.
 COPY apps/web ./apps/web
 
+# The release notes /changelog renders. They live at the repository root
+# because landing one is what cuts a release (changelog/README.md), and the
+# page reads them from beside apps/, the same relative place they are in a
+# checkout. The root .dockerignore re-includes them past its `*.md` rule.
+COPY changelog ./changelog
+
 WORKDIR /app/apps/web
 
 ENV NODE_ENV=production

@@ -20,6 +20,11 @@ const PRIORITY: Record<string, number> = {
   '/architecture/internals': 0.9,
   '/sandboxes': 0.8,
   '/deploy': 0.8,
+  '/agents': 0.8,
+  // The page a visitor who has decided lands on, so it outranks the brand
+  // page and sits under the ones that do the deciding.
+  '/install': 0.7,
+  '/changelog': 0.5,
   '/brand': 0.3,
 };
 

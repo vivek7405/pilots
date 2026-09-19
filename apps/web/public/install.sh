@@ -1,7 +1,12 @@
 #!/bin/sh
 # Install the `pilot` CLI.
 #
-#   curl -fsSL https://raw.githubusercontent.com/pilotsrun/pilots/main/scripts/install-pilot.sh | sh
+#   curl -fsSL https://pilots.run/install.sh | sh
+#
+# This file IS that URL (apps/web/app/install.sh/route.ts serves it). It lives
+# in apps/web/public because the site's image holds apps/web and nothing else
+# of the repository, and there is one copy because a second would be a second
+# copy of the asset-name contract below.
 #
 # POSIX sh, not bash: this is piped into whatever /bin/sh is on the machine,
 # and a bashism here fails on Alpine, on Debian's dash, and inside a slim
@@ -21,7 +26,7 @@ BIN_DIR="${PILOT_BIN_DIR:-$HOME/.local/bin}"
 API="https://api.github.com/repos/$REPO/releases/latest"
 
 say() { printf '%s\n' "$*"; }
-die() { printf 'install-pilot: %s\n' "$*" >&2; exit 1; }
+die() { printf 'pilot: %s\n' "$*" >&2; exit 1; }
 
 need() { command -v "$1" >/dev/null 2>&1 || die "$1 is required"; }
 
@@ -52,7 +57,7 @@ case "$arch" in
 esac
 
 asset="pilot_${goos}_${goarch}"
-say "install-pilot: looking for $asset"
+say "pilot: looking for $asset"
 
 # The download URL for that exact asset, read out of the release JSON without
 # a JSON parser: jq is not installed on a fresh box and requiring it would
@@ -77,7 +82,7 @@ tmp="$(mktemp "$BIN_DIR/.pilot.XXXXXX")"
 # is never left behind for someone to find and run.
 trap 'rm -f "$tmp"' EXIT INT TERM
 
-say "install-pilot: downloading $url"
+say "pilot: downloading $url"
 fetch_to "$url" "$tmp"
 
 # Verify against the checksums.txt the release publishes beside the binary.
@@ -102,16 +107,16 @@ fi
 want="$(fetch "$sums_url" 2>/dev/null | grep " \*\?${asset}\$" | cut -d' ' -f1 | head -n 1)"
 got="$(sha256_of "$tmp")"
 if [ -z "$got" ]; then
-  say "install-pilot: neither sha256sum nor shasum is installed; SKIPPING verification"
+  say "pilot: neither sha256sum nor shasum is installed; SKIPPING verification"
 elif [ -z "$want" ]; then
-  say "install-pilot: the release publishes no checksum for $asset; SKIPPING verification"
+  say "pilot: the release publishes no checksum for $asset; SKIPPING verification"
 elif [ "$want" != "$got" ]; then
   die "checksum mismatch for $asset
   expected $want
   got      $got
 The download is corrupt or has been tampered with; nothing was installed."
 else
-  say "install-pilot: sha256 verified"
+  say "pilot: sha256 verified"
 fi
 
 chmod 0755 "$tmp"
@@ -121,7 +126,7 @@ chmod 0755 "$tmp"
 mv "$tmp" "$BIN_DIR/pilot"
 trap - EXIT INT TERM
 
-say "install-pilot: installed $("$BIN_DIR/pilot" version)"
+say "pilot: installed $("$BIN_DIR/pilot" version)"
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
