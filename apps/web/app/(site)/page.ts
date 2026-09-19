@@ -97,7 +97,13 @@ export default function Home() {
 
     <!-- TWO FACES. An asymmetric split rather than a symmetric pair of cards:
          the sandbox face is the one a reader is more likely to have arrived
-         for, so it gets the wider column and the transcript. -->
+         for, so it gets the wider column and the transcript.
+
+         The line under them is the glimpse of promote, and it exists because
+         the site said "same machine" in five places and never once said what
+         the second face GAINS. A reader deciding where to run real traffic
+         reads "your production service is a sandbox" out of that silence. One
+         sentence here, the table on /deploy. -->
     ${section({
       id: 'faces',
       layout: 'split',
@@ -135,6 +141,13 @@ export default function Home() {
             <a class="${LINK} text-sm w-fit" href="/deploy">What deploying looks like &rarr;</a>
           </div>
         </div>
+
+        <p class="${PROSE} mt-8">
+          Going from one to the other only ever adds. The machine keeps its address, its state and
+          its checkpoints, and gains a release to roll back to, a health gate on every deploy, more
+          copies under load, and a domain of its own.
+          <a class=${LINK} href="/deploy#promote">What promotion adds, line by line &rarr;</a>
+        </p>
       `,
     })}
 
