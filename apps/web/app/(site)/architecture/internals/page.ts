@@ -5,7 +5,7 @@ import { terminal } from '#site/lib/ui/terminal.ts';
 import { inlineFact, readout } from '#site/lib/ui/stat.ts';
 import { arrowDefs } from '#site/lib/ui/diagram.ts';
 import { plainly } from '#site/lib/ui/plainly.ts';
-import { PROSE, LINK, BTN_GHOST, HAIRLINE, FIELD_LABEL, PANEL } from '#site/lib/design/recipes.ts';
+import { PROSE, LINK, HAIRLINE, FIELD_LABEL, PANEL } from '#site/lib/design/recipes.ts';
 import { fleetFigure, splitBrainFigure } from '#site/modules/internals/diagrams/fleet.ts';
 import { hostFigure } from '#site/modules/internals/diagrams/host.ts';
 import { requestFigure } from '#site/modules/internals/diagrams/request.ts';
