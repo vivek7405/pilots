@@ -2,7 +2,7 @@ import { html } from '@webjsdev/core';
 import { terminal } from '#site/lib/ui/terminal.ts';
 import { section } from '#site/lib/ui/section.ts';
 import { PANEL, PROSE, LINK, BTN_PRIMARY, BTN_GHOST, HAIRLINE } from '#site/lib/design/recipes.ts';
-import { WORKLOAD_APEX, WEBJS_URL, GH_URL, NEW_TAB } from '#site/lib/links.ts';
+import { WORKLOAD_APEX, WEBJS_URL, NEW_TAB } from '#site/lib/links.ts';
 import { pageHero } from '#site/lib/ui/page-hero.ts';
 import { inlineFact } from '#site/lib/ui/stat.ts';
 
@@ -17,10 +17,38 @@ import { inlineFact } from '#site/lib/ui/stat.ts';
  */
 
 export const metadata = {
-  title: 'Deploy: any Dockerfile to a durable service',
+  title: 'Deploy - any Dockerfile to a durable service',
   description:
     'Build any Dockerfile into a microVM, deploy behind a health gate that keeps the old release until the new one answers, and serve it on a custom domain with automatic certificates.',
 };
+
+/**
+ * Promote, capability by capability.
+ *
+ * The page said for a long time that promotion changes one number on a row,
+ * which is true of the MECHANISM and answers the wrong question: a reader
+ * deciding whether to trust this with real traffic wants to know what they
+ * get, and the knob panels below show three identical rows out of four. So the
+ * table leads and the knobs support it.
+ *
+ * Promotion is purely ADDITIVE, and that is the fact worth showing plainly:
+ * every row that a sandbox has stays exactly as it was, because promote does
+ * not rewrite the machine (internal/services/promote.go), and checkpoints,
+ * exec, files and volumes are all machine-scoped routes rather than sandbox
+ * ones. Nothing here may claim a capability is lost, because none is.
+ */
+const PROMOTE_ROWS: [string, string, string][] = [
+  ['Its URL, its state and its agent token', 'yes', 'unchanged'],
+  ['Suspends when idle, wakes on the next request', 'yes', 'unchanged'],
+  ['Exec, a terminal, and files in and out', 'yes', 'unchanged'],
+  ['Checkpoint, and restore in place', 'yes', 'unchanged'],
+  ['A release to deploy, and to roll back to', 'no', 'added'],
+  ['Health-gated deploys, the old release serving until the new one answers', 'no', 'added'],
+  ['More than one copy, with requests spread across them', 'no', 'added'],
+  ['Copies started by load, and stopped when it passes', 'no', 'added'],
+  ['A domain of your own, with its certificate', 'no', 'added'],
+  ['Its lifecycle managed by', 'the idle monitor', 'the autoscaler'],
+];
 
 export default function Deploy() {
   return html`
@@ -29,7 +57,7 @@ export default function Deploy() {
       lede: html`Point Pilots at any repository with a Dockerfile and it builds a microVM image, starts it
         behind a health check, and cuts traffic over only once the new release answers. The previous
         release stays alive until then, which is what makes a rollback instant rather than a rebuild.`,
-      actions: html`<a class=${BTN_PRIMARY} href="/architecture">How it works underneath</a>`,
+      actions: html`<a class=${BTN_PRIMARY} href="/architecture/internals">How it works underneath</a>`,
     })}
 
     ${section({
@@ -140,14 +168,47 @@ export default function Deploy() {
 
     ${section({
       id: 'promote',
-      heading: 'Promotion changes one number on a row',
-      lede: html`A prototype becomes a production service by changing one number on its row, how
-        many copies to run, and giving it a release and a health check. Its lifecycle knobs do not
-        move: it still suspends when idle and still wakes on demand, because a service that cannot
-        sleep is the thing this platform exists to avoid. Nothing is rebuilt and nothing is copied,
-        because there was never a second kind of thing to copy it into.`,
+      heading: 'What promotion adds',
+      lede: html`A sandbox becomes a production service by gaining a release, a health check and a
+        number of copies to run. Everything it already did, it still does, at the same address.
+        Nothing is rebuilt and nothing is copied, because there was never a second kind of thing to
+        copy it into.`,
       body: html`
-        <div class="grid gap-6 mid:grid-cols-2">
+        <div class="overflow-x-auto scroll-thin">
+          <table class="w-full border-collapse text-sm min-w-[640px]">
+            <caption class="sr-only">
+              What a machine can do as a sandbox, and what it can do once it is a service
+            </caption>
+            <thead>
+              <tr class="border-b border-rule-strong text-left">
+                <th scope="col" class="py-3 pr-6 font-mono text-xs uppercase tracking-[0.14em] text-ink-subtle font-medium">Capability</th>
+                <th scope="col" class="py-3 pr-6 font-mono text-xs uppercase tracking-[0.14em] text-ink-subtle font-medium">As a sandbox</th>
+                <th scope="col" class="py-3 font-mono text-xs uppercase tracking-[0.14em] text-ink-subtle font-medium">After promote</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${PROMOTE_ROWS.map(
+                ([capability, before, after]) => html`
+                  <tr class="border-b border-rule align-top">
+                    <td class="py-4 pr-6">${capability}</td>
+                    <td class="py-4 pr-6 text-ink-muted whitespace-nowrap">${before}</td>
+                    <td class="py-4 whitespace-nowrap">${after}</td>
+                  </tr>
+                `,
+              )}
+            </tbody>
+          </table>
+        </div>
+
+        <p class="${PROSE} mt-10">
+          The last row is the whole lifecycle change. Before, the idle monitor decides when the
+          machine sleeps, on a timer and on whether anything is still talking to it. After, the
+          autoscaler does, and it will not take the last copy down below the floor you set. The
+          knobs themselves do not move, which is why a promoted service still suspends when nobody
+          is using it.
+        </p>
+
+        <div class="grid gap-6 mid:grid-cols-2 mt-8">
           <div class="${PANEL} p-6">
             <p class="font-semibold m-0 mb-2.5">As a sandbox</p>
             <dl class="m-0 grid grid-cols-[auto_1fr] gap-x-6 gap-y-2 font-mono text-sm">
@@ -210,9 +271,7 @@ export default function Deploy() {
         requires the other. They are designed by people who know what the other one does.
       </p>
       <div class="flex flex-wrap gap-3 mt-7">
-        <a class=${BTN_PRIMARY} href="/architecture">Read the architecture</a>
-        <a class=${BTN_GHOST} href=${WEBJS_URL} target="_blank" rel="noopener">Visit WebJs${NEW_TAB}</a>
-        <a class=${BTN_GHOST} href=${GH_URL} target="_blank" rel="noopener">Source${NEW_TAB}</a>
+        <a class=${BTN_PRIMARY} href=${WEBJS_URL} target="_blank" rel="noopener">Visit WebJs${NEW_TAB}</a>
       </div>
     </div>
   `;

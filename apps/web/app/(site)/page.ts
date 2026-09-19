@@ -5,7 +5,7 @@ import { terminal } from '#site/lib/ui/terminal.ts';
 import { section } from '#site/lib/ui/section.ts';
 import { readout, inlineFact } from '#site/lib/ui/stat.ts';
 import { BTN_PRIMARY, BTN_GHOST, PANEL, PROSE, LINK, FIELD_LABEL } from '#site/lib/design/recipes.ts';
-import { GH_URL, WEBJS_URL, WORKLOAD_APEX, NEW_TAB, DASHBOARD_HREF } from '#site/lib/links.ts';
+import { WEBJS_URL, WORKLOAD_APEX, NEW_TAB, DASHBOARD_HREF } from '#site/lib/links.ts';
 
 /**
  * The home page.
@@ -13,14 +13,23 @@ import { GH_URL, WEBJS_URL, WORKLOAD_APEX, NEW_TAB, DASHBOARD_HREF } from '#site
  * It is written as ONE argument, not a list of features, and the section ledes
  * carry it:
  *
- *   hero            the sandbox and the service are the same machine
+ *   hero            from sandbox to production on the same URL, and nothing is
+ *                   rebuilt to get there. The mechanism (one machine, two sets
+ *                   of lifecycle knobs) is the NEXT two sections' job: said in
+ *                   the hero it reads as "your production service is a sandbox",
+ *                   which is the doubt it was meant to settle.
  *   one URL         and that identity survives every lifecycle event
  *   two faces       which is what lets one primitive serve both audiences
  *   instant         the reason a sandbox is usable at all: restore, not boot
  *   no control      the reason a service is trustworthy: nothing central to lose
  *   plane
- *   limits          what it cannot do, stated before you find out
  *   webjs           the sibling product, for readers who arrived from it
+ *
+ * There was a "what it cannot do" section here, and it is now docs/honesty.md.
+ * This is a page someone reads while deciding whether to try the product, and
+ * the CPU-vendor rule and the depth of a diff chain are not decisions they
+ * make. The operational limits that DO change someone's mind still have a
+ * page, and the pages that sell a capability still say where it stops.
  *
  * EVERY SECTION MUST STAND ALONE. Readers arrive mid-page from a search result
  * or a shared link, so a heading plus its first sentence has to resolve with
@@ -55,26 +64,19 @@ export default function Home() {
         <div class="grid gap-12 wide:grid-cols-[1.1fr_1fr] wide:gap-14 wide:items-center">
           <div>
             <h1 class="text-display font-bold leading-[0.98] m-0">
-              The sandbox and the service are the same machine.
+              From sandbox to production, on the same URL.
             </h1>
 
             <p class="${PROSE} text-lede mt-6">
-              Start one as a scratch pad for an agent to break. Promote it when it turns out to
-              matter. It keeps its address, its state, and its identity, because nothing about it
-              was ever temporary except your intentions.
+              Run your app in an instant sandbox and it has a live URL. Promote it when it turns
+              out to matter. It keeps its URL, its state, and its identity, and nothing is rebuilt
+              or redeployed to get there.
             </p>
 
             <div class="flex flex-wrap gap-3 mt-8">
-              <a class=${BTN_PRIMARY} href="/architecture">How it works</a>
-              <a class=${BTN_GHOST} href=${GH_URL} target="_blank" rel="noopener"
-                >Read the source${NEW_TAB}</a
-              >
+              <a class=${BTN_PRIMARY} href=${DASHBOARD_HREF} data-no-router>Start a sandbox</a>
+              <a class=${BTN_GHOST} href="/deploy">How deploying works</a>
             </div>
-
-            <p class="text-sm text-ink-subtle mt-6 m-0">
-              Open source under Apache 2.0.
-              <a class=${LINK} href="/architecture/internals">See how it works, drawn.</a>
-            </p>
           </div>
 
           <div class="wide:pl-4">${heroTranscript()}</div>
@@ -93,7 +95,13 @@ export default function Home() {
 
     <!-- TWO FACES. An asymmetric split rather than a symmetric pair of cards:
          the sandbox face is the one a reader is more likely to have arrived
-         for, so it gets the wider column and the transcript. -->
+         for, so it gets the wider column and the transcript.
+
+         The line under them is the glimpse of promote, and it exists because
+         the site said "same machine" in five places and never once said what
+         the second face GAINS. A reader deciding where to run real traffic
+         reads "your production service is a sandbox" out of that silence. One
+         sentence here, the table on /deploy. -->
     ${section({
       id: 'faces',
       layout: 'split',
@@ -131,6 +139,13 @@ export default function Home() {
             <a class="${LINK} text-sm w-fit" href="/deploy">What deploying looks like &rarr;</a>
           </div>
         </div>
+
+        <p class="${PROSE} mt-8">
+          Going from one to the other only ever adds. The machine keeps its address, its state and
+          its checkpoints, and gains a release to roll back to, a health gate on every deploy, more
+          copies under load, and a domain of its own.
+          <a class=${LINK} href="/deploy#promote">What promotion adds, line by line &rarr;</a>
+        </p>
       `,
     })}
 
@@ -213,47 +228,13 @@ export default function Home() {
       `,
     })}
 
-    <!-- LIMITS. Deliberately not hidden in a FAQ at the bottom. A reader
-         evaluating infrastructure is looking for whether you know your own
-         edges, and finding them stated plainly is worth more than another
-         paragraph of capability. -->
-    ${section({
-      id: 'limits',
-      heading: 'What it cannot do',
-      body: html`
-        <ul class="m-0 p-0 list-none grid gap-px bg-rule border border-rule rounded overflow-hidden">
-          ${[
-            [
-              'Snapshots are locked to a CPU vendor',
-              'A memory snapshot carries raw CPUID, so it will not restore across the Intel/AMD boundary. The whole fleet has to be one vendor, and a machine cannot migrate off it.',
-            ],
-            [
-              'Diff chains are exactly two levels',
-              'A template and a per-machine diff. A checkpoint of a checkpoint of a checkpoint is a hard error at parse time rather than a mystery at fault time.',
-            ],
-            [
-              'One region',
-              'Every host is in one European region. Nothing in the design pins the fleet there, but a machine answers from that region wherever the request comes from.',
-            ],
-          ].map(
-            ([title, body]) => html`
-              <li class="bg-paper-elev p-5">
-                <p class="font-semibold m-0 mb-1.5">${title}</p>
-                <p class="text-sm text-ink-muted m-0 max-w-[70ch]">${body}</p>
-              </li>
-            `,
-          )}
-        </ul>
-      `,
-    })}
-
     ${section({
       id: 'webjs',
       layout: 'split',
       heading: 'WebJs is the framework, Pilots is the platform',
-      lede: html`They are built by the same people, the way Next.js and Vercel are. You do not need
-        either one to use the other: Pilots runs any Dockerfile, and WebJs deploys anywhere a Node
-        process runs. They are just designed by people who know what the other one does.`,
+      lede: html`They are built by the same people, the way Next.js and Vercel are. Neither one
+        needs the other. Pilots runs any Dockerfile, and WebJs deploys anywhere a Node process
+        runs. They are just designed by people who know what the other one does.`,
       body: html`
         <div class="${PANEL} p-6 flex flex-col mid:flex-row mid:items-center gap-6 justify-between">
           <p class="${PROSE} m-0">
@@ -270,15 +251,13 @@ export default function Home() {
     <!-- CLOSING CTA. The dashboard is the way in; the design is the reason to. -->
     <div class="max-w-6xl mx-auto px-6 pb-24">
       <div class="rounded border border-rule-strong bg-paper-elev p-8 mid:p-12">
-        <h2 class="text-h2 font-bold m-0 max-w-[24ch]">Read it before you trust it</h2>
+        <h2 class="text-h2 font-bold m-0 max-w-[24ch]">Start with a sandbox</h2>
         <p class="${PROSE} mt-4">
-          The full design is written down, and the source that implements it is public. If the
-          architecture does not convince you, the product should not either. When it does, sign in
-          with GitHub and create a machine.
+          Create one, run your code in it, and keep it if it turns out to matter. Nothing has to be
+          decided up front, and nothing is rebuilt when you promote it.
         </p>
         <div class="flex flex-wrap gap-3 mt-7">
-          <a class=${BTN_PRIMARY} href=${DASHBOARD_HREF}>Open the dashboard</a>
-          <a class=${BTN_GHOST} href="/architecture">Read the architecture</a>
+          <a class=${BTN_PRIMARY} href=${DASHBOARD_HREF} data-no-router>Open the dashboard</a>
         </div>
       </div>
     </div>

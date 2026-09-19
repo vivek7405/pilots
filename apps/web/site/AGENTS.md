@@ -115,16 +115,21 @@ to state the thing positively. The same caution applies to the rule of
 three ("no A, no B, and no C") and to any other cadence you find yourself
 reaching for twice on one page.
 
-## 6. State the limits
+## 6. Never claim more than the product does
 
-Say what pilots cannot do. Snapshots are CPU-vendor-locked, so a machine
-restores only onto hosts of the same CPU vendor. Name constraints like
-that on the page.
+Every capability on a page is one the product has today, and a page that
+sells a capability says where that capability stops, in the section that
+sells it. What this does NOT mean is a "what it cannot do" section: the
+site carried one, listing the CPU-vendor rule and the depth of a diff
+chain, and neither is a decision a visitor makes while deciding whether
+to try the product. Those live in `docs/honesty.md` now, with the
+operational limits that DO change somebody's mind.
 
-Generated marketing copy never admits a limit, so admitting one is close
-to unforgeable. It also happens to be true, and the reader who is
-evaluating infrastructure is specifically looking for whether you know
-your own edges.
+The rule survives because the failure it prevents is real: generated
+marketing copy claims capabilities in the abstract, and the reader
+evaluating infrastructure is looking for whether the specifics hold up.
+Specifics that hold up beat an admission of weakness, and both beat an
+adjective.
 
 ## 7. Specificity that only the builder has
 

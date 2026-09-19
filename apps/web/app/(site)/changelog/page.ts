@@ -1,7 +1,6 @@
 import { html } from '@webjsdev/core';
 import { pageHero } from '#site/lib/ui/page-hero.ts';
 import { BTN_GHOST, BTN_PRIMARY, PROSE } from '#site/lib/design/recipes.ts';
-import { GH_URL, NEW_TAB } from '#site/lib/links.ts';
 import { listEntries } from '#site/modules/changelog/entries.server.ts';
 import { renderBlocks } from '#site/modules/changelog/render.ts';
 
@@ -30,11 +29,9 @@ export default async function Changelog() {
   return html`
     ${pageHero({
       heading: 'What shipped',
-      lede: html`Release notes, newest first. Each entry is a file in the repository, and that file
-        is also what cuts the release: it reaches the main branch through a reviewed pull request,
-        and the workflow that publishes the binaries takes its notes from it.`,
-      actions: html`<a class=${BTN_PRIMARY} href="/install">Install the CLI</a>
-        <a class=${BTN_GHOST} href="${GH_URL}/releases" target="_blank" rel="noopener">Releases on GitHub${NEW_TAB}</a>`,
+      lede: html`Release notes, newest first. Every entry here is the same text that cut the
+        release it describes, so what shipped and what is written about it cannot drift apart.`,
+      actions: html`<a class=${BTN_PRIMARY} href="/install">Install the CLI</a>`,
     })}
 
     <div class="max-w-6xl mx-auto px-6 py-16 mid:py-20">

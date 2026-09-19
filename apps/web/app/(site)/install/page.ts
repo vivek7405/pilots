@@ -3,7 +3,7 @@ import { terminal } from '#site/lib/ui/terminal.ts';
 import { section } from '#site/lib/ui/section.ts';
 import { pageHero } from '#site/lib/ui/page-hero.ts';
 import { PROSE, LINK, BTN_PRIMARY, BTN_GHOST, HAIRLINE } from '#site/lib/design/recipes.ts';
-import { SITE_ORIGIN, GH_URL, NEW_TAB } from '#site/lib/links.ts';
+import { SITE_ORIGIN } from '#site/lib/links.ts';
 
 /**
  * /install
@@ -86,7 +86,7 @@ export default function Install() {
         under it and no daemon beside it, so installing it is downloading a file and removing it
         is deleting one.`,
       actions: html`<a class=${BTN_PRIMARY} href="/install.sh" data-no-router>Read the script</a>
-        <a class=${BTN_GHOST} href="${GH_URL}/releases" target="_blank" rel="noopener">Every release${NEW_TAB}</a>`,
+        <a class=${BTN_GHOST} href="/changelog">What shipped</a>`,
     })}
 
     ${section({
@@ -170,36 +170,5 @@ export default function Install() {
       `,
     })}
 
-    <div class="max-w-6xl mx-auto px-6"><hr class=${HAIRLINE} /></div>
-
-    ${section({
-      id: 'limits',
-      layout: 'split',
-      heading: 'Where it stops',
-      lede: html`Two limits worth knowing before you depend on it.`,
-      body: html`
-        <div class="grid gap-10 wide:grid-cols-2">
-          <div>
-            <p class="font-semibold m-0 mb-2">Linux and macOS, x64 and arm64</p>
-            <p class="${PROSE} m-0">
-              There is no Windows binary, because the CLI does not build for Windows. WSL is Linux,
-              so both commands above work there unchanged. On Windows itself the npm launcher says
-              exactly this and points at WSL, so the failure explains itself.
-            </p>
-          </div>
-          <div>
-            <p class="font-semibold m-0 mb-2">A checksum is not a signature</p>
-            <p class="${PROSE} m-0">
-              The checksum proves the file you received is the file the release published. Someone
-              able to replace a release could replace its checksum file as well. The npm package
-              carries a provenance record, which ties it to the commit and the workflow run that
-              built it, and the
-              <a class=${LINK} href=${GH_URL} target="_blank" rel="noopener">source${NEW_TAB}</a>
-              builds with <code>go build ./cmd/pilot</code> from <code>apps/pilot</code>.
-            </p>
-          </div>
-        </div>
-      `,
-    })}
   `;
 }

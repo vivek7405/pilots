@@ -2,7 +2,7 @@ import { html } from '@webjsdev/core';
 import { terminal } from '#site/lib/ui/terminal.ts';
 import { section } from '#site/lib/ui/section.ts';
 import { PANEL, PROSE, LINK, BTN_PRIMARY, BTN_GHOST, HAIRLINE } from '#site/lib/design/recipes.ts';
-import { WORKLOAD_APEX, GH_URL, NEW_TAB } from '#site/lib/links.ts';
+import { WORKLOAD_APEX, NEW_TAB } from '#site/lib/links.ts';
 import { pageHero } from '#site/lib/ui/page-hero.ts';
 import { ADAPTERS, HARNESSES, SDKS } from '#site/lib/agents.ts';
 
@@ -20,7 +20,7 @@ import { ADAPTERS, HARNESSES, SDKS } from '#site/lib/agents.ts';
  */
 
 export const metadata = {
-  title: 'Agents: every coding agent, one fleet',
+  title: 'Agents - every coding agent, one fleet',
   description:
     'Point Claude Code, Codex, Cursor, OpenCode or any MCP client at a Pilots fleet, with typed clients for TypeScript, Python and Go and adapters for the agent frameworks.',
 };
@@ -33,7 +33,7 @@ export default function Agents() {
         things in, break, snapshot, roll back and deploy, and reach it from whichever editor you
         already have open.`,
       actions: html`<a class=${BTN_PRIMARY} href="/sandboxes">What it gets</a>
-        <a class=${BTN_GHOST} href=${GH_URL} target="_blank" rel="noopener">Read the source${NEW_TAB}</a>`,
+        <a class=${BTN_GHOST} href="/install">Install the CLI</a>`,
     })}
 
     ${section({

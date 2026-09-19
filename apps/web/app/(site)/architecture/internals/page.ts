@@ -5,8 +5,7 @@ import { terminal } from '#site/lib/ui/terminal.ts';
 import { inlineFact, readout } from '#site/lib/ui/stat.ts';
 import { arrowDefs } from '#site/lib/ui/diagram.ts';
 import { plainly } from '#site/lib/ui/plainly.ts';
-import { PROSE, LINK, BTN_GHOST, HAIRLINE, FIELD_LABEL, PANEL } from '#site/lib/design/recipes.ts';
-import { GH_URL, NEW_TAB } from '#site/lib/links.ts';
+import { PROSE, LINK, HAIRLINE, FIELD_LABEL, PANEL } from '#site/lib/design/recipes.ts';
 import { fleetFigure, splitBrainFigure } from '#site/modules/internals/diagrams/fleet.ts';
 import { hostFigure } from '#site/modules/internals/diagrams/host.ts';
 import { requestFigure } from '#site/modules/internals/diagrams/request.ts';
@@ -36,7 +35,7 @@ import { pipelineFigure } from '#site/modules/internals/diagrams/pipeline.ts';
  */
 
 export const metadata = {
-  title: 'Internals: the whole Pilots architecture, drawn',
+  title: 'Internals - the whole Pilots architecture, drawn',
   description:
     'A technical walkthrough of Pilots end to end: the fleet, one host, the CRDT state layer, the request path, content-addressed snapshots, lazy memory and disk, guest networking, and the build pipeline.',
 };
@@ -137,10 +136,6 @@ export default function Internals() {
         what a request actually does, why a snapshot restores on a machine that never made it, and
         where the freeze in a checkpoint really is. Every section also states its idea in ordinary
         words, so the page is readable without the background it otherwise assumes.`,
-      actions: html`<a class=${BTN_GHOST} href="${GH_URL}/blob/main/ARCHITECTURE.md" target="_blank" rel="noopener"
-          >ARCHITECTURE.md${NEW_TAB}</a
-        >
-        <a class=${BTN_GHOST} href="/architecture">The shorter version</a>`,
     })}
 
     <nav aria-label="On this page" class="border-b border-rule">
