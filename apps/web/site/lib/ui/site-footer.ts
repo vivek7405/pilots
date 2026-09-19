@@ -31,6 +31,7 @@ export function siteFooter() {
           <nav class="${col}" aria-label="Product">
             <span class="${FIELD_LABEL}">Product</span>
             ${NAV.map((n) => html`<a class="${link}" href=${n.href}>${n.label}</a>`)}
+            <a class="${link}" href="/brand">Brand</a>
           </nav>
 
           <nav class="${col}" aria-label="Source">

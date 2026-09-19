@@ -1,71 +1,61 @@
-import { html } from '@webjsdev/core';
+import { html, asset } from '@webjsdev/core';
 import { section } from '#site/lib/ui/section.ts';
 import { pageHero } from '#site/lib/ui/page-hero.ts';
-import { PROSE, FIELD_LABEL, PANEL } from '#site/lib/design/recipes.ts';
+import { PROSE, FIELD_LABEL, PANEL, BTN_PRIMARY, BTN_GHOST, LINK } from '#site/lib/design/recipes.ts';
 import { DELTA, markSvg, type Candidate } from '#site/lib/design/logo-candidates.ts';
+import { PALETTE } from '#site/lib/design/palette.ts';
+import { GH_URL, NEW_TAB } from '#site/lib/links.ts';
 
 /**
  * /brand
  *
- * The mark, and the three places it has to keep working.
+ * The brand guidelines and the downloadable mark, for anyone who has to show
+ * pilots somewhere that is not this site: an article, a talk, an integration
+ * page, a badge.
  *
- * This was a bake-off between six drawings. Delta won, so the page is now the
- * shorter thing a settled mark needs: the drawing on both grounds and at
- * favicon sizes, the word beside it, and the header it lives in on nearly every
- * page view. The losing drawings came out of the repo rather than staying
- * behind a flag, because a rejected mark left in the tree gets rendered by
- * accident eventually.
+ * Three things this page must keep doing, none of which a test can see:
  *
- * It sits in the nav and stays `noindex`. The two audiences want different
- * things: the nav serves people already working on this, the index serves
- * people arriving cold, and a page of design tiles is not a stranger's first
- * search result for a product.
+ * 1. The mark is RENDERED from `logo-candidates.ts`, the same function the
+ *    header and the footer call, so the guidelines cannot show a drawing the
+ *    site does not ship.
+ * 2. The swatches PAINT the live tokens. The hex strings beside them come from
+ *    `palette.ts`, which a test holds against the stylesheet.
+ * 3. The clear-space and minimum-size rules are drawn. A rule stated only in a
+ *    sentence is a rule nobody follows.
  *
- * The order below is the order a mark actually fails in. Favicon size kills
- * most of them, the inversion kills the next few, and the rest die standing
- * next to the word they have to share a header with.
+ * The sections run in the order a mark fails in. Small sizes break most
+ * drawings, inversion breaks the next few, and the rest go wrong beside the
+ * word they have to share a header with.
  */
 export const metadata = {
   title: 'Brand',
-  description: 'Candidate marks for pilots, drawn on one grid and compared at working sizes.',
-  /**
-   * Linked from the nav but kept out of the index, which is not a
-   * contradiction. The nav is for people who are already here and want to see
-   * where the mark stands. The index is for people arriving cold, and a
-   * stranger's first result for this product should not be a page of logos
-   * that disagree with each other. When one is chosen this becomes a real
-   * brand page and the flag comes off.
-   */
-  robots: { index: false, follow: false },
+  description:
+    'The pilots mark as downloadable SVG files, with the rules that keep it legible, the palette, the type, and how the name is written.',
 };
 
-/** The sizes a mark has to survive, smallest first, because that is the order they fail in. */
+/** The sizes the mark is checked at, largest first, down to the floor. */
 const SMALL_SIZES = [32, 24, 20, 16];
 
-/**
- * The two wordmark voices under test.
- *
- * The header ships the mono one today. The sans one is here because a mono
- * wordmark is a strong instrument-panel signal and a weak brand signal: it
- * looks like a filename, which is fine in a header and thin on a title slide.
- */
-/**
- * The two casings under test.
- *
- * The site writes the name lowercase everywhere, including at the start of a
- * sentence, which is a deliberate choice rather than an oversight. The capital
- * is here because a lockup is where that choice is most visible and least
- * committed: the header can carry one form while the prose carries another, and
- * this is the surface for deciding whether it should.
- */
-const WORD_CASES = [
-  { id: 'lower', label: 'lowercase', word: 'pilots' },
-  { id: 'upper', label: 'capital P', word: 'Pilots' },
+/** The files, in the order somebody is likely to need them. */
+const FILES = [
+  {
+    file: 'pilots-mark-ink.svg',
+    name: 'Mark, ink',
+    use: 'The default. Dark ink with no background of its own, for paper, white, and any light surface.',
+  },
+  {
+    file: 'pilots-mark-paper.svg',
+    name: 'Mark, paper',
+    use: 'The same drawing in light ink, for dark surfaces, slides and terminals.',
+  },
 ];
 
-const WORD_FACES = [
-  { id: 'mono', label: 'mono, semibold', cls: 'font-mono font-semibold tracking-tight' },
-  { id: 'sans', label: 'sans, extrabold', cls: 'font-sans font-extrabold tracking-[-0.035em]' },
+/** How the name is written, and the forms that turn up in its place. */
+const NAME_FORMS = [
+  { form: 'pilots', ok: true, note: 'Always lowercase, including at the start of a sentence and in a title.' },
+  { form: 'pilot', ok: true, note: 'The command line tool, and only that. The platform is plural.' },
+  { form: 'Pilots', ok: false, note: 'A capital reads as a different product name.' },
+  { form: 'PILOTS', ok: false, note: 'It is a word and it is never set as an acronym.' },
 ];
 
 /** One tile, one background, one mark. The class carries both the ink and the paper. */
@@ -76,12 +66,9 @@ function tile(c: Candidate, tone: 'dark' | 'light') {
 }
 
 /**
- * A candidate card.
- *
- * Heading first, then the artwork, then the small-size strip, then the two
- * sentences. The label under the strip labels the VALUES beside it rather
- * than introducing a heading, which is the distinction AGENTS.md invariant 12
- * turns on.
+ * The mark's card: both grounds, then the small-size strip, then what it is
+ * and what may not change about it. The label under the strip labels the
+ * VALUES beside it, which is the distinction AGENTS.md invariant 12 turns on.
  */
 function card(c: Candidate) {
   return html`
@@ -89,10 +76,7 @@ function card(c: Candidate) {
       <div class="flex border-b border-rule">${tile(c, 'dark')}${tile(c, 'light')}</div>
 
       <div class="p-5 flex flex-col gap-4 flex-1">
-        <div class="flex items-baseline justify-between gap-3">
-          <h3 class="text-h3 font-bold m-0">${c.name}</h3>
-          <code class="font-mono text-xs text-ink-subtle">${c.id}</code>
-        </div>
+        <h3 class="text-h3 font-bold m-0">${c.name}</h3>
 
         <div class="lab-paper flex items-end gap-4 border-y border-rule py-3">
           ${SMALL_SIZES.map(
@@ -107,7 +91,7 @@ function card(c: Candidate) {
 
         <p class="${PROSE} text-sm m-0">${c.idea}</p>
         <p class="text-sm text-ink-subtle leading-[1.65] m-0 mt-auto pt-1">
-          <span class="text-ink font-semibold">The cost.</span> ${c.cost}
+          <span class="text-ink font-semibold">What may not change.</span> ${c.cost}
         </p>
       </div>
     </article>
@@ -115,45 +99,38 @@ function card(c: Candidate) {
 }
 
 /**
- * A lockup row: the mark against the word, in both wordmark voices.
+ * The clear-space figure.
  *
- * The mark is set at cap height rather than at line height. Matching the
- * mark's box to the text's box is the usual mistake and it always leaves the
- * mark looking a size too big, because a lowercase word's visual mass sits
- * well inside its em.
+ * Drawn on a 48-unit canvas: the mark's own 32-unit box in the middle and a
+ * quarter of that box, 8 units, kept empty on every side. The header follows
+ * the same rule, since the word sits a little further than that from the mark.
  */
-function lockupRow(c: Candidate, word: string, label: string) {
+function clearSpace(c: Candidate) {
   return html`
-    <div class="grid gap-5 items-center py-6 border-b border-rule mid:grid-cols-[9rem_1fr_1fr]">
-      <span class=${FIELD_LABEL}>${label}</span>
-      ${WORD_FACES.map(
-        (w) => html`
-          <div class="on-paper text-ink flex items-center gap-2.5">
-            ${markSvg(c, 30)}
-            <span class="${w.cls} text-[26px] leading-none text-ink">${word}</span>
-          </div>
-        `,
-      )}
+    <div class="${PANEL} lab-paper p-6 grid place-items-center">
+      <svg viewBox="0 0 48 48" class="block w-full max-w-[15rem] h-auto" role="img" aria-label="The mark with clear space around it">
+        <rect x="0.5" y="0.5" width="47" height="47" fill="none" stroke="var(--rule-strong)" stroke-width="0.5" stroke-dasharray="1.5 1.5" />
+        <rect x="8" y="8" width="32" height="32" fill="none" stroke="var(--rule)" stroke-width="0.5" />
+        <g transform="translate(8 8)">${c.art()}</g>
+      </svg>
     </div>
   `;
 }
 
 /**
- * The header strip, reproduced close enough to judge against.
+ * The header strip, reproduced from the real one.
  *
- * A mark that looks resolved on a white card and then disappears next to
- * four nav links has not passed anything, and the header is the placement
- * this mark will actually live in on nearly every page view.
+ * The placement that matters most, since it is on every page view. A mark
+ * that looks resolved on a card and then disappears next to the nav links has
+ * not passed anything.
  */
-function headerMock(c: Candidate, word: string, label: string) {
+function headerMock(c: Candidate) {
   return html`
-    <div>
-      <p class="${FIELD_LABEL} mb-2">${label}</p>
-      <div class="border border-rule bg-paper overflow-hidden">
+    <div class="border border-rule bg-paper overflow-hidden">
       <div class="flex items-center gap-3 px-4 h-14">
         <span class="on-paper text-ink flex items-center gap-2 mr-2">
           ${markSvg(c, 22)}
-          <span class="font-mono text-[15px] font-semibold tracking-tight text-ink">${word}</span>
+          <span class="font-mono text-[15px] font-semibold tracking-tight text-ink">pilots</span>
         </span>
         <span class="hidden mid:flex items-center gap-4 text-sm text-ink-muted">
           <span>Sandboxes</span><span>Deploy</span><span>Architecture</span>
@@ -162,13 +139,12 @@ function headerMock(c: Candidate, word: string, label: string) {
           class="ml-auto h-8 px-4 grid place-items-center rounded-full bg-signal text-signal-ink text-[13px] font-semibold"
           >GitHub</span
         >
-        </div>
       </div>
     </div>
   `;
 }
 
-export default function LogoLabPage() {
+export default function BrandPage() {
   return html`
     <style>
       /* The two review tiles are fixed colours on purpose. They are not the
@@ -178,8 +154,7 @@ export default function LogoLabPage() {
 
          Everything else resolves through the live tokens, so a mark shown
          "on paper" really is on this page's paper in whichever theme the
-         reader is in. No colour is declared twice here, which is what
-         AGENTS.md invariant 11 is about. */
+         reader is in. */
       .lab-dark {
         --logo-bg: #0e1014;
         background: #0e1014;
@@ -194,97 +169,217 @@ export default function LogoLabPage() {
         --logo-bg: var(--paper-elev);
         color: var(--ink);
       }
-      /* Sets the one custom property every mark reads for its accented part. */
-      .lab-accent {
-        --logo-accent: var(--signal);
+      /* One class per swatch in palette.ts, painted from the token itself. */
+      .sw-paper {
+        background: var(--paper);
       }
-      /* The wordmark faces. Set on the SVG text rather than passed as a
-         font-family attribute, because the attribute does not resolve a
-         custom property and the whole point is to use the site's own stack. */
-      .lockup-sans {
-        font-family: var(--font-sans);
-        font-weight: 900;
-        letter-spacing: -0.04em;
+      .sw-paper-elev {
+        background: var(--paper-elev);
       }
-      .lockup-mono {
-        font-family: var(--font-mono);
-        font-weight: 600;
-        letter-spacing: -0.02em;
+      .sw-ink {
+        background: var(--ink);
+      }
+      .sw-ink-muted {
+        background: var(--ink-muted);
+      }
+      .sw-ink-subtle {
+        background: var(--ink-subtle);
+      }
+      .sw-rule {
+        background: var(--rule);
+      }
+      .sw-signal {
+        background: var(--signal);
+      }
+      .sw-alert {
+        background: var(--alert);
       }
     </style>
 
     ${pageHero({
-      heading: 'The mark',
+      heading: 'The mark, the colours and the name',
       lede: html`
-        Delta, chosen out of six. This page is what it has to keep surviving:
-        both grounds, the sizes a favicon renders at, the word beside it, and
-        the header it lives in on nearly every page view.
+        Everything needed to show pilots somewhere other than this site. The
+        mark as files, the rules that keep it legible, the palette, the type,
+        and how the name is written.
+      `,
+      actions: html`
+        <a class=${BTN_PRIMARY} href=${asset('/public/brand/pilots-mark-ink.svg')} download>Download the mark</a>
+        <a class=${BTN_GHOST} href="#usage">Usage</a>
       `,
     })}
 
     ${section({
       id: 'mark',
-      heading: 'The drawing',
+      heading: 'The mark',
       layout: 'split',
       lede: html`
         Shown on deep ink and on warm paper, because a drawing tuned against
         black often goes muddy when it is inverted. The strip underneath is the
-        same file at the sizes a favicon and an avatar actually render at, which
-        is where most marks fall apart.
+        same drawing at the sizes a favicon and an avatar render at, which is
+        where most marks fall apart.
       `,
       body: html`
-        <div class="grid gap-6 mid:grid-cols-2">
+        <div class="grid gap-8 wide:grid-cols-[1fr_1fr] wide:items-start">
           ${card(DELTA)}
+
+          <ul class="m-0 p-0 list-none border-t border-rule">
+            ${FILES.map(
+              (f) => html`
+                <li class="py-5 border-b border-rule flex flex-col gap-2">
+                  <div class="flex items-baseline justify-between gap-4">
+                    <span class="font-semibold">${f.name}</span>
+                    <a class="${LINK} font-mono text-xs" href=${asset('/public/brand/' + f.file)} download>${f.file}</a>
+                  </div>
+                  <p class="text-sm text-ink-muted m-0 max-w-[52ch]">${f.use}</p>
+                </li>
+              `,
+            )}
+            <li class="py-5 text-sm text-ink-subtle max-w-[52ch]">
+              Both are vector files with the band cut out for real, so they need no background and
+              scale to any size. There is no file for the word, because the word is set in type.
+            </li>
+          </ul>
         </div>
       `,
     })}
 
     ${section({
-      id: 'lockups',
-      heading: 'Against the word',
+      id: 'space',
+      heading: 'Clear space and the smallest size',
       body: html`
-        <p class="${PROSE} mb-6">
-          Two questions at once, neither settled. Across the columns, whether a
-          heavier sans carries the name better than the mono the header uses
-          today, which reads as an instrument label and also, at a glance, as a
-          filename. Down the rows, whether the name takes a capital. The site
-          writes it lowercase everywhere, including at the start of a sentence,
-          so a capital here would be a decision rather than a tidy-up.
-        </p>
-        <div class="border-t border-rule">
-          <div class="hidden mid:grid grid-cols-[9rem_1fr_1fr] gap-5 pt-4">
-            <span></span>
-            ${WORD_FACES.map((w) => html`<span class=${FIELD_LABEL}>${w.label}</span>`)}
+        <div class="grid gap-8 mid:grid-cols-[minmax(0,18rem)_1fr] mid:items-center">
+          ${clearSpace(DELTA)}
+          <div class="flex flex-col gap-6">
+            <div>
+              <p class="font-semibold m-0 mb-1.5">Keep a quarter of the mark clear on every side</p>
+              <p class="${PROSE} text-sm m-0">
+                The dashed line is the edge nothing else may cross, and the inner box is the mark's
+                own. Text, other logos and the edge of a card all stay outside the dashed line. The
+                header on this site follows the same rule.
+              </p>
+            </div>
+            <div>
+              <p class="font-semibold m-0 mb-1.5">Sixteen pixels is the floor</p>
+              <p class="${PROSE} text-sm m-0">
+                At that size the band is a single pixel tall. Any smaller and it closes up, and a
+                leaning triangle without its cut reads as a play button. Where the space is
+                smaller than that, write the name instead.
+              </p>
+            </div>
+            <div>
+              <p class="font-semibold m-0 mb-1.5">Leave the drawing alone</p>
+              <p class="${PROSE} text-sm m-0">
+                No outline, shadow, rotation or stretch, and no straightening of the lean. One ink
+                colour at a time, which is either of the two in the files or the ink of the surface
+                it sits on.
+              </p>
+            </div>
           </div>
-          ${WORD_CASES.map((k) => lockupRow(DELTA, k.word, k.label))}
         </div>
       `,
     })}
 
     ${section({
-      id: 'in-place',
-      heading: 'In the header',
+      id: 'colour',
+      heading: 'Colour',
       layout: 'split',
       lede: html`
-        The placement that matters most, since it is on every page view. A mark
-        that resolves on a card and then vanishes beside six nav links has not
-        passed. Both casings are shown at the size they actually render.
+        Neutrals carry everything. The green is rationed to the primary action and to live state,
+        and it never tints a panel, never colours a heading, and never appears as a gradient.
+        Each value is given for the light theme first and the dark theme second.
       `,
       body: html`
-        <div class="grid gap-6 wide:grid-cols-2">
-          ${WORD_CASES.map((k) => headerMock(DELTA, k.word, k.label))}
+        <ul class="m-0 p-0 list-none grid gap-px bg-rule border border-rule rounded overflow-hidden mid:grid-cols-2">
+          ${PALETTE.map(
+            (s) => html`
+              <li class="bg-paper-elev p-4 flex items-center gap-4">
+                <span class="sw-${s.token} block size-12 shrink-0 rounded-sm border border-rule-strong"></span>
+                <span class="flex flex-col gap-1 min-w-0">
+                  <span class="font-mono text-sm font-semibold">${s.token}</span>
+                  <span class="text-sm text-ink-muted">${s.role}</span>
+                  <span class="font-mono text-xs text-ink-subtle">${s.light} ${s.dark}</span>
+                </span>
+              </li>
+            `,
+          )}
+        </ul>
+      `,
+    })}
+
+    ${section({
+      id: 'type',
+      heading: 'Type',
+      body: html`
+        <div class="grid gap-10 mid:grid-cols-2">
+          <div>
+            <p class="font-sans font-bold text-h2 leading-[1.05] tracking-tight m-0">
+              The sandbox and the service are the same machine.
+            </p>
+            <p class="${PROSE} text-sm m-0 mt-4">
+              Headings and prose are the reader's own system sans, bold for headings with the
+              tracking pulled in. No font is downloaded, so the page has its type before the first
+              byte of anything else arrives.
+            </p>
+          </div>
+          <div>
+            <p class="font-mono font-semibold text-h2 leading-[1.05] tracking-tight m-0">pilot exec</p>
+            <p class="${PROSE} text-sm m-0 mt-4">
+              The system monospace sets the name beside the mark, field labels, measured numbers
+              and every terminal. It is the voice of the instrument panel, and it is kept for
+              things a machine would print.
+            </p>
+          </div>
         </div>
       `,
     })}
 
-    <div class="max-w-6xl mx-auto px-6 pb-20">
-      <hr class="border-0 border-t border-rule m-0 mb-6" />
-      <p class="text-sm text-ink-subtle max-w-[62ch] m-0">
-        The mark is settled and the losing drawings are out of the repo. This
-        route stays out of the index and the sitemap all the same: it is a
-        working surface for whoever is checking the mark still holds up, not a
-        brand page for a stranger arriving cold.
-      </p>
+    ${section({
+      id: 'name',
+      heading: 'Writing the name',
+      layout: 'split',
+      lede: html`
+        Beside the mark the name is set in the monospace at semibold, lowercase, at the size shown
+        in the header below. In a sentence it is written the same way and takes no special type.
+      `,
+      body: html`
+        <div class="flex flex-col gap-8">
+          ${headerMock(DELTA)}
+
+          <dl class="m-0 border-t border-rule">
+            ${NAME_FORMS.map(
+              (n) => html`
+                <div class="grid gap-x-6 gap-y-1 py-4 border-b border-rule mid:grid-cols-[8rem_5rem_1fr] mid:items-baseline">
+                  <dt class="font-mono font-semibold ${n.ok ? 'text-ink' : 'text-ink-subtle line-through'}">${n.form}</dt>
+                  <dd class="m-0 ${FIELD_LABEL}">${n.ok ? 'use' : 'avoid'}</dd>
+                  <dd class="m-0 text-sm text-ink-muted">${n.note}</dd>
+                </div>
+              `,
+            )}
+          </dl>
+        </div>
+      `,
+    })}
+
+    <div id="usage" class="scroll-mt-24 max-w-6xl mx-auto px-6 pb-24">
+      <div class="border-t border-rule pt-10 grid gap-8 mid:grid-cols-[14rem_1fr]">
+        <h2 class="text-h3 font-bold m-0">Using the mark</h2>
+        <div class="flex flex-col gap-4">
+          <p class="${PROSE} m-0">
+            Use the mark and the name freely to refer to pilots. That covers an article, a talk, a
+            comparison, documentation for an integration, and a note that something runs on it.
+            Nobody needs to ask for any of those.
+          </p>
+          <p class="${PROSE} m-0">
+            The source code is under the Apache licence, and that licence does not extend to the
+            name or the mark. Ask before using either as part of another product's name or logo,
+            on merchandise, or in a way that suggests pilots endorses something.
+            <a class=${LINK} href="${GH_URL}/issues" target="_blank" rel="noopener"
+              >Open an issue to ask${NEW_TAB}</a
+            >.
+          </p>
+        </div>
+      </div>
     </div>
   `;
 }
