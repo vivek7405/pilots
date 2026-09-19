@@ -5,7 +5,7 @@ import { terminal } from '#site/lib/ui/terminal.ts';
 import { section } from '#site/lib/ui/section.ts';
 import { readout, inlineFact } from '#site/lib/ui/stat.ts';
 import { BTN_PRIMARY, BTN_GHOST, PANEL, PROSE, LINK, FIELD_LABEL } from '#site/lib/design/recipes.ts';
-import { GH_URL, WEBJS_URL, WORKLOAD_APEX, NEW_TAB } from '#site/lib/links.ts';
+import { GH_URL, WEBJS_URL, WORKLOAD_APEX, NEW_TAB, DASHBOARD_HREF } from '#site/lib/links.ts';
 
 /**
  * The home page.
@@ -72,8 +72,8 @@ export default function Home() {
             </div>
 
             <p class="text-sm text-ink-subtle mt-6 m-0">
-              Being built in the open, one phase at a time.
-              <a class=${LINK} href="/roadmap">See exactly where it is.</a>
+              Open source under Apache 2.0.
+              <a class=${LINK} href="/architecture/internals">See how it works, drawn.</a>
             </p>
           </div>
 
@@ -85,7 +85,7 @@ export default function Home() {
     ${section({
       id: 'url',
       heading: 'A URL that outlives everything that happens to it',
-      lede: html`Most platforms mean "stable until you redeploy". On pilots the address is part of
+      lede: html`Most platforms mean "stable until you redeploy". On Pilots the address is part of
         the machine's identity, so suspend, wake, checkpoint, restore, promote, and a host dying
         underneath it all leave the address alone. Drive one yourself and watch the counter.`,
       body: html`<lifecycle-demo></lifecycle-demo>`,
@@ -100,7 +100,7 @@ export default function Home() {
       heading: 'Two things to want, one thing to run',
       lede: html`A sandbox and a production service differ by a release, a health check and how many
         copies to run. Both suspend when idle and wake on the next request. They are not two
-        products, and pilots does not build them as two.`,
+        products, and Pilots does not build them as two.`,
       body: html`
         <div class="grid gap-6 wide:grid-cols-[1.25fr_1fr]">
           <div class="${PANEL} p-6 flex flex-col gap-4">
@@ -138,18 +138,19 @@ export default function Home() {
       id: 'instant',
       heading: 'Nothing boots, so nothing waits',
       lede: html`A machine that boots takes as long as its operating system does, which is why
-        sandbox products either keep you waiting or keep idle VMs burning money. pilots restores a
+        sandbox products either keep you waiting or keep idle VMs burning money. Pilots restores a
         memory snapshot instead, and pages it in lazily as the guest touches it, so a machine is
         answering before most of its memory has been read.`,
       body: html`
         <div class="grid gap-8 mid:grid-cols-3 mid:gap-6">
-          ${readout('create')} ${readout('wake')} ${readout('checkpoint')}
+          ${readout('createMeasured')} ${readout('wakeMeasured')} ${readout('resumeGapMeasured')}
         </div>
 
         <p class="${PROSE} mt-10">
-          Those are the thresholds Phase 3 had to clear to close, measured on a laptop rather than
-          on the metal this eventually runs on. Hover any number to see where it came from. When
-          the Hetzner fleet is up, real fleet timings replace them here and these become the floor.
+          Those are medians from the production fleet: bare-metal Hetzner hosts with the bucket a
+          network away, timed by the platform's own end-to-end battery. Hover any number to see
+          where it came from, or read
+          <a class=${LINK} href="/architecture/internals#numbers">how each one is measured</a>.
         </p>
 
         <div class="grid gap-6 mid:grid-cols-2 mt-10">
@@ -232,11 +233,7 @@ export default function Home() {
             ],
             [
               'One region',
-              'The design is decentralised but the fleet is not yet geographically spread. Multi-region comes after parity rather than inside it.',
-            ],
-            [
-              'No production traffic yet',
-              'Phases 1 through 5 are closed and Phase 6, the product surface, is being built. The gate for calling it production is the full battery green on real hardware, and that has not happened.',
+              'Every host is in one European region. Nothing in the design pins the fleet there, but a machine answers from that region wherever the request comes from.',
             ],
           ].map(
             ([title, body]) => html`
@@ -253,15 +250,15 @@ export default function Home() {
     ${section({
       id: 'webjs',
       layout: 'split',
-      heading: 'WebJs is the framework, pilots is the platform',
+      heading: 'WebJs is the framework, Pilots is the platform',
       lede: html`They are built by the same people, the way Next.js and Vercel are. You do not need
-        either one to use the other: pilots runs any Dockerfile, and WebJs deploys anywhere a Node
+        either one to use the other: Pilots runs any Dockerfile, and WebJs deploys anywhere a Node
         process runs. They are just designed by people who know what the other one does.`,
       body: html`
         <div class="${PANEL} p-6 flex flex-col mid:flex-row mid:items-center gap-6 justify-between">
           <p class="${PROSE} m-0">
             A WebJs app has no build step, so deploying one is copying files and starting a process.
-            Its readiness endpoint is what pilots gates a health-checked cutover on.
+            Its readiness endpoint is what Pilots gates a health-checked cutover on.
           </p>
           <a class="${BTN_GHOST} shrink-0" href=${WEBJS_URL} target="_blank" rel="noopener"
             >Visit WebJs${NEW_TAB}</a
@@ -270,18 +267,18 @@ export default function Home() {
       `,
     })}
 
-    <!-- CLOSING CTA. There is no signup, so it does not pretend there is. -->
+    <!-- CLOSING CTA. The dashboard is the way in; the design is the reason to. -->
     <div class="max-w-6xl mx-auto px-6 pb-24">
       <div class="rounded border border-rule-strong bg-paper-elev p-8 mid:p-12">
         <h2 class="text-h2 font-bold m-0 max-w-[24ch]">Read it before you trust it</h2>
         <p class="${PROSE} mt-4">
-          There is nothing to sign up for yet. What there is: the full design, written down, and
-          the source that implements it. If the architecture does not convince you, the product
-          should not either.
+          The full design is written down, and the source that implements it is public. If the
+          architecture does not convince you, the product should not either. When it does, sign in
+          with GitHub and create a machine.
         </p>
         <div class="flex flex-wrap gap-3 mt-7">
-          <a class=${BTN_PRIMARY} href="/architecture">Read the architecture</a>
-          <a class=${BTN_GHOST} href="/roadmap">See what is done</a>
+          <a class=${BTN_PRIMARY} href=${DASHBOARD_HREF}>Open the dashboard</a>
+          <a class=${BTN_GHOST} href="/architecture">Read the architecture</a>
         </div>
       </div>
     </div>

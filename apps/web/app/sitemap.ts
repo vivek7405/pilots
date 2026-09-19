@@ -20,7 +20,7 @@ const PRIORITY: Record<string, number> = {
   '/architecture/internals': 0.9,
   '/sandboxes': 0.8,
   '/deploy': 0.8,
-  '/roadmap': 0.6,
+  '/brand': 0.3,
 };
 
 export default function Sitemap() {

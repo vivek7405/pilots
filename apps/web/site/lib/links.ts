@@ -33,10 +33,9 @@ export const WORKLOAD_APEX = 'pilotrun.app';
 export const DASHBOARD_HREF = '/dashboard';
 
 export const GH_URL = 'https://github.com/vivek7405/pilots';
-export const GH_BOARD_URL = 'https://github.com/users/vivek7405/projects/10';
 
 /**
- * WebJs is the sibling product: the framework, where pilots is the platform
+ * WebJs is the sibling product: the framework, where Pilots is the platform
  * it runs on. Same company, the way Next.js and Vercel are the same company.
  * The site links it as a sibling rather than as a third-party integration,
  * because that is what it is.
@@ -56,6 +55,4 @@ export const NAV = [
   { label: 'Agents', href: '/agents' },
   { label: 'Architecture', href: '/architecture' },
   { label: 'Internals', href: '/architecture/internals' },
-  { label: 'Roadmap', href: '/roadmap' },
-  { label: 'Brand', href: '/brand' },
 ];

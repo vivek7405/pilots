@@ -8,7 +8,7 @@
  * from advertising a command that does not exist.
  */
 
-/** A coding agent that can load the pilots MCP server. */
+/** A coding agent that can load the Pilots MCP server. */
 export interface Harness {
   /** What `pilot mcp install <name>` takes. */
   name: string;
@@ -26,7 +26,7 @@ export const HARNESSES: Harness[] = [
   { name: 'claude-code', title: 'Claude Code', note: 'Or install the plugin, which adds the skill, two slash commands and a guard.' },
   { name: 'codex', title: 'Codex', note: 'Writes the entry into config.toml and leaves every other line alone.' },
   { name: 'cursor', title: 'Cursor', note: 'User-wide, or per repository with --project.' },
-  { name: 'vscode', title: 'VS Code (Copilot)', note: 'For Copilot. The pilots extension is separate and does more.' },
+  { name: 'vscode', title: 'VS Code (Copilot)', note: 'For Copilot. The Pilots extension is separate and does more.' },
   { name: 'opencode', title: 'OpenCode', note: 'Reads opencode.json, so the entry can live with the repository.' },
   { name: 'windsurf', title: 'Windsurf', note: 'One user-wide file, no per-repository form.' },
   { name: 'gemini', title: 'Gemini CLI', note: 'Settings live under .gemini, either scope.' },

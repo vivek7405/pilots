@@ -6,7 +6,7 @@ import { inlineFact, readout } from '#site/lib/ui/stat.ts';
 import { arrowDefs } from '#site/lib/ui/diagram.ts';
 import { plainly } from '#site/lib/ui/plainly.ts';
 import { PROSE, LINK, BTN_GHOST, HAIRLINE, FIELD_LABEL, PANEL } from '#site/lib/design/recipes.ts';
-import { GH_URL, GH_BOARD_URL, NEW_TAB } from '#site/lib/links.ts';
+import { GH_URL, NEW_TAB } from '#site/lib/links.ts';
 import { fleetFigure, splitBrainFigure } from '#site/modules/internals/diagrams/fleet.ts';
 import { hostFigure } from '#site/modules/internals/diagrams/host.ts';
 import { requestFigure } from '#site/modules/internals/diagrams/request.ts';
@@ -25,11 +25,8 @@ import { pipelineFigure } from '#site/modules/internals/diagrams/pipeline.ts';
  * engineer and too long for everyone else, which is what the single page was
  * becoming.
  *
- * Everything here is drawn from ARCHITECTURE.md and the phase issues #2 to #7 and #15.
- * Nothing is invented to fill a figure. Where a mechanism is not built yet the
- * page says which phase owns it rather than describing it in the present tense,
- * because a roadmap written in the present tense is the thing this project's
- * own roadmap page exists to avoid.
+ * Everything here is drawn from ARCHITECTURE.md. Nothing is invented to fill a
+ * figure.
  *
  * On the figures: they are hand-authored inline SVG through #lib/ui/diagram.ts,
  * which carries the reasoning for that choice. The one rule worth repeating
@@ -39,9 +36,9 @@ import { pipelineFigure } from '#site/modules/internals/diagrams/pipeline.ts';
  */
 
 export const metadata = {
-  title: 'Internals: the whole pilots architecture, drawn',
+  title: 'Internals: the whole Pilots architecture, drawn',
   description:
-    'A technical walkthrough of pilots end to end: the fleet, one host, the CRDT state layer, the request path, content-addressed snapshots, lazy memory and disk, guest networking, and the build pipeline.',
+    'A technical walkthrough of Pilots end to end: the fleet, one host, the CRDT state layer, the request path, content-addressed snapshots, lazy memory and disk, guest networking, and the build pipeline.',
 };
 
 /**
@@ -64,7 +61,6 @@ const CONTENTS: [string, string][] = [
   ['network', 'Networking'],
   ['pipeline', 'Build and deploy'],
   ['surface', 'The surface'],
-  ['phases', 'Phase by phase'],
   ['glossary', 'Glossary'],
   ['numbers', 'Numbers'],
 ];
@@ -88,7 +84,7 @@ const GLOSSARY: [string, unknown][] = [
   ],
   [
     'control plane',
-    'The coordinating brain a platform usually has: a scheduler deciding where things run, a central database holding what is true, a load balancer at the front. pilots has none of the three, which is the claim the rest of this page is spent paying for.',
+    'The coordinating brain a platform usually has: a scheduler deciding where things run, a central database holding what is true, a load balancer at the front. Pilots has none of the three, which is the claim the rest of this page is spent paying for.',
   ],
   [
     'gossip',
@@ -108,7 +104,7 @@ const GLOSSARY: [string, unknown][] = [
   ],
   [
     'a page fault',
-    'What happens when a program reaches for memory that is not actually loaded. The processor pauses that program, someone supplies the missing piece, and it carries on with no idea anything happened. pilots uses this to start a machine before its memory has finished arriving.',
+    'What happens when a program reaches for memory that is not actually loaded. The processor pauses that program, someone supplies the missing piece, and it carries on with no idea anything happened. Pilots uses this to start a machine before its memory has finished arriving.',
   ],
   [
     'a namespace',
@@ -171,7 +167,7 @@ export default function Internals() {
         <div class="grid gap-10 wide:grid-cols-[1.05fr_0.95fr]">
           <div>
             <p class="${PROSE} m-0">
-              pilots runs your code inside a tiny simulated computer. Not a shared container with a
+              Pilots runs your code inside a tiny simulated computer. Not a shared container with a
               fence around it, an actual separate machine with its own kernel, which is what makes it
               safe to hand one to a stranger or to an AI agent that is about to run something reckless.
               The trick is that starting one does not mean booting one. The system keeps a photograph
@@ -647,7 +643,7 @@ export default function Internals() {
           Build logs are structured rather than a text stream, and that is a product decision. An agent
           pointed at a repository with no Dockerfile writes one, reads the failing step out of the
           stream when it is wrong, patches it, and goes again. The loop is what the structure exists
-          for, and it is the flow the final phase gates on.
+          for, and the end-to-end battery drives it on every run.
         </p>
         ${plainly(html`A sandbox and a production website are the same object here, with different
           settings. Deploying an app turns your code into exactly the kind of photograph a sandbox
@@ -660,9 +656,10 @@ export default function Internals() {
     ${section({
       id: 'surface',
       heading: 'What drives all of this',
-      lede: html`The engine finished ahead of the surface over it. What exists on the API today is
-        tenancy, scoped keys, revocation, and quotas. The dashboard and the command line have landed,
-        and the tool server for agents ships inside the command line.`,
+      lede: html`The engine is driven through one API, and everything else is a client of it. The
+        API carries tenancy, scoped keys, revocation, and quotas. The dashboard and the command line
+        call it like any other client, and the tool server for agents ships inside the command
+        line.`,
       body: html`
         <div class="grid gap-10 wide:grid-cols-[0.9fr_1.1fr]">
           <div class="min-w-0">
@@ -701,60 +698,6 @@ export default function Internals() {
     })}
 
     ${section({
-      id: 'phases',
-      heading: 'Which part of the drawing each phase added',
-      lede: html`The build order is deliberate: correctness first, then speed, then a fleet, then the
-        product face. Nothing above was designed as a first version to be replaced later, and each phase
-        closes on a gate rather than on the code being written.`,
-      body: html`
-        <ol class="m-0 p-0 list-none flex flex-col">
-          ${[
-            ['1', 2, 'closed', 'Scaffold and contracts', 'The state schema, the API shape, the guest protocol, and the storage layout, all frozen before any parallel work started. Nothing on this page changed shape afterwards.'],
-            ['2', 3, 'closed', 'Engine core', 'One box end to end: boot, exec, pause and resume, snapshot and restore, the router with wake-on-request, the idle monitor, and the isolation layer. Allowed to be slow, and it was.'],
-            ['3', 4, 'closed', 'The instant engine', 'Everything under the storage and lazy-paging figures: content-addressed blocks, the header format, the two handlers, fault-order replay, and checkpoints that resume before they finish uploading.'],
-            ['4', 5, 'closed', 'Cross-host and resilience', 'The gossiped replica replacing a local database, the encrypted mesh, any host serving any machine, and the self-heal loop with the standing-down rule.'],
-            ['5', 15, 'closed', 'Volumes and the PaaS face', 'Durable volumes on object storage, the build pipeline, guest-to-guest naming, sealed environment values, and services with health-gated deploys. All three parts merged and the gate passed.'],
-            ['6', 7, 'in progress', 'Product surface and sign-off', 'Tenancy, scoped keys and quotas on the API, typed clients, the hostility suite, hugepage-backed guest memory, streaming exec, metering, the command line with the agent tool server, the dashboard, and the machine root served from object storage with the host disk as a cache have all merged. The sign-off run on the production fleet remains.'],
-          ].map(
-            ([n, issue, status, title, body], i) => html`
-              <li class="py-7 ${i > 0 ? 'border-t border-rule' : ''}">
-                <div class="grid gap-4 wide:grid-cols-[3rem_1fr_auto] wide:gap-8 wide:items-start">
-                  <span class="font-mono text-h2 leading-none text-ink-subtle">${n}</span>
-                  <div>
-                    <h3 class="text-h3 font-semibold m-0">${title}</h3>
-                    <p class="text-sm text-ink-muted m-0 mt-2 max-w-[74ch]">${body}</p>
-                  </div>
-                  <div class="flex wide:flex-col items-start gap-2 wide:text-right">
-                    <span
-                      class="font-mono text-[10px] uppercase tracking-[0.14em] px-2 py-1 rounded-[2px] whitespace-nowrap
-                             ${status === 'closed'
-                               ? 'bg-signal text-signal-ink'
-                               : status === 'in progress'
-                                 ? 'border border-rule-strong text-ink'
-                                 : 'border border-rule text-ink-subtle'}"
-                      >${status}</span
-                    >
-                    <a
-                      class="font-mono text-xs text-ink-subtle hover:text-ink no-underline whitespace-nowrap"
-                      href="${GH_URL}/issues/${issue}"
-                      target="_blank"
-                      rel="noopener"
-                      >issue #${issue}${NEW_TAB}</a
-                    >
-                  </div>
-                </div>
-              </li>
-            `,
-          )}
-        </ol>
-        <p class="${PROSE} mt-8">
-          <a class=${LINK} href="/roadmap">The roadmap</a> carries each gate in full, including the ones
-          that have not been met.
-        </p>
-      `,
-    })}
-
-    ${section({
       id: 'glossary',
       heading: 'The nine words this page leans on',
       lede: html`A technical page usually loses a reader on vocabulary rather than on ideas. These are
@@ -777,43 +720,56 @@ export default function Internals() {
     ${section({
       id: 'numbers',
       layout: 'split',
-      heading: 'Measured on a laptop, budgeted for metal',
-      lede: html`Two sets of numbers, kept apart on purpose. The first were printed by the battery on a
-        development rig whose disk cannot share extents, which makes them slower than the fleet should
-        be. The second are targets that nothing has met yet, because there is no fleet.`,
+      heading: 'Measured on the production fleet',
+      lede: html`These are the fleet's own numbers. The platform's end-to-end battery prints them on
+        a production host, and they are published as printed, whether or not they flatter the
+        design.`,
       body: html`
         <div>
-          <p class="${FIELD_LABEL} m-0">What the battery printed</p>
+          <p class="${FIELD_LABEL} m-0">What the battery printed on a production host</p>
           <div class="grid gap-8 mt-5 mid:grid-cols-4">
             ${readout('createMeasured')} ${readout('wakeMeasured')} ${readout('resumeGapMeasured')}
-            ${readout('assertions')}
+            ${readout('urlWake')}
           </div>
         </div>
 
         <hr class="${HAIRLINE} my-10" />
 
         <div>
-          <p class="${FIELD_LABEL} m-0">What sign-off requires, and has not yet been run against</p>
-          <div class="grid gap-8 mt-5 mid:grid-cols-3">
-            ${readout('metalCreate')} ${readout('metalWake')} ${readout('metalPromote')}
+          <p class="${FIELD_LABEL} m-0">The targets the fleet is held to</p>
+          <div class="grid gap-8 mt-5 mid:grid-cols-2">
+            ${readout('metalCreate')} ${readout('metalWake')}
           </div>
         </div>
 
         <p class="${PROSE} mt-10">
-          The largest single change since the engine closed is guest memory backed by
-          ${inlineFact('pageSize')} hugepages. On the same host, the same battery's checkpoint resume gap
-          fell from ${inlineFact('resumeGapSmallPages')} to ${inlineFact('resumeGapMeasured')}, because
-          the page size is recorded in every snapshot and a host that disagrees with the fleet refuses to
-          restore rather than restoring slowly.
+          Create is inside its target, narrowly. Wake is above its own: ${inlineFact('wakeMeasured')}
+          against ${inlineFact('metalWake')}. The last readout in the first row is the same wake as a
+          visitor meets it, a request to a real site that had gone to sleep, with the network's share
+          removed by subtracting a warm request from the cold one. The root flush is the other line
+          above target. Every pause one host recorded was under ${inlineFact('rootFlushPauseMetal')},
+          and a minority were inside the ${inlineFact('rootFlushPause')} target.
         </p>
 
         <p class="${PROSE} mt-6">
-          The fleet numbers that matter are not in either group, because the fleet does not exist yet.
-          The chaos gate is the closest thing there is: on a three-node rig, hard-killing the host that
-          owned a machine returned it on a survivor in ${inlineFact('rescue')} with the same address and
-          the disk intact, and a fourth host joined and started taking traffic ${inlineFact('join')}
-          after one command. Both are correctness results rather than latency results, and they are the
-          ones this design was actually built to produce.
+          These hosts are older desktop-class processors with the bucket a network away. That is the
+          place to measure, because a target is only worth stating against the hardware it is sold on.
+        </p>
+
+        <p class="${PROSE} mt-6">
+          Guest memory is backed by ${inlineFact('pageSize')} hugepages, and it is the largest single
+          lever on these numbers. On a test host, the same battery's checkpoint resume gap fell from
+          ${inlineFact('resumeGapSmallPages')} to ${inlineFact('resumeGapHugepages')} with hugepages
+          on. The page size is recorded in every snapshot, and a host that disagrees with the fleet
+          refuses to restore rather than restoring slowly.
+        </p>
+
+        <p class="${PROSE} mt-6">
+          The results this design exists to produce are about correctness rather than latency. The
+          fleet battery kills hosts on purpose, so it runs on a three-host test cluster. There,
+          hard-killing the host that owned a machine returned it on a survivor in
+          ${inlineFact('rescue')} with the same address and the disk intact, and a fourth host joined
+          and started taking traffic ${inlineFact('join')} after one command.
         </p>
 
         <div class="mt-10 max-w-[54ch]">
@@ -822,7 +778,7 @@ export default function Internals() {
             { kind: 'out', text: 'create, exec, checkpoint, restore, suspend, wake, destroy' },
             { kind: 'out', text: 'no orphaned processes, namespaces, slots or ports' },
             { kind: 'mark', text: 'the same battery, run against any host in the fleet' },
-            { kind: 'note', text: 'later phases add assertions and never retire earlier ones' },
+            { kind: 'note', text: 'the battery only grows, and an assertion is never retired' },
           ])}
         </div>
 
@@ -830,9 +786,6 @@ export default function Internals() {
           Everything drawn on this page is written down in full in the design document, and the code
           implementing it sits beside it. If a figure here disagrees with the repository, the repository
           is right and this page is a bug.
-          <a class=${LINK} href=${GH_BOARD_URL} target="_blank" rel="noopener"
-            >The board tracks what is left${NEW_TAB}</a
-          >.
         </p>
       `,
     })}

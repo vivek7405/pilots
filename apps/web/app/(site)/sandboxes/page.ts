@@ -38,17 +38,16 @@ export default function Sandboxes() {
       id: 'speed',
       heading: 'A machine that was never off',
       lede: html`Booting a Linux guest costs whatever the operating system costs, every time, which
-        is why sandbox products either make you wait or keep idle machines burning money. pilots
+        is why sandbox products either make you wait or keep idle machines burning money. Pilots
         restores a memory snapshot of an already-running guest and pages memory in as the guest
         touches it.`,
       body: html`
         <div class="grid gap-8 mid:grid-cols-3 mid:gap-6">
-          ${readout('create')} ${readout('wake')} ${readout('checkpoint')}
+          ${readout('createMeasured')} ${readout('wakeMeasured')} ${readout('resumeGapMeasured')}
         </div>
         <p class="${PROSE} mt-10">
-          These are the thresholds Phase 3 had to clear before it could close, timed on a laptop.
-          Every number on this site carries its source. Hover one to see it. Fleet numbers replace
-          these when there is a fleet to measure.
+          These are medians from the production fleet, printed by the test battery on one of its
+          hosts. Every number on this site carries its source. Hover one to see it.
         </p>
       `,
     })}
@@ -108,9 +107,9 @@ export default function Sandboxes() {
       heading: 'Streaming exec, because agents produce output for minutes',
       lede: html`Running a command and collecting its output at the end is fine for a script and
         useless for a model that emits tokens for several minutes. Both shapes exist in the guest
-        agent and in the typed clients: buffered when you want a result, streamed over a socket when
-        you want to watch. The streamed form does not answer on the public API yet, so the clients and
-        the command line are written against a route the engine still refuses.`,
+        agent, the public API and the typed clients: buffered when you want a result, streamed over a
+        socket when you want to watch. The web terminal and the command line's interactive shell are
+        the streamed form.`,
       body: html`
         <div class="grid gap-6 mid:grid-cols-2">
           <div class="${PANEL} p-5">
@@ -233,7 +232,7 @@ export default function Sandboxes() {
           </p>
           <div class="flex flex-wrap gap-3 mt-6">
             <a class=${BTN_PRIMARY} href="/deploy">How deploying works</a>
-            <a class=${BTN_GHOST} href="/roadmap">Where it actually is</a>
+            <a class=${BTN_GHOST} href="/architecture">How it is built</a>
           </div>
         </div>
       </div>

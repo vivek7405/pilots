@@ -106,8 +106,8 @@ function visibleText(src: string): string {
  * Everywhere a numeric claim can reach a reader.
  *
  * Markup alone is not enough, and finding that out was worth a rule change.
- * The roadmap page holds its phase gates ("under 500 milliseconds") in a plain
- * data array that html`` renders later, so scanning templates declared the
+ * The roadmap page, since removed, held its phase gates ("under 500
+ * milliseconds") in a plain data array that html`` rendered later, so scanning templates declared the
  * page clean while unsourced numbers sat on it. Anything a page can print has
  * to be scanned, not just the syntax it happens to print it with.
  *

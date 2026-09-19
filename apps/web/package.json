@@ -112,6 +112,11 @@
         "source": "/.well-known/openid-configuration",
         "destination": "/api/oauth/metadata",
         "statusCode": 307
+      },
+      {
+        "source": "/roadmap",
+        "destination": "/architecture",
+        "statusCode": 308
       }
     ]
   }

@@ -26,7 +26,7 @@ export default function Deploy() {
   return html`
     ${pageHero({
       heading: 'Ship a Dockerfile, keep the old one running',
-      lede: html`Point pilots at any repository with a Dockerfile and it builds a microVM image, starts it
+      lede: html`Point Pilots at any repository with a Dockerfile and it builds a microVM image, starts it
         behind a health check, and cuts traffic over only once the new release answers. The previous
         release stays alive until then, which is what makes a rollback instant rather than a rebuild.`,
       actions: html`<a class=${BTN_PRIMARY} href="/architecture">How it works underneath</a>`,
@@ -194,9 +194,8 @@ export default function Deploy() {
           database and a place for everything else.
         </p>
         <p class="${PROSE} mt-4">
-          Volumes shipped with Phase 5, and its gate asserts that volume data survives the host
-          dying and the machine being rescued elsewhere.
-          <a class=${LINK} href="/roadmap">The roadmap</a> says what is still open.
+          The fleet's own test battery asserts this rather than assuming it: volume data survives
+          the host dying and the machine being rescued elsewhere.
         </p>
       `,
     })}

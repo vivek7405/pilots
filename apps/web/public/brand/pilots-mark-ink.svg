@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="256" height="256" role="img" aria-label="Pilots">
+  <!-- The pilots mark for a light background. The band is a real cut, made with
+       a mask, so the file has no background of its own and sits on any
+       surface. Drawn on the favicon grid of 32 units. -->
+  <mask id="cut">
+    <rect width="32" height="32" fill="#fff"/>
+    <rect x="3" y="17.6" width="26" height="2" fill="#000"/>
+  </mask>
+  <g mask="url(#cut)">
+    <g transform="translate(5.4 0)">
+      <g transform="skewX(-11)">
+        <path d="M16 3.8 L26.8 27.6 L16 21.4 L5.2 27.6 Z" fill="#16181c"/>
+      </g>
+    </g>
+  </g>
+</svg>

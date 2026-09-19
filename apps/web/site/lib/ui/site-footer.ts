@@ -1,5 +1,5 @@
 import { html } from '@webjsdev/core';
-import { GH_URL, GH_BOARD_URL, WEBJS_URL, WORKLOAD_APEX, NEW_TAB, NAV } from '#site/lib/links.ts';
+import { GH_URL, WEBJS_URL, WORKLOAD_APEX, NEW_TAB, NAV } from '#site/lib/links.ts';
 import { FIELD_LABEL } from '#site/lib/design/recipes.ts';
 import { brandMark } from '#site/lib/design/logo-candidates.ts';
 
@@ -9,10 +9,8 @@ const link = 'text-sm text-ink-muted no-underline hover:text-ink transition-colo
 /**
  * The site footer.
  *
- * It states the build's status in plain words rather than implying a finished
- * product. AGENTS.md invariant 6: say what the thing cannot do yet. A reader
- * evaluating infrastructure is specifically looking for whether you know your
- * own edges, and a footer claiming nothing is the cheapest place to be honest.
+ * Its last line says where this site itself runs, which is the cheapest proof
+ * the platform can offer: the page being read is a service on the fleet.
  */
 export function siteFooter() {
   return html`
@@ -33,12 +31,12 @@ export function siteFooter() {
           <nav class="${col}" aria-label="Product">
             <span class="${FIELD_LABEL}">Product</span>
             ${NAV.map((n) => html`<a class="${link}" href=${n.href}>${n.label}</a>`)}
+            <a class="${link}" href="/brand">Brand</a>
           </nav>
 
           <nav class="${col}" aria-label="Source">
             <span class="${FIELD_LABEL}">Source</span>
             <a class="${link}" href=${GH_URL} target="_blank" rel="noopener">Repository${NEW_TAB}</a>
-            <a class="${link}" href=${GH_BOARD_URL} target="_blank" rel="noopener">Project board${NEW_TAB}</a>
             <a class="${link}" href="${GH_URL}/blob/main/LICENSE" target="_blank" rel="noopener">Apache 2.0 licence${NEW_TAB}</a>
           </nav>
 
@@ -54,7 +52,7 @@ export function siteFooter() {
             Workloads answer on ${WORKLOAD_APEX}. This site is not the request path.
           </p>
           <p class="text-xs text-ink-subtle m-0">
-            Being built in the open. Not accepting production traffic yet.
+            This site is a service on the fleet it describes.
           </p>
         </div>
       </div>

@@ -53,7 +53,7 @@ export function pipelineFigure() {
       its own unprivileged user and its own resource slice, with the layer cache shared through object
       storage so a rebuild is warm on any host. The output is not a special deployment artifact. It is a
       generation-zero template exactly like the one a sandbox is created from, which is why a replica
-      starts by restoring rather than booting, and why the sign-off budget for a replica or a rollback is
+      starts by restoring rather than booting, and why the target for a replica or a rollback is
       ${inlineFact('metalRelease')} rather than a boot time. A service with no domain still health-gates
       and still rolls back, but it has no concurrency signal, so scaling it to zero is refused at
       validation instead of being silently redefined.`,
