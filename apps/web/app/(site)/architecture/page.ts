@@ -3,7 +3,7 @@ import '#site/components/fleet-demo.ts';
 import { terminal } from '#site/lib/ui/terminal.ts';
 import { section } from '#site/lib/ui/section.ts';
 import { inlineFact } from '#site/lib/ui/stat.ts';
-import { PANEL, PROSE, LINK, BTN_GHOST, HAIRLINE } from '#site/lib/design/recipes.ts';
+import { BTN_PRIMARY, PANEL, PROSE, LINK, BTN_GHOST, HAIRLINE } from '#site/lib/design/recipes.ts';
 import { GH_URL, NEW_TAB } from '#site/lib/links.ts';
 import { pageHero } from '#site/lib/ui/page-hero.ts';
 
@@ -90,7 +90,7 @@ export default function Architecture() {
       lede: html`Every host runs the identical stack and serves the entire API. There is no scheduler to
         register with, no database to fail over, and no appliance in front. The tradeoffs that choice
         forces are the interesting part, and they are all below.`,
-      actions: html`<a class=${BTN_GHOST} href="/architecture/internals">The internals, with diagrams</a>
+      actions: html`<a class=${BTN_PRIMARY} href="/architecture/internals">The internals, with diagrams</a>
         <a class=${BTN_GHOST} href=${GH_URL} target="_blank" rel="noopener">Read ARCHITECTURE.md${NEW_TAB}</a>`,
     })}
 
