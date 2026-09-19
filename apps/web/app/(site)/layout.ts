@@ -46,7 +46,19 @@ export function generateMetadata(ctx: { url: string }) {
     cacheControl: 'public, max-age=60, s-maxage=600, stale-while-revalidate=86400',
     title: TITLE,
     description: DESCRIPTION,
-    icons: { icon: [{ url: '/public/favicon.svg', type: 'image/svg+xml', sizes: 'any' }] },
+    // Raster first on purpose: a search crawler takes the first usable icon and
+    // wants a square raster whose side is a multiple of 48, which 192 is. The
+    // SVG follows for browsers that prefer it. /favicon.ico is not linked: the
+    // framework serves public/favicon.ico at the origin root, where the clients
+    // that read no markup look for it. Every raster is baked from favicon.svg
+    // by scripts/generate-favicon.sh.
+    icons: {
+      icon: [
+        { url: '/public/favicon-192.png', type: 'image/png', sizes: '192x192' },
+        { url: '/public/favicon.svg', type: 'image/svg+xml', sizes: 'any' },
+      ],
+      apple: { url: '/public/apple-touch-icon.png', sizes: '180x180' },
+    },
     openGraph: {
       type: 'website',
       title: TITLE,
