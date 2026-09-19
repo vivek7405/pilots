@@ -13,8 +13,11 @@ import { GH_URL, WEBJS_URL, WORKLOAD_APEX, NEW_TAB, DASHBOARD_HREF } from '#site
  * It is written as ONE argument, not a list of features, and the section ledes
  * carry it:
  *
- *   hero            from sandbox to production on the same URL, because the
- *                   sandbox and the service are the same machine
+ *   hero            from sandbox to production on the same URL, and nothing is
+ *                   rebuilt to get there. The mechanism (one machine, two sets
+ *                   of lifecycle knobs) is the NEXT two sections' job: said in
+ *                   the hero it reads as "your production service is a sandbox",
+ *                   which is the doubt it was meant to settle.
  *   one URL         and that identity survives every lifecycle event
  *   two faces       which is what lets one primitive serve both audiences
  *   instant         the reason a sandbox is usable at all: restore, not boot
@@ -61,8 +64,8 @@ export default function Home() {
 
             <p class="${PROSE} text-lede mt-6">
               Run your app in an instant sandbox and it has a live URL. Promote it when it turns
-              out to matter. It keeps its URL, its state, and its identity. The sandbox and the
-              production service are the same machine.
+              out to matter. It keeps its URL, its state, and its identity, and nothing is rebuilt
+              or redeployed to get there.
             </p>
 
             <div class="flex flex-wrap gap-3 mt-8">
