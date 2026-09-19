@@ -12,12 +12,12 @@ const ROOT = join(import.meta.dirname, '..', '..');
 const read = (...p: string[]) => readFileSync(join(ROOT, ...p), 'utf8');
 const flat = (s: string) => s.replace(/\s+/g, ' ');
 
-// Read out of the script's source rather than imported: it is a plain .mjs
-// with no types, and importing it would also pull in its font files.
+// Read out of the script's source rather than imported: the script renders the
+// card as soon as it is loaded, which a test must not do.
 const SCRIPT = read('scripts', 'build-og.mjs');
 const constant = (name: string) => {
-  const m = new RegExp(`export const ${name} =\\s*'([^']+)'`).exec(SCRIPT);
-  assert.ok(m, `build-og.mjs exports ${name} as a plain string`);
+  const m = new RegExp(`const ${name} =\\s*'([^']+)'`).exec(SCRIPT);
+  assert.ok(m, `build-og.mjs declares ${name} as a plain string`);
   return m[1];
 };
 const HEADLINE = constant('HEADLINE');

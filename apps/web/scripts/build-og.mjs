@@ -39,6 +39,7 @@
  * The mark is the Delta from site/lib/design/logo-candidates.ts, and the blurb
  * is the footer's, word for word. test/site/og.test.ts holds both.
  */
+import { chromium } from 'playwright';
 import { readFileSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
@@ -51,8 +52,10 @@ const face = (file) => `url(data:font/woff2;base64,${readFileSync(here(`./fonts/
 /** The light half of the palette in public/site.input.css. A PNG has no light-dark(). */
 const T = { paper: '#f7f4ee', elev: '#fffdf9', ink: '#16181c', muted: '#54585f', subtle: '#80858e', rule: '#ddd7ca', ruleStrong: '#c6bfae', signal: '#a3e635', signalInk: '#12160a' };
 
-export const HEADLINE = 'The sandbox and the service are the same machine.';
-export const BLURB =
+// test/site/og.test.ts reads these two out of this file's source and holds them
+// to the home page and the footer, so keep each a plain single-quoted string.
+const HEADLINE = 'The sandbox and the service are the same machine.';
+const BLURB =
   'Sandboxes and production services on the same platform. Start one as a sandbox, promote it to production, keep the URL.';
 
 const HTML = `<!doctype html>
@@ -137,15 +140,10 @@ const HTML = `<!doctype html>
   ${GUIDES ? '<div class="guide" style="left:285px;top:0;width:630px;height:630px"></div><div class="guide" style="left:0;top:15px;width:1200px;height:600px"></div>' : ''}
 </body></html>`;
 
-// Only render when run as a script: the test imports HEADLINE and BLURB.
-if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  // Imported here, so the test can read the two strings without a browser.
-  const { chromium } = await import('playwright');
-  const browser = await chromium.launch();
-  const page = await browser.newPage({ viewport: { width: 1200, height: 630 }, deviceScaleFactor: 1 });
-  await page.setContent(HTML, { waitUntil: 'load' });
-  await page.evaluate(() => document.fonts.ready);
-  await page.screenshot({ path: OUT });
-  await browser.close();
-  console.log(`og: wrote ${OUT} (${Math.round(statSync(OUT).size / 1024)} KiB)`);
-}
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 1200, height: 630 }, deviceScaleFactor: 1 });
+await page.setContent(HTML, { waitUntil: 'load' });
+await page.evaluate(() => document.fonts.ready);
+await page.screenshot({ path: OUT });
+await browser.close();
+console.log(`og: wrote ${OUT} (${Math.round(statSync(OUT).size / 1024)} KiB)`);
