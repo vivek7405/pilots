@@ -89,7 +89,7 @@ What makes it different:
   two CLIs (`fly` and `sprite`, both installed locally). Pilots is one
   product, one primitive, one CLI, designed as the 2-in-1 from the start.
 
-Tracking: [project board](https://github.com/users/vivek7405/projects/10).
+Tracking: [project board](https://github.com/orgs/pilotsrun/projects/1).
 Master plan and phase breakdown: issues #1–#7.
 
 ## Layout
