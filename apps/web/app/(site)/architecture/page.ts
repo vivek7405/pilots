@@ -3,7 +3,7 @@ import '#site/components/fleet-demo.ts';
 import { terminal } from '#site/lib/ui/terminal.ts';
 import { section } from '#site/lib/ui/section.ts';
 import { inlineFact } from '#site/lib/ui/stat.ts';
-import { PANEL, PROSE, LINK, BTN_GHOST, HAIRLINE } from '#site/lib/design/recipes.ts';
+import { BTN_PRIMARY, PANEL, PROSE, LINK, BTN_GHOST, HAIRLINE } from '#site/lib/design/recipes.ts';
 import { GH_URL, NEW_TAB } from '#site/lib/links.ts';
 import { pageHero } from '#site/lib/ui/page-hero.ts';
 
@@ -57,20 +57,21 @@ const INVARIANTS = [
  *
  * This is the on-ramp the page lacked. Everything below it assumes the reader
  * already holds the whole shape in their head, and most do not. The layers are
- * the order the system was built in, which is also the order it makes sense
- * in: each one works without the ones above it.
+ * in the order they make sense in: each one works without the ones above it.
+ * The first is the UNIT, not a count. It was once titled as one machine on one
+ * box, which read as a limit on a platform where a server runs many.
  */
 const LAYERS = [
   [
-    'One machine on one box',
-    'A small virtual machine that boots, runs a command, and can be paused, photographed and brought back exactly as it was. A router in front of it holds a request open and wakes the machine when one arrives, and a monitor puts it back to sleep when nothing is using it. Everything else is this, made faster, spread wider, and given a product face.',
+    'The machine',
+    'A small virtual machine that boots, runs a command, and can be paused, photographed and brought back exactly as it was. One server runs many of them side by side, each inside its own private network. A router in front holds a request open and wakes the machine it is for, and a monitor puts a machine back to sleep when nothing is using it. Everything else is this, made faster, spread wider, and given a product face.',
   ],
   [
     'Making it instant',
     'A photograph of a machine is stored as small blocks, and only the blocks that differ from a shared starting point are kept. Memory and disk are then loaded on demand rather than up front, so a machine starts running before most of it has arrived. That is why creating one is a restore rather than a boot, and why saving one does not wait for the upload.',
   ],
   [
-    'Many boxes, and nobody in charge',
+    'Many servers, and nobody in charge',
     'Every server runs the same software and can answer any request about any machine. They share what they know by gossiping it to each other, over a private encrypted network, instead of asking a central database. When a server dies the others notice on their own and bring its machines back, with the same addresses.',
   ],
   [
@@ -90,7 +91,7 @@ export default function Architecture() {
       lede: html`Every host runs the identical stack and serves the entire API. There is no scheduler to
         register with, no database to fail over, and no appliance in front. The tradeoffs that choice
         forces are the interesting part, and they are all below.`,
-      actions: html`<a class=${BTN_GHOST} href="/architecture/internals">The internals, with diagrams</a>
+      actions: html`<a class=${BTN_PRIMARY} href="/architecture/internals">The internals, with diagrams</a>
         <a class=${BTN_GHOST} href=${GH_URL} target="_blank" rel="noopener">Read ARCHITECTURE.md${NEW_TAB}</a>`,
     })}
 
