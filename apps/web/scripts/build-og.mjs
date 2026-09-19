@@ -37,9 +37,8 @@
  *    site still ships none of them.
  *
  * The mark is the Delta from site/lib/design/logo-candidates.ts, and the blurb
- * is the footer's, word for word. test/site/og.test.ts holds both. The headline
- * is the card's own: the home page keeps the thesis, the card leads with the
- * outcome.
+ * is the footer's and the headline the home page's, word for word.
+ * test/site/og.test.ts holds all three.
  */
 import { chromium } from 'playwright';
 import { readFileSync, statSync } from 'node:fs';
@@ -55,10 +54,12 @@ const face = (file) => `url(data:font/woff2;base64,${readFileSync(here(`./fonts/
 const T = { paper: '#f7f4ee', elev: '#fffdf9', ink: '#16181c', muted: '#54585f', subtle: '#80858e', rule: '#ddd7ca', ruleStrong: '#c6bfae', signal: '#a3e635', signalInk: '#12160a' };
 
 // What happens to the reader, in the order it happens: a link preview gets a
-// couple of seconds, and an outcome lands in that time where the site's thesis
-// (the sandbox and the service are the same machine) has to be decoded first.
-// test/site/og.test.ts reads both out of this file's source and holds the blurb
-// to the footer, so keep each a plain single-quoted string with no apostrophe.
+// couple of seconds, and an outcome lands in that time where the thesis (the
+// sandbox and the service are the same machine) has to be decoded first. The
+// home page leads with the same sentence and gives the thesis as its reason.
+// test/site/og.test.ts reads both out of this file's source and holds the
+// headline to the home page and the blurb to the footer, so keep each a plain
+// single-quoted string with no apostrophe.
 const HEADLINE = 'From sandbox to production, on the same URL.';
 // Broken by hand, one clause a line. Left to the browser it breaks after
 // "production, on", which strands the preposition.

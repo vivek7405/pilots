@@ -1,7 +1,7 @@
 // The social card is a picture of the site, made by a script nobody runs on a
 // deploy, so nothing else notices when it falls behind. It did once: it carried
 // a logo the site had retired and a tagline the footer had dropped. This holds
-// the card's blurb to the footer, its mark to the header's,
+// the card's blurb to the footer, its headline to the home page, its mark to the header's,
 // and the file to what the platforms accept.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -23,11 +23,11 @@ const constant = (name: string) => {
 const HEADLINE = constant('HEADLINE');
 const BLURB = constant('BLURB');
 
-test('the card says what the footer says', () => {
+test('the card says what the footer and the home page say', () => {
   assert.ok(flat(read('site', 'lib', 'ui', 'site-footer.ts')).includes(BLURB), 'the blurb is the footer blurb, word for word');
-  // The headline is the card's own, so there is nothing on the site to hold it
-  // to. It only has to be short enough to sit inside the centre square.
-  assert.ok(HEADLINE.length > 0 && HEADLINE.length <= 52, `the headline is ${HEADLINE.length} characters`);
+  assert.ok(flat(read('app', '(site)', 'page.ts')).includes(HEADLINE), 'the headline is the home page heading');
+  // And short enough to sit inside the centre square at the size it is set.
+  assert.ok(HEADLINE.length <= 52, `the headline is ${HEADLINE.length} characters`);
 });
 
 test('the card draws the mark the header does', () => {

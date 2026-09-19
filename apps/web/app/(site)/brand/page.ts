@@ -322,7 +322,7 @@ export default function BrandPage() {
         <div class="grid gap-10 mid:grid-cols-2">
           <div>
             <p class="font-sans font-bold text-h2 leading-[1.05] tracking-tight m-0">
-              The sandbox and the service are the same machine.
+              From sandbox to production, on the same URL.
             </p>
             <p class="${PROSE} text-sm m-0 mt-4">
               Headings and prose are the reader's own system sans, bold for headings with the
