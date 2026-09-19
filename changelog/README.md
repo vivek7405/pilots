@@ -8,10 +8,9 @@ These files do three jobs, which is why they are written with care:
 1. **Landing one on `main` cuts the release.** `.github/workflows/release-pilot.yml`
    runs when a push to `main` adds a file under `changelog/pilot/`. It builds
    the binaries at that version, creates the tag `pilot-v<version>` and the
-   GitHub release, and stages `pilots` on npm. There is no tag to push by
-   hand and no publish to run from a laptop. The npm version goes live when a
-   maintainer approves the staged upload with 2FA: the package's Trusted
-   Publisher deliberately cannot publish by itself.
+   GitHub release, and publishes `pilots` to npm. There is no tag to push by
+   hand, no publish to run from a laptop and nothing to approve afterwards:
+   merging the release PR is the one human step.
 2. **The body is the GitHub release's notes**, verbatim.
 3. **`https://pilots.run/changelog` renders every file**, newest first.
 
@@ -26,11 +25,7 @@ These files do three jobs, which is why they are written with care:
    failed run is recovered by dispatching the workflow by hand with the
    version as its input. Do not use "Re-run failed jobs" for that: a re-run
    replays the workflow file from its original commit and never sees a fix.
-5. Approve the staged npm version: `npm stage list pilots`, then
-   `npm stage approve <stage-id>` (or from the package's page on npmjs.com).
-   The run's summary prints these. Until then `install.sh` serves the new
-   version and npm still serves the previous one.
-6. Redeploy `apps/web` so `/changelog` carries the entry.
+5. Redeploy `apps/web` so `/changelog` carries the entry.
 
 Never edit a file for a version that has been published. Release the next
 version and say what changed there.
