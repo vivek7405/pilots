@@ -9,8 +9,10 @@ const link = 'text-sm text-ink-muted no-underline hover:text-ink transition-colo
 /**
  * The site footer.
  *
- * Its last line says where this site itself runs, which is the cheapest proof
- * the platform can offer: the page being read is a service on the fleet.
+ * Its last two lines are written for a visitor, not an operator: where their
+ * own apps will live, and that the page being read is deployed on the platform
+ * it sells, which is the cheapest proof the platform can offer. They once said
+ * "workloads", "request path" and "fleet", which are our words, not theirs.
  */
 export function siteFooter() {
   return html`
@@ -49,10 +51,10 @@ export function siteFooter() {
 
         <div class="mt-12 pt-6 border-t border-rule flex flex-wrap gap-x-6 gap-y-2 items-center justify-between">
           <p class="text-xs text-ink-subtle m-0 font-mono">
-            Workloads answer on ${WORKLOAD_APEX}. This site is not the request path.
+            Your apps and sandboxes run on ${WORKLOAD_APEX}.
           </p>
           <p class="text-xs text-ink-subtle m-0">
-            This site is a service on the fleet it describes.
+            This site is deployed on Pilots itself.
           </p>
         </div>
       </div>
