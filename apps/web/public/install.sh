@@ -85,39 +85,41 @@ trap 'rm -f "$tmp"' EXIT INT TERM
 say "pilot: downloading $url"
 fetch_to "$url" "$tmp"
 
-# Verify against the checksums.txt the release publishes beside the binary.
+# Verify against the checksums.txt the release publishes beside the binary,
+# or install nothing.
 #
 # This script is run as `curl ... | sh`, so it fetches an executable over the
-# network and puts it on PATH. The release workflow already writes
-# checksums.txt; not reading it meant a corrupted download -- or a tampered
-# one -- was installed and run with nothing noticing.
+# network and puts it on PATH. There is ONE outcome that installs: the digest
+# was read, the file was hashed, and the two agree. It used to skip the check,
+# with a notice, when the checksum could not be fetched or the machine had no
+# hashing tool, which made "verified" on the install page true only on the
+# happy path, and disagreed with `pilot upgrade`, which refuses in the same
+# case. sprites' installer, the nearest prior art, dies on all three as well.
 #
-# A machine with neither sha256sum nor shasum says so rather than failing:
-# refusing to install on a box that cannot hash would be a worse outcome than
-# an unverified install the operator was told about.
+# A machine with neither tool is rare (coreutils and BusyBox ship sha256sum,
+# macOS ships shasum) and is told what to install, or where to get the binary
+# by hand.
 sums_url="${url%/*}/checksums.txt"
 if command -v sha256sum >/dev/null 2>&1; then
   sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
 elif command -v shasum >/dev/null 2>&1; then
   sha256_of() { shasum -a 256 "$1" | cut -d' ' -f1; }
 else
-  sha256_of() { printf ''; }
+  die "sha256sum or shasum is required to verify the download; nothing was installed.
+Install one (coreutils), or take the binary from https://github.com/$REPO/releases"
 fi
 
-want="$(fetch "$sums_url" 2>/dev/null | grep " \*\?${asset}\$" | cut -d' ' -f1 | head -n 1)"
+sums="$(fetch "$sums_url")" || die "could not fetch $sums_url, so the download cannot be verified; nothing was installed"
+want="$(printf '%s\n' "$sums" | grep " \*\?${asset}\$" | cut -d' ' -f1 | head -n 1)"
+[ -n "$want" ] || die "$sums_url carries no checksum for $asset, so the download cannot be verified; nothing was installed"
 got="$(sha256_of "$tmp")"
-if [ -z "$got" ]; then
-  say "pilot: neither sha256sum nor shasum is installed; SKIPPING verification"
-elif [ -z "$want" ]; then
-  say "pilot: the release publishes no checksum for $asset; SKIPPING verification"
-elif [ "$want" != "$got" ]; then
+if [ "$want" != "$got" ]; then
   die "checksum mismatch for $asset
   expected $want
   got      $got
 The download is corrupt or has been tampered with; nothing was installed."
-else
-  say "pilot: sha256 verified"
 fi
+say "pilot: sha256 verified"
 
 chmod 0755 "$tmp"
 
