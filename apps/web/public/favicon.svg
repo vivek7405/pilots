@@ -9,14 +9,26 @@
 
        The drawing is the one in site/lib/design/logo-candidates.ts, and
        test/site/favicon.test.ts fails if the two paths stop matching. It is
-       scaled to 0.88 about its own centre, which keeps the band at close to a
-       whole pixel in a 16 pixel tab. Any smaller and the cut closes up, and a
-       leaning triangle without its cut reads as a play button.
+       scaled to 0.88, which keeps the band at close to a whole pixel in a 16
+       pixel tab. Any smaller and the cut closes up, and a leaning triangle
+       without its cut reads as a play button.
+
+       PLACEMENT is measured, and it is deliberately not bounding-box centred.
+       The lean throws the apex right and the left foot out to the edge, so
+       centring the box (x 16.0, y 15.7) leaves the ink's weight right of the
+       tile's centre and low: the icon looks off to the right over an empty
+       top-left corner. The ink's centre of mass, band included, is x 18.0,
+       y 17.4 on the mark's own grid. Horizontally that point sits on the
+       tile's centre line, so the margins are uneven (left smaller than right)
+       and must stay uneven. Vertically the mark is moved half way from box
+       centre to mass centre, y 16.56: all the way puts the apex against the
+       top edge, because a point carries almost no weight but still sets the
+       margin. The sibling WebJs favicon places its leaning W the same way.
 
        scripts/generate-favicon.sh bakes every raster from this file. Change
        the icon here and run it, never edit a PNG. -->
   <rect id="tile" x="0.5" y="0.5" width="31" height="31" rx="7" fill="#0e1014" stroke="#333a45" stroke-width="1"/>
-  <g transform="translate(16 16) scale(0.88) translate(-16.03 -15.7)">
+  <g transform="translate(16 16) scale(0.88) translate(-18 -16.56)">
     <g transform="translate(5.4 0)">
       <g transform="skewX(-11)">
         <path d="M16 3.8 L26.8 27.6 L16 21.4 L5.2 27.6 Z" fill="#e9e7e1"/>
