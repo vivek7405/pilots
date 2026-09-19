@@ -3,7 +3,7 @@ import { terminal } from '#site/lib/ui/terminal.ts';
 import { section } from '#site/lib/ui/section.ts';
 import { pageHero } from '#site/lib/ui/page-hero.ts';
 import { PROSE, LINK, BTN_PRIMARY, BTN_GHOST, HAIRLINE } from '#site/lib/design/recipes.ts';
-import { SITE_ORIGIN, GH_URL, NEW_TAB } from '#site/lib/links.ts';
+import { SITE_ORIGIN } from '#site/lib/links.ts';
 
 /**
  * /install
@@ -86,7 +86,7 @@ export default function Install() {
         under it and no daemon beside it, so installing it is downloading a file and removing it
         is deleting one.`,
       actions: html`<a class=${BTN_PRIMARY} href="/install.sh" data-no-router>Read the script</a>
-        <a class=${BTN_GHOST} href="${GH_URL}/releases" target="_blank" rel="noopener">Every release${NEW_TAB}</a>`,
+        <a class=${BTN_GHOST} href="/changelog">What shipped</a>`,
     })}
 
     ${section({

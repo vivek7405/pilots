@@ -2,7 +2,7 @@ import { html } from '@webjsdev/core';
 import { terminal } from '#site/lib/ui/terminal.ts';
 import { section } from '#site/lib/ui/section.ts';
 import { PANEL, PROSE, LINK, BTN_PRIMARY, BTN_GHOST, HAIRLINE } from '#site/lib/design/recipes.ts';
-import { WORKLOAD_APEX, WEBJS_URL, GH_URL, NEW_TAB } from '#site/lib/links.ts';
+import { WORKLOAD_APEX, WEBJS_URL, NEW_TAB } from '#site/lib/links.ts';
 import { pageHero } from '#site/lib/ui/page-hero.ts';
 import { inlineFact } from '#site/lib/ui/stat.ts';
 
@@ -271,9 +271,7 @@ export default function Deploy() {
         requires the other. They are designed by people who know what the other one does.
       </p>
       <div class="flex flex-wrap gap-3 mt-7">
-        <a class=${BTN_PRIMARY} href="/architecture">Read the architecture</a>
-        <a class=${BTN_GHOST} href=${WEBJS_URL} target="_blank" rel="noopener">Visit WebJs${NEW_TAB}</a>
-        <a class=${BTN_GHOST} href=${GH_URL} target="_blank" rel="noopener">Source${NEW_TAB}</a>
+        <a class=${BTN_PRIMARY} href=${WEBJS_URL} target="_blank" rel="noopener">Visit WebJs${NEW_TAB}</a>
       </div>
     </div>
   `;

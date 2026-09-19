@@ -1,5 +1,5 @@
 import { html } from '@webjsdev/core';
-import { GH_URL, WEBJS_URL, WORKLOAD_APEX, NEW_TAB, NAV } from '#site/lib/links.ts';
+import { WEBJS_URL, WORKLOAD_APEX, NEW_TAB, NAV } from '#site/lib/links.ts';
 import { FIELD_LABEL } from '#site/lib/design/recipes.ts';
 import { brandMark } from '#site/lib/design/logo-candidates.ts';
 
@@ -18,7 +18,7 @@ export function siteFooter() {
   return html`
     <footer class="border-t border-rule mt-24">
       <div class="max-w-6xl mx-auto px-6 py-14">
-        <div class="grid gap-10 mid:grid-cols-[1.4fr_1fr_1fr_1fr]">
+        <div class="grid gap-10 mid:grid-cols-[1.6fr_1fr_1fr]">
           <div class="${col}">
             <span class="on-paper flex items-center gap-2 font-mono text-sm font-semibold tracking-tight">
               ${brandMark(18)}
@@ -34,12 +34,6 @@ export function siteFooter() {
             <span class="${FIELD_LABEL}">Product</span>
             ${NAV.map((n) => html`<a class="${link}" href=${n.href}>${n.label}</a>`)}
             <a class="${link}" href="/brand">Brand</a>
-          </nav>
-
-          <nav class="${col}" aria-label="Source">
-            <span class="${FIELD_LABEL}">Source</span>
-            <a class="${link}" href=${GH_URL} target="_blank" rel="noopener">Repository${NEW_TAB}</a>
-            <a class="${link}" href="${GH_URL}/blob/main/LICENSE" target="_blank" rel="noopener">Apache 2.0 licence${NEW_TAB}</a>
           </nav>
 
           <nav class="${col}" aria-label="Related">

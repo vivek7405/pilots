@@ -4,7 +4,7 @@ import { terminal } from '#site/lib/ui/terminal.ts';
 import { section } from '#site/lib/ui/section.ts';
 import { readout, inlineFact } from '#site/lib/ui/stat.ts';
 import { PANEL, PROSE, LINK, BTN_PRIMARY, BTN_GHOST, HAIRLINE } from '#site/lib/design/recipes.ts';
-import { WORKLOAD_APEX, GH_URL, NEW_TAB } from '#site/lib/links.ts';
+import { WORKLOAD_APEX } from '#site/lib/links.ts';
 import { pageHero } from '#site/lib/ui/page-hero.ts';
 
 /**
@@ -31,7 +31,7 @@ export default function Sandboxes() {
         a machine you throw away. A real virtual machine gives you that boundary. Restoring one from a
         snapshot instead of booting it is what makes the boundary affordable.`,
       actions: html`<a class=${BTN_PRIMARY} href="/deploy">Then promote it</a>
-        <a class=${BTN_GHOST} href=${GH_URL} target="_blank" rel="noopener">Read the source${NEW_TAB}</a>`,
+        <a class=${BTN_GHOST} href="/agents">For coding agents</a>`,
     })}
 
     ${section({
@@ -133,9 +133,7 @@ export default function Sandboxes() {
         <p class="${PROSE} mt-8">
           Typed JavaScript and Go clients cover every route, and each carries a test that parses the
           server's own source and fails when the wire types drift.
-          <a class=${LINK} href="${GH_URL}/tree/main/sdks" target="_blank" rel="noopener"
-            >The clients${NEW_TAB}</a
-          >.
+          <a class=${LINK} href="/agents">Every client and adapter</a>.
         </p>
 
         <p class="${PROSE} mt-6">

@@ -5,7 +5,7 @@ import { terminal } from '#site/lib/ui/terminal.ts';
 import { section } from '#site/lib/ui/section.ts';
 import { readout, inlineFact } from '#site/lib/ui/stat.ts';
 import { BTN_PRIMARY, BTN_GHOST, PANEL, PROSE, LINK, FIELD_LABEL } from '#site/lib/design/recipes.ts';
-import { GH_URL, WEBJS_URL, WORKLOAD_APEX, NEW_TAB, DASHBOARD_HREF } from '#site/lib/links.ts';
+import { WEBJS_URL, WORKLOAD_APEX, NEW_TAB, DASHBOARD_HREF } from '#site/lib/links.ts';
 
 /**
  * The home page.
@@ -74,16 +74,9 @@ export default function Home() {
             </p>
 
             <div class="flex flex-wrap gap-3 mt-8">
-              <a class=${BTN_PRIMARY} href="/architecture">How it works</a>
-              <a class=${BTN_GHOST} href=${GH_URL} target="_blank" rel="noopener"
-                >Read the source${NEW_TAB}</a
-              >
+              <a class=${BTN_PRIMARY} href=${DASHBOARD_HREF} data-no-router>Start a sandbox</a>
+              <a class=${BTN_GHOST} href="/architecture">How it works</a>
             </div>
-
-            <p class="text-sm text-ink-subtle mt-6 m-0">
-              Open source under Apache 2.0.
-              <a class=${LINK} href="/architecture/internals">See how it works, drawn.</a>
-            </p>
           </div>
 
           <div class="wide:pl-4">${heroTranscript()}</div>
@@ -258,15 +251,13 @@ export default function Home() {
     <!-- CLOSING CTA. The dashboard is the way in; the design is the reason to. -->
     <div class="max-w-6xl mx-auto px-6 pb-24">
       <div class="rounded border border-rule-strong bg-paper-elev p-8 mid:p-12">
-        <h2 class="text-h2 font-bold m-0 max-w-[24ch]">Read it before you trust it</h2>
+        <h2 class="text-h2 font-bold m-0 max-w-[24ch]">Start with a sandbox</h2>
         <p class="${PROSE} mt-4">
-          The full design is written down, and the source that implements it is public. If the
-          architecture does not convince you, the product should not either. When it does, sign in
-          with GitHub and create a machine.
+          Create one, run your code in it, and keep it if it turns out to matter. Nothing has to be
+          decided up front, and nothing is rebuilt when you promote it.
         </p>
         <div class="flex flex-wrap gap-3 mt-7">
-          <a class=${BTN_PRIMARY} href=${DASHBOARD_HREF}>Open the dashboard</a>
-          <a class=${BTN_GHOST} href="/architecture">Read the architecture</a>
+          <a class=${BTN_PRIMARY} href=${DASHBOARD_HREF} data-no-router>Open the dashboard</a>
         </div>
       </div>
     </div>

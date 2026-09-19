@@ -1,7 +1,7 @@
 import { html, asset, cspNonce } from '@webjsdev/core';
 import type { LayoutProps } from '@webjsdev/core';
 import '#site/components/theme-toggle.ts';
-import { NAV, GH_URL, SITE_ORIGIN, NEW_TAB, DASHBOARD_HREF } from '#site/lib/links.ts';
+import { NAV, SITE_ORIGIN, DASHBOARD_HREF } from '#site/lib/links.ts';
 import { THEME_STORAGE_KEY, FORCED_THEMES } from '#site/lib/theme.ts';
 import { siteFooter } from '#site/lib/ui/site-footer.ts';
 import { BTN_PRIMARY } from '#site/lib/design/recipes.ts';
@@ -169,9 +169,8 @@ export default function SiteLayout({ children }: LayoutProps) {
           <!-- A full page load, never the client router: the product is a
                different shell with a different stylesheet, and a soft
                navigation would keep this one's. -->
-          <a class=${navLink} href=${DASHBOARD_HREF} data-no-router>Dashboard</a>
-          <a class="${BTN_PRIMARY} h-8 px-4 text-[13px]" href=${GH_URL} target="_blank" rel="noopener"
-            >GitHub${NEW_TAB}</a
+          <a class="${BTN_PRIMARY} h-8 px-4 text-[13px]" href=${DASHBOARD_HREF} data-no-router
+            >Dashboard</a
           >
         </div>
       </div>

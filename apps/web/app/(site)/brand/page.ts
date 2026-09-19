@@ -4,7 +4,6 @@ import { pageHero } from '#site/lib/ui/page-hero.ts';
 import { PROSE, FIELD_LABEL, PANEL, BTN_PRIMARY, BTN_GHOST, LINK } from '#site/lib/design/recipes.ts';
 import { DELTA, markSvg, type Candidate } from '#site/lib/design/logo-candidates.ts';
 import { PALETTE } from '#site/lib/design/palette.ts';
-import { GH_URL, NEW_TAB } from '#site/lib/links.ts';
 
 /**
  * /brand
@@ -379,12 +378,8 @@ export default function BrandPage() {
             Nobody needs to ask for any of those.
           </p>
           <p class="${PROSE} m-0">
-            The source code is under the Apache licence, and that licence does not extend to the
-            name or the mark. Ask before using either as part of another product's name or logo,
-            on merchandise, or in a way that suggests Pilots endorses something.
-            <a class=${LINK} href="${GH_URL}/issues" target="_blank" rel="noopener"
-              >Open an issue to ask${NEW_TAB}</a
-            >.
+            Ask first before using the name or the mark as part of another product's name or logo,
+            on merchandise, or in any way that suggests Pilots endorses something.
           </p>
         </div>
       </div>
