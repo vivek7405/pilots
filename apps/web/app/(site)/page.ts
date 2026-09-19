@@ -85,7 +85,7 @@ export default function Home() {
     ${section({
       id: 'url',
       heading: 'A URL that outlives everything that happens to it',
-      lede: html`Most platforms mean "stable until you redeploy". On pilots the address is part of
+      lede: html`Most platforms mean "stable until you redeploy". On Pilots the address is part of
         the machine's identity, so suspend, wake, checkpoint, restore, promote, and a host dying
         underneath it all leave the address alone. Drive one yourself and watch the counter.`,
       body: html`<lifecycle-demo></lifecycle-demo>`,
@@ -100,7 +100,7 @@ export default function Home() {
       heading: 'Two things to want, one thing to run',
       lede: html`A sandbox and a production service differ by a release, a health check and how many
         copies to run. Both suspend when idle and wake on the next request. They are not two
-        products, and pilots does not build them as two.`,
+        products, and Pilots does not build them as two.`,
       body: html`
         <div class="grid gap-6 wide:grid-cols-[1.25fr_1fr]">
           <div class="${PANEL} p-6 flex flex-col gap-4">
@@ -138,7 +138,7 @@ export default function Home() {
       id: 'instant',
       heading: 'Nothing boots, so nothing waits',
       lede: html`A machine that boots takes as long as its operating system does, which is why
-        sandbox products either keep you waiting or keep idle VMs burning money. pilots restores a
+        sandbox products either keep you waiting or keep idle VMs burning money. Pilots restores a
         memory snapshot instead, and pages it in lazily as the guest touches it, so a machine is
         answering before most of its memory has been read.`,
       body: html`
@@ -250,15 +250,15 @@ export default function Home() {
     ${section({
       id: 'webjs',
       layout: 'split',
-      heading: 'WebJs is the framework, pilots is the platform',
+      heading: 'WebJs is the framework, Pilots is the platform',
       lede: html`They are built by the same people, the way Next.js and Vercel are. You do not need
-        either one to use the other: pilots runs any Dockerfile, and WebJs deploys anywhere a Node
+        either one to use the other: Pilots runs any Dockerfile, and WebJs deploys anywhere a Node
         process runs. They are just designed by people who know what the other one does.`,
       body: html`
         <div class="${PANEL} p-6 flex flex-col mid:flex-row mid:items-center gap-6 justify-between">
           <p class="${PROSE} m-0">
             A WebJs app has no build step, so deploying one is copying files and starting a process.
-            Its readiness endpoint is what pilots gates a health-checked cutover on.
+            Its readiness endpoint is what Pilots gates a health-checked cutover on.
           </p>
           <a class="${BTN_GHOST} shrink-0" href=${WEBJS_URL} target="_blank" rel="noopener"
             >Visit WebJs${NEW_TAB}</a

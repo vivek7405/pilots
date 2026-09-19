@@ -36,9 +36,9 @@ import { pipelineFigure } from '#site/modules/internals/diagrams/pipeline.ts';
  */
 
 export const metadata = {
-  title: 'Internals: the whole pilots architecture, drawn',
+  title: 'Internals: the whole Pilots architecture, drawn',
   description:
-    'A technical walkthrough of pilots end to end: the fleet, one host, the CRDT state layer, the request path, content-addressed snapshots, lazy memory and disk, guest networking, and the build pipeline.',
+    'A technical walkthrough of Pilots end to end: the fleet, one host, the CRDT state layer, the request path, content-addressed snapshots, lazy memory and disk, guest networking, and the build pipeline.',
 };
 
 /**
@@ -84,7 +84,7 @@ const GLOSSARY: [string, unknown][] = [
   ],
   [
     'control plane',
-    'The coordinating brain a platform usually has: a scheduler deciding where things run, a central database holding what is true, a load balancer at the front. pilots has none of the three, which is the claim the rest of this page is spent paying for.',
+    'The coordinating brain a platform usually has: a scheduler deciding where things run, a central database holding what is true, a load balancer at the front. Pilots has none of the three, which is the claim the rest of this page is spent paying for.',
   ],
   [
     'gossip',
@@ -104,7 +104,7 @@ const GLOSSARY: [string, unknown][] = [
   ],
   [
     'a page fault',
-    'What happens when a program reaches for memory that is not actually loaded. The processor pauses that program, someone supplies the missing piece, and it carries on with no idea anything happened. pilots uses this to start a machine before its memory has finished arriving.',
+    'What happens when a program reaches for memory that is not actually loaded. The processor pauses that program, someone supplies the missing piece, and it carries on with no idea anything happened. Pilots uses this to start a machine before its memory has finished arriving.',
   ],
   [
     'a namespace',
@@ -167,7 +167,7 @@ export default function Internals() {
         <div class="grid gap-10 wide:grid-cols-[1.05fr_0.95fr]">
           <div>
             <p class="${PROSE} m-0">
-              pilots runs your code inside a tiny simulated computer. Not a shared container with a
+              Pilots runs your code inside a tiny simulated computer. Not a shared container with a
               fence around it, an actual separate machine with its own kernel, which is what makes it
               safe to hand one to a stranger or to an AI agent that is about to run something reckless.
               The trick is that starting one does not mean booting one. The system keeps a photograph

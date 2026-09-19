@@ -22,7 +22,7 @@ import { ADAPTERS, HARNESSES, SDKS } from '#site/lib/agents.ts';
 export const metadata = {
   title: 'Agents: every coding agent, one fleet',
   description:
-    'Point Claude Code, Codex, Cursor, OpenCode or any MCP client at a pilots fleet, with typed clients for TypeScript, Python and Go and adapters for the agent frameworks.',
+    'Point Claude Code, Codex, Cursor, OpenCode or any MCP client at a Pilots fleet, with typed clients for TypeScript, Python and Go and adapters for the agent frameworks.',
 };
 
 export default function Agents() {
@@ -260,7 +260,7 @@ export default function Agents() {
           </div>
         </div>
         <p class="${PROSE} mt-8">
-          The token is an ordinary pilots token, which is the reason all of this is short. There is
+          The token is an ordinary Pilots token, which is the reason all of this is short. There is
           no second credential system to reason about, revoking one on the tokens page stops it
           everywhere, and it keeps working even when the dashboard that issued it does not.
         </p>

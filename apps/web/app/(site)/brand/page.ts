@@ -10,7 +10,7 @@ import { GH_URL, NEW_TAB } from '#site/lib/links.ts';
  * /brand
  *
  * The brand guidelines and the downloadable mark, for anyone who has to show
- * pilots somewhere that is not this site: an article, a talk, an integration
+ * Pilots somewhere that is not this site: an article, a talk, an integration
  * page, a badge.
  *
  * Three things this page must keep doing, none of which a test can see:
@@ -30,7 +30,7 @@ import { GH_URL, NEW_TAB } from '#site/lib/links.ts';
 export const metadata = {
   title: 'Brand',
   description:
-    'The pilots mark as downloadable SVG files, with the rules that keep it legible, the palette, the type, and how the name is written.',
+    'The Pilots mark as downloadable SVG files, with the rules that keep it legible, the palette, the type, and how the name is written.',
 };
 
 /** The sizes the mark is checked at, largest first, down to the floor. */
@@ -50,12 +50,20 @@ const FILES = [
   },
 ];
 
-/** How the name is written, and the forms that turn up in its place. */
+/**
+ * How the name is written, and the forms that turn up in its place.
+ *
+ * The capital in prose is a readability rule before it is a style one. The
+ * name is an ordinary English plural, so a lowercase one makes a sentence like
+ * "pilots restores a snapshot" read as a grammar mistake until the reader
+ * works out it is a name.
+ */
 const NAME_FORMS = [
-  { form: 'pilots', ok: true, note: 'Always lowercase, including at the start of a sentence and in a title.' },
+  { form: 'Pilots', ok: true, note: 'In a sentence, a heading or a title. It is a product name and takes a capital like any other.' },
+  { form: 'pilots', ok: true, note: 'Only as the wordmark beside the mark, and wherever it is typed, such as a package name or an address.' },
   { form: 'pilot', ok: true, note: 'The command line tool, and only that. The platform is plural.' },
-  { form: 'Pilots', ok: false, note: 'A capital reads as a different product name.' },
   { form: 'PILOTS', ok: false, note: 'It is a word and it is never set as an acronym.' },
+  { form: 'Pilot', ok: false, note: 'The singular is the command, which is always lowercase.' },
 ];
 
 /** One tile, one background, one mark. The class carries both the ink and the paper. */
@@ -199,7 +207,7 @@ export default function BrandPage() {
     ${pageHero({
       heading: 'The mark, the colours and the name',
       lede: html`
-        Everything needed to show pilots somewhere other than this site. The
+        Everything needed to show Pilots somewhere other than this site. The
         mark as files, the rules that keep it legible, the palette, the type,
         and how the name is written.
       `,
@@ -340,7 +348,7 @@ export default function BrandPage() {
       layout: 'split',
       lede: html`
         Beside the mark the name is set in the monospace at semibold, lowercase, at the size shown
-        in the header below. In a sentence it is written the same way and takes no special type.
+        in the header below. In a sentence it is Pilots, with a capital and in no special type.
       `,
       body: html`
         <div class="flex flex-col gap-8">
@@ -366,14 +374,14 @@ export default function BrandPage() {
         <h2 class="text-h3 font-bold m-0">Using the mark</h2>
         <div class="flex flex-col gap-4">
           <p class="${PROSE} m-0">
-            Use the mark and the name freely to refer to pilots. That covers an article, a talk, a
+            Use the mark and the name freely to refer to Pilots. That covers an article, a talk, a
             comparison, documentation for an integration, and a note that something runs on it.
             Nobody needs to ask for any of those.
           </p>
           <p class="${PROSE} m-0">
             The source code is under the Apache licence, and that licence does not extend to the
             name or the mark. Ask before using either as part of another product's name or logo,
-            on merchandise, or in a way that suggests pilots endorses something.
+            on merchandise, or in a way that suggests Pilots endorses something.
             <a class=${LINK} href="${GH_URL}/issues" target="_blank" rel="noopener"
               >Open an issue to ask${NEW_TAB}</a
             >.

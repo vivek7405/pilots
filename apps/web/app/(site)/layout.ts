@@ -15,7 +15,7 @@ import { brandMark } from '#site/lib/design/logo-candidates.ts';
  * only the brand matches nothing in the strongest on-page signal there is.
  * 59 characters, inside the SERP truncation limit, brand first.
  */
-const TITLE = 'pilots: microVM sandboxes and PaaS on one primitive';
+const TITLE = 'Pilots: microVM sandboxes and PaaS on one primitive';
 /**
  * 154 characters. Google renders about 160, so anything past that is written
  * for nobody. It states the differentiator rather than adjectives, because the
@@ -56,7 +56,7 @@ export function generateMetadata(ctx: { url: string }) {
       'image:width': '1200',
       'image:height': '630',
       'image:alt': TITLE,
-      site_name: 'pilots',
+      site_name: 'Pilots',
     },
     twitter: { card: 'summary_large_image', title: TITLE, description: DESCRIPTION, image },
     /**
@@ -64,7 +64,7 @@ export function generateMetadata(ctx: { url: string }) {
      * a name and a url and without one a crawler cannot tell whether they are
      * two descriptions of one thing or two things.
      *
-     * The `parentOrganization` edge is the load-bearing one: pilots and WebJs
+     * The `parentOrganization` edge is the load-bearing one: Pilots and WebJs
      * are one company, the way Vercel and Next.js are, and stating it in
      * structured data is what consolidates their authority instead of leaving
      * two unrelated small sites competing with each other.
@@ -74,7 +74,7 @@ export function generateMetadata(ctx: { url: string }) {
         '@context': 'https://schema.org',
         '@type': 'Organization',
         '@id': `${SITE_ORIGIN}#organization`,
-        name: 'pilots',
+        name: 'Pilots',
         url: SITE_ORIGIN,
         description: 'Firecracker microVM sandboxes and production services on one primitive.',
       },
@@ -82,7 +82,7 @@ export function generateMetadata(ctx: { url: string }) {
         '@context': 'https://schema.org',
         '@type': 'SoftwareApplication',
         '@id': `${SITE_ORIGIN}#software`,
-        name: 'pilots',
+        name: 'Pilots',
         applicationCategory: 'DeveloperApplication',
         operatingSystem: 'Linux (Firecracker microVM)',
         url: SITE_ORIGIN,

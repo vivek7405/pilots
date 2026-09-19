@@ -26,7 +26,7 @@ import { pageHero } from '#site/lib/ui/page-hero.ts';
 export const metadata = {
   title: 'Architecture: no control plane, one primitive',
   description:
-    'How pilots runs Firecracker microVMs with no scheduler tier and no managed database. Gossiped CRDT state, content-addressed snapshots, and a router that wakes machines on request.',
+    'How Pilots runs Firecracker microVMs with no scheduler tier and no managed database. Gossiped CRDT state, content-addressed snapshots, and a router that wakes machines on request.',
 };
 
 const INVARIANTS = [
@@ -147,7 +147,7 @@ export default function Architecture() {
       id: 'host',
       layout: 'split',
       heading: 'Three processes, and that is the whole machine',
-      lede: html`A pilots host is not a node in a cluster that something else manages. It runs
+      lede: html`A Pilots host is not a node in a cluster that something else manages. It runs
         ${inlineFact('processes')} processes, holds a full replica of the fleet’s state, and can
         answer any API call for any machine in the fleet, including ones it has never run.`,
       body: html`
@@ -251,7 +251,7 @@ export default function Architecture() {
       id: 'storage',
       layout: 'split',
       heading: 'One storage model, and the host disk is not in it',
-      lede: html`Platforms that pin a disk to a host spend years making that disk movable. pilots
+      lede: html`Platforms that pin a disk to a host spend years making that disk movable. Pilots
         never pins one. The machine root and the volume are both true only in the bucket, and the
         host’s NVMe is a read-through cache in front of it that can be emptied at any time.`,
       body: html`

@@ -38,7 +38,7 @@ export default function Sandboxes() {
       id: 'speed',
       heading: 'A machine that was never off',
       lede: html`Booting a Linux guest costs whatever the operating system costs, every time, which
-        is why sandbox products either make you wait or keep idle machines burning money. pilots
+        is why sandbox products either make you wait or keep idle machines burning money. Pilots
         restores a memory snapshot of an already-running guest and pages memory in as the guest
         touches it.`,
       body: html`
